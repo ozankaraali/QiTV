@@ -21,7 +21,7 @@ jobs:
         run: |
           pip install pyinstaller
           PACKAGES_PATH=$(python -c "import site; print(site.getsitepackages()[0])")
-          pyinstaller --onefile --windowed -n handroller --icon=assets/handroller.png main.py \
+          pyinstaller --onefile --windowed -n qitv --icon=assets/icon.png main.py \
           --paths $PACKAGES_PATH/cv2 \
           --paths $PACKAGES_PATH/mediapipe \
           --paths $PACKAGES_PATH/pyautogui \
@@ -31,7 +31,7 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: packaged-app-linux
-          path: dist/handroller
+          path: dist/qitv
 
   build-windows:
     runs-on: windows-latest
@@ -55,15 +55,15 @@ jobs:
         shell: pwsh
         run: |
           pip install pyinstaller
-          pyinstaller handroller-windows.spec
+          pyinstaller qitv-windows.spec
 #      - name: Zip the contents of dist directory
 #        run: |
-#          Compress-Archive -Path dist/handroller/* -DestinationPath dist/handroller.zip
+#          Compress-Archive -Path dist/qitv/* -DestinationPath dist/qitv.zip
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v3
         with:
           name: packaged-app-windows
-          path: dist/handroller.exe
+          path: dist/qitv.exe
 
   build-macos:
     runs-on: macos-latest
@@ -79,19 +79,19 @@ jobs:
       - name: Package App with PyInstaller for MacOS
         run: |
           pip install pyinstaller
-          pyinstaller handroller.spec
+          pyinstaller qitv.spec
       - name: Ad-Hoc Sign the app
         run: |
-          codesign --force --deep --sign - "$(pwd)/dist/handroller.app"
+          codesign --force --deep --sign - "$(pwd)/dist/qitv.app"
       - name: Zip macOS App
         run: |
           cd dist
-          zip -r handroller-macos.zip handroller.app
+          zip -r qitv-macos.zip qitv.app
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v3
         with:
           name: packaged-app-macos
-          path: dist/handroller-macos.zip
+          path: dist/qitv-macos.zip
 
   release:
     needs: [build-linux, build-windows, build-macos]
@@ -120,8 +120,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./packaged-app-linux/handroller
-          asset_name: handroller-linux
+          asset_path: ./packaged-app-linux/qitv
+          asset_name: qitv-linux
           asset_content_type: application/octet-stream
       - name: Upload Windows Release Asset
         uses: actions/upload-release-asset@v1
@@ -129,8 +129,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./packaged-app-windows/handroller.exe
-          asset_name: handroller-windows.exe
+          asset_path: ./packaged-app-windows/qitv.exe
+          asset_name: qitv-windows.exe
           asset_content_type: application/octet-stream
       - name: Upload macOS Release Asset
         uses: actions/upload-release-asset@v1
@@ -138,6 +138,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./packaged-app-macos/handroller-macos.zip
-          asset_name: handroller-macos.zip
+          asset_path: ./packaged-app-macos/qitv-macos.zip
+          asset_name: qitv-macos.zip
           asset_content_type: application/zip

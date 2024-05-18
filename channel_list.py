@@ -1,13 +1,14 @@
 import json
-import sys
+
 import requests
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
-    QMainWindow, QAction, QFileDialog, QVBoxLayout, QWidget, QPushButton, QListWidget,
-    QHBoxLayout, QListWidgetItem, QLineEdit, QGridLayout, QApplication
+    QMainWindow, QFileDialog, QVBoxLayout, QWidget, QPushButton, QListWidget,
+    QHBoxLayout, QListWidgetItem, QLineEdit, QGridLayout
 )
-from proxy_server import ProxyHTTPRequestHandler, ProxyServerThread
+
 from options import OptionsDialog
+from proxy_server import ProxyHTTPRequestHandler, ProxyServerThread
 
 
 class ChannelList(QMainWindow):
@@ -22,7 +23,8 @@ class ChannelList(QMainWindow):
         self.setCentralWidget(self.container_widget)
         self.grid_layout = QGridLayout(self.container_widget)
 
-        self.create_menu()
+        # self.create_menu()
+        self.create_upper_panel()
         self.create_left_panel()
         self.create_media_controls()
 
@@ -40,28 +42,23 @@ class ChannelList(QMainWindow):
         self.save_config()
         event.accept()
 
-    def create_menu(self):
-        menubar = self.menuBar()
-        file_menu = menubar.addMenu('&File')
-        open_action = QAction('Open', self)
-        open_action.triggered.connect(self.open_file)
-        file_menu.addAction(open_action)
+    def create_upper_panel(self):
+        self.upper_layout = QWidget(self.container_widget)
+        ctl_layout = QHBoxLayout(self.upper_layout)
 
-        options_action = QAction('Options', self)
-        options_action.triggered.connect(self.options_dialog)
-        file_menu.addAction(options_action)
+        self.open_button = QPushButton("Open File")
+        self.open_button.clicked.connect(self.open_file)
+        ctl_layout.addWidget(self.open_button)
+
+        self.options_button = QPushButton("Options")
+        self.options_button.clicked.connect(self.options_dialog)
+        ctl_layout.addWidget(self.options_button)
+        self.grid_layout.addWidget(self.upper_layout, 0, 0)
+
 
     def create_left_panel(self):
         self.left_panel = QWidget(self.container_widget)
         left_layout = QVBoxLayout(self.left_panel)
-
-        self.open_button = QPushButton("Open")
-        self.open_button.clicked.connect(self.open_file)
-        left_layout.addWidget(self.open_button)
-
-        self.options_button = QPushButton("Options")
-        self.options_button.clicked.connect(self.options_dialog)
-        left_layout.addWidget(self.options_button)
 
         self.search_box = QLineEdit(self.left_panel)
         self.search_box.setPlaceholderText("Search channels...")
@@ -72,7 +69,7 @@ class ChannelList(QMainWindow):
         self.channel_list.itemClicked.connect(self.channel_selected)
         left_layout.addWidget(self.channel_list)
 
-        self.grid_layout.addWidget(self.left_panel, 0, 0)
+        self.grid_layout.addWidget(self.left_panel, 1, 0)
         self.grid_layout.setColumnStretch(0, 1)
 
     def create_media_controls(self):
@@ -87,7 +84,7 @@ class ChannelList(QMainWindow):
         self.stop_button.clicked.connect(self.player.stop_video)
         control_layout.addWidget(self.stop_button)
 
-        self.grid_layout.addWidget(self.media_controls, 1, 0)
+        self.grid_layout.addWidget(self.media_controls, 2, 0)
 
     def open_file(self):
         file_dialog = QFileDialog(self)

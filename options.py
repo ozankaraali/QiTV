@@ -84,13 +84,16 @@ class OptionsDialog(QDialog):
         self.selected_provider = self.config["data"][index]
         self.url_input.setText(self.selected_provider.get("url", ""))
         self.mac_input.setText(self.selected_provider.get("mac", ""))
+        self.update_radio_buttons()
         self.update_inputs()
 
-    def update_inputs(self):
-        self.type_STB.setChecked(self.selected_provider["type"] == "STB")
-        self.type_M3UPLAYLIST.setChecked(self.selected_provider["type"] == "M3UPLAYLIST")
-        self.type_M3USTREAM.setChecked(self.selected_provider["type"] == "M3USTREAM")
+    def update_radio_buttons(self):
+        provider_type = self.selected_provider.get("type", "")
+        self.type_STB.setChecked(provider_type == "STB")
+        self.type_M3UPLAYLIST.setChecked(provider_type == "M3UPLAYLIST")
+        self.type_M3USTREAM.setChecked(provider_type == "M3USTREAM")
 
+    def update_inputs(self):
         self.mac_label.setVisible(self.type_STB.isChecked())
         self.mac_input.setVisible(self.type_STB.isChecked())
         self.file_button.setVisible(self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked())
