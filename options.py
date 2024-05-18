@@ -3,8 +3,6 @@ from PyQt5.QtWidgets import (
 )
 
 
-# Attempt to import vlc, set to None if unavailable
-
 class OptionsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)

@@ -1,0 +1,143 @@
+name: Build and Package App
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.8
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Package App with PyInstaller for Linux
+        run: |
+          pip install pyinstaller
+          PACKAGES_PATH=$(python -c "import site; print(site.getsitepackages()[0])")
+          pyinstaller --onefile --windowed -n handroller --icon=assets/handroller.png main.py \
+          --paths $PACKAGES_PATH/cv2 \
+          --paths $PACKAGES_PATH/mediapipe \
+          --paths $PACKAGES_PATH/pyautogui \
+          --add-data $PACKAGES_PATH/mediapipe:mediapipe \
+          --add-data $PACKAGES_PATH/cv2/data:cv2/data
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: packaged-app-linux
+          path: dist/handroller
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.8
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check mediapipe and cv2 location
+        shell: pwsh
+        run: |
+          $MEDIAPIPE_PATH = (python -c "import mediapipe; print(mediapipe.__path__[0])")
+          echo "MEDIAPIPE_PATH=$MEDIAPIPE_PATH" >> $env:GITHUB_ENV
+          $CV2_PATH = (python -c "import cv2; print(cv2.__path__[0])")
+          echo "CV2_PATH=$CV2_PATH" >> $env:GITHUB_ENV
+      - name: Package App with PyInstaller for Windows
+        shell: pwsh
+        run: |
+          pip install pyinstaller
+          pyinstaller handroller-windows.spec
+#      - name: Zip the contents of dist directory
+#        run: |
+#          Compress-Archive -Path dist/handroller/* -DestinationPath dist/handroller.zip
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: packaged-app-windows
+          path: dist/handroller.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.8
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Package App with PyInstaller for MacOS
+        run: |
+          pip install pyinstaller
+          pyinstaller handroller.spec
+      - name: Ad-Hoc Sign the app
+        run: |
+          codesign --force --deep --sign - "$(pwd)/dist/handroller.app"
+      - name: Zip macOS App
+        run: |
+          cd dist
+          zip -r handroller-macos.zip handroller.app
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: packaged-app-macos
+          path: dist/handroller-macos.zip
+
+  release:
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get shortened SHA
+        id: short-sha
+        run: |
+          echo ${GITHUB_SHA:0:7} > short_sha.txt
+          echo "SHORT_SHA=$(cat short_sha.txt)" >> $GITHUB_ENV
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        with:
+          tag_name: release-${{ env.SHORT_SHA }}
+          release_name: Release ${{ env.SHORT_SHA }}
+          draft: false
+          prerelease: false
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+      - name: Upload Linux Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./packaged-app-linux/handroller
+          asset_name: handroller-linux
+          asset_content_type: application/octet-stream
+      - name: Upload Windows Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./packaged-app-windows/handroller.exe
+          asset_name: handroller-windows.exe
+          asset_content_type: application/octet-stream
+      - name: Upload macOS Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./packaged-app-macos/handroller-macos.zip
+          asset_name: handroller-macos.zip
+          asset_content_type: application/zip
