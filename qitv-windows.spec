@@ -1,6 +1,6 @@
 import site
-import mediapipe
-import cv2
+#import mediapipe
+#import cv2
 
 # Determine path to site-packages
 PACKAGES_PATH = site.getsitepackages()[0]

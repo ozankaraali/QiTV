@@ -21,7 +21,7 @@ jobs:
         run: |
           pip install pyinstaller
           PACKAGES_PATH=$(python -c "import site; print(site.getsitepackages()[0])")
-          pyinstaller --onefile --windowed -n qitv --icon=assets/icon.png main.py \
+          pyinstaller --onefile --windowed -n qitv --icon=assets/qitv.png main.py \
 #          --paths $PACKAGES_PATH/cv2 \
 #          --paths $PACKAGES_PATH/mediapipe \
 #          --paths $PACKAGES_PATH/pyautogui \
