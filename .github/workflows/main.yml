@@ -22,11 +22,11 @@ jobs:
           pip install pyinstaller
           PACKAGES_PATH=$(python -c "import site; print(site.getsitepackages()[0])")
           pyinstaller --onefile --windowed -n qitv --icon=assets/icon.png main.py \
-          --paths $PACKAGES_PATH/cv2 \
-          --paths $PACKAGES_PATH/mediapipe \
-          --paths $PACKAGES_PATH/pyautogui \
-          --add-data $PACKAGES_PATH/mediapipe:mediapipe \
-          --add-data $PACKAGES_PATH/cv2/data:cv2/data
+#          --paths $PACKAGES_PATH/cv2 \
+#          --paths $PACKAGES_PATH/mediapipe \
+#          --paths $PACKAGES_PATH/pyautogui \
+#          --add-data $PACKAGES_PATH/mediapipe:mediapipe \
+#          --add-data $PACKAGES_PATH/cv2/data:cv2/data
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v3
         with:
@@ -44,13 +44,13 @@ jobs:
           python-version: 3.8
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Check mediapipe and cv2 location
-        shell: pwsh
-        run: |
-          $MEDIAPIPE_PATH = (python -c "import mediapipe; print(mediapipe.__path__[0])")
-          echo "MEDIAPIPE_PATH=$MEDIAPIPE_PATH" >> $env:GITHUB_ENV
-          $CV2_PATH = (python -c "import cv2; print(cv2.__path__[0])")
-          echo "CV2_PATH=$CV2_PATH" >> $env:GITHUB_ENV
+#      - name: Check mediapipe and cv2 location
+#        shell: pwsh
+#        run: |
+#          $MEDIAPIPE_PATH = (python -c "import mediapipe; print(mediapipe.__path__[0])")
+#          echo "MEDIAPIPE_PATH=$MEDIAPIPE_PATH" >> $env:GITHUB_ENV
+#          $CV2_PATH = (python -c "import cv2; print(cv2.__path__[0])")
+#          echo "CV2_PATH=$CV2_PATH" >> $env:GITHUB_ENV
       - name: Package App with PyInstaller for Windows
         shell: pwsh
         run: |
