@@ -6,115 +6,20 @@ import vlc
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import (
     QMainWindow, QAction, QFileDialog, QVBoxLayout, QWidget, QPushButton, QFrame,
-    QListWidget, QHBoxLayout, QListWidgetItem, QLineEdit, QGridLayout,
-    QSlider, QStyle, QApplication
+    QListWidget, QHBoxLayout, QListWidgetItem, QLineEdit, QGridLayout, QApplication
 )
 from proxy_server import ProxyHTTPRequestHandler, ProxyServerThread
 from options import OptionsDialog
 
 
-class VideoPlayer(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Not PiTV Player")
-        self.setGeometry(100, 100, 1200, 800)
-
-        self.container_widget = QWidget(self)
-        self.setCentralWidget(self.container_widget)
-        self.grid_layout = QGridLayout(self.container_widget)
-
-        self.instance = vlc.Instance('--no-xlib', '--vout=gl')
-        self.player = self.instance.media_player_new()
-        self.create_video_area()
-        self.create_media_controls()
-
-        self.proxy_server = None
-
-    def create_video_area(self):
-        self.video_frame = QFrame(self.container_widget)
-        self.grid_layout.addWidget(self.video_frame, 0, 0)
-        self.grid_layout.setColumnStretch(0, 4)
-
-    def create_media_controls(self):
-        self.media_controls = QWidget(self.container_widget)
-        control_layout = QHBoxLayout(self.media_controls)
-
-        self.play_button = QPushButton()
-        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-        self.play_button.clicked.connect(self.play_pause)
-        control_layout.addWidget(self.play_button)
-
-        self.stop_button = QPushButton()
-        self.stop_button.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
-        self.stop_button.clicked.connect(self.stop)
-        control_layout.addWidget(self.stop_button)
-
-        self.fullscreen_button = QPushButton("Fullscreen", self)
-        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
-        control_layout.addWidget(self.fullscreen_button)
-
-        self.position_slider = QSlider(Qt.Horizontal)
-        self.position_slider.setRange(0, 0)
-        self.position_slider.sliderMoved.connect(self.set_position)
-        control_layout.addWidget(self.position_slider)
-
-        self.grid_layout.addWidget(self.media_controls, 1, 0)
-
-    def set_position(self, position):
-        self.player.setPosition(position)
-
-    def position_changed(self, position):
-        self.position_slider.setValue(position)
-
-    def duration_changed(self, duration):
-        self.position_slider.setRange(0, duration)
-
-    def play_pause(self):
-        state = self.player.get_state()
-        if state == vlc.State.Playing:
-            self.player.pause()
-            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-        else:
-            self.player.play()
-            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
-
-    def stop(self):
-        self.player.stop()
-        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
-
-    def toggle_fullscreen(self):
-        self.toggle_fullscreen_custom(self.video_frame)
-
-    @staticmethod
-    def toggle_fullscreen_custom(widget):
-        if widget.isFullScreen():
-            widget.setWindowFlags(Qt.Widget)
-            widget.showNormal()
-        else:
-            widget.setWindowFlags(Qt.Window)
-            widget.showFullScreen()
-
-    def play_video(self, file_path):
-        if sys.platform.startswith('linux'):
-            self.player.set_xwindow(int(self.video_frame.winId()))
-        elif sys.platform == "win32":
-            self.player.set_hwnd(int(self.video_frame.winId()))
-        elif sys.platform == "darwin":
-            self.player.set_nsobject(int(self.video_frame.winId()))
-        media = self.instance.media_new(file_path)
-        self.player.set_media(media)
-        self.player.play()
-        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
-
-
-class ChannelListWindow(QMainWindow):
+class ChannelList(QMainWindow):
     channels_loaded = pyqtSignal(list)
 
     def __init__(self, player):
         super().__init__()
         self.player = player
-        self.setWindowTitle("Not PiTV Channel List")
-        self.setGeometry(800, 100, 400, 800)
+        self.setWindowTitle("QiTV Channel List")
+        self.setGeometry(1250, 100, 400, 800)
 
         self.container_widget = QWidget(self)
         self.setCentralWidget(self.container_widget)
@@ -122,6 +27,7 @@ class ChannelListWindow(QMainWindow):
 
         self.create_menu()
         self.create_left_panel()
+        self.create_media_controls()
 
         self.load_config()
         self.load_channels()
@@ -148,15 +54,40 @@ class ChannelListWindow(QMainWindow):
     def create_left_panel(self):
         self.left_panel = QWidget(self.container_widget)
         left_layout = QVBoxLayout(self.left_panel)
+
+        self.open_button = QPushButton("Open")
+        self.open_button.clicked.connect(self.open_file)
+        left_layout.addWidget(self.open_button)
+
+        self.options_button = QPushButton("Options")
+        self.options_button.clicked.connect(self.options_dialog)
+        left_layout.addWidget(self.options_button)
+
         self.search_box = QLineEdit(self.left_panel)
         self.search_box.setPlaceholderText("Search channels...")
         self.search_box.textChanged.connect(self.filter_channels)
         left_layout.addWidget(self.search_box)
+
         self.channel_list = QListWidget(self.left_panel)
         self.channel_list.itemClicked.connect(self.channel_selected)
         left_layout.addWidget(self.channel_list)
+
         self.grid_layout.addWidget(self.left_panel, 0, 0)
         self.grid_layout.setColumnStretch(0, 1)
+
+    def create_media_controls(self):
+        self.media_controls = QWidget(self.container_widget)
+        control_layout = QHBoxLayout(self.media_controls)
+
+        self.play_button = QPushButton("Play/Pause")
+        self.play_button.clicked.connect(self.player.toggle_play_pause)
+        control_layout.addWidget(self.play_button)
+
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self.player.stop_video)
+        control_layout.addWidget(self.stop_button)
+
+        self.grid_layout.addWidget(self.media_controls, 1, 0)
 
     def open_file(self):
         file_dialog = QFileDialog(self)
