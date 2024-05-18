@@ -1,12 +1,10 @@
 import json
 import sys
-
 import requests
-import vlc
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import (
-    QMainWindow, QAction, QFileDialog, QVBoxLayout, QWidget, QPushButton, QFrame,
-    QListWidget, QHBoxLayout, QListWidgetItem, QLineEdit, QGridLayout, QApplication
+    QMainWindow, QAction, QFileDialog, QVBoxLayout, QWidget, QPushButton, QListWidget,
+    QHBoxLayout, QListWidgetItem, QLineEdit, QGridLayout, QApplication
 )
 from proxy_server import ProxyHTTPRequestHandler, ProxyServerThread
 from options import OptionsDialog
@@ -19,7 +17,6 @@ class ChannelList(QMainWindow):
         super().__init__()
         self.player = player
         self.setWindowTitle("QiTV Channel List")
-        self.setGeometry(1250, 100, 400, 800)
 
         self.container_widget = QWidget(self)
         self.setCentralWidget(self.container_widget)
@@ -30,6 +27,7 @@ class ChannelList(QMainWindow):
         self.create_media_controls()
 
         self.load_config()
+        self.apply_window_settings()
         self.load_channels()
 
         self.proxy_server = ProxyServerThread('localhost', 8081, ProxyHTTPRequestHandler)
@@ -38,7 +36,9 @@ class ChannelList(QMainWindow):
 
     def closeEvent(self, event):
         self.proxy_server.stop_server()
-        QApplication.quit()
+        self.save_window_settings()
+        self.save_config()
+        event.accept()
 
     def create_menu(self):
         menubar = self.menuBar()
@@ -92,7 +92,7 @@ class ChannelList(QMainWindow):
     def open_file(self):
         file_dialog = QFileDialog(self)
         file_path, _ = file_dialog.getOpenFileName()
-        if file_path != '':
+        if file_path:
             self.player.play_video(file_path)
 
     def load_config(self):
@@ -114,12 +114,38 @@ class ChannelList(QMainWindow):
                     "type": "M3UPLAYLIST",
                     "url": "https://iptv-org.github.io/iptv/index.m3u"
                 }
-            ]
+            ],
+            "window_positions": {
+                "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800},
+                "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800}
+            }
         }
 
     def save_config(self):
         with open('config.json', 'w') as f:
             json.dump(self.config, f)
+
+    def save_window_settings(self):
+        pos = self.geometry()
+        window_positions = self.config.get("window_positions", {})
+        window_positions["channel_list"] = {
+            "x": pos.x(),
+            "y": pos.y(),
+            "width": pos.width(),
+            "height": pos.height()
+        }
+        self.config["window_positions"] = window_positions
+        self.save_config()
+
+    def apply_window_settings(self):
+        window_positions = self.config.get("window_positions", {})
+        channel_list_pos = window_positions.get("channel_list", {})
+        self.setGeometry(
+            channel_list_pos.get("x", 1250),
+            channel_list_pos.get("y", 100),
+            channel_list_pos.get("width", 400),
+            channel_list_pos.get("height", 800)
+        )
 
     def load_channels(self):
         selected_provider = self.config["data"][self.config["selected"]]
