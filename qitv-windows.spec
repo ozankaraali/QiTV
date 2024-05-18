@@ -13,7 +13,7 @@ block_cipher = None
 
 # Add paths to the Analysis object
 a = Analysis(['main.py'],
-             pathex=[cv2_path, mediapipe_path, pyautogui_path],
+#             pathex=[cv2_path, mediapipe_path, pyautogui_path],
              binaries=[],
 #             datas=[(f"{mediapipe_path}", "mediapipe"),
 #                    (f"{cv2_path}/data", "cv2/data")],

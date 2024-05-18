@@ -1,7 +1,7 @@
-PyQt5==5.15.10
-PyQt5-Qt5==5.15.13
-PyQt5-sip==12.13.0
-PyQt5-stubs==5.15.6.0
+PyQt5
+PyQt5-Qt5
+PyQt5-sip
+PyQt5-stubs
 python-vlc==3.0.20123
 requests==2.31.0
 urllib3==1.26.6
