@@ -21,7 +21,6 @@ try:
 except ImportError:
     VLC_AVAILABLE = False
 
-
 class ProxyHTTPRequestHandler(BaseHTTPRequestHandler):
     parent_app = None  # Reference to VideoPlayer instance
     active_request = False
@@ -67,7 +66,6 @@ class ProxyHTTPRequestHandler(BaseHTTPRequestHandler):
                 ProxyHTTPRequestHandler.active_request = False
         return super().finish()
 
-
 class ProxyServerThread(threading.Thread):
     def __init__(self, host, port, handler):
         super().__init__()
@@ -80,7 +78,6 @@ class ProxyServerThread(threading.Thread):
     def stop_server(self):
         self.server.shutdown()
         self.server.server_close()
-
 
 class OptionsDialog(QDialog):
     def __init__(self, parent=None):
@@ -366,19 +363,17 @@ class VideoPlayer(QMainWindow):
 
     def toggle_fullscreen(self):
         if self.vlc_available:
-            if self.video_frame.isFullScreen():
-                self.video_frame.setWindowFlags(Qt.Widget)
-                self.video_frame.showNormal()
-            else:
-                self.video_frame.setWindowFlags(Qt.Window)
-                self.video_frame.showFullScreen()
+            self.toggle_fullscreen_custom(self.video_frame)
         else:
-            if self.video_widget.isFullScreen():
-                self.video_widget.setWindowFlags(Qt.Widget)
-                self.video_widget.showNormal()
-            else:
-                self.video_widget.setWindowFlags(Qt.Window)
-                self.video_widget.showFullScreen()
+            self.toggle_fullscreen_custom(self.video_widget)
+
+    def toggle_fullscreen_custom(self, widget):
+        if widget.isFullScreen():
+            widget.setWindowFlags(Qt.Widget)
+            widget.showNormal()
+        else:
+            widget.setWindowFlags(Qt.Window)
+            widget.showFullScreen()
 
     def open_file(self):
         file_dialog = QFileDialog(self)
@@ -482,11 +477,9 @@ class VideoPlayer(QMainWindow):
             proxy_url = f"http://localhost:8081/?url={requests.utils.quote(cmd)}"
             self.play_video(proxy_url)
 
-
     def options_dialog(self):
         options = OptionsDialog(self)
         options.exec_()
-
 
     @staticmethod
     def parse_m3u(data):
@@ -501,7 +494,6 @@ class VideoPlayer(QMainWindow):
                 channel['cmd'] = line
                 result.append(channel)
         return result
-
 
     def do_handshake(self, url, mac, retries=0, max_retries=3):
         if retries > max_retries:
@@ -525,7 +517,6 @@ class VideoPlayer(QMainWindow):
             print("Error in handshake:", e)
             return False
 
-
     def load_stb_channels(self, url, options):
         try:
             fetchurl = f"{url}/server/load.php?type=itv&action=get_all_channels"
@@ -535,7 +526,6 @@ class VideoPlayer(QMainWindow):
             self.display_channels(channels)
         except Exception as e:
             print(f"Error loading STB channels: {e}")
-
 
     def create_link(self, cmd):
         try:
@@ -550,7 +540,6 @@ class VideoPlayer(QMainWindow):
         except Exception as e:
             print(f"Error creating link: {e}")
             return None
-
 
     @staticmethod
     def create_options(url, mac, token):
@@ -570,11 +559,9 @@ class VideoPlayer(QMainWindow):
         }
         return options
 
-
     def generate_headers(self):
         selected_provider = self.config["data"][self.config["selected"]]
         return selected_provider["options"]["headers"]
-
 
     def verify_url(self, url):
         try:
@@ -583,7 +570,6 @@ class VideoPlayer(QMainWindow):
         except Exception as e:
             print("Error verifying URL:", e)
             return False
-
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
