@@ -1,17 +1,22 @@
-from PyQt5.QtWidgets import QDialog, QFormLayout, QLabel, QComboBox, QPushButton, QRadioButton, QButtonGroup, QLineEdit, \
-    QFileDialog
-import requests
+from PyQt5.QtWidgets import (
+    QFileDialog, QPushButton, QLineEdit, QDialog, QLabel, QFormLayout, QRadioButton, QButtonGroup, QComboBox
+)
 
+
+# Attempt to import vlc, set to None if unavailable
 
 class OptionsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Options")
-
         self.layout = QFormLayout(self)
         self.config = parent.config
         self.selected_provider_index = 0
 
+        self.create_options_ui()
+        self.load_providers()
+
+    def create_options_ui(self):
         self.provider_label = QLabel("Select Provider:", self)
         self.provider_combo = QComboBox(self)
         self.provider_combo.currentIndexChanged.connect(self.load_provider_settings)
@@ -25,6 +30,29 @@ class OptionsDialog(QDialog):
         self.remove_provider_button.clicked.connect(self.remove_provider)
         self.layout.addWidget(self.remove_provider_button)
 
+        self.create_stream_type_ui()
+        self.url_label = QLabel("Server URL:", self)
+        self.url_input = QLineEdit(self)
+        self.layout.addRow(self.url_label, self.url_input)
+
+        self.mac_label = QLabel("MAC Address (STB only):", self)
+        self.mac_input = QLineEdit(self)
+        self.layout.addRow(self.mac_label, self.mac_input)
+
+        self.file_button = QPushButton("Load File", self)
+        self.file_button.clicked.connect(self.load_file)
+        self.layout.addWidget(self.file_button)
+
+        self.verify_button = QPushButton("Verify Provider", self)
+        self.verify_button.clicked.connect(self.verify_provider)
+        self.layout.addWidget(self.verify_button)
+        self.verify_result = QLabel("", self)
+        self.layout.addWidget(self.verify_result)
+        self.save_button = QPushButton("Save", self)
+        self.save_button.clicked.connect(self.save_settings)
+        self.layout.addWidget(self.save_button)
+
+    def create_stream_type_ui(self):
         self.type_label = QLabel("Stream Type:", self)
         self.type_group = QButtonGroup(self)
         self.type_STB = QRadioButton("STB", self)
@@ -43,31 +71,6 @@ class OptionsDialog(QDialog):
         self.layout.addRow(self.type_M3UPLAYLIST)
         self.layout.addRow(self.type_M3USTREAM)
 
-        self.url_label = QLabel("Server URL:", self)
-        self.url_input = QLineEdit(self)
-        self.layout.addRow(self.url_label, self.url_input)
-
-        self.mac_label = QLabel("MAC Address (STB only):", self)
-        self.mac_input = QLineEdit(self)
-        self.layout.addRow(self.mac_label, self.mac_input)
-
-        self.file_button = QPushButton("Load File", self)
-        self.file_button.clicked.connect(self.load_file)
-        self.layout.addWidget(self.file_button)
-
-        self.verify_button = QPushButton("Verify Provider", self)
-        self.verify_button.clicked.connect(self.verify_provider)
-        self.layout.addWidget(self.verify_button)
-
-        self.verify_result = QLabel("", self)
-        self.layout.addWidget(self.verify_result)
-
-        self.save_button = QPushButton("Save", self)
-        self.save_button.clicked.connect(self.save_settings)
-        self.layout.addWidget(self.save_button)
-
-        self.load_providers()
-
     def load_providers(self):
         self.provider_combo.blockSignals(True)
         self.provider_combo.clear()
@@ -83,34 +86,20 @@ class OptionsDialog(QDialog):
         self.selected_provider = self.config["data"][index]
         self.url_input.setText(self.selected_provider.get("url", ""))
         self.mac_input.setText(self.selected_provider.get("mac", ""))
-
-        if self.selected_provider["type"] == "STB":
-            self.type_STB.setChecked(True)
-        elif self.selected_provider["type"] == "M3UPLAYLIST":
-            self.type_M3UPLAYLIST.setChecked(True)
-        elif self.selected_provider["type"] == "M3USTREAM":
-            self.type_M3USTREAM.setChecked(True)
-
         self.update_inputs()
 
     def update_inputs(self):
-        if self.type_STB.isChecked():
-            self.mac_label.setVisible(True)
-            self.mac_input.setVisible(True)
-            self.file_button.setVisible(False)
-            self.url_input.setEnabled(True)
-        elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
-            self.mac_label.setVisible(False)
-            self.mac_input.setVisible(False)
-            self.file_button.setVisible(True if not self.url_input.text() else False)
-            self.url_input.setEnabled(True)
+        self.type_STB.setChecked(self.selected_provider["type"] == "STB")
+        self.type_M3UPLAYLIST.setChecked(self.selected_provider["type"] == "M3UPLAYLIST")
+        self.type_M3USTREAM.setChecked(self.selected_provider["type"] == "M3USTREAM")
+
+        self.mac_label.setVisible(self.type_STB.isChecked())
+        self.mac_input.setVisible(self.type_STB.isChecked())
+        self.file_button.setVisible(self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked())
+        self.url_input.setEnabled(True)
 
     def add_new_provider(self):
-        new_provider = {
-            "type": "STB",
-            "url": "",
-            "mac": ""
-        }
+        new_provider = {"type": "STB", "url": "", "mac": ""}
         self.config["data"].append(new_provider)
         self.selected_provider_index = len(self.config["data"]) - 1
         self.load_providers()
@@ -126,12 +115,11 @@ class OptionsDialog(QDialog):
         if self.selected_provider:
             self.selected_provider["url"] = self.url_input.text()
             self.selected_provider["mac"] = self.mac_input.text() if self.type_STB.isChecked() else ""
-            if self.type_STB.isChecked():
-                self.selected_provider["type"] = "STB"
-            elif self.type_M3UPLAYLIST.isChecked():
-                self.selected_provider["type"] = "M3UPLAYLIST"
-            elif self.type_M3USTREAM.isChecked():
-                self.selected_provider["type"] = "M3USTREAM"
+            self.selected_provider["type"] = (
+                "STB" if self.type_STB.isChecked() else
+                "M3UPLAYLIST" if self.type_M3UPLAYLIST.isChecked() else
+                "M3USTREAM"
+            )
             self.parent().save_config()
             self.parent().load_channels()
             self.accept()
@@ -151,9 +139,5 @@ class OptionsDialog(QDialog):
             result = self.parent().do_handshake(self.url_input.text(), self.mac_input.text(), max_retries=3)
         elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
             result = self.parent().verify_url(self.url_input.text())
-        if result:
-            self.verify_result.setText("Provider verified successfully.")
-            self.verify_result.setStyleSheet("color: green;")
-        else:
-            self.verify_result.setText("Failed to verify provider.")
-            self.verify_result.setStyleSheet("color: red;")
+        self.verify_result.setText("Provider verified successfully." if result else "Failed to verify provider.")
+        self.verify_result.setStyleSheet("color: green;" if result else "color: red;")
