@@ -7,84 +7,33 @@ from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import (
     QMainWindow, QAction, QFileDialog, QVBoxLayout, QWidget, QPushButton, QFrame,
     QListWidget, QHBoxLayout, QListWidgetItem, QLineEdit, QGridLayout,
-    QSlider, QStyle
+    QSlider, QStyle, QApplication
 )
 from proxy_server import ProxyHTTPRequestHandler, ProxyServerThread
 from options import OptionsDialog
 
 
 class VideoPlayer(QMainWindow):
-    channels_loaded = pyqtSignal(list)
-
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Not PiTV")
+        self.setWindowTitle("Not PiTV Player")
         self.setGeometry(100, 100, 1200, 800)
 
         self.container_widget = QWidget(self)
         self.setCentralWidget(self.container_widget)
         self.grid_layout = QGridLayout(self.container_widget)
 
-        self.create_ui()
-        self.load_config()
-        self.load_channels()
-
-        ProxyHTTPRequestHandler.parent_app = self
-        self.proxy_server = ProxyServerThread('localhost', 8081, ProxyHTTPRequestHandler)
-        self.proxy_server.start()
-
-    def closeEvent(self, event):
-        self.proxy_server.stop_server()
-        event.accept()
-
-    def create_ui(self):
-        self.create_menu()
-        self.create_buttons()
-        self.create_video_area()
-        self.create_left_panel()
-        self.create_media_controls()
-
-    def create_menu(self):
-        menubar = self.menuBar()
-        file_menu = menubar.addMenu('&File')
-        open_action = QAction('Open', self)
-        open_action.triggered.connect(self.open_file)
-        file_menu.addAction(open_action)
-
-        options_action = QAction('Options', self)
-        options_action.triggered.connect(self.options_dialog)
-        file_menu.addAction(options_action)
-
-    def create_buttons(self):
-        self.buttons_widget = QWidget(self.container_widget)
-        buttons_layout = QHBoxLayout(self.buttons_widget)
-        self.open_button = QPushButton("Open", self)
-        self.open_button.clicked.connect(self.open_file)
-        buttons_layout.addWidget(self.open_button)
-        self.options_button = QPushButton("Options", self)
-        self.options_button.clicked.connect(self.options_dialog)
-        buttons_layout.addWidget(self.options_button)
-        self.grid_layout.addWidget(self.buttons_widget, 0, 1, 1, 1)
-
-    def create_video_area(self):
         self.instance = vlc.Instance('--no-xlib', '--vout=gl')
         self.player = self.instance.media_player_new()
-        self.video_frame = QFrame(self.container_widget)
-        self.grid_layout.addWidget(self.video_frame, 1, 1, 1, 2)
-        self.grid_layout.setColumnStretch(1, 4)
+        self.create_video_area()
+        self.create_media_controls()
 
-    def create_left_panel(self):
-        self.left_panel = QWidget(self.container_widget)
-        left_layout = QVBoxLayout(self.left_panel)
-        self.search_box = QLineEdit(self.left_panel)
-        self.search_box.setPlaceholderText("Search channels...")
-        self.search_box.textChanged.connect(self.filter_channels)
-        left_layout.addWidget(self.search_box)
-        self.channel_list = QListWidget(self.left_panel)
-        self.channel_list.itemClicked.connect(self.channel_selected)
-        left_layout.addWidget(self.channel_list)
-        self.grid_layout.addWidget(self.left_panel, 1, 0, 1, 1)
-        self.grid_layout.setColumnStretch(0, 1)
+        self.proxy_server = None
+
+    def create_video_area(self):
+        self.video_frame = QFrame(self.container_widget)
+        self.grid_layout.addWidget(self.video_frame, 0, 0)
+        self.grid_layout.setColumnStretch(0, 4)
 
     def create_media_controls(self):
         self.media_controls = QWidget(self.container_widget)
@@ -109,7 +58,7 @@ class VideoPlayer(QMainWindow):
         self.position_slider.sliderMoved.connect(self.set_position)
         control_layout.addWidget(self.position_slider)
 
-        self.grid_layout.addWidget(self.media_controls, 2, 0, 1, 3)
+        self.grid_layout.addWidget(self.media_controls, 1, 0)
 
     def set_position(self, position):
         self.player.setPosition(position)
@@ -137,19 +86,13 @@ class VideoPlayer(QMainWindow):
         self.toggle_fullscreen_custom(self.video_frame)
 
     @staticmethod
-    def toggle_fullscreen_custom(self, widget):
+    def toggle_fullscreen_custom(widget):
         if widget.isFullScreen():
             widget.setWindowFlags(Qt.Widget)
             widget.showNormal()
         else:
             widget.setWindowFlags(Qt.Window)
             widget.showFullScreen()
-
-    def open_file(self):
-        file_dialog = QFileDialog(self)
-        file_path, _ = file_dialog.getOpenFileName()
-        if file_path != '':
-            self.play_video(file_path)
 
     def play_video(self, file_path):
         if sys.platform.startswith('linux'):
@@ -163,6 +106,64 @@ class VideoPlayer(QMainWindow):
         self.player.play()
         self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
 
+
+class ChannelListWindow(QMainWindow):
+    channels_loaded = pyqtSignal(list)
+
+    def __init__(self, player):
+        super().__init__()
+        self.player = player
+        self.setWindowTitle("Not PiTV Channel List")
+        self.setGeometry(800, 100, 400, 800)
+
+        self.container_widget = QWidget(self)
+        self.setCentralWidget(self.container_widget)
+        self.grid_layout = QGridLayout(self.container_widget)
+
+        self.create_menu()
+        self.create_left_panel()
+
+        self.load_config()
+        self.load_channels()
+
+        self.proxy_server = ProxyServerThread('localhost', 8081, ProxyHTTPRequestHandler)
+        ProxyHTTPRequestHandler.parent_app = self
+        self.proxy_server.start()
+
+    def closeEvent(self, event):
+        self.proxy_server.stop_server()
+        QApplication.quit()
+
+    def create_menu(self):
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu('&File')
+        open_action = QAction('Open', self)
+        open_action.triggered.connect(self.open_file)
+        file_menu.addAction(open_action)
+
+        options_action = QAction('Options', self)
+        options_action.triggered.connect(self.options_dialog)
+        file_menu.addAction(options_action)
+
+    def create_left_panel(self):
+        self.left_panel = QWidget(self.container_widget)
+        left_layout = QVBoxLayout(self.left_panel)
+        self.search_box = QLineEdit(self.left_panel)
+        self.search_box.setPlaceholderText("Search channels...")
+        self.search_box.textChanged.connect(self.filter_channels)
+        left_layout.addWidget(self.search_box)
+        self.channel_list = QListWidget(self.left_panel)
+        self.channel_list.itemClicked.connect(self.channel_selected)
+        left_layout.addWidget(self.channel_list)
+        self.grid_layout.addWidget(self.left_panel, 0, 0)
+        self.grid_layout.setColumnStretch(0, 1)
+
+    def open_file(self):
+        file_dialog = QFileDialog(self)
+        file_path, _ = file_dialog.getOpenFileName()
+        if file_path != '':
+            self.player.play_video(file_path)
+
     def load_config(self):
         try:
             with open('config.json', 'r') as f:
@@ -174,7 +175,7 @@ class VideoPlayer(QMainWindow):
             self.save_config()
 
     @staticmethod
-    def default_config(self):
+    def default_config():
         return {
             "selected": 0,
             "data": [
@@ -230,12 +231,12 @@ class VideoPlayer(QMainWindow):
             url = self.create_link(cmd)
             if url:
                 proxy_url = f"http://localhost:8081/?url={requests.utils.quote(url)}"
-                self.play_video(proxy_url)
+                self.player.play_video(proxy_url)
             else:
                 print("Failed to create link.")
         else:
             proxy_url = f"http://localhost:8081/?url={requests.utils.quote(cmd)}"
-            self.play_video(proxy_url)
+            self.player.play_video(proxy_url)
 
     def options_dialog(self):
         options = OptionsDialog(self)
@@ -324,7 +325,7 @@ class VideoPlayer(QMainWindow):
         return selected_provider["options"]["headers"]
 
     @staticmethod
-    def verify_url(self, url):
+    def verify_url(url):
         try:
             response = requests.get(url)
             return response.status_code == 200
