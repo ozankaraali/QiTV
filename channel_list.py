@@ -189,7 +189,7 @@ class ChannelList(QMainWindow):
             else:
                 print("Failed to create link.")
         else:
-            proxy_url = f"http://localhost:8081/?url={requests.utils.quote(cmd)}"
+            proxy_url = cmd  #f"http://localhost:8081/?url={requests.utils.quote(cmd)}"
             self.player.play_video(proxy_url)
 
     def options_dialog(self):

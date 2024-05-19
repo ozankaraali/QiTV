@@ -48,9 +48,9 @@ app = BUNDLE(
     info_plist={
         'NSPrincipalClass': 'NSApplication',
         'NSAppleScriptEnabled': False,
-        'NSMicrophoneUsageDescription': 'This app requires access to the microphone for audio processing.',
-        'NSCameraUsageDescription': 'This app requires access to the camera for hand gesture detection.',
-        'NSAccessibilityUsageDescription': 'This app requires accessibility permissions to control the mouse using hand gestures.'
+#        'NSMicrophoneUsageDescription': 'This app requires access to the microphone for audio processing.',
+#        'NSCameraUsageDescription': 'This app requires access to the camera for hand gesture detection.',
+#        'NSAccessibilityUsageDescription': 'This app requires accessibility permissions to control the mouse using hand gestures.'
     },
     version='0.0.1'
 )
