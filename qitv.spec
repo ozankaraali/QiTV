@@ -2,6 +2,8 @@ import site
 
 # Determine path to site-packages
 PACKAGES_PATH = site.getsitepackages()[0]
+block_cipher = None
+
 # Add paths
 a = Analysis(
     ['main.py'],
