@@ -22,7 +22,7 @@ jobs:
       - name: Package App with PyInstaller for Linux
         run: |
           pip install pyinstaller
-          pyinstaller --onefile --windowed --name qitv --icon=assets/qitv.png qitv-linux.spec
+          pyinstaller qitv-linux.spec
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v3
         with:
@@ -45,7 +45,7 @@ jobs:
       - name: Package App with PyInstaller for Windows
         run: |
           pip install pyinstaller
-          pyinstaller --onefile --windowed --name qitv --icon=assets/qitv.ico qitv-windows.spec
+          pyinstaller qitv-windows.spec
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v3
         with:
@@ -68,7 +68,7 @@ jobs:
       - name: Package App with PyInstaller for macOS
         run: |
           pip install pyinstaller
-          pyinstaller --onefile --windowed --name qitv --icon=assets/qitv.icns qitv-macos.spec
+          pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         run: |
           codesign --force --deep --sign - dist/qitv.app
@@ -98,7 +98,7 @@ jobs:
       - name: Package App with PyInstaller for macOS (Intel)
         run: |
           pip install pyinstaller
-          pyinstaller --onefile --windowed --name qitv --icon=assets/qitv.icns qitv-macos-intel.spec
+          pyinstaller qitv-macos-intel.spec
       - name: Ad-Hoc Sign the app
         run: |
           codesign --force --deep --sign - dist/qitv.app
