@@ -20,13 +20,7 @@ jobs:
       - name: Package App with PyInstaller for Linux
         run: |
           pip install pyinstaller
-          PACKAGES_PATH=$(python -c "import site; print(site.getsitepackages()[0])")
-          pyinstaller --onefile --windowed -n qitv --icon=assets/qitv.png main.py \
-#          --paths $PACKAGES_PATH/cv2 \
-#          --paths $PACKAGES_PATH/mediapipe \
-#          --paths $PACKAGES_PATH/pyautogui \
-#          --add-data $PACKAGES_PATH/mediapipe:mediapipe \
-#          --add-data $PACKAGES_PATH/cv2/data:cv2/data
+          pyinstaller -F -w -n qitv --icon=assets/qitv.png main.py
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v3
         with:
@@ -44,28 +38,17 @@ jobs:
           python-version: 3.8
       - name: Install dependencies
         run: pip install -r requirements.txt
-#      - name: Check mediapipe and cv2 location
-#        shell: pwsh
-#        run: |
-#          $MEDIAPIPE_PATH = (python -c "import mediapipe; print(mediapipe.__path__[0])")
-#          echo "MEDIAPIPE_PATH=$MEDIAPIPE_PATH" >> $env:GITHUB_ENV
-#          $CV2_PATH = (python -c "import cv2; print(cv2.__path__[0])")
-#          echo "CV2_PATH=$CV2_PATH" >> $env:GITHUB_ENV
       - name: Package App with PyInstaller for Windows
-        shell: pwsh
         run: |
           pip install pyinstaller
-          pyinstaller qitv-windows.spec
-#      - name: Zip the contents of dist directory
-#        run: |
-#          Compress-Archive -Path dist/qitv/* -DestinationPath dist/qitv.zip
+          pyinstaller -F -w -n qitv --icon=assets/qitv.ico main.py
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v3
         with:
           name: packaged-app-windows
           path: dist/qitv.exe
 
-  build-macos:
+  build-macos-universal:
     runs-on: macos-latest
     steps:
       - name: Checkout code
@@ -82,19 +65,50 @@ jobs:
           pyinstaller qitv.spec
       - name: Ad-Hoc Sign the app
         run: |
-          codesign --force --deep --sign - "$(pwd)/dist/qitv.app"
+          codesign --force --deep --sign - dist/qitv.app
       - name: Zip macOS App
         run: |
           cd dist
-          zip -r qitv-macos.zip qitv.app
+          zip -r qitv-macos-universal.zip qitv.app
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v3
         with:
-          name: packaged-app-macos
-          path: dist/qitv-macos.zip
+          name: packaged-app-macos-universal
+          path: dist/qitv-macos-universal.zip
+
+  build-macos-intel:
+    runs-on: macos-11
+    strategy:
+      matrix:
+        architecture: [x86_64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.8
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Package App with PyInstaller for Intel MacOS
+        run: |
+          pip install pyinstaller
+          pyinstaller qitv-x86_64.spec
+      - name: Ad-Hoc Sign the app
+        run: |
+          codesign --force --deep --sign - dist/qitv.app
+      - name: Zip macOS App
+        run: |
+          cd dist
+          zip -r qitv-macos-intel.zip qitv.app
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: packaged-app-macos-intel
+          path: dist/qitv-macos-intel.zip
 
   release:
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-linux, build-windows, build-macos-universal, build-macos-intel]
     runs-on: ubuntu-latest
     steps:
       - name: Get shortened SHA
@@ -120,7 +134,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./packaged-app-linux/qitv
+          asset_path: packaged-app-linux/qitv
           asset_name: qitv-linux
           asset_content_type: application/octet-stream
       - name: Upload Windows Release Asset
@@ -129,15 +143,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./packaged-app-windows/qitv.exe
+          asset_path: packaged-app-windows/qitv.exe
           asset_name: qitv-windows.exe
           asset_content_type: application/octet-stream
-      - name: Upload macOS Release Asset
+      - name: Upload macOS Universal Release Asset
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./packaged-app-macos/qitv-macos.zip
-          asset_name: qitv-macos.zip
+          asset_path: packaged-app-macos-universal/qitv-macos-universal.zip
+          asset_name: qitv-macos-universal.zip
+          asset_content_type: application/zip
+      - name: Upload macOS Intel Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: packaged-app-macos-intel/qitv-macos-intel.zip
+          asset_name: qitv-macos-intel.zip
           asset_content_type: application/zip
