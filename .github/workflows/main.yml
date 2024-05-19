@@ -15,12 +15,14 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: 3.9
+      - name: Install VLC
+        run: sudo apt-get install -y vlc
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Package App with PyInstaller for Linux
         run: |
           pip install pyinstaller
-          pyinstaller -F -w -n qitv --icon=assets/qitv.png main.py
+          pyinstaller --onefile --windowed --name qitv --icon=assets/qitv.png qitv-linux.spec
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v3
         with:
@@ -36,12 +38,14 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: 3.8
+      - name: Install VLC
+        run: choco install vlc -y
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Package App with PyInstaller for Windows
         run: |
           pip install pyinstaller
-          pyinstaller -F -w -n qitv --icon=assets/qitv.ico main.py
+          pyinstaller --onefile --windowed --name qitv --icon=assets/qitv.ico qitv-windows.spec
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v3
         with:
@@ -57,12 +61,14 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: 3.8
+      - name: Install VLC
+        run: brew install --cask vlc
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Package App with PyInstaller for MacOS
+      - name: Package App with PyInstaller for macOS
         run: |
           pip install pyinstaller
-          pyinstaller qitv.spec
+          pyinstaller --onefile --windowed --name qitv --icon=assets/qitv.icns qitv-macos.spec
       - name: Ad-Hoc Sign the app
         run: |
           codesign --force --deep --sign - dist/qitv.app
@@ -78,9 +84,6 @@ jobs:
 
   build-macos-intel:
     runs-on: macos-11
-    strategy:
-      matrix:
-        architecture: [x86_64]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -88,12 +91,14 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: 3.8
+      - name: Install VLC
+        run: brew install --cask vlc
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Package App with PyInstaller for Intel MacOS
+      - name: Package App with PyInstaller for macOS (Intel)
         run: |
           pip install pyinstaller
-          pyinstaller qitv-x86_64.spec
+          pyinstaller --onefile --windowed --name qitv --icon=assets/qitv.icns qitv-macos-intel.spec
       - name: Ad-Hoc Sign the app
         run: |
           codesign --force --deep --sign - dist/qitv.app

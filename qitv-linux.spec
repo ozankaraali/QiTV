@@ -2,7 +2,7 @@ import site
 import os
 
 PACKAGES_PATH = site.getsitepackages()[0]
-VLC_PATH = 'C:\\Program Files\\VideoLAN\\VLC'  # Adjust this path if necessary
+VLC_PATH = '/usr/lib/x86_64-linux-gnu/'  # Adjust this path if necessary
 
 block_cipher = None
 
@@ -10,11 +10,11 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[
-        (os.path.join(VLC_PATH, 'libvlc.dll'), '.'),
-        (os.path.join(VLC_PATH, 'libvlccore.dll'), '.'),
+        (os.path.join(VLC_PATH, 'libvlc.so'), '.'),
+        (os.path.join(VLC_PATH, 'libvlccore.so'), '.'),
     ],
     datas=[
-        ('assets/qitv.ico', 'assets/qitv.ico')
+        ('assets/qitv.png', 'assets/qitv.png')
     ],
     hiddenimports=[],
     hookspath=[],
@@ -33,10 +33,10 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='qitv.exe',
+    name='qitv',
     debug=False,
     strip=False,
     upx=True,
     console=False,
-    icon='assets/qitv.ico'
+    icon='assets/qitv.png'
 )
