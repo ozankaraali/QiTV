@@ -1,4 +1,9 @@
 import json
+import string
+import random
+import re
+import aiohttp
+from urlobject import URLObject
 
 import requests
 from PyQt5.QtCore import pyqtSignal
@@ -8,7 +13,6 @@ from PyQt5.QtWidgets import (
 )
 
 from options import OptionsDialog
-from proxy_server import ProxyHTTPRequestHandler, ProxyServerThread
 
 
 class ChannelList(QMainWindow):
@@ -32,12 +36,7 @@ class ChannelList(QMainWindow):
         self.apply_window_settings()
         self.load_channels()
 
-        self.proxy_server = ProxyServerThread('localhost', 8081, ProxyHTTPRequestHandler)
-        ProxyHTTPRequestHandler.parent_app = self
-        self.proxy_server.start()
-
     def closeEvent(self, event):
-        self.proxy_server.stop_server()
         self.save_window_settings()
         self.save_config()
         event.accept()
@@ -101,6 +100,23 @@ class ChannelList(QMainWindow):
         except (FileNotFoundError, json.JSONDecodeError):
             self.config = self.default_config()
             self.save_config()
+
+        selected_config = self.config['data'][self.config['selected']]
+        if 'options' in selected_config:
+            self.options = selected_config['options']
+            self.token = self.options['headers']['Authorization'].split(" ")[1]
+        else:
+            self.options = {
+                'headers': {
+                    'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+                    'Accept-Charset': 'UTF-8,*;q=0.8',
+                    'X-User-Agent': 'Model: MAG200; Link: Ethernet',
+                    'Content-Type': 'application/json'
+                }
+            }
+
+        self.url = selected_config.get('url')
+        self.mac = selected_config.get('mac')
 
     @staticmethod
     def default_config():
@@ -184,13 +200,11 @@ class ChannelList(QMainWindow):
         if self.config["data"][self.config["selected"]]["type"] == "STB":
             url = self.create_link(cmd)
             if url:
-                proxy_url = f"http://localhost:8081/?url={requests.utils.quote(url)}"
-                self.player.play_video(proxy_url)
+                self.player.play_video(url)
             else:
                 print("Failed to create link.")
         else:
-            proxy_url = cmd  #f"http://localhost:8081/?url={requests.utils.quote(cmd)}"
-            self.player.play_video(proxy_url)
+            self.player.play_video(cmd)
 
     def options_dialog(self):
         options = OptionsDialog(self)
@@ -198,23 +212,31 @@ class ChannelList(QMainWindow):
 
     @staticmethod
     def parse_m3u(data):
-        lines = data.split('\n')
+        lines = data.split("\n")
         result = []
         channel = {}
+        id = 0
         for line in lines:
-            if line.startswith('#EXTINF'):
-                info = line.split(',')
-                channel = {'id': len(result) + 1, 'name': info[1] if len(info) > 1 else 'Unnamed Channel'}
-            elif line.startswith('http'):
-                channel['cmd'] = line
+            if line.startswith("#EXTINF"):
+                tvg_id_match = re.search(r'tvg-id="([^"]+)"', line)
+                tvg_logo_match = re.search(r'tvg-logo="([^"]+)"', line)
+                group_title_match = re.search(r'group-title="([^"]+)"', line)
+                channel_name_match = re.search(r",(.+)", line)
+
+                tvg_id = tvg_id_match.group(1) if tvg_id_match else None
+                tvg_logo = tvg_logo_match.group(1) if tvg_logo_match else None
+                group_title = group_title_match.group(1) if group_title_match else None
+                channel_name = channel_name_match.group(1) if channel_name_match else None
+
+                id += 1
+                channel = {"id": id, "name": channel_name}
+            elif line.startswith("http"):
+                channel["cmd"] = line
                 result.append(channel)
         return result
 
-    def do_handshake(self, url, mac, retries=0, max_retries=3):
-        if retries > max_retries:
-            return False
-        token = self.config.get("token")
-        serverload = "/server/load.php"
+    def do_handshake(self, url, mac, serverload="/server/load.php", load=True):
+        token = self.config.get("token") if self.config.get("token") else self.random_token(self)
         options = self.create_options(url, mac, token)
         try:
             fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash=0&token={token}&JsHttpRequest=1-xml"
@@ -224,21 +246,28 @@ class ChannelList(QMainWindow):
             options["headers"]["Authorization"] = f"Bearer {token}"
             self.config["data"][self.config["selected"]]["options"] = options
             self.save_config()
-            self.load_stb_channels(url, options)
+            if load:
+                self.load_stb_channels(url, options)
             return True
         except Exception as e:
-            if retries < max_retries:
-                return self.do_handshake(url, mac, retries + 1, max_retries)
+            if serverload != "/portal.php":
+                serverload = "/portal.php"
+                return self.do_handshake(url, mac, serverload)
             print("Error in handshake:", e)
             return False
 
     def load_stb_channels(self, url, options):
+        url = URLObject(url)
+        url = f"{url.scheme}://{url.netloc}"
         try:
             fetchurl = f"{url}/server/load.php?type=itv&action=get_all_channels"
             response = requests.get(fetchurl, headers=options["headers"])
             result = response.json()
             channels = result["js"]["data"]
             self.display_channels(channels)
+            self.config["data"][self.config["selected"]]["options"] = options
+            self.config["data"][self.config["selected"]]["channels"] = channels
+            self.save_config()
         except Exception as e:
             print(f"Error loading STB channels: {e}")
 
@@ -246,6 +275,8 @@ class ChannelList(QMainWindow):
         try:
             selected_provider = self.config["data"][self.config["selected"]]
             url = selected_provider["url"]
+            url = URLObject(url)
+            url = f"{url.scheme}://{url.netloc}"
             options = selected_provider["options"]
             fetchurl = f"{url}/server/load.php?type=itv&action=create_link&type=itv&cmd={requests.utils.quote(cmd)}&JsHttpRequest=1-xml"
             response = requests.get(fetchurl, headers=options["headers"])
@@ -255,21 +286,25 @@ class ChannelList(QMainWindow):
         except Exception as e:
             print(f"Error creating link: {e}")
             return None
+    @staticmethod
+    def random_token(self):
+        return ''.join(random.choices(string.ascii_letters + string.digits, k=32))
 
     @staticmethod
     def create_options(url, mac, token):
+        url = URLObject(url)
         options = {
             "headers": {
                 "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
                 "Accept-Charset": "UTF-8,*;q=0.8",
                 "X-User-Agent": "Model: MAG200; Link: Ethernet",
-                "Content-Type": "application/json",
-                "Host": url.split("//")[1].split("/")[0],
+                # "Content-Type": "application/json",
+                "Host": f"{url.netloc}",
                 "Range": "bytes=0-",
                 "Accept": "*/*",
-                "Referer": f"{url}/c/",
+                "Referer": f"{url}/c/" if not url.path else f"{url}/",
                 "Cookie": f"mac={mac}; stb_lang=en; timezone=Europe/Kiev; PHPSESSID=null;",
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {token}"
             }
         }
         return options
