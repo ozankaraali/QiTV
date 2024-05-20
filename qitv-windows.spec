@@ -12,6 +12,8 @@ a = Analysis(
     binaries=[
         (os.path.join(VLC_PATH, 'libvlc.dll'), '.'),
         (os.path.join(VLC_PATH, 'libvlccore.dll'), '.'),
+        (os.path.join(VLC_PATH, 'axvlc.dll'), '.'),
+        (os.path.join(VLC_PATH, 'npvlc.dll'), '.'),
     ],
     datas=[
         ('assets/qitv.ico', 'assets/qitv.ico')

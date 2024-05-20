@@ -11,8 +11,8 @@ a = Analysis(
     pathex=[],
     binaries=[
         (os.path.join(VLC_PATH, 'libvlc.dylib'), '.'),
-        (os.path.join(VLC_PATH, 'libvlccore.dylib'), '.'),
-    ],
+        (os.path.join(VLC_PATH, 'libvlccore.dylib'), '.')
+     ],
     datas=[
         ('assets/qitv.icns', 'assets/qitv.icns')
     ],
@@ -46,11 +46,14 @@ app = BUNDLE(
     icon='assets/qitv.icns',
     bundle_identifier=None,
     info_plist={
+        'CFBundleName': 'qitv',
+        'CFBundleDisplayName': 'qitv',
+        'CFBundleIdentifier': 'com.ozankaraali.qitv',
+        'CFBundleVersion': '1.0',
+        'CFBundleExecutable': 'qitv',
+        'CFBundleIconFile': 'qitv.icns',
         'NSPrincipalClass': 'NSApplication',
-        'NSAppleScriptEnabled': False,
-#        'NSMicrophoneUsageDescription': 'This app requires access to the microphone for audio processing.',
-#        'NSCameraUsageDescription': 'This app requires access to the camera for hand gesture detection.',
-#        'NSAccessibilityUsageDescription': 'This app requires accessibility permissions to control the mouse using hand gestures.'
+        'LSUIElement': True,
     },
     version='0.0.1'
 )

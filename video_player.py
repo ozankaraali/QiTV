@@ -5,7 +5,7 @@ import platform
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QFrame, QWidget
 from PyQt5.QtGui import QPalette, QColor
 from PyQt5.QtCore import Qt
-
+import os
 
 class VideoPlayer(QMainWindow):
     def __init__(self):
@@ -17,9 +17,40 @@ class VideoPlayer(QMainWindow):
         palette.setColor(QPalette.Window, QColor(0, 0, 0))
         self.setPalette(palette)
 
-        # VLC instance and media player
-        self.instance = vlc.Instance()
-        self.mediaplayer = self.instance.media_player_new()
+        if platform.system() == "Windows":
+            vlc_path = os.path.join(os.path.dirname(__file__), 'libvlc.dll')  # Confirm this path as per your setup
+            # Ensure the VLC path is set in the environment
+            os.environ.setdefault('PYTHON_VLC_LIB_PATH', vlc_path)
+
+            # Log the VLC path for debugging
+            print(f"VLC Path: {vlc_path}")
+        if platform.system() == "Linux":
+            vlc_path = os.path.join(os.path.dirname(__file__), 'libvlc.so')
+            os.environ.setdefault('PYTHON_VLC_LIB_PATH', vlc_path)
+            print(f"VLC Path: {vlc_path}")
+        if platform.system() == "Darwin":
+            vlc_path = os.path.join(os.path.dirname(__file__), 'libvlc.dylib')
+            os.environ.setdefault('PYTHON_VLC_LIB_PATH', vlc_path)
+            print(f"VLC Path: {vlc_path}")
+
+
+        # Initialize VLC instance
+        try:
+            self.instance = vlc.Instance()
+            if not self.instance:
+                raise Exception("Failed to create VLC instance")
+        except Exception as e:
+            print(f"Exception occurred while creating VLC instance: {e}")
+            raise
+
+        try:
+            self.media_player = self.instance.media_player_new()
+            if not self.media_player:
+                raise Exception("Failed to create VLC media player")
+        except Exception as e:
+            print(f"Exception occurred while creating VLC media player: {e}")
+            raise
+
         self.proxy_server = None
 
         # Main widget and layout
@@ -48,8 +79,8 @@ class VideoPlayer(QMainWindow):
     def closeEvent(self, event):
         self.save_window_settings()
         self.save_config()
-        if self.mediaplayer.is_playing():
-            self.mediaplayer.stop()
+        if self.media_player.is_playing():
+            self.media_player.stop()
         event.accept()
 
     def create_video_area(self):
@@ -62,25 +93,25 @@ class VideoPlayer(QMainWindow):
 
     def play_video(self, video_url):
         if platform.system() == "Linux":
-            self.mediaplayer.set_xwindow(self.videoframe.winId())
+            self.media_player.set_xwindow(self.videoframe.winId())
         elif platform.system() == "Windows":
-            self.mediaplayer.set_hwnd(self.videoframe.winId())
+            self.media_player.set_hwnd(self.videoframe.winId())
         elif platform.system() == "Darwin":
-            self.mediaplayer.set_nsobject(int(self.videoframe.winId()))
+            self.media_player.set_nsobject(int(self.videoframe.winId()))
 
         self.media = self.instance.media_new(video_url)
-        self.mediaplayer.set_media(self.media)
-        self.mediaplayer.play()
+        self.media_player.set_media(self.media)
+        self.media_player.play()
 
     def stop_video(self):
-        self.mediaplayer.stop()
+        self.media_player.stop()
 
     def toggle_play_pause(self):
-        state = self.mediaplayer.get_state()
+        state = self.media_player.get_state()
         if state == vlc.State.Playing:
-            self.mediaplayer.pause()
+            self.media_player.pause()
         else:
-            self.mediaplayer.play()
+            self.media_player.play()
 
     def load_config(self):
         try:
