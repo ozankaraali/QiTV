@@ -98,7 +98,7 @@ jobs:
       - name: Package App with PyInstaller for macOS (Intel)
         run: |
           pip install pyinstaller
-          pyinstaller qitv-macos-intel.spec
+          pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         run: |
           codesign --force --deep --sign - dist/qitv.app

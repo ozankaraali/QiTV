@@ -1,44 +1,48 @@
-import site
-import os
+# -*- mode: python ; coding: utf-8 -*-
 
-PACKAGES_PATH = site.getsitepackages()[0]
-VLC_PATH = '/Applications/VLC.app/Contents/MacOS/lib'  # Adjust this path if necessary
-
-block_cipher = None
+VLC_PATH = '/Applications/VLC.app/Contents'  # Adjust this path if necessary
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=[VLC_PATH],
     binaries=[
-        (os.path.join(VLC_PATH, 'libvlc.dylib'), '.'),
-        (os.path.join(VLC_PATH, 'libvlccore.dylib'), '.')
-     ],
-    datas=[
-        ('assets/qitv.icns', 'assets/qitv.icns')
+        (os.path.join(VLC_PATH, 'MacOS/plugins/*'), 'plugins'),
     ],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
     runtime_hooks=[],
     excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
-    noarchive=False
+    noarchive=False,
+    #https://github.com/pyinstaller/pyinstaller/issues/7851#issuecomment-1677986648
+    module_collection_mode={
+        'vlc': 'py',
+    }
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+pyz = PYZ(a.pure)
+
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
+    a.binaries, + [
+        "libvlc.dylib", os.path.join(VLC_PATH, 'MacOS/lib/libvlc.dylib'), "BINARY"),
+        "libvlccore.dylib", os.path.join(VLC_PATH, 'MacOS/lib/libvlccore.dylib'), "BINARY"),
+    ]
     a.datas,
     [],
     name='qitv',
-    debug=False,
+    bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
     console=False,
-    icon='assets/qitv.icns'
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
 )
 app = BUNDLE(
     exe,
