@@ -2,7 +2,6 @@ import json
 import string
 import random
 import re
-import aiohttp
 from urlobject import URLObject
 
 import requests
