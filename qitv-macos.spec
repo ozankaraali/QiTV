@@ -50,15 +50,4 @@ app = BUNDLE(
     name='qitv.app',
     icon='assets/qitv.icns',
     bundle_identifier=None,
-    info_plist={
-        'CFBundleName': 'qitv',
-        'CFBundleDisplayName': 'qitv',
-        'CFBundleIdentifier': 'com.ozankaraali.qitv',
-        'CFBundleVersion': '1.0',
-        'CFBundleExecutable': 'qitv',
-        'CFBundleIconFile': 'qitv.icns',
-        'NSPrincipalClass': 'NSApplication',
-        'LSUIElement': True,
-    },
-    version='0.0.1'
 )

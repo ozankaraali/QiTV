@@ -1,52 +1,62 @@
-import site
+# -*- mode: python ; coding: utf-8 -*-
+
 import os
+from PyInstaller.building.build_main import Analysis, PYZ, EXE, BUNDLE
 
-PACKAGES_PATH = site.getsitepackages()[0]
-# Attempt to locate VLC library files in common directories
-VLC_PATHS = [
-    '/usr/lib/x86_64-linux-gnu',
-    '/usr/lib',  # Try this common path as a fallback
-    '/usr/lib64' # Another common path on some distributions
-]
-found_vlc_paths = []
+VLC_PATH = '/usr/lib/x86_64-linux-gnu'  # Default path on Ubuntu
 
-# Check if the VLC libraries exist in any of the specified paths
-for path in VLC_PATHS:
-    if os.path.exists(os.path.join(path, 'libvlc.so')):
-        found_vlc_paths.append((os.path.join(path, 'libvlc.so'), '.'))
-    if os.path.exists(os.path.join(path, 'libvlccore.so')):
-        found_vlc_paths.append((os.path.join(path, 'libvlccore.so'), '.'))
+# Find the exact versions of libvlc and libvlccore
+libvlc_version = "libvlc.so"
+libvlccore_version = "libvlccore.so"
 
-block_cipher = None
+# Check if versioned libraries exist; use `ls` to find versions if not directly known
+for file in os.listdir(VLC_PATH):
+    if file.startswith("libvlc.so"):
+        libvlc_version = file
+    if file.startswith("libvlccore.so"):
+        libvlccore_version = file
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
-    binaries=found_vlc_paths,
-    datas=[
-        ('assets/qitv.png', 'assets/qitv.png')
+    pathex=[VLC_PATH],
+    binaries=[
+        (os.path.join(VLC_PATH, 'vlc/plugins/*'), 'plugins'),
     ],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
+    hooksconfig={},
     runtime_hooks=[],
     excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
-    noarchive=False
+    noarchive=False,
+    # If using a custom path for VLC, ensure you include the libvlc libraries
+    module_collection_mode={
+        'vlc': 'py',
+    }
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+pyz = PYZ(a.pure)
+
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
+    a.binaries + [
+        (libvlc_version, os.path.join(VLC_PATH, libvlc_version), "BINARY"),
+        (libvlccore_version, os.path.join(VLC_PATH, libvlccore_version), "BINARY")
+    ],
     a.datas,
     [],
     name='qitv',
     debug=False,
+    bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
-    icon='assets/qitv.png'
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,  # Set to False if you want to suppress the console
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
 )

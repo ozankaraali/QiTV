@@ -69,9 +69,14 @@ jobs:
         run: |
           pip install pyinstaller
           pyinstaller qitv-macos.spec
-      - name: Ad-Hoc Sign the app
+      - name: Rename the executable
+        run: mv dist/qitv.app/Contents/MacOS/qitv dist/qitv.app/Contents/MacOS/qitv_cli
+      - name: Create launcher script
         run: |
-          codesign --force --deep --sign - dist/qitv.app
+          echo '#!/bin/bash\nopen -n /Applications/qitv.app/Contents/MacOS/qitv_cli' > dist/qitv.app/Contents/MacOS/qitv
+          chmod +x dist/qitv.app/Contents/MacOS/qitv
+      - name: Ad-Hoc Sign the app
+        run: codesign --force --deep --sign - dist/qitv.app
       - name: Zip macOS App
         run: |
           cd dist
@@ -99,9 +104,14 @@ jobs:
         run: |
           pip install pyinstaller
           pyinstaller qitv-macos.spec
-      - name: Ad-Hoc Sign the app
+      - name: Rename the executable
+        run: mv dist/qitv.app/Contents/MacOS/qitv dist/qitv.app/Contents/MacOS/qitv_cli
+      - name: Create launcher script
         run: |
-          codesign --force --deep --sign - dist/qitv.app
+          echo '#!/bin/bash\nopen -n /Applications/qitv.app/Contents/MacOS/qitv_cli' > dist/qitv.app/Contents/MacOS/qitv
+          chmod +x dist/qitv.app/Contents/MacOS/qitv
+      - name: Ad-Hoc Sign the app
+        run: codesign --force --deep --sign - dist/qitv.app
       - name: Zip macOS App
         run: |
           cd dist
