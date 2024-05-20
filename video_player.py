@@ -1,11 +1,10 @@
-import sys
-import vlc
 import json
 import platform
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QFrame, QWidget
-from PyQt5.QtGui import QPalette, QColor
+
+import vlc
 from PyQt5.QtCore import Qt
-import os
+from PyQt5.QtGui import QPalette, QColor
+from PyQt5.QtWidgets import QMainWindow, QVBoxLayout, QWidget
 
 
 class VideoPlayer(QMainWindow):
@@ -18,59 +17,8 @@ class VideoPlayer(QMainWindow):
         palette.setColor(QPalette.Window, QColor(0, 0, 0))
         self.setPalette(palette)
 
-        if platform.system() == "Windows":
-            if getattr(sys, 'frozen', False):
-                vlc_dir = sys._MEIPASS  # Temporary extraction path used by PyInstaller
-            else:
-                vlc_dir = os.path.dirname(os.path.abspath(__file__))
-
-            # Ensure the VLC path is set in the environment
-            libvlc_path = os.path.join(vlc_dir, 'libvlc.dll')
-            libvlccore_path = os.path.join(vlc_dir, 'libvlccore.dll')
-
-            # Log paths for debugging
-            print(f"VLC Path: {libvlc_path}")
-            print(f"VLC Core Path: {libvlccore_path}")
-
-            # Ensure the paths are set correctly
-            os.environ['PYTHON_VLC_LIB_PATH'] = vlc_dir
-
-        if platform.system() == "Linux":
-            if getattr(sys, 'frozen', False):
-                vlc_dir = sys._MEIPASS  # Temporary extraction path used by PyInstaller
-            else:
-                vlc_dir = os.path.dirname(os.path.abspath(__file__))
-            # Ensure the VLC path is set in the environment
-            libvlc_path = os.path.join(vlc_dir, 'libvlc.so')
-            libvlccore_path = os.path.join(vlc_dir, 'libvlccore.so')
-
-            # Log paths for debugging
-            print(f"VLC Path: {libvlc_path}")
-            print(f"VLC Core Path: {libvlccore_path}")
-
-            # Ensure the paths are set correctly
-            os.environ['PYTHON_VLC_LIB_PATH'] = vlc_dir
-        if platform.system() == "Darwin":
-            if getattr(sys, 'frozen', False):
-                vlc_dir = sys._MEIPASS  # Temporary extraction path used by PyInstaller
-            else:
-                vlc_dir = os.path.dirname(os.path.abspath(__file__))
-            # Ensure the VLC path is set in the environment
-            libvlc_path = os.path.join(vlc_dir, 'libvlc.dylib')
-            libvlccore_path = os.path.join(vlc_dir, 'libvlccore.dylib')
-
-            # Log paths for debugging
-            print(f"VLC Path: {libvlc_path}")
-            print(f"VLC Core Path: {libvlccore_path}")
-
-            # Ensure the paths are set correctly
-            os.environ['PYTHON_VLC_LIB_PATH'] = vlc_dir
-
-        # Initialize VLC instance
         try:
-            self.instance = vlc.Instance(['--plugin-path', vlc_dir])
-            if not self.instance:
-                raise Exception("Failed to create VLC instance")
+            self.instance = vlc.Instance()
         except Exception as e:
             print(f"Exception occurred while creating VLC instance: {e}")
             raise

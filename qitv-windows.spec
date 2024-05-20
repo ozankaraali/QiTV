@@ -1,44 +1,42 @@
-import site
-import os
+# -*- mode: python ; coding: utf-8 -*-
 
-PACKAGES_PATH = site.getsitepackages()[0]
-VLC_PATH = 'C:\\Program Files\\VideoLAN\\VLC'  # Adjust this path if necessary
+VLC_PATH = 'C:\\Program Files\\VideoLAN\\VLC'
 
 block_cipher = None
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=[VLC_PATH], #insert your base VLC path here, ex: pathex=["D:\KivySchool\VLC"],
     binaries=[
-        (os.path.join(VLC_PATH, 'libvlc.dll'), '.'),
-        (os.path.join(VLC_PATH, 'libvlccore.dll'), '.'),
-        (os.path.join(VLC_PATH, 'axvlc.dll'), '.'),
-        (os.path.join(VLC_PATH, 'npvlc.dll'), '.'),
+        (os.path.join(VLC_PATH, 'plugins/*'), 'plugins'),
     ],
-    datas=[
-        ('assets/qitv.ico', 'assets/qitv.ico')
-    ],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
+    hooksconfig={},
     runtime_hooks=[],
     excludes=[],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
-    noarchive=False
+    noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
+    a.binaries + [("libVLC.dll", os.path.join(VLC_PATH, 'libVLC.dll'), "BINARY")],
     a.datas,
     [],
     name='qitv.exe',
     debug=False,
+    bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
     console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
     icon='assets/qitv.ico'
 )
