@@ -265,7 +265,7 @@ class ChannelList(QMainWindow):
             channels = result["js"]["data"]
             self.display_channels(channels)
             self.config["data"][self.config["selected"]]["options"] = options
-            self.config["data"][self.config["selected"]]["channels"] = channels
+            # self.config["data"][self.config["selected"]]["channels"] = channels
             self.save_config()
         except Exception as e:
             print(f"Error loading STB channels: {e}")
