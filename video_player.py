@@ -66,6 +66,16 @@ class VideoPlayer(QMainWindow):
             self.change_volume(-10)  # Decrease volume
         elif event.key() == Qt.Key_Space:
             self.toggle_play_pause()  # Toggle Play/Pause
+        elif event.key() == Qt.Key_M:
+            self.toogle_mute()  # Toggle Mute
+        elif event.key() == Qt.Key_Escape:
+            self.setWindowState(Qt.WindowNoState)
+        elif event.key() == Qt.Key_F:
+            if self.windowState() == Qt.WindowNoState:
+                self.video_frame.show()
+                self.setWindowState(Qt.WindowFullScreen)
+            else:
+                self.setWindowState(Qt.WindowNoState)
         super().keyPressEvent(event)
 
     def change_volume(self, step):
@@ -103,6 +113,10 @@ class VideoPlayer(QMainWindow):
 
     def stop_video(self):
         self.media_player.stop()
+
+    def toogle_mute(self):
+        state = self.media_player.audio_get_mute()
+        self.media_player.audio_set_mute(not state)
 
     def toggle_play_pause(self):
         state = self.media_player.get_state()

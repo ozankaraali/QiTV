@@ -7,3 +7,4 @@ requests==2.31.0
 urllib3==1.26.6
 URLObject
 m3u-parser
+pyqtdarktheme==2.1.0
