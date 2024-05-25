@@ -6,3 +6,4 @@ python-vlc==3.0.20123
 requests==2.31.0
 urllib3==1.26.6
 URLObject
+m3u-parser

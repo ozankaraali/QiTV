@@ -31,7 +31,7 @@ class VideoPlayer(QMainWindow):
             print(f"Exception occurred while creating VLC media player: {e}")
             raise
 
-        self.proxy_server = None
+        self.fullscreen = False
 
         # Main widget and layout
         self.widget = QWidget(self)
@@ -47,7 +47,7 @@ class VideoPlayer(QMainWindow):
         self.apply_window_settings()
 
     def toggle_fullscreen(self):
-        if self.isFullScreen():
+        if self.fullscreen:
             self.showNormal()
             self.setWindowFlags(self.windowFlags() & ~Qt.FramelessWindowHint)
             self.show()
@@ -95,7 +95,7 @@ class VideoPlayer(QMainWindow):
 
     def load_config(self):
         try:
-            with open('config.json', 'r') as f:
+            with open("config.json", "r") as f:
                 self.config = json.load(f)
             if self.config is None:
                 self.config = self.default_config()
@@ -110,17 +110,17 @@ class VideoPlayer(QMainWindow):
             "data": [
                 {
                     "type": "M3UPLAYLIST",
-                    "url": "https://iptv-org.github.io/iptv/index.m3u"
+                    "url": "https://iptv-org.github.io/iptv/index.m3u",
                 }
             ],
             "window_positions": {
                 "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800},
-                "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800}
-            }
+                "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
+            },
         }
 
     def save_config(self):
-        with open('config.json', 'w') as f:
+        with open("config.json", "w") as f:
             json.dump(self.config, f)
 
     def save_window_settings(self):
@@ -130,7 +130,7 @@ class VideoPlayer(QMainWindow):
             "x": pos.x(),
             "y": pos.y(),
             "width": pos.width(),
-            "height": pos.height()
+            "height": pos.height(),
         }
         self.config["window_positions"] = window_positions
         self.save_config()
@@ -142,7 +142,7 @@ class VideoPlayer(QMainWindow):
             video_player_pos.get("x", 50),
             video_player_pos.get("y", 100),
             video_player_pos.get("width", 1200),
-            video_player_pos.get("height", 800)
+            video_player_pos.get("height", 800),
         )
 
 
@@ -152,4 +152,5 @@ class VideoFrame(QWidget):
         self.player = parent  # Store the VideoPlayer instance
 
     def mouseDoubleClickEvent(self, event):
+        self.player.fullscreen = not self.player.fullscreen
         self.player.toggle_fullscreen()  # Call the method on VideoPlayer instance

@@ -1,8 +1,6 @@
 import sys
 
-from PyQt5.QtWidgets import (
-    QApplication
-)
+from PyQt5.QtWidgets import QApplication
 
 from video_player import VideoPlayer
 from channel_list import ChannelList

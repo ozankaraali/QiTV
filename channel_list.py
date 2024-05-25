@@ -1,14 +1,27 @@
 import json
+import os
+import shutil
 import string
 import random
 import re
+import subprocess
+import platform
+
 from urlobject import URLObject
 
 import requests
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QMainWindow, QFileDialog, QVBoxLayout, QWidget, QPushButton, QListWidget,
-    QHBoxLayout, QListWidgetItem, QLineEdit, QGridLayout
+    QMainWindow,
+    QFileDialog,
+    QVBoxLayout,
+    QWidget,
+    QPushButton,
+    QListWidget,
+    QHBoxLayout,
+    QListWidgetItem,
+    QLineEdit,
+    QGridLayout,
 )
 
 from options import OptionsDialog
@@ -20,6 +33,7 @@ class ChannelList(QMainWindow):
     def __init__(self, player):
         super().__init__()
         self.player = player
+        self.link = None
         self.setWindowTitle("QiTV Channel List")
 
         self.container_widget = QWidget(self)
@@ -53,7 +67,6 @@ class ChannelList(QMainWindow):
         ctl_layout.addWidget(self.options_button)
         self.grid_layout.addWidget(self.upper_layout, 0, 0)
 
-
     def create_left_panel(self):
         self.left_panel = QWidget(self.container_widget)
         left_layout = QVBoxLayout(self.left_panel)
@@ -82,7 +95,50 @@ class ChannelList(QMainWindow):
         self.stop_button.clicked.connect(self.player.stop_video)
         control_layout.addWidget(self.stop_button)
 
+        self.vlc_button = QPushButton("Open in VLC")
+        self.vlc_button.clicked.connect(self.open_in_vlc)
+        control_layout.addWidget(self.vlc_button)
+
         self.grid_layout.addWidget(self.media_controls, 2, 0)
+
+    def open_in_vlc(self):
+        # Invoke user's VLC player to open the current stream
+        if self.link:
+            try:
+                if platform.system() == "Windows":
+                    vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
+                    if not vlc_path:
+                        program_files = os.environ.get(
+                            "ProgramFiles", "C:\\Program Files"
+                        )
+                        vlc_path = os.path.join(
+                            program_files, "VideoLAN", "VLC", "vlc.exe"
+                        )
+                    subprocess.Popen([vlc_path, self.link])
+
+                elif platform.system() == "Darwin":  # macOS
+                    vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
+                    if not vlc_path:
+                        common_paths = [
+                            "/Applications/VLC.app/Contents/MacOS/VLC",
+                            "~/Applications/VLC.app/Contents/MacOS/VLC",
+                        ]
+                        for path in common_paths:
+                            expanded_path = os.path.expanduser(path)
+                            if os.path.exists(expanded_path):
+                                vlc_path = expanded_path
+                                break
+                    subprocess.Popen([vlc_path, self.link])
+
+                else:  # Assuming Linux or other Unix-like OS
+                    vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
+                    subprocess.Popen([vlc_path, self.link])
+                # when VLC open, stop running video on self.player
+                self.player.stop_video()
+            except FileNotFoundError as fnf_error:
+                print("VLC not found: ", fnf_error)
+            except Exception as e:
+                print(f"Error opening VLC: {e}")
 
     def open_file(self):
         file_dialog = QFileDialog(self)
@@ -92,7 +148,7 @@ class ChannelList(QMainWindow):
 
     def load_config(self):
         try:
-            with open('config.json', 'r') as f:
+            with open("config.json", "r") as f:
                 self.config = json.load(f)
             if self.config is None:
                 self.config = self.default_config()
@@ -100,22 +156,22 @@ class ChannelList(QMainWindow):
             self.config = self.default_config()
             self.save_config()
 
-        selected_config = self.config['data'][self.config['selected']]
-        if 'options' in selected_config:
-            self.options = selected_config['options']
-            self.token = self.options['headers']['Authorization'].split(" ")[1]
+        selected_config = self.config["data"][self.config["selected"]]
+        if "options" in selected_config:
+            self.options = selected_config["options"]
+            self.token = self.options["headers"]["Authorization"].split(" ")[1]
         else:
             self.options = {
-                'headers': {
-                    'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
-                    'Accept-Charset': 'UTF-8,*;q=0.8',
-                    'X-User-Agent': 'Model: MAG200; Link: Ethernet',
-                    'Content-Type': 'application/json'
+                "headers": {
+                    "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+                    "Accept-Charset": "UTF-8,*;q=0.8",
+                    "X-User-Agent": "Model: MAG200; Link: Ethernet",
+                    "Content-Type": "application/json",
                 }
             }
 
-        self.url = selected_config.get('url')
-        self.mac = selected_config.get('mac')
+        self.url = selected_config.get("url")
+        self.mac = selected_config.get("mac")
 
     @staticmethod
     def default_config():
@@ -124,17 +180,17 @@ class ChannelList(QMainWindow):
             "data": [
                 {
                     "type": "M3UPLAYLIST",
-                    "url": "https://iptv-org.github.io/iptv/index.m3u"
+                    "url": "https://iptv-org.github.io/iptv/index.m3u",
                 }
             ],
             "window_positions": {
                 "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800},
-                "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800}
-            }
+                "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
+            },
         }
 
     def save_config(self):
-        with open('config.json', 'w') as f:
+        with open("config.json", "w") as f:
             json.dump(self.config, f)
 
     def save_window_settings(self):
@@ -144,7 +200,7 @@ class ChannelList(QMainWindow):
             "x": pos.x(),
             "y": pos.y(),
             "width": pos.width(),
-            "height": pos.height()
+            "height": pos.height(),
         }
         self.config["window_positions"] = window_positions
         self.save_config()
@@ -156,7 +212,7 @@ class ChannelList(QMainWindow):
             channel_list_pos.get("x", 1250),
             channel_list_pos.get("y", 100),
             channel_list_pos.get("width", 400),
-            channel_list_pos.get("height", 800)
+            channel_list_pos.get("height", 800),
         )
 
     def load_channels(self):
@@ -225,7 +281,9 @@ class ChannelList(QMainWindow):
                 tvg_id = tvg_id_match.group(1) if tvg_id_match else None
                 tvg_logo = tvg_logo_match.group(1) if tvg_logo_match else None
                 group_title = group_title_match.group(1) if group_title_match else None
-                channel_name = channel_name_match.group(1) if channel_name_match else None
+                channel_name = (
+                    channel_name_match.group(1) if channel_name_match else None
+                )
 
                 id += 1
                 channel = {"id": id, "name": channel_name}
@@ -235,7 +293,11 @@ class ChannelList(QMainWindow):
         return result
 
     def do_handshake(self, url, mac, serverload="/server/load.php", load=True):
-        token = self.config.get("token") if self.config.get("token") else self.random_token(self)
+        token = (
+            self.config.get("token")
+            if self.config.get("token")
+            else self.random_token(self)
+        )
         options = self.create_options(url, mac, token)
         try:
             fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash=0&token={token}&JsHttpRequest=1-xml"
@@ -280,14 +342,16 @@ class ChannelList(QMainWindow):
             fetchurl = f"{url}/server/load.php?type=itv&action=create_link&type=itv&cmd={requests.utils.quote(cmd)}&JsHttpRequest=1-xml"
             response = requests.get(fetchurl, headers=options["headers"])
             result = response.json()
-            link = result["js"]["cmd"].split(' ')[-1]
+            link = result["js"]["cmd"].split(" ")[-1]
+            self.link = link
             return link
         except Exception as e:
             print(f"Error creating link: {e}")
             return None
+
     @staticmethod
     def random_token(self):
-        return ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+        return "".join(random.choices(string.ascii_letters + string.digits, k=32))
 
     @staticmethod
     def create_options(url, mac, token):
@@ -303,7 +367,7 @@ class ChannelList(QMainWindow):
                 "Accept": "*/*",
                 "Referer": f"{url}/c/" if not url.path else f"{url}/",
                 "Cookie": f"mac={mac}; stb_lang=en; timezone=Europe/Kiev; PHPSESSID=null;",
-                "Authorization": f"Bearer {token}"
+                "Authorization": f"Bearer {token}",
             }
         }
         return options

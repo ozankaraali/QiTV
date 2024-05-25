@@ -1,5 +1,13 @@
 from PyQt5.QtWidgets import (
-    QFileDialog, QPushButton, QLineEdit, QDialog, QLabel, QFormLayout, QRadioButton, QButtonGroup, QComboBox
+    QFileDialog,
+    QPushButton,
+    QLineEdit,
+    QDialog,
+    QLabel,
+    QFormLayout,
+    QRadioButton,
+    QButtonGroup,
+    QComboBox,
 )
 
 
@@ -96,7 +104,9 @@ class OptionsDialog(QDialog):
     def update_inputs(self):
         self.mac_label.setVisible(self.type_STB.isChecked())
         self.mac_input.setVisible(self.type_STB.isChecked())
-        self.file_button.setVisible(self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked())
+        self.file_button.setVisible(
+            self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked()
+        )
         self.url_input.setEnabled(True)
 
     def add_new_provider(self):
@@ -115,14 +125,18 @@ class OptionsDialog(QDialog):
     def save_settings(self):
         if self.selected_provider:
             self.selected_provider["url"] = self.url_input.text()
-            self.selected_provider["mac"] = self.mac_input.text() if self.type_STB.isChecked() else ""
+            self.selected_provider["mac"] = (
+                self.mac_input.text() if self.type_STB.isChecked() else ""
+            )
             self.selected_provider["type"] = (
-                "STB" if self.type_STB.isChecked() else
-                "M3UPLAYLIST" if self.type_M3UPLAYLIST.isChecked() else
-                "M3USTREAM"
+                "STB"
+                if self.type_STB.isChecked()
+                else "M3UPLAYLIST" if self.type_M3UPLAYLIST.isChecked() else "M3USTREAM"
             )
             self.parent().save_config()
-            self.parent().do_handshake(self.url_input.text(), self.mac_input.text(), load=True)
+            self.parent().do_handshake(
+                self.url_input.text(), self.mac_input.text(), load=True
+            )
             # self.parent().load_channels()
             self.accept()
 
@@ -138,8 +152,14 @@ class OptionsDialog(QDialog):
         self.verify_result.repaint()
         result = False
         if self.type_STB.isChecked():
-            result = self.parent().do_handshake(self.url_input.text(), self.mac_input.text(), load=False)
+            result = self.parent().do_handshake(
+                self.url_input.text(), self.mac_input.text(), load=False
+            )
         elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
             result = self.parent().verify_url(self.url_input.text())
-        self.verify_result.setText("Provider verified successfully." if result else "Failed to verify provider.")
+        self.verify_result.setText(
+            "Provider verified successfully."
+            if result
+            else "Failed to verify provider."
+        )
         self.verify_result.setStyleSheet("color: green;" if result else "color: red;")
