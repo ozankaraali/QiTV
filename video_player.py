@@ -1,62 +1,83 @@
 import json
 import platform
-
 import vlc
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPalette, QColor
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget
+from PyQt5.QtCore import Qt, QEvent
+from PyQt5.QtWidgets import QMainWindow, QFrame, QHBoxLayout
+import sys
 
 
 class VideoPlayer(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("QiTV Player")
+    def __init__(self, *args, **kwargs):
+        super(VideoPlayer, self).__init__(*args, **kwargs)
 
+        self.config = None
+        self.media = None
         self.setGeometry(100, 100, 800, 600)
-        palette = self.palette()
-        palette.setColor(QPalette.Window, QColor(0, 0, 0))
-        self.setPalette(palette)
+        self.mainFrame = QFrame()
+        self.setCentralWidget(self.mainFrame)
+        self.setWindowTitle("QiTV Player")
+        t_lay_parent = QHBoxLayout()
+        t_lay_parent.setContentsMargins(0, 0, 0, 0)
 
-        try:
-            self.instance = vlc.Instance()
-        except Exception as e:
-            print(f"Exception occurred while creating VLC instance: {e}")
-            raise
+        self.video_frame = QFrame()
+        self.video_frame.mouseDoubleClickEvent = self.mouseDoubleClickEvent
+        self.video_frame.installEventFilter(self)
+        t_lay_parent.addWidget(self.video_frame)
+        self.instance = vlc.Instance(['--video-on-top'])
+        self.media_player = self.instance.media_player_new()
+        self.media_player.video_set_mouse_input(False)
+        self.media_player.video_set_key_input(False)
 
-        try:
-            self.media_player = self.instance.media_player_new()
-            if not self.media_player:
-                raise Exception("Failed to create VLC media player")
-        except Exception as e:
-            print(f"Exception occurred while creating VLC media player: {e}")
-            raise
+        if sys.platform.startswith('linux'):
+            self.media_player.set_xwindow(self.video_frame.winId())
+        elif sys.platform == "win32":
+            self.media_player.set_hwnd(self.video_frame.winId())
+        elif sys.platform == "darwin":
+            self.media_player.set_nsobject(int(self.video_frame.winId()))
 
-        self.fullscreen = False
-
-        # Main widget and layout
-        self.widget = QWidget(self)
-        self.setCentralWidget(self.widget)
-
-        self.layout = QVBoxLayout()
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(0)
-        self.widget.setLayout(self.layout)
-
-        self.create_video_area()
-        self.load_config()
-        self.apply_window_settings()
-
-    def toggle_fullscreen(self):
-        if self.fullscreen:
-            self.showNormal()
-            self.setWindowFlags(self.windowFlags() & ~Qt.FramelessWindowHint)
-            self.fullscreen = False
-        else:
-            self.showFullScreen()
-            self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
-            self.fullscreen = True
+        self.mainFrame.setLayout(t_lay_parent)
         self.show()
-        self._re_attach_video()
+
+    def eventFilter(self, obj, event):
+        if obj == self.video_frame:
+            if event.type() == QEvent.Wheel:
+                self.wheelEvent(event)
+                return True
+            elif event.type() == QEvent.KeyPress:
+                self.keyPressEvent(event)
+                return True
+        return False
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if platform.system() == "Darwin":
+            delta = -delta
+        if delta > 0:
+            self.change_volume(10)  # Increase volume
+        else:
+            self.change_volume(-10)  # Decrease volume
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Up:
+            self.change_volume(10)  # Increase volume
+        elif event.key() == Qt.Key_Down:
+            self.change_volume(-10)  # Decrease volume
+        elif event.key() == Qt.Key_Space:
+            self.toggle_play_pause()  # Toggle Play/Pause
+        super().keyPressEvent(event)
+
+    def change_volume(self, step):
+        current_volume = self.media_player.audio_get_volume()
+        new_volume = max(0, min(100, current_volume + step))
+        self.media_player.audio_set_volume(new_volume)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self.windowState() == Qt.WindowNoState:
+                self.video_frame.show()
+                self.setWindowState(Qt.WindowFullScreen)
+            else:
+                self.setWindowState(Qt.WindowNoState)
 
     def closeEvent(self, event):
         self.save_window_settings()
@@ -65,18 +86,17 @@ class VideoPlayer(QMainWindow):
             self.media_player.stop()
         event.accept()
 
-    def create_video_area(self):
-        self.videoframe = VideoFrame(self)
-        self.videoframe.setAutoFillBackground(True)
-        videoframe_palette = self.videoframe.palette()
-        videoframe_palette.setColor(QPalette.Window, Qt.black)
-        self.videoframe.setPalette(videoframe_palette)
-        self.layout.addWidget(self.videoframe)
-
     def play_video(self, video_url):
+        if platform.system() == "Linux":
+            self.media_player.set_xwindow(self.video_frame.winId())
+        elif platform.system() == "Windows":
+            self.media_player.set_hwnd(self.video_frame.winId())
+        elif platform.system() == "Darwin":
+            self.media_player.set_nsobject(int(self.video_frame.winId()))
+
         self.media = self.instance.media_new(video_url)
         self.media_player.set_media(self.media)
-        self._re_attach_video()
+        self.media_player.play()
 
     def stop_video(self):
         self.media_player.stop()
@@ -139,22 +159,3 @@ class VideoPlayer(QMainWindow):
             video_player_pos.get("width", 1200),
             video_player_pos.get("height", 800),
         )
-
-    def _re_attach_video(self):
-        if self.media:
-            if platform.system() == "Linux":
-                self.media_player.set_xwindow(self.videoframe.winId())
-            elif platform.system() == "Windows":
-                self.media_player.set_hwnd(self.videoframe.winId())
-            elif platform.system() == "Darwin":
-                self.media_player.set_nsobject(int(self.videoframe.winId()))
-            self.media_player.play()
-
-
-class VideoFrame(QWidget):
-    def __init__(self, parent=None):
-        super(VideoFrame, self).__init__(parent)
-        self.player = parent  # Store the VideoPlayer instance
-
-    def mouseDoubleClickEvent(self, event):
-        self.player.toggle_fullscreen()  # Call the method on VideoPlayer instance
