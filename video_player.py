@@ -83,7 +83,6 @@ class VideoPlayer(QMainWindow):
 
     def closeEvent(self, event):
         self.save_window_settings()
-        self.save_config()
         if self.media_player.is_playing():
             self.media_player.stop()
         self.hide()
@@ -144,6 +143,8 @@ class VideoPlayer(QMainWindow):
 
     def save_window_settings(self):
         pos = self.geometry()
+        if self.config == None:
+            self.load_config()
         window_positions = self.config.get("window_positions", {})
         window_positions["video_player"] = {
             "x": pos.x(),
