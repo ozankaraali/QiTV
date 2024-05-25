@@ -1,16 +1,14 @@
 import json
 import os
-import shutil
-import string
+import platform
 import random
 import re
+import shutil
+import string
 import subprocess
-import platform
-
-from urlobject import URLObject
 
 import requests
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
     QMainWindow,
     QFileDialog,
@@ -23,6 +21,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QGridLayout,
 )
+from urlobject import URLObject
 
 from options import OptionsDialog
 
@@ -30,8 +29,9 @@ from options import OptionsDialog
 class ChannelList(QMainWindow):
     channels_loaded = pyqtSignal(list)
 
-    def __init__(self, player):
+    def __init__(self, app, player):
         super().__init__()
+        self.app = app
         self.player = player
         self.link = None
         self.setWindowTitle("QiTV Channel List")
@@ -40,7 +40,6 @@ class ChannelList(QMainWindow):
         self.setCentralWidget(self.container_widget)
         self.grid_layout = QGridLayout(self.container_widget)
 
-        # self.create_menu()
         self.create_upper_panel()
         self.create_left_panel()
         self.create_media_controls()
@@ -50,9 +49,10 @@ class ChannelList(QMainWindow):
         self.load_channels()
 
     def closeEvent(self, event):
+        self.player.close()
         self.save_window_settings()
         self.save_config()
-        event.accept()
+        self.app.quit()
 
     def create_upper_panel(self):
         self.upper_layout = QWidget(self.container_widget)
@@ -327,7 +327,6 @@ class ChannelList(QMainWindow):
             channels = result["js"]["data"]
             self.display_channels(channels)
             self.config["data"][self.config["selected"]]["options"] = options
-            # self.config["data"][self.config["selected"]]["channels"] = channels
             self.save_config()
         except Exception as e:
             print(f"Error loading STB channels: {e}")
@@ -361,7 +360,6 @@ class ChannelList(QMainWindow):
                 "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
                 "Accept-Charset": "UTF-8,*;q=0.8",
                 "X-User-Agent": "Model: MAG200; Link: Ethernet",
-                # "Content-Type": "application/json",
                 "Host": f"{url.netloc}",
                 "Range": "bytes=0-",
                 "Accept": "*/*",

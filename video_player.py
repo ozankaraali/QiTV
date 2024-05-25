@@ -1,15 +1,17 @@
 import json
 import platform
+import sys
+
 import vlc
 from PyQt5.QtCore import Qt, QEvent
 from PyQt5.QtWidgets import QMainWindow, QFrame, QHBoxLayout
-import sys
 
 
 class VideoPlayer(QMainWindow):
     def __init__(self, *args, **kwargs):
         super(VideoPlayer, self).__init__(*args, **kwargs)
-
+        self.load_config()
+        self.apply_window_settings()
         self.config = None
         self.media = None
         self.setGeometry(100, 100, 800, 600)
@@ -23,12 +25,12 @@ class VideoPlayer(QMainWindow):
         self.video_frame.mouseDoubleClickEvent = self.mouseDoubleClickEvent
         self.video_frame.installEventFilter(self)
         t_lay_parent.addWidget(self.video_frame)
-        self.instance = vlc.Instance(['--video-on-top'])
+        self.instance = vlc.Instance(["--video-on-top"])
         self.media_player = self.instance.media_player_new()
         self.media_player.video_set_mouse_input(False)
         self.media_player.video_set_key_input(False)
 
-        if sys.platform.startswith('linux'):
+        if sys.platform.startswith("linux"):
             self.media_player.set_xwindow(self.video_frame.winId())
         elif sys.platform == "win32":
             self.media_player.set_hwnd(self.video_frame.winId())
@@ -84,7 +86,8 @@ class VideoPlayer(QMainWindow):
         self.save_config()
         if self.media_player.is_playing():
             self.media_player.stop()
-        event.accept()
+        self.hide()
+        event.ignore()
 
     def play_video(self, video_url):
         if platform.system() == "Linux":
@@ -97,6 +100,7 @@ class VideoPlayer(QMainWindow):
         self.media = self.instance.media_new(video_url)
         self.media_player.set_media(self.media)
         self.media_player.play()
+        self.show()
 
     def stop_video(self):
         self.media_player.stop()

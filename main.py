@@ -8,7 +8,7 @@ from channel_list import ChannelList
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     player = VideoPlayer()
-    channel_list = ChannelList(player)
+    channel_list = ChannelList(app, player)
     player.show()
     channel_list.show()
     sys.exit(app.exec_())
