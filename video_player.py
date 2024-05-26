@@ -5,21 +5,23 @@ import sys
 import vlc
 from PyQt5.QtCore import Qt, QEvent
 from PyQt5.QtWidgets import QMainWindow, QFrame, QHBoxLayout
-
+from PyQt5.QtGui import QIcon
 
 class VideoPlayer(QMainWindow):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, config_manager, *args, **kwargs):
         super(VideoPlayer, self).__init__(*args, **kwargs)
-        self.load_config()
-        self.apply_window_settings()
-        self.config = None
-        self.media = None
-        self.setGeometry(100, 100, 800, 600)
+        self.config_manager = config_manager
+        self.config = self.config_manager.config
+
+        self.config_manager.apply_window_settings("video_player", self)
+
         self.mainFrame = QFrame()
         self.setCentralWidget(self.mainFrame)
         self.setWindowTitle("QiTV Player")
+        self.setWindowIcon(QIcon("assets/qitv.png"))
         t_lay_parent = QHBoxLayout()
         t_lay_parent.setContentsMargins(0, 0, 0, 0)
+
 
         self.video_frame = QFrame()
         self.video_frame.mouseDoubleClickEvent = self.mouseDoubleClickEvent
@@ -92,9 +94,9 @@ class VideoPlayer(QMainWindow):
                 self.setWindowState(Qt.WindowNoState)
 
     def closeEvent(self, event):
-        self.save_window_settings()
         if self.media_player.is_playing():
             self.media_player.stop()
+        self.config_manager.save_window_settings(self.geometry(), "video_player")
         self.hide()
         event.ignore()
 
@@ -124,57 +126,3 @@ class VideoPlayer(QMainWindow):
             self.media_player.pause()
         else:
             self.media_player.play()
-
-    def load_config(self):
-        try:
-            with open("config.json", "r") as f:
-                self.config = json.load(f)
-            if self.config is None:
-                self.config = self.default_config()
-        except (FileNotFoundError, json.JSONDecodeError):
-            self.config = self.default_config()
-            self.save_config()
-
-    @staticmethod
-    def default_config():
-        return {
-            "selected": 0,
-            "data": [
-                {
-                    "type": "M3UPLAYLIST",
-                    "url": "https://iptv-org.github.io/iptv/index.m3u",
-                }
-            ],
-            "window_positions": {
-                "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800},
-                "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
-            },
-        }
-
-    def save_config(self):
-        with open("config.json", "w") as f:
-            json.dump(self.config, f)
-
-    def save_window_settings(self):
-        pos = self.geometry()
-        if self.config == None:
-            self.load_config()
-        window_positions = self.config.get("window_positions", {})
-        window_positions["video_player"] = {
-            "x": pos.x(),
-            "y": pos.y(),
-            "width": pos.width(),
-            "height": pos.height(),
-        }
-        self.config["window_positions"] = window_positions
-        self.save_config()
-
-    def apply_window_settings(self):
-        window_positions = self.config.get("window_positions", {})
-        video_player_pos = window_positions.get("video_player", {})
-        self.setGeometry(
-            video_player_pos.get("x", 50),
-            video_player_pos.get("y", 100),
-            video_player_pos.get("width", 1200),
-            video_player_pos.get("height", 800),
-        )

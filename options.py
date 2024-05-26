@@ -116,7 +116,7 @@ class OptionsDialog(QDialog):
         self.load_providers()
 
     def remove_provider(self):
-        if self.provider_combo.currentIndex() == -1:
+        if self.provider_combo.currentIndex() == 0:
             return
         del self.config["data"][self.provider_combo.currentIndex()]
         self.selected_provider_index = max(0, self.provider_combo.currentIndex() - 1)
@@ -134,10 +134,7 @@ class OptionsDialog(QDialog):
                 else "M3UPLAYLIST" if self.type_M3UPLAYLIST.isChecked() else "M3USTREAM"
             )
             self.parent().save_config()
-            self.parent().do_handshake(
-                self.url_input.text(), self.mac_input.text(), load=True
-            )
-            # self.parent().load_channels()
+            self.parent().load_channels()
             self.accept()
 
     def load_file(self):

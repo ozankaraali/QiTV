@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QGridLayout,
 )
+from PyQt5.QtGui import QIcon
 from urlobject import URLObject
 
 from options import OptionsDialog
@@ -29,12 +30,16 @@ from options import OptionsDialog
 class ChannelList(QMainWindow):
     channels_loaded = pyqtSignal(list)
 
-    def __init__(self, app, player):
+    def __init__(self, app, player, config_manager):
         super().__init__()
         self.app = app
         self.player = player
-        self.link = None
+        self.config_manager = config_manager
+        self.config = self.config_manager.config
+        self.config_manager.apply_window_settings("channel_list", self)
+
         self.setWindowTitle("QiTV Channel List")
+        self.setWindowIcon(QIcon("assets/qitv.png"))
 
         self.container_widget = QWidget(self)
         self.setCentralWidget(self.container_widget)
@@ -43,16 +48,13 @@ class ChannelList(QMainWindow):
         self.create_upper_panel()
         self.create_left_panel()
         self.create_media_controls()
-
-        self.load_config()
-        self.apply_window_settings()
         self.load_channels()
 
     def closeEvent(self, event):
-        self.player.close()
-        self.save_window_settings()
-        self.save_config()
         self.app.quit()
+        self.player.close()
+        self.config_manager.save_window_settings(self.geometry(), "channel_list")
+        event.accept()
 
     def create_upper_panel(self):
         self.upper_layout = QWidget(self.container_widget)
@@ -146,74 +148,8 @@ class ChannelList(QMainWindow):
         if file_path:
             self.player.play_video(file_path)
 
-    def load_config(self):
-        try:
-            with open("config.json", "r") as f:
-                self.config = json.load(f)
-            if self.config is None:
-                self.config = self.default_config()
-        except (FileNotFoundError, json.JSONDecodeError):
-            self.config = self.default_config()
-            self.save_config()
-
-        selected_config = self.config["data"][self.config["selected"]]
-        if "options" in selected_config:
-            self.options = selected_config["options"]
-            self.token = self.options["headers"]["Authorization"].split(" ")[1]
-        else:
-            self.options = {
-                "headers": {
-                    "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
-                    "Accept-Charset": "UTF-8,*;q=0.8",
-                    "X-User-Agent": "Model: MAG200; Link: Ethernet",
-                    "Content-Type": "application/json",
-                }
-            }
-
-        self.url = selected_config.get("url")
-        self.mac = selected_config.get("mac")
-
-    @staticmethod
-    def default_config():
-        return {
-            "selected": 0,
-            "data": [
-                {
-                    "type": "M3UPLAYLIST",
-                    "url": "https://iptv-org.github.io/iptv/index.m3u",
-                }
-            ],
-            "window_positions": {
-                "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800},
-                "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
-            },
-        }
-
     def save_config(self):
-        with open("config.json", "w") as f:
-            json.dump(self.config, f)
-
-    def save_window_settings(self):
-        pos = self.geometry()
-        window_positions = self.config.get("window_positions", {})
-        window_positions["channel_list"] = {
-            "x": pos.x(),
-            "y": pos.y(),
-            "width": pos.width(),
-            "height": pos.height(),
-        }
-        self.config["window_positions"] = window_positions
-        self.save_config()
-
-    def apply_window_settings(self):
-        window_positions = self.config.get("window_positions", {})
-        channel_list_pos = window_positions.get("channel_list", {})
-        self.setGeometry(
-            channel_list_pos.get("x", 1250),
-            channel_list_pos.get("y", 100),
-            channel_list_pos.get("width", 400),
-            channel_list_pos.get("height", 800),
-        )
+        self.config_manager.save_config()
 
     def load_channels(self):
         selected_provider = self.config["data"][self.config["selected"]]
