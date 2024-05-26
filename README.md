@@ -38,6 +38,13 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 
 This project is in early phase. If you want to change any function, feel free to do. You could refactor, propose architecture changes, design assets, add new features, provide CI/CD things and build for other platforms. Basically, all changes that can improve this software are welcome.
 
+## Acknowledgements
+
+### LibVLC
+This software uses code of <a href=https://www.videolan.org/vlc/libvlc.html>LibVLC</a> licensed under the <a href=https://www.gnu.org/licenses/lgpl-2.1.html>LGPLv2.1</a> and its source can be downloaded <a href=https://github.com/ozankaraali/QiTV>here</a>
+
+### PySide6
+PySide6 is available under both Open Source (LGPLv3/GPLv3) and commercial license. Using PyPi is the recommended installation source, because the content of the wheels is valid for both cases. For more information, refer to the <a href=https://www.qt.io/licensing/>Qt Licensing page</a>.
 ## License
 
 This software licensed under [MIT](https://github.com/ozankaraali/QiTV/blob/main/LICENSE).
