@@ -17,7 +17,7 @@ if __name__ == "__main__":
     icon_path = "assets/qitv.png"
 
     if platform.system() == 'Windows':
-        myappid = 'com.ozankaraali.qitv.1'  # arbitrary string
+        myappid = 'com.ozankaraali.qitv.1.1.5'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         if hasattr(sys, '_MEIPASS'):
             icon_path = sys._MEIPASS + "\\assets\\qitv.ico"

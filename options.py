@@ -17,7 +17,7 @@ class OptionsDialog(QDialog):
         self.setWindowTitle("Options")
         self.layout = QFormLayout(self)
         self.config = parent.config
-        self.selected_provider_index = 0
+        self.selected_provider_index = self.config.get("selected", 0)
 
         self.create_options_ui()
         self.load_providers()
@@ -81,8 +81,9 @@ class OptionsDialog(QDialog):
         self.provider_combo.blockSignals(True)
         self.provider_combo.clear()
         for i, provider in enumerate(self.config["data"]):
-            self.provider_combo.addItem(f"Provider {i + 1}", userData=provider)
+            self.provider_combo.addItem(f"Provider {i + 1}: {provider['url']}", userData=provider)
         self.provider_combo.blockSignals(False)
+        self.provider_combo.setCurrentIndex(self.selected_provider_index)
         self.load_provider_settings(self.selected_provider_index)
 
     def load_provider_settings(self, index):
@@ -112,15 +113,15 @@ class OptionsDialog(QDialog):
     def add_new_provider(self):
         new_provider = {"type": "STB", "url": "", "mac": ""}
         self.config["data"].append(new_provider)
-        self.selected_provider_index = len(self.config["data"]) - 1
         self.load_providers()
+        self.provider_combo.setCurrentIndex(len(self.config["data"]) - 1)
 
     def remove_provider(self):
-        if self.provider_combo.currentIndex() == 0:
+        if len(self.config["data"]) == 1:
             return
         del self.config["data"][self.provider_combo.currentIndex()]
-        self.selected_provider_index = max(0, self.provider_combo.currentIndex() - 1)
         self.load_providers()
+        self.provider_combo.setCurrentIndex(min(self.selected_provider_index, len(self.config["data"]) - 1))
 
     def save_settings(self):
         if self.selected_provider:
@@ -133,6 +134,7 @@ class OptionsDialog(QDialog):
                 if self.type_STB.isChecked()
                 else "M3UPLAYLIST" if self.type_M3UPLAYLIST.isChecked() else "M3USTREAM"
             )
+            self.config["selected"] = self.selected_provider_index
             self.parent().save_config()
             self.parent().load_channels()
             self.accept()
