@@ -21,8 +21,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QGridLayout,
 )
-from PySide6.QtGui import QIcon
 from urlobject import URLObject
+from urllib.parse import urlparse
 
 from options import OptionsDialog
 
@@ -224,7 +224,6 @@ class ChannelList(QMainWindow):
                 id += 1
                 channel = {"id": id, "name": channel_name}
             elif line.startswith("http"):
-                from urllib.parse import urlparse
                 urlobject = urlparse(line)
                 channel["cmd"] = urlobject.geturl()
                 result.append(channel)
