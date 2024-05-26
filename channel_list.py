@@ -224,7 +224,9 @@ class ChannelList(QMainWindow):
                 id += 1
                 channel = {"id": id, "name": channel_name}
             elif line.startswith("http"):
-                channel["cmd"] = line
+                from urllib.parse import urlparse
+                urlobject = urlparse(line)
+                channel["cmd"] = urlobject.geturl()
                 result.append(channel)
         return result
 
