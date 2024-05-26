@@ -3,8 +3,9 @@ import os
 import platform
 import shutil
 
-
 class ConfigManager:
+    CURRENT_VERSION = "1.1.3"  # Set your current version here
+
     def __init__(self):
         self.config = {}
         self.options = {}
@@ -48,13 +49,7 @@ class ConfigManager:
             self.config = self.default_config()
             self.save_config()
 
-        try:
-            selected_config = self.config["data"][self.config["selected"]]
-        except IndexError:
-            self.config = self.default_config()
-            self.save_config()
-            selected_config = self.config["data"][self.config["selected"]]
-
+        selected_config = self.config["data"][self.config["selected"]]
         if "options" in selected_config:
             self.options = selected_config["options"]
             self.token = self.options["headers"]["Authorization"].split(" ")[1]
