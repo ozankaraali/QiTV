@@ -3,9 +3,9 @@ import platform
 import sys
 
 import vlc
-from PyQt5.QtCore import Qt, QEvent
-from PyQt5.QtWidgets import QMainWindow, QFrame, QHBoxLayout
-from PyQt5.QtGui import QIcon
+from PySide6.QtCore import Qt, QEvent
+from PySide6.QtWidgets import QMainWindow, QFrame, QHBoxLayout
+from PySide6.QtGui import QIcon
 
 
 class VideoPlayer(QMainWindow):

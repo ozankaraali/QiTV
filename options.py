@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import (
+from PySide6.QtWidgets import (
     QFileDialog,
     QPushButton,
     QLineEdit,

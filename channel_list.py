@@ -8,8 +8,8 @@ import string
 import subprocess
 
 import requests
-from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import (
     QMainWindow,
     QFileDialog,
     QVBoxLayout,
@@ -21,14 +21,14 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QGridLayout,
 )
-from PyQt5.QtGui import QIcon
+from PySide6.QtGui import QIcon
 from urlobject import URLObject
 
 from options import OptionsDialog
 
 
 class ChannelList(QMainWindow):
-    channels_loaded = pyqtSignal(list)
+    channels_loaded = Signal(list)
 
     def __init__(self, app, player, config_manager):
         super().__init__()

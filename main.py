@@ -1,6 +1,6 @@
 import sys
-import qdarktheme
-from PyQt5.QtWidgets import QApplication
+# import qdarktheme
+from PySide6.QtWidgets import QApplication
 
 from video_player import VideoPlayer
 from channel_list import ChannelList
@@ -12,8 +12,8 @@ if __name__ == "__main__":
     config_manager = ConfigManager()
     player = VideoPlayer(config_manager)
     channel_list = ChannelList(app, player, config_manager)
-    qdarktheme.setup_theme("auto")
+    # qdarktheme.setup_theme("auto")
     player.show()
     channel_list.show()
     check_for_updates()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
