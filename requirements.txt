@@ -3,5 +3,5 @@ requests==2.31.0
 urllib3==1.26.6
 URLObject~=2.4.3
 m3u-parser
-#pyqtdarktheme==2.1.0
+pyqtdarktheme==2.1.0
 PySide6

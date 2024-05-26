@@ -10,7 +10,9 @@ a = Analysis(
     binaries=[
         (os.path.join(VLC_PATH, 'plugins/*'), 'plugins'),
     ],
-    datas=[],
+    datas=[
+        ('assets/*', 'assets'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

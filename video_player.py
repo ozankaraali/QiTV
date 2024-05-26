@@ -19,7 +19,7 @@ class VideoPlayer(QMainWindow):
         self.mainFrame = QFrame()
         self.setCentralWidget(self.mainFrame)
         self.setWindowTitle("QiTV Player")
-        self.setWindowIcon(QIcon("assets/qitv.png"))
+        # self.setWindowIcon(QIcon("qitv.ico"))
         t_lay_parent = QHBoxLayout()
         t_lay_parent.setContentsMargins(0, 0, 0, 0)
 

@@ -39,7 +39,7 @@ class ChannelList(QMainWindow):
         self.config_manager.apply_window_settings("channel_list", self)
 
         self.setWindowTitle("QiTV Channel List")
-        self.setWindowIcon(QIcon("assets/qitv.png"))
+        # self.setWindowIcon(QIcon("qitv.ico"))
 
         self.container_widget = QWidget(self)
         self.setCentralWidget(self.container_widget)
