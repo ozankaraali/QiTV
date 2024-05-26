@@ -3,6 +3,7 @@ import os
 import platform
 import shutil
 
+
 class ConfigManager:
     CURRENT_VERSION = "1.1.3"  # Set your current version here
 
@@ -17,22 +18,24 @@ class ConfigManager:
         self.load_config()
 
     def _get_config_path(self):
-        app_name = 'qitv'
-        if platform.system() == 'Linux':
-            config_dir = os.path.join(os.getenv('HOME', ''), f'.config/{app_name}')
-        elif platform.system() == 'Darwin':  # macOS
-            config_dir = os.path.join(os.getenv('HOME', ''), f'Library/Application Support/{app_name}')
-        elif platform.system() == 'Windows':
-            config_dir = os.path.join(os.getenv('APPDATA', ''), app_name)
+        app_name = "qitv"
+        if platform.system() == "Linux":
+            config_dir = os.path.join(os.getenv("HOME", ""), f".config/{app_name}")
+        elif platform.system() == "Darwin":  # macOS
+            config_dir = os.path.join(
+                os.getenv("HOME", ""), f"Library/Application Support/{app_name}"
+            )
+        elif platform.system() == "Windows":
+            config_dir = os.path.join(os.getenv("APPDATA", ""), app_name)
         else:
             raise RuntimeError("Unsupported operating system")
 
         os.makedirs(config_dir, exist_ok=True)
-        return os.path.join(config_dir, 'config.json')
+        return os.path.join(config_dir, "config.json")
 
     def _migrate_old_config(self):
         try:
-            old_config_path = 'config.json'
+            old_config_path = "config.json"
             if os.path.isfile(old_config_path) and not os.path.isfile(self.config_path):
                 shutil.copy(old_config_path, self.config_path)
                 os.remove(old_config_path)
@@ -93,7 +96,9 @@ class ConfigManager:
 
     def apply_window_settings(self, window_name, window):
         settings = self.config["window_positions"][window_name]
-        window.setGeometry(settings["x"], settings["y"], settings["width"], settings["height"])
+        window.setGeometry(
+            settings["x"], settings["y"], settings["width"], settings["height"]
+        )
 
     def save_config(self):
         with open(self.config_path, "w") as f:

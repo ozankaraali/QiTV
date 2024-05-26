@@ -7,6 +7,7 @@ from PyQt5.QtCore import Qt, QEvent
 from PyQt5.QtWidgets import QMainWindow, QFrame, QHBoxLayout
 from PyQt5.QtGui import QIcon
 
+
 class VideoPlayer(QMainWindow):
     def __init__(self, config_manager, *args, **kwargs):
         super(VideoPlayer, self).__init__(*args, **kwargs)
@@ -21,7 +22,6 @@ class VideoPlayer(QMainWindow):
         self.setWindowIcon(QIcon("assets/qitv.png"))
         t_lay_parent = QHBoxLayout()
         t_lay_parent.setContentsMargins(0, 0, 0, 0)
-
 
         self.video_frame = QFrame()
         self.video_frame.mouseDoubleClickEvent = self.mouseDoubleClickEvent

@@ -15,5 +15,5 @@ if __name__ == "__main__":
     qdarktheme.setup_theme("auto")
     player.show()
     channel_list.show()
-    check_for_updates()  # Check for updates after initializing the UI
+    check_for_updates()
     sys.exit(app.exec_())
