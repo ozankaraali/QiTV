@@ -15,15 +15,14 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     icon_path = "assets/qitv.png"
-
+    config_manager = ConfigManager()
     if platform.system() == 'Windows':
-        myappid = 'com.ozankaraali.qitv.1.1.7'
+        myappid = f'com.ozankaraali.qitv.{config_manager.CURRENT_VERSION}'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         if hasattr(sys, '_MEIPASS'):
             icon_path = sys._MEIPASS + "\\assets\\qitv.ico"
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
-    config_manager = ConfigManager()
     player = VideoPlayer(config_manager)
     channel_list = ChannelList(app, player, config_manager)
     qdarktheme.setup_theme("auto")

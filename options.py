@@ -49,6 +49,15 @@ class OptionsDialog(QDialog):
         self.file_button.clicked.connect(self.load_file)
         self.layout.addWidget(self.file_button)
 
+        self.username_label = QLabel("Username:", self)
+        self.username_input = QLineEdit(self)
+        self.layout.addRow(self.username_label, self.username_input)
+
+        self.password_label = QLabel("Password:", self)
+        self.password_input = QLineEdit(self)
+        self.layout.addRow(self.password_label, self.password_input)
+
+
         self.verify_button = QPushButton("Verify Provider", self)
         self.verify_button.clicked.connect(self.verify_provider)
         self.layout.addWidget(self.verify_button)
@@ -64,24 +73,30 @@ class OptionsDialog(QDialog):
         self.type_STB = QRadioButton("STB", self)
         self.type_M3UPLAYLIST = QRadioButton("M3U Playlist", self)
         self.type_M3USTREAM = QRadioButton("M3U Stream", self)
+        self.type_XTREAM = QRadioButton("Xtream", self)
         self.type_group.addButton(self.type_STB)
         self.type_group.addButton(self.type_M3UPLAYLIST)
         self.type_group.addButton(self.type_M3USTREAM)
+        self.type_group.addButton(self.type_XTREAM)
 
         self.type_STB.toggled.connect(self.update_inputs)
         self.type_M3UPLAYLIST.toggled.connect(self.update_inputs)
         self.type_M3USTREAM.toggled.connect(self.update_inputs)
+        self.type_XTREAM.toggled.connect(self.update_inputs)
 
         self.layout.addRow(self.type_label)
         self.layout.addRow(self.type_STB)
         self.layout.addRow(self.type_M3UPLAYLIST)
         self.layout.addRow(self.type_M3USTREAM)
+        self.layout.addRow(self.type_XTREAM)
 
     def load_providers(self):
         self.provider_combo.blockSignals(True)
         self.provider_combo.clear()
         for i, provider in enumerate(self.config["data"]):
-            self.provider_combo.addItem(f"Provider {i + 1}: {provider['url']}", userData=provider)
+            # can we get the first couple ... last couple of characters of the url?
+            prov = provider["url"][:30] + "..." + provider["url"][-15:] if len(provider["url"]) > 45 else provider["url"]
+            self.provider_combo.addItem(f"{i + 1}: {prov}", userData=provider)
         self.provider_combo.blockSignals(False)
         self.provider_combo.setCurrentIndex(self.selected_provider_index)
         self.load_provider_settings(self.selected_provider_index)
@@ -93,6 +108,8 @@ class OptionsDialog(QDialog):
         self.selected_provider = self.config["data"][index]
         self.url_input.setText(self.selected_provider.get("url", ""))
         self.mac_input.setText(self.selected_provider.get("mac", ""))
+        self.username_input.setText(self.selected_provider.get("username", ""))
+        self.password_input.setText(self.selected_provider.get("password", ""))
         self.update_radio_buttons()
         self.update_inputs()
 
@@ -101,6 +118,7 @@ class OptionsDialog(QDialog):
         self.type_STB.setChecked(provider_type == "STB")
         self.type_M3UPLAYLIST.setChecked(provider_type == "M3UPLAYLIST")
         self.type_M3USTREAM.setChecked(provider_type == "M3USTREAM")
+        self.type_XTREAM.setChecked(provider_type == "XTREAM")
 
     def update_inputs(self):
         self.mac_label.setVisible(self.type_STB.isChecked())
@@ -108,7 +126,13 @@ class OptionsDialog(QDialog):
         self.file_button.setVisible(
             self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked()
         )
+
         self.url_input.setEnabled(True)
+
+        self.username_label.setVisible(self.type_XTREAM.isChecked())
+        self.username_input.setVisible(self.type_XTREAM.isChecked())
+        self.password_label.setVisible(self.type_XTREAM.isChecked())
+        self.password_input.setVisible(self.type_XTREAM.isChecked())
 
     def add_new_provider(self):
         new_provider = {"type": "STB", "url": "", "mac": ""}
@@ -126,14 +150,17 @@ class OptionsDialog(QDialog):
     def save_settings(self):
         if self.selected_provider:
             self.selected_provider["url"] = self.url_input.text()
-            self.selected_provider["mac"] = (
-                self.mac_input.text() if self.type_STB.isChecked() else ""
-            )
-            self.selected_provider["type"] = (
-                "STB"
-                if self.type_STB.isChecked()
-                else "M3UPLAYLIST" if self.type_M3UPLAYLIST.isChecked() else "M3USTREAM"
-            )
+            if self.type_STB.isChecked():
+                self.selected_provider["type"] = "STB"
+                self.selected_provider["mac"] = self.mac_input.text()
+            elif self.type_M3UPLAYLIST.isChecked():
+                self.selected_provider["type"] = "M3UPLAYLIST"
+            elif self.type_M3USTREAM.isChecked():
+                self.selected_provider["type"] = "M3USTREAM"
+            elif self.type_XTREAM.isChecked():
+                self.selected_provider["type"] = "XTREAM"
+                self.selected_provider["username"] = self.username_input.text()
+                self.selected_provider["password"] = self.password_input.text()
             self.config["selected"] = self.selected_provider_index
             self.parent().save_config()
             self.parent().load_channels()
@@ -155,6 +182,8 @@ class OptionsDialog(QDialog):
                 self.url_input.text(), self.mac_input.text(), load=False
             )
         elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
+            result = self.parent().verify_url(self.url_input.text())
+        elif self.type_XTREAM.isChecked():
             result = self.parent().verify_url(self.url_input.text())
         self.verify_result.setText(
             "Provider verified successfully."

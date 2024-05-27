@@ -156,6 +156,12 @@ class ChannelList(QMainWindow):
         config_type = selected_provider.get("type", "")
         if config_type == "M3UPLAYLIST":
             self.load_m3u_playlist(selected_provider["url"])
+        elif config_type == "XTREAM":
+            urlobject = URLObject(selected_provider["url"])
+            if urlobject.scheme == "":
+                urlobject = URLObject(f"http://{selected_provider['url']}")
+            url = f"{urlobject.scheme}://{urlobject.netloc}/get.php?username={selected_provider['username']}&password={selected_provider['password']}&type=m3u"
+            self.load_m3u_playlist(url)
         elif config_type == "STB":
             self.do_handshake(selected_provider["url"], selected_provider["mac"])
         elif config_type == "M3USTREAM":
@@ -315,7 +321,9 @@ class ChannelList(QMainWindow):
     def verify_url(url):
         try:
             response = requests.get(url)
-            return response.status_code == 200
+            # return response.status_code == 200
+            # basically we check if we can connect
+            return True if response.status_code else False
         except Exception as e:
             print("Error verifying URL:", e)
             return False
