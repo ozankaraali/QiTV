@@ -1,7 +1,7 @@
 import platform
 import sys
 import vlc
-from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QTimer
+from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QTimer, QCoreApplication
 from PySide6.QtGui import QGuiApplication, QScreen
 from PySide6.QtWidgets import QMainWindow, QFrame, QHBoxLayout
 
@@ -87,8 +87,14 @@ class VideoPlayer(QMainWindow):
             self.setWindowState(Qt.WindowNoState)
         elif event.key() == Qt.Key_F:
             if self.windowState() == Qt.WindowNoState:
+                QGuiApplication.setOverrideCursor(Qt.WaitCursor)
                 self.video_frame.show()
                 self.setWindowState(Qt.WindowFullScreen)
+
+                self.activateWindow()  # Ensure the PiP window is focused and on top
+                self.raise_()
+
+                QGuiApplication.restoreOverrideCursor()
             else:
                 self.setWindowState(Qt.WindowNoState)
         elif event.key() == Qt.Key_P and event.modifiers() == Qt.AltModifier:
@@ -105,8 +111,14 @@ class VideoPlayer(QMainWindow):
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
             if self.windowState() == Qt.WindowNoState:
+                QGuiApplication.setOverrideCursor(Qt.WaitCursor)
                 self.video_frame.show()
                 self.setWindowState(Qt.WindowFullScreen)
+
+                self.activateWindow()  # Ensure the PiP window is focused and on top
+                self.raise_()
+
+                QGuiApplication.restoreOverrideCursor()
             else:
                 self.setWindowState(Qt.WindowNoState)
 
@@ -146,6 +158,7 @@ class VideoPlayer(QMainWindow):
             self.media_player.play()
 
     def toggle_pip_mode(self):
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
         if not self.is_pip_mode:
             self.normal_geometry = (
                 self.geometry()
@@ -156,9 +169,13 @@ class VideoPlayer(QMainWindow):
         else:
             self.setWindowFlags(Qt.Window)
             self.setGeometry(self.normal_geometry)
-            self.show()  # Apply new window flags
+            self.show()
 
         self.is_pip_mode = not self.is_pip_mode  # Toggle PiP mode
+        self.activateWindow()  # Ensure the PiP window is focused and on top
+        self.raise_()
+
+        QGuiApplication.restoreOverrideCursor()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
