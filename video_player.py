@@ -1,7 +1,7 @@
 import platform
 import sys
 import vlc
-from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QSize
+from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMainWindow, QFrame, QHBoxLayout
 
@@ -14,8 +14,8 @@ class VideoPlayer(QMainWindow):
 
         # Start normally, not on top
         self.is_pip_mode = False
-        self.aspect_ratio = 16 / 9  # Default aspect ratio
         self.normal_geometry = None
+        self.aspect_ratio = 16 / 9  # Default aspect ratio
         self.setWindowFlags(Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -90,6 +90,8 @@ class VideoPlayer(QMainWindow):
             else:
                 self.setWindowState(Qt.WindowNoState)
         elif event.key() == Qt.Key_P and event.modifiers() == Qt.AltModifier:
+            if self.windowState() == Qt.WindowFullScreen:
+                self.setWindowState(Qt.WindowNoState)
             self.toggle_pip_mode()
         super().keyPressEvent(event)
 
@@ -145,17 +147,14 @@ class VideoPlayer(QMainWindow):
         if not self.is_pip_mode:
             self.normal_geometry = self.geometry()  # Save current geometry for restoring later
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+            self.resize_and_position_pip()
             self.show()
-            self.video_frame.setStyleSheet("background: black;")  # Prevents black background
-            self.resize_and_position_pip()  # Resize and position to bottom right
         else:
             self.setWindowFlags(Qt.Window)
-            self.show()
-            self.video_frame.setStyleSheet("")  # Reset background style
             self.setGeometry(self.normal_geometry)
+            self.show()  # Apply new window flags
 
         self.is_pip_mode = not self.is_pip_mode  # Toggle PiP mode
-        self.show()  # Ensure the window is visible after changing flags
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -230,11 +229,12 @@ class VideoPlayer(QMainWindow):
 
     def resize_and_position_pip(self):
         screen_geometry = QGuiApplication.primaryScreen().availableGeometry()
-        pip_width = int(screen_geometry.width() * 0.25)  # PiP width is 20% of screen width
+        pip_width = int(screen_geometry.width() * 0.25)  # PiP width is 25% of screen width
         pip_height = int(pip_width / self.aspect_ratio)
         x = screen_geometry.width() - pip_width - 10  # 10 pixels padding from edge
-        y = screen_geometry.height() - pip_height - 10  # 10 pixels padding from edge
+        y = screen_geometry.height() - pip_height - 60  # 10 pixels padding from edge
         self.setGeometry(x, y, pip_width, pip_height)
+        self.show()  # Apply geometry changes
         self.update()
 
     def resizeEvent(self, event):
