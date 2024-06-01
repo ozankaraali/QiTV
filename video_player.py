@@ -2,7 +2,7 @@ import platform
 import sys
 import vlc
 from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QTimer
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QScreen
 from PySide6.QtWidgets import QMainWindow, QFrame, QHBoxLayout
 
 
@@ -15,7 +15,9 @@ class VideoPlayer(QMainWindow):
         # Start normally, not on top
         self.is_pip_mode = False
         self.normal_geometry = None
-        self.aspect_ratio = 16 / 9  # Default aspect ratio
+        self.aspect_ratio = (
+            16 / 9
+        )  # Default aspect ratio; will be updated when video plays
         self.setWindowFlags(Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -145,7 +147,9 @@ class VideoPlayer(QMainWindow):
 
     def toggle_pip_mode(self):
         if not self.is_pip_mode:
-            self.normal_geometry = self.geometry()  # Save current geometry for restoring later
+            self.normal_geometry = (
+                self.geometry()
+            )  # Save current geometry for restoring later
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
             self.resize_and_position_pip()
             self.show()
@@ -167,22 +171,22 @@ class VideoPlayer(QMainWindow):
             # Determine the resize type (edges or corners)
             if event.pos().x() <= 10:  # Left
                 if event.pos().y() <= 10:  # Top-left corner
-                    self.resize_corner = 'top_left'
+                    self.resize_corner = "top_left"
                 elif event.pos().y() >= self.height() - 10:  # Bottom-left corner
-                    self.resize_corner = 'bottom_left'
+                    self.resize_corner = "bottom_left"
                 else:  # Left edge
-                    self.resize_corner = 'left'
+                    self.resize_corner = "left"
             elif event.pos().x() >= self.width() - 10:  # Right
                 if event.pos().y() <= 10:  # Top-right corner
-                    self.resize_corner = 'top_right'
+                    self.resize_corner = "top_right"
                 elif event.pos().y() >= self.height() - 10:  # Bottom-right corner
-                    self.resize_corner = 'bottom_right'
+                    self.resize_corner = "bottom_right"
                 else:  # Right edge
-                    self.resize_corner = 'right'
+                    self.resize_corner = "right"
             elif event.pos().y() <= 10:  # Top edge
-                self.resize_corner = 'top'
+                self.resize_corner = "top"
             elif event.pos().y() >= self.height() - 10:  # Bottom edge
-                self.resize_corner = 'bottom'
+                self.resize_corner = "bottom"
             else:  # Dragging
                 self.dragging = True
                 self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
@@ -196,18 +200,18 @@ class VideoPlayer(QMainWindow):
             new_width, new_height = self.start_size.width(), self.start_size.height()
             new_x, new_y = self.start_pos.x(), self.start_pos.y()
 
-            if self.resize_corner in ['left', 'top_left', 'bottom_left']:
+            if self.resize_corner in ["left", "top_left", "bottom_left"]:
                 new_width = max(100, self.start_size.width() - delta.x())
                 new_height = int(new_width / self.aspect_ratio)
                 new_x = self.start_pos.x() + delta.x()  # shift right
-            if self.resize_corner in ['right', 'top_right', 'bottom_right']:
+            if self.resize_corner in ["right", "top_right", "bottom_right"]:
                 new_width = max(100, self.start_size.width() + delta.x())
                 new_height = int(new_width / self.aspect_ratio)
-            if self.resize_corner in ['top', 'top_left', 'top_right']:
+            if self.resize_corner in ["top", "top_left", "top_right"]:
                 new_height = max(50, self.start_size.height() - delta.y())
                 new_width = int(new_height * self.aspect_ratio)
                 new_y = self.start_pos.y() + delta.y()  # shift down
-            if self.resize_corner in ['bottom', 'bottom_left', 'bottom_right']:
+            if self.resize_corner in ["bottom", "bottom_left", "bottom_right"]:
                 new_height = max(50, self.start_size.height() + delta.y())
                 new_width = int(new_height * self.aspect_ratio)
 
@@ -228,11 +232,18 @@ class VideoPlayer(QMainWindow):
         self.update()
 
     def resize_and_position_pip(self):
-        screen_geometry = QGuiApplication.primaryScreen().availableGeometry()
-        pip_width = int(screen_geometry.width() * 0.25)  # PiP width is 25% of screen width
+        screen_geometry = QGuiApplication.primaryScreen().geometry()
+        available_geometry = QGuiApplication.primaryScreen().availableGeometry()
+        pip_width = int(
+            screen_geometry.width() * 0.25
+        )  # PiP width is 25% of screen width
         pip_height = int(pip_width / self.aspect_ratio)
         x = screen_geometry.width() - pip_width - 10  # 10 pixels padding from edge
-        y = screen_geometry.height() - pip_height - 60  # 10 pixels padding from edge
+        y = (
+            screen_geometry.height() - pip_height - 70
+            if screen_geometry == available_geometry
+            else available_geometry.height() - pip_height - 10
+        )  # 10 pixels padding from edge
         self.setGeometry(x, y, pip_width, pip_height)
         self.show()  # Apply geometry changes
         self.update()
