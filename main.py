@@ -10,6 +10,7 @@ from config_manager import ConfigManager
 from update_checker import check_for_updates
 from sleep_manager import prevent_sleep, allow_sleep
 
+import ctypes
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

@@ -1,10 +1,9 @@
 import platform
 import sys
-
 import vlc
-from PySide6.QtCore import Qt, QEvent
+from PySide6.QtCore import Qt, QEvent, QPoint
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMainWindow, QFrame, QHBoxLayout
-
 
 class VideoPlayer(QMainWindow):
     def __init__(self, config_manager, *args, **kwargs):
@@ -12,12 +11,22 @@ class VideoPlayer(QMainWindow):
         self.config_manager = config_manager
         self.config = self.config_manager.config
 
+        # Start normally, not on top
+        self.is_pip_mode = False
+        self.normal_geometry = None
+        self.aspect_ratio = 16 / 9  # Default aspect ratio
+        self.setWindowFlags(Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+
+        self.dragging = False
+        self.drag_position = QPoint()
+
         self.config_manager.apply_window_settings("video_player", self)
 
         self.mainFrame = QFrame()
         self.setCentralWidget(self.mainFrame)
         self.setWindowTitle("QiTV Player")
-        # self.setWindowIcon(QIcon("qitv.ico"))
         t_lay_parent = QHBoxLayout()
         t_lay_parent.setContentsMargins(0, 0, 0, 0)
 
@@ -67,7 +76,7 @@ class VideoPlayer(QMainWindow):
         elif event.key() == Qt.Key_Space:
             self.toggle_play_pause()  # Toggle Play/Pause
         elif event.key() == Qt.Key_M:
-            self.toogle_mute()  # Toggle Mute
+            self.toggle_mute()  # Toggle Mute
         elif event.key() == Qt.Key_Escape:
             self.setWindowState(Qt.WindowNoState)
         elif event.key() == Qt.Key_F:
@@ -76,6 +85,8 @@ class VideoPlayer(QMainWindow):
                 self.setWindowState(Qt.WindowFullScreen)
             else:
                 self.setWindowState(Qt.WindowNoState)
+        elif event.key() == Qt.Key_P and event.modifiers() == Qt.AltModifier:
+            self.toggle_pip_mode()
         super().keyPressEvent(event)
 
     def change_volume(self, step):
@@ -109,12 +120,13 @@ class VideoPlayer(QMainWindow):
         self.media = self.instance.media_new(video_url)
         self.media_player.set_media(self.media)
         self.media_player.play()
+        self.adjust_aspect_ratio()  # Ensure the aspect ratio is set initially
         self.show()
 
     def stop_video(self):
         self.media_player.stop()
 
-    def toogle_mute(self):
+    def toggle_mute(self):
         state = self.media_player.audio_get_mute()
         self.media_player.audio_set_mute(not state)
 
@@ -124,3 +136,69 @@ class VideoPlayer(QMainWindow):
             self.media_player.pause()
         else:
             self.media_player.play()
+
+    def toggle_pip_mode(self):
+        if not self.is_pip_mode:
+            self.normal_geometry = self.geometry()  # Save current geometry for restoring later
+            self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+            self.show()
+            self.video_frame.setStyleSheet("background: black;")  # Prevents black background
+            self.resize_to_pip_size()
+            self.move_to_bottom_right()  # Move window to bottom right on first enter PiP mode
+            self.dragging = True  # Enable dragging in PiP mode
+        else:
+            self.setWindowFlags(Qt.Window)
+            self.show()
+            self.video_frame.setStyleSheet("")  # Reset background style
+            self.setGeometry(self.normal_geometry)
+            self.dragging = False  # Disable dragging in non-PiP mode
+
+        self.is_pip_mode = not self.is_pip_mode  # Toggle PiP mode
+        self.show()  # Ensure the window is visible after changing flags
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.is_pip_mode:
+            self.dragging = True
+            self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self.dragging and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPos() - self.drag_position)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self.dragging = False
+
+    def resize_to_aspect_ratio(self):
+        current_size = self.size()
+        width = current_size.width()
+        height = int(width / self.aspect_ratio)
+        self.resize(width, height)
+        self.update()
+
+    def resize_to_pip_size(self):
+        screen_geometry = QGuiApplication.primaryScreen().availableGeometry()
+        pip_width = int(screen_geometry.width() * 0.25)  # PiP width is 20% of screen width
+        pip_height = int(pip_width / self.aspect_ratio)
+        self.setFixedSize(pip_width, pip_height)
+        self.update()
+
+    def resizeEvent(self, event):
+        if self.is_pip_mode:
+            self.resize_to_aspect_ratio()
+        super().resizeEvent(event)
+
+    def adjust_aspect_ratio(self):
+        video_size = self.media_player.video_get_size()
+        if video_size:
+            width, height = video_size
+            if width > 0 and height > 0:
+                self.aspect_ratio = width / height
+
+    def move_to_bottom_right(self):
+        screen_geometry = QGuiApplication.primaryScreen().availableGeometry()
+        window_size = self.size()
+        x = screen_geometry.width() - window_size.width() - 10  # 10 pixels padding from edge
+        y = screen_geometry.height() - window_size.height() - 10  # 10 pixels padding from edge
+        self.move(x, y)
