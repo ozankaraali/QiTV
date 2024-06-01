@@ -5,7 +5,7 @@ import shutil
 
 
 class ConfigManager:
-    CURRENT_VERSION = "1.1.8"  # Set your current version here
+    CURRENT_VERSION = "1.1.9"  # Set your current version here
 
     def __init__(self):
         self.config = {}

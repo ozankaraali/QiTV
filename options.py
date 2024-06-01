@@ -57,7 +57,6 @@ class OptionsDialog(QDialog):
         self.password_input = QLineEdit(self)
         self.layout.addRow(self.password_label, self.password_input)
 
-
         self.verify_button = QPushButton("Verify Provider", self)
         self.verify_button.clicked.connect(self.verify_provider)
         self.layout.addWidget(self.verify_button)
@@ -95,7 +94,11 @@ class OptionsDialog(QDialog):
         self.provider_combo.clear()
         for i, provider in enumerate(self.config["data"]):
             # can we get the first couple ... last couple of characters of the url?
-            prov = provider["url"][:30] + "..." + provider["url"][-15:] if len(provider["url"]) > 45 else provider["url"]
+            prov = (
+                provider["url"][:30] + "..." + provider["url"][-15:]
+                if len(provider["url"]) > 45
+                else provider["url"]
+            )
             self.provider_combo.addItem(f"{i + 1}: {prov}", userData=provider)
         self.provider_combo.blockSignals(False)
         self.provider_combo.setCurrentIndex(self.selected_provider_index)
@@ -145,7 +148,9 @@ class OptionsDialog(QDialog):
             return
         del self.config["data"][self.provider_combo.currentIndex()]
         self.load_providers()
-        self.provider_combo.setCurrentIndex(min(self.selected_provider_index, len(self.config["data"]) - 1))
+        self.provider_combo.setCurrentIndex(
+            min(self.selected_provider_index, len(self.config["data"]) - 1)
+        )
 
     def save_settings(self):
         if self.selected_provider:
