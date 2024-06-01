@@ -1,9 +1,10 @@
 import platform
 import sys
 import vlc
-from PySide6.QtCore import Qt, QEvent, QPoint
+from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QSize
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMainWindow, QFrame, QHBoxLayout
+
 
 class VideoPlayer(QMainWindow):
     def __init__(self, config_manager, *args, **kwargs):
@@ -13,13 +14,14 @@ class VideoPlayer(QMainWindow):
 
         # Start normally, not on top
         self.is_pip_mode = False
-        self.normal_geometry = None
         self.aspect_ratio = 16 / 9  # Default aspect ratio
+        self.normal_geometry = None
         self.setWindowFlags(Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
 
         self.dragging = False
+        self.resizing = False
         self.drag_position = QPoint()
 
         self.config_manager.apply_window_settings("video_player", self)
@@ -48,6 +50,8 @@ class VideoPlayer(QMainWindow):
 
         self.mainFrame.setLayout(t_lay_parent)
         self.show()
+
+        self.resize_corner = None
 
     def eventFilter(self, obj, event):
         if obj == self.video_frame:
@@ -143,45 +147,94 @@ class VideoPlayer(QMainWindow):
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
             self.show()
             self.video_frame.setStyleSheet("background: black;")  # Prevents black background
-            self.resize_to_pip_size()
-            self.move_to_bottom_right()  # Move window to bottom right on first enter PiP mode
-            self.dragging = True  # Enable dragging in PiP mode
+            self.resize_and_position_pip()  # Resize and position to bottom right
         else:
             self.setWindowFlags(Qt.Window)
             self.show()
             self.video_frame.setStyleSheet("")  # Reset background style
             self.setGeometry(self.normal_geometry)
-            self.dragging = False  # Disable dragging in non-PiP mode
 
         self.is_pip_mode = not self.is_pip_mode  # Toggle PiP mode
         self.show()  # Ensure the window is visible after changing flags
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self.is_pip_mode:
-            self.dragging = True
-            self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+            self.resizing = False
+            self.start_size = self.size()
+            self.start_pos = self.pos()
+            self.drag_position = event.globalPos()
+
+            # Determine the resize type (edges or corners)
+            if event.pos().x() <= 10:  # Left
+                if event.pos().y() <= 10:  # Top-left corner
+                    self.resize_corner = 'top_left'
+                elif event.pos().y() >= self.height() - 10:  # Bottom-left corner
+                    self.resize_corner = 'bottom_left'
+                else:  # Left edge
+                    self.resize_corner = 'left'
+            elif event.pos().x() >= self.width() - 10:  # Right
+                if event.pos().y() <= 10:  # Top-right corner
+                    self.resize_corner = 'top_right'
+                elif event.pos().y() >= self.height() - 10:  # Bottom-right corner
+                    self.resize_corner = 'bottom_right'
+                else:  # Right edge
+                    self.resize_corner = 'right'
+            elif event.pos().y() <= 10:  # Top edge
+                self.resize_corner = 'top'
+            elif event.pos().y() >= self.height() - 10:  # Bottom edge
+                self.resize_corner = 'bottom'
+            else:  # Dragging
+                self.dragging = True
+                self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
+                self.resize_corner = None
+            self.resizing = bool(self.resize_corner)
             event.accept()
 
     def mouseMoveEvent(self, event):
-        if self.dragging and event.buttons() & Qt.LeftButton:
+        if self.resizing:
+            delta = event.globalPos() - self.drag_position
+            new_width, new_height = self.start_size.width(), self.start_size.height()
+            new_x, new_y = self.start_pos.x(), self.start_pos.y()
+
+            if self.resize_corner in ['left', 'top_left', 'bottom_left']:
+                new_width = max(100, self.start_size.width() - delta.x())
+                new_height = int(new_width / self.aspect_ratio)
+                new_x = self.start_pos.x() + delta.x()  # shift right
+            if self.resize_corner in ['right', 'top_right', 'bottom_right']:
+                new_width = max(100, self.start_size.width() + delta.x())
+                new_height = int(new_width / self.aspect_ratio)
+            if self.resize_corner in ['top', 'top_left', 'top_right']:
+                new_height = max(50, self.start_size.height() - delta.y())
+                new_width = int(new_height * self.aspect_ratio)
+                new_y = self.start_pos.y() + delta.y()  # shift down
+            if self.resize_corner in ['bottom', 'bottom_left', 'bottom_right']:
+                new_height = max(50, self.start_size.height() + delta.y())
+                new_width = int(new_height * self.aspect_ratio)
+
+            self.setGeometry(new_x, new_y, new_width, new_height)
+        elif self.dragging and event.buttons() & Qt.LeftButton:
             self.move(event.globalPos() - self.drag_position)
-            event.accept()
+        event.accept()
 
     def mouseReleaseEvent(self, event):
         self.dragging = False
+        self.resizing = False
+        self.resize_corner = None
 
     def resize_to_aspect_ratio(self):
-        current_size = self.size()
-        width = current_size.width()
+        width = self.width()
         height = int(width / self.aspect_ratio)
         self.resize(width, height)
         self.update()
 
-    def resize_to_pip_size(self):
+    def resize_and_position_pip(self):
         screen_geometry = QGuiApplication.primaryScreen().availableGeometry()
         pip_width = int(screen_geometry.width() * 0.25)  # PiP width is 20% of screen width
         pip_height = int(pip_width / self.aspect_ratio)
-        self.setFixedSize(pip_width, pip_height)
+        x = screen_geometry.width() - pip_width - 10  # 10 pixels padding from edge
+        y = screen_geometry.height() - pip_height - 10  # 10 pixels padding from edge
+        self.setGeometry(x, y, pip_width, pip_height)
         self.update()
 
     def resizeEvent(self, event):
@@ -195,10 +248,3 @@ class VideoPlayer(QMainWindow):
             width, height = video_size
             if width > 0 and height > 0:
                 self.aspect_ratio = width / height
-
-    def move_to_bottom_right(self):
-        screen_geometry = QGuiApplication.primaryScreen().availableGeometry()
-        window_size = self.size()
-        x = screen_geometry.width() - window_size.width() - 10  # 10 pixels padding from edge
-        y = screen_geometry.height() - window_size.height() - 10  # 10 pixels padding from edge
-        self.move(x, y)
