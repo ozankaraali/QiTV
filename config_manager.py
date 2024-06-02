@@ -5,7 +5,7 @@ import shutil
 
 
 class ConfigManager:
-    CURRENT_VERSION = "1.2.1"  # Set your current version here
+    CURRENT_VERSION = "1.3.0"  # Set your current version here
 
     def __init__(self):
         self.config = {}
@@ -52,6 +52,8 @@ class ConfigManager:
             self.config = self.default_config()
             self.save_config()
 
+        self.update_patcher()
+
         selected_config = self.config["data"][self.config["selected"]]
         if "options" in selected_config:
             self.options = selected_config["options"]
@@ -69,6 +71,12 @@ class ConfigManager:
         self.url = selected_config.get("url")
         self.mac = selected_config.get("mac")
 
+    def update_patcher(self):
+        # add favorites to the loaded config if it doesn't exist
+        if "favorites" not in self.config:
+            self.config["favorites"] = []
+            self.save_config()
+
     @staticmethod
     def default_config():
         return {
@@ -83,6 +91,7 @@ class ConfigManager:
                 "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800},
                 "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
             },
+            "favorites": [],
         }
 
     def save_window_settings(self, pos, window_name):

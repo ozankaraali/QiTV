@@ -8,7 +8,10 @@ import string
 import subprocess
 
 import requests
-from PySide6.QtCore import Signal
+from PySide6.QtCore import (
+    Signal,
+    Qt,
+)
 from PySide6.QtWidgets import (
     QMainWindow,
     QFileDialog,
@@ -19,7 +22,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QListWidgetItem,
     QLineEdit,
-    QGridLayout,
+    QGridLayout, QCheckBox,
+)
+from PySide6.QtGui import (
+    QColor,
 )
 from urlobject import URLObject
 from urllib.parse import urlparse
@@ -84,6 +90,69 @@ class ChannelList(QMainWindow):
 
         self.grid_layout.addWidget(self.left_panel, 1, 0)
         self.grid_layout.setColumnStretch(0, 1)
+
+        # Add favorite button and action
+        self.favorite_button = QPushButton("Favorite/Unfavorite")
+        self.favorite_button.clicked.connect(self.toggle_favorite)
+        left_layout.addWidget(self.favorite_button)
+
+        # Add checkbox to show only favorites
+        self.favorites_only_checkbox = QCheckBox("Show only favorites")
+        self.favorites_only_checkbox.stateChanged.connect(self.filter_channels)
+        left_layout.addWidget(self.favorites_only_checkbox)
+
+        # add context menu for channel list
+        self.channel_list.setContextMenuPolicy(Qt.ActionsContextMenu)
+
+    def filter_channels(self, text):
+        show_favorites = self.favorites_only_checkbox.isChecked()
+        search_text = text.lower()
+
+        for i in range(self.channel_list.count()):
+            item = self.channel_list.item(i)
+            channel_name = item.text().lower()
+
+            matches_search = search_text in channel_name
+            is_favorite = self.check_if_favorite(item.text())
+
+            if show_favorites and not is_favorite:
+                item.setHidden(True)
+            else:
+                item.setHidden(not matches_search)
+
+    def toggle_favorite(self):
+        selected_item = self.channel_list.currentItem()
+        if selected_item:
+            channel_name = selected_item.text()
+            is_favorite = self.check_if_favorite(channel_name)
+            if is_favorite:
+                self.remove_from_favorites(channel_name)
+            else:
+                self.add_to_favorites(channel_name)
+
+    def add_to_favorites(self, channel_name):
+        if channel_name not in self.config["favorites"]:
+            self.config["favorites"].append(channel_name)
+            self.config_manager.save_config()
+
+    def remove_from_favorites(self, channel_name):
+        if channel_name in self.config["favorites"]:
+            self.config["favorites"].remove(channel_name)
+            self.config_manager.save_config()
+
+    def check_if_favorite(self, channel_name):
+        return channel_name in self.config["favorites"]
+
+    def display_channels(self, channels):
+        self.channel_list.clear()
+        for channel in channels:
+            item = QListWidgetItem(channel["name"])
+            item.setData(1, channel["cmd"])
+            self.channel_list.addItem(item)
+
+            # Mark favorite channels
+            if self.check_if_favorite(channel["name"]):
+                item.setBackground(QColor("yellow"))  # Optional: change color for favorite channels
 
     def create_media_controls(self):
         self.media_controls = QWidget(self.container_widget)
@@ -186,11 +255,6 @@ class ChannelList(QMainWindow):
             item = QListWidgetItem(channel["name"])
             item.setData(1, channel["cmd"])
             self.channel_list.addItem(item)
-
-    def filter_channels(self, text):
-        for i in range(self.channel_list.count()):
-            item = self.channel_list.item(i)
-            item.setHidden(text.lower() not in item.text().lower())
 
     def channel_selected(self, item):
         cmd = item.data(1)
