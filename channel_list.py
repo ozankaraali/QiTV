@@ -55,6 +55,7 @@ class ChannelList(QMainWindow):
         self.create_left_panel()
         self.create_media_controls()
         self.load_channels()
+        self.link = None
 
     def closeEvent(self, event):
         self.app.quit()
@@ -81,7 +82,7 @@ class ChannelList(QMainWindow):
 
         self.search_box = QLineEdit(self.left_panel)
         self.search_box.setPlaceholderText("Search channels...")
-        self.search_box.textChanged.connect(self.filter_channels)
+        self.search_box.textChanged.connect(lambda: self.filter_channels(self.search_box.text()))
         left_layout.addWidget(self.search_box)
 
         self.channel_list = QListWidget(self.left_panel)
@@ -98,27 +99,8 @@ class ChannelList(QMainWindow):
 
         # Add checkbox to show only favorites
         self.favorites_only_checkbox = QCheckBox("Show only favorites")
-        self.favorites_only_checkbox.stateChanged.connect(self.filter_channels)
+        self.favorites_only_checkbox.stateChanged.connect(lambda: self.filter_channels(self.search_box.text()))
         left_layout.addWidget(self.favorites_only_checkbox)
-
-        # add context menu for channel list
-        self.channel_list.setContextMenuPolicy(Qt.ActionsContextMenu)
-
-    def filter_channels(self, text):
-        show_favorites = self.favorites_only_checkbox.isChecked()
-        search_text = text.lower()
-
-        for i in range(self.channel_list.count()):
-            item = self.channel_list.item(i)
-            channel_name = item.text().lower()
-
-            matches_search = search_text in channel_name
-            is_favorite = self.check_if_favorite(item.text())
-
-            if show_favorites and not is_favorite:
-                item.setHidden(True)
-            else:
-                item.setHidden(not matches_search)
 
     def toggle_favorite(self):
         selected_item = self.channel_list.currentItem()
@@ -129,6 +111,7 @@ class ChannelList(QMainWindow):
                 self.remove_from_favorites(channel_name)
             else:
                 self.add_to_favorites(channel_name)
+            self.filter_channels(self.search_box.text())
 
     def add_to_favorites(self, channel_name):
         if channel_name not in self.config["favorites"]:
@@ -153,6 +136,22 @@ class ChannelList(QMainWindow):
             # Mark favorite channels
             if self.check_if_favorite(channel["name"]):
                 item.setBackground(QColor("yellow"))  # Optional: change color for favorite channels
+
+    def filter_channels(self, text=""):
+        show_favorites = self.favorites_only_checkbox.isChecked()
+        search_text = text.lower() if isinstance(text, str) else ""
+
+        for i in range(self.channel_list.count()):
+            item = self.channel_list.item(i)
+            channel_name = item.text().lower()
+
+            matches_search = search_text in channel_name
+            is_favorite = self.check_if_favorite(item.text())
+
+            if show_favorites and not is_favorite:
+                item.setHidden(True)
+            else:
+                item.setHidden(not matches_search)
 
     def create_media_controls(self):
         self.media_controls = QWidget(self.container_widget)
@@ -261,10 +260,12 @@ class ChannelList(QMainWindow):
         if self.config["data"][self.config["selected"]]["type"] == "STB":
             url = self.create_link(cmd)
             if url:
+                self.link = url
                 self.player.play_video(url)
             else:
                 print("Failed to create link.")
         else:
+            self.link = cmd
             self.player.play_video(cmd)
 
     def options_dialog(self):
