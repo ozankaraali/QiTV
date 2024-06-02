@@ -22,10 +22,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QListWidgetItem,
     QLineEdit,
-    QGridLayout, QCheckBox,
+    QGridLayout,
+    QCheckBox,
 )
 from PySide6.QtGui import (
     QColor,
+    QPixmap,
+    QIcon,
 )
 from urlobject import URLObject
 from urllib.parse import urlparse
@@ -82,7 +85,9 @@ class ChannelList(QMainWindow):
 
         self.search_box = QLineEdit(self.left_panel)
         self.search_box.setPlaceholderText("Search channels...")
-        self.search_box.textChanged.connect(lambda: self.filter_channels(self.search_box.text()))
+        self.search_box.textChanged.connect(
+            lambda: self.filter_channels(self.search_box.text())
+        )
         left_layout.addWidget(self.search_box)
 
         self.channel_list = QListWidget(self.left_panel)
@@ -99,7 +104,9 @@ class ChannelList(QMainWindow):
 
         # Add checkbox to show only favorites
         self.favorites_only_checkbox = QCheckBox("Show only favorites")
-        self.favorites_only_checkbox.stateChanged.connect(lambda: self.filter_channels(self.search_box.text()))
+        self.favorites_only_checkbox.stateChanged.connect(
+            lambda: self.filter_channels(self.search_box.text())
+        )
         left_layout.addWidget(self.favorites_only_checkbox)
 
     def toggle_favorite(self):
@@ -130,12 +137,27 @@ class ChannelList(QMainWindow):
         self.channel_list.clear()
         for channel in channels:
             item = QListWidgetItem(channel["name"])
-            item.setData(1, channel["cmd"])
+            item.setData(31, channel["cmd"])
+
+            # if "logo" in channel and channel["logo"]:
+            #     # Assuming logos are URLs, download and convert into QIcon
+            #     try:
+            #         response = requests.get(channel["logo"], stream=True)
+            #         if response.status_code == 200:
+            #             pixmap = QPixmap()
+            #             pixmap.loadFromData(response.content)
+            #             icon = QIcon(pixmap)
+            #             item.setIcon(icon)
+            #     except Exception as e:
+            #         print(f"Error loading logo: {e}")
+
             self.channel_list.addItem(item)
 
             # Mark favorite channels
             if self.check_if_favorite(channel["name"]):
-                item.setBackground(QColor("yellow"))  # Optional: change color for favorite channels
+                item.setBackground(
+                    QColor(0, 0, 255, 20)
+                )  # Optional: change color for favorite channels
 
     def filter_channels(self, text=""):
         show_favorites = self.favorites_only_checkbox.isChecked()
@@ -248,15 +270,8 @@ class ChannelList(QMainWindow):
         channel = {"id": 1, "name": "Stream", "cmd": url}
         self.display_channels([channel])
 
-    def display_channels(self, channels):
-        self.channel_list.clear()
-        for channel in channels:
-            item = QListWidgetItem(channel["name"])
-            item.setData(1, channel["cmd"])
-            self.channel_list.addItem(item)
-
     def channel_selected(self, item):
-        cmd = item.data(1)
+        cmd = item.data(31)
         if self.config["data"][self.config["selected"]]["type"] == "STB":
             url = self.create_link(cmd)
             if url:
@@ -293,7 +308,12 @@ class ChannelList(QMainWindow):
                 )
 
                 id += 1
-                channel = {"id": id, "name": channel_name}
+                channel = {
+                    "id": id,
+                    "name": channel_name,
+                    "logo": tvg_logo,
+                }
+
             elif line.startswith("http"):
                 urlobject = urlparse(line)
                 channel["cmd"] = urlobject.geturl()
