@@ -41,11 +41,12 @@ jobs:
       # - name: Install VLC
       #   run: choco install vlc -y
       - name: Install VLC
+        shell: pwsh
         run: |
-          $vlcURL = "https://download.videolan.org/vlc/last/win64/"
-          $getHTML = Invoke-Webrequest -Uri $vlcURL
-          $name = ($getHTML.ParsedHtml.getElementsByTagName("a") | Where-Object {$_.innerhtml -like 'vlc-*.exe'}).innertext
-          $vlcURL = "https://download.videolan.org/vlc/last/win64/$name"
+          $vlcURL = "https://download.videolan.org/pub/videolan/vlc/last/win64/"
+          $getHTML = Invoke-WebRequest -Uri $vlcURL
+          $name = ($getHTML.Links | Where-Object { $_.href -match 'vlc-.*\.exe' }).href
+          $vlcURL = "$vlcURL$name"
 
           $outPath = "$env:GITHUB_WORKSPACE\temp"
           $outFile = "$outPath\vlc64.exe"
