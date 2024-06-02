@@ -45,18 +45,27 @@ jobs:
         run: |
           $vlcURL = "https://download.videolan.org/pub/videolan/vlc/last/win64/"
           $getHTML = Invoke-WebRequest -Uri $vlcURL
-          $name = ($getHTML.Links | Where-Object { $_.href -match 'vlc-.*\.exe' }).href
-          $vlcURL = "$vlcURL$name"
+          $name = ($getHTML.Links | Where-Object { $_.href -match 'vlc-.*\.exe$' }).href
+          
+          if ($name) {
+              $vlcURL = "$vlcURL$name"
+              Write-Output "Downloading VLC from $vlcURL"
 
-          $outPath = "$env:GITHUB_WORKSPACE\temp"
-          $outFile = "$outPath\vlc64.exe"
+              $outPath = "$env:GITHUB_WORKSPACE\temp"
+              $outFile = "$outPath\vlc64.exe"
 
-          mkdir $outPath -Force
+              mkdir $outPath -Force
 
-          (New-Object System.Net.WebClient).DownloadFile($vlcURL, $outFile)
+              (New-Object System.Net.WebClient).DownloadFile($vlcURL, $outFile)
 
-          Start-Process -FilePath $outFile -ArgumentList "/S" -Wait
-          Remove-Item $outFile
+              Start-Process -FilePath $outFile -ArgumentList "/S" -Wait
+              Remove-Item $outFile
+          }
+          else {
+              Write-Error "VLC executable not found."
+              exit 1
+          }
+
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Package App with PyInstaller for Windows
