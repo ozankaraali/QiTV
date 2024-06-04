@@ -1,4 +1,4 @@
-from PySide6.QtDBus import QDBusConnection, QDBusInterface
+from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
 import platform
 import ctypes
 
@@ -107,8 +107,11 @@ def prevent_sleep_linux():
     )
     if screensaver_interface.isValid():
         reply = screensaver_interface.call("Inhibit", "QiTV", "Playing video")
-        if reply.type() == reply.ReplyMessage:
-            linux_cookie = reply.arguments()[0]
+        try:
+            if reply.type() == QDBusMessage.ReplyMessage:
+                linux_cookie = reply.arguments()[0]
+        except:
+            pass
 
 
 def allow_sleep_linux():
