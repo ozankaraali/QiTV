@@ -5,7 +5,7 @@ import shutil
 
 
 class ConfigManager:
-    CURRENT_VERSION = "1.4.1"  # Set your current version here
+    CURRENT_VERSION = "1.4.2"  # Set your current version here
 
     def __init__(self):
         self.config = {}
@@ -44,7 +44,7 @@ class ConfigManager:
 
     def load_config(self):
         try:
-            with open(self.config_path, "rb") as f:
+            with open(self.config_path, "r", encoding="utf-8") as f:
                 self.config = json.loads(f.read())
             if self.config is None:
                 self.config = self.default_config()
@@ -109,6 +109,11 @@ class ConfigManager:
             settings["x"], settings["y"], settings["width"], settings["height"]
         )
 
+    # def save_config(self):
+    #     with open(self.config_path, "wb") as f:
+    #         f.write(json.dumps(self.config, option=json.OPT_INDENT_2))
+
     def save_config(self):
-        with open(self.config_path, "wb") as f:
-            f.write(json.dumps(self.config, option=json.OPT_INDENT_2))
+        serialized_config = json.dumps(self.config, option=json.OPT_INDENT_2)
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(serialized_config.decode("utf-8"))

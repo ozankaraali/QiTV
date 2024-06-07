@@ -152,21 +152,23 @@ jobs:
     needs: [build-linux, build-windows, build-macos-universal, build-macos-intel]
     runs-on: ubuntu-latest
     steps:
-      - name: Get shortened SHA
-        id: short-sha
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Get Version
+        id: get_version
         run: |
-          echo ${GITHUB_SHA:0:7} > short_sha.txt
-          echo "SHORT_SHA=$(cat short_sha.txt)" >> $GITHUB_ENV
+          version=$(grep -oP '(?<=CURRENT_VERSION = ")[^"]*' config_manager.py)
+          echo "VERSION=$version" >> $GITHUB_ENV
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         with:
-          tag_name: release-${{ env.SHORT_SHA }}
-          release_name: Release ${{ env.SHORT_SHA }}
+          tag_name: v${{ env.VERSION }}
+          release_name: v${{ env.VERSION }}
           draft: false
-          prerelease: false
+          prerelease: true
       - name: Download all artifacts
         uses: actions/download-artifact@v3
       - name: Upload Linux Release Asset

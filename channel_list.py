@@ -253,7 +253,7 @@ class ChannelList(QMainWindow):
 
     def save_m3u_channels(self, channels_data, file_path):
         try:
-            with open(file_path, 'w') as file:
+            with open(file_path, 'w', encoding='utf-8') as file:
                 file.write('#EXTM3U\n')
                 count = 0
                 for channel in channels_data:
@@ -272,7 +272,7 @@ class ChannelList(QMainWindow):
 
     def save_channel_list(self, base_url, channels_data, mac, file_path) -> None:
         try:
-            with open(file_path, 'w') as file:
+            with open(file_path, 'w', encoding='utf-8') as file:
                 file.write('#EXTM3U\n')
                 count = 0
                 for channel in channels_data:
