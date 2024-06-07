@@ -234,31 +234,58 @@ class ChannelList(QMainWindow):
 
     def export_channels(self):
         file_dialog = QFileDialog(self)
-        file_dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        file_dialog.setAcceptMode(QFileDialog.AcceptSave)
         file_dialog.setDefaultSuffix('m3u')
-        file_path, _ = file_dialog.getSaveFileName(self, "Export Channels", "", "*.m3u")
+        file_path, _ = file_dialog.getSaveFileName(self, "Export Channels", "", "M3U files (*.m3u)")
         if file_path:
-            base_url = self.config["data"][self.config["selected"]]["url"]
-            channels_data = self.config["data"][self.config["selected"]]["channels"]
-            mac = self.config["data"][self.config["selected"]]["mac"]
-            self.save_channel_list(base_url, channels_data, mac, file_path)
+            provider = self.config["data"][self.config["selected"]]
+            channels_data = provider.get("channels", [])
+            base_url = provider.get("url", "")
+            config_type = provider.get("type", "")
+            mac = provider.get("mac", "")
+
+            if config_type == "STB":
+                self.save_channel_list(base_url, channels_data, mac, file_path)
+            elif config_type in ["M3UPLAYLIST", "M3USTREAM", "XTREAM"]:
+                self.save_m3u_channels(channels_data, file_path)
+            else:
+                print(f"Unknown provider type: {config_type}")
+
+    def save_m3u_channels(self, channels_data, file_path):
+        try:
+            with open(file_path, 'w') as file:
+                file.write('#EXTM3U\n')
+                count = 0
+                for channel in channels_data:
+                    name = channel.get('name', 'Unknown Channel')
+                    logo = channel.get('logo', '')
+                    cmd_url = channel.get('cmd')  # Directly get the 'cmd' field
+
+                    if cmd_url:  # Proceed only if cmd_url exists
+                        channel_str = f'#EXTINF:-1 tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
+                        count += 1
+                        file.write(channel_str)
+                print(f"Channels = {count}")
+                print(f"\nChannel list has been dumped to {file_path}")
+        except IOError as e:
+            print(f"Error saving channel list: {e}")
 
     def save_channel_list(self, base_url, channels_data, mac, file_path) -> None:
         try:
             with open(file_path, 'w') as file:
                 file.write('#EXTM3U\n')
-                count: int = 0
+                count = 0
                 for channel in channels_data:
-                    name: str = channel['name']
-                    logo: str = channel.get('logo', '')
-                    cmd_url: str = channel['cmds'][0]['url'].replace('ffmpeg ', '')
+                    name = channel.get('name', 'Unknown Channel')
+                    logo = channel.get('logo', '')
+                    cmd_url = channel.get('cmd', '').replace('ffmpeg ', '')
                     if "localhost" in cmd_url:
                         ch_id_match = re.search(r'/ch/(\d+)_', cmd_url)
                         if ch_id_match:
-                            ch_id: str = ch_id_match.group(1)
+                            ch_id = ch_id_match.group(1)
                             cmd_url = f"{base_url}/play/live.php?mac={mac}&stream={ch_id}&extension=m3u8"
 
-                    channel_str: str = f'#EXTINF:-1 tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
+                    channel_str = f'#EXTINF:-1 tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
                     count += 1
                     file.write(channel_str)
                 print(f"Channels = {count}")
