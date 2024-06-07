@@ -1,5 +1,7 @@
 # QiTV - IPTV and STB Client
 
+## Please always download this free software from [RELEASES](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware.
+
 A cross-platform IPTV and STB player client. This time in Python with QT and LibVLC.
 
 ## Installation
