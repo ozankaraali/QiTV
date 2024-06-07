@@ -3,7 +3,7 @@
 import os
 from PyInstaller.building.build_main import Analysis, PYZ, EXE, BUNDLE
 
-VLC_PATH = '/usr/lib/x86_64-linux-gnu'  # Default path on Ubuntu
+VLC_PATH = '/usr/lib/x86_64-linux-gnu/vlc'  # Default path on Ubuntu
 
 # Find the exact versions of libvlc and libvlccore
 libvlc_version = "libvlc.so"
@@ -18,12 +18,17 @@ for file in os.listdir(VLC_PATH):
 
 a = Analysis(
     ['main.py'],
-    pathex=[VLC_PATH],
+    pathex=['.'],
     binaries=[
-        (os.path.join(VLC_PATH, 'vlc/plugins/*'), 'plugins'),
+        (os.path.join(VLC_PATH, 'libvlc.so'), '.'), # Do we need this?
+        (os.path.join(VLC_PATH, 'libvlccore.so'), '.'), # Do we need this?
+        (os.path.join(VLC_PATH, 'libvlc_pulse.so'), '.'),
+        (os.path.join(VLC_PATH, 'libvlc_vdpau.so'), '.'),
+        (os.path.join(VLC_PATH, 'libvlc_xcb_events.so'), '.'),
+        (os.path.join(VLC_PATH, 'plugins/*'), 'plugins'),
     ],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['vlc'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
