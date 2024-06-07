@@ -20,8 +20,6 @@ a = Analysis(
     ['main.py'],
     pathex=['.'],
     binaries=[
-        (os.path.join(VLC_PATH, 'libvlc.so'), '.'), # Do we need this?
-        (os.path.join(VLC_PATH, 'libvlccore.so'), '.'), # Do we need this?
         (os.path.join(VLC_PATH, 'libvlc_pulse.so'), '.'),
         (os.path.join(VLC_PATH, 'libvlc_vdpau.so'), '.'),
         (os.path.join(VLC_PATH, 'libvlc_xcb_events.so'), '.'),
