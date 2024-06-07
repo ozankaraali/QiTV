@@ -77,6 +77,16 @@ class ChannelList(QMainWindow):
         self.options_button = QPushButton("Options")
         self.options_button.clicked.connect(self.options_dialog)
         ctl_layout.addWidget(self.options_button)
+
+        self.export_button = QPushButton("Export Channels")
+        self.export_button.clicked.connect(self.export_channels)
+        # disable export button if not STB
+        if self.config["data"][self.config["selected"]]["type"] != "STB":
+            self.export_button.setDisabled(True)
+        else:
+            self.export_button.setDisabled(False)
+        ctl_layout.addWidget(self.export_button)
+
         self.grid_layout.addWidget(self.upper_layout, 0, 0)
 
     def create_left_panel(self):
@@ -238,6 +248,38 @@ class ChannelList(QMainWindow):
         if file_path:
             self.player.play_video(file_path)
 
+    def export_channels(self):
+        file_dialog = QFileDialog(self)
+        file_dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        file_dialog.setDefaultSuffix('m3u')
+        file_path, _ = file_dialog.getSaveFileName(self, "Export Channels", "", "*.m3u")
+        if file_path:
+            base_url = self.config["data"][self.config["selected"]]["url"]
+            channels_data = self.config["data"][self.config["selected"]]["channels"]
+            mac = self.config["data"][self.config["selected"]]["mac"]
+            self.save_channel_list(base_url, channels_data, mac, file_path)
+
+    def save_channel_list(self, base_url, channels_data, mac, file_path) -> None:
+        try:
+            with open(file_path, 'w') as file:
+                file.write('#EXTM3U\n')
+                count: int = 0
+                for channel in channels_data:
+                    name: str = channel['name']
+                    logo: str = channel.get('logo', '')
+                    cmd_url: str = channel['cmds'][0]['url'].replace('ffmpeg ', '')
+                    if "localhost" in cmd_url:
+                        ch_id_match = re.search(r'/ch/(\d+)_', cmd_url)
+                        if ch_id_match:
+                            ch_id: str = ch_id_match.group(1)
+                            cmd_url = f"{base_url}/play/live.php?mac={mac}&stream={ch_id}&extension=m3u8"
+
+                    channel_str: str = f'#EXTINF:-1 tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
+                    count += 1
+                    file.write(channel_str)
+        except IOError as e:
+            print(f"Error saving channel list: {e}")
+
     def save_config(self):
         self.config_manager.save_config()
 
@@ -355,6 +397,7 @@ class ChannelList(QMainWindow):
             channels = result["js"]["data"]
             self.display_channels(channels)
             self.config["data"][self.config["selected"]]["options"] = options
+            self.config["data"][self.config["selected"]]["channels"] = channels
             self.save_config()
         except Exception as e:
             print(f"Error loading STB channels: {e}")
