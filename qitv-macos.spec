@@ -1,13 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-VLC_PATH = '/Applications/VLC.app/Contents/MacOS'  # Adjust this path if necessary
+VLC_PATH = '/Applications/VLC.app/Contents'  # Adjust this path if necessary
 
 a = Analysis(
     ['main.py'],
-    pathex=['.'],
+    pathex=[VLC_PATH],
     binaries=[
-        (os.path.join(VLC_PATH, 'plugins/*'), 'plugins'),
-        (os.path.join(VLC_PATH, 'lib/*'), 'lib'),
+        (os.path.join(VLC_PATH, 'MacOS/plugins/*'), 'plugins'),
     ],
     datas=[],
     hiddenimports=[],

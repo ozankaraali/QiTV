@@ -6,11 +6,9 @@ block_cipher = None
 
 a = Analysis(
     ['main.py'],
-    pathex=['.'], #insert your base VLC path here, ex: pathex=["D:\KivySchool\VLC"],
+    pathex=[VLC_PATH], #insert your base VLC path here, ex: pathex=["D:\KivySchool\VLC"],
     binaries=[
         (os.path.join(VLC_PATH, 'plugins/*'), 'plugins'),
-        (os.path.join(VLC_PATH, 'libvlc.dll'), '.'),
-        (os.path.join(VLC_PATH, 'libvlccore.dll'), '.'),
     ],
     datas=[
         ('assets/*', 'assets'),
