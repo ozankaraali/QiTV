@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: 3.9
       - name: Install VLC
-        run: sudo apt-get install -y vlc
+        run: sudo apt install update && sudo apt install -y vlc
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Package App with PyInstaller for Linux
