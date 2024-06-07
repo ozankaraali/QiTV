@@ -5,3 +5,4 @@ URLObject~=2.4.3
 m3u-parser
 pyqtdarktheme==2.1.0
 PySide6
+orjson

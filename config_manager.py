@@ -1,4 +1,4 @@
-import json
+import orjson as json
 import os
 import platform
 import shutil
@@ -44,8 +44,8 @@ class ConfigManager:
 
     def load_config(self):
         try:
-            with open(self.config_path, "r") as f:
-                self.config = json.load(f)
+            with open(self.config_path, "rb") as f:
+                self.config = json.loads(f.read())
             if self.config is None:
                 self.config = self.default_config()
         except (FileNotFoundError, json.JSONDecodeError):
@@ -110,5 +110,5 @@ class ConfigManager:
         )
 
     def save_config(self):
-        with open(self.config_path, "w") as f:
-            json.dump(self.config, f, indent=4)
+        with open(self.config_path, "wb") as f:
+            f.write(json.dumps(self.config, option=json.OPT_INDENT_2))

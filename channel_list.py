@@ -1,4 +1,3 @@
-import json
 import os
 import platform
 import random
@@ -57,8 +56,8 @@ class ChannelList(QMainWindow):
         self.create_upper_panel()
         self.create_left_panel()
         self.create_media_controls()
-        self.load_channels()
         self.link = None
+        self.load_channels()
 
     def closeEvent(self, event):
         self.app.quit()
@@ -80,12 +79,11 @@ class ChannelList(QMainWindow):
 
         self.export_button = QPushButton("Export Channels")
         self.export_button.clicked.connect(self.export_channels)
-        # disable export button if not STB
-        if self.config["data"][self.config["selected"]]["type"] != "STB":
-            self.export_button.setDisabled(True)
-        else:
-            self.export_button.setDisabled(False)
         ctl_layout.addWidget(self.export_button)
+
+        self.update_button = QPushButton("Update Channels")
+        self.update_button.clicked.connect(self.update_channels)
+        ctl_layout.addWidget(self.update_button)
 
         self.grid_layout.addWidget(self.upper_layout, 0, 0)
 
@@ -133,12 +131,12 @@ class ChannelList(QMainWindow):
     def add_to_favorites(self, channel_name):
         if channel_name not in self.config["favorites"]:
             self.config["favorites"].append(channel_name)
-            self.config_manager.save_config()
+            self.save_config()
 
     def remove_from_favorites(self, channel_name):
         if channel_name in self.config["favorites"]:
             self.config["favorites"].remove(channel_name)
-            self.config_manager.save_config()
+            self.save_config()
 
     def check_if_favorite(self, channel_name):
         return channel_name in self.config["favorites"]
@@ -148,18 +146,6 @@ class ChannelList(QMainWindow):
         for channel in channels:
             item = QListWidgetItem(channel["name"])
             item.setData(31, channel["cmd"])
-
-            # if "logo" in channel and channel["logo"]:
-            #     # Assuming logos are URLs, download and convert into QIcon
-            #     try:
-            #         response = requests.get(channel["logo"], stream=True)
-            #         if response.status_code == 200:
-            #             pixmap = QPixmap()
-            #             pixmap.loadFromData(response.content)
-            #             icon = QIcon(pixmap)
-            #             item.setIcon(icon)
-            #     except Exception as e:
-            #         print(f"Error loading logo: {e}")
 
             self.channel_list.addItem(item)
 
@@ -217,7 +203,6 @@ class ChannelList(QMainWindow):
                             program_files, "VideoLAN", "VLC", "vlc.exe"
                         )
                     subprocess.Popen([vlc_path, self.link])
-
                 elif platform.system() == "Darwin":  # macOS
                     vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
                     if not vlc_path:
@@ -231,11 +216,10 @@ class ChannelList(QMainWindow):
                                 vlc_path = expanded_path
                                 break
                     subprocess.Popen([vlc_path, self.link])
-
                 else:  # Assuming Linux or other Unix-like OS
                     vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
                     subprocess.Popen([vlc_path, self.link])
-                # when VLC open, stop running video on self.player
+                # when VLC opens, stop running video on self.player
                 self.player.stop_video()
             except FileNotFoundError as fnf_error:
                 print("VLC not found: ", fnf_error)
@@ -277,6 +261,8 @@ class ChannelList(QMainWindow):
                     channel_str: str = f'#EXTINF:-1 tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
                     count += 1
                     file.write(channel_str)
+                print(f"Channels = {count}")
+                print(f"\nChannel list has been dumped to {file_path}")
         except IOError as e:
             print(f"Error saving channel list: {e}")
 
@@ -284,6 +270,14 @@ class ChannelList(QMainWindow):
         self.config_manager.save_config()
 
     def load_channels(self):
+        channels = self.config["data"][self.config["selected"]].get("channels", [])
+        if channels:
+            self.display_channels(channels)
+        else:
+            self.update_channels()  # If no channels, attempt to update
+
+    # Method to manually update channels
+    def update_channels(self):
         selected_provider = self.config["data"][self.config["selected"]]
         config_type = selected_provider.get("type", "")
         if config_type == "M3UPLAYLIST":
@@ -295,7 +289,7 @@ class ChannelList(QMainWindow):
             url = f"{urlobject.scheme}://{urlobject.netloc}/get.php?username={selected_provider['username']}&password={selected_provider['password']}&type=m3u"
             self.load_m3u_playlist(url)
         elif config_type == "STB":
-            self.do_handshake(selected_provider["url"], selected_provider["mac"])
+            self.do_handshake(selected_provider["url"], selected_provider["mac"], load=True)
         elif config_type == "M3USTREAM":
             self.load_stream(selected_provider["url"])
 
@@ -305,12 +299,18 @@ class ChannelList(QMainWindow):
             if response.status_code == 200:
                 channels = self.parse_m3u(response.text)
                 self.display_channels(channels)
+                # Update the channels in the config
+                self.config["data"][self.config["selected"]]["channels"] = channels
+                self.save_config()
         except requests.RequestException as e:
             print(f"Error loading M3U Playlist: {e}")
 
     def load_stream(self, url):
         channel = {"id": 1, "name": "Stream", "cmd": url}
         self.display_channels([channel])
+        # Update the channels in the config
+        self.config["data"][self.config["selected"]]["channels"] = [channel]
+        self.save_config()
 
     def channel_selected(self, item):
         cmd = item.data(31)
@@ -455,3 +455,4 @@ class ChannelList(QMainWindow):
         except Exception as e:
             print("Error verifying URL:", e)
             return False
+
