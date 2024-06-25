@@ -167,6 +167,23 @@ jobs:
         run: |
           version=$(grep -oP '(?<=CURRENT_VERSION = ")[^"]*' config_manager.py)
           echo "VERSION=$version" >> $GITHUB_ENV
+      - name: Get Previous Version
+        id: get_previous_version
+        run: |
+          previous_version=$(git tag --sort=-v:refname | head -n 2 | tail -n 1)
+          echo "PREVIOUS_VERSION=$previous_version" >> $GITHUB_ENV
+      - name: Generate Changelog
+        id: generate_changelog
+        run: |
+          echo "## Please always download this free software from [RELEASES](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware. Always keep the [original repository](https://github.com/ozankaraali/QiTV) for the reference." > changelog.md
+          echo "" >> changelog.md
+          echo "Security updates." >> changelog.md
+          echo "" >> changelog.md
+          echo "**Full Changelog**: https://github.com/ozankaraali/QiTV/compare/${{ env.PREVIOUS_VERSION }}...v${{ env.VERSION }}" >> changelog.md
+          echo "" >> changelog.md
+          echo "### Commits" >> changelog.md
+          echo "" >> changelog.md
+          git log --pretty=format:"- %s" ${{ env.PREVIOUS_VERSION }}...HEAD >> changelog.md
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -175,6 +192,7 @@ jobs:
         with:
           tag_name: v${{ env.VERSION }}
           release_name: v${{ env.VERSION }}
+          body: ${{ steps.generate_changelog.outputs.changelog }}
           draft: false
           prerelease: true
       - name: Download all artifacts
