@@ -15,6 +15,8 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: 3.9
+      - name: Check OpenSSL Version
+        run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
       - name: Install VLC
         run: sudo apt-get update && sudo apt-get install -y vlc
       - name: Install dependencies
@@ -38,6 +40,8 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: 3.8
+      - name: Check OpenSSL Version
+        run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
       # - name: Install VLC
       #   run: choco install vlc -y
       - name: Install VLC
@@ -87,6 +91,8 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: 3.8
+      - name: Check OpenSSL Version
+        run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
       - name: Install VLC
         run: brew install --cask vlc
       - name: Install dependencies
@@ -122,6 +128,8 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: 3.8
+      - name: Check OpenSSL Version
+        run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
       - name: Install VLC
         run: brew install --cask vlc
       - name: Install dependencies
