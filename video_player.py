@@ -1,8 +1,9 @@
 import platform
 import sys
+
 import vlc
-from PySide6.QtCore import Qt, QEvent, QPoint, QRect, QTimer, QCoreApplication
-from PySide6.QtGui import QGuiApplication, QScreen
+from PySide6.QtCore import Qt, QEvent, QPoint, QTimer
+from PySide6.QtGui import QGuiApplication, QCursor
 from PySide6.QtWidgets import QMainWindow, QFrame, QHBoxLayout
 
 
@@ -55,15 +56,43 @@ class VideoPlayer(QMainWindow):
 
         self.resize_corner = None
 
+        # Initialize the inactivity timer and set up cursor hiding mechanism
+        self.inactivity_timer = QTimer(self)
+        self.inactivity_timer.setInterval(5000)  # 5000 milliseconds = 5 seconds
+        self.inactivity_timer.timeout.connect(self.hide_cursor)
+        self.inactivity_timer.start()
+
+        # Set cursor visibility state
+        self.cursor_visible = True
+        self.last_mouse_pos = self.video_frame.mapFromGlobal(QCursor.pos())
+
     def eventFilter(self, obj, event):
         if obj == self.video_frame:
-            if event.type() == QEvent.Wheel:
+            if event.type() == QEvent.MouseMove:
+                if not self.cursor_visible or event.pos() != self.last_mouse_pos:
+                    self.reset_inactivity_timer()
+                    self.last_mouse_pos = event.pos()
+                return True
+            elif event.type() == QEvent.Wheel:
                 self.wheelEvent(event)
                 return True
             elif event.type() == QEvent.KeyPress:
                 self.keyPressEvent(event)
                 return True
         return False
+
+    def reset_inactivity_timer(self):
+        self.inactivity_timer.start()  # Reset the timer
+        if not self.cursor_visible:
+            self.show_cursor()
+
+    def hide_cursor(self):
+        self.video_frame.setCursor(Qt.BlankCursor)
+        self.cursor_visible = False
+
+    def show_cursor(self):
+        self.video_frame.unsetCursor()
+        self.cursor_visible = True
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()

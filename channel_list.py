@@ -235,8 +235,10 @@ class ChannelList(QMainWindow):
     def export_channels(self):
         file_dialog = QFileDialog(self)
         file_dialog.setAcceptMode(QFileDialog.AcceptSave)
-        file_dialog.setDefaultSuffix('m3u')
-        file_path, _ = file_dialog.getSaveFileName(self, "Export Channels", "", "M3U files (*.m3u)")
+        file_dialog.setDefaultSuffix("m3u")
+        file_path, _ = file_dialog.getSaveFileName(
+            self, "Export Channels", "", "M3U files (*.m3u)"
+        )
         if file_path:
             provider = self.config["data"][self.config["selected"]]
             channels_data = provider.get("channels", [])
@@ -253,16 +255,18 @@ class ChannelList(QMainWindow):
 
     def save_m3u_channels(self, channels_data, file_path):
         try:
-            with open(file_path, 'w', encoding='utf-8') as file:
-                file.write('#EXTM3U\n')
+            with open(file_path, "w", encoding="utf-8") as file:
+                file.write("#EXTM3U\n")
                 count = 0
                 for channel in channels_data:
-                    name = channel.get('name', 'Unknown Channel')
-                    logo = channel.get('logo', '')
-                    cmd_url = channel.get('cmd')  # Directly get the 'cmd' field
+                    name = channel.get("name", "Unknown Channel")
+                    logo = channel.get("logo", "")
+                    cmd_url = channel.get("cmd")  # Directly get the 'cmd' field
 
                     if cmd_url:  # Proceed only if cmd_url exists
-                        channel_str = f'#EXTINF:-1 tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
+                        channel_str = (
+                            f'#EXTINF:-1 tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
+                        )
                         count += 1
                         file.write(channel_str)
                 print(f"Channels = {count}")
@@ -272,15 +276,15 @@ class ChannelList(QMainWindow):
 
     def save_channel_list(self, base_url, channels_data, mac, file_path) -> None:
         try:
-            with open(file_path, 'w', encoding='utf-8') as file:
-                file.write('#EXTM3U\n')
+            with open(file_path, "w", encoding="utf-8") as file:
+                file.write("#EXTM3U\n")
                 count = 0
                 for channel in channels_data:
-                    name = channel.get('name', 'Unknown Channel')
-                    logo = channel.get('logo', '')
-                    cmd_url = channel.get('cmd', '').replace('ffmpeg ', '')
+                    name = channel.get("name", "Unknown Channel")
+                    logo = channel.get("logo", "")
+                    cmd_url = channel.get("cmd", "").replace("ffmpeg ", "")
                     if "localhost" in cmd_url:
-                        ch_id_match = re.search(r'/ch/(\d+)_', cmd_url)
+                        ch_id_match = re.search(r"/ch/(\d+)_", cmd_url)
                         if ch_id_match:
                             ch_id = ch_id_match.group(1)
                             cmd_url = f"{base_url}/play/live.php?mac={mac}&stream={ch_id}&extension=m3u8"
@@ -316,7 +320,9 @@ class ChannelList(QMainWindow):
             url = f"{urlobject.scheme}://{urlobject.netloc}/get.php?username={selected_provider['username']}&password={selected_provider['password']}&type=m3u"
             self.load_m3u_playlist(url)
         elif config_type == "STB":
-            self.do_handshake(selected_provider["url"], selected_provider["mac"], load=True)
+            self.do_handshake(
+                selected_provider["url"], selected_provider["mac"], load=True
+            )
         elif config_type == "M3USTREAM":
             self.load_stream(selected_provider["url"])
 
@@ -482,4 +488,3 @@ class ChannelList(QMainWindow):
         except Exception as e:
             print("Error verifying URL:", e)
             return False
-
