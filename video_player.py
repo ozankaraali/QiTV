@@ -39,7 +39,12 @@ class VideoPlayer(QMainWindow):
         self.video_frame.mouseDoubleClickEvent = self.mouseDoubleClickEvent
         self.video_frame.installEventFilter(self)
         t_lay_parent.addWidget(self.video_frame)
-        self.instance = vlc.Instance(["--video-on-top"])
+
+        # Custom user-agent string
+        user_agent = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
+        self.instance = vlc.Instance(
+            ["--video-on-top", f"--http-user-agent={user_agent}"]
+        )
         self.media_player = self.instance.media_player_new()
         self.media_player.video_set_mouse_input(False)
         self.media_player.video_set_key_input(False)
