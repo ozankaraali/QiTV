@@ -89,6 +89,7 @@ class ConfigManager:
             ],
             "window_positions": {
                 "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800},
+                "movie_list": {"x": 50, "y": 100, "width": 300, "height": 700},
                 "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
             },
             "favorites": [],

@@ -6,6 +6,7 @@ from PySide6 import QtGui
 
 from video_player import VideoPlayer
 from channel_list import ChannelList
+from movies_list import MoviesList
 from config_manager import ConfigManager
 from update_checker import check_for_updates
 from sleep_manager import prevent_sleep, allow_sleep
@@ -29,9 +30,12 @@ if __name__ == "__main__":
     try:
         player = VideoPlayer(config_manager)
         channel_list = ChannelList(app, player, config_manager)
+        movies_list = MoviesList(app, player, config_manager)
         qdarktheme.setup_theme("auto")
         player.show()
         channel_list.show()
+        movies_list.show()
+
         check_for_updates()
         sys.exit(app.exec())
     finally:
