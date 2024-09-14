@@ -142,7 +142,6 @@ class MoviesList(QMainWindow):
         return movie_name in self.config["favorites"]
 
     def display_movies(self, movies):
-        print("d")
         self.movies_list.clear()
         for movie in movies:
             item = QListWidgetItem(movie["name"])
@@ -426,9 +425,9 @@ class MoviesList(QMainWindow):
     def load_stb_movies(self, url, options):
         url = URLObject(url)
         url = f"{url.scheme}://{url.netloc}"
+        page = 0
         try:
-            fetchurl = f"{url}/server/load.php?type=vod&action=get_ordered_list&id=*"
-            print(fetchurl)
+            fetchurl = f"{url}/server/load.php?type=vod&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
             response = requests.get(fetchurl, headers=options["headers"])
             result = response.json()
             movies = result["js"]["data"]
