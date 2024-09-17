@@ -5,6 +5,7 @@ import re
 import shutil
 import string
 import subprocess
+import json
 
 import requests
 from PySide6.QtCore import (
@@ -421,17 +422,23 @@ class MoviesList(QMainWindow):
                 return self.do_handshake(url, mac, serverload)
             print("Error in handshake:", e)
             return False
-
+    
     def load_stb_movies(self, url, options):
         url = URLObject(url)
         url = f"{url.scheme}://{url.netloc}"
-        page = 0
+        Allmovies = []
         try:
-            fetchurl = f"{url}/server/load.php?type=vod&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
+            fetchurl = f"{url}/server/load.php?type=vod&action=get_ordered_list"
             response = requests.get(fetchurl, headers=options["headers"])
             result = response.json()
-            movies = result["js"]["data"]
-            self.display_movies(movies)
+            length = int(result["js"]["total_items"] / result["js"]["max_page_items"])
+            for i in range(length): 
+                fetchurl = f"{url}/server/load.php?type=vod&action=get_ordered_list&genre=0&category=*&p={i}&sortby=added"
+                response = requests.get(fetchurl, headers=options["headers"])
+                result = response.json()
+                movies = result["js"]["data"]
+                Allmovies += movies        
+            self.display_movies(Allmovies)
             self.config["data"][self.config["selected"]]["options"] = options
             self.config["data"][self.config["selected"]]["movies"] = movies
             self.save_config()
