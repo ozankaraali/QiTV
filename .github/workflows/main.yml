@@ -50,7 +50,7 @@ jobs:
           $vlcURL = "https://download.videolan.org/pub/videolan/vlc/last/win64/"
           $getHTML = Invoke-WebRequest -Uri $vlcURL
           $name = ($getHTML.Links | Where-Object { $_.href -match 'vlc-.*\.exe$' }).href
-          
+
           if ($name) {
               $vlcURL = "$vlcURL$name"
               Write-Output "Downloading VLC from $vlcURL"

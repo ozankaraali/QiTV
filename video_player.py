@@ -2,9 +2,9 @@ import platform
 import sys
 
 import vlc
-from PySide6.QtCore import Qt, QEvent, QPoint, QTimer
-from PySide6.QtGui import QGuiApplication, QCursor
-from PySide6.QtWidgets import QMainWindow, QFrame, QHBoxLayout
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
+from PySide6.QtGui import QCursor, QGuiApplication
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QMainWindow
 
 
 class VideoPlayer(QMainWindow):

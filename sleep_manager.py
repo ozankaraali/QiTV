@@ -1,6 +1,7 @@
-from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
-import platform
 import ctypes
+import platform
+
+from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
 
 mac_assertion_id = None
 linux_cookie = None
