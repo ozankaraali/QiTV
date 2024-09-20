@@ -42,34 +42,14 @@ jobs:
           python-version: 3.8
       - name: Check OpenSSL Version
         run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
-      # - name: Install VLC
-      #   run: choco install vlc -y
-      - name: Install VLC
-        shell: pwsh
-        run: |
-          $vlcURL = "https://download.videolan.org/pub/videolan/vlc/last/win64/"
-          $getHTML = Invoke-WebRequest -Uri $vlcURL
-          $name = ($getHTML.Links | Where-Object { $_.href -match 'vlc-.*\.exe$' }).href
-
-          if ($name) {
-              $vlcURL = "$vlcURL$name"
-              Write-Output "Downloading VLC from $vlcURL"
-
-              $outPath = "$env:GITHUB_WORKSPACE\temp"
-              $outFile = "$outPath\vlc64.exe"
-
-              mkdir $outPath -Force
-
-              (New-Object System.Net.WebClient).DownloadFile($vlcURL, $outFile)
-
-              Start-Process -FilePath $outFile -ArgumentList "/S" -Wait
-              Remove-Item $outFile
-          }
-          else {
-              Write-Error "VLC executable not found."
-              exit 1
-          }
-
+      # - name: Install Chocolatey
+      #   shell: powershell
+      #   run: |
+      #     Set-ExecutionPolicy Bypass -Scope Process -Force
+      #     [System.Net.ServicePointManager]::SecurityProtocol = 'Tls12'
+      #     iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+      - name: Install VLC using Chocolatey
+        run: choco install vlc -y
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Package App with PyInstaller for Windows
