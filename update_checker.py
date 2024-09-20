@@ -1,5 +1,6 @@
 import requests
 from PySide6.QtWidgets import QMessageBox
+
 from config_manager import ConfigManager
 
 
