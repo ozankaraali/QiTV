@@ -139,7 +139,8 @@ class ChannelList(QMainWindow):
     def check_if_favorite(self, item_name):
         return item_name in self.config["favorites"]
 
-    def toggle_content_type(self, state):
+    def toggle_content_type(self, value):
+        state = Qt.CheckState(value)
         self.content_type = "movies" if state == Qt.Checked else "channels"
         self.load_content()
 
