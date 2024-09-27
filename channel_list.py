@@ -1,3 +1,4 @@
+import asyncio
 import os
 import platform
 import random
@@ -7,8 +8,9 @@ import string
 import subprocess
 from urllib.parse import urlparse
 
+import aiohttp
 import requests
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -26,6 +28,23 @@ from PySide6.QtWidgets import (
 from urlobject import URLObject
 
 from options import OptionsDialog
+
+
+class AsyncWorker(QThread):
+    finished = Signal(object)
+
+    def __init__(self, coro):
+        super().__init__()
+        self.coro = coro
+
+    def run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(self.coro)
+            self.finished.emit(result)
+        finally:
+            loop.close()
 
 
 class ChannelList(QMainWindow):
@@ -52,11 +71,18 @@ class ChannelList(QMainWindow):
         self.create_media_controls()
         self.link = None
         self.load_content()
+        self.workers = []
 
     def closeEvent(self, event):
         self.app.quit()
         self.player.close()
         self.config_manager.save_window_settings(self.geometry(), "channel_list")
+
+        # Clean up workers
+        for worker in self.workers:
+            worker.quit()
+            worker.wait()
+
         event.accept()
 
     def create_upper_panel(self):
@@ -344,25 +370,44 @@ class ChannelList(QMainWindow):
                 )
             self.load_m3u_playlist(url)
         elif config_type == "STB":
-            self.do_handshake(
-                selected_provider["url"], selected_provider["mac"], load=True
+            worker = AsyncWorker(
+                self.do_handshake(
+                    selected_provider["url"], selected_provider["mac"], load=False
+                )
             )
+            worker.finished.connect(self.on_handshake_complete)
+            worker.start()
+            self.workers.append(worker)
         elif config_type == "M3USTREAM":
             self.load_stream(selected_provider["url"])
 
+    def on_handshake_complete(self, success):
+        if success:
+            selected_provider = self.config["data"][self.config["selected"]]
+            options = selected_provider["options"]
+            self.load_stb_content(selected_provider["url"], options)
+        else:
+            print("Handshake failed")
+
     def load_m3u_playlist(self, url):
-        try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                content = self.parse_m3u(response.text)
-                self.display_content(content)
-                # Update the content in the config
-                self.config["data"][self.config["selected"]][
-                    self.content_type
-                ] = content
-                self.save_config()
-        except requests.RequestException as e:
-            print(f"Error loading M3U Playlist: {e}")
+        async def fetch_m3u():
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        content = await response.text()
+                        return self.parse_m3u(content)
+                    else:
+                        return []
+
+        worker = AsyncWorker(fetch_m3u())
+        worker.finished.connect(self.on_m3u_loaded)
+        worker.start()
+        self.workers.append(worker)  # Keep a reference to the worker
+
+    def on_m3u_loaded(self, content):
+        self.display_content(content)
+        self.config["data"][self.config["selected"]][self.content_type] = content
+        self.save_config()
 
     def load_stream(self, url):
         item = {"id": 1, "name": "Stream", "cmd": url}
@@ -419,81 +464,135 @@ class ChannelList(QMainWindow):
                 result.append(item)
         return result
 
-    def do_handshake(self, url, mac, serverload="/server/load.php", load=True):
-        token = (
-            self.config.get("token")
-            if self.config.get("token")
-            else self.random_token()
-        )
+    async def do_handshake(self, url, mac, serverload="/server/load.php", load=True):
+        token = self.config.get("token") or self.random_token()
         options = self.create_options(url, mac, token)
-        try:
-            fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash=0&token={token}&JsHttpRequest=1-xml"
-            handshake = requests.get(fetchurl, headers=options["headers"])
-            body = handshake.json()
-            token = body["js"]["token"]
-            options["headers"]["Authorization"] = f"Bearer {token}"
-            self.config["data"][self.config["selected"]]["options"] = options
-            self.save_config()
-            if load:
-                self.load_stb_content(url, options)
-            return True
-        except Exception as e:
-            if serverload != "/portal.php":
-                serverload = "/portal.php"
-                return self.do_handshake(url, mac, serverload)
-            print("Error in handshake:", e)
-            return False
+        fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash=0&token={token}&JsHttpRequest=1-xml"
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(
+                    fetchurl, headers=options["headers"]
+                ) as response:
+                    if response.status == 200:
+                        body = await response.json()
+                        token = body["js"]["token"]
+                        options["headers"]["Authorization"] = f"Bearer {token}"
+                        self.config["data"][self.config["selected"]][
+                            "options"
+                        ] = options
+                        self.save_config()
+                        if load:
+                            await self.load_stb_content(url, options)
+                        return True
+                    else:
+                        print(f"Handshake failed with status code: {response.status}")
+                        return False
+            except aiohttp.ClientError as e:
+                print(f"Error in handshake: {e}")
+                if serverload != "/portal.php":
+                    return await self.do_handshake(url, mac, "/portal.php", load)
+                return False
 
     def load_stb_content(self, url, options):
         url = URLObject(url)
         url = f"{url.scheme}://{url.netloc}"
-        try:
-            if self.content_type == "channels":
-                fetchurl = f"{url}/server/load.php?type=itv&action=get_all_channels"
-                response = requests.get(fetchurl, headers=options["headers"])
-                result = response.json()
-                items = result["js"]["data"]
-            else:
-                fetchurl = f"{url}/server/load.php?type=vod&action=get_ordered_list"
-                response = requests.get(fetchurl, headers=options["headers"])
-                result = response.json()
-                total_items = int(result["js"]["total_items"])
-                max_page_items = int(result["js"]["max_page_items"])
-                pages = (total_items + max_page_items - 1) // max_page_items
-                items = []
-                for page in range(pages):
-                    fetchurl = f"{url}/server/load.php?type=vod&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
-                    response = requests.get(fetchurl, headers=options["headers"])
-                    result = response.json()
-                    items.extend(result["js"]["data"])
 
-            self.display_content(items)
-            self.config["data"][self.config["selected"]]["options"] = options
-            self.config["data"][self.config["selected"]][self.content_type] = items
-            self.save_config()
-        except Exception as e:
-            print(f"Error loading STB content: {e}")
+        async def fetch_content():
+            async with aiohttp.ClientSession() as session:
+                try:
+                    if self.content_type == "channels":
+                        fetchurl = (
+                            f"{url}/server/load.php?type=itv&action=get_all_channels"
+                        )
+                        async with session.get(
+                            fetchurl, headers=options["headers"]
+                        ) as response:
+                            result = await response.json()
+                            return result["js"]["data"]
+                    else:
+                        fetchurl = (
+                            f"{url}/server/load.php?type=vod&action=get_ordered_list"
+                        )
+                        async with session.get(
+                            fetchurl, headers=options["headers"]
+                        ) as response:
+                            result = await response.json()
+                            total_items = int(result["js"]["total_items"])
+                            max_page_items = int(result["js"]["max_page_items"])
+                            pages = (total_items + max_page_items - 1) // max_page_items
+
+                            tasks = []
+                            for page in range(pages):
+                                page_url = f"{url}/server/load.php?type=vod&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
+                                tasks.append(
+                                    session.get(page_url, headers=options["headers"])
+                                )
+
+                            responses = await asyncio.gather(*tasks)
+                            items = []
+                            for response in responses:
+                                result = await response.json()
+                                items.extend(result["js"]["data"])
+                            return items
+
+                except aiohttp.ClientError as e:
+                    print(f"Error fetching content: {e}")
+                    return None
+
+        worker = AsyncWorker(fetch_content())
+        worker.finished.connect(self.on_content_loaded)
+        worker.start()
+        self.workers.append(worker)  # Keep a reference to the worker
+
+    def on_content_loaded(self, items):
+        if items is None:
+            print("Error loading content")
+            return
+        self.display_content(items)
+        self.config["data"][self.config["selected"]][self.content_type] = items
+        self.save_config()
 
     def create_link(self, cmd):
-        try:
-            selected_provider = self.config["data"][self.config["selected"]]
-            url = selected_provider["url"]
-            url = URLObject(url)
-            url = f"{url.scheme}://{url.netloc}"
-            options = selected_provider["options"]
-            content_type = "vod" if self.content_type == "movies" else "itv"
-            fetchurl = (
-                f"{url}/server/load.php?type={content_type}&action=create_link"
-                f"&cmd={requests.utils.quote(cmd)}&JsHttpRequest=1-xml"
-            )
-            response = requests.get(fetchurl, headers=options["headers"])
-            result = response.json()
-            link = result["js"]["cmd"].split(" ")[-1]
+        async def fetch_link():
+            try:
+                selected_provider = self.config["data"][self.config["selected"]]
+                url = URLObject(selected_provider["url"])
+                url = f"{url.scheme}://{url.netloc}"
+                options = selected_provider["options"]
+                content_type = "vod" if self.content_type == "movies" else "itv"
+                fetchurl = (
+                    f"{url}/server/load.php?type={content_type}&action=create_link"
+                    f"&cmd={requests.utils.quote(cmd)}&JsHttpRequest=1-xml"
+                )
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        fetchurl, headers=options["headers"]
+                    ) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            link = result["js"]["cmd"].split(" ")[-1]
+                            return link
+                        else:
+                            print(
+                                f"Error creating link. Status code: {response.status}"
+                            )
+                            return None
+            except Exception as e:
+                print(f"Error creating link: {e}")
+                return None
+
+        worker = AsyncWorker(fetch_link())
+        worker.finished.connect(self.on_link_created)
+        worker.start()
+        self.workers.append(worker)  # Keep a reference to the worker
+
+    def on_link_created(self, link):
+        if link:
             self.link = link
-            return link
-        except Exception as e:
-            print(f"Error creating link: {e}")
-            return None
+            self.player.play_video(link)
+        else:
+            print("Failed to create link.")
 
     @staticmethod
     def random_token():
@@ -522,12 +621,24 @@ class ChannelList(QMainWindow):
         return selected_provider["options"]["headers"]
 
     @staticmethod
-    def verify_url(url):
+    async def verify_url(url):
         try:
-            response = requests.get(url)
-            # return response.status_code == 200
-            # basically we check if we can connect
-            return True if response.status_code else False
-        except Exception as e:
-            print("Error verifying URL:", e)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    return response.status != 0
+        except aiohttp.ClientError as e:
+            print(f"Error verifying URL: {e}")
             return False
+
+    # To use this method, you'll need to create an AsyncWorker:
+    def check_url(self, url):
+        worker = AsyncWorker(self.verify_url(url))
+        worker.finished.connect(self.on_url_verified)
+        worker.start()
+        self.workers.append(worker)  # Keep a reference to the worker
+
+    def on_url_verified(self, is_valid):
+        if is_valid:
+            print("URL is valid")
+        else:
+            print("URL is invalid")
