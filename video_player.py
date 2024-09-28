@@ -62,10 +62,10 @@ class VideoPlayer(QMainWindow):
         self.resize_corner = None
 
         # Initialize the inactivity timer and set up cursor hiding mechanism
-        self.inactivity_timer = QTimer(self)
-        self.inactivity_timer.setInterval(5000)  # 5000 milliseconds = 5 seconds
-        self.inactivity_timer.timeout.connect(self.hide_cursor)
-        self.inactivity_timer.start()
+        # self.inactivity_timer = QTimer(self)
+        # self.inactivity_timer.setInterval(5000)  # 5000 milliseconds = 5 seconds
+        # self.inactivity_timer.timeout.connect(self.hide_cursor)
+        # self.inactivity_timer.start()
 
         # Set cursor visibility state
         self.cursor_visible = True
