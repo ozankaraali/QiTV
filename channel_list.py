@@ -1,3 +1,4 @@
+import asyncio
 import os
 import platform
 import random
@@ -7,8 +8,10 @@ import string
 import subprocess
 from urllib.parse import urlparse
 
+import aiohttp
+import orjson
 import requests
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -19,6 +22,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -26,6 +30,82 @@ from PySide6.QtWidgets import (
 from urlobject import URLObject
 
 from options import OptionsDialog
+
+
+class ContentLoader(QThread):
+    content_loaded = Signal(list)
+    progress_updated = Signal(int, int)
+
+    def __init__(self, url, headers, content_type):
+        super().__init__()
+        self.url = url
+        self.headers = headers
+        self.content_type = content_type
+
+    async def fetch_page(self, session, page, max_retries=3):
+        for attempt in range(max_retries):
+            try:
+                fetchurl = f"{self.url}/server/load.php?type=vod&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
+                async with session.get(
+                    fetchurl, headers=self.headers, timeout=30
+                ) as response:
+                    if response.status == 503:
+                        wait_time = (2**attempt) + random.uniform(0, 1)
+                        print(
+                            f"Received 503 error. Retrying in {wait_time:.2f} seconds..."
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    content = await response.read()
+                    result = orjson.loads(content)
+                    return result["js"]["data"]
+            except (
+                aiohttp.ClientError,
+                orjson.JSONDecodeError,
+                asyncio.TimeoutError,
+            ) as e:
+                print(f"Error fetching page {page}: {e}")
+                if attempt == max_retries - 1:
+                    raise
+                wait_time = (2**attempt) + random.uniform(0, 1)
+                print(f"Retrying in {wait_time:.2f} seconds...")
+                await asyncio.sleep(wait_time)
+        return []
+
+    async def load_content(self):
+        async with aiohttp.ClientSession() as session:
+            # Fetch initial data to get total items and max page items
+            initial_url = f"{self.url}/server/load.php?type=vod&action=get_ordered_list"
+            async with session.get(initial_url, headers=self.headers) as response:
+                content = await response.read()
+                initial_result = orjson.loads(content)
+                total_items = int(initial_result["js"]["total_items"])
+                max_page_items = int(initial_result["js"]["max_page_items"])
+                pages = (total_items + max_page_items - 1) // max_page_items
+
+            semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent requests
+
+            async def fetch_with_semaphore(page):
+                async with semaphore:
+                    return await self.fetch_page(session, page)
+
+            tasks = [fetch_with_semaphore(page) for page in range(pages)]
+            items = []
+            for i, task in enumerate(asyncio.as_completed(tasks), 1):
+                page_items = await task
+                items.extend(page_items)
+                self.progress_updated.emit(i, pages)
+                if (
+                    len(items) % 100 == 0 or i == pages
+                ):  # Emit every 100 items or on last page
+                    self.content_loaded.emit(items)
+
+    def run(self):
+        try:
+            asyncio.run(self.load_content())
+        except Exception as e:
+            print(f"Error in content loading: {e}")
+            # You might want to emit a signal here to inform the main thread about the error
 
 
 class ChannelList(QMainWindow):
@@ -115,6 +195,12 @@ class ChannelList(QMainWindow):
         self.content_switch.stateChanged.connect(self.toggle_content_type)
         left_layout.addWidget(self.content_switch)
 
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        left_layout.addWidget(self.progress_bar)
+
     def toggle_favorite(self):
         selected_item = self.content_list.currentItem()
         if selected_item:
@@ -147,10 +233,14 @@ class ChannelList(QMainWindow):
     def display_content(self, items):
         self.content_list.clear()
         for item in items:
-            list_item = QListWidgetItem(item["name"])
-            list_item.setData(31, item["cmd"])
+            item_name = item.get("name") or item.get("title")
+            list_item = QListWidgetItem(item_name)
+            cmd = item.get("cmd") or item.get(
+                "id"
+            )  # if we append id, we need to handle
+            list_item.setData(31, cmd)
             self.content_list.addItem(list_item)
-            if self.check_if_favorite(item["name"]):
+            if self.check_if_favorite(item_name):
                 list_item.setBackground(QColor(0, 0, 255, 20))
 
     def filter_content(self, text=""):
@@ -447,14 +537,23 @@ class ChannelList(QMainWindow):
     def load_stb_content(self, url, options):
         url = URLObject(url)
         url = f"{url.scheme}://{url.netloc}"
+        items = []
         try:
             if self.content_type == "channels":
                 fetchurl = f"{url}/server/load.php?type=itv&action=get_all_channels"
                 response = requests.get(fetchurl, headers=options["headers"])
                 result = response.json()
                 items = result["js"]["data"]
-            else:
-                fetchurl = f"{url}/server/load.php?type=vod&action=get_ordered_list"
+            elif self.content_type == "movies":
+                self.content_loader = ContentLoader(
+                    url, options["headers"], self.content_type
+                )
+                self.content_loader.content_loaded.connect(self.update_content_list)
+                self.content_loader.progress_updated.connect(self.update_progress)
+                self.content_loader.finished.connect(self.content_loader_finished)
+                self.content_loader.start()
+            elif self.content_type == "series":
+                fetchurl = f"{url}/server/load.php?type=series&action=get_ordered_list"
                 response = requests.get(fetchurl, headers=options["headers"])
                 result = response.json()
                 total_items = int(result["js"]["total_items"])
@@ -462,10 +561,25 @@ class ChannelList(QMainWindow):
                 pages = (total_items + max_page_items - 1) // max_page_items
                 items = []
                 for page in range(pages):
-                    fetchurl = f"{url}/server/load.php?type=vod&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
+                    fetchurl = f"{url}/server/load.php?type=series&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
                     response = requests.get(fetchurl, headers=options["headers"])
                     result = response.json()
                     items.extend(result["js"]["data"])
+            elif self.content_type == "genres":
+                fetchurl = f"{url}/server/load.php?type=itv&action=get_genres"
+                response = requests.get(fetchurl, headers=options["headers"])
+                result = response.json()
+                items = result["js"]
+            elif self.content_type == "vod_categories":
+                fetchurl = f"{url}/server/load.php?type=vod&action=get_categories"
+                response = requests.get(fetchurl, headers=options["headers"])
+                result = response.json()
+                items = result["js"]
+            elif self.content_type == "series_categories":
+                fetchurl = f"{url}/server/load.php?type=series&action=get_categories"
+                response = requests.get(fetchurl, headers=options["headers"])
+                result = response.json()
+                items = result["js"]
 
             self.display_content(items)
             self.config["data"][self.config["selected"]]["options"] = options
@@ -473,6 +587,28 @@ class ChannelList(QMainWindow):
             self.save_config()
         except Exception as e:
             print(f"Error loading STB content: {e}")
+
+    def content_loader_finished(self):
+        if hasattr(self, "content_loader"):
+            if self.content_loader.exception:
+                print(f"Error loading content: {self.content_loader.exception}")
+                # Handle the error (e.g., show a message to the user)
+            self.content_loader.deleteLater()
+            del self.content_loader
+
+    def update_content_list(self, items):
+        self.display_content(items)
+        self.config["data"][self.config["selected"]][self.content_type] = items
+        self.save_config()
+
+    # Update the update_progress method
+    def update_progress(self, current, total):
+        progress_percentage = int((current / total) * 100)
+        self.progress_bar.setValue(progress_percentage)
+        if progress_percentage == 100:
+            self.progress_bar.setVisible(False)
+        else:
+            self.progress_bar.setVisible(True)
 
     def create_link(self, cmd):
         try:
