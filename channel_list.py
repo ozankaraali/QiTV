@@ -14,6 +14,7 @@ import requests
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QFileDialog,
     QGridLayout,
@@ -22,8 +23,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -45,7 +48,13 @@ class ContentLoader(QThread):
     async def fetch_page(self, session, page, max_retries=3):
         for attempt in range(max_retries):
             try:
-                fetchurl = f"{self.url}/server/load.php?type=vod&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
+                if self.content_type == "movies":
+                    fetchurl = f"{self.url}/server/load.php?type=vod&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
+                elif self.content_type == "series":
+                    fetchurl = f"{self.url}/server/load.php?type=series&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
+                else:
+                    raise ValueError(f"Unsupported content type: {self.content_type}")
+
                 async with session.get(
                     fetchurl, headers=self.headers, timeout=30
                 ) as response:
@@ -75,7 +84,17 @@ class ContentLoader(QThread):
     async def load_content(self):
         async with aiohttp.ClientSession() as session:
             # Fetch initial data to get total items and max page items
-            initial_url = f"{self.url}/server/load.php?type=vod&action=get_ordered_list"
+            if self.content_type == "movies":
+                initial_url = (
+                    f"{self.url}/server/load.php?type=vod&action=get_ordered_list"
+                )
+            elif self.content_type == "series":
+                initial_url = (
+                    f"{self.url}/server/load.php?type=series&action=get_ordered_list"
+                )
+            else:
+                raise ValueError(f"Unsupported content type: {self.content_type}")
+
             async with session.get(initial_url, headers=self.headers) as response:
                 content = await response.read()
                 initial_result = orjson.loads(content)
@@ -105,7 +124,6 @@ class ContentLoader(QThread):
             asyncio.run(self.load_content())
         except Exception as e:
             print(f"Error in content loading: {e}")
-            # You might want to emit a signal here to inform the main thread about the error
 
 
 class ChannelList(QMainWindow):
@@ -191,15 +209,38 @@ class ChannelList(QMainWindow):
         )
         left_layout.addWidget(self.favorites_only_checkbox)
 
-        self.content_switch = QCheckBox("Show Movies")
-        self.content_switch.stateChanged.connect(self.toggle_content_type)
-        left_layout.addWidget(self.content_switch)
+        self.content_switch_layout = QHBoxLayout()
+        self.content_switch_group = QButtonGroup(self)
+        self.content_switch_group.setExclusive(True)
+
+        self.channels_radio = QRadioButton("Channels")
+        self.movies_radio = QRadioButton("Movies")
+        # self.series_radio = QRadioButton("Series")
+
+        self.content_switch_group.addButton(self.channels_radio)
+        self.content_switch_group.addButton(self.movies_radio)
+        # self.content_switch_group.addButton(self.series_radio)
+
+        self.channels_radio.setChecked(True)
+
+        self.content_switch_layout.addWidget(self.channels_radio)
+        self.content_switch_layout.addWidget(self.movies_radio)
+        # self.content_switch_layout.addWidget(self.series_radio)
+
+        left_layout.addLayout(self.content_switch_layout)
+
+        self.content_switch_group.buttonClicked.connect(self.toggle_content_type)
 
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
         left_layout.addWidget(self.progress_bar)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_content_loading)
+        self.cancel_button.setVisible(False)
+        left_layout.addWidget(self.cancel_button)
 
     def toggle_favorite(self):
         selected_item = self.content_list.currentItem()
@@ -225,9 +266,13 @@ class ChannelList(QMainWindow):
     def check_if_favorite(self, item_name):
         return item_name in self.config["favorites"]
 
-    def toggle_content_type(self, value):
-        state = Qt.CheckState(value)
-        self.content_type = "movies" if state == Qt.Checked else "channels"
+    def toggle_content_type(self, button):
+        if button == self.channels_radio:
+            self.content_type = "channels"
+        elif button == self.movies_radio:
+            self.content_type = "movies"
+        elif button == self.series_radio:
+            self.content_type = "series"
         self.load_content()
 
     def display_content(self, items):
@@ -393,10 +438,13 @@ class ChannelList(QMainWindow):
         self.config_manager.save_config()
 
     def load_content(self):
+        self.content_list.clear()
         if self.content_type == "channels":
             self.load_channels()
-        else:
+        elif self.content_type == "movies":
             self.load_movies()
+        elif self.content_type == "series":
+            self.load_series()
 
     def load_channels(self):
         channels = self.config["data"][self.config["selected"]].get("channels", [])
@@ -409,6 +457,13 @@ class ChannelList(QMainWindow):
         movies = self.config["data"][self.config["selected"]].get("movies", [])
         if movies:
             self.display_content(movies)
+        else:
+            self.update_content()
+
+    def load_series(self):
+        series = self.config["data"][self.config["selected"]].get("series", [])
+        if series:
+            self.display_content(series)
         else:
             self.update_content()
 
@@ -537,14 +592,16 @@ class ChannelList(QMainWindow):
     def load_stb_content(self, url, options):
         url = URLObject(url)
         url = f"{url.scheme}://{url.netloc}"
-        items = []
         try:
             if self.content_type == "channels":
                 fetchurl = f"{url}/server/load.php?type=itv&action=get_all_channels"
                 response = requests.get(fetchurl, headers=options["headers"])
                 result = response.json()
                 items = result["js"]["data"]
-            elif self.content_type == "movies":
+                self.display_content(items)
+                self.config["data"][self.config["selected"]]["channels"] = items
+                self.save_config()
+            elif self.content_type in ["movies", "series"]:
                 self.content_loader = ContentLoader(
                     url, options["headers"], self.content_type
                 )
@@ -552,19 +609,8 @@ class ChannelList(QMainWindow):
                 self.content_loader.progress_updated.connect(self.update_progress)
                 self.content_loader.finished.connect(self.content_loader_finished)
                 self.content_loader.start()
-            elif self.content_type == "series":
-                fetchurl = f"{url}/server/load.php?type=series&action=get_ordered_list"
-                response = requests.get(fetchurl, headers=options["headers"])
-                result = response.json()
-                total_items = int(result["js"]["total_items"])
-                max_page_items = int(result["js"]["max_page_items"])
-                pages = (total_items + max_page_items - 1) // max_page_items
-                items = []
-                for page in range(pages):
-                    fetchurl = f"{url}/server/load.php?type=series&action=get_ordered_list&genre=0&category=*&p={page}&sortby=added"
-                    response = requests.get(fetchurl, headers=options["headers"])
-                    result = response.json()
-                    items.extend(result["js"]["data"])
+                self.progress_bar.setVisible(True)
+                self.cancel_button.setVisible(True)
             elif self.content_type == "genres":
                 fetchurl = f"{url}/server/load.php?type=itv&action=get_genres"
                 response = requests.get(fetchurl, headers=options["headers"])
@@ -581,18 +627,27 @@ class ChannelList(QMainWindow):
                 result = response.json()
                 items = result["js"]
 
-            self.display_content(items)
-            self.config["data"][self.config["selected"]]["options"] = options
-            self.config["data"][self.config["selected"]][self.content_type] = items
-            self.save_config()
+            if self.content_type not in ["movies", "series"]:
+                self.display_content(items)
+                self.config["data"][self.config["selected"]]["options"] = options
+                self.config["data"][self.config["selected"]][self.content_type] = items
+                self.save_config()
         except Exception as e:
             print(f"Error loading STB content: {e}")
 
+    def cancel_content_loading(self):
+        if hasattr(self, "content_loader") and self.content_loader.isRunning():
+            self.content_loader.terminate()
+            self.content_loader.wait()
+            self.content_loader_finished()
+            QMessageBox.information(
+                self, "Cancelled", "Content loading has been cancelled."
+            )
+
     def content_loader_finished(self):
+        self.progress_bar.setVisible(False)
+        self.cancel_button.setVisible(False)
         if hasattr(self, "content_loader"):
-            if self.content_loader.exception:
-                print(f"Error loading content: {self.content_loader.exception}")
-                # Handle the error (e.g., show a message to the user)
             self.content_loader.deleteLater()
             del self.content_loader
 
@@ -601,7 +656,6 @@ class ChannelList(QMainWindow):
         self.config["data"][self.config["selected"]][self.content_type] = items
         self.save_config()
 
-    # Update the update_progress method
     def update_progress(self, current, total):
         progress_percentage = int((current / total) * 100)
         self.progress_bar.setValue(progress_percentage)
@@ -617,7 +671,11 @@ class ChannelList(QMainWindow):
             url = URLObject(url)
             url = f"{url.scheme}://{url.netloc}"
             options = selected_provider["options"]
-            content_type = "vod" if self.content_type == "movies" else "itv"
+            content_type = (
+                "vod"
+                if self.content_type == "movies"
+                else "itv" if self.content_type == "channels" else "series"
+            )
             fetchurl = (
                 f"{url}/server/load.php?type={content_type}&action=create_link"
                 f"&cmd={requests.utils.quote(cmd)}&JsHttpRequest=1-xml"
