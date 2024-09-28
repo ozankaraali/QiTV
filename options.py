@@ -1,3 +1,4 @@
+import asyncio
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -168,7 +169,7 @@ class OptionsDialog(QDialog):
                 self.selected_provider["password"] = self.password_input.text()
             self.config["selected"] = self.selected_provider_index
             self.parent().save_config()
-            self.parent().load_channels()
+            self.parent().load_content()
             self.accept()
 
     def load_file(self):
@@ -183,9 +184,7 @@ class OptionsDialog(QDialog):
         self.verify_result.repaint()
         result = False
         if self.type_STB.isChecked():
-            result = self.parent().do_handshake(
-                self.url_input.text(), self.mac_input.text(), load=False
-            )
+            result = asyncio.run(self.parent().do_handshake(self.url_input.text(), self.mac_input.text()))
         elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
             result = self.parent().verify_url(self.url_input.text())
         elif self.type_XTREAM.isChecked():
