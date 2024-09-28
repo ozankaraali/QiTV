@@ -6,7 +6,7 @@ import re
 import shutil
 import string
 import subprocess
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import orjson
@@ -683,11 +683,57 @@ class ChannelList(QMainWindow):
             response = requests.get(fetchurl, headers=options["headers"])
             result = response.json()
             link = result["js"]["cmd"].split(" ")[-1]
+            link = self.sanitize_url(link)
             self.link = link
             return link
         except Exception as e:
             print(f"Error creating link: {e}")
             return None
+
+    @staticmethod
+    def sanitize_url(url):
+        # Remove any whitespace characters
+        url = url.strip()
+
+        # Parse the URL
+        parsed = urlparse(url)
+
+        # Create a URLObject for easier manipulation
+        url_obj = URLObject(url)
+
+        # Extract the scheme, netloc, and port
+        scheme = parsed.scheme or "http"
+        netloc = parsed.netloc.split(":")[0]  # Remove port if present in netloc
+        port = parsed.port or (80 if scheme == "http" else 443)
+
+        # Reconstruct the base URL
+        base_url = f"{scheme}://{netloc}:{port}"
+
+        # Get the path, removing any duplicate segments and the duplicate domain
+        path_parts = url_obj.path.split("/")
+        unique_path_parts = []
+        for part in path_parts:
+            if part and part not in unique_path_parts and not part.endswith(".com"):
+                unique_path_parts.append(part)
+
+        # Remove any segments that contain the original domain or common subdomains
+        unique_path_parts = [
+            part
+            for part in unique_path_parts
+            if netloc not in part and "ott" not in part
+        ]
+
+        path = "/" + "/".join(unique_path_parts)
+
+        # Get the query string
+        query = url_obj.query
+
+        # Reconstruct the sanitized URL
+        sanitized_url = urljoin(base_url, path)
+        if query:
+            sanitized_url += "?" + query
+
+        return sanitized_url
 
     @staticmethod
     def random_token():

@@ -4,7 +4,7 @@ import sys
 import vlc
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
 from PySide6.QtGui import QCursor, QGuiApplication
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QMainWindow
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QMainWindow, QProgressBar
 
 
 class VideoPlayer(QMainWindow):
@@ -61,43 +61,67 @@ class VideoPlayer(QMainWindow):
 
         self.resize_corner = None
 
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 1000)  # Use 1000 steps for smoother updates
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        self.mainFrame.layout().addWidget(self.progress_bar)
+
+        self.update_timer = QTimer(self)
+        self.update_timer.setInterval(100)  # Update every 100ms
+        self.update_timer.timeout.connect(self.update_progress)
+
+        self.progress_bar.mousePressEvent = self.seek_video
+
+    def seek_video(self, event):
+        if self.media_player.is_playing():
+            width = self.progress_bar.width()
+            click_position = event.position().x()
+            seek_position = click_position / width
+            self.media_player.set_position(seek_position)
+
         # Initialize the inactivity timer and set up cursor hiding mechanism
         # self.inactivity_timer = QTimer(self)
         # self.inactivity_timer.setInterval(5000)  # 5000 milliseconds = 5 seconds
         # self.inactivity_timer.timeout.connect(self.hide_cursor)
         # self.inactivity_timer.start()
 
-        # Set cursor visibility state
-        self.cursor_visible = True
-        self.last_mouse_pos = self.video_frame.mapFromGlobal(QCursor.pos())
+        # # Set cursor visibility state
+        # self.cursor_visible = True
+        # self.last_mouse_pos = self.video_frame.mapFromGlobal(QCursor.pos())
 
-    def eventFilter(self, obj, event):
-        if obj == self.video_frame:
-            if event.type() == QEvent.MouseMove:
-                if not self.cursor_visible or event.pos() != self.last_mouse_pos:
-                    self.reset_inactivity_timer()
-                    self.last_mouse_pos = event.pos()
-                return True
-            elif event.type() == QEvent.Wheel:
-                self.wheelEvent(event)
-                return True
-            elif event.type() == QEvent.KeyPress:
-                self.keyPressEvent(event)
-                return True
-        return False
+    # def eventFilter(self, obj, event):
+    #     if obj == self.video_frame:
+    #         if event.type() == QEvent.MouseMove:
+    #             if not self.cursor_visible or event.pos() != self.last_mouse_pos:
+    #                 self.reset_inactivity_timer()
+    #                 self.last_mouse_pos = event.pos()
+    #             return True
+    #         elif event.type() == QEvent.Wheel:
+    #             self.wheelEvent(event)
+    #             return True
+    #         elif event.type() == QEvent.KeyPress:
+    #             self.keyPressEvent(event)
+    #             return True
+    #     return False
 
-    def reset_inactivity_timer(self):
-        self.inactivity_timer.start()  # Reset the timer
-        if not self.cursor_visible:
-            self.show_cursor()
+    # def reset_inactivity_timer(self):
+    #     self.inactivity_timer.start()  # Reset the timer
+    #     if not self.cursor_visible:
+    #         self.show_cursor()
 
-    def hide_cursor(self):
-        self.video_frame.setCursor(Qt.BlankCursor)
-        self.cursor_visible = False
+    # def hide_cursor(self):
+    #     self.video_frame.setCursor(Qt.BlankCursor)
+    #     self.cursor_visible = False
+    #
+    # def show_cursor(self):
+    #     self.video_frame.unsetCursor()
+    #     self.cursor_visible = True
 
-    def show_cursor(self):
-        self.video_frame.unsetCursor()
-        self.cursor_visible = True
+    def update_progress(self):
+        if self.media_player.is_playing():
+            position = self.media_player.get_position()
+            self.progress_bar.setValue(int(position * 1000))
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -174,11 +198,25 @@ class VideoPlayer(QMainWindow):
         self.media = self.instance.media_new(video_url)
         self.media_player.set_media(self.media)
         self.media_player.play()
-        self.adjust_aspect_ratio()  # Ensure the aspect ratio is set initially
+
+        # Check if the content is VOD or live
+        self.media.parse()
+        duration = self.media.get_duration()
+
+        if duration > 0:  # VOD content
+            self.progress_bar.setVisible(True)
+            self.update_timer.start()
+        else:  # Live content
+            self.progress_bar.setVisible(False)
+            self.update_timer.stop()
+
+        self.adjust_aspect_ratio()
         self.show()
 
     def stop_video(self):
         self.media_player.stop()
+        self.progress_bar.setVisible(False)
+        self.update_timer.stop()
 
     def toggle_mute(self):
         state = self.media_player.audio_get_mute()
