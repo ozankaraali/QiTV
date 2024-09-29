@@ -987,8 +987,8 @@ class ChannelList(QMainWindow):
     @staticmethod
     def verify_url(url):
         try:
-            response = requests.get(url)
-            return response.status_code == 200
-        except Exception as e:
-            print("Error verifying URL:", e)
+            response = requests.head(url, timeout=5)
+            return True
+        except requests.RequestException as e:
+            print(f"Error verifying URL: {e}")
             return False
