@@ -337,7 +337,7 @@ class ChannelList(QMainWindow):
             self.content_list.addItem(item)
         self.back_button.setVisible(False)
 
-    def display_content(self, items, content_type="category"):
+    def display_content(self, items, content_type="content"):
         self.content_list.clear()
         for item_data in items:
             item_name = item_data.get("name") or item_data.get("title")
@@ -576,6 +576,8 @@ class ChannelList(QMainWindow):
                 self.navigation_stack.append(("root", self.current_category))
                 self.current_category = data["data"]
                 self.load_content_in_category(data["data"])
+            elif data["type"] == "content":
+                self.play_item(data["data"])
             elif data["type"] == "series":
                 if self.content_type == "series":
                     # For series, load seasons
