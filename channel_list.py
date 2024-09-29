@@ -334,6 +334,9 @@ class ChannelList(QMainWindow):
         for category in categories:
             item = QListWidgetItem(category.get("title", "Unknown Category"))
             item.setData(Qt.UserRole, {"type": "category", "data": category})
+            # Highlight favorite items
+            if self.check_if_favorite(category.get("title", "")):
+                item.setBackground(QColor(0, 0, 255, 20))
             self.content_list.addItem(item)
         self.back_button.setVisible(False)
 
@@ -343,9 +346,10 @@ class ChannelList(QMainWindow):
             item_name = item_data.get("name") or item_data.get("title")
             list_item = QListWidgetItem(item_name)
             list_item.setData(Qt.UserRole, {"type": content_type, "data": item_data})
-            self.content_list.addItem(list_item)
+            # Highlight favorite items
             if self.check_if_favorite(item_name):
                 list_item.setBackground(QColor(0, 0, 255, 20))
+            self.content_list.addItem(list_item)
         self.back_button.setVisible(True)
 
     def filter_content(self, text=""):
@@ -356,16 +360,15 @@ class ChannelList(QMainWindow):
             item = self.content_list.item(i)
             item_name = item.text().lower()
             data = item.data(Qt.UserRole)
+            is_favorite = self.check_if_favorite(item.text())
             matches_search = search_text in item_name
 
-            if data and data["type"] in ["category", "season", "episode"]:
-                is_favorite = self.check_if_favorite(item.text())
-                if show_favorites and not is_favorite:
-                    item.setHidden(True)
-                else:
-                    item.setHidden(not matches_search)
+            # Adjust filtering logic
+            if show_favorites and not is_favorite:
+                item.setHidden(True)
+            elif data and data["type"] in ["category", "season", "episode"]:
+                item.setHidden(not matches_search)
             else:
-                # For categories and series, only filter by search text
                 item.setHidden(not matches_search)
 
     def create_media_controls(self):
