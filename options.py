@@ -1,4 +1,3 @@
-import asyncio
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -184,7 +183,9 @@ class OptionsDialog(QDialog):
         self.verify_result.repaint()
         result = False
         if self.type_STB.isChecked():
-            result = asyncio.run(self.parent().do_handshake(self.url_input.text(), self.mac_input.text()))
+            result = self.parent().do_handshake(
+                self.url_input.text(), self.mac_input.text(), load=False
+            )
         elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
             result = self.parent().verify_url(self.url_input.text())
         elif self.type_XTREAM.isChecked():

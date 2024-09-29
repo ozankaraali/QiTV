@@ -1,6 +1,5 @@
 import asyncio
 import os
-import json
 import platform
 import random
 import re
@@ -8,13 +7,14 @@ import shutil
 import string
 import subprocess
 import time
-from urllib.parse import urlparse
 from collections import OrderedDict
+from urllib.parse import urlparse
 
 import aiohttp
+import orjson
 import requests
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -24,8 +24,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QRadioButton,
+    QMessageBox,
+    QProgressBar,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -34,21 +36,141 @@ from urlobject import URLObject
 from options import OptionsDialog
 
 
-class AsyncWorker(QThread):
-    finished = Signal(object)
+class ContentLoader(QThread):
+    content_loaded = Signal(dict)
+    progress_updated = Signal(int, int)
 
-    def __init__(self, coro):
+    def __init__(
+        self,
+        url,
+        headers,
+        content_type,
+        category_id=None,
+        parent_id=None,
+        movie_id=None,
+        season_id=None,
+        action="get_ordered_list",
+        sortby="name",
+    ):
         super().__init__()
-        self.coro = coro
+        self.url = url
+        self.headers = headers
+        self.content_type = content_type
+        self.category_id = category_id
+        self.parent_id = parent_id
+        self.movie_id = movie_id
+        self.season_id = season_id
+        self.action = action
+        self.sortby = sortby
+        self.items = []
+
+    async def fetch_page(self, session, page, max_retries=3):
+        for attempt in range(max_retries):
+            try:
+                params = self.get_params(page)
+                async with session.get(
+                    self.url, headers=self.headers, params=params, timeout=30
+                ) as response:
+                    content = await response.read()
+                    if response.status == 503 or not content:
+                        wait_time = (2**attempt) + random.uniform(0, 1)
+                        print(
+                            f"Received error or empty response. Retrying in {wait_time:.2f} seconds..."
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    result = orjson.loads(content)
+                    return (
+                        result["js"]["data"],
+                        int(result["js"]["total_items"]),
+                        int(result["js"]["max_page_items"]),
+                    )
+            except (
+                aiohttp.ClientError,
+                orjson.JSONDecodeError,
+                asyncio.TimeoutError,
+            ) as e:
+                print(f"Error fetching page {page}: {e}")
+                if attempt == max_retries - 1:
+                    raise
+                wait_time = (2**attempt) + random.uniform(0, 1)
+                print(f"Retrying in {wait_time:.2f} seconds...")
+                await asyncio.sleep(wait_time)
+        return [], 0, 0
+
+    def get_params(self, page):
+        params = {
+            "type": self.content_type,
+            "action": self.action,
+            "p": str(page),
+            "JsHttpRequest": "1-xml",
+        }
+        if self.content_type == "itv":
+            params.update(
+                {
+                    "genre": self.category_id if self.category_id else "*",
+                    "force_ch_link_check": "",
+                    "fav": "0",
+                    "sortby": self.sortby,
+                    "hd": "0",
+                }
+            )
+        elif self.content_type == "vod":
+            params.update(
+                {
+                    "category": self.category_id if self.category_id else "*",
+                    "sortby": self.sortby,
+                }
+            )
+        elif self.content_type == "series":
+            params.update(
+                {
+                    "category": self.category_id if self.category_id else "*",
+                    "movie_id": self.movie_id if self.movie_id else "0",
+                    "season_id": self.season_id if self.season_id else "0",
+                    "episode_id": "0",
+                    "sortby": self.sortby,
+                }
+            )
+        return params
+
+    async def load_content(self):
+        async with aiohttp.ClientSession() as session:
+            # Fetch initial data to get total items and max page items
+            page = 1
+            page_items, total_items, max_page_items = await self.fetch_page(
+                session, page
+            )
+            self.items.extend(page_items)
+
+            pages = (total_items + max_page_items - 1) // max_page_items
+            self.progress_updated.emit(1, pages)
+
+            tasks = []
+            for page_num in range(2, pages + 1):
+                tasks.append(self.fetch_page(session, page_num))
+
+            for i, task in enumerate(asyncio.as_completed(tasks), 2):
+                page_items, _, _ = await task
+                self.items.extend(page_items)
+                self.progress_updated.emit(i, pages)
+
+            # Emit all items once done
+            self.content_loaded.emit(
+                {
+                    "category_id": self.category_id,
+                    "items": self.items,
+                    "parent_id": self.parent_id,
+                    "movie_id": self.movie_id,
+                    "season_id": self.season_id,
+                }
+            )
 
     def run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            result = loop.run_until_complete(self.coro)
-            self.finished.emit(result)
-        finally:
-            loop.close()
+            asyncio.run(self.load_content())
+        except Exception as e:
+            print(f"Error in content loading: {e}")
 
 
 class ChannelList(QMainWindow):
@@ -68,25 +190,20 @@ class ChannelList(QMainWindow):
         self.setCentralWidget(self.container_widget)
         self.grid_layout = QGridLayout(self.container_widget)
 
-        self.content_type = "channels"  # Default to channels
+        self.content_type = "itv"  # Default to channels (STB type)
 
         self.create_upper_panel()
         self.create_left_panel()
         self.create_media_controls()
         self.link = None
-        self.workers = []
+        self.current_category = None  # For back navigation
+        self.navigation_stack = []  # To keep track of navigation for back button
         self.load_content()
 
     def closeEvent(self, event):
         self.app.quit()
         self.player.close()
         self.config_manager.save_window_settings(self.geometry(), "channel_list")
-
-        # Clean up workers
-        for worker in self.workers:
-            worker.quit()
-            worker.wait()
-
         event.accept()
 
     def create_upper_panel(self):
@@ -109,6 +226,11 @@ class ChannelList(QMainWindow):
         self.update_button.clicked.connect(self.update_content)
         ctl_layout.addWidget(self.update_button)
 
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self.go_back)
+        self.back_button.setVisible(False)
+        ctl_layout.addWidget(self.back_button)
+
         self.grid_layout.addWidget(self.upper_layout, 0, 0)
 
     def create_left_panel(self):
@@ -129,54 +251,10 @@ class ChannelList(QMainWindow):
         self.grid_layout.addWidget(self.left_panel, 1, 0)
         self.grid_layout.setColumnStretch(0, 1)
 
-        # Add a row with Previous page and Next page buttons below the content_list (for STB navigation in page)
-        self.stb_page_controls = QWidget(self.container_widget)
-        stb_page_layout = QHBoxLayout(self.stb_page_controls)
-        
-        self.stb_first_page_button = QPushButton("\u27EA")
-        self.stb_first_page_button.clicked.connect(self.stb_first_page)
-        stb_page_layout.addWidget(self.stb_first_page_button)
-
-        self.stb_prev_page_button = QPushButton("\u27E8")
-        self.stb_prev_page_button.clicked.connect(self.stb_prev_page)
-        stb_page_layout.addWidget(self.stb_prev_page_button)
-        
-        self.stb_current_page_button = QPushButton("Page x/x")
-        self.stb_current_page_button.clicked.connect(self.stb_next_page)
-        stb_page_layout.addWidget(self.stb_current_page_button)
-
-        self.stb_next_page_button = QPushButton("\u27E9")
-        self.stb_next_page_button.clicked.connect(self.stb_next_page)
-        stb_page_layout.addWidget(self.stb_next_page_button)
-        
-        self.stb_last_page_button = QPushButton("\u27EB")
-        self.stb_last_page_button.clicked.connect(self.stb_last_page)
-        stb_page_layout.addWidget(self.stb_last_page_button)
-        
-        left_layout.addWidget(self.stb_page_controls)
-
-        # Disable the stb_current_page_button
-        self.stb_current_page_button.setEnabled(False)
-
-        # Hide the STB page controls by default
-        self.stb_page_controls.hide()
-
-        # Add a row with a back to category (STB only) and favorite button
-        self.page_back_fav_controls = QWidget(self.container_widget)
-        page_back_fav_layout = QHBoxLayout(self.page_back_fav_controls)
-
-        self.stb_page_back_button = QPushButton("Back")
-        self.stb_page_back_button.clicked.connect(self.back_content)
-        page_back_fav_layout.addWidget(self.stb_page_back_button)
-
+        # Add favorite button and action
         self.favorite_button = QPushButton("Favorite/Unfavorite")
         self.favorite_button.clicked.connect(self.toggle_favorite)
-        page_back_fav_layout.addWidget(self.favorite_button)
-
-        left_layout.addWidget(self.page_back_fav_controls)
-
-        # Hide the Back/Favorite controls by default
-        self.page_back_fav_controls.hide()
+        left_layout.addWidget(self.favorite_button)
 
         # Add checkbox to show only favorites
         self.favorites_only_checkbox = QCheckBox("Show only favorites")
@@ -185,55 +263,40 @@ class ChannelList(QMainWindow):
         )
         left_layout.addWidget(self.favorites_only_checkbox)
 
-        # Add radio buttons to switch between Channels / Movies / Series
-        self.content_switch_controls = QWidget(self.container_widget)
-        content_switch_layout = QHBoxLayout(self.content_switch_controls)
+        # Add content type selection
+        self.content_switch_group = QWidget(self.left_panel)
+        content_switch_layout = QHBoxLayout(self.content_switch_group)
 
-        rb_channels = QRadioButton('Channels', self.content_switch_controls)
-        rb_channels.setChecked(True)
-        rb_channels.toggled.connect(self.toggle_content_type)
+        self.channels_radio = QRadioButton("Channels")
+        self.movies_radio = QRadioButton("Movies")
+        self.series_radio = QRadioButton("Series")
 
-        rb_movies = QRadioButton('Movies', self.content_switch_controls)
-        rb_movies.toggled.connect(self.toggle_content_type)
+        content_switch_layout.addWidget(self.channels_radio)
+        content_switch_layout.addWidget(self.movies_radio)
+        content_switch_layout.addWidget(self.series_radio)
 
-        rb_series = QRadioButton('Series', self.content_switch_controls)
-        rb_series.toggled.connect(self.toggle_content_type)
+        self.channels_radio.setChecked(True)
 
-        content_switch_layout.addWidget(rb_channels)
-        content_switch_layout.addWidget(rb_movies)
-        content_switch_layout.addWidget(rb_series)
+        self.channels_radio.toggled.connect(self.toggle_content_type)
+        self.movies_radio.toggled.connect(self.toggle_content_type)
+        self.series_radio.toggled.connect(self.toggle_content_type)
 
-        left_layout.addWidget(self.content_switch_controls)
+        left_layout.addWidget(self.content_switch_group)
 
-    def stb_first_page(self):
-        category = self.stb_navigation["category"]
-        page = self.stb_navigation["page"]
-        if page > 1:
-            self.load_stb_content_by_category(category, 1)
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        left_layout.addWidget(self.progress_bar)
 
-    def stb_prev_page(self):
-        category = self.stb_navigation["category"]
-        page = self.stb_navigation["page"]
-        if page > 1:
-            self.load_stb_content_by_category(category, page - 1)
-
-    def stb_next_page(self):
-        category = self.stb_navigation["category"]
-        page = self.stb_navigation["page"]
-        page_count = self.stb_navigation["page_count"]
-        if page < page_count:
-            self.load_stb_content_by_category(category, page + 1)
-
-    def stb_last_page(self):
-        category = self.stb_navigation["category"]
-        page = self.stb_navigation["page"]
-        page_count = self.stb_navigation["page_count"]
-        if page < page_count:
-            self.load_stb_content_by_category(category, page_count)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_content_loading)
+        self.cancel_button.setVisible(False)
+        left_layout.addWidget(self.cancel_button)
 
     def toggle_favorite(self):
         selected_item = self.content_list.currentItem()
-        if selected_item and selected_item.data(30) == "content":
+        if selected_item:
             item_name = selected_item.text()
             is_favorite = self.check_if_favorite(item_name)
             if is_favorite:
@@ -256,126 +319,53 @@ class ChannelList(QMainWindow):
         return item_name in self.config["favorites"]
 
     def toggle_content_type(self):
-        state = self.sender().isChecked()
-        if state:
-            if self.sender().text() == "Channels":
-                self.content_type = "channels"
-            elif self.sender().text() == "Movies":
-                self.content_type = "movies"
-            elif self.sender().text() == "Series":
-                self.content_type = "series"
-            self.load_content()
+        if self.channels_radio.isChecked():
+            self.content_type = "itv"
+        elif self.movies_radio.isChecked():
+            self.content_type = "vod"
+        elif self.series_radio.isChecked():
+            self.content_type = "series"
+        self.current_category = None
+        self.navigation_stack.clear()
+        self.load_content()
 
-    def show_back_fav(self, show):
-        # Hide/Show the Back/Favorite controls
-        if show:
-            self.page_back_fav_controls.show()
-        else:
-            self.page_back_fav_controls.hide()
-
-        # Show the Back to Category button if provider is STB
-        if self.config["data"][self.config["selected"]]["type"] == "STB":
-            self.stb_page_back_button.show()
-        else:
-            self.stb_page_back_button.hide()
-
-    def show_pagination(self, show, page = 1, page_count = 1):
-        # Show/Hide the STB page controls
-        if show:
-            self.stb_page_controls.show()
-        else:
-            self.stb_page_controls.hide()
-
-        # Update the STB navigation buttons
-        if show:
-            self.stb_current_page_button.setText(f"Page {page}/{page_count}")
-            self.stb_prev_page_button.setEnabled(page > 1)
-            self.stb_next_page_button.setEnabled(page < page_count)
-            self.stb_first_page_button.setEnabled(page > 1)
-            self.stb_last_page_button.setEnabled(page < page_count)
-
-    def display_content(self, items):
-        self.show_pagination(False)
-        self.show_back_fav(True)
-
+    def display_categories(self, categories):
         self.content_list.clear()
-        for item in items:
-            list_item = QListWidgetItem(item["name"])
-            list_item.setData(30, 'content')
-            list_item.setData(31, item)
+        for category in categories:
+            item = QListWidgetItem(category.get("title", "Unknown Category"))
+            item.setData(Qt.UserRole, {"type": "category", "data": category})
+            self.content_list.addItem(item)
+        self.back_button.setVisible(False)
+
+    def display_content(self, items, content_type="category"):
+        self.content_list.clear()
+        for item_data in items:
+            item_name = item_data.get("name") or item_data.get("title")
+            list_item = QListWidgetItem(item_name)
+            list_item.setData(Qt.UserRole, {"type": content_type, "data": item_data})
             self.content_list.addItem(list_item)
-            if self.check_if_favorite(item["name"]):
+            if self.check_if_favorite(item_name):
                 list_item.setBackground(QColor(0, 0, 255, 20))
-
-    def display_paginated_content(self, items, page, page_count):
-        self.display_content(items)
-        self.show_pagination(True, page, page_count)
-        
-    def display_categories(self, items):
-        self.show_pagination(False)
-        self.show_back_fav(False)
-
-        self.content_list.clear()
-        for item in items:
-            list_item = QListWidgetItem(item["title"])
-            list_item.setData(30, 'category')
-            list_item.setData(31, item)
-            self.content_list.addItem(list_item)
-
-    def display_paginated_series(self, items, page, page_count):
-        self.show_pagination(True, page, page_count)
-        self.show_back_fav(True)
-
-        self.content_list.clear()
-        for item in items:
-            list_item = QListWidgetItem(item["name"])
-            list_item.setData(30, 'serie')
-            list_item.setData(31, item)
-            self.content_list.addItem(list_item)
-
-    def display_seasons(self, items):
-        self.show_pagination(False)
-        self.show_back_fav(True)
-
-        self.content_list.clear()
-        for item in items:
-            list_item = QListWidgetItem(item["name"])
-            list_item.setData(30, 'season')
-            list_item.setData(31, item)
-            self.content_list.addItem(list_item)
-
-    def display_episodes(self, item):
-        self.show_pagination(False)
-        self.show_back_fav(True)
-
-        self.content_list.clear()
-        for episode in item.get("series", []):
-            list_item = QListWidgetItem(f"Episode {episode}")
-            list_item.setData(30, 'episode')
-            list_item.setData(31, item)
-            list_item.setData(32, episode)
-            self.content_list.addItem(list_item)
+        self.back_button.setVisible(True)
 
     def filter_content(self, text=""):
         show_favorites = self.favorites_only_checkbox.isChecked()
         search_text = text.lower() if isinstance(text, str) else ""
 
-        # Check if the current content is a list of folder by checking the first item
-        if self.content_list.count() > 0:
-            first_item = self.content_list.item(0)
-            is_folder = first_item.data(30) in ["category", "serie", "season"]
-
         for i in range(self.content_list.count()):
             item = self.content_list.item(i)
             item_name = item.text().lower()
-
+            data = item.data(Qt.UserRole)
             matches_search = search_text in item_name
-            if show_favorites and not is_folder:
-                is_favorite = self.check_if_favorite(item.text())
 
-            if show_favorites and not is_folder and not is_favorite:
-                item.setHidden(True)
+            if data and data["type"] in ["category", "season", "episode"]:
+                is_favorite = self.check_if_favorite(item.text())
+                if show_favorites and not is_favorite:
+                    item.setHidden(True)
+                else:
+                    item.setHidden(not matches_search)
             else:
+                # For categories and series, only filter by search text
                 item.setHidden(not matches_search)
 
     def create_media_controls(self):
@@ -448,16 +438,20 @@ class ChannelList(QMainWindow):
         )
         if file_path:
             provider = self.config["data"][self.config["selected"]]
+            content_data = provider.get(self.content_type, {})
             base_url = provider.get("url", "")
             config_type = provider.get("type", "")
             mac = provider.get("mac", "")
 
             if config_type == "STB":
-                content_data = provider.get(self.content_type, {}).get("contents", [])
-                self.save_stb_content(base_url, content_data, mac, file_path)
+                # Extract all content items from categories
+                all_items = []
+                for items in content_data.get("contents", {}).values():
+                    all_items.extend(items)
+                self.save_stb_content(base_url, all_items, mac, file_path)
             elif config_type in ["M3UPLAYLIST", "M3USTREAM", "XTREAM"]:
-                content_data = provider.get(self.content_type, [])
-                self.save_m3u_content(content_data, file_path)
+                content_items = provider.get(self.content_type, [])
+                self.save_m3u_content(content_items, file_path)
             else:
                 print(f"Unknown provider type: {config_type}")
 
@@ -517,32 +511,14 @@ class ChannelList(QMainWindow):
         config_type = selected_provider.get("type", "")
         content = selected_provider.get(self.content_type, {})
         if content:
+            # If we have categories cached, display them
             if config_type == "STB":
-                worker = AsyncWorker(self.do_handshake(selected_provider["url"], selected_provider["mac"]))
-                worker.finished.connect(lambda result, load=False: self.on_handshake_complete(result, load))
-                worker.start()
-                self.workers.append(worker)
-                self.display_categories(content["categories"])
+                self.display_categories(content.get("categories", []))
             else:
-                self.display_channels(content)
+                # For non-STB, display content directly
+                self.display_content(content)
         else:
             self.update_content()
-
-    def back_content(self):
-        if self.content_type in ["channels", "movies"]:
-            self.load_content()
-        else:
-            selected_provider = self.config["data"][self.config["selected"]]
-            folder_type = self.stb_navigation["folder_type"]
-            if folder_type == "series":
-                self.load_content()
-            elif folder_type == "seasons":
-                category = self.stb_navigation["category"]
-                page = self.stb_navigation["page"]
-                self.load_stb_content_by_category(category, page)
-            elif folder_type == "episodes":
-                serie = self.stb_navigation["serie"]
-                self.load_stb_seasons_by_serie(serie)
 
     def update_content(self):
         selected_provider = self.config["data"][self.config["selected"]]
@@ -553,12 +529,12 @@ class ChannelList(QMainWindow):
             urlobject = URLObject(selected_provider["url"])
             if urlobject.scheme == "":
                 urlobject = URLObject(f"http://{selected_provider['url']}")
-            if self.content_type == "channels":
+            if self.content_type == "itv":
                 url = (
                     f"{urlobject.scheme}://{urlobject.netloc}/get.php?"
                     f"username={selected_provider['username']}&password={selected_provider['password']}&type=m3u"
                 )
-            elif self.content_type == "movies":
+            else:
                 url = (
                     f"{urlobject.scheme}://{urlobject.netloc}/get.php?"
                     f"username={selected_provider['username']}&password={selected_provider['password']}&type=m3u&"
@@ -566,32 +542,25 @@ class ChannelList(QMainWindow):
                 )
             self.load_m3u_playlist(url)
         elif config_type == "STB":
-            worker = AsyncWorker(self.do_handshake(selected_provider["url"], selected_provider["mac"]))
-            worker.finished.connect(lambda result, load=True: self.on_handshake_complete(result, load))
-            worker.start()
-            self.workers.append(worker)
+            self.do_handshake(
+                selected_provider["url"], selected_provider["mac"], load=True
+            )
         elif config_type == "M3USTREAM":
             self.load_stream(selected_provider["url"])
 
     def load_m3u_playlist(self, url):
-        async def fetch_m3u():
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        content = await response.text()
-                        return self.parse_m3u(content)
-                    else:
-                        return []
-
-        worker = AsyncWorker(fetch_m3u())
-        worker.finished.connect(self.on_m3u_loaded)
-        worker.start()
-        self.workers.append(worker)  # Keep a reference to the worker
-
-    def on_m3u_loaded(self, content):
-        self.display_content(content)
-        self.config["data"][self.config["selected"]][self.content_type] = content
-        self.save_config()
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                content = self.parse_m3u(response.text)
+                self.display_content(content)
+                # Update the content in the config
+                self.config["data"][self.config["selected"]][
+                    self.content_type
+                ] = content
+                self.save_config()
+        except requests.RequestException as e:
+            print(f"Error loading M3U Playlist: {e}")
 
     def load_stream(self, url):
         item = {"id": 1, "name": "Stream", "cmd": url}
@@ -601,46 +570,68 @@ class ChannelList(QMainWindow):
         self.save_config()
 
     def item_selected(self, item):
-        typ = item.data(30)
-        if typ == "content":
-            if self.config["data"][self.config["selected"]]["type"] == "STB":
-                self.create_link(item.data(31))
+        data = item.data(Qt.UserRole)
+        if data and "type" in data:
+            if data["type"] == "category":
+                self.navigation_stack.append(("root", self.current_category))
+                self.current_category = data["data"]
+                self.load_content_in_category(data["data"])
+            elif data["type"] == "series":
+                if self.content_type == "series":
+                    # For series, load seasons
+                    self.navigation_stack.append(("category", self.current_category))
+                    self.current_series = data["data"]
+                    self.load_series_seasons(data["data"])
+                else:
+                    self.play_item(data["data"])
+            elif data["type"] == "season":
+                # Load episodes for the selected season
+                self.navigation_stack.append(("series", self.current_series))
+                self.current_season = data["data"]
+                self.load_season_episodes(data["data"])
+            elif data["type"] == "episode":
+                # Play the selected episode
+                self.play_item(data["data"], is_episode=True)
             else:
-                cmd = item.data(31)
-                self.link = cmd
-                self.player.play_video(cmd)
-        elif typ == "category":
-            self.load_stb_content_by_category(item.data(31))
-        elif typ == "serie":
-            self.load_stb_seasons_by_serie(item.data(31))
-        elif typ == "season":
-            self.load_stb_episodes_by_season(item.data(31))
-        elif typ == "episode":
-            season = item.data(31)
-            episode = item.data(32)
-            self.create_link_episode(season, episode)
+                print("Unknown item selected.")
+        else:
+            print("Unknown item selected.")
+
+    def go_back(self):
+        if self.navigation_stack:
+            nav_type, previous_data = self.navigation_stack.pop()
+            if nav_type == "root":
+                # Display root categories
+                content = self.config["data"][self.config["selected"]].get(
+                    self.content_type, {}
+                )
+                categories = content.get("categories", [])
+                self.display_categories(categories)
+                self.current_category = None
+            elif nav_type == "category":
+                # Go back to category content
+                self.current_category = previous_data
+                self.load_content_in_category(self.current_category)
+                self.current_series = None
+            elif nav_type == "series":
+                # Go back to series seasons
+                self.current_series = previous_data
+                self.load_series_seasons(self.current_series)
+                self.current_season = None
+        else:
+            # Already at the root level
+            pass
 
     def options_dialog(self):
         options = OptionsDialog(self)
         options.exec_()
-
-    def ContentTypeToSTB(self):
-        # Convert content type to STB type (itv, vod, series)
-        if self.content_type == "channels":
-            return "itv"
-        elif self.content_type == "movies":
-            return "vod"
-        elif self.content_type == "series":
-            return "series"
-        else:
-            return None
 
     @staticmethod
     def parse_m3u(data):
         lines = data.split("\n")
         result = []
         item = {}
-        id = 0
+        id_counter = 0
         for line in lines:
             if line.startswith("#EXTINF"):
                 tvg_id_match = re.search(r'tvg-id="([^"]+)"', line)
@@ -653,9 +644,9 @@ class ChannelList(QMainWindow):
                 group_title = group_title_match.group(1) if group_title_match else None
                 item_name = item_name_match.group(1) if item_name_match else None
 
-                id += 1
+                id_counter += 1
                 item = {
-                    "id": id,
+                    "id": id_counter,
                     "name": item_name,
                     "logo": tvg_logo,
                 }
@@ -666,415 +657,304 @@ class ChannelList(QMainWindow):
                 result.append(item)
         return result
 
-    async def do_handshake(self, url, mac, serverload="/server/load.php"):
-        token = self.config.get("token") or self.random_token()
+    def do_handshake(self, url, mac, serverload="/server/load.php", load=True):
+        token = (
+            self.config.get("token")
+            if self.config.get("token")
+            else self.random_token()
+        )
         options = self.create_options(url, mac, token)
-        fetchurl = f"{url}{serverload}?{self.getHandshakeParams(token)}"
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(fetchurl, headers=options["headers"]) as response:
-                    if response.status == 200:
-                        try:
-                            body = await response.json()
-                        except aiohttp.ContentTypeError:
-                            body = await response.text()
-                            body = json.loads(body)
-                        token = body["js"]["token"]
-                        options["headers"]["Authorization"] = f"Bearer {token}"
-                        self.config["data"][self.config["selected"]]["options"] = options
-                        return True
-                    else:
-                        print(f"Handshake failed with status code: {response.status}")
-                        return False
-            except aiohttp.ClientError as e:
-                print(f"Error in handshake: {e}")
-                if serverload != "/portal.php":
-                    return await self.do_handshake(url, mac, "/portal.php")
-                return False
-
-    def on_handshake_complete(self, success, load):
-        if success:
-            selected_provider = self.config["data"][self.config["selected"]]
-            options = selected_provider["options"]
+        try:
+            fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash=0&token={token}&JsHttpRequest=1-xml"
+            handshake = requests.get(fetchurl, headers=options["headers"])
+            body = handshake.json()
+            token = body["js"]["token"]
+            options["headers"]["Authorization"] = f"Bearer {token}"
+            self.config["data"][self.config["selected"]]["options"] = options
+            self.save_config()
             if load:
-                self.load_stb_categories(selected_provider["url"], options)
-        else:
-            print("Handshake failed")
+                self.load_stb_categories(url, options)
+            return True
+        except Exception as e:
+            if serverload != "/portal.php":
+                serverload = "/portal.php"
+                return self.do_handshake(url, mac, serverload)
+            print("Error in handshake:", e)
+            return False
 
     def load_stb_categories(self, url, options):
         url = URLObject(url)
         url = f"{url.scheme}://{url.netloc}"
-        async def fetch_categories():
-            async with aiohttp.ClientSession() as session:
-                try:
-                    fetchurl = f"{url}/server/load.php?{self.getCategoriesParams(self.ContentTypeToSTB())}"
-                    async with session.get(fetchurl, headers=options["headers"]) as response:
-                        try:
-                            result = await response.json()
-                        except aiohttp.ContentTypeError:
-                            result = await response.text()
-                            result = json.loads(result)
-                        return result["js"]
-                except aiohttp.ClientError as e:
-                    print(f"Error fetching categories: {e}")
-                    return None
-
-        worker = AsyncWorker(fetch_categories())
-        worker.finished.connect(self.on_stb_categories_loaded)
-        worker.start()
-        self.workers.append(worker)  # Keep a reference to the worker
-
-    def on_stb_categories_loaded(self, categories):
-        if categories is None:
-            print("Error loading categories")
-            return
-        selected_provider = self.config["data"][self.config["selected"]]
-        url = URLObject(selected_provider["url"])
-        url = f"{url.scheme}://{url.netloc}"
-
-        selected_provider[self.content_type] = {}
-        selected_provider[self.content_type]["categories"] = categories
-
-        async def fetch_allchannels():
-            async with aiohttp.ClientSession() as session:
-                try:
-                    fetchurl = f"{url}/server/load.php?{self.getAllChannelsParams()}"
-                    async with session.get(fetchurl, headers=self.generate_headers()) as response:
-                        try:
-                            result = await response.json()
-                        except aiohttp.ContentTypeError:
-                            result = await response.text()
-                            result = json.loads(result)
-                        return result["js"]["data"]
-                except aiohttp.ClientError as e:
-                    print(f"Error fetching channels: {e}")
-                    return None
-
-        # Fetching all channels
-        if self.content_type == "channels":
-            worker = AsyncWorker(fetch_allchannels())
-            worker.finished.connect(self.on_stb_allchannels_loaded)
-            worker.start()
-            self.workers.append(worker)  # Keep a reference to the worker
-        else:
-            self.display_categories(categories)
-
-    def on_stb_allchannels_loaded(self, items):
-        if items is None:
-            print("Error loading channels")
-            return
-
-        # Sorting all channels by category
-        content = self.config["data"][self.config["selected"]][self.content_type]
-        content["contents"] = items
-
-        # Split channels by category, and sort them number-wise
-        sorted_channels = {}
-
-        for i in range(len(content["contents"])):
-            genre_id = content["contents"][i]["tv_genre_id"]
-            category = str(genre_id)
-            if category not in sorted_channels:
-                sorted_channels[category] = []
-            sorted_channels[category].append(i)
-
-        for category in sorted_channels:
-            sorted_channels[category].sort(key=lambda x: int(content["contents"][x]["number"]))
-
-        # Prepend a specific category for null genre_id before
-        if "None" in sorted_channels:
-            content["categories"].insert(0, {
-                "id": "None",
-                "title": "No Category"
-                })
-
-        content["sorted_channels"] = sorted_channels
-        self.display_categories(content["categories"])
-
-    def load_stb_content_by_category(self, category, page=0):
-        category_id = category["id"]
-
-        async def fetch_content(category_id, page):
-            async with aiohttp.ClientSession() as session:
-                try:
-                    selected_provider = self.config["data"][self.config["selected"]]
-                    url = URLObject(selected_provider["url"])
-                    url = f"{url.scheme}://{url.netloc}"
-                    options = selected_provider["options"]
-                    if not page:
-                        fetchurl = f"{url}/server/load.php?{self.getChannelOrSeriesParams(self.ContentTypeToSTB(), category_id, 'name', 1, 0, 0)}"
-                        async with session.get(fetchurl, headers=options["headers"]) as response:
-                            try:
-                                result = await response.json()
-                            except aiohttp.ContentTypeError:
-                                result = await response.text()
-                                result = json.loads(result)
-                            total_items = int(result["js"]["total_items"])
-                            max_page_items = int(result["js"]["max_page_items"])
-                            page_count = (total_items + max_page_items - 1) // max_page_items
-                            page = 1
-                            if page_count and page > page_count:
-                                return None
-                            items = result["js"]["data"]
-                    else:
-                        # Load content for the category and the page
-                        page_count = self.stb_navigation["page_count"]
-                        if page <= page_count:
-                            fetchurl = f"{url}/server/load.php?{self.getChannelOrSeriesParams(self.ContentTypeToSTB(), category_id, 'name', page, 0, 0)}"
-                            async with session.get(fetchurl, headers=options["headers"]) as response:
-                                try:
-                                    result = await response.json()
-                                except aiohttp.ContentTypeError:
-                                    result = await response.text()
-                                    result = json.loads(result)
-                                items = result["js"]["data"]
-                    return (page, page_count, items)
-
-                except aiohttp.ClientError as e:
-                    print(f"Error fetching content by category: {e}")
-                    return None
         try:
-            if self.content_type == "channels":
-                selected_provider = self.config["data"][self.config["selected"]]
-                content = selected_provider[self.content_type]
-                # Show only channels for the selected category
-                if category_id == "*":
-                    items = content["contents"]
-                    # Sort channels by number
-                    items.sort(key=lambda x: int(x["number"]))
-                else:
-                    items = [content["contents"][i] for i in content["sorted_channels"].get(category_id, [])]
-                self.display_content(items)
-            else:
-                worker = AsyncWorker(fetch_content(category_id, page))
-                worker.finished.connect(lambda result, cat=category: self.on_stb_content_by_category_loaded(result, cat))
-                worker.start()
-                self.workers.append(worker)  # Keep a reference to the worker
-        except Exception as e:
-            print(f"Error loading STB content by category: {e}")
-
-    def on_stb_content_by_category_loaded(self, data, category):
-        if data is None:
-            print("Error loading STB content by category")
-            return
-
-        page, page_count, items = data
-
-        if self.content_type == "movies":
-            self.display_paginated_content(items, page, page_count)
-        elif self.content_type == "series":
-            self.display_paginated_series(items, page, page_count)
-
-        # Update the config with the navigation data
-        self.stb_navigation = {
-            "folder_type": self.content_type,
-            "category": category,
-            "page": page,
-            "page_count": page_count
+            fetchurl = (
+                f"{url}/server/load.php?{self.get_categories_params(self.content_type)}"
+            )
+            response = requests.get(fetchurl, headers=options["headers"])
+            result = response.json()
+            categories = result["js"]
+            if not categories:
+                print("No categories found.")
+                return
+            # Save categories in config
+            self.config["data"][self.config["selected"]][self.content_type] = {
+                "categories": categories,
+                "contents": {},
             }
-
-    def load_stb_seasons_by_serie(self, serie):
-        selected_provider = self.config["data"][self.config["selected"]]
-        url = selected_provider["url"]
-        url = URLObject(url)
-        url = f"{url.scheme}://{url.netloc}"
-        options = selected_provider["options"]
-
-        async def fetch_content(serie):
-            async with aiohttp.ClientSession() as session:
-                try:
-                    selected_provider = self.config["data"][self.config["selected"]]
-                    url = URLObject(selected_provider["url"])
-                    url = f"{url.scheme}://{url.netloc}"
-                    options = selected_provider["options"]
-                    fetchurl = f"{url}/server/load.php?{self.getChannelOrSeriesParams(self.ContentTypeToSTB(), serie['category_id'], 'added', 1, serie['id'], 0)}"
-
-                    async with session.get(fetchurl, headers=options["headers"]) as response:
-                        try:
-                            result = await response.json()
-                        except aiohttp.ContentTypeError:
-                            result = await response.text()
-                            result = json.loads(result)
-                        total_items = int(result["js"]["total_items"])
-                        max_page_items = int(result["js"]["max_page_items"])
-                        pages = (total_items + max_page_items - 1) // max_page_items
-
-                        tasks = []
-                        for page in range(pages):
-                            page_url = f"{url}/server/load.php?{self.getChannelOrSeriesParams(self.ContentTypeToSTB(), serie['category_id'], 'added', page+1, serie['id'], 0)}"
-                            tasks.append(session.get(page_url, headers=options["headers"]))
-
-                        responses = await asyncio.gather(*tasks)
-                        items = []
-                        for response in responses:
-                            try:
-                                result = await response.json()
-                            except aiohttp.ContentTypeError:
-                                result = await response.text()
-                                result = json.loads(result)
-                            items.extend(result["js"]["data"])
-                        return items
-                except aiohttp.ClientError as e:
-                    print(f"Error fetching seasons by serie: {e}")
-                    return None
-
-        worker = AsyncWorker(fetch_content(serie))
-        worker.finished.connect(lambda result, serie=serie: self.on_stb_seasons_by_serie_loaded(result, serie))
-        worker.start()
-        self.workers.append(worker)  # Keep a reference to the worker
-
-    def on_stb_seasons_by_serie_loaded(self, items, serie):
-        if items is None:
-            print("Error loading STB seasons by serie")
-            return
-
-        self.display_seasons(items)
-
-        # Update the config with the navigation data
-        self.stb_navigation["folder_type"] = "seasons"
-        self.stb_navigation["serie"] = serie
-
-    def load_stb_episodes_by_season(self, season):
-        try:
-            self.display_episodes(season)
-
-            # Update the config with the navigation data
-            self.stb_navigation["folder_type"] = "episodes"
-            self.stb_navigation["season"] = season
-
+            self.save_config()
+            self.display_categories(categories)
         except Exception as e:
-            print(f"Error loading STB episode by season: {e}")
+            print(f"Error loading STB categories: {e}")
 
-    def create_link(self, item):
-        async def fetch_link():
-            try:
-                selected_provider = self.config["data"][self.config["selected"]]
-                url = URLObject(selected_provider["url"])
-                url = f"{url.scheme}://{url.netloc}"
-                fetchurl = f"{url}/server/load.php?{self.getLinkParams(self.ContentTypeToSTB(), requests.utils.quote(item['cmd']), 0)}"
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(fetchurl, headers=self.generate_headers()) as response:
-                        if response.status == 200:
-                            try:
-                                result = await response.json()
-                            except aiohttp.ContentTypeError:
-                                result = await response.text()
-                                result = json.loads(result)
-                            link = result["js"]["cmd"].split(" ")[-1]
-                            return link
-                        else:
-                            print(f"Error creating link. Status code: {response.status}")
-                            return None
-            except Exception as e:
-                print(f"Error creating link: {e}")
-                return None
+    @staticmethod
+    def get_categories_params(_type):
+        params = {}
+        params["type"] = _type
+        params["action"] = "get_genres" if _type == "itv" else "get_categories"
+        params["JsHttpRequest"] = str(int(time.time() * 1000)) + "-xml"
+        return "&".join(f"{k}={v}" for k, v in params.items())
 
-        worker = AsyncWorker(fetch_link())
-        worker.finished.connect(self.on_link_created)
-        worker.start()
-        self.workers.append(worker)  # Keep a reference to the worker
+    def load_content_in_category(self, category):
+        selected_provider = self.config["data"][self.config["selected"]]
+        content_data = selected_provider.get(self.content_type, {})
+        category_id = category.get("id", "*")
 
-    def on_link_created(self, link):
-        if link:
-            self.link = link
-            self.player.play_video(link)
+        # Check if we have cached content for this category
+        if category_id in content_data.get("contents", {}):
+            items = content_data["contents"][category_id]
+            if self.content_type == "series":
+                self.display_content(items, content_type="series")
+            else:
+                self.display_content(items)
         else:
-            print("Failed to create link.")
+            # Fetch content for the category
+            self.fetch_content_in_category(category_id)
 
-    def create_link_episode(self, season, episode):
-        async def fetch_link():
-            try:
-                selected_provider = self.config["data"][self.config["selected"]]
-                url = URLObject(selected_provider["url"])
-                url = f"{url.scheme}://{url.netloc}"
-                fetchurl = f"{url}/server/load.php?{self.getLinkParams(self.ContentTypeToSTB(), requests.utils.quote(season['cmd']), episode)}"
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(fetchurl, headers=self.generate_headers()) as response:
-                        if response.status == 200:
-                            try:
-                                result = await response.json()
-                            except aiohttp.ContentTypeError:
-                                result = await response.text()
-                                result = json.loads(result)
-                            link = result["js"]["cmd"].split(" ")[-1]
-                            return link
-                        else:
-                            print(f"Error creating link for episode. Status code: {response.status}")
-                            return None
-            except Exception as e:
-                print(f"Error creating link for episode: {e}")
-                return None
-        worker = AsyncWorker(fetch_link())
-        worker.finished.connect(self.on_link_episode_created)
-        worker.start()
-        self.workers.append(worker)  # Keep a reference to the worker
+    def fetch_content_in_category(self, category_id):
+        selected_provider = self.config["data"][self.config["selected"]]
+        options = selected_provider.get("options", {})
+        url = selected_provider.get("url", "")
+        url = URLObject(url)
+        url = f"{url.scheme}://{url.netloc}/server/load.php"
 
-    def on_link_episode_created(self, link):
-        if link:
-            self.link = link
-            self.player.play_video(link)
-        else:
-            print("Failed to create link.")
+        self.content_loader = ContentLoader(
+            url, options["headers"], self.content_type, category_id=category_id
+        )
+        self.content_loader.content_loaded.connect(self.update_content_list)
+        self.content_loader.progress_updated.connect(self.update_progress)
+        self.content_loader.finished.connect(self.content_loader_finished)
+        self.content_loader.start()
+        self.progress_bar.setVisible(True)
+        self.cancel_button.setVisible(True)
+
+    def load_series_seasons(self, series_item):
+        selected_provider = self.config["data"][self.config["selected"]]
+        options = selected_provider.get("options", {})
+        url = selected_provider.get("url", "")
+        url = URLObject(url)
+        url = f"{url.scheme}://{url.netloc}/server/load.php"
+
+        self.current_series = series_item  # Store current series
+
+        self.content_loader = ContentLoader(
+            url=url,
+            headers=options["headers"],
+            content_type="series",
+            category_id=series_item["category_id"],
+            movie_id=series_item["id"],  # series ID
+            season_id=0,
+            action="get_ordered_list",
+            sortby="name",
+        )
+        self.content_loader.content_loaded.connect(self.update_seasons_list)
+        self.content_loader.progress_updated.connect(self.update_progress)
+        self.content_loader.finished.connect(self.content_loader_finished)
+        self.content_loader.start()
+        self.progress_bar.setVisible(True)
+        self.cancel_button.setVisible(True)
+
+    def load_season_episodes(self, season_item):
+        selected_provider = self.config["data"][self.config["selected"]]
+        options = selected_provider.get("options", {})
+        url = selected_provider.get("url", "")
+        url = URLObject(url)
+        url = f"{url.scheme}://{url.netloc}/server/load.php"
+
+        self.current_season = season_item  # Store current season
+
+        self.content_loader = ContentLoader(
+            url=url,
+            headers=options["headers"],
+            content_type="series",
+            category_id=self.current_category["id"],  # Category ID
+            movie_id=self.current_series["id"],  # Series ID
+            season_id=season_item["id"],  # Season ID
+            action="get_ordered_list",
+            sortby="added",
+        )
+        self.content_loader.content_loaded.connect(self.update_episodes_list)
+        self.content_loader.progress_updated.connect(self.update_progress)
+        self.content_loader.finished.connect(self.content_loader_finished)
+        self.content_loader.start()
+        self.progress_bar.setVisible(True)
+        self.cancel_button.setVisible(True)
+
+    def display_episodes(self, season_item):
+        episodes = season_item.get("series", [])
+        episode_items = []
+        for episode_num in episodes:
+            episode_item = {
+                "name": f"Episode {episode_num}",
+                "cmd": season_item.get("cmd"),
+                "series": episode_num,
+            }
+            episode_items.append(episode_item)
+        self.display_content(episode_items, content_type="episode")
 
     @staticmethod
-    def getHandshakeParams(token):
-        params = OrderedDict()
-        params["type"] = "stb"
-        params["action"] = "handshake"
-        params["prehash"] = "0"
-        params["token"] = token
-        params["JsHttpRequest"] = str(int(time.time() * 1000)) + "-xml"
-        return "&".join(f"{k}={v}" for k, v in params.items())
-
-    @staticmethod
-    def getCategoriesParams(typ):
-        params = OrderedDict()
-        params["type"] = typ
-        params["action"] = "get_genres" if typ == "itv" else "get_categories"
-        params["JsHttpRequest"] = str(int(time.time() * 1000)) + "-xml"
-        return "&".join(f"{k}={v}" for k, v in params.items())
-
-    @staticmethod
-    def getAllChannelsParams():
-        params = OrderedDict()
-        params["type"] = "itv"
-        params["action"] = "get_all_channels"
-        params["JsHttpRequest"] = str(int(time.time() * 1000)) + "-xml"
-        return "&".join(f"{k}={v}" for k, v in params.items())
-
-    @staticmethod
-    def getChannelOrSeriesParams(typ, category, sortby, pageNumber, movieId, seriesId):
-        params = OrderedDict()
-        params["type"] = typ
-        params["action"] = "get_ordered_list"
-        params["genre"] = category
-        params["force_ch_link_check"] = ""
-        params["fav"] = "0"
-        params["sortby"] = sortby # name, number, added
+    def get_channel_or_series_params(
+        typ, category, sortby, page_number, movie_id, series_id
+    ):
+        params = {
+            "type": typ,
+            "action": "get_ordered_list",
+            "genre": category,
+            "force_ch_link_check": "",
+            "fav": "0",
+            "sortby": sortby,  # name, number, added
+            "hd": "0",
+            "p": str(page_number),
+            "JsHttpRequest": str(int(time.time() * 1000)) + "-xml",
+        }
         if typ == "series":
-            params["movie_id"] = movieId if movieId else "0"
-            params["category"] = category
-            params["season_id"] = seriesId if seriesId else "0"
-            params["episode_id"] = "0"
-        params["hd"] = "0"
-        params["p"] = str(pageNumber)
-        params["JsHttpRequest"] = str(int(time.time() * 1000)) + "-xml"
+            params.update(
+                {
+                    "movie_id": movie_id if movie_id else "0",
+                    "category": category,
+                    "season_id": series_id if series_id else "0",
+                    "episode_id": "0",
+                }
+            )
         return "&".join(f"{k}={v}" for k, v in params.items())
 
+    def play_item(self, item_data, is_episode=False):
+        if self.config["data"][self.config["selected"]]["type"] == "STB":
+            url = self.create_link(item_data, is_episode=is_episode)
+            if url:
+                self.link = url
+                self.player.play_video(url)
+            else:
+                print("Failed to create link.")
+        else:
+            cmd = item_data.get("cmd")
+            self.link = cmd
+            self.player.play_video(cmd)
+
+    def cancel_content_loading(self):
+        if hasattr(self, "content_loader") and self.content_loader.isRunning():
+            self.content_loader.terminate()
+            self.content_loader.wait()
+            self.content_loader_finished()
+            QMessageBox.information(
+                self, "Cancelled", "Content loading has been cancelled."
+            )
+
+    def content_loader_finished(self):
+        self.progress_bar.setVisible(False)
+        self.cancel_button.setVisible(False)
+        if hasattr(self, "content_loader"):
+            self.content_loader.deleteLater()
+            del self.content_loader
+
+    def update_content_list(self, data):
+        category_id = data.get("category_id")
+        items = data.get("items")
+
+        # Cache the items in config
+        selected_provider = self.config["data"][self.config["selected"]]
+        content_data = selected_provider.setdefault(self.content_type, {})
+        contents = content_data.setdefault("contents", {})
+        contents[category_id] = items
+        self.save_config()
+
+        if self.content_type == "series":
+            self.display_content(items, content_type="series")
+        else:
+            self.display_content(items)
+
+    def update_seasons_list(self, data):
+        items = data.get("items")
+        self.display_content(items, content_type="season")
+
+    def update_episodes_list(self, data):
+        items = data.get("items")
+        selected_season = None
+        for item in items:
+            if item.get("id") == data.get("season_id"):
+                selected_season = item
+                break
+
+        if selected_season:
+            episodes = selected_season.get("series", [])
+            episode_items = []
+            for episode_num in episodes:
+                episode_item = {
+                    "name": f"Episode {episode_num}",
+                    "cmd": selected_season.get("cmd"),
+                    "series": episode_num,
+                }
+                episode_items.append(episode_item)
+            self.display_content(episode_items, content_type="episode")
+        else:
+            print("Season not found in data.")
+
+    def update_progress(self, current, total):
+        progress_percentage = int((current / total) * 100)
+        self.progress_bar.setValue(progress_percentage)
+        if progress_percentage == 100:
+            self.progress_bar.setVisible(False)
+        else:
+            self.progress_bar.setVisible(True)
+
+    def create_link(self, item, is_episode=False):
+        try:
+            selected_provider = self.config["data"][self.config["selected"]]
+            url = selected_provider["url"]
+            url = URLObject(url)
+            url = f"{url.scheme}://{url.netloc}"
+            options = selected_provider["options"]
+            cmd = item.get("cmd")
+            if is_episode:
+                # For episodes, we need to pass 'series' parameter
+                series_param = item.get("series")  # This should be the episode number
+                fetchurl = (
+                    f"{url}/server/load.php?type={'vod' if self.content_type == 'series' else self.content_type}&action=create_link"
+                    f"&cmd={requests.utils.quote(cmd)}&series={series_param}&JsHttpRequest=1-xml"
+                )
+            else:
+                fetchurl = (
+                    f"{url}/server/load.php?type={self.content_type}&action=create_link"
+                    f"&cmd={requests.utils.quote(cmd)}&JsHttpRequest=1-xml"
+                )
+            response = requests.get(fetchurl, headers=options["headers"])
+            if response.status_code != 200 or not response.content:
+                print(
+                    f"Error creating link: status code {response.status_code}, response content empty"
+                )
+                return None
+            result = response.json()
+            link = result["js"]["cmd"].split(" ")[-1]
+            link = self.sanitize_url(link)
+            self.link = link
+            return link
+        except Exception as e:
+            print(f"Error creating link: {e}")
+            return None
+
     @staticmethod
-    def getLinkParams(typ, cmd, episode):
-        params = OrderedDict()
-        params["type"] = "vod" if typ == "series" else typ
-        params["action"] = "create_link"
-        params["cmd"] = cmd
-        params["series"] = episode if typ == "series" else ""
-        params["hd"] = "0"
-        params["forced_storage"] = "0"
-        params["disable_ad"] = "0"
-        params["download"] = "0"
-        params["JsHttpRequest"] = str(int(time.time() * 1000)) + "-xml"
-        return "&".join(f"{k}={v}" for k, v in params.items())
+    def sanitize_url(url):
+        # Remove any whitespace characters
+        url = url.strip()
+        return url
 
     @staticmethod
     def random_token():
@@ -1103,24 +983,10 @@ class ChannelList(QMainWindow):
         return selected_provider["options"]["headers"]
 
     @staticmethod
-    async def verify_url(url):
+    def verify_url(url):
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    return response.status != 0
-        except aiohttp.ClientError as e:
-            print(f"Error verifying URL: {e}")
+            response = requests.get(url)
+            return response.status_code == 200
+        except Exception as e:
+            print("Error verifying URL:", e)
             return False
-
-    # To use this method, you'll need to create an AsyncWorker:
-    def check_url(self, url):
-        worker = AsyncWorker(self.verify_url(url))
-        worker.finished.connect(self.on_url_verified)
-        worker.start()
-        self.workers.append(worker)  # Keep a reference to the worker
-
-    def on_url_verified(self, is_valid):
-        if is_valid:
-            print("URL is valid")
-        else:
-            print("URL is invalid")
