@@ -354,6 +354,11 @@ class ChannelList(QMainWindow):
         return item_name in self.config["favorites"]
 
     def toggle_content_type(self):
+        # get the radio button that send the signal
+        rb = self.sender()
+        if not rb.isChecked():
+            return # ignore if not checked to avoid double toggling
+
         if self.channels_radio.isChecked():
             self.content_type = "itv"
         elif self.movies_radio.isChecked():
