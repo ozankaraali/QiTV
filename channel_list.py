@@ -399,21 +399,26 @@ class ChannelList(QMainWindow):
     def display_content(self, items, content_type="content"):
         self.content_list.clear()
         self.content_list.setSortingEnabled(False)
+
+        # Define headers for different content types
+        category_hdr = self.current_category.get('title', '') if self.current_category else ''
+        serie_hdr = self.current_series.get('name', '') if self.current_series else ''
+        season_hdr = self.current_season.get('name', '') if self.current_season else ''
         header_info = {
             "serie": {
-               "headers": [self.shorten_header(f"{self.current_category['title']} > Series"), "Added"],
+               "headers": [self.shorten_header(f"{category_hdr} > Series"), "Added"],
                "keys": ["name", "added"] },
             "movie": {
-               "headers": [self.shorten_header(f"{self.current_category['title']} > Movies"), "Added"],
+               "headers": [self.shorten_header(f"{category_hdr} > Movies"), "Added"],
                "keys": ["name", "added"] },
             "season": { 
-                "headers": [self.shorten_header(f"{self.current_category['title']} > {self.current_series['name'] if self.current_series else ''} > Seasons"), "Added"],
+                "headers": [self.shorten_header(f"{category_hdr} > {serie_hdr} > Seasons"), "Added"],
                 "keys": ["name", "added"] },
             "episode": { 
-                "headers": ["#", self.shorten_header(f"{self.current_category['title']} > {self.current_series['name'] if self.current_series else ''} > {self.current_season['name'] if self.current_season else ''} > Episodes")],
+                "headers": ["#", self.shorten_header(f"{category_hdr} > {serie_hdr} > {season_hdr} > Episodes")],
                 "keys": ["number", "name"] },
             "channel": { 
-                "headers": ["#", self.shorten_header(f"{self.current_category['title']} > Channels")],
+                "headers": ["#", self.shorten_header(f"{category_hdr} > Channels")],
                 "keys": ["number", "name"] },
             "content": {
                 "headers": ["Name"] }
