@@ -366,6 +366,11 @@ class ChannelList(QMainWindow):
         self.navigation_stack.clear()
         self.load_content()
 
+        # Clear search box after changing content type and force re-filtering if needed
+        self.search_box.clear()
+        if not self.search_box.isModified():
+            self.filter_content(self.search_box.text())
+
     def display_categories(self, categories):
         self.content_list.clear()
         self.content_list.setSortingEnabled(False)
@@ -376,6 +381,8 @@ class ChannelList(QMainWindow):
             self.content_list.setHeaderLabels(["Movie Categories"])
         elif self.content_type == "series":
             self.content_list.setHeaderLabels(["Serie Categories"])
+
+        self.favorite_button.setHidden(False)
 
         for category in categories:
             item = CategoryTreeWidgetItem(self.content_list)
@@ -414,6 +421,10 @@ class ChannelList(QMainWindow):
         self.content_list.setColumnCount(len(header_info[content_type]["headers"]))
         self.content_list.setHeaderLabels(header_info[content_type]["headers"])
 
+        # no need to check favorites or allow to add favorites on seasons or episodes folders
+        check_fav = content_type in ["channel", "movie", "serie", "content"]
+        self.favorite_button.setHidden(not check_fav)
+
         for item_data in items:
             list_item = NumberedTreeWidgetItem(self.content_list)
             item_name = item_data.get("name") or item_data.get("title")
@@ -424,8 +435,9 @@ class ChannelList(QMainWindow):
                     list_item.setText(i, item_data.get(key, "N/A"))
             list_item.setData(0, Qt.UserRole, {"type": content_type, "data": item_data})
             # Highlight favorite items
-            if self.check_if_favorite(item_name):
+            if check_fav and self.check_if_favorite(item_name):
                 list_item.setBackground(0, QColor(0, 0, 255, 20))
+
         for i in range(len(header_info[content_type]["headers"])):
             self.content_list.resizeColumnToContents(i)
 
@@ -437,9 +449,10 @@ class ChannelList(QMainWindow):
         show_favorites = self.favorites_only_checkbox.isChecked()
         search_text = text.lower() if isinstance(text, str) else ""
 
-        for i in range(self.content_list.topLevelItemCount()):
-            item = self.content_list.topLevelItem(i)
-            item_name = self.get_item_name(item, item_type)
+        # retrieve items type first
+        if self.content_list.topLevelItemCount() > 0:
+            item = self.content_list.topLevelItem(0)
+            item_type = self.get_item_type(item)
 
         for i in range(self.content_list.topLevelItemCount()):
             item = self.content_list.topLevelItem(i)
@@ -1112,13 +1125,13 @@ class ChannelList(QMainWindow):
         return item_type
 
     @staticmethod
-    def get_item_name(item, item_type):
-        return item.text(self.get_item_name_col(item_type))
-
-    @staticmethod
     def get_item_name_col(item_type):
         column_with_name_by_item_type = {
             "channel": 1 # Channel names are in second column
             }
         return column_with_name_by_item_type.get(item_type, 0)
+
+    @staticmethod
+    def get_item_name(item, item_type):
+        return item.text(ChannelList.get_item_name_col(item_type))
 
