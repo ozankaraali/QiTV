@@ -2,9 +2,9 @@ import platform
 import sys
 
 import vlc
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, QMetaObject, Slot
 from PySide6.QtGui import QCursor, QGuiApplication
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QMainWindow, QProgressBar
+from PySide6.QtWidgets import QFrame, QVBoxLayout, QMainWindow, QProgressBar
 
 
 class VideoPlayer(QMainWindow):
@@ -32,7 +32,7 @@ class VideoPlayer(QMainWindow):
         self.mainFrame = QFrame()
         self.setCentralWidget(self.mainFrame)
         self.setWindowTitle("QiTV Player")
-        t_lay_parent = QHBoxLayout()
+        t_lay_parent = QVBoxLayout()
         t_lay_parent.setContentsMargins(0, 0, 0, 0)
 
         self.video_frame = QFrame()
@@ -164,19 +164,12 @@ class VideoPlayer(QMainWindow):
 
         self.media = self.instance.media_new(video_url)
         self.media_player.set_media(self.media)
+
+        events = self.media_player.event_manager()
+        events.event_attach(vlc.EventType.MediaPlayerLengthChanged, self.on_media_length_changed)
+        self.media.parse_with_options(1, 0)
+
         self.media_player.play()
-
-        # Check if the content is VOD or live
-        self.media.parse()
-        duration = self.media.get_duration()
-
-        if duration > 0:  # VOD content
-            self.progress_bar.setVisible(True)
-            self.update_timer.start()
-        else:  # Live content
-            self.progress_bar.setVisible(False)
-            self.update_timer.stop()
-
         self.adjust_aspect_ratio()
         self.show()
 
@@ -339,3 +332,17 @@ class VideoPlayer(QMainWindow):
             width, height = video_size
             if width > 0 and height > 0:
                 self.aspect_ratio = width / height
+
+    def on_media_length_changed(self, event):
+        QMetaObject.invokeMethod(self, "media_length_changed", Qt.QueuedConnection)
+
+    @Slot()
+    def media_length_changed(self):
+        # Check if the content is VOD or live
+        duration = self.media.get_duration()
+        if duration > 0:  # VOD content
+            self.progress_bar.setVisible(True)
+            self.update_timer.start()
+        else:  # Live content
+            self.progress_bar.setVisible(False)
+            self.update_timer.stop()
