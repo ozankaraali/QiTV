@@ -2,9 +2,9 @@ import platform
 import sys
 
 import vlc
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, QMetaObject, Slot
+from PySide6.QtCore import QEvent, QMetaObject, QPoint, Qt, QTimer, Slot
 from PySide6.QtGui import QCursor, QGuiApplication
-from PySide6.QtWidgets import QFrame, QVBoxLayout, QMainWindow, QProgressBar
+from PySide6.QtWidgets import QFrame, QMainWindow, QProgressBar, QVBoxLayout
 
 
 class VideoPlayer(QMainWindow):
@@ -65,6 +65,8 @@ class VideoPlayer(QMainWindow):
         self.progress_bar.setRange(0, 1000)  # Use 1000 steps for smoother updates
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("00:00 / 00:00")
         self.mainFrame.layout().addWidget(self.progress_bar)
 
         self.update_timer = QTimer(self)
@@ -85,10 +87,28 @@ class VideoPlayer(QMainWindow):
             seek_position = click_position / width
             self.media_player.set_position(seek_position)
 
+    def format_time(self, milliseconds):
+        seconds = int(milliseconds / 1000)
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes:02d}:{seconds:02d}"
+
     def update_progress(self):
         if self.media_player.is_playing():
-            position = self.media_player.get_position()
-            self.progress_bar.setValue(int(position * 1000))
+            current_time = self.media_player.get_time()
+            total_time = self.media.get_duration()
+
+            if total_time > 0:
+                formatted_current = self.format_time(current_time)
+                formatted_total = self.format_time(total_time)
+                self.progress_bar.setFormat(f"{formatted_current} / {formatted_total}")
+                self.progress_bar.setValue(int(current_time * 1000 / total_time))
+            else:
+                self.progress_bar.setFormat("Live")
+                self.progress_bar.setValue(0)
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -166,7 +186,9 @@ class VideoPlayer(QMainWindow):
         self.media_player.set_media(self.media)
 
         events = self.media_player.event_manager()
-        events.event_attach(vlc.EventType.MediaPlayerLengthChanged, self.on_media_length_changed)
+        events.event_attach(
+            vlc.EventType.MediaPlayerLengthChanged, self.on_media_length_changed
+        )
         self.media.parse_with_options(1, 0)
 
         self.media_player.play()
@@ -338,11 +360,12 @@ class VideoPlayer(QMainWindow):
 
     @Slot()
     def media_length_changed(self):
-        # Check if the content is VOD or live
         duration = self.media.get_duration()
         if duration > 0:  # VOD content
             self.progress_bar.setVisible(True)
+            self.progress_bar.setFormat("00:00 / " + self.format_time(duration))
             self.update_timer.start()
         else:  # Live content
-            self.progress_bar.setVisible(False)
-            self.update_timer.stop()
+            self.progress_bar.setVisible(False)  # Hide the progress bar
+            self.progress_bar.setFormat("Live")
+            # self.update_timer.start()
