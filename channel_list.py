@@ -691,16 +691,21 @@ class ChannelList(QMainWindow):
 
     def load_m3u_playlist(self, url):
         try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                content = self.parse_m3u(response.text)
-                self.display_content(content)
-                # Update the content in the config
-                self.config["data"][self.config["selected"]][
-                    self.content_type
-                ] = content
-                self.save_config()
-        except requests.RequestException as e:
+            if url.startswith(("http://", "https://")):
+                response = requests.get(url)
+                content = response.text
+            else:
+                with open(url, "r", encoding="utf-8") as file:
+                    content = file.read()
+
+            parsed_content = self.parse_m3u(content)
+            self.display_content(parsed_content)
+            # Update the content in the config
+            self.config["data"][self.config["selected"]][
+                self.content_type
+            ] = parsed_content
+            self.save_config()
+        except (requests.RequestException, IOError) as e:
             print(f"Error loading M3U Playlist: {e}")
 
     def load_stream(self, url):
@@ -1146,12 +1151,15 @@ class ChannelList(QMainWindow):
 
     @staticmethod
     def verify_url(url):
-        try:
-            response = requests.head(url, timeout=5)
-            return True
-        except requests.RequestException as e:
-            print(f"Error verifying URL: {e}")
-            return False
+        if url.startswith(("http://", "https://")):
+            try:
+                response = requests.head(url, timeout=5)
+                return response.status_code == 200
+            except requests.RequestException as e:
+                print(f"Error verifying URL: {e}")
+                return False
+        else:
+            return os.path.isfile(url)
 
     @staticmethod
     def shorten_header(s):

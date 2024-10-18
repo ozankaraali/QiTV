@@ -1,3 +1,5 @@
+import os
+
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -182,14 +184,18 @@ class OptionsDialog(QDialog):
         self.verify_result.setText("Verifying...")
         self.verify_result.repaint()
         result = False
+        url = self.url_input.text()
+
         if self.type_STB.isChecked():
-            result = self.parent().do_handshake(
-                self.url_input.text(), self.mac_input.text(), load=False
-            )
+            result = self.parent().do_handshake(url, self.mac_input.text(), load=False)
         elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
-            result = self.parent().verify_url(self.url_input.text())
+            if url.startswith(("http://", "https://")):
+                result = self.parent().verify_url(url)
+            else:
+                result = os.path.isfile(url)
         elif self.type_XTREAM.isChecked():
-            result = self.parent().verify_url(self.url_input.text())
+            result = self.parent().verify_url(url)
+
         self.verify_result.setText(
             "Provider verified successfully."
             if result
