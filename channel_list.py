@@ -246,28 +246,42 @@ class ChannelList(QMainWindow):
 
     def create_upper_panel(self):
         self.upper_layout = QWidget(self.container_widget)
-        ctl_layout = QHBoxLayout(self.upper_layout)
+        main_layout = QVBoxLayout(self.upper_layout)
+
+        # Top row
+        top_layout = QHBoxLayout()
 
         self.open_button = QPushButton("Open File")
         self.open_button.clicked.connect(self.open_file)
-        ctl_layout.addWidget(self.open_button)
+        top_layout.addWidget(self.open_button)
 
         self.options_button = QPushButton("Options")
         self.options_button.clicked.connect(self.options_dialog)
-        ctl_layout.addWidget(self.options_button)
-
-        self.export_button = QPushButton("Export Content")
-        self.export_button.clicked.connect(self.export_content)
-        ctl_layout.addWidget(self.export_button)
+        top_layout.addWidget(self.options_button)
 
         self.update_button = QPushButton("Update Content")
         self.update_button.clicked.connect(self.update_content)
-        ctl_layout.addWidget(self.update_button)
+        top_layout.addWidget(self.update_button)
 
         self.back_button = QPushButton("Back")
         self.back_button.clicked.connect(self.go_back)
         self.back_button.setVisible(False)
-        ctl_layout.addWidget(self.back_button)
+        top_layout.addWidget(self.back_button)
+
+        main_layout.addLayout(top_layout)
+
+        # Bottom row (export buttons)
+        bottom_layout = QHBoxLayout()
+
+        self.export_button = QPushButton("Export Browsed")
+        self.export_button.clicked.connect(self.export_content)
+        bottom_layout.addWidget(self.export_button)
+
+        self.export_all_live_button = QPushButton("Export All Live")
+        self.export_all_live_button.clicked.connect(self.export_all_live_channels)
+        bottom_layout.addWidget(self.export_all_live_button)
+
+        main_layout.addLayout(bottom_layout)
 
         self.grid_layout.addWidget(self.upper_layout, 0, 0)
 
@@ -567,6 +581,75 @@ class ChannelList(QMainWindow):
         file_path, _ = file_dialog.getOpenFileName()
         if file_path:
             self.player.play_video(file_path)
+
+    def export_all_live_channels(self):
+        selected_provider = self.config["data"][self.config["selected"]]
+        if selected_provider.get("type") != "STB":
+            QMessageBox.warning(
+                self,
+                "Export Error",
+                "This feature is only available for STB providers.",
+            )
+            return
+
+        file_dialog = QFileDialog(self)
+        file_dialog.setAcceptMode(QFileDialog.AcceptSave)
+        file_dialog.setDefaultSuffix("m3u")
+        file_path, _ = file_dialog.getSaveFileName(
+            self, "Export All Live Channels", "", "M3U files (*.m3u)"
+        )
+        if file_path:
+            self.fetch_and_export_all_live_channels(file_path)
+
+    def fetch_and_export_all_live_channels(self, file_path):
+        selected_provider = self.config["data"][self.config["selected"]]
+        options = selected_provider.get("options", {})
+        url = selected_provider.get("url", "")
+        url = URLObject(url)
+        base_url = f"{url.scheme}://{url.netloc}"
+        mac = selected_provider.get("mac", "")
+
+        try:
+            fetchurl = f"{base_url}/server/load.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
+            response = requests.get(fetchurl, headers=options["headers"])
+            result = response.json()
+            channels = result["js"]["data"]
+
+            self.save_channel_list(base_url, channels, mac, file_path)
+            QMessageBox.information(
+                self,
+                "Export Successful",
+                f"All live channels have been exported to {file_path}",
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Export Error",
+                f"An error occurred while exporting channels: {str(e)}",
+            )
+
+    def save_channel_list(self, base_url, channels_data, mac, file_path) -> None:
+        try:
+            with open(file_path, "w", encoding="utf-8") as file:
+                file.write("#EXTM3U\n")
+                count = 0
+                for channel in channels_data:
+                    name = channel.get("name", "Unknown Channel")
+                    logo = channel.get("logo", "")
+                    cmd_url = channel.get("cmd", "").replace("ffmpeg ", "")
+                    if "localhost" in cmd_url:
+                        ch_id_match = re.search(r"/ch/(\d+)_", cmd_url)
+                        if ch_id_match:
+                            ch_id = ch_id_match.group(1)
+                            cmd_url = f"{base_url}/play/live.php?mac={mac}&stream={ch_id}&extension=m3u8"
+
+                    channel_str = f'#EXTINF:-1 tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
+                    count += 1
+                    file.write(channel_str)
+                print(f"Channels = {count}")
+                print(f"\nChannel list has been dumped to {file_path}")
+        except IOError as e:
+            print(f"Error saving channel list: {e}")
 
     def export_content(self):
         file_dialog = QFileDialog(self)

@@ -6,7 +6,7 @@ import orjson as json
 
 
 class ConfigManager:
-    CURRENT_VERSION = "1.5.7"  # Set your current version here
+    CURRENT_VERSION = "1.5.8"  # Set your current version here
 
     def __init__(self):
         self.config = {}
