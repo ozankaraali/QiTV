@@ -7,7 +7,6 @@ import shutil
 import string
 import subprocess
 import time
-from collections import OrderedDict
 from urllib.parse import urlparse
 
 import aiohttp
@@ -21,13 +20,13 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLineEdit,
-    QTreeWidget,
-    QTreeWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -35,10 +34,11 @@ from urlobject import URLObject
 
 from options import OptionsDialog
 
+
 class CategoryTreeWidgetItem(QTreeWidgetItem):
     # sort to always have value "All" first and "Unknown Category" last
-    def __lt__( self, other ):
-        if ( not isinstance(other, CategoryTreeWidgetItem) ):
+    def __lt__(self, other):
+        if not isinstance(other, CategoryTreeWidgetItem):
             return super(CategoryTreeWidgetItem, self).__lt__(other)
 
         sort_column = self.treeWidget().sortColumn()
@@ -54,10 +54,11 @@ class CategoryTreeWidgetItem(QTreeWidgetItem):
             return True
         return t1 < t2
 
+
 class NumberedTreeWidgetItem(QTreeWidgetItem):
     # Modify the sorting by # to used integer and not string (1 < 10, but "1" may not be < "10")
-    def __lt__( self, other ):
-        if ( not isinstance(other, NumberedTreeWidgetItem) ):
+    def __lt__(self, other):
+        if not isinstance(other, NumberedTreeWidgetItem):
             return super(NumberedTreeWidgetItem, self).__lt__(other)
 
         sort_column = self.treeWidget().sortColumn()
@@ -65,6 +66,7 @@ class NumberedTreeWidgetItem(QTreeWidgetItem):
         if sort_header == "#":
             return int(self.text(sort_column)) < int(other.text(sort_column))
         return self.text(sort_column) < other.text(sort_column)
+
 
 class ContentLoader(QThread):
     content_loaded = Signal(dict)
@@ -232,6 +234,10 @@ class ChannelList(QMainWindow):
         self.navigation_stack = []  # To keep track of navigation for back button
         self.load_content()
 
+        self.channels_radio.toggled.connect(self.toggle_content_type)
+        self.movies_radio.toggled.connect(self.toggle_content_type)
+        self.series_radio.toggled.connect(self.toggle_content_type)
+
     def closeEvent(self, event):
         self.app.quit()
         self.player.close()
@@ -354,17 +360,13 @@ class ChannelList(QMainWindow):
         return item_name in self.config["favorites"]
 
     def toggle_content_type(self):
-        # get the radio button that send the signal
-        rb = self.sender()
-        if not rb.isChecked():
-            return # ignore if not checked to avoid double toggling
-
         if self.channels_radio.isChecked():
             self.content_type = "itv"
         elif self.movies_radio.isChecked():
             self.content_type = "vod"
         elif self.series_radio.isChecked():
             self.content_type = "series"
+
         self.current_category = None
         self.current_series = None
         self.current_season = None
@@ -406,27 +408,53 @@ class ChannelList(QMainWindow):
         self.content_list.setSortingEnabled(False)
 
         # Define headers for different content types
-        category_hdr = self.current_category.get('title', '') if self.current_category else ''
-        serie_hdr = self.current_series.get('name', '') if self.current_series else ''
-        season_hdr = self.current_season.get('name', '') if self.current_season else ''
+        category_header = (
+            self.current_category.get("title", "") if self.current_category else ""
+        )
+        serie_header = (
+            self.current_series.get("name", "") if self.current_series else ""
+        )
+        season_header = (
+            self.current_season.get("name", "") if self.current_season else ""
+        )
         header_info = {
             "serie": {
-               "headers": [self.shorten_header(f"{category_hdr} > Series"), "Added"],
-               "keys": ["name", "added"] },
+                "headers": [
+                    self.shorten_header(f"{category_header} > Series"),
+                    "Added",
+                ],
+                "keys": ["name", "added"],
+            },
             "movie": {
-               "headers": [self.shorten_header(f"{category_hdr} > Movies"), "Added"],
-               "keys": ["name", "added"] },
-            "season": { 
-                "headers": [self.shorten_header(f"{category_hdr} > {serie_hdr} > Seasons"), "Added"],
-                "keys": ["name", "added"] },
-            "episode": { 
-                "headers": ["#", self.shorten_header(f"{category_hdr} > {serie_hdr} > {season_hdr} > Episodes")],
-                "keys": ["number", "name"] },
-            "channel": { 
-                "headers": ["#", self.shorten_header(f"{category_hdr} > Channels")],
-                "keys": ["number", "name"] },
-            "content": {
-                "headers": ["Name"] }
+                "headers": [
+                    self.shorten_header(f"{category_header} > Movies"),
+                    "Added",
+                ],
+                "keys": ["name", "added"],
+            },
+            "season": {
+                "headers": [
+                    self.shorten_header(
+                        f"{category_header} > {serie_header} > Seasons"
+                    ),
+                    "Added",
+                ],
+                "keys": ["name", "added"],
+            },
+            "episode": {
+                "headers": [
+                    "#",
+                    self.shorten_header(
+                        f"{category_header} > {serie_header} > {season_header} > Episodes"
+                    ),
+                ],
+                "keys": ["number", "name"],
+            },
+            "channel": {
+                "headers": ["#", self.shorten_header(f"{category_header} > Channels")],
+                "keys": ["number", "name"],
+            },
+            "content": {"headers": ["Name"]},
         }
         self.content_list.setColumnCount(len(header_info[content_type]["headers"]))
         self.content_list.setHeaderLabels(header_info[content_type]["headers"])
@@ -453,7 +481,7 @@ class ChannelList(QMainWindow):
 
         self.content_list.sortItems(0, Qt.AscendingOrder)
         self.content_list.setSortingEnabled(True)
-        self.back_button.setVisible(content_type!="content")
+        self.back_button.setVisible(content_type != "content")
 
     def filter_content(self, text=""):
         show_favorites = self.favorites_only_checkbox.isChecked()
@@ -566,7 +594,8 @@ class ChannelList(QMainWindow):
             else:
                 print(f"Unknown provider type: {config_type}")
 
-    def save_m3u_content(self, content_data, file_path):
+    @staticmethod
+    def save_m3u_content(content_data, file_path):
         try:
             with open(file_path, "w", encoding="utf-8") as file:
                 file.write("#EXTM3U\n")
@@ -585,7 +614,8 @@ class ChannelList(QMainWindow):
         except IOError as e:
             print(f"Error saving content list: {e}")
 
-    def save_stb_content(self, base_url, content_data, mac, file_path):
+    @staticmethod
+    def save_stb_content(base_url, content_data, mac, file_path):
         try:
             with open(file_path, "w", encoding="utf-8") as file:
                 file.write("#EXTM3U\n")
@@ -708,7 +738,7 @@ class ChannelList(QMainWindow):
                 self.play_item(data["data"], is_episode=True)
             else:
                 print("Unknown item type selected.")
-            
+
             # Clear search box after navigating and force re-filtering if needed
             if len(self.navigation_stack) != nav_len:
                 self.search_box.clear()
@@ -832,10 +862,11 @@ class ChannelList(QMainWindow):
 
     @staticmethod
     def get_categories_params(_type):
-        params = {}
-        params["type"] = _type
-        params["action"] = "get_genres" if _type == "itv" else "get_categories"
-        params["JsHttpRequest"] = str(int(time.time() * 1000)) + "-xml"
+        params = {
+            "type": _type,
+            "action": "get_genres" if _type == "itv" else "get_categories",
+            "JsHttpRequest": str(int(time.time() * 1000)) + "-xml",
+        }
         return "&".join(f"{k}={v}" for k, v in params.items())
 
     def load_content_in_category(self, category):
@@ -1128,20 +1159,9 @@ class ChannelList(QMainWindow):
 
     @staticmethod
     def get_item_type(item):
-        item_type = None
         data = item.data(0, Qt.UserRole)
-        if data:
-            item_type = data.get("type", None)
-        return item_type
-
-    @staticmethod
-    def get_item_name_col(item_type):
-        column_with_name_by_item_type = {
-            "channel": 1 # Channel names are in second column
-            }
-        return column_with_name_by_item_type.get(item_type, 0)
+        return data.get("type") if data else None
 
     @staticmethod
     def get_item_name(item, item_type):
-        return item.text(ChannelList.get_item_name_col(item_type))
-
+        return item.text(1 if item_type == "channel" else 0)
