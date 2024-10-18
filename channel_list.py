@@ -21,8 +21,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -35,6 +35,36 @@ from urlobject import URLObject
 
 from options import OptionsDialog
 
+class CategoryTreeWidgetItem(QTreeWidgetItem):
+    # sort to always have value "All" first and "Unknown Category" last
+    def __lt__( self, other ):
+        if ( not isinstance(other, CategoryTreeWidgetItem) ):
+            return super(CategoryTreeWidgetItem, self).__lt__(other)
+
+        sort_column = self.treeWidget().sortColumn()
+        t1 = self.text(sort_column)
+        t2 = other.text(sort_column)
+        if t1 == "All":
+            return True
+        if t2 == "All":
+            return False
+        if t1 == "Unknown Category":
+            return False
+        if t2 == "Unknown Category":
+            return True
+        return t1 < t2
+
+class NumberedTreeWidgetItem(QTreeWidgetItem):
+    # Modify the sorting by # to used integer and not string (1 < 10, but "1" may not be < "10")
+    def __lt__( self, other ):
+        if ( not isinstance(other, NumberedTreeWidgetItem) ):
+            return super(NumberedTreeWidgetItem, self).__lt__(other)
+
+        sort_column = self.treeWidget().sortColumn()
+        sort_header = self.treeWidget().headerItem().text(sort_column)
+        if sort_header == "#":
+            return int(self.text(sort_column)) < int(other.text(sort_column))
+        return self.text(sort_column) < other.text(sort_column)
 
 class ContentLoader(QThread):
     content_loaded = Signal(dict)
@@ -197,6 +227,8 @@ class ChannelList(QMainWindow):
         self.create_media_controls()
         self.link = None
         self.current_category = None  # For back navigation
+        self.current_series = None
+        self.current_season = None
         self.navigation_stack = []  # To keep track of navigation for back button
         self.load_content()
 
@@ -244,8 +276,10 @@ class ChannelList(QMainWindow):
         )
         left_layout.addWidget(self.search_box)
 
-        self.content_list = QListWidget(self.left_panel)
+        self.content_list = QTreeWidget(self.left_panel)
+        self.content_list.setIndentation(0)
         self.content_list.itemClicked.connect(self.item_selected)
+
         left_layout.addWidget(self.content_list)
 
         self.grid_layout.addWidget(self.left_panel, 1, 0)
@@ -297,7 +331,8 @@ class ChannelList(QMainWindow):
     def toggle_favorite(self):
         selected_item = self.content_list.currentItem()
         if selected_item:
-            item_name = selected_item.text()
+            item_type = self.get_item_type(selected_item)
+            item_name = self.get_item_name(selected_item, item_type)
             is_favorite = self.check_if_favorite(item_name)
             if is_favorite:
                 self.remove_from_favorites(item_name)
@@ -319,6 +354,11 @@ class ChannelList(QMainWindow):
         return item_name in self.config["favorites"]
 
     def toggle_content_type(self):
+        # get the radio button that send the signal
+        rb = self.sender()
+        if not rb.isChecked():
+            return # ignore if not checked to avoid double toggling
+
         if self.channels_radio.isChecked():
             self.content_type = "itv"
         elif self.movies_radio.isChecked():
@@ -326,49 +366,117 @@ class ChannelList(QMainWindow):
         elif self.series_radio.isChecked():
             self.content_type = "series"
         self.current_category = None
+        self.current_series = None
+        self.current_season = None
         self.navigation_stack.clear()
         self.load_content()
 
+        # Clear search box after changing content type and force re-filtering if needed
+        self.search_box.clear()
+        if not self.search_box.isModified():
+            self.filter_content(self.search_box.text())
+
     def display_categories(self, categories):
         self.content_list.clear()
+        self.content_list.setSortingEnabled(False)
+        self.content_list.setColumnCount(1)
+        if self.content_type == "itv":
+            self.content_list.setHeaderLabels(["Channel Categories"])
+        elif self.content_type == "vod":
+            self.content_list.setHeaderLabels(["Movie Categories"])
+        elif self.content_type == "series":
+            self.content_list.setHeaderLabels(["Serie Categories"])
+
+        self.favorite_button.setHidden(False)
+
         for category in categories:
-            item = QListWidgetItem(category.get("title", "Unknown Category"))
-            item.setData(Qt.UserRole, {"type": "category", "data": category})
+            item = CategoryTreeWidgetItem(self.content_list)
+            item.setText(0, category.get("title", "Unknown Category"))
+            item.setData(0, Qt.UserRole, {"type": "category", "data": category})
             # Highlight favorite items
             if self.check_if_favorite(category.get("title", "")):
-                item.setBackground(QColor(0, 0, 255, 20))
-            self.content_list.addItem(item)
+                item.setBackground(0, QColor(0, 0, 255, 20))
+
+        self.content_list.sortItems(0, Qt.AscendingOrder)
+        self.content_list.setSortingEnabled(True)
         self.back_button.setVisible(False)
 
     def display_content(self, items, content_type="content"):
         self.content_list.clear()
+        self.content_list.setSortingEnabled(False)
+
+        # Define headers for different content types
+        category_hdr = self.current_category.get('title', '') if self.current_category else ''
+        serie_hdr = self.current_series.get('name', '') if self.current_series else ''
+        season_hdr = self.current_season.get('name', '') if self.current_season else ''
+        header_info = {
+            "serie": {
+               "headers": [self.shorten_header(f"{category_hdr} > Series"), "Added"],
+               "keys": ["name", "added"] },
+            "movie": {
+               "headers": [self.shorten_header(f"{category_hdr} > Movies"), "Added"],
+               "keys": ["name", "added"] },
+            "season": { 
+                "headers": [self.shorten_header(f"{category_hdr} > {serie_hdr} > Seasons"), "Added"],
+                "keys": ["name", "added"] },
+            "episode": { 
+                "headers": ["#", self.shorten_header(f"{category_hdr} > {serie_hdr} > {season_hdr} > Episodes")],
+                "keys": ["number", "name"] },
+            "channel": { 
+                "headers": ["#", self.shorten_header(f"{category_hdr} > Channels")],
+                "keys": ["number", "name"] },
+            "content": {
+                "headers": ["Name"] }
+        }
+        self.content_list.setColumnCount(len(header_info[content_type]["headers"]))
+        self.content_list.setHeaderLabels(header_info[content_type]["headers"])
+
+        # no need to check favorites or allow to add favorites on seasons or episodes folders
+        check_fav = content_type in ["channel", "movie", "serie", "content"]
+        self.favorite_button.setHidden(not check_fav)
+
         for item_data in items:
+            list_item = NumberedTreeWidgetItem(self.content_list)
             item_name = item_data.get("name") or item_data.get("title")
-            list_item = QListWidgetItem(item_name)
-            list_item.setData(Qt.UserRole, {"type": content_type, "data": item_data})
+            if content_type == "content":
+                list_item.setText(0, item_name)
+            else:
+                for i, key in enumerate(header_info[content_type]["keys"]):
+                    list_item.setText(i, item_data.get(key, "N/A"))
+            list_item.setData(0, Qt.UserRole, {"type": content_type, "data": item_data})
             # Highlight favorite items
-            if self.check_if_favorite(item_name):
-                list_item.setBackground(QColor(0, 0, 255, 20))
-            self.content_list.addItem(list_item)
-        self.back_button.setVisible(True)
+            if check_fav and self.check_if_favorite(item_name):
+                list_item.setBackground(0, QColor(0, 0, 255, 20))
+
+        for i in range(len(header_info[content_type]["headers"])):
+            self.content_list.resizeColumnToContents(i)
+
+        self.content_list.sortItems(0, Qt.AscendingOrder)
+        self.content_list.setSortingEnabled(True)
+        self.back_button.setVisible(content_type!="content")
 
     def filter_content(self, text=""):
         show_favorites = self.favorites_only_checkbox.isChecked()
         search_text = text.lower() if isinstance(text, str) else ""
 
-        for i in range(self.content_list.count()):
-            item = self.content_list.item(i)
-            item_name = item.text().lower()
-            data = item.data(Qt.UserRole)
-            is_favorite = self.check_if_favorite(item.text())
-            matches_search = search_text in item_name
+        # retrieve items type first
+        if self.content_list.topLevelItemCount() > 0:
+            item = self.content_list.topLevelItem(0)
+            item_type = self.get_item_type(item)
 
-            # Adjust filtering logic
-            if show_favorites and not is_favorite:
-                item.setHidden(True)
-            elif data and data["type"] in ["category", "season", "episode"]:
-                item.setHidden(not matches_search)
+        for i in range(self.content_list.topLevelItemCount()):
+            item = self.content_list.topLevelItem(i)
+            item_name = self.get_item_name(item, item_type)
+            matches_search = search_text in item_name.lower()
+            if item_type in ["category", "channel", "movie", "serie", "content"]:
+                # For category, channel, movie, serie and generic content, filter by search text and favorite
+                is_favorite = self.check_if_favorite(item_name)
+                if show_favorites and not is_favorite:
+                    item.setHidden(True)
+                else:
+                    item.setHidden(not matches_search)
             else:
+                # For season, episode, only filter by search text
                 item.setHidden(not matches_search)
 
     def create_media_controls(self):
@@ -573,15 +681,14 @@ class ChannelList(QMainWindow):
         self.save_config()
 
     def item_selected(self, item):
-        data = item.data(Qt.UserRole)
+        data = item.data(0, Qt.UserRole)
         if data and "type" in data:
+            nav_len = len(self.navigation_stack)
             if data["type"] == "category":
                 self.navigation_stack.append(("root", self.current_category))
                 self.current_category = data["data"]
                 self.load_content_in_category(data["data"])
-            elif data["type"] == "content":
-                self.play_item(data["data"])
-            elif data["type"] == "series":
+            elif data["type"] == "serie":
                 if self.content_type == "series":
                     # For series, load seasons
                     self.navigation_stack.append(("category", self.current_category))
@@ -594,13 +701,21 @@ class ChannelList(QMainWindow):
                 self.navigation_stack.append(("series", self.current_series))
                 self.current_season = data["data"]
                 self.load_season_episodes(data["data"])
+            elif data["type"] in ["content", "channel", "movie"]:
+                self.play_item(data["data"])
             elif data["type"] == "episode":
                 # Play the selected episode
                 self.play_item(data["data"], is_episode=True)
             else:
-                print("Unknown item selected.")
+                print("Unknown item type selected.")
+            
+            # Clear search box after navigating and force re-filtering if needed
+            if len(self.navigation_stack) != nav_len:
+                self.search_box.clear()
+                if not self.search_box.isModified():
+                    self.filter_content(self.search_box.text())
         else:
-            print("Unknown item selected.")
+            print("Item with no type selected.")
 
     def go_back(self):
         if self.navigation_stack:
@@ -623,6 +738,11 @@ class ChannelList(QMainWindow):
                 self.current_series = previous_data
                 self.load_series_seasons(self.current_series)
                 self.current_season = None
+
+            # Clear search box after navigating backward and force re-filtering if needed
+            self.search_box.clear()
+            if not self.search_box.isModified():
+                self.filter_content(self.search_box.text())
         else:
             # Already at the root level
             pass
@@ -726,10 +846,12 @@ class ChannelList(QMainWindow):
         # Check if we have cached content for this category
         if category_id in content_data.get("contents", {}):
             items = content_data["contents"][category_id]
-            if self.content_type == "series":
-                self.display_content(items, content_type="series")
-            else:
-                self.display_content(items)
+            if self.content_type == "itv":
+                self.display_content(items, content_type="channel")
+            elif self.content_type == "series":
+                self.display_content(items, content_type="serie")
+            elif self.content_type == "vod":
+                self.display_content(items, content_type="movie")
         else:
             # Fetch content for the category
             self.fetch_content_in_category(category_id)
@@ -808,6 +930,7 @@ class ChannelList(QMainWindow):
         episode_items = []
         for episode_num in episodes:
             episode_item = {
+                "number": f"{episode_num}",
                 "name": f"Episode {episode_num}",
                 "cmd": season_item.get("cmd"),
                 "series": episode_num,
@@ -882,9 +1005,11 @@ class ChannelList(QMainWindow):
         self.save_config()
 
         if self.content_type == "series":
-            self.display_content(items, content_type="series")
-        else:
-            self.display_content(items)
+            self.display_content(items, content_type="serie")
+        elif self.content_type == "vod":
+            self.display_content(items, content_type="movie")
+        elif self.content_type == "itv":
+            self.display_content(items, content_type="channel")
 
     def update_seasons_list(self, data):
         items = data.get("items")
@@ -903,6 +1028,7 @@ class ChannelList(QMainWindow):
             episode_items = []
             for episode_num in episodes:
                 episode_item = {
+                    "number": f"{episode_num}",
                     "name": f"Episode {episode_num}",
                     "cmd": selected_season.get("cmd"),
                     "series": episode_num,
@@ -995,3 +1121,27 @@ class ChannelList(QMainWindow):
         except requests.RequestException as e:
             print(f"Error verifying URL: {e}")
             return False
+
+    @staticmethod
+    def shorten_header(s):
+        return s[:20] + "..." + s[-25:] if len(s) > 45 else s
+
+    @staticmethod
+    def get_item_type(item):
+        item_type = None
+        data = item.data(0, Qt.UserRole)
+        if data:
+            item_type = data.get("type", None)
+        return item_type
+
+    @staticmethod
+    def get_item_name_col(item_type):
+        column_with_name_by_item_type = {
+            "channel": 1 # Channel names are in second column
+            }
+        return column_with_name_by_item_type.get(item_type, 0)
+
+    @staticmethod
+    def get_item_name(item, item_type):
+        return item.text(ChannelList.get_item_name_col(item_type))
+
