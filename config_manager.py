@@ -8,6 +8,9 @@ import orjson as json
 class ConfigManager:
     CURRENT_VERSION = "1.5.8"  # Set your current version here
 
+    DEFAULT_OPTION_CHECKUPDATE = True
+    DEFAULT_OPTION_STB_CONTENT_INFO = False
+
     def __init__(self):
         self.config = {}
         self.options = {}
@@ -34,6 +37,9 @@ class ConfigManager:
         os.makedirs(config_dir, exist_ok=True)
         return os.path.join(config_dir, "config.json")
 
+    def get_config_dir(self):
+        return os.path.dirname(self.config_path)
+
     def _migrate_old_config(self):
         try:
             old_config_path = "config.json"
@@ -55,53 +61,91 @@ class ConfigManager:
 
         self.update_patcher()
 
-        selected_config = self.config["data"][self.config["selected"]]
-        if "options" in selected_config:
-            self.options = selected_config["options"]
-            self.token = self.options["headers"]["Authorization"].split(" ")[1]
-        else:
-            self.options = {
-                "headers": {
-                    "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
-                    "Accept-Charset": "UTF-8,*;q=0.8",
-                    "X-User-Agent": "Model: MAG200; Link: Ethernet",
-                    "Content-Type": "application/json",
-                }
-            }
-
-        self.url = selected_config.get("url")
-        self.mac = selected_config.get("mac")
-
     def update_patcher(self):
+
+        need_update = False
+
         # add favorites to the loaded config if it doesn't exist
         if "favorites" not in self.config:
-            self.config["favorites"] = []
+            self.favorites = []
+            need_update = True
+
+        # add check_updates to the loaded config if it doesn't exist
+        if "check_updates" not in self.config:
+            self.check_updates = ConfigManager.DEFAULT_OPTION_CHECKUPDATE
+            need_update = True
+
+        # add show_stb_content_info to the loaded config if it doesn't exist
+        if "show_stb_content_info" not in self.config:
+            self.show_stb_content_info = ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO
+            need_update = True
+
+        if need_update:
             self.save_config()
+
+    @property
+    def check_updates(self):
+        return self.config.get("check_updates", ConfigManager.DEFAULT_OPTION_CHECKUPDATE)
+
+    @check_updates.setter
+    def check_updates(self, value):
+        self.config["check_updates"] = value
+
+    @property
+    def favorites(self):
+        return self.config.get("favorites", [])
+
+    @favorites.setter
+    def favorites(self, value):
+        self.config["favorites"] = value
+
+    @property
+    def show_stb_content_info(self):
+        return self.config.get("show_stb_content_info", ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO)
+
+    @show_stb_content_info.setter
+    def show_stb_content_info(self, value):
+        self.config["show_stb_content_info"] = value
+
+    @property
+    def selected_provider_name(self):
+        return self.config.get("selected_provider_name", "iptv-org.github.io")
+
+    @selected_provider_name.setter
+    def selected_provider_name(self, value):
+        self.config["selected_provider_name"] = value
 
     @staticmethod
     def default_config():
         return {
-            "selected": 0,
+            "selected_provider_name": "iptv-org.github.io",
+            "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
             "data": [
                 {
                     "type": "M3UPLAYLIST",
+                    "name": "iptv-org.github.io",
                     "url": "https://iptv-org.github.io/iptv/index.m3u",
                 }
             ],
             "window_positions": {
-                "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800},
+                "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800, "splitter_ratio": 0.75},
                 "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
             },
             "favorites": [],
+            "show_stb_content_info": ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO,
         }
 
-    def save_window_settings(self, pos, window_name):
+    def save_window_settings(self, window, window_name):
+        pos = window.geometry()
         self.config["window_positions"][window_name] = {
             "x": pos.x(),
             "y": pos.y(),
             "width": pos.width(),
             "height": pos.height(),
         }
+        if window_name == "channel_list":
+            self.config["window_positions"][window_name]["splitter_ratio"] = window.splitter_ratio
+
         self.save_config()
 
     def apply_window_settings(self, window_name, window):
@@ -109,10 +153,8 @@ class ConfigManager:
         window.setGeometry(
             settings["x"], settings["y"], settings["width"], settings["height"]
         )
-
-    # def save_config(self):
-    #     with open(self.config_path, "wb") as f:
-    #         f.write(json.dumps(self.config, option=json.OPT_INDENT_2))
+        if window_name == "channel_list":
+            window.splitter_ratio = settings.get("splitter_ratio", 0.75)
 
     def save_config(self):
         serialized_config = json.dumps(self.config, option=json.OPT_INDENT_2)
