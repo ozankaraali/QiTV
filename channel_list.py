@@ -846,9 +846,7 @@ class ChannelList(QMainWindow):
         QTreeWidget {{ font-size: {font_size}px; }}
         """)
 
-        # Set main font (specific Qt font compatible with tiny size)
-        font = QFont("Tahoma")
-
+        font = QFont()
         font.setPointSize(font_size)
         self.content_list.setFont(font)
 

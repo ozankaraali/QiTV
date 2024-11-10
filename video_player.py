@@ -59,12 +59,11 @@ class VideoPlayer(QMainWindow):
         t_lay_parent.addWidget(self.video_frame)
 
         # Custom user-agent string
-        user_agent = "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
         self.vlc_logger = VLCLogger()
 
         # Initialize VLC instance
         self.instance = vlc.Instance(
-            ["--video-on-top", f"--http-user-agent={user_agent}"]
+            ["--video-on-top"]
         )  # vlc.Instance(["--verbose=2"])  # Enable verbose logging
 
         self.media_player = self.instance.media_player_new()
@@ -130,12 +129,14 @@ class VideoPlayer(QMainWindow):
             current_time = self.media_player.get_time()
             total_time = self.media.get_duration()
 
-            if total_time > 0:
+            if current_time > 0:  # let's give the control after play
+                self.progress_bar.setVisible(True)
                 formatted_current = self.format_time(current_time)
                 formatted_total = self.format_time(total_time)
                 self.progress_bar.setFormat(f"{formatted_current} / {formatted_total}")
                 self.progress_bar.setValue(int(current_time * 1000 / total_time))
             else:
+                self.progress_bar.setVisible(False)
                 self.progress_bar.setFormat("Live")
                 self.progress_bar.setValue(0)
         elif state == vlc.State.Error:
