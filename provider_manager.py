@@ -17,7 +17,7 @@ class ProviderContext:
 class ProviderManager(QObject):
     progress = Signal(str)
 
-    def __init__(self, config_manager, provider_context):
+    def __init__(self, config_manager):
         super().__init__()
         self.config_manager = config_manager
         self.provider_context = provider_context
@@ -78,6 +78,7 @@ class ProviderManager(QObject):
             progress_callback.emit("Performing handshake...")
             self.token = ""
             self.do_handshake(self.current_provider["url"], self.current_provider["mac"])
+
         progress_callback.emit("Provider setup complete.")
 
     def save_providers(self):

@@ -87,8 +87,26 @@ class ContentLoader(QThread):
             "JsHttpRequest": "1-xml",
         }
         if self.content_type == "itv":
+            if self.action == "get_short_epg":
+                params.update(
+                    {
+                        "ch_id": self.ch_id,
+                        "size": self.size,
+                    }
+                )
+                # remove unnecessary params
+                params.pop("p")
+            elif self.action == "get_epg_info":
             params.update(
                 {
+                        "period": self.period,
+                    }
+                )
+                # remove unnecessary params
+                params.pop("p")
+            else:
+                params.update(
+                    {
                     "genre": self.category_id if self.category_id else "*",
                     "force_ch_link_check": "",
                     "fav": "0",
@@ -129,7 +147,11 @@ class ContentLoader(QThread):
             elif isinstance(page_items, dict):
                 self.items.append(page_items)
 
+            if max_page_items:
             pages = (total_items + max_page_items - 1) // max_page_items
+            else:
+                pages = 0
+
             self.progress_updated.emit(1, pages)
 
             tasks = []
