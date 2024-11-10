@@ -97,8 +97,8 @@ class ContentLoader(QThread):
                 # remove unnecessary params
                 params.pop("p")
             elif self.action == "get_epg_info":
-                params.update(
-                    {
+            params.update(
+                {
                         "period": self.period,
                     }
                 )
@@ -107,12 +107,12 @@ class ContentLoader(QThread):
             else:
                 params.update(
                     {
-                        "genre": self.category_id if self.category_id else "*",
-                        "force_ch_link_check": "",
-                        "fav": "0",
-                        "sortby": self.sortby,
-                        "hd": "0",
-                    }
+                    "genre": self.category_id if self.category_id else "*",
+                    "force_ch_link_check": "",
+                    "fav": "0",
+                    "sortby": self.sortby,
+                    "hd": "0",
+                }
             )
         elif self.content_type == "vod":
             params.update(
@@ -148,16 +148,16 @@ class ContentLoader(QThread):
                 self.items.append(page_items)
 
             if max_page_items:
-                pages = (total_items + max_page_items - 1) // max_page_items
+            pages = (total_items + max_page_items - 1) // max_page_items
             else:
                 pages = 0
 
             self.progress_updated.emit(1, pages)
-    
+
             tasks = []
             for page_num in range(2, pages + 1):
                 tasks.append(self.fetch_page(session, page_num))
-    
+
             for i, task in enumerate(asyncio.as_completed(tasks), 2):
                 page_items, _, _ = await task
                 self.items.extend(page_items)
@@ -166,6 +166,7 @@ class ContentLoader(QThread):
             # Emit all items once done
             self.content_loaded.emit(
                 {
+                    "page_count": (total_items + max_page_items - 1) // max_page_items,
                     "category_id": self.category_id,
                     "items": self.items,
                     "parent_id": self.parent_id,

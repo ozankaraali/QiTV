@@ -862,6 +862,98 @@ class ChannelList(QMainWindow):
             if item.widget():
                 item.widget().setVisible(show)
 
+    def can_show_content_info(self, item_type):
+        return self.config_manager.show_stb_content_info and item_type in ["movie", "serie"] and self.provider_manager.current_provider["type"] == "STB"
+
+    def create_content_info_panel(self):
+        self.content_info_panel = QWidget(self.container_widget)
+        self.content_info_layout = QVBoxLayout(self.content_info_panel)
+        self.content_info_panel.setVisible(False)
+
+    def setup_movie_tvshow_content_info(self):
+        self.clear_content_info_panel()
+        self.content_info_layout.setContentsMargins(8, 4, 8, 8)
+        self.content_info_text = QLabel(self.content_info_panel)
+        self.content_info_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored) # Allow to reduce splitter below label minimum size
+        self.content_info_text.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.content_info_text.setWordWrap(True)
+        self.content_info_layout.addWidget(self.content_info_text, 1)
+
+    def clear_content_info_panel(self):
+        # Clear all widgets from the content_info layout
+        for i in reversed(range(self.content_info_layout.count())):
+            widget = self.content_info_layout.itemAt(i).widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        # Clear the layout itself
+        while self.content_info_layout.count():
+            item = self.content_info_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self.clear_layout(item.layout())
+
+        # Hide the content_info panel if it is visible
+        if self.content_info_panel.isVisible():
+            self.content_info_panel.setVisible(False)
+            self.splitter.setSizes([1, 0])
+            self.main_layout.setContentsMargins(8, 8, 8, 8)
+
+    def clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self.clear_layout(item.layout())
+        layout.deleteLater()
+
+    def switch_content_info_panel(self, content_type):
+        if content_type == "channel":
+            pass # for program content info
+        else:
+            self.setup_movie_tvshow_content_info()
+
+        if not self.content_info_panel.isVisible():
+            self.main_layout.setContentsMargins(8, 8, 8, 4)
+
+            # set splitter sizes to show both panels using the splitter_ratio
+            self.splitter.setSizes([int(self.container_widget.height() * self.splitter_ratio), int(self.container_widget.height() * (1 - self.splitter_ratio))])
+            self.content_info_panel.setVisible(True)
+
+    def populate_movie_tvshow_content_info(self, item_data):
+        content_info_label = {
+            "name": "Title",
+            "rating_imdb": "Rating",
+            "age": "Age",
+            "country": "Country",
+            "year": "Year",
+            "genre_str": "Genre",
+            "length": "Length",
+            "director": "Director",
+            "actors": "Actors",
+            "description": "Summary"
+        }
+
+        info = ""
+        for key, label in content_info_label.items():
+            if key in item_data:
+                value = item_data[key]
+                # if string, check is not empty and not "na" or "n/a"
+                if value:
+                    if isinstance(value, str) and value.lower() in ["na", "n/a"]:
+                        continue
+                    info += f"<b>{label}:</b> {value}<br>"
+        self.content_info_text.setText(info)
+
+    def show_favorite_layout(self, show):
+        for i in range(self.favorite_layout.count()):
+            item = self.favorite_layout.itemAt(i)
+            if item.widget():
+                item.widget().setVisible(show)
+
     def toggle_favorite(self):
         selected_item = self.content_list.currentItem()
         if selected_item:
@@ -984,7 +1076,11 @@ class ChannelList(QMainWindow):
     def display_content(self, items, content_type="content", select_first=True):
         # Unregister the content_list selection change event
         self.content_list.itemSelectionChanged.disconnect(self.item_selected)
+        # Unregister the content_list selection change event
+        self.content_list.itemSelectionChanged.disconnect(self.item_selected)
         self.content_list.clear()
+        # Re-egister the content_list selection change event
+        self.content_list.itemSelectionChanged.connect(self.item_selected)
         self.content_list.setSortingEnabled(False)
         # Re-egister the content_list selection change event
         self.content_list.itemSelectionChanged.connect(self.item_selected)
@@ -1145,6 +1241,10 @@ class ChannelList(QMainWindow):
                 base64_data = base64.b64encode(buffer.data()).decode('utf-8')
                 img_tag = f'<img src="data:image/png;base64,{base64_data}" alt="Poster Image" style="float:right; margin: 0 0 10px 10px;">'
                 self.content_info_text.setText(img_tag + self.content_info_text.text())
+
+        # Select 1st item in the list
+        if self.content_list.topLevelItemCount() > 0:
+            self.content_list.setCurrentItem(self.content_list.topLevelItem(0))
 
     def filter_content(self, text=""):
         show_favorites = self.favorites_only_checkbox.isChecked()
@@ -1556,6 +1656,13 @@ class ChannelList(QMainWindow):
             self.search_box.clear()
             if not self.search_box.isModified():
                 self.filter_content(self.search_box.text())
+
+            # Select previous item
+            if previous_selected_id:
+                previous_selected = self.content_list.findItems(previous_selected_id, Qt.MatchExactly, 0)
+                if previous_selected:
+                    self.content_list.setCurrentItem(previous_selected[0])
+                    self.content_list.scrollToItem(previous_selected[0], QTreeWidget.PositionAtTop)
         else:
             # Already at the root level
             pass

@@ -4,6 +4,7 @@ from config_manager import MultiKeyDict
 import orjson as json
 import requests
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,

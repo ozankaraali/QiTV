@@ -9,12 +9,18 @@ from urlobject import URLObject
 from urllib.parse import urlencode
 from PySide6.QtCore import QObject, Signal
 
+class ProviderContext:
+    def __init__(self):
+        self.provider_url = None
+        self.headers = None
+
 class ProviderManager(QObject):
     progress = Signal(str)
 
     def __init__(self, config_manager):
         super().__init__()
         self.config_manager = config_manager
+        self.provider_context = provider_context
         self.provider_dir = os.path.join(config_manager.get_config_dir(), 'cache', 'provider')
         os.makedirs(self.provider_dir, exist_ok=True)
         self.index_file = os.path.join(self.provider_dir, 'index.json')
@@ -28,6 +34,14 @@ class ProviderManager(QObject):
     def _current_provider_cache_name(self):
         hashed_name = hashlib.sha256(self.current_provider["name"].encode('utf-8')).hexdigest()
         return os.path.join(self.provider_dir, f"{hashed_name}.json")
+
+    def _update_provider_context(self):
+        if self.current_provider["type"] == "STB":
+            self.provider_context.provider_url = self.current_provider["url"]
+            self.provider_context.headers = self.headers
+        else:
+            self.provider_context.provider_url = None
+            self.provider_context.headers = None
 
     def _load_providers(self):
         try:
@@ -46,6 +60,7 @@ class ProviderManager(QObject):
             for provider in self.providers:
                 if provider["name"] == self.config_manager.selected_provider_name:
                     self.current_provider = provider
+                    self._update_provider_context()
                     break
 
         # if provider not found, set the first one
