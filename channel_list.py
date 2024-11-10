@@ -1358,4 +1358,4 @@ class ChannelList(QMainWindow):
 
     @staticmethod
     def get_item_name(item, item_type):
-        return item.text(1 if item_type == "channel" else 0)
+        return item.text(1 if item_type in ["channel", "content"] else 0)
