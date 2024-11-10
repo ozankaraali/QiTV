@@ -263,11 +263,11 @@ class OptionsDialog(QDialog):
             result = self.provider_manager.do_handshake(url, self.mac_input.text())
         elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
             if url.startswith(("http://", "https://")):
-                result = self.parent().verify_url(url)
+                result = self.verify_url(url)
             else:
                 result = os.path.isfile(url)
         elif self.type_XTREAM.isChecked():
-            result = self.parent().verify_url(url)
+            result = self.verify_url(url)
 
         self.verify_result.setText(
             "Provider verified successfully."
