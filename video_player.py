@@ -3,7 +3,7 @@ import platform
 import sys
 
 import vlc
-from PySide6.QtCore import QMetaObject, QPoint, Qt, QTimer, Slot, Signal
+from PySide6.QtCore import QMetaObject, QPoint, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QFrame, QMainWindow, QProgressBar, QVBoxLayout
 
@@ -128,8 +128,8 @@ class VideoPlayer(QMainWindow):
         if state == vlc.State.Playing:
             current_time = self.media_player.get_time()
             total_time = self.media.get_duration()
-
-            if current_time > 0:  # let's give the control after play
+            # if we have current time, but if current time is bigger than total time then it is live stream so we go to else
+            if current_time > 0 and current_time < total_time:
                 self.progress_bar.setVisible(True)
                 formatted_current = self.format_time(current_time)
                 formatted_total = self.format_time(total_time)
@@ -244,7 +244,9 @@ class VideoPlayer(QMainWindow):
 
     def check_playback_status(self):
         state = self.media_player.get_state()
-        if state == vlc.State.Playing: # only check if media has not been paused, or stopped
+        if (
+            state == vlc.State.Playing
+        ):  # only check if media has not been paused, or stopped
             if not self.media_player.is_playing():
                 media_state = self.media.get_state()
                 if media_state == vlc.State.Error:

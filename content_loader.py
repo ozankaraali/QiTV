@@ -1,8 +1,10 @@
-import random
-import aiohttp
 import asyncio
+import random
+
+import aiohttp
 import orjson as json
 from PySide6.QtCore import QThread, Signal
+
 
 class ContentLoader(QThread):
     content_loaded = Signal(dict)
@@ -33,7 +35,7 @@ class ContentLoader(QThread):
         self.season_id = season_id
         self.action = action
         self.sortby = sortby
-        self.period= period
+        self.period = period
         self.ch_id = ch_id
         self.size = size
         self.items = []
@@ -97,8 +99,8 @@ class ContentLoader(QThread):
                 # remove unnecessary params
                 params.pop("p")
             elif self.action == "get_epg_info":
-            params.update(
-                {
+                params.update(
+                    {
                         "period": self.period,
                     }
                 )
@@ -107,13 +109,13 @@ class ContentLoader(QThread):
             else:
                 params.update(
                     {
-                    "genre": self.category_id if self.category_id else "*",
-                    "force_ch_link_check": "",
-                    "fav": "0",
-                    "sortby": self.sortby,
-                    "hd": "0",
-                }
-            )
+                        "genre": self.category_id if self.category_id else "*",
+                        "force_ch_link_check": "",
+                        "fav": "0",
+                        "sortby": self.sortby,
+                        "hd": "0",
+                    }
+                )
         elif self.content_type == "vod":
             params.update(
                 {
@@ -148,7 +150,7 @@ class ContentLoader(QThread):
                 self.items.append(page_items)
 
             if max_page_items:
-            pages = (total_items + max_page_items - 1) // max_page_items
+                pages = (total_items + max_page_items - 1) // max_page_items
             else:
                 pages = 0
 

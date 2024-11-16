@@ -1,12 +1,14 @@
 import os
 import platform
 import shutil
-from multikeydict import MultiKeyDict
+
 import orjson as json
+
+from multikeydict import MultiKeyDict
 
 
 class ConfigManager:
-    CURRENT_VERSION = "1.5.9"  # Set your current version here
+    CURRENT_VERSION = "1.6.0.dev1"  # Set your current version here
 
     DEFAULT_OPTION_CHECKUPDATE = True
     DEFAULT_OPTION_STB_CONTENT_INFO = False
@@ -94,7 +96,9 @@ class ConfigManager:
 
         # add max_cache_image_size to the loaded config if it doesn't exist
         if "max_cache_image_size" not in self.config:
-            self.max_cache_image_size = ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
+            self.max_cache_image_size = (
+                ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
+            )
             need_update = True
 
         # add epg_source to the loaded config if it doesn't exist
@@ -114,7 +118,9 @@ class ConfigManager:
 
         # add epg_expiration_value to the loaded config if it doesn't exist
         if "epg_expiration_value" not in self.config:
-            self.epg_expiration_value = ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE
+            self.epg_expiration_value = (
+                ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE
+            )
             need_update = True
 
         # add epg_expiration_unit to the loaded config if it doesn't exist
@@ -132,7 +138,9 @@ class ConfigManager:
 
     @property
     def check_updates(self):
-        return self.config.get("check_updates", ConfigManager.DEFAULT_OPTION_CHECKUPDATE)
+        return self.config.get(
+            "check_updates", ConfigManager.DEFAULT_OPTION_CHECKUPDATE
+        )
 
     @check_updates.setter
     def check_updates(self, value):
@@ -148,7 +156,9 @@ class ConfigManager:
 
     @property
     def show_stb_content_info(self):
-        return self.config.get("show_stb_content_info", ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO)
+        return self.config.get(
+            "show_stb_content_info", ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO
+        )
 
     @show_stb_content_info.setter
     def show_stb_content_info(self, value):
@@ -172,7 +182,9 @@ class ConfigManager:
 
     @property
     def channel_logos(self):
-        return self.config.get("channel_logos", ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO)
+        return self.config.get(
+            "channel_logos", ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO
+        )
 
     @channel_logos.setter
     def channel_logos(self, value):
@@ -180,7 +192,9 @@ class ConfigManager:
 
     @property
     def max_cache_image_size(self):
-        return self.config.get("max_cache_image_size", ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE)
+        return self.config.get(
+            "max_cache_image_size", ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
+        )
 
     @max_cache_image_size.setter
     def max_cache_image_size(self, value):
@@ -212,7 +226,9 @@ class ConfigManager:
 
     @property
     def epg_expiration_value(self):
-        return self.config.get("epg_expiration_value", ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE)
+        return self.config.get(
+            "epg_expiration_value", ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE
+        )
 
     @epg_expiration_value.setter
     def epg_expiration_value(self, value):
@@ -220,7 +236,9 @@ class ConfigManager:
 
     @property
     def epg_expiration_unit(self):
-        return self.config.get("epg_expiration_unit", ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_UNIT)
+        return self.config.get(
+            "epg_expiration_unit", ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_UNIT
+        )
 
     @epg_expiration_unit.setter
     def epg_expiration_unit(self, value):
@@ -230,7 +248,9 @@ class ConfigManager:
     def epg_expiration(self):
         # Get expiration in seconds
         if self.epg_expiration_unit == "Months":
-            return self.epg_expiration_value * 30 * 24 * 60 * 60  # Approximate month as 30 days
+            return (
+                self.epg_expiration_value * 30 * 24 * 60 * 60
+            )  # Approximate month as 30 days
         elif self.epg_expiration_unit == "Days":
             return self.epg_expiration_value * 24 * 60 * 60
         elif self.epg_expiration_unit == "Hours":
@@ -261,7 +281,14 @@ class ConfigManager:
                 }
             ],
             "window_positions": {
-                "channel_list": {"x": 1250, "y": 100, "width": 400, "height": 800, "splitter_ratio": 0.75, "splitter_content_info_ratio": 0.33},
+                "channel_list": {
+                    "x": 1250,
+                    "y": 100,
+                    "width": 400,
+                    "height": 800,
+                    "splitter_ratio": 0.75,
+                    "splitter_content_info_ratio": 0.33,
+                },
                 "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
             },
             "favorites": [],
@@ -281,8 +308,12 @@ class ConfigManager:
             "height": pos.height(),
         }
         if window_name == "channel_list":
-            self.config["window_positions"][window_name]["splitter_ratio"] = window.splitter_ratio
-            self.config["window_positions"][window_name]["splitter_content_info_ratio"] = window.splitter_content_info_ratio
+            self.config["window_positions"][window_name][
+                "splitter_ratio"
+            ] = window.splitter_ratio
+            self.config["window_positions"][window_name][
+                "splitter_content_info_ratio"
+            ] = window.splitter_content_info_ratio
 
         self.save_config()
 
@@ -293,7 +324,9 @@ class ConfigManager:
         )
         if window_name == "channel_list":
             window.splitter_ratio = settings.get("splitter_ratio", 0.75)
-            window.splitter_content_info_ratio = settings.get("splitter_content_info_ratio", 0.33)
+            window.splitter_content_info_ratio = settings.get(
+                "splitter_content_info_ratio", 0.33
+            )
 
     def save_config(self):
         self.xmltv_channel_map = self.xmltv_channel_map.serialize()
