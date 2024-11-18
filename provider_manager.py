@@ -11,21 +11,12 @@ from PySide6.QtCore import QObject, Signal
 from urlobject import URLObject
 
 
-class ProviderContext:
-    def __init__(self):
-        self.provider_url = None
-        self.headers = None
-
-
 class ProviderManager(QObject):
     progress = Signal(str)
 
     def __init__(self, config_manager):
         super().__init__()
         self.config_manager = config_manager
-        self.provider_context = (
-            ProviderContext()
-        )  # is it the proper way to initialize the object? what was it before, no initialization?
         self.provider_dir = os.path.join(
             config_manager.get_config_dir(), "cache", "provider"
         )
@@ -44,14 +35,6 @@ class ProviderManager(QObject):
         ).hexdigest()
         return os.path.join(self.provider_dir, f"{hashed_name}.json")
 
-    def _update_provider_context(self):
-        if self.current_provider["type"] == "STB":
-            self.provider_context.provider_url = self.current_provider["url"]
-            self.provider_context.headers = self.headers
-        else:
-            self.provider_context.provider_url = None
-            self.provider_context.headers = None
-
     def _load_providers(self):
         try:
             with open(self.index_file, "r", encoding="utf-8") as f:
@@ -62,6 +45,13 @@ class ProviderManager(QObject):
             self.providers = self.default_providers()
             self.save_providers()
 
+    def clear_current_provider_cache(self):
+        try:
+            os.remove(self._current_provider_cache_name())
+        except FileNotFoundError:
+            pass
+        self.current_provider_content = {}
+
     def set_current_provider(self, progress_callback):
         progress_callback.emit("Searching for provider...")
         # search for provider in the list
@@ -69,7 +59,6 @@ class ProviderManager(QObject):
             for provider in self.providers:
                 if provider["name"] == self.config_manager.selected_provider_name:
                     self.current_provider = provider
-                    self._update_provider_context()
                     break
 
         # if provider not found, set the first one

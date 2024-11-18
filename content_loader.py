@@ -9,6 +9,7 @@ from PySide6.QtCore import QThread, Signal
 class ContentLoader(QThread):
     content_loaded = Signal(dict)
     progress_updated = Signal(int, int)
+    counter_page_not_fetched = 0
 
     def __init__(
         self,
@@ -24,6 +25,8 @@ class ContentLoader(QThread):
         size=0,
         action="get_ordered_list",
         sortby="name",
+        max_retries=2,
+        timeout=5,
     ):
         super().__init__()
         self.url = url
@@ -38,20 +41,31 @@ class ContentLoader(QThread):
         self.period = period
         self.ch_id = ch_id
         self.size = size
+        self.max_retries = max_retries
+        self.timeout = timeout
         self.items = []
+        self.counter_page_not_fetched = 0
 
     async def fetch_page(self, session, page, max_retries=2, timeout=5):
         for attempt in range(max_retries):
             try:
+                if attempt:
+                    print(f"Retrying page {page}...")
                 params = self.get_params(page)
                 async with session.get(
                     self.url, headers=self.headers, params=params, timeout=timeout
                 ) as response:
                     content = await response.read()
                     if response.status == 503 or not content:
+                        print(
+                            f"Received error or empty response fetching page {page}"
+                        )
+                        if attempt == max_retries - 1:
+                            self.counter_page_not_fetched += 1
+                            return [], 0, 0
                         wait_time = (2**attempt) + random.uniform(0, 1)
                         print(
-                            f"Received error or empty response. Retrying in {wait_time:.2f} seconds..."
+                            f"Retrying in {wait_time:.2f} seconds..."
                         )
                         await asyncio.sleep(wait_time)
                         continue
@@ -62,11 +76,14 @@ class ContentLoader(QThread):
                             1,
                             1,
                         )
-
+                    ret = result.get("js", {})
+                    if not isinstance(ret, dict):
+                        print(f"Invalid response fetching page {page}")
+                        return [], 0, 0
                     return (
-                        result["js"]["data"],
-                        int(result["js"].get("total_items", 1)),
-                        int(result["js"].get("max_page_items", 1)),
+                        ret.get("data", []),
+                        int(ret.get("total_items", 0)),
+                        int(ret.get("max_page_items", 0)),
                     )
             except (
                 aiohttp.ClientError,
@@ -75,7 +92,8 @@ class ContentLoader(QThread):
             ) as e:
                 print(f"Error fetching page {page}: {e}")
                 if attempt == max_retries - 1:
-                    raise
+                    self.counter_page_not_fetched += 1
+                    return [], 0, 0
                 wait_time = (2**attempt) + random.uniform(0, 1)
                 print(f"Retrying in {wait_time:.2f} seconds...")
                 await asyncio.sleep(wait_time)
@@ -136,11 +154,13 @@ class ContentLoader(QThread):
         return params
 
     async def load_content(self):
+        semaphore = asyncio.Semaphore(10)  # Limit concurrent fetch_page calls
+
         async with aiohttp.ClientSession() as session:
             # Fetch initial data to get total items and max page items
             page = 1
             page_items, total_items, max_page_items = await self.fetch_page(
-                session, page
+                session, page, self.timeout
             )
             # if page_items is list, extend items
             if isinstance(page_items, list):
@@ -156,19 +176,26 @@ class ContentLoader(QThread):
 
             self.progress_updated.emit(1, pages)
 
+            async def fetch_with_semaphore(page_num):
+                async with semaphore:
+                    return await self.fetch_page(session, page_num, self.max_retries, self.timeout)
+
             tasks = []
             for page_num in range(2, pages + 1):
-                tasks.append(self.fetch_page(session, page_num))
+                tasks.append(fetch_with_semaphore(page_num))
 
             for i, task in enumerate(asyncio.as_completed(tasks), 2):
                 page_items, _, _ = await task
                 self.items.extend(page_items)
                 self.progress_updated.emit(i, pages)
 
+            if self.counter_page_not_fetched:
+                print(f"Failed to fetch {self.counter_page_not_fetched} pages ({self.counter_page_not_fetched/pages*100:.2f}%)")
+
             # Emit all items once done
             self.content_loaded.emit(
                 {
-                    "page_count": (total_items + max_page_items - 1) // max_page_items,
+                    "page_count": pages,
                     "category_id": self.category_id,
                     "items": self.items,
                     "parent_id": self.parent_id,
