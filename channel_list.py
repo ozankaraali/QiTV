@@ -1,10 +1,12 @@
+import base64
+import html
 import os
 import platform
 import re
+import requests
 import shutil
 import subprocess
 import time
-import base64
 from urllib.parse import urlparse
 from content_loader import ContentLoader
 from image_loader import ImageLoader
@@ -165,7 +167,7 @@ class ChannelItemDelegate(QStyledItemDelegate):
 
     def paint(self, painter, inOption, index):
         col = index.column()
-        if col == 2:
+        if col == 2: # EPG program progress
             progress = index.data(Qt.UserRole)
             if not progress is None:
                 options = QStyleOptionViewItem(inOption)
@@ -180,7 +182,7 @@ class ChannelItemDelegate(QStyledItemDelegate):
                 style.drawControl(QStyle.CE_ProgressBar, opt, painter, inOption.widget)
             else:
                 super().paint(painter, inOption, index)
-        elif col == 3:
+        elif col == 3: # EPG program name
             epg_text = index.data(Qt.UserRole)
             if epg_text:
                 options = QStyleOptionViewItem(inOption)
@@ -192,6 +194,23 @@ class ChannelItemDelegate(QStyledItemDelegate):
                 super().paint(painter, inOption, index)
         else:
             super().paint(painter, inOption, index)
+
+    def sizeHint( self, inOption, index ):
+        col = index.column()
+        if col == 2:
+            return QSize(100, 20)
+        elif col == 3:
+            options = QStyleOptionViewItem(inOption)
+            self.initStyleOption(options, index)
+            style = options.widget.style() if options.widget else QApplication.style()
+            text = index.data(Qt.UserRole)
+            font = options.font
+            if not font:
+                font = style.font(QStyle.CE_ItemViewItem, options, index)
+            metrics = QFontMetrics(font)
+            return QSize(metrics.boundingRect(text).width(), metrics.height())
+
+        return super().sizeHint(inOption, index)
 
 class SetProviderThread(QThread):
     progress = Signal(str)
@@ -228,6 +247,7 @@ class ChannelList(QMainWindow):
         self.setCentralWidget(self.container_widget)
 
         self.content_type = "itv"  # Default to channels (STB type)
+        self.current_list_content = None
         self.content_info_show = None
 
         self.create_upper_panel()
@@ -296,7 +316,7 @@ class ChannelList(QMainWindow):
             item_data = item.data(0, Qt.UserRole)
             content_type = item_data.get("type")
 
-            if self.can_show_epg(content_type) and self.config_manager.channel_epg:
+            if self.config_manager.channel_epg and self.can_show_epg(content_type):
                 epg_data = self.epg_manager.get_programs_for_channel(item_data["data"], None, 1)
                 if epg_data:
                     epg_item = epg_data[0]
@@ -327,6 +347,9 @@ class ChannelList(QMainWindow):
     def set_provider(self, force_update=False):
         self.lock_ui_before_loading()
         self.progress_bar.setRange(0, 0)  # busy indicator
+
+        if force_update:
+            self.provider_manager.clear_current_provider_cache()
 
         self.set_provider_thread = SetProviderThread(self.provider_manager, self.epg_manager)
         self.set_provider_thread.progress.connect(self.update_busy_progress)
@@ -380,7 +403,7 @@ class ChannelList(QMainWindow):
         top_layout.addWidget(self.options_button)
 
         self.update_button = QPushButton("Update Content")
-        self.update_button.clicked.connect(lambda: self.set_provider(True))
+        self.update_button.clicked.connect(lambda: self.set_provider(force_update=True))
         top_layout.addWidget(self.update_button)
 
         self.back_button = QPushButton("Back")
@@ -477,7 +500,7 @@ class ChannelList(QMainWindow):
 
         # Add the horizontal layout to the main vertical layout
         list_layout.addLayout(self.favorite_layout)
-        
+
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -542,7 +565,7 @@ class ChannelList(QMainWindow):
         return item_type in ["movie", "serie", "season", "episode"] and self.provider_manager.current_provider["type"] == "STB"
 
     def can_show_epg(self, item_type):
-        if item_type in ["channel", "content"]:
+        if item_type in ["channel", "m3ucontent"]:
             if self.config_manager.epg_source == "No Source":
                 return False
             if self.config_manager.epg_source == "STB" and self.provider_manager.current_provider["type"] != "STB":
@@ -630,7 +653,7 @@ class ChannelList(QMainWindow):
         layout.deleteLater()
 
     def switch_content_info_panel(self, item_type):
-        if item_type in ["channel", "content"]:
+        if item_type in ["channel", "m3ucontent"]:
             if self.content_info_shown == "channel":
                 return
             self.setup_channel_program_content_info()
@@ -644,8 +667,11 @@ class ChannelList(QMainWindow):
             self.splitter.setSizes([int(self.container_widget.height() * self.splitter_ratio), int(self.container_widget.height() * (1 - self.splitter_ratio))])
 
     def populate_channel_programs_content_info(self, item_data):
-        # Show EPG data for the selected channel
+        self.program_list.itemSelectionChanged.disconnect()
         self.program_list.clear()
+        self.program_list.itemSelectionChanged.connect(self.update_channel_program)
+
+        # Show EPG data for the selected channel
         epg_data = self.epg_manager.get_programs_for_channel(item_data)
         if epg_data:
             # Fill the program list
@@ -805,8 +831,6 @@ class ChannelList(QMainWindow):
         content_info_label = {
             "name": "Title",
             "rating_imdb": "Rating",
-            "age": "Age",
-            "country": "Country",
             "year": "Year",
             "genres_str": "Genre",
             "length": "Length",
@@ -855,98 +879,6 @@ class ChannelList(QMainWindow):
         header_font.setPointSize(font_size)
         header_font.setBold(True)
         self.content_list.header().setFont(header_font)
-
-    def show_favorite_layout(self, show):
-        for i in range(self.favorite_layout.count()):
-            item = self.favorite_layout.itemAt(i)
-            if item.widget():
-                item.widget().setVisible(show)
-
-    def can_show_content_info(self, item_type):
-        return self.config_manager.show_stb_content_info and item_type in ["movie", "serie"] and self.provider_manager.current_provider["type"] == "STB"
-
-    def create_content_info_panel(self):
-        self.content_info_panel = QWidget(self.container_widget)
-        self.content_info_layout = QVBoxLayout(self.content_info_panel)
-        self.content_info_panel.setVisible(False)
-
-    def setup_movie_tvshow_content_info(self):
-        self.clear_content_info_panel()
-        self.content_info_layout.setContentsMargins(8, 4, 8, 8)
-        self.content_info_text = QLabel(self.content_info_panel)
-        self.content_info_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored) # Allow to reduce splitter below label minimum size
-        self.content_info_text.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.content_info_text.setWordWrap(True)
-        self.content_info_layout.addWidget(self.content_info_text, 1)
-
-    def clear_content_info_panel(self):
-        # Clear all widgets from the content_info layout
-        for i in reversed(range(self.content_info_layout.count())):
-            widget = self.content_info_layout.itemAt(i).widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
-
-        # Clear the layout itself
-        while self.content_info_layout.count():
-            item = self.content_info_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
-                self.clear_layout(item.layout())
-
-        # Hide the content_info panel if it is visible
-        if self.content_info_panel.isVisible():
-            self.content_info_panel.setVisible(False)
-            self.splitter.setSizes([1, 0])
-            self.main_layout.setContentsMargins(8, 8, 8, 8)
-
-    def clear_layout(self, layout):
-        while layout.count():
-            item = layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
-                self.clear_layout(item.layout())
-        layout.deleteLater()
-
-    def switch_content_info_panel(self, content_type):
-        if content_type == "channel":
-            pass # for program content info
-        else:
-            self.setup_movie_tvshow_content_info()
-
-        if not self.content_info_panel.isVisible():
-            self.main_layout.setContentsMargins(8, 8, 8, 4)
-
-            # set splitter sizes to show both panels using the splitter_ratio
-            self.splitter.setSizes([int(self.container_widget.height() * self.splitter_ratio), int(self.container_widget.height() * (1 - self.splitter_ratio))])
-            self.content_info_panel.setVisible(True)
-
-    def populate_movie_tvshow_content_info(self, item_data):
-        content_info_label = {
-            "name": "Title",
-            "rating_imdb": "Rating",
-            "age": "Age",
-            "country": "Country",
-            "year": "Year",
-            "genre_str": "Genre",
-            "length": "Length",
-            "director": "Director",
-            "actors": "Actors",
-            "description": "Summary"
-        }
-
-        info = ""
-        for key, label in content_info_label.items():
-            if key in item_data:
-                value = item_data[key]
-                # if string, check is not empty and not "na" or "n/a"
-                if value:
-                    if isinstance(value, str) and value.lower() in ["na", "n/a"]:
-                        continue
-                    info += f"<b>{label}:</b> {value}<br>"
-        self.content_info_text.setText(info)
 
     def show_favorite_layout(self, show):
         for i in range(self.favorite_layout.count()):
@@ -1033,14 +965,16 @@ class ChannelList(QMainWindow):
         # Stop refreshing content list
         self.refresh_on_air_timer.stop()
 
+        self.current_list_content = "category"
+
         self.content_list.setSortingEnabled(False)
         self.content_list.setColumnCount(1)
         if self.content_type == "itv":
-            self.content_list.setHeaderLabels(["Channel Categories"])
+            self.content_list.setHeaderLabels([f"Channel Categories ({len(categories)})"])
         elif self.content_type == "vod":
-            self.content_list.setHeaderLabels(["Movie Categories"])
+            self.content_list.setHeaderLabels([f"Movie Categories ({len(categories)})"])
         elif self.content_type == "series":
-            self.content_list.setHeaderLabels(["Serie Categories"])
+            self.content_list.setHeaderLabels([f"Serie Categories ({len(categories)})"])
 
         self.show_favorite_layout(True)
         self.rescanlogo_button.setVisible(False)
@@ -1073,24 +1007,21 @@ class ChannelList(QMainWindow):
                     self.content_list.setCurrentItem(previous_selected[0])
                     self.content_list.scrollToItem(previous_selected[0], QTreeWidget.PositionAtTop)
 
-    def display_content(self, items, content_type="content", select_first=True):
-        # Unregister the content_list selection change event
-        self.content_list.itemSelectionChanged.disconnect(self.item_selected)
-        # Unregister the content_list selection change event
+    def display_content(self, items, content="m3ucontent", select_first=True):
+        # Unregister the selection change event
         self.content_list.itemSelectionChanged.disconnect(self.item_selected)
         self.content_list.clear()
-        # Re-egister the content_list selection change event
-        self.content_list.itemSelectionChanged.connect(self.item_selected)
         self.content_list.setSortingEnabled(False)
-        # Re-egister the content_list selection change event
+        # Re-register the selection change event
         self.content_list.itemSelectionChanged.connect(self.item_selected)
 
         # Stop refreshing On Air content
         self.refresh_on_air_timer.stop()
         
-        need_logos = content_type in ["channel", "content"] and self.config_manager.channel_logos
+        self.current_list_content = content
+        need_logos = content in ["channel", "m3ucontent"] and self.config_manager.channel_logos
         logo_urls = []
-        use_epg = self.can_show_epg(content_type) and self.config_manager.channel_epg
+        use_epg = self.can_show_epg(content) and self.config_manager.channel_epg
 
         # Define headers for different content types
         category_header = (
@@ -1105,7 +1036,7 @@ class ChannelList(QMainWindow):
         header_info = {
             "serie": {
                 "headers": [
-                    self.shorten_header(f"{category_header} > Series"),
+                    self.shorten_header(f"{category_header} > Series ({len(items)})"),
                     "Genre",
                     "Added",
                 ],
@@ -1113,7 +1044,7 @@ class ChannelList(QMainWindow):
             },
             "movie": {
                 "headers": [
-                    self.shorten_header(f"{category_header} > Movies"),
+                    self.shorten_header(f"{category_header} > Movies ({len(items)})"),
                     "Genre",
                     "Added",
                 ],
@@ -1139,37 +1070,37 @@ class ChannelList(QMainWindow):
                 "keys": ["number", "ename"],
             },
             "channel": {
-                "headers": ["#", self.shorten_header(f"{category_header} > Channels")] + (["", "On Air"] if use_epg else []),
+                "headers": ["#", self.shorten_header(f"{category_header} > Channels ({len(items)})")] + (["", "On Air"] if use_epg else []),
                 "keys": ["number", "name"],
             },
-            "content": {
-                "headers": ["Group", "Name"] + (["", "On Air"] if use_epg else []),
-                "keys": ["group", "name"]
+            "m3ucontent": {
+                "headers": [f"Name ({len(items)})", "Group"] + (["", "On Air"] if use_epg else []),
+                "keys": ["name", "group"]
             },
         }
-        self.content_list.setColumnCount(len(header_info[content_type]["headers"]))
-        self.content_list.setHeaderLabels(header_info[content_type]["headers"])
+        self.content_list.setColumnCount(len(header_info[content]["headers"]))
+        self.content_list.setHeaderLabels(header_info[content]["headers"])
 
         # no favorites on seasons or episodes genre_sfolders
-        check_fav = content_type in ["channel", "movie", "serie", "content"]
+        check_fav = content in ["channel", "movie", "serie", "m3ucontent"]
         self.show_favorite_layout(check_fav)
 
         for item_data in items:
-            if content_type == "channel":
+            if content == "channel":
                 list_item = ChannelTreeWidgetItem(self.content_list)
-            elif content_type in ["season", "episode"]:
+            elif content in ["season", "episode"]:
                 list_item = NumberedTreeWidgetItem(self.content_list)
             else:
                 list_item = QTreeWidgetItem(self.content_list)
 
-            for i, key in enumerate(header_info[content_type]["keys"]):
+            for i, key in enumerate(header_info[content]["keys"]):
                 if key == "added":
                     # Change a date time from "YYYY-MM-DD HH:MM:SS" to "YYYY-MM-DD" only
-                    list_item.setText(i, item_data.get(key, "N/A").split()[0])
+                    list_item.setText(i, html.unescape(item_data.get(key, "")).split()[0])
                 else:
-                    list_item.setText(i, item_data.get(key, "N/A"))
+                    list_item.setText(i, html.unescape(item_data.get(key, "")))
 
-            list_item.setData(0, Qt.UserRole, {"type": content_type, "data": item_data})
+            list_item.setData(0, Qt.UserRole, {"type": content, "data": item_data})
 
             # If content type is channel, collect the logo urls from the image_manager
             if need_logos:
@@ -1180,18 +1111,18 @@ class ChannelList(QMainWindow):
             if check_fav and self.check_if_favorite(item_name):
                 list_item.setBackground(0, QColor(0, 0, 255, 20))
 
-        for i in range(len(header_info[content_type]["headers"])):
+        for i in range(len(header_info[content]["headers"])):
             self.content_list.resizeColumnToContents(i)
 
         self.content_list.sortItems(0, Qt.AscendingOrder)
         self.content_list.setSortingEnabled(True)
-        self.back_button.setVisible(content_type != "content")
-        self.epg_checkbox.setVisible(self.can_show_epg(content_type))
-        self.vodinfo_checkbox.setVisible(self.can_show_content_info(content_type))
+        self.back_button.setVisible(content != "m3ucontent")
+        self.epg_checkbox.setVisible(self.can_show_epg(content))
+        self.vodinfo_checkbox.setVisible(self.can_show_content_info(content))
 
         if use_epg:
             self.content_list.setItemDelegate(ChannelItemDelegate())
-            # Start refreshing content list (On Air progress)
+            # Start refreshing content list (currently aired program)
             self.refresh_on_air()
             self.refresh_on_air_timer.start(30000)
 
@@ -1224,9 +1155,10 @@ class ChannelList(QMainWindow):
         if data:
             qicon = data.get("icon", None)
             if qicon:
+                logo_column = ChannelList.get_logo_column(self.current_list_content)
                 rank = data["rank"]
                 item = self.content_list.topLevelItem(rank)
-                item.setIcon(1, qicon)
+                item.setIcon(logo_column, qicon)
 
     def update_poster(self, current, total, data):
         self.update_progress(current, total)
@@ -1242,10 +1174,6 @@ class ChannelList(QMainWindow):
                 img_tag = f'<img src="data:image/png;base64,{base64_data}" alt="Poster Image" style="float:right; margin: 0 0 10px 10px;">'
                 self.content_info_text.setText(img_tag + self.content_info_text.text())
 
-        # Select 1st item in the list
-        if self.content_list.topLevelItemCount() > 0:
-            self.content_list.setCurrentItem(self.content_list.topLevelItem(0))
-
     def filter_content(self, text=""):
         show_favorites = self.favorites_only_checkbox.isChecked()
         search_text = text.lower() if isinstance(text, str) else ""
@@ -1259,7 +1187,7 @@ class ChannelList(QMainWindow):
             item = self.content_list.topLevelItem(i)
             item_name = self.get_item_name(item, item_type)
             matches_search = search_text in item_name.lower()
-            if item_type in ["category", "channel", "movie", "serie", "content"]:
+            if item_type in ["category", "channel", "movie", "serie", "m3ucontent"]:
                 # For category, channel, movie, serie and generic content, filter by search text and favorite
                 is_favorite = self.check_if_favorite(item_name)
                 if show_favorites and not is_favorite:
@@ -1614,7 +1542,7 @@ class ChannelList(QMainWindow):
                 self.navigation_stack.append(("series", self.current_series, item.text(0)))
                 self.current_season = item_data
                 self.load_season_episodes(item_data)
-            elif item_type in ["content", "channel", "movie"]:
+            elif item_type in ["m3ucontent", "channel", "movie"]:
                 self.play_item(item_data)
             elif item_type == "episode":
                 # Play the selected episode
@@ -1656,13 +1584,6 @@ class ChannelList(QMainWindow):
             self.search_box.clear()
             if not self.search_box.isModified():
                 self.filter_content(self.search_box.text())
-
-            # Select previous item
-            if previous_selected_id:
-                previous_selected = self.content_list.findItems(previous_selected_id, Qt.MatchExactly, 0)
-                if previous_selected:
-                    self.content_list.setCurrentItem(previous_selected[0])
-                    self.content_list.scrollToItem(previous_selected[0], QTreeWidget.PositionAtTop)
         else:
             # Already at the root level
             pass
@@ -1793,22 +1714,35 @@ class ChannelList(QMainWindow):
                 items = content_data["contents"]
             else:
                 items = [content_data["contents"][i] for i in content_data["sorted_channels"].get(category_id, [])]
-            self.display_content(items, content_type="channel")
+            self.display_content(items, content="channel")
         else:
             # Check if we have cached content for this category
             if category_id in content_data.get("contents", {}):
                 items = content_data["contents"][category_id]
                 if self.content_type == "itv":
-                    self.display_content(items, content_type="channel", select_first=select_first)
+                    self.display_content(items, content="channel", select_first=select_first)
                 elif self.content_type == "series":
-                    self.display_content(items, content_type="serie", select_first=select_first)
+                    self.display_content(items, content="serie", select_first=select_first)
                 elif self.content_type == "vod":
-                    self.display_content(items, content_type="movie", select_first=select_first)
+                    self.display_content(items, content="movie", select_first=select_first)
             else:
                 # Fetch content for the category
                 self.fetch_content_in_category(category_id, select_first=select_first)
 
     def fetch_content_in_category(self, category_id, select_first=True):
+
+        # Ask confirmation if the user wants to load all content
+        if category_id == '*':
+            reply = QMessageBox.question(
+                self,
+                "Load All Content",
+                "This will load all content in this category. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.No:
+                return
+
         selected_provider = self.provider_manager.current_provider
         headers = self.provider_manager.headers
         url = selected_provider.get("url", "")
@@ -1961,18 +1895,18 @@ class ChannelList(QMainWindow):
         self.save_provider()
 
         if self.content_type == "series":
-            self.display_content(items, content_type="serie", select_first=select_first)
+            self.display_content(items, content="serie", select_first=select_first)
         elif self.content_type == "vod":
-            self.display_content(items, content_type="movie", select_first=select_first)
+            self.display_content(items, content="movie", select_first=select_first)
         elif self.content_type == "itv":
-            self.display_content(items, content_type="channel", select_first=select_first)
+            self.display_content(items, content="channel", select_first=select_first)
 
     def update_seasons_list(self, data, select_first=True):
         items = data.get("items")
         for item in items:
             item["number"] = item["name"].split(" ")[-1]
             item["name"] = f'{self.current_series["name"]}.{item["name"]}'
-        self.display_content(items, content_type="season", select_first=select_first)
+        self.display_content(items, content="season", select_first=select_first)
 
     def update_episodes_list(self, data, select_first=True):
         items = data.get("items")
@@ -1993,7 +1927,7 @@ class ChannelList(QMainWindow):
                 episode_item["cmd"] = selected_season.get("cmd")
                 episode_item["series"] = episode_num
                 episode_items.append(episode_item)
-            self.display_content(episode_items, content_type="episode", select_first=select_first)
+            self.display_content(episode_items, content="episode", select_first=select_first)
         else:
             print("Season not found in data.")
 
@@ -2061,4 +1995,8 @@ class ChannelList(QMainWindow):
 
     @staticmethod
     def get_item_name(item, item_type):
-        return item.text(1 if item_type in ["channel", "content"] else 0)
+        return item.text(1 if item_type == "channel" else 0)
+
+    @staticmethod
+    def get_logo_column(item_type):
+        return 0 if item_type == "m3ucontent" else 1

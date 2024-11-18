@@ -44,7 +44,7 @@ class ImageLoader(QThread):
             raise
         return None
 
-    async def load_images(self, max_concurrent_fetch=5):
+    async def load_images(self):
         async with aiohttp.ClientSession() as session:
             tasks = []
             for image_rank, url in enumerate(self.image_urls):
@@ -54,7 +54,7 @@ class ImageLoader(QThread):
                     elif url.startswith("data:image"):
                         tasks.append(self.decode_base64_image(image_rank, url))
             image_count = len(tasks)
-        
+
             for i, task in enumerate(asyncio.as_completed(tasks), 1):
                 try:
                     image_item = await task
