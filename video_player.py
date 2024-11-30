@@ -3,7 +3,7 @@ import platform
 import sys
 
 import vlc
-from PySide6.QtCore import QMetaObject, QPoint, Qt, QTimer, Slot
+from PySide6.QtCore import QMetaObject, QPoint, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QFrame, QMainWindow, QProgressBar, QVBoxLayout
 
@@ -23,6 +23,9 @@ class VLCLogger:
 
 
 class VideoPlayer(QMainWindow):
+    playing = Signal()
+    stopped = Signal()
+
     def __init__(self, config_manager, *args, **kwargs):
         super(VideoPlayer, self).__init__(*args, **kwargs)
         self.config_manager = config_manager
@@ -125,8 +128,8 @@ class VideoPlayer(QMainWindow):
         if state == vlc.State.Playing:
             current_time = self.media_player.get_time()
             total_time = self.media.get_duration()
-
-            if current_time > 0:  # let's give the control after play
+            # if we have current time, but if current time is bigger than total time then it is live stream so we go to else
+            if current_time > 0 and current_time < total_time:
                 self.progress_bar.setVisible(True)
                 formatted_current = self.format_time(current_time)
                 formatted_total = self.format_time(total_time)
@@ -208,7 +211,8 @@ class VideoPlayer(QMainWindow):
     def closeEvent(self, event):
         if self.media_player.is_playing():
             self.media_player.stop()
-        self.config_manager.save_window_settings(self.geometry(), "video_player")
+            self.stopped.emit()
+        self.config_manager.save_window_settings(self, "video_player")
         self.hide()
         event.ignore()
 
@@ -235,20 +239,27 @@ class VideoPlayer(QMainWindow):
         else:
             self.adjust_aspect_ratio()
             self.show()
+            self.playing.emit()
             QTimer.singleShot(5000, self.check_playback_status)
 
     def check_playback_status(self):
-        if not self.media_player.is_playing():
-            media_state = self.media.get_state()
-            if media_state == vlc.State.Error:
-                self.handle_error("Playback error")
-            else:
-                self.handle_error("Failed to start playback")
+        state = self.media_player.get_state()
+        if (
+            state == vlc.State.Playing
+        ):  # only check if media has not been paused, or stopped
+            if not self.media_player.is_playing():
+                media_state = self.media.get_state()
+                if media_state == vlc.State.Error:
+                    self.handle_error("Playback error")
+                else:
+                    self.handle_error("Failed to start playback")
+                self.stopped.emit()
 
     def stop_video(self):
         self.media_player.stop()
         self.progress_bar.setVisible(False)
         self.update_timer.stop()
+        self.stopped.emit()
 
     def toggle_mute(self):
         state = self.media_player.audio_get_mute()

@@ -1,4 +1,5 @@
 import requests
+from packaging.version import parse
 from PySide6.QtWidgets import QMessageBox
 
 from config_manager import ConfigManager
@@ -35,9 +36,7 @@ def extract_version_from_tag(tag):
 
 
 def compare_versions(latest_version, current_version):
-    latest_version_parts = list(map(int, latest_version.split(".")))
-    current_version_parts = list(map(int, current_version.split(".")))
-    return latest_version_parts > current_version_parts
+    return parse(latest_version) > parse(current_version)
 
 
 def show_update_dialog(latest_version, release_url):
