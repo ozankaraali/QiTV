@@ -8,3 +8,4 @@ PySide6
 orjson
 tzlocal
 aiohttp[speedups]
+packaging
