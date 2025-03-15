@@ -26,7 +26,7 @@ jobs:
           pip install pyinstaller
           pyinstaller qitv-linux.spec
       - name: Upload Linux artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: packaged-app-linux
           path: dist/qitv
@@ -57,7 +57,7 @@ jobs:
           pip install pyinstaller
           pyinstaller qitv-windows.spec
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: packaged-app-windows
           path: dist/qitv.exe
@@ -94,7 +94,7 @@ jobs:
           cd dist
           zip -r qitv-macos-universal.zip qitv.app
       - name: Upload macOS artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: packaged-app-macos-universal
           path: dist/qitv-macos-universal.zip
@@ -131,7 +131,7 @@ jobs:
           cd dist
           zip -r qitv-macos-intel.zip qitv.app
       - name: Upload macOS artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: packaged-app-macos-intel
           path: dist/qitv-macos-intel.zip
@@ -176,7 +176,7 @@ jobs:
           draft: false
           prerelease: true
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
       - name: Upload Linux Release Asset
         uses: actions/upload-release-asset@v1
         env:
