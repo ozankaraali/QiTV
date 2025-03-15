@@ -8,7 +8,7 @@ from multikeydict import MultiKeyDict
 
 
 class ConfigManager:
-    CURRENT_VERSION = "1.6.0"  # Set your current version here
+    CURRENT_VERSION = "1.6.1"  # Set your current version here
 
     DEFAULT_OPTION_CHECKUPDATE = True
     DEFAULT_OPTION_STB_CONTENT_INFO = False
@@ -295,7 +295,7 @@ class ConfigManager:
             "show_stb_content_info": ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO,
             "channel_logos": ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO,
             "channel_epg": ConfigManager.DEFAULT_OPTION_CHANNEL_EPG,
-            "xmltv_channel_map": [],
+            "xmltv_channel_map": MultiKeyDict(),
             "max_cache_image_size": ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE,
         }
 
