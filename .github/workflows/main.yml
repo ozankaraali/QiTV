@@ -99,45 +99,8 @@ jobs:
           name: packaged-app-macos-universal
           path: dist/qitv-macos-universal.zip
 
-  build-macos-intel:
-    runs-on: macos-12
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: 3.8
-      - name: Check OpenSSL Version
-        run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
-      - name: Install VLC
-        run: brew install --cask vlc
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Package App with PyInstaller for macOS (Intel)
-        run: |
-          pip install pyinstaller
-          pyinstaller qitv-macos.spec
-#      - name: Rename the executable
-#        run: mv dist/qitv.app/Contents/MacOS/qitv dist/qitv.app/Contents/MacOS/qitv_cli
-#      - name: Create launcher script
-#        run: |
-#          printf '#!/bin/bash\nopen -n "$(dirname "$0")/qitv_cli"\n' > dist/qitv.app/Contents/MacOS/qitv
-#          chmod +x dist/qitv.app/Contents/MacOS/qitv
-      - name: Ad-Hoc Sign the app
-        run: codesign --force --deep --sign - dist/qitv.app
-      - name: Zip macOS App
-        run: |
-          cd dist
-          zip -r qitv-macos-intel.zip qitv.app
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: packaged-app-macos-intel
-          path: dist/qitv-macos-intel.zip
-
   release:
-    needs: [build-linux, build-windows, build-macos-universal, build-macos-intel]
+    needs: [build-linux, build-windows, build-macos-universal]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -203,13 +166,4 @@ jobs:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: packaged-app-macos-universal/qitv-macos-universal.zip
           asset_name: qitv-macos-universal.zip
-          asset_content_type: application/zip
-      - name: Upload macOS Intel Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: packaged-app-macos-intel/qitv-macos-intel.zip
-          asset_name: qitv-macos-intel.zip
           asset_content_type: application/zip
