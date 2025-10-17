@@ -8,10 +8,11 @@ import shutil
 import subprocess
 import time
 from datetime import datetime
+from typing import Optional
 from urllib.parse import urlparse
 
 import requests
-from PySide6.QtCore import QBuffer, QRect, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QBuffer, QObject, QRect, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -52,6 +53,97 @@ logger = logging.getLogger(__name__)
 from content_loader import ContentLoader
 from image_loader import ImageLoader
 from options import OptionsDialog
+
+
+class M3ULoaderWorker(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, url: str):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            response = requests.get(self.url, timeout=10)
+            response.raise_for_status()
+            self.finished.emit({"content": response.text})
+        except requests.RequestException as e:
+            self.error.emit(str(e))
+
+
+class STBCategoriesWorker(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, base_url: str, headers: dict):
+        super().__init__()
+        self.base_url = base_url
+        self.headers = headers
+
+    def run(self):
+        try:
+            url = URLObject(self.base_url)
+            base = f"{url.scheme}://{url.netloc}"
+            fetchurl = (
+                f"{base}/server/load.php?type=itv&action=get_genres&JsHttpRequest=1-xml"
+            )
+            resp = requests.get(fetchurl, headers=self.headers, timeout=10)
+            resp.raise_for_status()
+            categories = resp.json()["js"]
+
+            fetchurl = f"{base}/server/load.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
+            resp = requests.get(fetchurl, headers=self.headers, timeout=10)
+            resp.raise_for_status()
+            all_channels = resp.json()["js"]["data"]
+
+            self.finished.emit({"categories": categories, "all_channels": all_channels})
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class LinkCreatorWorker(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        base_url: str,
+        headers: dict,
+        content_type: str,
+        cmd: str,
+        is_episode: bool = False,
+        series_param: Optional[str] = None,
+    ):
+        super().__init__()
+        self.base_url = base_url
+        self.headers = headers
+        self.content_type = content_type
+        self.cmd = cmd
+        self.is_episode = is_episode
+        self.series_param = series_param
+
+    def run(self):
+        try:
+            url = URLObject(self.base_url)
+            base = f"{url.scheme}://{url.netloc}"
+            if self.is_episode:
+                fetchurl = (
+                    f"{base}/server/load.php?type={'vod' if self.content_type == 'series' else self.content_type}&action=create_link"
+                    f"&cmd={requests.utils.quote(self.cmd)}&series={self.series_param}&JsHttpRequest=1-xml"
+                )
+            else:
+                fetchurl = (
+                    f"{base}/server/load.php?type={self.content_type}&action=create_link"
+                    f"&cmd={requests.utils.quote(self.cmd)}&JsHttpRequest=1-xml"
+                )
+            response = requests.get(fetchurl, headers=self.headers, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+            link = result["js"]["cmd"].split(" ")[-1]
+            self.finished.emit({"link": link})
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class CategoryTreeWidgetItem(QTreeWidgetItem):
@@ -285,7 +377,7 @@ class SetProviderThread(QThread):
             self.provider_manager.set_current_provider(self.progress)
             self.epg_manager.set_current_epg()
         except Exception as e:
-            print(f"Error in initializing provider: {e}")
+            logger.warning(f"Error in initializing provider: {e}")
 
 
 class ChannelList(QMainWindow):
@@ -358,6 +450,9 @@ class ChannelList(QMainWindow):
         self.update_layout()
 
         self.set_provider()
+
+        # Keep references to background jobs (threads/workers)
+        self._bg_jobs = []
 
     def closeEvent(self, event):
         # Stop and delete timer
@@ -1420,9 +1515,9 @@ class ChannelList(QMainWindow):
                 # when VLC opens, stop running video on self.player
                 self.player.stop_video()
             except FileNotFoundError as fnf_error:
-                print("VLC not found: ", fnf_error)
+                logger.warning("VLC not found: %s", fnf_error)
             except Exception as e:
-                print(f"Error opening VLC: {e}")
+                logger.warning(f"Error opening VLC: {e}")
 
     def open_file(self):
         file_dialog = QFileDialog(self)
@@ -1504,10 +1599,10 @@ class ChannelList(QMainWindow):
                     channel_str = f'#EXTINF:-1  tvg-id="{xmltv_id}" tvg-logo="{logo}" group-title="{group}" ,{name}\n{cmd_url}\n'
                     count += 1
                     file.write(channel_str)
-                print(f"Channels = {count}")
-                print(f"\nChannel list has been dumped to {file_path}")
+                logger.info(f"Channels = {count}")
+                logger.info(f"Channel list has been dumped to {file_path}")
         except IOError as e:
-            print(f"Error saving channel list: {e}")
+            logger.warning(f"Error saving channel list: {e}")
 
     def export_content(self):
         file_dialog = QFileDialog(self)
@@ -1539,7 +1634,7 @@ class ChannelList(QMainWindow):
                 content_items = provider_content if provider_content else []
                 self.save_m3u_content(content_items, file_path)
             else:
-                print(f"Unknown provider type: {config_type}")
+                logger.info(f"Unknown provider type: {config_type}")
 
     @staticmethod
     def save_m3u_content(content_data, file_path):
@@ -1558,10 +1653,10 @@ class ChannelList(QMainWindow):
                         item_str = f'#EXTINF:-1 tvg-id="{xmltv_id}" tvg-logo="{logo}" group-title="{group}" ,{name}\n{cmd_url}\n'
                         count += 1
                         file.write(item_str)
-                print(f"Items exported: {count}")
-                print(f"\nContent list has been saved to {file_path}")
+                logger.info(f"Items exported: {count}")
+                logger.info(f"Content list has been saved to {file_path}")
         except IOError as e:
-            print(f"Error saving content list: {e}")
+            logger.warning(f"Error saving content list: {e}")
 
     @staticmethod
     def save_stb_content(base_url, content_data, mac, file_path):
@@ -1589,10 +1684,10 @@ class ChannelList(QMainWindow):
                     item_str = f'#EXTINF:-1 tvg-id="{xmltv_id}" tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
                     count += 1
                     file.write(item_str)
-                print(f"Items exported: {count}")
-                print(f"\nContent list has been saved to {file_path}")
+                logger.info(f"Items exported: {count}")
+                logger.info(f"Content list has been saved to {file_path}")
         except IOError as e:
-            print(f"Error saving content list: {e}")
+            logger.warning(f"Error saving content list: {e}")
 
     def save_config(self):
         self.config_manager.save_config()
@@ -1647,19 +1742,57 @@ class ChannelList(QMainWindow):
     def load_m3u_playlist(self, url):
         try:
             if url.startswith(("http://", "https://")):
-                response = requests.get(url, timeout=5)
-                content = response.text
+                # Run network download in a worker thread
+                self.lock_ui_before_loading()
+                thread = QThread()
+                worker = M3ULoaderWorker(url)
+                worker.moveToThread(thread)
+
+                def on_started():
+                    worker.run()
+
+                def on_finished(payload):
+                    try:
+                        content = payload.get("content", "")
+                        parsed_content = self.parse_m3u(content)
+                        self.display_content(parsed_content)
+                        self.provider_manager.current_provider_content[
+                            self.content_type
+                        ] = parsed_content
+                        self.save_provider()
+                    finally:
+                        thread.quit()
+                        thread.wait()
+                        try:
+                            self._bg_jobs.remove((thread, worker))
+                        except ValueError:
+                            pass
+                        self.unlock_ui_after_loading()
+
+                def on_error(msg):
+                    logger.warning(f"Error loading M3U Playlist: {msg}")
+                    thread.quit()
+                    thread.wait()
+                    try:
+                        self._bg_jobs.remove((thread, worker))
+                    except ValueError:
+                        pass
+                    self.unlock_ui_after_loading()
+
+                thread.started.connect(on_started)
+                worker.finished.connect(on_finished)
+                worker.error.connect(on_error)
+                thread.start()
+                self._bg_jobs.append((thread, worker))
             else:
                 with open(url, "r", encoding="utf-8") as file:
                     content = file.read()
-
-            parsed_content = self.parse_m3u(content)
-            self.display_content(parsed_content)
-            # Update the content in the config
-            self.provider_manager.current_provider_content[self.content_type] = (
-                parsed_content
-            )
-            self.save_provider()
+                parsed_content = self.parse_m3u(content)
+                self.display_content(parsed_content)
+                self.provider_manager.current_provider_content[self.content_type] = (
+                    parsed_content
+                )
+                self.save_provider()
         except (requests.RequestException, IOError) as e:
             logger.warning(f"Error loading M3U Playlist: {e}")
 
@@ -1815,59 +1948,76 @@ class ChannelList(QMainWindow):
         return result
 
     def load_stb_categories(self, url, headers):
-        url = URLObject(url)
-        url = f"{url.scheme}://{url.netloc}"
-        try:
-            fetchurl = (
-                f"{url}/server/load.php?{self.get_categories_params(self.content_type)}"
-            )
-            response = requests.get(fetchurl, headers=headers, timeout=5)
-            result = response.json()
-            categories = result["js"]
-            if not categories:
-                print("No categories found.")
-                return
-            # Save categories in config
-            provider_content = (
-                self.provider_manager.current_provider_content.setdefault(
-                    self.content_type, {}
-                )
-            )
-            provider_content["categories"] = categories
-            provider_content["contents"] = {}
+        # Run network calls in a worker thread
+        self.lock_ui_before_loading()
+        thread = QThread()
+        worker = STBCategoriesWorker(url, headers)
+        worker.moveToThread(thread)
 
-            # Sorting all channels now by category
-            if self.content_type == "itv":
-                fetchurl = f"{url}/server/load.php?{self.get_allchannels_params()}"
-                response = requests.get(fetchurl, headers=headers, timeout=5)
-                result = response.json()
-                provider_content["contents"] = result["js"]["data"]
+        def on_started():
+            worker.run()
 
-                # Split channels by category, and sort them number-wise
-                sorted_channels = {}
-
-                for i in range(len(provider_content["contents"])):
-                    genre_id = provider_content["contents"][i]["tv_genre_id"]
-                    category = str(genre_id)
-                    if category not in sorted_channels:
-                        sorted_channels[category] = []
-                    sorted_channels[category].append(i)
-
-                for category in sorted_channels:
-                    sorted_channels[category].sort(
-                        key=lambda x: int(provider_content["contents"][x]["number"])
+        def on_finished(payload):
+            try:
+                categories = payload.get("categories", [])
+                if not categories:
+                    logger.info("No categories found.")
+                    return
+                provider_content = (
+                    self.provider_manager.current_provider_content.setdefault(
+                        self.content_type, {}
                     )
+                )
+                provider_content["categories"] = categories
+                provider_content["contents"] = {}
 
-                # Add a specific category for null genre_id
-                if "None" in sorted_channels:
-                    categories.append({"id": "None", "title": "Unknown Category"})
+                if self.content_type == "itv":
+                    provider_content["contents"] = payload.get("all_channels", [])
 
-                provider_content["sorted_channels"] = sorted_channels
+                    sorted_channels = {}
+                    for i in range(len(provider_content["contents"])):
+                        genre_id = provider_content["contents"][i]["tv_genre_id"]
+                        category_id = str(genre_id)
+                        if category_id not in sorted_channels:
+                            sorted_channels[category_id] = []
+                        sorted_channels[category_id].append(i)
 
-            self.save_provider()
-            self.display_categories(categories)
-        except Exception as e:
-            logger.warning(f"Error loading STB categories: {e}")
+                    for cat in sorted_channels:
+                        sorted_channels[cat].sort(
+                            key=lambda x: int(provider_content["contents"][x]["number"])
+                        )
+
+                    if "None" in sorted_channels:
+                        categories.append({"id": "None", "title": "Unknown Category"})
+
+                    provider_content["sorted_channels"] = sorted_channels
+
+                self.save_provider()
+                self.display_categories(categories)
+            finally:
+                thread.quit()
+                thread.wait()
+                try:
+                    self._bg_jobs.remove((thread, worker))
+                except ValueError:
+                    pass
+                self.unlock_ui_after_loading()
+
+        def on_error(msg):
+            logger.warning(f"Error loading STB categories: {msg}")
+            thread.quit()
+            thread.wait()
+            try:
+                self._bg_jobs.remove((thread, worker))
+            except ValueError:
+                pass
+            self.unlock_ui_after_loading()
+
+        thread.started.connect(on_started)
+        worker.finished.connect(on_finished)
+        worker.error.connect(on_error)
+        thread.start()
+        self._bg_jobs.append((thread, worker))
 
     @staticmethod
     def get_categories_params(_type):
@@ -2020,12 +2170,60 @@ class ChannelList(QMainWindow):
 
     def play_item(self, item_data, is_episode=False):
         if self.provider_manager.current_provider["type"] == "STB":
-            url = self.create_link(item_data, is_episode=is_episode)
-            if url:
-                self.link = url
-                self.player.play_video(url)
-            else:
-                print("Failed to create link.")
+            # Create link in a worker thread, then play
+            selected_provider = self.provider_manager.current_provider
+            headers = self.provider_manager.headers
+            base_url = selected_provider.get("url", "")
+            cmd = item_data.get("cmd")
+            series_param = item_data.get("series") if is_episode else None
+
+            self.lock_ui_before_loading()
+            thread = QThread()
+            worker = LinkCreatorWorker(
+                base_url=base_url,
+                headers=headers,
+                content_type=self.content_type,
+                cmd=cmd,
+                is_episode=is_episode,
+                series_param=series_param,
+            )
+            worker.moveToThread(thread)
+
+            def on_started():
+                worker.run()
+
+            def on_finished(payload):
+                try:
+                    link = self.sanitize_url(payload.get("link", ""))
+                    if link:
+                        self.link = link
+                        self.player.play_video(link)
+                    else:
+                        logger.warning("Failed to create link.")
+                finally:
+                    thread.quit()
+                    thread.wait()
+                    try:
+                        self._bg_jobs.remove((thread, worker))
+                    except ValueError:
+                        pass
+                    self.unlock_ui_after_loading()
+
+            def on_error(msg):
+                logger.warning(f"Error creating link: {msg}")
+                thread.quit()
+                thread.wait()
+                try:
+                    self._bg_jobs.remove((thread, worker))
+                except ValueError:
+                    pass
+                self.unlock_ui_after_loading()
+
+            thread.started.connect(on_started)
+            worker.finished.connect(on_finished)
+            worker.error.connect(on_error)
+            thread.start()
+            self._bg_jobs.append((thread, worker))
         else:
             cmd = item_data.get("cmd")
             self.link = cmd

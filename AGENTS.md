@@ -25,8 +25,9 @@ Current Work Plan (Living TODO)
    - [ ] Add keyboard shortcuts as QActions (Play/Pause, Mute, Fullscreen, PiP) and bind menu/toolbar if added later
 
 2) Networking and responsiveness
-   - [ ] Identify all `requests` usages on UI thread and move to QThread workers or async layer
+   - [x] Identify and thread key `requests` (M3U load, STB categories, link creation)
    - [x] Standardize timeouts/retries across network calls (added timeouts; moved update check to QThread)
+   - [ ] Move remaining UI-thread `requests` to workers (exports OK as is)
    - [ ] Consolidate provider/EPG URL building and headers in one place
 
 3) Modularity and structure
