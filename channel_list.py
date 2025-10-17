@@ -1,5 +1,6 @@
 import base64
 import html
+import logging
 import os
 import platform
 import re
@@ -45,6 +46,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from urlobject import URLObject
+
+logger = logging.getLogger(__name__)
 
 from content_loader import ContentLoader
 from image_loader import ImageLoader
@@ -916,7 +919,7 @@ class ChannelList(QMainWindow):
                         elif isinstance(editor, list):
                             info += f"<b>Editor:</b> {', '.join([c.get('__text') for c in editor])}<br>"
                 if country:
-                    info += f"<b>Country:</b> {episode_num.get('__text')}<br>"
+                    info += f"<b>Country:</b> {country.get('__text')}<br>"
 
                 self.content_info_text.setText(info if info else "No data available")
 
@@ -1644,7 +1647,7 @@ class ChannelList(QMainWindow):
     def load_m3u_playlist(self, url):
         try:
             if url.startswith(("http://", "https://")):
-                response = requests.get(url)
+                response = requests.get(url, timeout=5)
                 content = response.text
             else:
                 with open(url, "r", encoding="utf-8") as file:
@@ -1658,7 +1661,7 @@ class ChannelList(QMainWindow):
             )
             self.save_provider()
         except (requests.RequestException, IOError) as e:
-            print(f"Error loading M3U Playlist: {e}")
+            logger.warning(f"Error loading M3U Playlist: {e}")
 
     def load_stream(self, url):
         item = {"id": 1, "name": "Stream", "cmd": url}
@@ -1723,7 +1726,7 @@ class ChannelList(QMainWindow):
                 # Play the selected episode
                 self.play_item(item_data, is_episode=True)
             else:
-                print("Unknown item type selected.")
+                logger.info("Unknown item type selected.")
 
             # Clear search box after navigating and force re-filtering if needed
             if len(self.navigation_stack) != nav_len:
@@ -1731,7 +1734,7 @@ class ChannelList(QMainWindow):
                 if not self.search_box.isModified():
                     self.filter_content(self.search_box.text())
         else:
-            print("Item with no type selected.")
+            logger.info("Item with no type selected.")
 
     def go_back(self):
         if self.navigation_stack:
@@ -1818,7 +1821,7 @@ class ChannelList(QMainWindow):
             fetchurl = (
                 f"{url}/server/load.php?{self.get_categories_params(self.content_type)}"
             )
-            response = requests.get(fetchurl, headers=headers)
+            response = requests.get(fetchurl, headers=headers, timeout=5)
             result = response.json()
             categories = result["js"]
             if not categories:
@@ -1836,7 +1839,7 @@ class ChannelList(QMainWindow):
             # Sorting all channels now by category
             if self.content_type == "itv":
                 fetchurl = f"{url}/server/load.php?{self.get_allchannels_params()}"
-                response = requests.get(fetchurl, headers=headers)
+                response = requests.get(fetchurl, headers=headers, timeout=5)
                 result = response.json()
                 provider_content["contents"] = result["js"]["data"]
 
@@ -1864,7 +1867,7 @@ class ChannelList(QMainWindow):
             self.save_provider()
             self.display_categories(categories)
         except Exception as e:
-            print(f"Error loading STB categories: {e}")
+            logger.warning(f"Error loading STB categories: {e}")
 
     @staticmethod
     def get_categories_params(_type):
@@ -2128,7 +2131,7 @@ class ChannelList(QMainWindow):
                 episode_items, content="episode", select_first=select_first
             )
         else:
-            print("Season not found in data.")
+            logger.info("Season not found in data.")
 
     def update_progress(self, current, total):
         if total:
@@ -2162,9 +2165,9 @@ class ChannelList(QMainWindow):
                     f"{url}/server/load.php?type={self.content_type}&action=create_link"
                     f"&cmd={requests.utils.quote(cmd)}&JsHttpRequest=1-xml"
                 )
-            response = requests.get(fetchurl, headers=headers)
+            response = requests.get(fetchurl, headers=headers, timeout=5)
             if response.status_code != 200 or not response.content:
-                print(
+                logger.warning(
                     f"Error creating link: status code {response.status_code}, response content empty"
                 )
                 return None
@@ -2174,7 +2177,7 @@ class ChannelList(QMainWindow):
             self.link = link
             return link
         except Exception as e:
-            print(f"Error creating link: {e}")
+            logger.warning(f"Error creating link: {e}")
             return None
 
     @staticmethod

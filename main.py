@@ -1,4 +1,5 @@
 import ctypes
+import logging
 import platform
 import sys
 
@@ -8,20 +9,27 @@ from PySide6.QtWidgets import QApplication
 
 from channel_list import ChannelList
 from config_manager import ConfigManager
+from epg_manager import EpgManager
+from image_manager import ImageManager
+from provider_manager import ProviderManager
 from sleep_manager import allow_sleep, prevent_sleep
 from update_checker import check_for_updates
 from video_player import VideoPlayer
-from image_manager import ImageManager
-from provider_manager import ProviderManager
-from epg_manager import EpgManager
 
 if __name__ == "__main__":
+    # Basic logging configuration (tweak level as needed)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     app = QApplication(sys.argv)
 
     icon_path = "assets/qitv.png"
-    
+
     config_manager = ConfigManager()
-    image_manager = ImageManager(config_manager, config_manager.max_cache_image_size * 1024 * 1024)
+    image_manager = ImageManager(
+        config_manager, config_manager.max_cache_image_size * 1024 * 1024
+    )
     provider_manager = ProviderManager(config_manager)
     epg_manager = EpgManager(config_manager, provider_manager)
 
@@ -36,7 +44,9 @@ if __name__ == "__main__":
     prevent_sleep()
     try:
         player = VideoPlayer(config_manager)
-        channel_list = ChannelList(app, player, config_manager, provider_manager, image_manager, epg_manager)
+        channel_list = ChannelList(
+            app, player, config_manager, provider_manager, image_manager, epg_manager
+        )
         qdarktheme.setup_theme("auto")
         player.show()
         channel_list.show()

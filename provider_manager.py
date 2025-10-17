@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import random
 import string
@@ -9,6 +10,8 @@ import requests
 import tzlocal
 from PySide6.QtCore import QObject, Signal
 from urlobject import URLObject
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderManager(QObject):
@@ -86,12 +89,30 @@ class ProviderManager(QObject):
         with open(self.index_file, "w", encoding="utf-8") as f:
             f.write(serialized.decode("utf-8"))
 
-        # Delete provider files not in the providers list
-        for provider in os.listdir(self.provider_dir):
-            if provider == "index.json":
+        # Delete stale cache files not matching any known provider name hash
+        expected_files = set()
+        for p in self.providers:
+            try:
+                name = p.get("name") if isinstance(p, dict) else None
+                if name:
+                    expected_files.add(
+                        f"{hashlib.sha256(name.encode('utf-8')).hexdigest()}.json"
+                    )
+            except Exception:
+                # ignore malformed entries
+                pass
+
+        for entry in os.listdir(self.provider_dir):
+            if entry == "index.json":
                 continue
-            if provider not in self.providers:
-                os.remove(os.path.join(self.provider_dir, provider))
+            # Only consider json cache files for pruning
+            if not entry.endswith(".json"):
+                continue
+            if entry not in expected_files:
+                try:
+                    os.remove(os.path.join(self.provider_dir, entry))
+                except FileNotFoundError:
+                    pass
 
     def save_provider(self):
         serialized = json.dumps(self.current_provider_content, option=json.OPT_INDENT_2)
@@ -153,7 +174,7 @@ class ProviderManager(QObject):
             if serverload != "/server/load.php" and "handshake" in fetchurl:
                 serverload = "/server/load.php"
                 return self.do_handshake(url, mac, serverload)
-            print("Error in handshake:", e)
+            logger.warning("Error in handshake: %s", e)
             return False
 
     @staticmethod

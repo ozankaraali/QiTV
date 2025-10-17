@@ -7,8 +7,6 @@ from PySide6.QtCore import QMetaObject, QPoint, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QFrame, QMainWindow, QProgressBar, QVBoxLayout
 
-logging.basicConfig(level=logging.ERROR)
-
 
 class VLCLogger:
     def __init__(self):
@@ -55,7 +53,7 @@ class VideoPlayer(QMainWindow):
 
         self.video_frame = QFrame()
         self.video_frame.mouseDoubleClickEvent = self.mouseDoubleClickEvent
-        self.video_frame.installEventFilter(self)
+        # Note: No custom eventFilter implemented; avoid installing unused event filter
         t_lay_parent.addWidget(self.video_frame)
 
         # Custom user-agent string
@@ -102,10 +100,14 @@ class VideoPlayer(QMainWindow):
 
         self.progress_bar.mousePressEvent = self.seek_video
 
+        # Single vs double click handling
         self.click_position = None
         self.click_timer = QTimer(self)
         self.click_timer.setSingleShot(True)
         self.click_timer.timeout.connect(self.handle_click)
+        self._ignore_single_click = (
+            False  # guard to suppress single-click after dblclick
+        )
 
     def seek_video(self, event):
         if self.media_player.is_playing():
@@ -148,6 +150,11 @@ class VideoPlayer(QMainWindow):
             self.progress_bar.setFormat("Opening...")
             self.progress_bar.setValue(0)
         elif state == vlc.State.Buffering:
+            # Keep the bar visible in VOD, hide for live streams; set informative text
+            if self.media and self.media.get_duration() > 0:
+                self.progress_bar.setVisible(True)
+            else:
+                self.progress_bar.setVisible(False)
             self.progress_bar.setFormat("Buffering...")
             self.progress_bar.setValue(0)
 
@@ -196,6 +203,11 @@ class VideoPlayer(QMainWindow):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
+            # Suppress any pending single-click action
+            if self.click_timer.isActive():
+                self.click_timer.stop()
+            self._ignore_single_click = True
+
             if self.windowState() == Qt.WindowNoState:
                 QGuiApplication.setOverrideCursor(Qt.WaitCursor)
                 self.video_frame.show()
@@ -293,13 +305,7 @@ class VideoPlayer(QMainWindow):
         QGuiApplication.restoreOverrideCursor()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.click_position = event.globalPos()
-            self.click_timer.start(
-                200
-            )  # Wait for 200ms to determine if it's a click or drag
-
-        elif event.button() == Qt.RightButton:
+        if event.button() == Qt.RightButton:
             self.toggle_pip_mode()
             return
 
@@ -309,6 +315,7 @@ class VideoPlayer(QMainWindow):
             self.start_size = self.size()
             self.start_pos = self.pos()
             self.drag_position = event.globalPos()
+            self.click_position = event.globalPos()
 
             # Determine the resize type (edges or corners)
             if event.pos().x() <= 10:  # Left
@@ -337,12 +344,6 @@ class VideoPlayer(QMainWindow):
             event.accept()
 
     def mouseMoveEvent(self, event):
-        if (
-            self.click_timer.isActive()
-            and (event.globalPos() - self.click_position).manhattanLength() > 3
-        ):
-            self.click_timer.stop()  # Cancel the click timer if the mouse has moved
-
         if self.resizing:
             delta = event.globalPos() - self.drag_position
             new_width, new_height = self.start_size.width(), self.start_size.height()
@@ -369,9 +370,16 @@ class VideoPlayer(QMainWindow):
         event.accept()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.click_timer.isActive():
-            self.click_timer.stop()
-            self.handle_click()
+        if event.button() == Qt.LeftButton:
+            # If a double-click was just handled, ignore this release
+            if self._ignore_single_click:
+                self._ignore_single_click = False
+            else:
+                # Only consider as a click if not dragging/resizing
+                if not self.dragging and not self.resizing:
+                    # Defer single-click to allow double-click detection window
+                    interval = QGuiApplication.doubleClickInterval()
+                    self.click_timer.start(interval)
 
         self.dragging = False
         self.resizing = False

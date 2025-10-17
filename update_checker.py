@@ -1,26 +1,79 @@
+import logging
+from typing import List, Tuple
+
 import requests
 from packaging.version import parse
+from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import QMessageBox
 
 from config_manager import ConfigManager
 
+logger = logging.getLogger(__name__)
+
+# Keep references to background threads/workers to avoid premature GC
+_update_jobs: List[Tuple[QThread, "UpdateWorker"]] = []
+
+
+class UpdateWorker(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+
+    def run(self):
+        repo = "ozankaraali/QiTV"
+        api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+        try:
+            response = requests.get(api_url, timeout=5)
+            response.raise_for_status()
+            latest_release = response.json()
+            latest_version = extract_version_from_tag(latest_release.get("name", ""))
+            if latest_version and compare_versions(
+                latest_version, ConfigManager.CURRENT_VERSION
+            ):
+                self.finished.emit(
+                    {
+                        "version": latest_version,
+                        "url": latest_release.get("html_url", ""),
+                    }
+                )
+            else:
+                self.finished.emit(None)
+        except requests.RequestException as e:
+            self.error.emit(str(e))
+
 
 def check_for_updates():
-    repo = "ozankaraali/QiTV"
-    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
-    try:
-        response = requests.get(api_url)
-        response.raise_for_status()
-        latest_release = response.json()
-        latest_version = extract_version_from_tag(latest_release["name"])
-        if latest_version and compare_versions(
-            latest_version, ConfigManager.CURRENT_VERSION
-        ):
-            show_update_dialog(latest_version, latest_release["html_url"])
-        else:
-            print("No new updates found or version is pre-release.")
-    except requests.RequestException as e:
-        print(f"Error checking for updates: {e}")
+    # Run update check in a worker thread to avoid blocking UI
+    thread = QThread()
+    worker = UpdateWorker()
+    worker.moveToThread(thread)
+
+    def on_started():
+        worker.run()
+
+    def on_finished(result):
+        thread.quit()
+        thread.wait()
+        try:
+            _update_jobs.remove((thread, worker))
+        except ValueError:
+            pass
+        if result:
+            show_update_dialog(result["version"], result["url"])
+
+    def on_error(msg):
+        thread.quit()
+        thread.wait()
+        try:
+            _update_jobs.remove((thread, worker))
+        except ValueError:
+            pass
+        logger.warning(f"Error checking for updates: {msg}")
+
+    thread.started.connect(on_started)
+    worker.finished.connect(on_finished)
+    worker.error.connect(on_error)
+    thread.start()
+    _update_jobs.append((thread, worker))
 
 
 def extract_version_from_tag(tag):
@@ -31,7 +84,7 @@ def extract_version_from_tag(tag):
     if match:
         return match.group(0)
     else:
-        print(f"Unexpected version format found: '{tag}'")
+        logger.info(f"Unexpected version format found: '{tag}'")
         return None
 
 
