@@ -9,18 +9,10 @@ import subprocess
 import time
 from datetime import datetime
 from typing import Optional
-from urllib.parse import urlparse
 
 import requests
 from PySide6.QtCore import QBuffer, QObject, QRect, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import (
-    QColor,
-    QFont,
-    QFontMetrics,
-    QTextCursor,
-    QTextDocument,
-    QTextOption,
-)
+from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -37,10 +29,6 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSizePolicy,
     QSplitter,
-    QStyle,
-    QStyledItemDelegate,
-    QStyleOptionProgressBar,
-    QStyleOptionViewItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -53,6 +41,9 @@ logger = logging.getLogger(__name__)
 from content_loader import ContentLoader
 from image_loader import ImageLoader
 from options import OptionsDialog
+from services.export import save_m3u_content, save_stb_content
+from services.m3u import parse_m3u
+from widgets.delegates import ChannelItemDelegate, HtmlItemDelegate
 
 
 class M3ULoaderWorker(QObject):
@@ -206,162 +197,7 @@ class NumberedTreeWidgetItem(QTreeWidgetItem):
         return self.text(sort_column) < other.text(sort_column)
 
 
-class HtmlItemDelegate(QStyledItemDelegate):
-    elidedPostfix = "..."
-    doc = QTextDocument()
-    doc.setDocumentMargin(1)
-
-    def __init__(self):
-        super().__init__()
-
-    def paint(self, painter, inOption, index):
-        options = QStyleOptionViewItem(inOption)
-        self.initStyleOption(options, index)
-        if not options.text:
-            return super().paint(painter, inOption, index)
-        style = options.widget.style() if options.widget else QApplication.style()
-
-        textOption = QTextOption()
-        textOption.setWrapMode(
-            QTextOption.WordWrap
-            if options.features & QStyleOptionViewItem.WrapText
-            else QTextOption.ManualWrap
-        )
-        textOption.setTextDirection(options.direction)
-
-        self.doc.setDefaultTextOption(textOption)
-        self.doc.setHtml(options.text)
-        self.doc.setDefaultFont(options.font)
-        self.doc.setTextWidth(options.rect.width())
-        self.doc.adjustSize()
-
-        if self.doc.size().width() > options.rect.width():
-            # Elide text
-            cursor = QTextCursor(self.doc)
-            cursor.movePosition(QTextCursor.End)
-            metric = QFontMetrics(options.font)
-            postfixWidth = metric.horizontalAdvance(self.elidedPostfix)
-            while self.doc.size().width() > options.rect.width() - postfixWidth:
-                cursor.deletePreviousChar()
-                self.doc.adjustSize()
-            cursor.insertText(self.elidedPostfix)
-
-        # Painting item without text (this takes care of painting e.g. the highlighted for selected
-        # or hovered over items in an ItemView)
-        options.text = ""
-        style.drawControl(QStyle.CE_ItemViewItem, options, painter, inOption.widget)
-
-        # Figure out where to render the text in order to follow the requested alignment
-        textRect = style.subElementRect(QStyle.SE_ItemViewItemText, options)
-        documentSize = QSize(
-            self.doc.size().width(), self.doc.size().height()
-        )  # Convert QSizeF to QSize
-        layoutRect = QRect(
-            QStyle.alignedRect(
-                Qt.LayoutDirectionAuto, options.displayAlignment, documentSize, textRect
-            )
-        )
-
-        painter.save()
-
-        # Translate the painter to the origin of the layout rectangle in order for the text to be
-        # rendered at the correct position
-        painter.translate(layoutRect.topLeft())
-        self.doc.drawContents(painter, textRect.translated(-textRect.topLeft()))
-
-        painter.restore()
-
-    def sizeHint(self, inOption, index):
-        options = QStyleOptionViewItem(inOption)
-        self.initStyleOption(options, index)
-        if not options.text:
-            return super().sizeHint(inOption, index)
-        self.doc.setHtml(options.text)
-        self.doc.setTextWidth(options.rect.width())
-        return QSize(self.doc.idealWidth(), self.doc.size().height())
-
-
-class ChannelItemDelegate(QStyledItemDelegate):
-    def __init__(self):
-        super().__init__()
-        # Create a default font to avoid font family issues
-        self.default_font = QFont()
-        self.default_font.setPointSize(12)
-
-    def paint(self, painter, inOption, index):
-        col = index.column()
-        if col == 2:  # EPG program progress
-            progress = index.data(Qt.UserRole)
-            if progress is not None:
-                options = QStyleOptionViewItem(inOption)
-                self.initStyleOption(options, index)
-
-                # Draw selection background first
-                style = (
-                    options.widget.style() if options.widget else QApplication.style()
-                )
-                style.drawPrimitive(
-                    QStyle.PE_PanelItemViewItem, options, painter, options.widget
-                )
-
-                # Save painter state
-                painter.save()
-
-                # Calculate progress bar dimensions with padding
-                padding = 4
-                rect = options.rect.adjusted(padding, padding, -padding, -padding)
-
-                # Draw background (gray rectangle)
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor(200, 200, 200))
-                painter.drawRect(rect)
-
-                # Draw progress (blue rectangle)
-                if progress > 0:
-                    progress_width = int((rect.width() * progress) / 100)
-                    progress_rect = QRect(
-                        rect.x(), rect.y(), progress_width, rect.height()
-                    )
-                    painter.setBrush(QColor(0, 120, 215))  # Windows 10 style blue
-                    painter.drawRect(progress_rect)
-
-                # Restore painter state
-                painter.restore()
-            else:
-                super().paint(painter, inOption, index)
-        elif col == 3:  # EPG program name
-            epg_text = index.data(Qt.UserRole)
-            if epg_text:
-                options = QStyleOptionViewItem(inOption)
-                self.initStyleOption(options, index)
-                style = (
-                    options.widget.style() if options.widget else QApplication.style()
-                )
-                options.text = epg_text
-                style.drawControl(
-                    QStyle.CE_ItemViewItem, options, painter, inOption.widget
-                )
-            else:
-                super().paint(painter, inOption, index)
-        else:
-            super().paint(painter, inOption, index)
-
-    def sizeHint(self, option, index):
-        col = index.column()
-        if col == 2:  # EPG program progress
-            # Set a minimum width of 100 pixels and height of 24 pixels for the progress bar column
-            return QSize(100, 24)
-        elif col == 3:  # EPG program name
-            options = QStyleOptionViewItem(option)
-            self.initStyleOption(options, index)
-            style = options.widget.style() if options.widget else QApplication.style()
-            text = index.data(Qt.UserRole)
-            font = options.font
-            if not font:
-                font = style.font(QStyle.CE_ItemViewItem, options, index)
-            metrics = QFontMetrics(font)
-            return QSize(metrics.boundingRect(text).width(), metrics.height())
-        return super().sizeHint(option, index)
+## Delegates moved to widgets/delegates.py
 
 
 class SetProviderThread(QThread):
@@ -1629,65 +1465,14 @@ class ChannelList(QMainWindow):
                 all_items = []
                 for items in provider_content.get("contents", {}).values():
                     all_items.extend(items)
-                self.save_stb_content(base_url, all_items, mac, file_path)
+                save_stb_content(base_url, all_items, mac, file_path)
             elif config_type in ["M3UPLAYLIST", "M3USTREAM", "XTREAM"]:
                 content_items = provider_content if provider_content else []
-                self.save_m3u_content(content_items, file_path)
+                save_m3u_content(content_items, file_path)
             else:
                 logger.info(f"Unknown provider type: {config_type}")
 
-    @staticmethod
-    def save_m3u_content(content_data, file_path):
-        try:
-            with open(file_path, "w", encoding="utf-8") as file:
-                file.write("#EXTM3U\n")
-                count = 0
-                for item in content_data:
-                    name = item.get("name", "Unknown")
-                    logo = item.get("logo", "")
-                    group = item.get("group", "")
-                    xmltv_id = item.get("xmltv_id", "")
-                    cmd_url = item.get("cmd")
-
-                    if cmd_url:
-                        item_str = f'#EXTINF:-1 tvg-id="{xmltv_id}" tvg-logo="{logo}" group-title="{group}" ,{name}\n{cmd_url}\n'
-                        count += 1
-                        file.write(item_str)
-                logger.info(f"Items exported: {count}")
-                logger.info(f"Content list has been saved to {file_path}")
-        except IOError as e:
-            logger.warning(f"Error saving content list: {e}")
-
-    @staticmethod
-    def save_stb_content(base_url, content_data, mac, file_path):
-        try:
-            with open(file_path, "w", encoding="utf-8") as file:
-                file.write("#EXTM3U\n")
-                count = 0
-                for item in content_data:
-                    name = item.get("name", "Unknown")
-                    logo = item.get("logo", "")
-                    xmltv_id = item.get("xmltv_id", "")
-                    cmd_url = item.get("cmd", "").replace("ffmpeg ", "")
-
-                    # Generalized URL construction
-                    if "localhost" in cmd_url:
-                        id_match = re.search(r"/(ch|vod)/(\d+)_", cmd_url)
-                        if id_match:
-                            content_type = id_match.group(1)
-                            content_id = id_match.group(2)
-                            if content_type == "ch":
-                                cmd_url = f"{base_url}/play/live.php?mac={mac}&stream={content_id}&extension=m3u8"
-                            elif content_type == "vod":
-                                cmd_url = f"{base_url}/play/vod.php?mac={mac}&stream={content_id}&extension=m3u8"
-
-                    item_str = f'#EXTINF:-1 tvg-id="{xmltv_id}" tvg-logo="{logo}" ,{name}\n{cmd_url}\n'
-                    count += 1
-                    file.write(item_str)
-                logger.info(f"Items exported: {count}")
-                logger.info(f"Content list has been saved to {file_path}")
-        except IOError as e:
-            logger.warning(f"Error saving content list: {e}")
+    # save_m3u_content and save_stb_content moved to services/export.py
 
     def save_config(self):
         self.config_manager.save_config()
@@ -1754,7 +1539,7 @@ class ChannelList(QMainWindow):
                 def on_finished(payload):
                     try:
                         content = payload.get("content", "")
-                        parsed_content = self.parse_m3u(content)
+                        parsed_content = parse_m3u(content)
                         self.display_content(parsed_content)
                         self.provider_manager.current_provider_content[
                             self.content_type
@@ -1787,7 +1572,7 @@ class ChannelList(QMainWindow):
             else:
                 with open(url, "r", encoding="utf-8") as file:
                     content = file.read()
-                parsed_content = self.parse_m3u(content)
+                parsed_content = parse_m3u(content)
                 self.display_content(parsed_content)
                 self.provider_manager.current_provider_content[self.content_type] = (
                     parsed_content
@@ -1908,44 +1693,7 @@ class ChannelList(QMainWindow):
         options.exec_()
 
     @staticmethod
-    def parse_m3u(data):
-        lines = data.split("\n")
-        result = []
-        item = {}
-        id_counter = 0
-        for line in lines:
-            if line.startswith("#EXTINF"):
-                tvg_id_match = re.search(r'tvg-id="([^"]+)"', line)
-                tvg_logo_match = re.search(r'tvg-logo="([^"]+)"', line)
-                group_title_match = re.search(r'group-title="([^"]+)"', line)
-                user_agent_match = re.search(r'user-agent="([^"]+)"', line)
-                item_name_match = re.search(r",([^,]+)$", line)
-
-                tvg_id = tvg_id_match.group(1) if tvg_id_match else None
-                tvg_logo = tvg_logo_match.group(1) if tvg_logo_match else None
-                group_title = group_title_match.group(1) if group_title_match else None
-                user_agent = user_agent_match.group(1) if user_agent_match else None
-                item_name = item_name_match.group(1) if item_name_match else None
-
-                id_counter += 1
-                item = {
-                    "id": id_counter,
-                    "group": group_title,
-                    "xmltv_id": tvg_id,
-                    "name": item_name,
-                    "logo": tvg_logo,
-                    "user_agent": user_agent,
-                }
-
-            elif line.startswith("#EXTVLCOPT:http-user-agent="):
-                user_agent = line.split("=", 1)[1]
-                item["user_agent"] = user_agent
-
-            elif line.startswith("http"):
-                urlobject = urlparse(line)
-                item["cmd"] = urlobject.geturl()
-                result.append(item)
-        return result
+    # parse_m3u moved to services/m3u.py
 
     def load_stb_categories(self, url, headers):
         # Run network calls in a worker thread

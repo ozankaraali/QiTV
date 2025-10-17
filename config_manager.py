@@ -8,7 +8,7 @@ from multikeydict import MultiKeyDict
 
 
 class ConfigManager:
-    CURRENT_VERSION = "1.6.4"  # Set your current version here
+    CURRENT_VERSION = "1.6.5"  # Set your current version here
 
     DEFAULT_OPTION_CHECKUPDATE = True
     DEFAULT_OPTION_STB_CONTENT_INFO = False

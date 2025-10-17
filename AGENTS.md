@@ -31,7 +31,10 @@ Current Work Plan (Living TODO)
    - [ ] Consolidate provider/EPG URL building and headers in one place
 
 3) Modularity and structure
-   - [ ] Split `channel_list.py` into: widgets/ (delegates, panels), services/ (provider, epg, images), models/ (data structs)
+   - [x] Extract delegates to `widgets/delegates.py`
+   - [x] Move M3U parsing to `services/m3u.py`
+   - [x] Move export helpers to `services/export.py`
+   - [ ] Split remaining `channel_list.py` into widgets/ (panels) and services/ (provider, epg)
    - [ ] Move image caching and EPG parsing unit-testable logic out of UI code paths
    - [ ] Consider a small event-bus/signal helper to decouple UI components
 
@@ -48,14 +51,25 @@ Current Work Plan (Living TODO)
    - [ ] Pin more dependency versions in requirements.txt (PySide6, orjson, aiohttp, tzlocal)
    - [ ] Add a `pyproject.toml` for tool config (black/isort/mypy) to keep settings centralized
 
+Next Steps (Paused)
+- Extract panels from `channel_list.py` into `widgets/`:
+  - content info panel, list panel, media controls
+- Add `services/provider_api.py` to centralize STB/Xtream calls with timeouts + QThread wrappers
+- Move remaining UI-thread `requests` to workers (exports may stay synchronous)
+- Introduce lightweight dataclasses for Channel/Program for safer data access
+- Add cancelation support to network workers (or switch to aiohttp within QThreads)
+- Add unit tests for `services/m3u.py` and `services/export.py`
+
 Recent Changes (for context)
 - Fix: Prevent single-click pause when double-click toggles fullscreen (video_player.py)
 - Fix: Provider cache pruning now matches hashed provider-name files (provider_manager.py)
 - Fix: Image cache accounting bug when file missing on disk (image_manager.py)
 - Fix: Country field mapping typo in content info (channel_list.py)
- - Infra: Centralized logging config (main.py); replaced prints with loggers across modules
- - UX: Buffering progress bar visibility consistent for live/VOD (video_player.py)
- - Perf: Update checker moved to QThread and added network timeouts; added timeouts in several requests
+- Infra: Centralized logging config (main.py); replaced prints with loggers across modules
+- UX: Buffering progress bar visibility consistent for live/VOD (video_player.py)
+- Perf: Update checker moved to QThread and added network timeouts; added timeouts in several requests
+- Arch: Extracted delegates to `widgets/delegates.py`; moved M3U parsing to `services/m3u.py`; moved export helpers to `services/export.py`
+ - Packaging: Added `__init__.py` to `services/` and `widgets/` to satisfy mypy package resolution
 
 Conventions for New Code
 - Keep UI and data/services separate. Long-running network calls must run in QThread.
