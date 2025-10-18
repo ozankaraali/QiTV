@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime
 import html
 import logging
 import os
@@ -7,10 +8,9 @@ import re
 import shutil
 import subprocess
 import time
-from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote as url_quote
 
-import requests
 from PySide6.QtCore import QBuffer, QObject, QRect, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+import requests
 from urlobject import URLObject
 
 logger = logging.getLogger(__name__)
@@ -76,14 +77,14 @@ class STBCategoriesWorker(QObject):
         try:
             url = URLObject(self.base_url)
             base = f"{url.scheme}://{url.netloc}"
-            fetchurl = (
-                f"{base}/server/load.php?type=itv&action=get_genres&JsHttpRequest=1-xml"
-            )
+            fetchurl = f"{base}/server/load.php?type=itv&action=get_genres&JsHttpRequest=1-xml"
             resp = requests.get(fetchurl, headers=self.headers, timeout=10)
             resp.raise_for_status()
             categories = resp.json()["js"]
 
-            fetchurl = f"{base}/server/load.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
+            fetchurl = (
+                f"{base}/server/load.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
+            )
             resp = requests.get(fetchurl, headers=self.headers, timeout=10)
             resp.raise_for_status()
             all_channels = resp.json()["js"]["data"]
@@ -121,12 +122,12 @@ class LinkCreatorWorker(QObject):
             if self.is_episode:
                 fetchurl = (
                     f"{base}/server/load.php?type={'vod' if self.content_type == 'series' else self.content_type}&action=create_link"
-                    f"&cmd={requests.utils.quote(self.cmd)}&series={self.series_param}&JsHttpRequest=1-xml"
+                    f"&cmd={url_quote(self.cmd)}&series={self.series_param}&JsHttpRequest=1-xml"
                 )
             else:
                 fetchurl = (
                     f"{base}/server/load.php?type={self.content_type}&action=create_link"
-                    f"&cmd={requests.utils.quote(self.cmd)}&JsHttpRequest=1-xml"
+                    f"&cmd={url_quote(self.cmd)}&JsHttpRequest=1-xml"
                 )
             response = requests.get(fetchurl, headers=self.headers, timeout=10)
             response.raise_for_status()
@@ -174,13 +175,9 @@ class ChannelTreeWidgetItem(QTreeWidgetItem):
             p2 = other.data(sort_column, Qt.UserRole)
             if p2 is None:
                 return True
-            return self.data(sort_column, Qt.UserRole) < other.data(
-                sort_column, Qt.UserRole
-            )
+            return self.data(sort_column, Qt.UserRole) < other.data(sort_column, Qt.UserRole)
         elif sort_column == 3:  # EPG Program name
-            return self.data(sort_column, Qt.UserRole) < other.data(
-                sort_column, Qt.UserRole
-            )
+            return self.data(sort_column, Qt.UserRole) < other.data(sort_column, Qt.UserRole)
 
         return self.text(sort_column) < other.text(sort_column)
 
@@ -218,9 +215,7 @@ class SetProviderThread(QThread):
 
 class ChannelList(QMainWindow):
 
-    def __init__(
-        self, app, player, config_manager, provider_manager, image_manager, epg_manager
-    ):
+    def __init__(self, app, player, config_manager, provider_manager, image_manager, epg_manager):
         super().__init__()
         self.app = app
         self.player = player
@@ -238,8 +233,10 @@ class ChannelList(QMainWindow):
         self.setCentralWidget(self.container_widget)
 
         self.content_type = "itv"  # Default to channels (STB type)
-        self.current_list_content = None
-        self.content_info_show = None
+        self.current_list_content: Optional[str] = None
+        self.content_info_shown: Optional[str] = None
+        self.image_loader: Optional[ImageLoader] = None
+        self.content_loader: Optional[ContentLoader] = None
 
         self.create_upper_panel()
         self.create_list_panel()
@@ -264,10 +261,10 @@ class ChannelList(QMainWindow):
         container_layout.addWidget(self.splitter)
         container_layout.addWidget(self.media_controls)
 
-        self.link = None
-        self.current_category = None  # For back navigation
-        self.current_series = None
-        self.current_season = None
+        self.link: Optional[str] = None
+        self.current_category: Optional[Dict[str, Any]] = None  # For back navigation
+        self.current_series: Optional[Dict[str, Any]] = None
+        self.current_season: Optional[Dict[str, Any]] = None
         self.navigation_stack = []  # To keep track of navigation for back button
 
         # Connect player signals to show/hide media controls
@@ -311,25 +308,15 @@ class ChannelList(QMainWindow):
             content_type = item_data.get("type")
 
             if self.config_manager.channel_epg and self.can_show_epg(content_type):
-                epg_data = self.epg_manager.get_programs_for_channel(
-                    item_data["data"], None, 1
-                )
+                epg_data = self.epg_manager.get_programs_for_channel(item_data["data"], None, 1)
                 if epg_data:
                     epg_item = epg_data[0]
                     if epg_source == "STB":
-                        start_time = datetime.strptime(
-                            epg_item["time"], "%Y-%m-%d %H:%M:%S"
-                        )
-                        end_time = datetime.strptime(
-                            epg_item["time_to"], "%Y-%m-%d %H:%M:%S"
-                        )
+                        start_time = datetime.strptime(epg_item["time"], "%Y-%m-%d %H:%M:%S")
+                        end_time = datetime.strptime(epg_item["time_to"], "%Y-%m-%d %H:%M:%S")
                     else:
-                        start_time = datetime.strptime(
-                            epg_item["@start"], "%Y%m%d%H%M%S %z"
-                        )
-                        end_time = datetime.strptime(
-                            epg_item["@stop"], "%Y%m%d%H%M%S %z"
-                        )
+                        start_time = datetime.strptime(epg_item["@start"], "%Y%m%d%H%M%S %z")
+                        end_time = datetime.strptime(epg_item["@stop"], "%Y%m%d%H%M%S %z")
                     now = datetime.now(start_time.tzinfo)
                     if end_time != start_time:
                         progress = (
@@ -347,7 +334,8 @@ class ChannelList(QMainWindow):
                     item.setData(2, Qt.UserRole, progress)
                     item.setData(3, Qt.UserRole, epg_text)
                 else:
-                    item.setData(2, Qt.UserRole, None)
+                    # Avoid passing None to Qt (causes _pythonToCppCopy warnings)
+                    item.setData(2, Qt.UserRole, 0)
                     item.setData(3, Qt.UserRole, "")
 
         self.content_list.viewport().update()
@@ -359,13 +347,9 @@ class ChannelList(QMainWindow):
         if force_update:
             self.provider_manager.clear_current_provider_cache()
 
-        self.set_provider_thread = SetProviderThread(
-            self.provider_manager, self.epg_manager
-        )
+        self.set_provider_thread = SetProviderThread(self.provider_manager, self.epg_manager)
         self.set_provider_thread.progress.connect(self.update_busy_progress)
-        self.set_provider_thread.finished.connect(
-            lambda: self.set_provider_finished(force_update)
-        )
+        self.set_provider_thread.finished.connect(lambda: self.set_provider_finished(force_update))
         self.set_provider_thread.start()
 
     def set_provider_finished(self, force_update=False):
@@ -468,9 +452,7 @@ class ChannelList(QMainWindow):
 
         self.search_box = QLineEdit(self.list_panel)
         self.search_box.setPlaceholderText("Search content...")
-        self.search_box.textChanged.connect(
-            lambda: self.filter_content(self.search_box.text())
-        )
+        self.search_box.textChanged.connect(lambda: self.filter_content(self.search_box.text()))
         list_layout.addWidget(self.search_box)
 
         self.content_list = QTreeWidget(self.list_panel)
@@ -567,9 +549,7 @@ class ChannelList(QMainWindow):
             self.load_content_in_category(self.current_category)
 
         # Restore the sorting
-        self.content_list.sortItems(
-            sort_column, self.content_list.header().sortIndicatorOrder()
-        )
+        self.content_list.sortItems(sort_column, self.content_list.header().sortIndicatorOrder())
 
         # Restore the selected item
         if selected_item:
@@ -626,18 +606,13 @@ class ChannelList(QMainWindow):
         self.splitter_content_info.setSizes(
             [
                 int(self.content_info_panel.width() * self.splitter_content_info_ratio),
-                int(
-                    self.content_info_panel.width()
-                    * (1 - self.splitter_content_info_ratio)
-                ),
+                int(self.content_info_panel.width() * (1 - self.splitter_content_info_ratio)),
             ]
         )
         self.content_info_shown = "channel"
 
         self.program_list.itemSelectionChanged.connect(self.update_channel_program)
-        self.splitter_content_info.splitterMoved.connect(
-            self.update_splitter_content_info_ratio
-        )
+        self.splitter_content_info.splitterMoved.connect(self.update_splitter_content_info_ratio)
 
     def clear_content_info_panel(self):
         # Clear all widgets from the content_info layout
@@ -728,9 +703,7 @@ class ChannelList(QMainWindow):
             self.program_list.addItem(item)
             xmltv_id = item_data.get("xmltv_id", "")
             if xmltv_id:
-                self.content_info_text.setText(
-                    f'No EPG found for channel id "{xmltv_id}"'
-                )
+                self.content_info_text.setText(f'No EPG found for channel id "{xmltv_id}"')
             else:
                 self.content_info_text.setText(f"Channel without id")
 
@@ -798,7 +771,9 @@ class ChannelList(QMainWindow):
                     if isinstance(category, dict):
                         info += f"<b>Category:</b> {category.get('__text')}<br>"
                     elif isinstance(category, list):
-                        info += f"<b>Category:</b> {', '.join([c.get('__text') for c in category])}<br>"
+                        info += (
+                            f"<b>Category:</b> {', '.join([c.get('__text') for c in category])}<br>"
+                        )
                 if rating:
                     info += f"<b>Rating:</b> {rating.get('__text')}<br>"
                 if desc:
@@ -813,17 +788,23 @@ class ChannelList(QMainWindow):
                         if isinstance(actor, dict):
                             info += f"<b>Actor:</b> {actor.get('__text')}<br>"
                         elif isinstance(actor, list):
-                            info += f"<b>Actor:</b> {', '.join([c.get('__text') for c in actor])}<br>"
+                            info += (
+                                f"<b>Actor:</b> {', '.join([c.get('__text') for c in actor])}<br>"
+                            )
                     if guest:
                         if isinstance(guest, dict):
                             info += f"<b>Guest:</b> {guest.get('__text')}<br>"
                         elif isinstance(guest, list):
-                            info += f"<b>Guest:</b> {', '.join([c.get('__text') for c in guest])}<br>"
+                            info += (
+                                f"<b>Guest:</b> {', '.join([c.get('__text') for c in guest])}<br>"
+                            )
                     if writer:
                         if isinstance(writer, dict):
                             info += f"<b>Writer:</b> {writer.get('__text')}<br>"
                         elif isinstance(writer, list):
-                            info += f"<b>Writer:</b> {', '.join([c.get('__text') for c in writer])}<br>"
+                            info += (
+                                f"<b>Writer:</b> {', '.join([c.get('__text') for c in writer])}<br>"
+                            )
                     if presenter:
                         if isinstance(presenter, dict):
                             info += f"<b>Presenter:</b> {presenter.get('__text')}<br>"
@@ -848,7 +829,9 @@ class ChannelList(QMainWindow):
                         if isinstance(editor, dict):
                             info += f"<b>Editor:</b> {editor.get('__text')}<br>"
                         elif isinstance(editor, list):
-                            info += f"<b>Editor:</b> {', '.join([c.get('__text') for c in editor])}<br>"
+                            info += (
+                                f"<b>Editor:</b> {', '.join([c.get('__text') for c in editor])}<br>"
+                            )
                 if country:
                     info += f"<b>Country:</b> {country.get('__text')}<br>"
 
@@ -858,7 +841,7 @@ class ChannelList(QMainWindow):
                 icon_url = item_data.get("icon", {}).get("@src")
                 if icon_url:
                     self.lock_ui_before_loading()
-                    if hasattr(self, "image_loader") and self.image_loader.isRunning():
+                    if self.image_loader and self.image_loader.isRunning():
                         self.image_loader.wait()
                     self.image_loader = ImageLoader(
                         [
@@ -901,7 +884,7 @@ class ChannelList(QMainWindow):
         poster_url = item_data.get("screenshot_uri", "")
         if poster_url:
             self.lock_ui_before_loading()
-            if hasattr(self, "image_loader") and self.image_loader.isRunning():
+            if self.image_loader and self.image_loader.isRunning():
                 self.image_loader.wait()
             self.image_loader = ImageLoader(
                 [
@@ -977,7 +960,7 @@ class ChannelList(QMainWindow):
                 self.image_manager.remove_icon_from_cache(url_logo)
 
         self.lock_ui_before_loading()
-        if hasattr(self, "image_loader") and self.image_loader.isRunning():
+        if self.image_loader and self.image_loader.isRunning():
             self.image_loader.wait()
         self.image_loader = ImageLoader(logo_urls, self.image_manager, iconified=True)
         self.image_loader.progress_updated.connect(self.update_channel_logos)
@@ -1025,9 +1008,7 @@ class ChannelList(QMainWindow):
         self.content_list.setSortingEnabled(False)
         self.content_list.setColumnCount(1)
         if self.content_type == "itv":
-            self.content_list.setHeaderLabels(
-                [f"Channel Categories ({len(categories)})"]
-            )
+            self.content_list.setHeaderLabels([f"Channel Categories ({len(categories)})"])
         elif self.content_type == "vod":
             self.content_list.setHeaderLabels([f"Movie Categories ({len(categories)})"])
         elif self.content_type == "series":
@@ -1064,9 +1045,7 @@ class ChannelList(QMainWindow):
                 )
                 if previous_selected:
                     self.content_list.setCurrentItem(previous_selected[0])
-                    self.content_list.scrollToItem(
-                        previous_selected[0], QTreeWidget.PositionAtTop
-                    )
+                    self.content_list.scrollToItem(previous_selected[0], QTreeWidget.PositionAtTop)
 
     def display_content(self, items, content="m3ucontent", select_first=True):
         # Unregister the selection change event
@@ -1080,22 +1059,14 @@ class ChannelList(QMainWindow):
         self.refresh_on_air_timer.stop()
 
         self.current_list_content = content
-        need_logos = (
-            content in ["channel", "m3ucontent"] and self.config_manager.channel_logos
-        )
+        need_logos = content in ["channel", "m3ucontent"] and self.config_manager.channel_logos
         logo_urls = []
         use_epg = self.can_show_epg(content) and self.config_manager.channel_epg
 
         # Define headers for different content types
-        category_header = (
-            self.current_category.get("title", "") if self.current_category else ""
-        )
-        serie_header = (
-            self.current_series.get("name", "") if self.current_series else ""
-        )
-        season_header = (
-            self.current_season.get("name", "") if self.current_season else ""
-        )
+        category_header = self.current_category.get("title", "") if self.current_category else ""
+        serie_header = self.current_series.get("name", "") if self.current_series else ""
+        season_header = self.current_season.get("name", "") if self.current_season else ""
         header_info = {
             "serie": {
                 "headers": [
@@ -1116,9 +1087,7 @@ class ChannelList(QMainWindow):
             "season": {
                 "headers": [
                     "#",
-                    self.shorten_header(
-                        f"{category_header} > {serie_header} > Seasons"
-                    ),
+                    self.shorten_header(f"{category_header} > {serie_header} > Seasons"),
                     "Added",
                 ],
                 "keys": ["number", "o_name", "added"],
@@ -1141,8 +1110,7 @@ class ChannelList(QMainWindow):
                 "keys": ["number", "name"],
             },
             "m3ucontent": {
-                "headers": [f"Name ({len(items)})", "Group"]
-                + (["", "On Air"] if use_epg else []),
+                "headers": [f"Name ({len(items)})", "Group"] + (["", "On Air"] if use_epg else []),
                 "keys": ["name", "group"],
             },
         }
@@ -1164,9 +1132,7 @@ class ChannelList(QMainWindow):
             for i, key in enumerate(header_info[content]["keys"]):
                 if key == "added":
                     # Change a date time from "YYYY-MM-DD HH:MM:SS" to "YYYY-MM-DD" only
-                    list_item.setText(
-                        i, html.unescape(item_data.get(key, "")).split()[0]
-                    )
+                    list_item.setText(i, html.unescape(item_data.get(key, "")).split()[0])
                 else:
                     list_item.setText(i, html.unescape(item_data.get(key, "")))
 
@@ -1215,19 +1181,15 @@ class ChannelList(QMainWindow):
                 )
                 if previous_selected:
                     self.content_list.setCurrentItem(previous_selected[0])
-                    self.content_list.scrollToItem(
-                        previous_selected[0], QTreeWidget.PositionAtTop
-                    )
+                    self.content_list.scrollToItem(previous_selected[0], QTreeWidget.PositionAtTop)
 
         # Load channel logos if needed
         self.rescanlogo_button.setVisible(need_logos)
         if need_logos:
             self.lock_ui_before_loading()
-            if hasattr(self, "image_loader") and self.image_loader.isRunning():
+            if self.image_loader and self.image_loader.isRunning():
                 self.image_loader.wait()
-            self.image_loader = ImageLoader(
-                logo_urls, self.image_manager, iconified=True
-            )
+            self.image_loader = ImageLoader(logo_urls, self.image_manager, iconified=True)
             self.image_loader.progress_updated.connect(self.update_channel_logos)
             self.image_loader.finished.connect(self.image_loader_finished)
             self.image_loader.start()
@@ -1248,9 +1210,7 @@ class ChannelList(QMainWindow):
         if data:
             pixmap = data.get("pixmap", None)
             if pixmap:
-                scaled_pixmap = pixmap.scaled(
-                    200, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
+                scaled_pixmap = pixmap.scaled(200, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 buffer = QBuffer()
                 buffer.open(QBuffer.ReadWrite)
                 scaled_pixmap.save(buffer, "PNG")
@@ -1325,12 +1285,8 @@ class ChannelList(QMainWindow):
                 if platform.system() == "Windows":
                     vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
                     if not vlc_path:
-                        program_files = os.environ.get(
-                            "ProgramFiles", "C:\\Program Files"
-                        )
-                        vlc_path = os.path.join(
-                            program_files, "VideoLAN", "VLC", "vlc.exe"
-                        )
+                        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+                        vlc_path = os.path.join(program_files, "VideoLAN", "VLC", "vlc.exe")
                     subprocess.Popen([vlc_path, self.link])
                 elif platform.system() == "Darwin":  # macOS
                     vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
@@ -1344,9 +1300,13 @@ class ChannelList(QMainWindow):
                             if os.path.exists(expanded_path):
                                 vlc_path = expanded_path
                                 break
+                    if not vlc_path:
+                        raise FileNotFoundError("VLC not found")
                     subprocess.Popen([vlc_path, self.link])
                 else:  # Assuming Linux or other Unix-like OS
                     vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
+                    if not vlc_path:
+                        raise FileNotFoundError("VLC not found")
                     subprocess.Popen([vlc_path, self.link])
                 # when VLC opens, stop running video on self.player
                 self.player.stop_video()
@@ -1389,13 +1349,12 @@ class ChannelList(QMainWindow):
 
         try:
             # Get all channels and categories (in provider cache)
-            provider_itv_content = (
-                self.provider_manager.current_provider_content.setdefault("itv", {})
+            provider_itv_content = self.provider_manager.current_provider_content.setdefault(
+                "itv", {}
             )
             categories_list = provider_itv_content.setdefault("categories", [])
             categories = {
-                c.get("id", "None"): c.get("title", "Unknown Category")
-                for c in categories_list
+                c.get("id", "None"): c.get("title", "Unknown Category") for c in categories_list
             }
             channels = provider_itv_content["contents"]
 
@@ -1412,9 +1371,7 @@ class ChannelList(QMainWindow):
                 f"An error occurred while exporting channels: {str(e)}",
             )
 
-    def save_channel_list(
-        self, base_url, channels_data, categories, mac, file_path
-    ) -> None:
+    def save_channel_list(self, base_url, channels_data, categories, mac, file_path) -> None:
         try:
             with open(file_path, "w", encoding="utf-8") as file:
                 file.write("#EXTM3U\n")
@@ -1430,7 +1387,9 @@ class ChannelList(QMainWindow):
                         ch_id_match = re.search(r"/ch/(\d+)_", cmd_url)
                         if ch_id_match:
                             ch_id = ch_id_match.group(1)
-                            cmd_url = f"{base_url}/play/live.php?mac={mac}&stream={ch_id}&extension=m3u8"
+                            cmd_url = (
+                                f"{base_url}/play/live.php?mac={mac}&stream={ch_id}&extension=m3u8"
+                            )
 
                     channel_str = f'#EXTINF:-1  tvg-id="{xmltv_id}" tvg-logo="{logo}" group-title="{group}" ,{name}\n{cmd_url}\n'
                     count += 1
@@ -1444,16 +1403,12 @@ class ChannelList(QMainWindow):
         file_dialog = QFileDialog(self)
         file_dialog.setAcceptMode(QFileDialog.AcceptSave)
         file_dialog.setDefaultSuffix("m3u")
-        file_path, _ = file_dialog.getSaveFileName(
-            self, "Export Content", "", "M3U files (*.m3u)"
-        )
+        file_path, _ = file_dialog.getSaveFileName(self, "Export Content", "", "M3U files (*.m3u)")
         if file_path:
             provider = self.provider_manager.current_provider
             # Get the content data from the provider manager on content type
-            provider_content = (
-                self.provider_manager.current_provider_content.setdefault(
-                    self.content_type, {}
-                )
+            provider_content = self.provider_manager.current_provider_content.setdefault(
+                self.content_type, {}
             )
 
             base_url = provider.get("url", "")
@@ -1483,9 +1438,7 @@ class ChannelList(QMainWindow):
     def load_content(self):
         selected_provider = self.provider_manager.current_provider
         config_type = selected_provider.get("type", "")
-        content = self.provider_manager.current_provider_content.setdefault(
-            self.content_type, {}
-        )
+        content = self.provider_manager.current_provider_content.setdefault(self.content_type, {})
         if content:
             # If we have categories cached, display them
             if config_type == "STB":
@@ -1518,9 +1471,7 @@ class ChannelList(QMainWindow):
                 )
             self.load_m3u_playlist(url)
         elif config_type == "STB":
-            self.load_stb_categories(
-                selected_provider["url"], self.provider_manager.headers
-            )
+            self.load_stb_categories(selected_provider["url"], self.provider_manager.headers)
         elif config_type == "M3USTREAM":
             self.load_stream(selected_provider["url"])
 
@@ -1541,32 +1492,29 @@ class ChannelList(QMainWindow):
                         content = payload.get("content", "")
                         parsed_content = parse_m3u(content)
                         self.display_content(parsed_content)
-                        self.provider_manager.current_provider_content[
-                            self.content_type
-                        ] = parsed_content
+                        self.provider_manager.current_provider_content[self.content_type] = (
+                            parsed_content
+                        )
                         self.save_provider()
                     finally:
                         thread.quit()
-                        thread.wait()
-                        try:
-                            self._bg_jobs.remove((thread, worker))
-                        except ValueError:
-                            pass
                         self.unlock_ui_after_loading()
 
                 def on_error(msg):
                     logger.warning(f"Error loading M3U Playlist: {msg}")
                     thread.quit()
-                    thread.wait()
+                    self.unlock_ui_after_loading()
+
+                def _cleanup():
                     try:
                         self._bg_jobs.remove((thread, worker))
                     except ValueError:
                         pass
-                    self.unlock_ui_after_loading()
 
                 thread.started.connect(on_started)
-                worker.finished.connect(on_finished)
-                worker.error.connect(on_error)
+                worker.finished.connect(on_finished, Qt.QueuedConnection)
+                worker.error.connect(on_error, Qt.QueuedConnection)
+                thread.finished.connect(_cleanup)
                 thread.start()
                 self._bg_jobs.append((thread, worker))
             else:
@@ -1574,9 +1522,7 @@ class ChannelList(QMainWindow):
                     content = file.read()
                 parsed_content = parse_m3u(content)
                 self.display_content(parsed_content)
-                self.provider_manager.current_provider_content[self.content_type] = (
-                    parsed_content
-                )
+                self.provider_manager.current_provider_content[self.content_type] = parsed_content
                 self.save_provider()
         except (requests.RequestException, IOError) as e:
             logger.warning(f"Error loading M3U Playlist: {e}")
@@ -1618,24 +1564,18 @@ class ChannelList(QMainWindow):
 
             nav_len = len(self.navigation_stack)
             if item_type == "category":
-                self.navigation_stack.append(
-                    ("root", self.current_category, item.text(0))
-                )
+                self.navigation_stack.append(("root", self.current_category, item.text(0)))
                 self.current_category = item_data
                 self.load_content_in_category(item_data)
             elif item_type == "serie":
                 if self.content_type == "series":
                     # For series, load seasons
-                    self.navigation_stack.append(
-                        ("category", self.current_category, item.text(0))
-                    )
+                    self.navigation_stack.append(("category", self.current_category, item.text(0)))
                     self.current_series = item_data
                     self.load_series_seasons(item_data)
             elif item_type == "season":
                 # Load episodes for the selected season
-                self.navigation_stack.append(
-                    ("series", self.current_series, item.text(0))
-                )
+                self.navigation_stack.append(("series", self.current_series, item.text(0)))
                 self.current_season = item_data
                 self.load_season_episodes(item_data)
             elif item_type in ["m3ucontent", "channel", "movie"]:
@@ -1675,9 +1615,7 @@ class ChannelList(QMainWindow):
             elif nav_type == "series":
                 # Go back to series seasons
                 self.current_series = previous_data
-                self.load_series_seasons(
-                    self.current_series, select_first=previous_selected_id
-                )
+                self.load_series_seasons(self.current_series, select_first=previous_selected_id)
                 self.current_season = None
 
             # Clear search box after navigating backward and force re-filtering if needed
@@ -1695,7 +1633,9 @@ class ChannelList(QMainWindow):
     @staticmethod
     # parse_m3u moved to services/m3u.py
 
-    def load_stb_categories(self, url, headers):
+    def load_stb_categories(self, url: str, headers: Optional[dict] = None):
+        if headers is None:
+            headers = self.provider_manager.headers
         # Run network calls in a worker thread
         self.lock_ui_before_loading()
         thread = QThread()
@@ -1711,10 +1651,8 @@ class ChannelList(QMainWindow):
                 if not categories:
                     logger.info("No categories found.")
                     return
-                provider_content = (
-                    self.provider_manager.current_provider_content.setdefault(
-                        self.content_type, {}
-                    )
+                provider_content = self.provider_manager.current_provider_content.setdefault(
+                    self.content_type, {}
                 )
                 provider_content["categories"] = categories
                 provider_content["contents"] = {}
@@ -1722,7 +1660,7 @@ class ChannelList(QMainWindow):
                 if self.content_type == "itv":
                     provider_content["contents"] = payload.get("all_channels", [])
 
-                    sorted_channels = {}
+                    sorted_channels: Dict[str, List[int]] = {}
                     for i in range(len(provider_content["contents"])):
                         genre_id = provider_content["contents"][i]["tv_genre_id"]
                         category_id = str(genre_id)
@@ -1744,26 +1682,23 @@ class ChannelList(QMainWindow):
                 self.display_categories(categories)
             finally:
                 thread.quit()
-                thread.wait()
-                try:
-                    self._bg_jobs.remove((thread, worker))
-                except ValueError:
-                    pass
                 self.unlock_ui_after_loading()
 
         def on_error(msg):
             logger.warning(f"Error loading STB categories: {msg}")
             thread.quit()
-            thread.wait()
+            self.unlock_ui_after_loading()
+
+        def _cleanup():
             try:
                 self._bg_jobs.remove((thread, worker))
             except ValueError:
                 pass
-            self.unlock_ui_after_loading()
 
         thread.started.connect(on_started)
-        worker.finished.connect(on_finished)
-        worker.error.connect(on_error)
+        worker.finished.connect(on_finished, Qt.QueuedConnection)
+        worker.error.connect(on_error, Qt.QueuedConnection)
+        thread.finished.connect(_cleanup)
         thread.start()
         self._bg_jobs.append((thread, worker))
 
@@ -1806,17 +1741,11 @@ class ChannelList(QMainWindow):
             if category_id in content_data.get("contents", {}):
                 items = content_data["contents"][category_id]
                 if self.content_type == "itv":
-                    self.display_content(
-                        items, content="channel", select_first=select_first
-                    )
+                    self.display_content(items, content="channel", select_first=select_first)
                 elif self.content_type == "series":
-                    self.display_content(
-                        items, content="serie", select_first=select_first
-                    )
+                    self.display_content(items, content="serie", select_first=select_first)
                 elif self.content_type == "vod":
-                    self.display_content(
-                        items, content="movie", select_first=select_first
-                    )
+                    self.display_content(items, content="movie", select_first=select_first)
             else:
                 # Fetch content for the category
                 self.fetch_content_in_category(category_id, select_first=select_first)
@@ -1842,7 +1771,7 @@ class ChannelList(QMainWindow):
         url = f"{url.scheme}://{url.netloc}/server/load.php"
 
         self.lock_ui_before_loading()
-        if hasattr(self, "content_loader") and self.content_loader.isRunning():
+        if self.content_loader and self.content_loader.isRunning():
             self.content_loader.wait()
         self.content_loader = ContentLoader(
             url, headers, self.content_type, category_id=category_id
@@ -1865,7 +1794,7 @@ class ChannelList(QMainWindow):
         self.current_series = series_item  # Store current series
 
         self.lock_ui_before_loading()
-        if hasattr(self, "content_loader") and self.content_loader.isRunning():
+        if self.content_loader and self.content_loader.isRunning():
             self.content_loader.wait()
         self.content_loader = ContentLoader(
             url=url,
@@ -1895,8 +1824,12 @@ class ChannelList(QMainWindow):
 
         self.current_season = season_item  # Store current season
 
+        if not self.current_category or not self.current_series:
+            logger.warning("Current category/series not set when loading season episodes")
+            return
+
         self.lock_ui_before_loading()
-        if hasattr(self, "content_loader") and self.content_loader.isRunning():
+        if self.content_loader and self.content_loader.isRunning():
             self.content_loader.wait()
         self.content_loader = ContentLoader(
             url=url,
@@ -1950,26 +1883,23 @@ class ChannelList(QMainWindow):
                         logger.warning("Failed to create link.")
                 finally:
                     thread.quit()
-                    thread.wait()
-                    try:
-                        self._bg_jobs.remove((thread, worker))
-                    except ValueError:
-                        pass
                     self.unlock_ui_after_loading()
 
             def on_error(msg):
                 logger.warning(f"Error creating link: {msg}")
                 thread.quit()
-                thread.wait()
+                self.unlock_ui_after_loading()
+
+            def _cleanup():
                 try:
                     self._bg_jobs.remove((thread, worker))
                 except ValueError:
                     pass
-                self.unlock_ui_after_loading()
 
             thread.started.connect(on_started)
-            worker.finished.connect(on_finished)
-            worker.error.connect(on_error)
+            worker.finished.connect(on_finished, Qt.QueuedConnection)
+            worker.error.connect(on_error, Qt.QueuedConnection)
+            thread.finished.connect(_cleanup)
             thread.start()
             self._bg_jobs.append((thread, worker))
         else:
@@ -1978,23 +1908,17 @@ class ChannelList(QMainWindow):
             self.player.play_video(cmd)
 
     def cancel_loading(self):
-        if hasattr(self, "content_loader") and self.content_loader.isRunning():
+        if self.content_loader and self.content_loader.isRunning():
             self.content_loader.terminate()
-            if hasattr(self, "content_loader"):
-                self.content_loader.wait()
+            self.content_loader.wait()
             self.content_loader_finished()
-            QMessageBox.information(
-                self, "Cancelled", "Content loading has been cancelled."
-            )
-        elif hasattr(self, "image_loader") and self.image_loader.isRunning():
+            QMessageBox.information(self, "Cancelled", "Content loading has been cancelled.")
+        elif self.image_loader and self.image_loader.isRunning():
             self.image_loader.terminate()
-            if hasattr(self, "image_loader"):
-                self.image_loader.wait()
+            self.image_loader.wait()
             self.image_loader_finished()
             self.image_manager.save_index()
-            QMessageBox.information(
-                self, "Cancelled", "Image loading has been cancelled."
-            )
+            QMessageBox.information(self, "Cancelled", "Image loading has been cancelled.")
 
     def lock_ui_before_loading(self):
         self.update_ui_on_loading(loading=True)
@@ -2018,15 +1942,15 @@ class ChannelList(QMainWindow):
             self.content_list.setSelectionMode(QListWidget.SingleSelection)
 
     def content_loader_finished(self):
-        if hasattr(self, "content_loader"):
+        if self.content_loader:
             self.content_loader.deleteLater()
-            del self.content_loader
+            self.content_loader = None
         self.unlock_ui_after_loading()
 
     def image_loader_finished(self):
-        if hasattr(self, "image_loader"):
+        if self.image_loader:
             self.image_loader.deleteLater()
-            del self.image_loader
+            self.image_loader = None
         self.unlock_ui_after_loading()
 
     def update_content_list(self, data, select_first=True):
@@ -2048,6 +1972,9 @@ class ChannelList(QMainWindow):
             self.display_content(items, content="channel", select_first=select_first)
 
     def update_seasons_list(self, data, select_first=True):
+        if not self.current_series:
+            logger.warning("Current series not set when updating seasons list")
+            return
         items = data.get("items")
         for item in items:
             item["number"] = item["name"].split(" ")[-1]
@@ -2055,6 +1982,9 @@ class ChannelList(QMainWindow):
         self.display_content(items, content="season", select_first=select_first)
 
     def update_episodes_list(self, data, select_first=True):
+        if not self.current_series:
+            logger.warning("Current series not set when updating episodes list")
+            return
         items = data.get("items")
         selected_season = None
         for item in items:
@@ -2073,9 +2003,7 @@ class ChannelList(QMainWindow):
                 episode_item["cmd"] = selected_season.get("cmd")
                 episode_item["series"] = episode_num
                 episode_items.append(episode_item)
-            self.display_content(
-                episode_items, content="episode", select_first=select_first
-            )
+            self.display_content(episode_items, content="episode", select_first=select_first)
         else:
             logger.info("Season not found in data.")
 
@@ -2104,12 +2032,12 @@ class ChannelList(QMainWindow):
                 series_param = item.get("series")  # This should be the episode number
                 fetchurl = (
                     f"{url}/server/load.php?type={'vod' if self.content_type == 'series' else self.content_type}&action=create_link"
-                    f"&cmd={requests.utils.quote(cmd)}&series={series_param}&JsHttpRequest=1-xml"
+                    f"&cmd={url_quote(cmd)}&series={series_param}&JsHttpRequest=1-xml"
                 )
             else:
                 fetchurl = (
                     f"{url}/server/load.php?type={self.content_type}&action=create_link"
-                    f"&cmd={requests.utils.quote(cmd)}&JsHttpRequest=1-xml"
+                    f"&cmd={url_quote(cmd)}&JsHttpRequest=1-xml"
                 )
             response = requests.get(fetchurl, headers=headers, timeout=5)
             if response.status_code != 200 or not response.content:

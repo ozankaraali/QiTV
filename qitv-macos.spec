@@ -1,5 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+from pathlib import Path
+import tomllib
+
+
+def read_version():
+    pyproj = Path(__file__).with_name('pyproject.toml')
+    with pyproj.open('rb') as f:
+        return tomllib.load(f)['project']['version']
+
+
+APP_VERSION = read_version()
+
 VLC_PATH = '/Applications/VLC.app/Contents'  # Adjust this path if necessary
 
 a = Analysis(
@@ -47,7 +60,7 @@ app = BUNDLE(
     name='QiTV.app',
     icon='assets/qitv.icns',
     bundle_identifier='com.ozankaraali.QiTV',
-    version='1.1.2',
+    version=APP_VERSION,
     info_plist={
         'CFBundleDisplayName': 'QiTV',
         'CFBundleExecutable': 'QiTV',
@@ -55,8 +68,8 @@ app = BUNDLE(
         'CFBundleInfoDictionaryVersion': '6.0',
         'CFBundleName': 'QiTV',
         'CFBundlePackageType': 'APPL',
-        'CFBundleShortVersionString': '1.0.0',
-        'CFBundleVersion': '1.0.0',
+        'CFBundleShortVersionString': APP_VERSION,
+        'CFBundleVersion': APP_VERSION,
         'LSApplicationCategoryType': 'public.app-category.video',
         'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication',

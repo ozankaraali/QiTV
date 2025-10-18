@@ -1,7 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+from pathlib import Path
+import tomllib
 from PyInstaller.building.build_main import Analysis, PYZ, EXE, BUNDLE
+
+
+def read_version():
+    pyproj = Path(__file__).with_name('pyproject.toml')
+    with pyproj.open('rb') as f:
+        return tomllib.load(f)['project']['version']
+
+
+APP_VERSION = read_version()
 
 VLC_PATH = '/usr/lib/x86_64-linux-gnu'  # Default path on Ubuntu
 

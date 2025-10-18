@@ -48,8 +48,10 @@ Current Work Plan (Living TODO)
    - [ ] Add simple smoke tests for content loader pagination/aggregation
 
 6) Packaging & config
+   - [x] Completing the Github Actions for UV environment usage.
    - [ ] Pin more dependency versions in requirements.txt (PySide6, orjson, aiohttp, tzlocal)
-   - [ ] Add a `pyproject.toml` for tool config (black/isort/mypy) to keep settings centralized
+   - [x] Add a `pyproject.toml` for tool config (black/isort/mypy) to keep settings centralized
+   - [x] Drive bundle/app version from `pyproject.toml` in PyInstaller specs
 
 Next Steps (Paused)
 - Extract panels from `channel_list.py` into `widgets/`:
@@ -70,6 +72,7 @@ Recent Changes (for context)
 - Perf: Update checker moved to QThread and added network timeouts; added timeouts in several requests
 - Arch: Extracted delegates to `widgets/delegates.py`; moved M3U parsing to `services/m3u.py`; moved export helpers to `services/export.py`
  - Packaging: Added `__init__.py` to `services/` and `widgets/` to satisfy mypy package resolution
+ - CI: Switched GitHub Actions to uv; centralized tool configs in `pyproject.toml`
 
 Conventions for New Code
 - Keep UI and data/services separate. Long-running network calls must run in QThread.

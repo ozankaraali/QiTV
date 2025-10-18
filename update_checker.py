@@ -1,12 +1,12 @@
 import logging
 from typing import List, Tuple
 
-import requests
-from packaging.version import parse
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import QMessageBox
+from packaging.version import parse
+import requests
 
-from config_manager import ConfigManager
+from config_manager import get_app_version
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +26,7 @@ class UpdateWorker(QObject):
             response.raise_for_status()
             latest_release = response.json()
             latest_version = extract_version_from_tag(latest_release.get("name", ""))
-            if latest_version and compare_versions(
-                latest_version, ConfigManager.CURRENT_VERSION
-            ):
+            if latest_version and compare_versions(latest_version, get_app_version()):
                 self.finished.emit(
                     {
                         "version": latest_version,
@@ -52,26 +50,26 @@ def check_for_updates():
 
     def on_finished(result):
         thread.quit()
-        thread.wait()
-        try:
-            _update_jobs.remove((thread, worker))
-        except ValueError:
-            pass
         if result:
-            show_update_dialog(result["version"], result["url"])
+            # Ensure dialog runs on the GUI thread
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, lambda: show_update_dialog(result["version"], result["url"]))
 
     def on_error(msg):
         thread.quit()
-        thread.wait()
+        logger.warning(f"Error checking for updates: {msg}")
+
+    def _cleanup():
         try:
             _update_jobs.remove((thread, worker))
         except ValueError:
             pass
-        logger.warning(f"Error checking for updates: {msg}")
 
     thread.started.connect(on_started)
-    worker.finished.connect(on_finished)
-    worker.error.connect(on_error)
+    worker.finished.connect(on_finished, Qt.QueuedConnection)
+    worker.error.connect(on_error, Qt.QueuedConnection)
+    thread.finished.connect(_cleanup)
     thread.start()
     _update_jobs.append((thread, worker))
 
@@ -96,9 +94,7 @@ def show_update_dialog(latest_version, release_url):
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Information)
     msg.setText(f"A new version ({latest_version}) is available!")
-    msg.setInformativeText(
-        "Would you like to open the release page to download the update?"
-    )
+    msg.setInformativeText("Would you like to open the release page to download the update?")
     msg.setWindowTitle("Update Available")
     msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
     if msg.exec_() == QMessageBox.Yes:

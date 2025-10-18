@@ -5,10 +5,10 @@ import random
 import string
 from urllib.parse import urlencode
 
+from PySide6.QtCore import QObject, Signal
 import orjson as json
 import requests
 import tzlocal
-from PySide6.QtCore import QObject, Signal
 from urlobject import URLObject
 
 logger = logging.getLogger(__name__)
@@ -20,9 +20,7 @@ class ProviderManager(QObject):
     def __init__(self, config_manager):
         super().__init__()
         self.config_manager = config_manager
-        self.provider_dir = os.path.join(
-            config_manager.get_config_dir(), "cache", "provider"
-        )
+        self.provider_dir = os.path.join(config_manager.get_config_dir(), "cache", "provider")
         os.makedirs(self.provider_dir, exist_ok=True)
         self.index_file = os.path.join(self.provider_dir, "index.json")
         self.providers = []
@@ -33,9 +31,7 @@ class ProviderManager(QObject):
         self._load_providers()
 
     def _current_provider_cache_name(self):
-        hashed_name = hashlib.sha256(
-            self.current_provider["name"].encode("utf-8")
-        ).hexdigest()
+        hashed_name = hashlib.sha256(self.current_provider["name"].encode("utf-8")).hexdigest()
         return os.path.join(self.provider_dir, f"{hashed_name}.json")
 
     def _load_providers(self):
@@ -78,9 +74,7 @@ class ProviderManager(QObject):
         if self.current_provider["type"] == "STB":
             progress_callback.emit("Performing handshake...")
             self.token = ""
-            self.do_handshake(
-                self.current_provider["url"], self.current_provider["mac"]
-            )
+            self.do_handshake(self.current_provider["url"], self.current_provider["mac"])
 
         progress_callback.emit("Provider setup complete.")
 
@@ -95,9 +89,7 @@ class ProviderManager(QObject):
             try:
                 name = p.get("name") if isinstance(p, dict) else None
                 if name:
-                    expected_files.add(
-                        f"{hashlib.sha256(name.encode('utf-8')).hexdigest()}.json"
-                    )
+                    expected_files.add(f"{hashlib.sha256(name.encode('utf-8')).hexdigest()}.json")
             except Exception:
                 # ignore malformed entries
                 pass
@@ -194,7 +186,11 @@ class ProviderManager(QObject):
     @staticmethod
     def create_headers(url, mac, token):
         url = URLObject(url)
-        timezone = tzlocal.get_localzone().key
+        # Use a robust string representation of local timezone
+        try:
+            timezone = str(tzlocal.get_localzone())
+        except Exception:
+            timezone = "UTC"
         headers = {
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
             "Accept-Charset": "UTF-8,*;q=0.8",

@@ -1,14 +1,63 @@
+import logging
 import os
+from pathlib import Path
 import platform
 import shutil
+import sys
+import tomllib
 
 import orjson as json
 
 from multikeydict import MultiKeyDict
 
+try:
+    from importlib import metadata as importlib_metadata
+except Exception:  # pragma: no cover
+    import importlib_metadata  # type: ignore
+
+logger = logging.getLogger(__name__)
+
+
+_APP_VERSION: str | None = None
+
+
+def get_app_version() -> str:
+    global _APP_VERSION
+    if _APP_VERSION:
+        return _APP_VERSION
+
+    # 1) Try installed package metadata
+    try:
+        _APP_VERSION = importlib_metadata.version("qitv")
+        return _APP_VERSION
+    except Exception:
+        pass
+
+    # 2) Try reading pyproject.toml from common locations (repo root / CWD)
+    candidates = [
+        Path(__file__).resolve().parent.parent / "pyproject.toml",
+        Path(__file__).resolve().parent / "pyproject.toml",
+        Path.cwd() / "pyproject.toml",
+    ]
+    for p in candidates:
+        try:
+            if p.exists():
+                with p.open("rb") as f:
+                    data = tomllib.load(f)
+                v = data.get("project", {}).get("version")
+                if isinstance(v, str):
+                    _APP_VERSION = v
+                    return v
+        except Exception as e:
+            logger.debug(f"Unable to read version from {p}: {e}")
+
+    # 3) Fallback
+    if _APP_VERSION is None:
+        _APP_VERSION = "0.0.0"
+    return _APP_VERSION
+
 
 class ConfigManager:
-    CURRENT_VERSION = "1.6.5"  # Set your current version here
 
     DEFAULT_OPTION_CHECKUPDATE = True
     DEFAULT_OPTION_STB_CONTENT_INFO = False
@@ -53,7 +102,7 @@ class ConfigManager:
                 shutil.copy(old_config_path, self.config_path)
                 os.remove(old_config_path)
         except Exception as e:
-            print(f"Error during config migration: {e}")
+            logger.warning(f"Error during config migration: {e}")
 
     def load_config(self):
         try:
@@ -96,9 +145,7 @@ class ConfigManager:
 
         # add max_cache_image_size to the loaded config if it doesn't exist
         if "max_cache_image_size" not in self.config:
-            self.max_cache_image_size = (
-                ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
-            )
+            self.max_cache_image_size = ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
             need_update = True
 
         # add epg_source to the loaded config if it doesn't exist
@@ -118,9 +165,7 @@ class ConfigManager:
 
         # add epg_expiration_value to the loaded config if it doesn't exist
         if "epg_expiration_value" not in self.config:
-            self.epg_expiration_value = (
-                ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE
-            )
+            self.epg_expiration_value = ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE
             need_update = True
 
         # add epg_expiration_unit to the loaded config if it doesn't exist
@@ -138,9 +183,7 @@ class ConfigManager:
 
     @property
     def check_updates(self):
-        return self.config.get(
-            "check_updates", ConfigManager.DEFAULT_OPTION_CHECKUPDATE
-        )
+        return self.config.get("check_updates", ConfigManager.DEFAULT_OPTION_CHECKUPDATE)
 
     @check_updates.setter
     def check_updates(self, value):
@@ -182,9 +225,7 @@ class ConfigManager:
 
     @property
     def channel_logos(self):
-        return self.config.get(
-            "channel_logos", ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO
-        )
+        return self.config.get("channel_logos", ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO)
 
     @channel_logos.setter
     def channel_logos(self, value):
@@ -248,9 +289,7 @@ class ConfigManager:
     def epg_expiration(self):
         # Get expiration in seconds
         if self.epg_expiration_unit == "Months":
-            return (
-                self.epg_expiration_value * 30 * 24 * 60 * 60
-            )  # Approximate month as 30 days
+            return self.epg_expiration_value * 30 * 24 * 60 * 60  # Approximate month as 30 days
         elif self.epg_expiration_unit == "Days":
             return self.epg_expiration_value * 24 * 60 * 60
         elif self.epg_expiration_unit == "Hours":
@@ -308,9 +347,7 @@ class ConfigManager:
             "height": pos.height(),
         }
         if window_name == "channel_list":
-            self.config["window_positions"][window_name][
-                "splitter_ratio"
-            ] = window.splitter_ratio
+            self.config["window_positions"][window_name]["splitter_ratio"] = window.splitter_ratio
             self.config["window_positions"][window_name][
                 "splitter_content_info_ratio"
             ] = window.splitter_content_info_ratio
@@ -319,14 +356,10 @@ class ConfigManager:
 
     def apply_window_settings(self, window_name, window):
         settings = self.config["window_positions"][window_name]
-        window.setGeometry(
-            settings["x"], settings["y"], settings["width"], settings["height"]
-        )
+        window.setGeometry(settings["x"], settings["y"], settings["width"], settings["height"])
         if window_name == "channel_list":
             window.splitter_ratio = settings.get("splitter_ratio", 0.75)
-            window.splitter_content_info_ratio = settings.get(
-                "splitter_content_info_ratio", 0.33
-            )
+            window.splitter_content_info_ratio = settings.get("splitter_content_info_ratio", 0.33)
 
     def save_config(self):
         self.xmltv_channel_map = self.xmltv_channel_map.serialize()

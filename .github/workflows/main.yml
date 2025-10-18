@@ -1,4 +1,4 @@
-name: Build and Package App
+name: Build and Package App (uv)
 
 on:
   push:
@@ -11,20 +11,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@v4
         with:
-          python-version: 3.9
+          python-version: '3.14'
+          enable-cache: true
       - name: Check OpenSSL Version
-        run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
+        run: uv run python -c "import ssl; print(ssl.OPENSSL_VERSION)"
       - name: Install VLC
         run: sudo apt-get update && sudo apt-get install -y vlc
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Sync dependencies with uv
+        run: uv sync --frozen --dev
       - name: Package App with PyInstaller for Linux
         run: |
-          pip install pyinstaller
-          pyinstaller qitv-linux.spec
+          uv run pyinstaller qitv-linux.spec
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
@@ -36,12 +36,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@v4
         with:
-          python-version: 3.8
+          python-version: '3.14'
+          enable-cache: true
       - name: Check OpenSSL Version
-        run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
+        run: uv run python -c "import ssl; print(ssl.OPENSSL_VERSION)"
       # - name: Install Chocolatey
       #   shell: powershell
       #   run: |
@@ -50,12 +51,11 @@ jobs:
       #     iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
       - name: Install VLC using Chocolatey
         run: choco install vlc -y
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Sync dependencies with uv
+        run: uv sync --frozen --dev
       - name: Package App with PyInstaller for Windows
         run: |
-          pip install pyinstaller
-          pyinstaller qitv-windows.spec
+          uv run pyinstaller qitv-windows.spec
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
@@ -67,20 +67,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@v4
         with:
-          python-version: 3.8
+          python-version: '3.14'
+          enable-cache: true
       - name: Check OpenSSL Version
-        run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
+        run: uv run python -c "import ssl; print(ssl.OPENSSL_VERSION)"
       - name: Install VLC
         run: brew install --cask vlc
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Sync dependencies with uv
+        run: uv sync --frozen --dev
       - name: Package App with PyInstaller for macOS
         run: |
-          pip install pyinstaller
-          pyinstaller qitv-macos.spec
+          uv run pyinstaller qitv-macos.spec
 #      - name: Rename the executable
 #        run: mv dist/qitv.app/Contents/MacOS/qitv dist/qitv.app/Contents/MacOS/qitv_cli
 #      - name: Create launcher script
@@ -104,20 +104,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@v4
         with:
-          python-version: 3.8
+          python-version: '3.14'
+          enable-cache: true
       - name: Check OpenSSL Version
-        run: python -c "import ssl; print(ssl.OPENSSL_VERSION)"
+        run: uv run python -c "import ssl; print(ssl.OPENSSL_VERSION)"
       - name: Install VLC
         run: brew install --cask vlc
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Sync dependencies with uv
+        run: uv sync --frozen --dev
       - name: Package App with PyInstaller for macOS (Intel)
         run: |
-          pip install pyinstaller
-          pyinstaller qitv-macos.spec
+          uv run pyinstaller qitv-macos.spec
 #      - name: Rename the executable
 #        run: mv dist/qitv.app/Contents/MacOS/qitv dist/qitv.app/Contents/MacOS/qitv_cli
 #      - name: Create launcher script
@@ -142,10 +142,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.14'
+          enable-cache: true
       - name: Get Version
         id: get_version
         run: |
-          version=$(grep -oP '(?<=CURRENT_VERSION = ")[^"]*' config_manager.py)
+          version=$(python - <<'PY'
+          import tomllib
+          with open('pyproject.toml','rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          PY
+          )
           echo "VERSION=$version" >> $GITHUB_ENV
       - name: Get Previous Version
         id: get_previous_version

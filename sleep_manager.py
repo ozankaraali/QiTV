@@ -45,12 +45,16 @@ def allow_sleep():
 def prevent_sleep_windows():
     ES_CONTINUOUS = 0x80000000
     ES_SYSTEM_REQUIRED = 0x00000001
-    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+    windll = getattr(ctypes, "windll", None)
+    if windll is not None:
+        windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
 
 
 def allow_sleep_windows():
     ES_CONTINUOUS = 0x80000000
-    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+    windll = getattr(ctypes, "windll", None)
+    if windll is not None:
+        windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 
 
 def prevent_sleep_macos():
@@ -89,9 +93,7 @@ def prevent_sleep_macos():
 def allow_sleep_macos():
     global mac_assertion_id
     if mac_assertion_id is not None:
-        IOKit = ctypes.cdll.LoadLibrary(
-            "/System/Library/Frameworks/IOKit.framework/IOKit"
-        )
+        IOKit = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/IOKit.framework/IOKit")
         IOKit.IOPMAssertionRelease.argtypes = [ctypes.c_uint32]
         IOKit.IOPMAssertionRelease(mac_assertion_id)
         mac_assertion_id = None
@@ -103,9 +105,7 @@ def prevent_sleep_linux():
     object_path = "/org/freedesktop/ScreenSaver"
     service_name = "org.freedesktop.ScreenSaver"
     connection = QDBusConnection.sessionBus()
-    screensaver_interface = QDBusInterface(
-        service_name, object_path, interface, connection
-    )
+    screensaver_interface = QDBusInterface(service_name, object_path, interface, connection)
     if screensaver_interface.isValid():
         reply = screensaver_interface.call("Inhibit", "QiTV", "Playing video")
         try:
@@ -122,8 +122,6 @@ def allow_sleep_linux():
         object_path = "/org/freedesktop/ScreenSaver"
         service_name = "org.freedesktop.ScreenSaver"
         connection = QDBusConnection.sessionBus()
-        screensaver_interface = QDBusInterface(
-            service_name, object_path, interface, connection
-        )
+        screensaver_interface = QDBusInterface(service_name, object_path, interface, connection)
         if screensaver_interface.isValid():
             screensaver_interface.call("UnInhibit", linux_cookie)

@@ -1,8 +1,5 @@
+import logging
 import os
-from update_checker import check_for_updates
-from config_manager import MultiKeyDict
-import orjson as json
-import requests
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -21,12 +18,17 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSpinBox,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
-    QWidget
+    QWidget,
 )
+import orjson as json
+import requests
+
+from config_manager import MultiKeyDict
+from update_checker import check_for_updates
 
 
 class AddXmltvMappingDialog(QDialog):
@@ -62,7 +64,7 @@ class AddXmltvMappingDialog(QDialog):
         return (
             self.channel_name_input.text(),
             self.logo_url_input.text(),
-            self.channel_ids_input.text()
+            self.channel_ids_input.text(),
         )
 
 
@@ -88,7 +90,7 @@ class OptionsDialog(QDialog):
                 self.selected_provider_index = i
                 break
 
-        self.main_layout = QVBoxLayout(self);
+        self.main_layout = QVBoxLayout(self)
 
         self.create_options_ui()
 
@@ -130,7 +132,10 @@ class OptionsDialog(QDialog):
 
         # Add cache options
         self.cache_options_layout = QVBoxLayout()
-        self.cache_image_size_label = QLabel(f"Max size of image cache (actual size: {self.get_cache_image_size():.2f} MB)", self.settings_tab)
+        self.cache_image_size_label = QLabel(
+            f"Max size of image cache (actual size: {self.get_cache_image_size():.2f} MB)",
+            self.settings_tab,
+        )
         self.cache_image_size_input = QLineEdit(self.settings_tab)
         self.cache_image_size_input.setText(str(self.config_manager.max_cache_image_size))
         self.settings_layout.addRow(self.cache_image_size_label, self.cache_image_size_input)
@@ -275,8 +280,12 @@ class OptionsDialog(QDialog):
         self.xmltv_mapping_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.xmltv_mapping_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.xmltv_mapping_table.setColumnCount(3)
-        self.xmltv_mapping_table.setHorizontalHeaderLabels(["Channel Name", "Logo URL", "Channel IDs"])
-        self.xmltv_mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.xmltv_mapping_table.setHorizontalHeaderLabels(
+            ["Channel Name", "Logo URL", "Channel IDs"]
+        )
+        self.xmltv_mapping_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
         self.xmltv_mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.xmltv_mapping_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.xmltv_mapping_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -332,7 +341,9 @@ class OptionsDialog(QDialog):
     def load_provider_settings(self, index):
         if index == -1 or index >= len(self.providers):
             return
-        self.selected_provider_name = self.providers[index].get("name", self.providers[index].get("url", ""))
+        self.selected_provider_name = self.providers[index].get(
+            "name", self.providers[index].get("url", "")
+        )
         self.selected_provider_index = index
         self.edited_provider = self.providers[index]
         self.name_input.setText(self.edited_provider.get("name", ""))
@@ -418,7 +429,7 @@ class OptionsDialog(QDialog):
 
     def save_settings(self):
         self.config_manager.check_updates = self.check_updates_checkbox.isChecked()
-        self.config_manager.max_cache_image_size= int(self.cache_image_size_input.text())
+        self.config_manager.max_cache_image_size = int(self.cache_image_size_input.text())
 
         need_to_refresh_content_list_size = False
         current_provider_changed = False
@@ -498,9 +509,7 @@ class OptionsDialog(QDialog):
             result = self.verify_url(url)
 
         self.verify_result.setText(
-            "Provider verified successfully."
-            if result
-            else "Failed to verify provider."
+            "Provider verified successfully." if result else "Failed to verify provider."
         )
         self.verify_result.setStyleSheet("color: green;" if result else "color: red;")
 
@@ -530,7 +539,10 @@ class OptionsDialog(QDialog):
 
     def clear_image_cache(self):
         self.parent().image_manager.clear_cache()
-        self.cache_image_size_label = QLabel(f"Max size of image cache (actual size: {self.get_cache_image_size():.2f} MB)", self.settings_tab)
+        self.cache_image_size_label = QLabel(
+            f"Max size of image cache (actual size: {self.get_cache_image_size():.2f} MB)",
+            self.settings_tab,
+        )
 
     def get_cache_image_size(self):
         total_size = self.parent().image_manager.current_cache_size
@@ -544,7 +556,9 @@ class OptionsDialog(QDialog):
         self.xmltv_mapping_table.setRowCount(len(self.config_manager.xmltv_channel_map))
         for row_position, (key, value) in enumerate(self.config_manager.xmltv_channel_map.items()):
             self.xmltv_mapping_table.setItem(row_position, 0, QTableWidgetItem(value["name"]))
-            self.xmltv_mapping_table.setItem(row_position, 1, QTableWidgetItem(value.get("icon", "")))
+            self.xmltv_mapping_table.setItem(
+                row_position, 1, QTableWidgetItem(value.get("icon", ""))
+            )
             self.xmltv_mapping_table.setItem(row_position, 2, QTableWidgetItem(", ".join(key)))
 
     def add_xmltv_mapping(self):
@@ -571,7 +585,7 @@ class OptionsDialog(QDialog):
             # Add the new mapping to the config manager
             self.config_manager.xmltv_channel_map[tuple(channel_ids_list)] = {
                 "name": channel_name,
-                "icon": logo_url
+                "icon": logo_url,
             }
 
             # Refresh the XMLTV mapping table
@@ -593,7 +607,7 @@ class OptionsDialog(QDialog):
             self,
             channel_name=current_channel_name,
             logo_url=current_logo_url,
-            channel_ids=current_channel_ids
+            channel_ids=current_channel_ids,
         )
         if dialog.exec() == QDialog.Accepted:
             channel_name, logo_url, channel_ids = dialog.get_data()
@@ -619,7 +633,7 @@ class OptionsDialog(QDialog):
             del self.config_manager.xmltv_channel_map[key_tuple[0].strip()]
             self.config_manager.xmltv_channel_map[tuple(channel_ids_list)] = {
                 "name": channel_name,
-                "icon": logo_url
+                "icon": logo_url,
             }
 
             # Refresh the XMLTV mapping table
@@ -648,7 +662,7 @@ class OptionsDialog(QDialog):
                     list_channels = json.loads(f.read())
                 if list_channels is not None:
                     multiKey = MultiKeyDict()
-                    for k,v in list_channels.items():
+                    for k, v in list_channels.items():
                         xmltv_ids = v.get("xmltv_id", [])
                         if xmltv_ids:
                             v.pop("xmltv_id")
@@ -663,9 +677,13 @@ class OptionsDialog(QDialog):
         file_dialog = QFileDialog(self)
         file_path, _ = file_dialog.getSaveFileName()
         if file_path:
-            with open(file_path if file_path.endswith(".json") else file_path + ".json", "w", encoding="utf-8") as f:
+            with open(
+                file_path if file_path.endswith(".json") else file_path + ".json",
+                "w",
+                encoding="utf-8",
+            ) as f:
                 export = {}
-                for k,v in self.config_manager.xmltv_channel_map.items():
+                for k, v in self.config_manager.xmltv_channel_map.items():
                     mainKey = k[0].strip()
                     export[mainKey] = v
                     export[mainKey]["xmltv_id"] = list(k)
@@ -678,7 +696,7 @@ class OptionsDialog(QDialog):
                 response = requests.head(url, timeout=5)
                 return response.status_code == 200
             except requests.RequestException as e:
-                print(f"Error verifying URL: {e}")
+                logging.getLogger(__name__).warning(f"Error verifying URL: {e}")
                 return False
         else:
             return os.path.isfile(url)

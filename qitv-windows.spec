@@ -1,5 +1,70 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+from pathlib import Path
+import tomllib
+from PyInstaller.utils.win32.versioninfo import (
+    VSVersionInfo,
+    FixedFileInfo,
+    StringFileInfo,
+    StringTable,
+    StringStruct,
+    VarFileInfo,
+    VarStruct,
+)
+
+
+def read_version():
+    pyproj = Path(__file__).with_name('pyproject.toml')
+    with pyproj.open('rb') as f:
+        return tomllib.load(f)['project']['version']
+
+
+def to_4tuple(ver: str):
+    parts = [int(p) for p in ver.split('.') if p.isdigit()]
+    while len(parts) < 4:
+        parts.append(0)
+    return tuple(parts[:4])
+
+
+APP_VERSION = read_version()
+FILEVERS = to_4tuple(APP_VERSION)
+PRODVERS = FILEVERS
+FILEVER_STR = '.'.join(map(str, FILEVERS))
+
+version_resource = VSVersionInfo(
+    ffi=FixedFileInfo(
+        filevers=FILEVERS,
+        prodvers=PRODVERS,
+        mask=0x3F,
+        flags=0x0,
+        OS=0x4,
+        fileType=0x1,
+        subtype=0x0,
+        date=(0, 0),
+    ),
+    kids=[
+        StringFileInfo(
+            [
+                StringTable(
+                    '040904B0',
+                    [
+                        StringStruct('CompanyName', 'ozankaraali'),
+                        StringStruct('FileDescription', 'QiTV'),
+                        StringStruct('FileVersion', FILEVER_STR),
+                        StringStruct('InternalName', 'qitv.exe'),
+                        StringStruct('LegalCopyright', ''),
+                        StringStruct('OriginalFilename', 'qitv.exe'),
+                        StringStruct('ProductName', 'QiTV'),
+                        StringStruct('ProductVersion', FILEVER_STR),
+                    ],
+                ),
+            ]
+        ),
+        VarFileInfo([VarStruct('Translation', [1033, 1200])]),
+    ],
+)
+
 VLC_PATH = 'C:\\Program Files\\VideoLAN\\VLC'
 
 block_cipher = None
@@ -40,5 +105,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/qitv.ico'
+    icon='assets/qitv.ico',
+    version=version_resource,
 )

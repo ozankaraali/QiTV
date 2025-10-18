@@ -1,12 +1,13 @@
+from datetime import datetime, timedelta
 import gzip
 import hashlib
 import io
 import logging
 import os
 import pickle
+from typing import Any, Dict
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import datetime, timedelta
 
 import orjson as json
 import requests
@@ -24,7 +25,7 @@ def xml_to_dict(element):
     """
 
     def parse_element(element):
-        parsed_data = {}
+        parsed_data: Dict[str, Any] = {}
 
         # Include element attributes
         if element.attrib:
@@ -55,8 +56,8 @@ class EpgManager:
         self.config_manager = config_manager
         self.provider_manager = provider_manager
 
-        self.index = {}
-        self.epg = {}
+        self.index: Dict[str, Any] = {}
+        self.epg: MultiKeyDict = MultiKeyDict()
         self._load_index()
 
     def _cache_dir(self):
@@ -96,15 +97,17 @@ class EpgManager:
             start_time = programme.get("start")
             stop_time = programme.get("stop")
 
+            if not channel_id or not start_time or not stop_time:
+                # Skip malformed entries
+                continue
+
             # Fix stop_time < start_time, which means the program ends on the next day
             if start_time > stop_time:
                 stop_time = (
                     datetime.strptime(stop_time, "%Y%m%d%H%M%S %z") + timedelta(days=1)
                 ).strftime("%Y%m%d%H%M%S %z")
 
-            multikeys = self.config_manager.xmltv_channel_map.get_keys(
-                channel_id, channel_id
-            )
+            multikeys = self.config_manager.xmltv_channel_map.get_keys(channel_id, channel_id)
             program_data = xml_to_dict(programme)["programme"]
             programs.setdefault(multikeys, []).append(program_data)
         return programs
@@ -147,9 +150,7 @@ class EpgManager:
                 current_time = datetime.now()
                 # Check expiration time
                 epg_date = datetime.strptime(epg_info["date"], "%Y-%m-%d %H:%M:%S")
-                if (
-                    current_time - epg_date
-                ).total_seconds() > self.config_manager.epg_expiration:
+                if (current_time - epg_date).total_seconds() > self.config_manager.epg_expiration:
                     self._fetch_epg_from_stb(provider_url, headers)
                     return True
         return False
@@ -174,20 +175,14 @@ class EpgManager:
             epg_info = self.index[url_hash]
             if epg_info:
                 # Check expiration time first, if expired check header for last-modified
-                last_access = datetime.strptime(
-                    epg_info["last_access"], "%Y-%m-%d %H:%M:%S"
-                )
+                last_access = datetime.strptime(epg_info["last_access"], "%Y-%m-%d %H:%M:%S")
                 current_time = datetime.now()
                 if (
                     current_time - last_access
                 ).total_seconds() > self.config_manager.epg_expiration:
                     epg_date = datetime.strptime(epg_info["date"], "%Y-%m-%d %H:%M:%S")
                     # Request the URL with "If-Modified-Since" header
-                    headers = {
-                        "If-Modified-Since": epg_date.strftime(
-                            "%a, %d %b %Y %H:%M:%S GMT"
-                        )
-                    }
+                    headers = {"If-Modified-Since": epg_date.strftime("%a, %d %b %Y %H:%M:%S GMT")}
                     r = requests.get(url, headers=headers, timeout=5)
                     if r.status_code == 304:
                         # EPG is still fresh
@@ -201,15 +196,12 @@ class EpgManager:
         return False
 
     def set_current_epg(self):
-        self.epg = {}
+        self.epg = MultiKeyDict()
         if not self.config_manager.channel_epg:
             return
 
         epg_source = self.config_manager.epg_source
-        if (
-            epg_source == "STB"
-            and self.provider_manager.current_provider["type"] == "STB"
-        ):
+        if epg_source == "STB" and self.provider_manager.current_provider["type"] == "STB":
             self._set_epg_from_stb(
                 self.provider_manager.current_provider["url"],
                 self.provider_manager.headers,
@@ -224,7 +216,7 @@ class EpgManager:
         if provider_hash in self.index:
             epg_info = self.index[provider_hash]
             if epg_info is None:
-                self.epg = {}
+                self.epg = MultiKeyDict()
                 return
             refreshed = self._refresh_epg_stb(provider_url, headers)
             if refreshed:
@@ -250,7 +242,7 @@ class EpgManager:
         if xmltv_filehash in self.index:
             epg_info = self.index[xmltv_filehash]
             if epg_info is None:
-                self.epg = {}
+                self.epg = MultiKeyDict()
                 return
             refreshed = self._refresh_epg_file(xmltv_file)
             if refreshed:
@@ -275,7 +267,7 @@ class EpgManager:
         if url_hash in self.index:
             epg_info = self.index[url_hash]
             if epg_info is None:
-                self.epg = {}
+                self.epg = MultiKeyDict()
                 return
             refreshed = self._refresh_epg_url(url)
             if refreshed:
@@ -338,7 +330,7 @@ class EpgManager:
             }
         else:
             self.index[provider_hash] = None
-            self.epg = {}
+            self.epg = MultiKeyDict()
         self.save_index()
 
     def _fetch_epg_from_url(self, url):
@@ -354,15 +346,14 @@ class EpgManager:
                 with zipfile.ZipFile(io.BytesIO(r.raw.read())) as z:
                     for name in z.namelist():
                         if name.endswith(".xml"):
-                            with z.open(name) as xml_file, open(
-                                xmltv_file_path, "wb"
-                            ) as f:
+                            with z.open(name) as xml_file, open(xmltv_file_path, "wb") as f:
                                 f.write(xml_file.read())
                             break
             elif content_type == "application/gzip":
-                with gzip.GzipFile(fileobj=io.BytesIO(r.raw.read())) as gz, open(
-                    xmltv_file_path, "wb"
-                ) as f:
+                with (
+                    gzip.GzipFile(fileobj=io.BytesIO(r.raw.read())) as gz,
+                    open(xmltv_file_path, "wb") as f,
+                ):
                     f.write(gz.read())
             else:
                 with open(xmltv_file_path, "wb") as f:
@@ -389,7 +380,7 @@ class EpgManager:
                     }
                 else:
                     self.index[url_hash] = None
-                    self.epg = {}
+                    self.epg = MultiKeyDict()
         self.save_index()
 
     def get_programs_for_channel(self, channel_data, start_time=None, max_programs=5):
@@ -397,14 +388,10 @@ class EpgManager:
 
         if epg_source == "STB":
             channel_id = channel_data.get("id", "")
-            return self._get_programs_for_channel_from_stb(
-                channel_id, start_time, max_programs
-            )
+            return self._get_programs_for_channel_from_stb(channel_id, start_time, max_programs)
         else:
             channel_id = channel_data.get("xmltv_id", "")
-            return self._get_programs_for_channel_from_xmltv(
-                channel_id, start_time, max_programs
-            )
+            return self._get_programs_for_channel_from_xmltv(channel_id, start_time, max_programs)
 
     def _get_programs_for_channel_from_stb(self, channel_id, start_time, max_programs):
         if start_time is None:
@@ -413,9 +400,7 @@ class EpgManager:
         programs = self.epg.get(channel_id, [])
         return self._filter_and_sort_programs(programs, start_time, max_programs)
 
-    def _get_programs_for_channel_from_xmltv(
-        self, channel_id, start_time, max_programs
-    ):
+    def _get_programs_for_channel_from_xmltv(self, channel_id, start_time, max_programs):
         if start_time is None:
             start_time = datetime.now()
 
@@ -454,8 +439,7 @@ class EpgManager:
         for program in programs:
             if (
                 datetime.strptime(program["time"], "%Y-%m-%d %H:%M:%S") >= start_time
-                or datetime.strptime(program["time_to"], "%Y-%m-%d %H:%M:%S")
-                > start_time
+                or datetime.strptime(program["time_to"], "%Y-%m-%d %H:%M:%S") > start_time
             ):
                 filtered_programs.append(program)
                 if len(filtered_programs) >= max_programs:
