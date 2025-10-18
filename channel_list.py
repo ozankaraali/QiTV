@@ -1874,16 +1874,11 @@ class ChannelList(QMainWindow):
         options = OptionsDialog(self)
         options.exec_()
 
-    @staticmethod
     # parse_m3u moved to services/m3u.py
 
     def load_stb_categories(self, url: str, headers: Optional[dict] = None):
         if headers is None:
-            if hasattr(self, "provider_manager") and hasattr(self.provider_manager, "headers"):
-                headers = self.provider_manager.headers
-            else:
-                logger.error("Provider manager or headers not available")
-                return
+            headers = self.provider_manager.headers
         # Run network calls in a worker thread
         self.lock_ui_before_loading()
         thread = QThread()
