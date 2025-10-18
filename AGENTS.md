@@ -63,6 +63,8 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Fix: Movies/Series content type switching now correctly fetches respective categories (channel_list.py:71-101,1649)
+- Fix: Single-click pause/play now works correctly; dragging only marked when mouse moves (video_player.py:340,369)
 - Fix: Prevent single-click pause when double-click toggles fullscreen (video_player.py)
 - Fix: Provider cache pruning now matches hashed provider-name files (provider_manager.py)
 - Fix: Image cache accounting bug when file missing on disk (image_manager.py)
@@ -71,8 +73,8 @@ Recent Changes (for context)
 - UX: Buffering progress bar visibility consistent for live/VOD (video_player.py)
 - Perf: Update checker moved to QThread and added network timeouts; added timeouts in several requests
 - Arch: Extracted delegates to `widgets/delegates.py`; moved M3U parsing to `services/m3u.py`; moved export helpers to `services/export.py`
- - Packaging: Added `__init__.py` to `services/` and `widgets/` to satisfy mypy package resolution
- - CI: Switched GitHub Actions to uv; centralized tool configs in `pyproject.toml`
+- Packaging: Added `__init__.py` to `services/` and `widgets/` to satisfy mypy package resolution
+- CI: Switched GitHub Actions to uv; centralized tool configs in `pyproject.toml`
 
 Conventions for New Code
 - Keep UI and data/services separate. Long-running network calls must run in QThread.

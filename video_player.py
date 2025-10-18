@@ -2,10 +2,10 @@ import logging
 import platform
 import sys
 
-import vlc
 from PySide6.QtCore import QMetaObject, QPoint, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QFrame, QMainWindow, QProgressBar, QVBoxLayout
+import vlc
 
 
 class VLCLogger:
@@ -32,9 +32,7 @@ class VideoPlayer(QMainWindow):
         # Start normally, not on top
         self.is_pip_mode = False
         self.normal_geometry = None
-        self.aspect_ratio = (
-            16 / 9
-        )  # Default aspect ratio; will be updated when video plays
+        self.aspect_ratio = 16 / 9  # Default aspect ratio; will be updated when video plays
         self.setWindowFlags(Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -105,9 +103,7 @@ class VideoPlayer(QMainWindow):
         self.click_timer = QTimer(self)
         self.click_timer.setSingleShot(True)
         self.click_timer.timeout.connect(self.handle_click)
-        self._ignore_single_click = (
-            False  # guard to suppress single-click after dblclick
-        )
+        self._ignore_single_click = False  # guard to suppress single-click after dblclick
 
     def seek_video(self, event):
         if self.media_player.is_playing():
@@ -240,9 +236,7 @@ class VideoPlayer(QMainWindow):
         self.media_player.set_media(self.media)
 
         events = self.media_player.event_manager()
-        events.event_attach(
-            vlc.EventType.MediaPlayerLengthChanged, self.on_media_length_changed
-        )
+        events.event_attach(vlc.EventType.MediaPlayerLengthChanged, self.on_media_length_changed)
         self.media.parse_with_options(1, 0)
 
         play_result = self.media_player.play()
@@ -256,9 +250,7 @@ class VideoPlayer(QMainWindow):
 
     def check_playback_status(self):
         state = self.media_player.get_state()
-        if (
-            state == vlc.State.Playing
-        ):  # only check if media has not been paused, or stopped
+        if state == vlc.State.Playing:  # only check if media has not been paused, or stopped
             if not self.media_player.is_playing():
                 media_state = self.media.get_state()
                 if media_state == vlc.State.Error:
@@ -287,9 +279,7 @@ class VideoPlayer(QMainWindow):
     def toggle_pip_mode(self):
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
         if not self.is_pip_mode:
-            self.normal_geometry = (
-                self.geometry()
-            )  # Save current geometry for restoring later
+            self.normal_geometry = self.geometry()  # Save current geometry for restoring later
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
             self.resize_and_position_pip()
             self.show()
@@ -336,8 +326,7 @@ class VideoPlayer(QMainWindow):
                 self.resize_corner = "top"
             elif event.pos().y() >= self.height() - 10:  # Bottom edge
                 self.resize_corner = "bottom"
-            else:  # Dragging
-                self.dragging = True
+            else:  # Center area - may be a click or drag, wait for mouseMoveEvent
                 self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
                 self.resize_corner = None
             self.resizing = bool(self.resize_corner)
@@ -365,7 +354,9 @@ class VideoPlayer(QMainWindow):
                 new_width = int(new_height * self.aspect_ratio)
 
             self.setGeometry(new_x, new_y, new_width, new_height)
-        elif self.dragging and event.buttons() & Qt.LeftButton:
+        elif event.buttons() & Qt.LeftButton and not self.resize_corner:
+            # Mark as dragging only when mouse actually moves
+            self.dragging = True
             self.move(event.globalPos() - self.drag_position)
         event.accept()
 
@@ -398,9 +389,7 @@ class VideoPlayer(QMainWindow):
     def resize_and_position_pip(self):
         screen_geometry = QGuiApplication.primaryScreen().geometry()
         available_geometry = QGuiApplication.primaryScreen().availableGeometry()
-        pip_width = int(
-            screen_geometry.width() * 0.25
-        )  # PiP width is 25% of screen width
+        pip_width = int(screen_geometry.width() * 0.25)  # PiP width is 25% of screen width
         pip_height = int(pip_width / self.aspect_ratio)
         x = screen_geometry.width() - pip_width - 10  # 10 pixels padding from edge
         y = (
