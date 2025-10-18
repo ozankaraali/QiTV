@@ -128,6 +128,11 @@ class ConfigManager:
             self.favorites = []
             need_update = True
 
+        # add last_watched to the loaded config if it doesn't exist
+        if "last_watched" not in self.config:
+            self.last_watched = None
+            need_update = True
+
         # add check_updates to the loaded config if it doesn't exist
         if "check_updates" not in self.config:
             self.check_updates = ConfigManager.DEFAULT_OPTION_CHECKUPDATE
@@ -196,6 +201,14 @@ class ConfigManager:
     @favorites.setter
     def favorites(self, value):
         self.config["favorites"] = value
+
+    @property
+    def last_watched(self):
+        return self.config.get("last_watched", None)
+
+    @last_watched.setter
+    def last_watched(self, value):
+        self.config["last_watched"] = value
 
     @property
     def show_stb_content_info(self):

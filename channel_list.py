@@ -409,6 +409,10 @@ class ChannelList(QMainWindow):
         self.update_button.clicked.connect(lambda: self.set_provider(force_update=True))
         top_layout.addWidget(self.update_button)
 
+        self.resume_button = QPushButton("Resume Last Watched")
+        self.resume_button.clicked.connect(self.resume_last_watched)
+        top_layout.addWidget(self.resume_button)
+
         self.back_button = QPushButton("Back")
         self.back_button.clicked.connect(self.go_back)
         self.back_button.setVisible(False)
@@ -1586,10 +1590,10 @@ class ChannelList(QMainWindow):
                 self.current_season = item_data
                 self.load_season_episodes(item_data)
             elif item_type in ["m3ucontent", "channel", "movie"]:
-                self.play_item(item_data)
+                self.play_item(item_data, item_type=item_type)
             elif item_type == "episode":
                 # Play the selected episode
-                self.play_item(item_data, is_episode=True)
+                self.play_item(item_data, is_episode=True, item_type=item_type)
             else:
                 logger.info("Unknown item type selected.")
 
@@ -1856,7 +1860,7 @@ class ChannelList(QMainWindow):
         self.content_loader.start()
         self.cancel_button.setText("Cancel loading episodes")
 
-    def play_item(self, item_data, is_episode=False):
+    def play_item(self, item_data, is_episode=False, item_type=None):
         if self.provider_manager.current_provider["type"] == "STB":
             # Create link in a worker thread, then play
             selected_provider = self.provider_manager.current_provider
@@ -1886,6 +1890,8 @@ class ChannelList(QMainWindow):
                     if link:
                         self.link = link
                         self.player.play_video(link)
+                        # Save last watched
+                        self.save_last_watched(item_data, item_type or "channel", link)
                     else:
                         logger.warning("Failed to create link.")
                 finally:
@@ -1913,6 +1919,52 @@ class ChannelList(QMainWindow):
             cmd = item_data.get("cmd")
             self.link = cmd
             self.player.play_video(cmd)
+            # Save last watched
+            self.save_last_watched(item_data, item_type or "m3ucontent", cmd)
+
+    def save_last_watched(self, item_data, item_type, link):
+        """Save the last watched item to config"""
+        self.config_manager.last_watched = {
+            "item_data": item_data,
+            "item_type": item_type,
+            "link": link,
+            "timestamp": datetime.now().isoformat(),
+            "provider_name": self.provider_manager.current_provider.get("name", ""),
+        }
+        self.config_manager.save_config()
+
+    def resume_last_watched(self):
+        """Resume playing the last watched item"""
+        last_watched = self.config_manager.last_watched
+        if not last_watched:
+            QMessageBox.information(self, "No History", "No previously watched content found.")
+            return
+
+        # Check if the provider matches
+        current_provider = self.provider_manager.current_provider.get("name", "")
+        if last_watched.get("provider_name") != current_provider:
+            reply = QMessageBox.question(
+                self,
+                "Different Provider",
+                f"Last watched content was from provider '{last_watched.get('provider_name')}'. Continue anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.No:
+                return
+
+        # Play the last watched item
+        item_data = last_watched.get("item_data")
+        item_type = last_watched.get("item_type")
+        is_episode = item_type == "episode"
+
+        # If we have a stored link and it's the same provider, use it directly
+        if last_watched.get("link"):
+            self.link = last_watched["link"]
+            self.player.play_video(self.link)
+        else:
+            # Otherwise, recreate the link
+            self.play_item(item_data, is_episode=is_episode, item_type=item_type)
 
     def cancel_loading(self):
         if self.content_loader and self.content_loader.isRunning():
