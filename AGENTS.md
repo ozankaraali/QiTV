@@ -63,6 +63,8 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Fix: PyInstaller spec files now use SPECPATH instead of __file__ (qitv-*.spec:10)
+- Fix: Updated to new UV dependency-groups format (pyproject.toml:49-50)
 - Fix: Delayed main window activation to prevent cursor blinking issues (main.py:60-64)
 - Fix: Video player no longer steals focus from channel list on playback (video_player.py:250-251)
 - Feature: Added optional Serial Number and Device ID fields for STB providers (fixes #31) (options.py:179-187,362-363,408-411,424-431,525-530,537-538; provider_manager.py:115-118,77-82,175,189,197-207,217)

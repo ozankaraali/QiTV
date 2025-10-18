@@ -1,6 +1,6 @@
 [project]
 name = "qitv"
-version = "1.7.2"
+version = "1.7.3"
 description = "A cross-platform STB and IPTV player client"
 requires-python = ">=3.14"
 dependencies = [
@@ -46,8 +46,8 @@ extend-ignore = ["E203"]
 select = ["E9", "F63", "F7", "F82"]
 
 # Developer tools used in CI and locally
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
   "pyinstaller>=6.10",
   "black==25.9.0",
   "isort==5.13.2",

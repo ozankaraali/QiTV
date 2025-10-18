@@ -6,7 +6,8 @@ import tomllib
 
 
 def read_version():
-    pyproj = Path(__file__).with_name('pyproject.toml')
+    # SPECPATH is provided by PyInstaller and points to the spec file directory
+    pyproj = Path(SPECPATH) / 'pyproject.toml'
     with pyproj.open('rb') as f:
         return tomllib.load(f)['project']['version']
 
