@@ -3,7 +3,7 @@ import platform
 import sys
 
 from PySide6.QtCore import QMetaObject, QPoint, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import QFrame, QMainWindow, QProgressBar, QVBoxLayout
 import vlc
 
@@ -92,6 +92,9 @@ class VideoPlayer(QMainWindow):
         self.progress_bar.setFormat("00:00 / 00:00")
         self.mainFrame.layout().addWidget(self.progress_bar)
 
+        # Track content type to reduce repeated progress bar toggles
+        self._is_live = None  # type: bool | None
+
         self.update_timer = QTimer(self)
         self.update_timer.setInterval(100)  # Update every 100ms
         self.update_timer.timeout.connect(self.update_progress)
@@ -104,6 +107,40 @@ class VideoPlayer(QMainWindow):
         self.click_timer.setSingleShot(True)
         self.click_timer.timeout.connect(self.handle_click)
         self._ignore_single_click = False  # guard to suppress single-click after dblclick
+
+        # Keyboard shortcuts via QActions
+        self._setup_actions()
+
+    def _setup_actions(self):
+        action_play_pause = QAction("Play/Pause", self)
+        action_play_pause.setShortcut(QKeySequence(Qt.Key_Space))
+        action_play_pause.triggered.connect(self.toggle_play_pause)
+        self.addAction(action_play_pause)
+
+        action_mute = QAction("Mute", self)
+        action_mute.setShortcut(QKeySequence(Qt.Key_M))
+        action_mute.triggered.connect(self.toggle_mute)
+        self.addAction(action_mute)
+
+        action_fullscreen = QAction("Fullscreen", self)
+        action_fullscreen.setShortcut(QKeySequence(Qt.Key_F))
+        action_fullscreen.triggered.connect(self.toggle_fullscreen)
+        self.addAction(action_fullscreen)
+
+        action_exit_fullscreen = QAction("Exit Fullscreen", self)
+        action_exit_fullscreen.setShortcut(QKeySequence(Qt.Key_Escape))
+        action_exit_fullscreen.triggered.connect(lambda: self.setWindowState(Qt.WindowNoState))
+        self.addAction(action_exit_fullscreen)
+
+        action_pip = QAction("Picture in Picture", self)
+        action_pip.setShortcut(QKeySequence(Qt.ALT | Qt.Key_P))
+        action_pip.triggered.connect(self._action_toggle_pip)
+        self.addAction(action_pip)
+
+    def _action_toggle_pip(self):
+        if self.windowState() == Qt.WindowFullScreen:
+            self.setWindowState(Qt.WindowNoState)
+        self.toggle_pip_mode()
 
     def seek_video(self, event):
         if self.media_player.is_playing():
@@ -124,36 +161,33 @@ class VideoPlayer(QMainWindow):
 
     def update_progress(self):
         state = self.media_player.get_state()
+        # Only update the progress bar value/text here to avoid repeated visibility toggles
         if state == vlc.State.Playing:
-            current_time = self.media_player.get_time()
-            total_time = self.media.get_duration()
-            # if we have current time, but if current time is bigger than total time then it is live stream so we go to else
-            if current_time > 0 and current_time < total_time:
-                self.progress_bar.setVisible(True)
-                formatted_current = self.format_time(current_time)
-                formatted_total = self.format_time(total_time)
-                self.progress_bar.setFormat(f"{formatted_current} / {formatted_total}")
-                self.progress_bar.setValue(int(current_time * 1000 / total_time))
-            else:
-                self.progress_bar.setVisible(False)
-                self.progress_bar.setFormat("Live")
-                self.progress_bar.setValue(0)
+            if self._is_live is False and getattr(self, "media", None):
+                current_time = self.media_player.get_time()
+                total_time = self.media.get_duration()
+                if total_time and 0 <= current_time <= total_time:
+                    formatted_current = self.format_time(current_time)
+                    formatted_total = self.format_time(total_time)
+                    self.progress_bar.setFormat(f"{formatted_current} / {formatted_total}")
+                    try:
+                        self.progress_bar.setValue(int(current_time * 1000 / total_time))
+                    except ZeroDivisionError:
+                        self.progress_bar.setValue(0)
         elif state == vlc.State.Error:
             self.handle_error("Playback error")
         elif state == vlc.State.Ended:
-            self.progress_bar.setFormat("Playback ended")
-            self.progress_bar.setValue(1000)  # Set to 100%
+            if self._is_live is False:
+                self.progress_bar.setFormat("Playback ended")
+                self.progress_bar.setValue(1000)
         elif state == vlc.State.Opening:
-            self.progress_bar.setFormat("Opening...")
-            self.progress_bar.setValue(0)
+            if self._is_live is False:
+                self.progress_bar.setFormat("Opening...")
+                self.progress_bar.setValue(0)
         elif state == vlc.State.Buffering:
-            # Keep the bar visible in VOD, hide for live streams; set informative text
-            if self.media and self.media.get_duration() > 0:
-                self.progress_bar.setVisible(True)
-            else:
-                self.progress_bar.setVisible(False)
-            self.progress_bar.setFormat("Buffering...")
-            self.progress_bar.setValue(0)
+            if self._is_live is False:
+                self.progress_bar.setFormat("Buffering...")
+                self.progress_bar.setValue(0)
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -166,31 +200,9 @@ class VideoPlayer(QMainWindow):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Up:
-            self.change_volume(10)  # Increase volume
+            self.change_volume(10)
         elif event.key() == Qt.Key_Down:
-            self.change_volume(-10)  # Decrease volume
-        elif event.key() == Qt.Key_Space:
-            self.toggle_play_pause()  # Toggle Play/Pause
-        elif event.key() == Qt.Key_M:
-            self.toggle_mute()  # Toggle Mute
-        elif event.key() == Qt.Key_Escape:
-            self.setWindowState(Qt.WindowNoState)
-        elif event.key() == Qt.Key_F:
-            if self.windowState() == Qt.WindowNoState:
-                QGuiApplication.setOverrideCursor(Qt.WaitCursor)
-                self.video_frame.show()
-                self.setWindowState(Qt.WindowFullScreen)
-
-                self.activateWindow()  # Ensure the PiP window is focused and on top
-                self.raise_()
-
-                QGuiApplication.restoreOverrideCursor()
-            else:
-                self.setWindowState(Qt.WindowNoState)
-        elif event.key() == Qt.Key_P and event.modifiers() == Qt.AltModifier:
-            if self.windowState() == Qt.WindowFullScreen:
-                self.setWindowState(Qt.WindowNoState)
-            self.toggle_pip_mode()
+            self.change_volume(-10)
         super().keyPressEvent(event)
 
     def change_volume(self, step):
@@ -204,18 +216,7 @@ class VideoPlayer(QMainWindow):
             if self.click_timer.isActive():
                 self.click_timer.stop()
             self._ignore_single_click = True
-
-            if self.windowState() == Qt.WindowNoState:
-                QGuiApplication.setOverrideCursor(Qt.WaitCursor)
-                self.video_frame.show()
-                self.setWindowState(Qt.WindowFullScreen)
-
-                self.activateWindow()  # Ensure the PiP window is focused and on top
-                self.raise_()
-
-                QGuiApplication.restoreOverrideCursor()
-            else:
-                self.setWindowState(Qt.WindowNoState)
+            self.toggle_fullscreen()
 
     def closeEvent(self, event):
         if self.media_player.is_playing():
@@ -234,6 +235,13 @@ class VideoPlayer(QMainWindow):
             self.media_player.set_nsobject(int(self.video_frame.winId()))
 
         self.media = self.instance.media_new(video_url)
+        # Helpful defaults for IPTV streams
+        try:
+            self.media.add_option(":http-user-agent=VLC/3.0.20")
+            self.media.add_option(":network-caching=1200")
+            self.media.add_option(":http-reconnect=true")
+        except Exception:
+            pass
         self.media_player.set_media(self.media)
 
         events = self.media_player.event_manager()
@@ -423,14 +431,18 @@ class VideoPlayer(QMainWindow):
     @Slot()
     def media_length_changed(self):
         duration = self.media.get_duration()
-        if duration > 0:  # VOD content
-            self.progress_bar.setVisible(True)
+        self._is_live = duration <= 0
+        if not self._is_live:  # VOD content
+            if not self.progress_bar.isVisible():
+                self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 1000)
             self.progress_bar.setFormat("00:00 / " + self.format_time(duration))
             self.update_timer.start()
         else:  # Live content
-            self.progress_bar.setVisible(False)  # Hide the progress bar
+            self.update_timer.stop()
+            if self.progress_bar.isVisible():
+                self.progress_bar.setVisible(False)
             self.progress_bar.setFormat("Live")
-            # self.update_timer.start()
 
     def on_vlc_error(self, event):
         # We don't use event data here, just log that an error occurred
@@ -450,3 +462,14 @@ class VideoPlayer(QMainWindow):
         self.progress_bar.setFormat(f"Error: {error_message}")
         self.progress_bar.setValue(0)
         self.update_timer.stop()
+
+    def toggle_fullscreen(self):
+        if self.windowState() == Qt.WindowNoState:
+            QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+            self.video_frame.show()
+            self.setWindowState(Qt.WindowFullScreen)
+            self.activateWindow()
+            self.raise_()
+            QGuiApplication.restoreOverrideCursor()
+        else:
+            self.setWindowState(Qt.WindowNoState)

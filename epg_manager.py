@@ -15,6 +15,7 @@ from urlobject import URLObject
 
 from content_loader import ContentLoader
 from multikeydict import MultiKeyDict
+from services.provider_api import base_from_url, stb_endpoint
 
 
 def xml_to_dict(element):
@@ -306,8 +307,8 @@ class EpgManager:
 
     def _fetch_epg_from_stb(self, provider_url, headers):
         provider_hash = hashlib.md5(provider_url.encode()).hexdigest()
-        url = URLObject(provider_url)
-        url = f"{url.scheme}://{url.netloc}/server/load.php"
+        base = base_from_url(provider_url)
+        url = stb_endpoint(base)
         period = 5
         content_loader = ContentLoader(
             url=url,

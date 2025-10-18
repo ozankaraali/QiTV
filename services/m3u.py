@@ -1,12 +1,25 @@
 import re
+from typing import Dict, List
 from urllib.parse import urlparse
 
 
-def parse_m3u(data: str):
+def parse_m3u(data: str, categorize: bool = False):
+    """Parse M3U playlist.
+
+    Args:
+        data: M3U playlist content
+        categorize: If True, return categorized structure with categories and sorted_channels.
+                   If False, return flat list (default for backward compatibility)
+
+    Returns:
+        If categorize=False: List of items
+        If categorize=True: Dict with 'categories', 'contents', 'sorted_channels'
+    """
     lines = data.split("\n")
-    result = []
+    items = []
     item = {}
     id_counter = 0
+
     for line in lines:
         if line.startswith("#EXTINF"):
             tvg_id_match = re.search(r'tvg-id="([^"]+)"', line)
@@ -38,5 +51,54 @@ def parse_m3u(data: str):
         elif line.startswith("http"):
             urlobject = urlparse(line)
             item["cmd"] = urlobject.geturl()
-            result.append(item)
-    return result
+            items.append(item)
+
+    # Return flat list if not categorizing
+    if not categorize:
+        return items
+
+    # Build categorized structure
+    return _build_categorized_structure(items)
+
+
+def _build_categorized_structure(items: List[Dict]) -> Dict:
+    """Build categorized structure from M3U items with group-title support.
+
+    Returns dict with:
+        - categories: List of category dicts with id and title
+        - contents: List of all items with tv_genre_id field added
+        - sorted_channels: Dict mapping category_id -> list of item indices
+    """
+    categories_map: Dict[str, str] = {}
+    sorted_channels: Dict[str, List[int]] = {}
+    contents: List[Dict] = []
+
+    # Group items by category
+    for idx, item in enumerate(items):
+        group = item.get("group") or "Uncategorized"
+        category_id = str(abs(hash(group)) % 1000000)  # Generate stable category ID
+
+        # Add to categories map
+        if category_id not in categories_map:
+            categories_map[category_id] = group
+
+        # Add tv_genre_id for compatibility with STB/Xtream structure
+        item["tv_genre_id"] = category_id
+        item["number"] = str(idx + 1)
+        contents.append(item)
+
+        # Add to sorted_channels mapping
+        if category_id not in sorted_channels:
+            sorted_channels[category_id] = []
+        sorted_channels[category_id].append(idx)
+
+    # Build categories list
+    categories = [{"id": "*", "title": "All"}]
+    for cat_id, cat_name in sorted(categories_map.items(), key=lambda x: x[1]):
+        categories.append({"id": cat_id, "title": cat_name})
+
+    return {
+        "categories": categories,
+        "contents": contents,
+        "sorted_channels": sorted_channels,
+    }

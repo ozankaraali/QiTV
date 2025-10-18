@@ -21,15 +21,15 @@ Current Work Plan (Living TODO)
 1) Input/UI polish and correctness
    - [x] Separate dblclick fullscreen from single-click play/pause (video_player.py)
    - [x] Remove unused `installEventFilter(self)` on `video_frame` or implement `eventFilter` explicitly
-   - [ ] Normalize progress bar behavior for live/VOD; avoid toggling visibility repeatedly
-   - [ ] Add keyboard shortcuts as QActions (Play/Pause, Mute, Fullscreen, PiP) and bind menu/toolbar if added later
+   - [x] Normalize progress bar behavior for live/VOD; avoid toggling visibility repeatedly
+   - [x] Add keyboard shortcuts as QActions (Play/Pause, Mute, Fullscreen, PiP) and bind menu/toolbar if added later
 
 2) Networking and responsiveness
    - [x] Identify and thread key `requests` (M3U load, STB categories, link creation)
    - [x] Standardize timeouts/retries across network calls (added timeouts; moved update check to QThread)
    - [x] Move remaining UI-thread `requests` to workers (exports OK as is)
    - [x] Ensure all worker completions marshal back to the UI thread (no cross-thread timers)
-   - [ ] Consolidate provider/EPG URL building and headers in one place
+   - [x] Consolidate provider/EPG URL building and headers in one place
 
 3) Modularity and structure
    - [x] Extract delegates to `widgets/delegates.py`
@@ -66,6 +66,9 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- UX: Added QActions for playback controls (Space: Play/Pause, M: Mute, F: Fullscreen, Alt+P: PiP) for future menu/toolbar binding (video_player.py)
+- UX: Normalized VOD vs Live progress behavior; avoid repeated visibility toggles and only update values on VOD (video_player.py)
+- Refactor: Centralized STB URL building in `services/provider_api.py`; updated STB workers and EPG to use it (channel_list.py, epg_manager.py)
 - Fix: Eliminated cross-thread timer warnings by posting worker completions to the GUI thread (channel_list.py: M3U/STB/link creators; update_checker.py). Also avoided unconditional signal disconnects that caused warnings.
 - Refactor: Image loading pipeline avoids GUI objects in worker threads; workers cache files, GUI constructs QPixmap/QIcon (image_loader.py, image_manager.py, channel_list.py logos/posters).
 - UX: Export button now uses a clean label; dropdown arrow provided by Qt via setMenu (channel_list.py).

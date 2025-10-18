@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote as url_quote
 
 from PySide6.QtCore import QBuffer, QObject, QRect, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -39,6 +39,15 @@ from PySide6.QtWidgets import (
 )
 import requests
 from urlobject import URLObject
+
+from services.provider_api import (
+    base_from_url,
+    stb_request_url,
+    xtream_choose_resolved_base,
+    xtream_choose_stream_base,
+    xtream_get_php_url,
+    xtream_player_api_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +76,412 @@ class M3ULoaderWorker(QObject):
             self.error.emit(str(e))
 
 
+class XtreamAuthWorker(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, base_url: str, username: str, password: str):
+        super().__init__()
+        self.base_url = base_url
+        self.username = username
+        self.password = password
+
+    def run(self):
+        try:
+            # First authenticate to resolve the correct domain/ports
+            auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
+            resp = requests.get(auth_url, timeout=10)
+            resp.raise_for_status()
+            body = resp.json()
+            server_info = body.get("server_info", {}) if isinstance(body, dict) else {}
+            allowed: List[str] = []
+            user_info = body.get("user_info", {}) if isinstance(body, dict) else {}
+            try:
+                allowed = user_info.get("allowed_output_formats", []) or []
+            except Exception:
+                allowed = []
+
+            resolved_base = xtream_choose_resolved_base(server_info)
+            if not resolved_base:
+                # Fall back to given base
+                url_obj = URLObject(self.base_url)
+                resolved_base = f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip(
+                    '/'
+                )
+
+            self.finished.emit(
+                {
+                    "resolved_base": resolved_base,
+                    "allowed_output_formats": allowed,
+                    "server_info": server_info,
+                }
+            )
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class XtreamLoaderWorker(QObject):
+    """Worker for loading Xtream content (Live/VOD/Series) using Player API v2."""
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, base_url: str, username: str, password: str, content_type: str = "itv"):
+        super().__init__()
+        self.base_url = base_url
+        self.username = username
+        self.password = password
+        self.content_type = content_type  # "itv", "vod", or "series"
+
+    def run(self):
+        try:
+            # Step 1: Authenticate and resolve proper base + formats
+            auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
+            auth_resp = requests.get(auth_url, timeout=10)
+            auth_resp.raise_for_status()
+            auth_body = auth_resp.json() if auth_resp.content else {}
+            server_info = auth_body.get("server_info", {}) if isinstance(auth_body, dict) else {}
+            user_info = auth_body.get("user_info", {}) if isinstance(auth_body, dict) else {}
+            allowed_formats = user_info.get("allowed_output_formats", []) or []
+
+            resolved_base = xtream_choose_resolved_base(server_info)
+            if not resolved_base:
+                url_obj = URLObject(self.base_url)
+                resolved_base = f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip(
+                    '/'
+                )
+
+            stream_base = xtream_choose_stream_base(server_info) or resolved_base
+
+            # Build candidate ext/base combinations
+            exts_pref = []
+            if not allowed_formats:
+                exts_pref = ["ts", "m3u8"]
+            else:
+                # Prefer TS if present, then m3u8
+                if "ts" in allowed_formats:
+                    exts_pref.append("ts")
+                if "m3u8" in allowed_formats:
+                    exts_pref.append("m3u8")
+                # Ensure at least one
+                if not exts_pref:
+                    exts_pref = ["ts"]
+
+            bases_pref = []
+            # Per API doc: prefer HTTPS when available for API & player requests
+            if resolved_base:
+                bases_pref.append(resolved_base)
+            if stream_base and stream_base not in bases_pref:
+                bases_pref.append(stream_base)
+
+            # Step 2: Determine API actions based on content type
+            if self.content_type == "itv":
+                cat_action = "get_live_categories"
+                streams_action = "get_live_streams"
+                url_prefix = "live"
+            elif self.content_type == "vod":
+                cat_action = "get_vod_categories"
+                streams_action = "get_vod_streams"
+                url_prefix = "movie"
+            elif self.content_type == "series":
+                cat_action = "get_series_categories"
+                streams_action = "get_series"
+                url_prefix = "series"
+            else:
+                raise ValueError(f"Unknown content type: {self.content_type}")
+
+            # Step 3: Fetch categories
+            cat_url = xtream_player_api_url(
+                resolved_base, self.username, self.password, action=cat_action
+            )
+            categories = []
+            categories_map = {}
+            try:
+                cat_resp = requests.get(cat_url, timeout=10)
+                if cat_resp.ok and cat_resp.content:
+                    cats_data = cat_resp.json() or []
+                    for c in cats_data:
+                        cid = str(c.get("category_id"))
+                        cname = c.get("category_name") or "Unknown"
+                        categories_map[cid] = cname
+                        categories.append({"id": cid, "title": cname})
+            except Exception as e:
+                logger.warning(f"Failed to fetch categories: {e}")
+
+            # Add "All" category
+            categories.insert(0, {"id": "*", "title": "All"})
+
+            # Step 4: Fetch all content
+            streams_url = xtream_player_api_url(
+                resolved_base, self.username, self.password, action=streams_action
+            )
+            streams_resp = requests.get(streams_url, timeout=15)
+            streams_resp.raise_for_status()
+            streams = streams_resp.json() or []
+
+            # Step 5: Probe a working combination for live/vod (not needed for series metadata)
+            pick_base = bases_pref[0] if bases_pref else resolved_base
+            pick_ext = exts_pref[0]
+
+            if self.content_type in ("itv", "vod"):
+                sample_id = None
+                for s in streams:
+                    sid = s.get("stream_id")
+                    if sid:
+                        sample_id = sid
+                        break
+
+                if sample_id:
+
+                    def looks_like_m3u8(rbytes, ctype):
+                        if ctype:
+                            ctype = ctype.lower()
+                            if (
+                                "application/vnd.apple.mpegurl" in ctype
+                                or "application/x-mpegurl" in ctype
+                            ):
+                                return True
+                            if "text/plain" in ctype and rbytes.startswith(b"#EXTM3U"):
+                                return True
+                        return rbytes.startswith(b"#EXTM3U")
+
+                    def looks_like_ts(rbytes, ctype):
+                        # First byte of TS packet is 0x47 (sync byte) every 188 bytes
+                        if not rbytes:
+                            return False
+                        if rbytes[0:1] == b"\x47":
+                            return True
+                        if ctype:
+                            ctype = ctype.lower()
+                            if "video/" in ctype or "application/octet-stream" in ctype:
+                                return True
+                        return False
+
+                    for b in bases_pref:
+                        worked = False
+                        # Prefer ext order depending on scheme (https -> m3u8 first)
+                        if b.startswith("https://"):
+                            ext_order = [ext for ext in ("m3u8", "ts") if ext in exts_pref]
+                        else:
+                            ext_order = [ext for ext in ("ts", "m3u8") if ext in exts_pref]
+                        for ext in ext_order:
+                            test_url = f"{b}/{url_prefix}/{self.username}/{self.password}/{sample_id}.{ext}"
+                            try:
+                                headers = {
+                                    "User-Agent": "VLC/3.0.20",
+                                }
+                                # Fetch a small range sufficient to identify TS or M3U
+                                if ext == "ts":
+                                    headers["Range"] = "bytes=0-187"
+                                else:
+                                    headers["Range"] = "bytes=0-1023"
+                                r = requests.get(
+                                    test_url,
+                                    headers=headers,
+                                    timeout=6,
+                                    allow_redirects=True,
+                                )
+                                # Check status, content exists, and content-length > 0
+                                clen = r.headers.get("Content-Length", "1")
+                                if (
+                                    r.status_code in (200, 206)
+                                    and r.content
+                                    and len(r.content) > 0
+                                    and clen != "0"
+                                ):
+                                    ctype = r.headers.get("Content-Type", "")
+                                    ok = (
+                                        looks_like_m3u8(r.content, ctype)
+                                        if ext == "m3u8"
+                                        else looks_like_ts(r.content, ctype)
+                                    )
+                                    if ok:
+                                        pick_base, pick_ext = b, ext
+                                        worked = True
+                                        break
+                            except Exception:
+                                pass
+                        if worked:
+                            break
+
+                try:
+                    logger.info(
+                        "Xtream stream probe picked base=%s ext=%s (candidates bases=%s, exts=%s)",
+                        pick_base,
+                        pick_ext,
+                        bases_pref,
+                        exts_pref,
+                    )
+                except Exception:
+                    pass
+
+            # Step 6: Build items list with category mapping
+            items: List[Dict] = []
+            sorted_channels: Dict[str, List[int]] = {}
+
+            for s in streams:
+                try:
+                    stream_id = s.get("stream_id") or s.get("series_id")
+                    if not stream_id:
+                        continue
+
+                    num = s.get("num") or len(items) + 1
+                    name = s.get("name") or f"Stream {stream_id}"
+                    logo = s.get("stream_icon") or s.get("cover") or ""
+
+                    # Get category ID
+                    if isinstance(s.get("category_ids"), list) and s.get("category_ids"):
+                        cid = str(s.get("category_ids")[0])
+                    else:
+                        cid = str(s.get("category_id") or "None")
+
+                    # Build URL based on content type
+                    if self.content_type == "series":
+                        # Series don't have direct playback URLs; store series_id for later fetching
+                        cmd = ""  # Will be populated when episodes are fetched
+                    else:
+                        cmd = f"{pick_base}/{url_prefix}/{self.username}/{self.password}/{stream_id}.{pick_ext}"
+
+                    item = {
+                        "id": stream_id,
+                        "number": str(num),
+                        "name": name,
+                        "logo": logo,
+                        "tv_genre_id": cid,  # Use STB-compatible field name
+                        "cmd": cmd,
+                    }
+
+                    if self.content_type == "itv":
+                        item["xmltv_id"] = s.get("epg_channel_id") or ""
+                    elif self.content_type == "vod":
+                        item["director"] = s.get("director") or ""
+                        item["description"] = s.get("plot") or ""
+                        item["rating"] = s.get("rating") or ""
+                        item["year"] = s.get("releasedate") or ""
+                    elif self.content_type == "series":
+                        item["plot"] = s.get("plot") or ""
+                        item["rating"] = s.get("rating") or ""
+                        item["year"] = s.get("year") or ""
+
+                    items.append(item)
+
+                    # Build sorted_channels mapping
+                    if cid not in sorted_channels:
+                        sorted_channels[cid] = []
+                    sorted_channels[cid].append(len(items) - 1)
+
+                except Exception as e:
+                    logger.warning(f"Failed to process stream: {e}")
+                    continue
+
+            # Sort channels within each category
+            for cat_id in sorted_channels:
+                sorted_channels[cat_id].sort(
+                    key=lambda x: int(items[x]["number"]) if items[x]["number"].isdigit() else 0
+                )
+
+            # Add "None" category if there are uncategorized items
+            if "None" in sorted_channels:
+                categories.append({"id": "None", "title": "Unknown Category"})
+
+            result = {
+                "categories": categories,
+                "contents": items,
+                "sorted_channels": sorted_channels,
+                "resolved_base": resolved_base,
+                "stream_base": pick_base,
+                "stream_ext": pick_ext,
+            }
+
+            self.finished.emit(result)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class XtreamSeriesInfoWorker(QObject):
+    """Worker for loading Xtream series info (seasons and episodes) using Player API v2."""
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self, base_url: str, username: str, password: str, series_id: str, resolved_base: str = ""
+    ):
+        super().__init__()
+        self.base_url = base_url
+        self.username = username
+        self.password = password
+        self.series_id = series_id
+        self.resolved_base = resolved_base
+
+    def run(self):
+        try:
+            # Use resolved_base if provided, otherwise determine from base_url
+            if not self.resolved_base:
+                auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
+                auth_resp = requests.get(auth_url, timeout=10)
+                auth_resp.raise_for_status()
+                auth_body = auth_resp.json() if auth_resp.content else {}
+                server_info = (
+                    auth_body.get("server_info", {}) if isinstance(auth_body, dict) else {}
+                )
+                self.resolved_base = xtream_choose_resolved_base(server_info)
+
+            if not self.resolved_base:
+                url_obj = URLObject(self.base_url)
+                self.resolved_base = (
+                    f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip("/")
+                )
+
+            # Fetch series info
+            info_url = xtream_player_api_url(
+                self.resolved_base,
+                self.username,
+                self.password,
+                action="get_series_info",
+                extra={"series_id": self.series_id},
+            )
+            info_resp = requests.get(info_url, timeout=15)
+            info_resp.raise_for_status()
+            series_data = info_resp.json() or {}
+
+            # Extract seasons and episodes
+            episodes_dict = series_data.get("episodes", {})
+            seasons_info = series_data.get("seasons", {})
+            series_info = series_data.get("info", {})
+
+            # Build seasons list
+            seasons = []
+            for season_num in sorted(
+                episodes_dict.keys(), key=lambda x: int(x) if x.isdigit() else 0
+            ):
+                season_episodes = episodes_dict[season_num]
+                season_data = seasons_info.get(season_num, {})
+
+                season_item = {
+                    "id": season_num,
+                    "name": season_data.get("name") or f"Season {season_num}",
+                    "cover": season_data.get("cover_big") or season_data.get("cover") or "",
+                    "overview": season_data.get("overview") or "",
+                    "air_date": season_data.get("air_date") or "",
+                    "episode_count": str(len(season_episodes)),
+                    "episodes": season_episodes,  # Store episodes with season
+                }
+                seasons.append(season_item)
+
+            result = {
+                "seasons": seasons,
+                "series_info": series_info,
+                "resolved_base": self.resolved_base,
+            }
+
+            self.finished.emit(result)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class STBCategoriesWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
@@ -79,12 +494,11 @@ class STBCategoriesWorker(QObject):
 
     def run(self):
         try:
-            url = URLObject(self.base_url)
-            base = f"{url.scheme}://{url.netloc}"
+            base = base_from_url(self.base_url)
 
             # Use correct action based on content type
             action = "get_genres" if self.content_type == "itv" else "get_categories"
-            fetchurl = f"{base}/server/load.php?type={self.content_type}&action={action}&JsHttpRequest=1-xml"
+            fetchurl = stb_request_url(base, self.content_type, action)
             resp = requests.get(fetchurl, headers=self.headers, timeout=10)
             resp.raise_for_status()
             categories = resp.json()["js"]
@@ -92,9 +506,7 @@ class STBCategoriesWorker(QObject):
             # Only fetch all channels for itv type
             all_channels = []
             if self.content_type == "itv":
-                fetchurl = (
-                    f"{base}/server/load.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
-                )
+                fetchurl = stb_request_url(base, "itv", "get_all_channels")
                 resp = requests.get(fetchurl, headers=self.headers, timeout=10)
                 resp.raise_for_status()
                 all_channels = resp.json()["js"]["data"]
@@ -285,6 +697,9 @@ class ChannelList(QMainWindow):
         self.splitter.splitterMoved.connect(self.update_splitter_ratio)
         self.channels_radio.toggled.connect(self.toggle_content_type)
         self.movies_radio.toggled.connect(self.toggle_content_type)
+
+        # Global shortcuts mirrored on main window
+        self._setup_global_shortcuts()
         self.series_radio.toggled.connect(self.toggle_content_type)
 
         # Create a timer to update "On Air" status
@@ -387,7 +802,8 @@ class ChannelList(QMainWindow):
         # No need to switch content type if not STB
         selected_provider = self.provider_manager.current_provider
         config_type = selected_provider.get("type", "")
-        self.content_switch_group.setVisible(config_type == "STB")
+        # Show content type switches for STB and XTREAM providers
+        self.content_switch_group.setVisible(config_type in ("STB", "XTREAM"))
 
         if force_update:
             self.update_content()
@@ -561,6 +977,54 @@ class ChannelList(QMainWindow):
 
         # Populate provider combo box
         self.populate_provider_combo()
+
+    def _setup_global_shortcuts(self):
+        def not_in_text_input():
+            from PySide6.QtWidgets import QLineEdit, QPlainTextEdit, QTextEdit
+
+            w = QApplication.focusWidget()
+            return not isinstance(w, (QLineEdit, QTextEdit, QPlainTextEdit))
+
+        # Fullscreen
+        act_full = QAction("Fullscreen", self)
+        act_full.setShortcut(QKeySequence(Qt.Key_F))
+        act_full.setShortcutContext(Qt.ApplicationShortcut)
+        act_full.triggered.connect(
+            lambda: self.player.toggle_fullscreen() if not_in_text_input() else None
+        )
+        self.addAction(act_full)
+
+        # Mute
+        act_mute = QAction("Mute", self)
+        act_mute.setShortcut(QKeySequence(Qt.Key_M))
+        act_mute.setShortcutContext(Qt.ApplicationShortcut)
+        act_mute.triggered.connect(
+            lambda: self.player.toggle_mute() if not_in_text_input() else None
+        )
+        self.addAction(act_mute)
+
+        # Play/Pause
+        act_play = QAction("Play/Pause", self)
+        act_play.setShortcut(QKeySequence(Qt.Key_Space))
+        act_play.setShortcutContext(Qt.ApplicationShortcut)
+        act_play.triggered.connect(
+            lambda: self.player.toggle_play_pause() if not_in_text_input() else None
+        )
+        self.addAction(act_play)
+
+        # Picture-in-Picture
+        act_pip = QAction("PiP", self)
+        act_pip.setShortcut(QKeySequence(Qt.ALT | Qt.Key_P))
+        act_pip.setShortcutContext(Qt.ApplicationShortcut)
+
+        def _pip():
+            if not_in_text_input():
+                if self.player.windowState() == Qt.WindowFullScreen:
+                    self.player.setWindowState(Qt.WindowNoState)
+                self.player.toggle_pip_mode()
+
+        act_pip.triggered.connect(_pip)
+        self.addAction(act_pip)
 
     def populate_provider_combo(self):
         """Populate the provider dropdown with available providers."""
@@ -1428,6 +1892,7 @@ class ChannelList(QMainWindow):
         search_text = text.lower() if isinstance(text, str) else ""
 
         # retrieve items type first
+        item_type = None
         if self.content_list.topLevelItemCount() > 0:
             item = self.content_list.topLevelItem(0)
             item_type = self.get_item_type(item)
@@ -1436,6 +1901,27 @@ class ChannelList(QMainWindow):
             item = self.content_list.topLevelItem(i)
             item_name = self.get_item_name(item, item_type)
             matches_search = search_text in item_name.lower()
+
+            # For categories, check if any content inside matches and show dropdown
+            if item_type == "category" and search_text:
+                matching_items = self._get_matching_items_in_category(item, search_text)
+                if matching_items:
+                    matches_search = True
+                    # Populate category with matching items as children
+                    self._populate_category_dropdown(item, matching_items)
+                    item.setExpanded(True)  # Auto-expand to show matches
+                else:
+                    # Category name matches but no content inside
+                    # Clear any existing children
+                    item.takeChildren()
+                    if not matches_search:
+                        item.setExpanded(False)
+            else:
+                # Not searching or not a category - clear children
+                if item_type == "category":
+                    item.takeChildren()
+                    item.setExpanded(False)
+
             if item_type in ["category", "channel", "movie", "serie", "m3ucontent"]:
                 # For category, channel, movie, serie and generic content, filter by search text and favorite
                 is_favorite = self.check_if_favorite(item_name)
@@ -1446,6 +1932,101 @@ class ChannelList(QMainWindow):
             else:
                 # For season, episode, only filter by search text
                 item.setHidden(not matches_search)
+
+    def _get_matching_items_in_category(self, category_item, search_text):
+        """Get items in category that match the search text.
+
+        Returns list of matching items that can be displayed as dropdown children.
+        """
+        try:
+            data = category_item.data(0, Qt.UserRole)
+            if not data or "data" not in data:
+                return []
+
+            category_data = data["data"]
+            category_id = category_data.get("id", "*")
+
+            # Get provider content
+            content_data = self.provider_manager.current_provider_content.get(self.content_type, {})
+
+            # Check if we have categorized structure
+            if not isinstance(content_data, dict):
+                return []
+
+            # Get all items in this category
+            if category_id == "*":
+                # "All" category - check all contents
+                items = content_data.get("contents", [])
+            else:
+                # Specific category - get items by sorted_channels index
+                sorted_channels = content_data.get("sorted_channels", {})
+                indices = sorted_channels.get(category_id, [])
+                contents = content_data.get("contents", [])
+                items = [contents[i] for i in indices if i < len(contents)]
+
+            # Find matching items
+            search_lower = search_text.lower()
+            matching = []
+            for item in items:
+                # Check name
+                name = item.get("name", "")
+                matches_name = search_lower in name.lower()
+
+                # Also check description for movies/series
+                description = item.get("description") or item.get("plot") or ""
+                matches_desc = search_lower in description.lower()
+
+                if matches_name or matches_desc:
+                    matching.append(item)
+
+            return matching
+
+        except Exception as e:
+            # If anything goes wrong, return empty list
+            return []
+
+    def _populate_category_dropdown(self, category_item, items):
+        """Populate category tree item with matching content as children."""
+        # Clear existing children
+        category_item.takeChildren()
+
+        # Limit number of items shown in dropdown to avoid performance issues
+        max_items = 50
+        items_to_show = items[:max_items]
+        has_more = len(items) > max_items
+
+        # Add matching items as children
+        for item_data in items_to_show:
+            child_item = QTreeWidgetItem(category_item)
+            name = item_data.get("name", "Unknown")
+
+            # Add channel number if available
+            number = item_data.get("number", "")
+            if number:
+                child_item.setText(0, f"{number}. {name}")
+            else:
+                child_item.setText(0, name)
+
+            # Store item data
+            item_type = "channel"
+            if self.content_type == "vod":
+                item_type = "movie"
+            elif self.content_type == "series":
+                item_type = "serie"
+
+            child_item.setData(0, Qt.UserRole, {"type": item_type, "data": item_data})
+
+        # Add "... and X more" item if truncated
+        if has_more:
+            more_item = QTreeWidgetItem(category_item)
+            more_item.setText(
+                0, f"... and {len(items) - max_items} more (click category to see all)"
+            )
+            more_item.setDisabled(True)
+            # Gray out the text
+            font = more_item.font(0)
+            font.setItalic(True)
+            more_item.setFont(0, font)
 
     def create_media_controls(self):
         self.media_controls = QWidget(self.container_widget)
@@ -1854,11 +2435,15 @@ class ChannelList(QMainWindow):
         config_type = selected_provider.get("type", "")
         content = self.provider_manager.current_provider_content.setdefault(self.content_type, {})
         if content:
-            # If we have categories cached, display them
-            if config_type == "STB":
+            # Check if content is a dict with categories (categorized format)
+            if isinstance(content, dict) and "categories" in content:
+                # Display categories for STB, XTREAM, and categorized M3U
                 self.display_categories(content.get("categories", []))
+            elif config_type in ("STB", "XTREAM"):
+                # Old cached format for STB/XTREAM - force update
+                self.update_content()
             else:
-                # For non-STB, display content directly
+                # For flat M3U lists and other types, display content directly
                 self.display_content(content)
         else:
             self.update_content()
@@ -1869,21 +2454,13 @@ class ChannelList(QMainWindow):
         if config_type == "M3UPLAYLIST":
             self.load_m3u_playlist(selected_provider["url"])
         elif config_type == "XTREAM":
-            urlobject = URLObject(selected_provider["url"])
-            if urlobject.scheme == "":
-                urlobject = URLObject(f"http://{selected_provider['url']}")
-            if self.content_type == "itv":
-                url = (
-                    f"{urlobject.scheme}://{urlobject.netloc}/get.php?"
-                    f"username={selected_provider['username']}&password={selected_provider['password']}&type=m3u"
-                )
-            else:
-                url = (
-                    f"{urlobject.scheme}://{urlobject.netloc}/get.php?"
-                    f"username={selected_provider['username']}&password={selected_provider['password']}&type=m3u&"
-                    "contentType=vod"
-                )
-            self.load_m3u_playlist(url)
+            # Use Xtream Player API v2 with categories
+            self.load_xtream_content(
+                base_url=selected_provider.get("url", ""),
+                username=selected_provider.get("username", ""),
+                password=selected_provider.get("password", ""),
+                content_type=self.content_type,
+            )
         elif config_type == "STB":
             self.load_stb_categories(selected_provider["url"], self.provider_manager.headers)
         elif config_type == "M3USTREAM":
@@ -1904,12 +2481,25 @@ class ChannelList(QMainWindow):
                 def handle_finished_ui(payload):
                     try:
                         content = payload.get("content", "")
-                        parsed_content = parse_m3u(content)
-                        self.display_content(parsed_content)
-                        self.provider_manager.current_provider_content[self.content_type] = (
-                            parsed_content
-                        )
-                        self.save_provider()
+                        # Parse with categorization enabled
+                        parsed_content = parse_m3u(content, categorize=True)
+
+                        # Check if we have categories (dict structure)
+                        if isinstance(parsed_content, dict) and "categories" in parsed_content:
+                            # Store categorized content
+                            self.provider_manager.current_provider_content[self.content_type] = (
+                                parsed_content
+                            )
+                            self.save_provider()
+                            # Display categories
+                            self.display_categories(parsed_content.get("categories", []))
+                        else:
+                            # Fallback to flat list (shouldn't happen with categorize=True)
+                            self.display_content(parsed_content)
+                            self.provider_manager.current_provider_content[self.content_type] = (
+                                parsed_content
+                            )
+                            self.save_provider()
                     finally:
                         thread.quit()
                         self.unlock_ui_after_loading()
@@ -1941,10 +2531,25 @@ class ChannelList(QMainWindow):
             else:
                 with open(url, "r", encoding="utf-8") as file:
                     content = file.read()
-                parsed_content = parse_m3u(content)
-                self.display_content(parsed_content)
-                self.provider_manager.current_provider_content[self.content_type] = parsed_content
-                self.save_provider()
+                # Parse with categorization enabled
+                parsed_content = parse_m3u(content, categorize=True)
+
+                # Check if we have categories (dict structure)
+                if isinstance(parsed_content, dict) and "categories" in parsed_content:
+                    # Store categorized content
+                    self.provider_manager.current_provider_content[self.content_type] = (
+                        parsed_content
+                    )
+                    self.save_provider()
+                    # Display categories
+                    self.display_categories(parsed_content.get("categories", []))
+                else:
+                    # Fallback to flat list
+                    self.display_content(parsed_content)
+                    self.provider_manager.current_provider_content[self.content_type] = (
+                        parsed_content
+                    )
+                    self.save_provider()
         except (requests.RequestException, IOError) as e:
             logger.warning(f"Error loading M3U Playlist: {e}")
 
@@ -2055,6 +2660,68 @@ class ChannelList(QMainWindow):
 
     # parse_m3u moved to services/m3u.py
 
+    def load_xtream_content(self, base_url: str, username: str, password: str, content_type: str):
+        """Load Xtream content (Live/VOD/Series) using Player API v2 with categories."""
+        self.lock_ui_before_loading()
+        thread = QThread()
+        worker = XtreamLoaderWorker(base_url, username, password, content_type)
+        worker.moveToThread(thread)
+
+        def on_started():
+            worker.run()
+
+        def handle_finished_ui(payload):
+            try:
+                categories = payload.get("categories", [])
+                contents = payload.get("contents", [])
+                sorted_channels = payload.get("sorted_channels", {})
+
+                if not categories and not contents:
+                    logger.info("No content found.")
+                    return
+
+                provider_content = self.provider_manager.current_provider_content.setdefault(
+                    self.content_type, {}
+                )
+                provider_content["categories"] = categories
+                provider_content["contents"] = contents
+                provider_content["sorted_channels"] = sorted_channels
+
+                # Store stream settings for later use
+                provider_content["stream_base"] = payload.get("stream_base", "")
+                provider_content["stream_ext"] = payload.get("stream_ext", "")
+                provider_content["resolved_base"] = payload.get("resolved_base", "")
+
+                self.save_provider()
+                self.display_categories(categories)
+            finally:
+                thread.quit()
+                self.unlock_ui_after_loading()
+
+        def on_finished(payload):
+            QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
+
+        def on_error(msg):
+            def handle_error_ui():
+                logger.warning(f"Error loading Xtream content: {msg}")
+                thread.quit()
+                self.unlock_ui_after_loading()
+
+            QTimer.singleShot(0, self, handle_error_ui)
+
+        def _cleanup():
+            try:
+                self._bg_jobs.remove((thread, worker))
+            except ValueError:
+                pass
+
+        thread.started.connect(on_started)
+        worker.finished.connect(on_finished, Qt.QueuedConnection)
+        worker.error.connect(on_error, Qt.QueuedConnection)
+        thread.finished.connect(_cleanup)
+        thread.start()
+        self._bg_jobs.append((thread, worker))
+
     def load_stb_categories(self, url: str, headers: Optional[dict] = None):
         if headers is None:
             headers = self.provider_manager.headers
@@ -2153,18 +2820,29 @@ class ChannelList(QMainWindow):
             self.content_type, {}
         )
         category_id = category.get("id", "*")
+        selected_provider = self.provider_manager.current_provider
+        config_type = selected_provider.get("type", "")
 
-        if self.content_type == "itv":
-            # Show only channels for the selected category
+        # For XTREAM and STB providers with sorted_channels structure
+        if "sorted_channels" in content_data:
+            contents = content_data.get("contents", [])
             if category_id == "*":
-                items = content_data["contents"]
+                items = contents if isinstance(contents, list) else []
             else:
-                items = [
-                    content_data["contents"][i]
-                    for i in content_data["sorted_channels"].get(category_id, [])
-                ]
-            self.display_content(items, content="channel")
+                sorted_map = content_data.get("sorted_channels", {})
+                indices = sorted_map.get(category_id, []) if isinstance(sorted_map, dict) else []
+                # Guard missing/invalid state
+                items = [contents[i] for i in indices] if isinstance(contents, list) else []
+
+            # Display with appropriate content type
+            if self.content_type == "itv":
+                self.display_content(items, content="channel", select_first=select_first)
+            elif self.content_type == "series":
+                self.display_content(items, content="serie", select_first=select_first)
+            elif self.content_type == "vod":
+                self.display_content(items, content="movie", select_first=select_first)
         else:
+            # For STB providers with per-category fetching
             # Check if we have cached content for this category
             if category_id in content_data.get("contents", {}):
                 items = content_data["contents"][category_id]
@@ -2175,8 +2853,9 @@ class ChannelList(QMainWindow):
                 elif self.content_type == "vod":
                     self.display_content(items, content="movie", select_first=select_first)
             else:
-                # Fetch content for the category
-                self.fetch_content_in_category(category_id, select_first=select_first)
+                # Fetch content for the category (STB only)
+                if config_type == "STB":
+                    self.fetch_content_in_category(category_id, select_first=select_first)
 
     def fetch_content_in_category(self, category_id, select_first=True):
 
@@ -2214,68 +2893,169 @@ class ChannelList(QMainWindow):
 
     def load_series_seasons(self, series_item, select_first=True):
         selected_provider = self.provider_manager.current_provider
-        headers = self.provider_manager.headers
-        url = selected_provider.get("url", "")
-        url = URLObject(url)
-        url = f"{url.scheme}://{url.netloc}/server/load.php"
+        config_type = selected_provider.get("type", "")
 
         self.current_series = series_item  # Store current series
 
-        self.lock_ui_before_loading()
-        if self.content_loader and self.content_loader.isRunning():
-            self.content_loader.wait()
-        self.content_loader = ContentLoader(
-            url=url,
-            headers=headers,
-            content_type="series",
-            category_id=series_item["category_id"],
-            movie_id=series_item["id"],  # series ID
-            season_id=0,
-            action="get_ordered_list",
-            sortby="name",
-        )
+        if config_type == "XTREAM":
+            # Use Xtream API v2 to get series info
+            self.load_xtream_series_info(series_item, select_first)
+        elif config_type == "STB":
+            # Use STB API
+            headers = self.provider_manager.headers
+            url = selected_provider.get("url", "")
+            url = URLObject(url)
+            url = f"{url.scheme}://{url.netloc}/server/load.php"
 
-        self.content_loader.content_loaded.connect(
-            lambda data: self.update_seasons_list(data, select_first)
+            self.lock_ui_before_loading()
+            if self.content_loader and self.content_loader.isRunning():
+                self.content_loader.wait()
+            self.content_loader = ContentLoader(
+                url=url,
+                headers=headers,
+                content_type="series",
+                category_id=series_item.get("category_id") or series_item.get("tv_genre_id", ""),
+                movie_id=series_item["id"],  # series ID
+                season_id=0,
+                action="get_ordered_list",
+                sortby="name",
+            )
+
+            self.content_loader.content_loaded.connect(
+                lambda data: self.update_seasons_list(data, select_first)
+            )
+            self.content_loader.progress_updated.connect(self.update_progress)
+            self.content_loader.finished.connect(self.content_loader_finished)
+            self.content_loader.start()
+            self.cancel_button.setText("Cancel loading seasons")
+
+    def load_xtream_series_info(self, series_item, select_first=True):
+        """Load Xtream series info (seasons and episodes) using Player API v2."""
+        selected_provider = self.provider_manager.current_provider
+        content_data = self.provider_manager.current_provider_content.get(self.content_type, {})
+        resolved_base = content_data.get("resolved_base", "")
+
+        self.lock_ui_before_loading()
+        thread = QThread()
+        worker = XtreamSeriesInfoWorker(
+            base_url=selected_provider.get("url", ""),
+            username=selected_provider.get("username", ""),
+            password=selected_provider.get("password", ""),
+            series_id=str(series_item["id"]),
+            resolved_base=resolved_base,
         )
-        self.content_loader.progress_updated.connect(self.update_progress)
-        self.content_loader.finished.connect(self.content_loader_finished)
-        self.content_loader.start()
-        self.cancel_button.setText("Cancel loading seasons")
+        worker.moveToThread(thread)
+
+        def on_started():
+            worker.run()
+
+        def handle_finished_ui(payload):
+            try:
+                seasons = payload.get("seasons", [])
+                if seasons:
+                    self.update_seasons_list({"data": seasons}, select_first)
+                else:
+                    logger.info("No seasons found for this series.")
+            finally:
+                thread.quit()
+                self.unlock_ui_after_loading()
+
+        def on_finished(payload):
+            QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
+
+        def on_error(msg):
+            def handle_error_ui():
+                logger.warning(f"Error loading Xtream series info: {msg}")
+                thread.quit()
+                self.unlock_ui_after_loading()
+
+            QTimer.singleShot(0, self, handle_error_ui)
+
+        def _cleanup():
+            try:
+                self._bg_jobs.remove((thread, worker))
+            except ValueError:
+                pass
+
+        thread.started.connect(on_started)
+        worker.finished.connect(on_finished, Qt.QueuedConnection)
+        worker.error.connect(on_error, Qt.QueuedConnection)
+        thread.finished.connect(_cleanup)
+        thread.start()
+        self._bg_jobs.append((thread, worker))
 
     def load_season_episodes(self, season_item, select_first=True):
         selected_provider = self.provider_manager.current_provider
-        headers = self.provider_manager.headers
-        url = selected_provider.get("url", "")
-        url = URLObject(url)
-        url = f"{url.scheme}://{url.netloc}/server/load.php"
+        config_type = selected_provider.get("type", "")
 
         self.current_season = season_item  # Store current season
 
-        if not self.current_category or not self.current_series:
-            logger.warning("Current category/series not set when loading season episodes")
-            return
+        if config_type == "XTREAM":
+            # Episodes are already loaded with the season data
+            episodes = season_item.get("episodes", [])
+            if episodes:
+                # Format episodes for Xtream
+                content_data = self.provider_manager.current_provider_content.get(
+                    self.content_type, {}
+                )
+                stream_base = content_data.get("stream_base", "")
+                stream_ext = content_data.get("stream_ext", "ts")
+                username = selected_provider.get("username", "")
+                password = selected_provider.get("password", "")
 
-        self.lock_ui_before_loading()
-        if self.content_loader and self.content_loader.isRunning():
-            self.content_loader.wait()
-        self.content_loader = ContentLoader(
-            url=url,
-            headers=headers,
-            content_type="series",
-            category_id=self.current_category["id"],  # Category ID
-            movie_id=self.current_series["id"],  # Series ID
-            season_id=season_item["id"],  # Season ID
-            action="get_ordered_list",
-            sortby="added",
-        )
-        self.content_loader.content_loaded.connect(
-            lambda data: self.update_episodes_list(data, select_first)
-        )
-        self.content_loader.progress_updated.connect(self.update_progress)
-        self.content_loader.finished.connect(self.content_loader_finished)
-        self.content_loader.start()
-        self.cancel_button.setText("Cancel loading episodes")
+                formatted_episodes = []
+                for ep in episodes:
+                    episode_id = ep.get("id")
+                    cmd = f"{stream_base}/series/{username}/{password}/{episode_id}.{stream_ext}"
+                    formatted_ep = {
+                        "id": episode_id,
+                        "name": ep.get("title") or f"Episode {ep.get('episode_num', '')}",
+                        "description": ep.get("info") or "",
+                        "cmd": cmd,
+                        "logo": (
+                            ep.get("info", {}).get("movie_image")
+                            if isinstance(ep.get("info"), dict)
+                            else ""
+                        ),
+                        "season": ep.get("season"),
+                        "episode_num": ep.get("episode_num"),
+                    }
+                    formatted_episodes.append(formatted_ep)
+
+                self.update_episodes_list({"data": formatted_episodes}, select_first)
+            else:
+                logger.info("No episodes found for this season.")
+        elif config_type == "STB":
+            # Use STB API
+            if not self.current_category or not self.current_series:
+                logger.warning("Current category/series not set when loading season episodes")
+                return
+
+            headers = self.provider_manager.headers
+            url = selected_provider.get("url", "")
+            url = URLObject(url)
+            url = f"{url.scheme}://{url.netloc}/server/load.php"
+
+            self.lock_ui_before_loading()
+            if self.content_loader and self.content_loader.isRunning():
+                self.content_loader.wait()
+            self.content_loader = ContentLoader(
+                url=url,
+                headers=headers,
+                content_type="series",
+                category_id=self.current_category["id"],  # Category ID
+                movie_id=self.current_series["id"],  # Series ID
+                season_id=season_item["id"],  # Season ID
+                action="get_ordered_list",
+                sortby="added",
+            )
+            self.content_loader.content_loaded.connect(
+                lambda data: self.update_episodes_list(data, select_first)
+            )
+            self.content_loader.progress_updated.connect(self.update_progress)
+            self.content_loader.finished.connect(self.content_loader_finished)
+            self.content_loader.start()
+            self.cancel_button.setText("Cancel loading episodes")
 
     def play_item(self, item_data, is_episode=False, item_type=None):
         if self.provider_manager.current_provider["type"] == "STB":
@@ -2555,9 +3335,8 @@ class ChannelList(QMainWindow):
 
     @staticmethod
     def sanitize_url(url):
-        # Remove any whitespace characters
-        url = url.strip()
-        return url
+        # Keep it minimal and non-invasive; prior working behavior
+        return (url or "").strip()
 
     @staticmethod
     def shorten_header(s):
