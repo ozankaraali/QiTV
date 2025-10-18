@@ -455,8 +455,23 @@ class XtreamSeriesInfoWorker(QObject):
 
             # Extract seasons and episodes
             episodes_dict = series_data.get("episodes", {})
-            seasons_info = series_data.get("seasons", {})
+            seasons_info_raw = series_data.get("seasons", [])
             series_info = series_data.get("info", {})
+
+            # Convert seasons list to dict for easy lookup (some providers use list, some use dict)
+            seasons_info = {}
+            if isinstance(seasons_info_raw, list):
+                # List format: convert to dict by season number
+                for season_item in seasons_info_raw:
+                    if isinstance(season_item, dict):
+                        season_num = str(
+                            season_item.get("season_number", season_item.get("id", ""))
+                        )
+                        if season_num:
+                            seasons_info[season_num] = season_item
+            elif isinstance(seasons_info_raw, dict):
+                # Already in dict format
+                seasons_info = seasons_info_raw
 
             # Build seasons list
             seasons = []
@@ -2968,11 +2983,14 @@ class ChannelList(QMainWindow):
 
         def handle_finished_ui(payload):
             try:
-                seasons = payload.get("seasons", [])
-                if seasons:
-                    self.update_seasons_list({"data": seasons}, select_first)
+                if payload and isinstance(payload, dict):
+                    seasons = payload.get("seasons", [])
+                    if seasons:
+                        self.update_seasons_list({"items": seasons}, select_first)
+                    else:
+                        logger.info("No seasons found for this series.")
                 else:
-                    logger.info("No seasons found for this series.")
+                    logger.warning("Invalid or empty payload received for series info")
             finally:
                 thread.quit()
                 self.unlock_ui_after_loading()
@@ -3026,9 +3044,12 @@ class ChannelList(QMainWindow):
                     # Use container_extension from episode data, fallback to stream_ext
                     container_ext = ep.get("container_extension") or stream_ext
                     cmd = f"{stream_base}/series/{username}/{password}/{episode_id}.{container_ext}"
+                    episode_num = ep.get("episode_num", "")
                     formatted_ep = {
                         "id": episode_id,
-                        "name": ep.get("title") or f"Episode {ep.get('episode_num', '')}",
+                        "number": str(episode_num),
+                        "ename": ep.get("title") or f"Episode {episode_num}",
+                        "name": ep.get("title") or f"Episode {episode_num}",
                         "description": ep.get("info") or "",
                         "cmd": cmd,
                         "logo": (
@@ -3037,12 +3058,15 @@ class ChannelList(QMainWindow):
                             else ""
                         ),
                         "season": ep.get("season"),
-                        "episode_num": ep.get("episode_num"),
+                        "episode_num": episode_num,
                         "container_extension": container_ext,
                     }
                     formatted_episodes.append(formatted_ep)
 
-                self.update_episodes_list({"data": formatted_episodes}, select_first)
+                # Display episodes directly for Xtream
+                self.display_content(
+                    formatted_episodes, content="episode", select_first=select_first
+                )
             else:
                 logger.info("No episodes found for this season.")
         elif config_type == "STB":
@@ -3275,6 +3299,9 @@ class ChannelList(QMainWindow):
             logger.warning("Current series not set when updating seasons list")
             return
         items = data.get("items")
+        if not items:
+            logger.warning("No items in data when updating seasons list")
+            return
         for item in items:
             item["number"] = item["name"].split(" ")[-1]
             item["name"] = f'{self.current_series["name"]}.{item["name"]}'
