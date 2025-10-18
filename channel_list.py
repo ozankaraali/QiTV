@@ -511,31 +511,39 @@ class ChannelList(QMainWindow):
 
     def populate_provider_combo(self):
         """Populate the provider dropdown with available providers."""
-        self.provider_combo.blockSignals(True)  # Prevent triggering change during population
-        self.provider_combo.clear()
+        # Block signals to prevent triggering change during population
+        was_blocked = self.provider_combo.blockSignals(True)
 
-        for provider in self.provider_manager.providers:
-            self.provider_combo.addItem(provider["name"])
+        try:
+            self.provider_combo.clear()
 
-        # Set current provider
-        current_name = self.config_manager.selected_provider_name
-        index = self.provider_combo.findText(current_name)
-        if index >= 0:
-            self.provider_combo.setCurrentIndex(index)
+            for provider in self.provider_manager.providers:
+                self.provider_combo.addItem(provider["name"])
 
-        self.provider_combo.blockSignals(False)
+            # Set current provider
+            current_name = self.config_manager.selected_provider_name
+            index = self.provider_combo.findText(current_name)
+            if index >= 0:
+                self.provider_combo.setCurrentIndex(index)
+        finally:
+            # Restore previous signal blocking state
+            self.provider_combo.blockSignals(was_blocked)
 
     def on_provider_changed(self, provider_name):
         """Handle provider selection change from combo box."""
         if not provider_name:
             return
 
+        # Check if this is actually a change
+        if provider_name == self.config_manager.selected_provider_name:
+            return
+
         # Update config
         self.config_manager.selected_provider_name = provider_name
         self.config_manager.save_config()
 
-        # Reload provider
-        self.set_provider()
+        # Reload provider (use QTimer to ensure we're in the main thread)
+        QTimer.singleShot(0, lambda: self.set_provider())
 
     def create_list_panel(self):
         self.list_panel = QWidget(self.container_widget)
