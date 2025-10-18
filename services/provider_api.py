@@ -141,3 +141,34 @@ def xtream_choose_stream_base(server_info: Dict[str, str]) -> str:
         return xtream_choose_resolved_base(server_info)
     except Exception:
         return ""
+
+
+def xtream_xmltv_url(base: str, username: str, password: str) -> str:
+    """Build the XMLTV EPG URL for Xtream providers.
+
+    Returns full EPG list for all streams in XMLTV format.
+    Example: {base}/xmltv.php?username=U&password=P
+    """
+    base = _ensure_base(base)
+    query = {"username": username, "password": password}
+    return f"{base}/xmltv.php?{urlencode(query, doseq=True, quote_via=quote)}"
+
+
+def xtream_epg_url(
+    base: str, username: str, password: str, stream_id: str, limit: Optional[int] = None
+) -> str:
+    """Build the EPG data table URL for a specific Xtream stream.
+
+    Gets all EPG listings for a single stream (like STB portal).
+    Example: {base}/player_api.php?username=U&password=P&action=get_simple_data_table&stream_id=XXX&limit=X
+    """
+    base = _ensure_base(base)
+    query = {
+        "username": username,
+        "password": password,
+        "action": "get_simple_data_table",
+        "stream_id": stream_id,
+    }
+    if limit is not None:
+        query["limit"] = str(limit)
+    return f"{base}/player_api.php?{urlencode(query, doseq=True, quote_via=quote)}"

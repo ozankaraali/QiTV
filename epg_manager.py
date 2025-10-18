@@ -15,7 +15,7 @@ from urlobject import URLObject
 
 from content_loader import ContentLoader
 from multikeydict import MultiKeyDict
-from services.provider_api import base_from_url, stb_endpoint
+from services.provider_api import base_from_url, stb_endpoint, xtream_xmltv_url
 
 
 def xml_to_dict(element):
@@ -133,10 +133,18 @@ class EpgManager:
         epg_source = self.config_manager.epg_source
 
         if epg_source == "STB":
-            return self._refresh_epg_stb(
-                self.provider_manager.current_provider["url"],
-                self.provider_manager.headers,
-            )
+            provider_type = self.provider_manager.current_provider.get("type", "").upper()
+            if provider_type == "STB":
+                return self._refresh_epg_stb(
+                    self.provider_manager.current_provider["url"],
+                    self.provider_manager.headers,
+                )
+            elif provider_type == "XTREAM":
+                return self._refresh_epg_xtream(
+                    self.provider_manager.current_provider["url"],
+                    self.provider_manager.current_provider.get("username", ""),
+                    self.provider_manager.current_provider.get("password", ""),
+                )
         elif epg_source == "Local File":
             return self._refresh_epg_file(self.config_manager.epg_file)
         elif epg_source == "URL":
@@ -153,6 +161,19 @@ class EpgManager:
                 epg_date = datetime.strptime(epg_info["date"], "%Y-%m-%d %H:%M:%S")
                 if (current_time - epg_date).total_seconds() > self.config_manager.epg_expiration:
                     self._fetch_epg_from_stb(provider_url, headers)
+                    return True
+        return False
+
+    def _refresh_epg_xtream(self, provider_url, username, password):
+        provider_hash = hashlib.md5(f"{provider_url}:{username}".encode()).hexdigest()
+        if provider_hash in self.index:
+            epg_info = self.index[provider_hash]
+            if epg_info:
+                current_time = datetime.now()
+                # Check expiration time
+                epg_date = datetime.strptime(epg_info["date"], "%Y-%m-%d %H:%M:%S")
+                if (current_time - epg_date).total_seconds() > self.config_manager.epg_expiration:
+                    self._fetch_epg_from_xtream(provider_url, username, password)
                     return True
         return False
 
@@ -197,16 +218,25 @@ class EpgManager:
         return False
 
     def set_current_epg(self):
+        # Initialize with MultiKeyDict for compatibility with both STB and XMLTV formats
         self.epg = MultiKeyDict()
         if not self.config_manager.channel_epg:
             return
 
         epg_source = self.config_manager.epg_source
-        if epg_source == "STB" and self.provider_manager.current_provider["type"] == "STB":
-            self._set_epg_from_stb(
-                self.provider_manager.current_provider["url"],
-                self.provider_manager.headers,
-            )
+        if epg_source == "STB":
+            provider_type = self.provider_manager.current_provider.get("type", "").upper()
+            if provider_type == "STB":
+                self._set_epg_from_stb(
+                    self.provider_manager.current_provider["url"],
+                    self.provider_manager.headers,
+                )
+            elif provider_type == "XTREAM":
+                self._set_epg_from_xtream(
+                    self.provider_manager.current_provider["url"],
+                    self.provider_manager.current_provider.get("username", ""),
+                    self.provider_manager.current_provider.get("password", ""),
+                )
         elif epg_source == "Local File":
             self._set_epg_from_file(self.config_manager.epg_file)
         elif epg_source == "URL":
@@ -217,7 +247,7 @@ class EpgManager:
         if provider_hash in self.index:
             epg_info = self.index[provider_hash]
             if epg_info is None:
-                self.epg = MultiKeyDict()
+                # STB EPG not available, keep MultiKeyDict
                 return
             refreshed = self._refresh_epg_stb(provider_url, headers)
             if refreshed:
@@ -238,12 +268,41 @@ class EpgManager:
         # no EPG or not fresh enough, fetch it
         self._fetch_epg_from_stb(provider_url, headers)
 
+    def _set_epg_from_xtream(self, provider_url, username, password):
+        provider_hash = hashlib.md5(f"{provider_url}:{username}".encode()).hexdigest()
+        if provider_hash in self.index:
+            epg_info = self.index[provider_hash]
+            if epg_info is None:
+                # Xtream uses XMLTV format, which requires MultiKeyDict
+                if not isinstance(self.epg, MultiKeyDict):
+                    self.epg = MultiKeyDict()
+                return
+            refreshed = self._refresh_epg_xtream(provider_url, username, password)
+            if refreshed:
+                return
+
+            # EPG was fresh enough
+            cache_dir = self._cache_dir()
+            epg_file = os.path.join(cache_dir, f"{provider_hash}.pkl")
+            if os.path.exists(epg_file):
+                with open(epg_file, "rb") as f:
+                    self.epg = pickle.load(f)
+                    self.index[provider_hash]["last_access"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    return
+
+        # no EPG or not fresh enough, fetch it
+        self._fetch_epg_from_xtream(provider_url, username, password)
+
     def _set_epg_from_file(self, xmltv_file):
         xmltv_filehash = hashlib.md5(xmltv_file.encode()).hexdigest()
         if xmltv_filehash in self.index:
             epg_info = self.index[xmltv_filehash]
             if epg_info is None:
-                self.epg = MultiKeyDict()
+                # XMLTV files require MultiKeyDict
+                if not isinstance(self.epg, MultiKeyDict):
+                    self.epg = MultiKeyDict()
                 return
             refreshed = self._refresh_epg_file(xmltv_file)
             if refreshed:
@@ -268,7 +327,9 @@ class EpgManager:
         if url_hash in self.index:
             epg_info = self.index[url_hash]
             if epg_info is None:
-                self.epg = MultiKeyDict()
+                # XMLTV URLs require MultiKeyDict
+                if not isinstance(self.epg, MultiKeyDict):
+                    self.epg = MultiKeyDict()
                 return
             refreshed = self._refresh_epg_url(url)
             if refreshed:
@@ -334,6 +395,65 @@ class EpgManager:
             self.epg = MultiKeyDict()
         self.save_index()
 
+    def _fetch_epg_from_xtream(self, provider_url, username, password):
+        """Fetch EPG from Xtream provider using XMLTV endpoint."""
+        provider_hash = hashlib.md5(f"{provider_url}:{username}".encode()).hexdigest()
+        xmltv_url = xtream_xmltv_url(provider_url, username, password)
+
+        try:
+            # Fetch the XMLTV data from Xtream endpoint
+            r = requests.get(xmltv_url, stream=True, timeout=30)
+            if r.status_code == 200:
+                cache_dir = self._cache_dir()
+                xmltv_file_path = os.path.join(cache_dir, f"{provider_hash}_xtream.xml")
+
+                # Handle compressed responses
+                content_type = r.headers.get("Content-Type", "")
+                content_encoding = r.headers.get("Content-Encoding", "")
+
+                if content_encoding == "gzip" or content_type == "application/gzip":
+                    with (
+                        gzip.GzipFile(fileobj=io.BytesIO(r.content)) as gz,
+                        open(xmltv_file_path, "wb") as f,
+                    ):
+                        f.write(gz.read())
+                else:
+                    with open(xmltv_file_path, "wb") as f:
+                        f.write(r.content)
+
+                # Parse and index the XMLTV file
+                if os.path.exists(xmltv_file_path):
+                    self.epg = self._index_programs(xmltv_file_path)
+                    os.remove(xmltv_file_path)
+
+                    if self.epg:
+                        # Cache the parsed EPG
+                        epg_file = os.path.join(cache_dir, f"{provider_hash}.pkl")
+                        with open(epg_file, "wb") as f:
+                            pickle.dump(self.epg, f)
+
+                        current_time = datetime.now()
+                        self.index[provider_hash] = {
+                            "date": current_time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "last_access": current_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    else:
+                        self.index[provider_hash] = None
+                        self.epg = MultiKeyDict()
+                else:
+                    self.index[provider_hash] = None
+                    self.epg = MultiKeyDict()
+            else:
+                logger.warning(f"Failed to fetch Xtream EPG, status code: {r.status_code}")
+                self.index[provider_hash] = None
+                self.epg = MultiKeyDict()
+        except Exception as e:
+            logger.error(f"Error fetching Xtream EPG: {e}")
+            self.index[provider_hash] = None
+            self.epg = MultiKeyDict()
+
+        self.save_index()
+
     def _fetch_epg_from_url(self, url):
         r = requests.get(url, stream=True, timeout=10)
         if r.status_code == 200:
@@ -386,11 +506,13 @@ class EpgManager:
 
     def get_programs_for_channel(self, channel_data, start_time=None, max_programs=5):
         epg_source = self.config_manager.epg_source
+        provider_type = self.provider_manager.current_provider.get("type", "").upper()
 
-        if epg_source == "STB":
+        if epg_source == "STB" and provider_type == "STB":
             channel_id = channel_data.get("id", "")
             return self._get_programs_for_channel_from_stb(channel_id, start_time, max_programs)
         else:
+            # For Xtream, Local File, and URL sources, use XMLTV format
             channel_id = channel_data.get("xmltv_id", "")
             return self._get_programs_for_channel_from_xmltv(channel_id, start_time, max_programs)
 

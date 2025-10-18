@@ -339,7 +339,12 @@ class XtreamLoaderWorker(QObject):
                     if self.content_type == "series":
                         # Series don't have direct playback URLs; store series_id for later fetching
                         cmd = ""  # Will be populated when episodes are fetched
+                    elif self.content_type == "vod":
+                        # For VOD, use container_extension from stream data
+                        container_ext = s.get("container_extension") or pick_ext
+                        cmd = f"{pick_base}/{url_prefix}/{self.username}/{self.password}/{stream_id}.{container_ext}"
                     else:
+                        # For live streams (itv), use probed extension
                         cmd = f"{pick_base}/{url_prefix}/{self.username}/{self.password}/{stream_id}.{pick_ext}"
 
                     item = {
@@ -358,6 +363,8 @@ class XtreamLoaderWorker(QObject):
                         item["description"] = s.get("plot") or ""
                         item["rating"] = s.get("rating") or ""
                         item["year"] = s.get("releasedate") or ""
+                        # Store container extension for reference
+                        item["container_extension"] = s.get("container_extension") or pick_ext
                     elif self.content_type == "series":
                         item["plot"] = s.get("plot") or ""
                         item["rating"] = s.get("rating") or ""
@@ -1165,12 +1172,13 @@ class ChannelList(QMainWindow):
             return
         # No refresh from itv list of categories
         selected_provider = self.provider_manager.current_provider
-        config_type = selected_provider.get("type", "")
+        config_type = selected_provider.get("type", "").upper()
         if config_type == "STB" and not self.current_category:
             return
 
         # Get the index of the selected item in the content list
         selected_item = self.content_list.selectedItems()
+        selected_row = None
         if selected_item:
             selected_row = self.content_list.indexOfTopLevelItem(selected_item[0])
 
@@ -1179,11 +1187,18 @@ class ChannelList(QMainWindow):
 
         # Update the content list
         if config_type != "STB":
-            # For non-STB, display content directly
-            content = self.provider_manager.current_provider_content.setdefault(
-                self.content_type, {}
-            )
-            self.display_content(content)
+            # For non-STB (Xtream or M3U), display content directly
+            content_data = self.provider_manager.current_provider_content.get(self.content_type, {})
+            # Get the items from either 'contents' or the content_data itself
+            items = content_data.get("contents", content_data)
+
+            # Determine content type for display
+            if config_type == "XTREAM":
+                content_type_name = "channel"
+            else:
+                content_type_name = "m3ucontent"
+
+            self.display_content(items, content=content_type_name, select_first=False)
         else:
             # Reload the current category
             self.load_content_in_category(self.current_category)
@@ -1192,10 +1207,11 @@ class ChannelList(QMainWindow):
         self.content_list.sortItems(sort_column, self.content_list.header().sortIndicatorOrder())
 
         # Restore the selected item
-        if selected_item:
+        if selected_row is not None:
             item = self.content_list.topLevelItem(selected_row)
-            self.content_list.setCurrentItem(item)
-            self.item_selected()
+            if item:
+                self.content_list.setCurrentItem(item)
+                self.item_selected()
 
     def can_show_content_info(self, item_type):
         return (
@@ -1207,11 +1223,11 @@ class ChannelList(QMainWindow):
         if item_type in ["channel", "m3ucontent"]:
             if self.config_manager.epg_source == "No Source":
                 return False
-            if (
-                self.config_manager.epg_source == "STB"
-                and self.provider_manager.current_provider["type"] != "STB"
-            ):
-                return False
+            if self.config_manager.epg_source == "STB":
+                # STB EPG source works with both STB and Xtream providers
+                provider_type = self.provider_manager.current_provider.get("type", "").upper()
+                if provider_type not in ["STB", "XTREAM"]:
+                    return False
             return True
         return False
 
@@ -2066,6 +2082,7 @@ class ChannelList(QMainWindow):
     def open_in_vlc(self):
         # Invoke user's VLC player to open the current stream
         if self.link:
+            logger.warning(f"Opening VLC for link: {self.link}")
             try:
                 if platform.system() == "Windows":
                     vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
@@ -3006,7 +3023,9 @@ class ChannelList(QMainWindow):
                 formatted_episodes = []
                 for ep in episodes:
                     episode_id = ep.get("id")
-                    cmd = f"{stream_base}/series/{username}/{password}/{episode_id}.{stream_ext}"
+                    # Use container_extension from episode data, fallback to stream_ext
+                    container_ext = ep.get("container_extension") or stream_ext
+                    cmd = f"{stream_base}/series/{username}/{password}/{episode_id}.{container_ext}"
                     formatted_ep = {
                         "id": episode_id,
                         "name": ep.get("title") or f"Episode {ep.get('episode_num', '')}",
@@ -3019,6 +3038,7 @@ class ChannelList(QMainWindow):
                         ),
                         "season": ep.get("season"),
                         "episode_num": ep.get("episode_num"),
+                        "container_extension": container_ext,
                     }
                     formatted_episodes.append(formatted_ep)
 
