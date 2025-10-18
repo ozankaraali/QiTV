@@ -63,10 +63,12 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
-- Feature: Added export dropdown with "Export Cached" and "Export Complete" options (fixes #27) (channel_list.py:429-443,1427-1650; README.md:36-44)
-  - Export Cached: Quickly exports only browsed/cached content
-  - Export Complete: For STB series, fetches all seasons/episodes before exporting with progress dialog
-  - Converted export button to QToolButton with dropdown menu
+- Feature: Consolidated export functionality into single dropdown menu (fixes #27) (channel_list.py:430-446,1427-1650; README.md:36-46)
+  - Replaced "Export Browsed" and "Export All Live" buttons with unified "Export" dropdown menu
+  - Export Cached Content: Quickly exports only browsed/cached content
+  - Export Complete (Fetch All): For STB series, fetches all seasons/episodes before exporting with progress dialog
+  - Export All Live Channels: Exports all available live channels from cache
+  - Changed popup mode to InstantPopup for cleaner UX
   - Added synchronous fetch methods for seasons and episodes
 - Feature: Added portable mode support via `portable.txt` file (fixes #26) (config_manager.py:79-109; README.md:27-34)
   - When `portable.txt` exists in program directory, config and cache are stored locally instead of system directories

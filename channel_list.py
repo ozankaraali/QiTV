@@ -429,23 +429,21 @@ class ChannelList(QMainWindow):
 
         # Export button with dropdown menu
         self.export_button = QToolButton()
-        self.export_button.setText("Export Browsed")
-        self.export_button.setPopupMode(QToolButton.MenuButtonPopup)
-        self.export_button.clicked.connect(self.export_content_cached)
+        self.export_button.setText("Export")
+        self.export_button.setPopupMode(QToolButton.InstantPopup)
 
         # Create export menu
         export_menu = QMenu(self)
-        export_cached_action = export_menu.addAction("Export Cached")
+        export_cached_action = export_menu.addAction("Export Cached Content")
         export_cached_action.triggered.connect(self.export_content_cached)
         export_complete_action = export_menu.addAction("Export Complete (Fetch All)")
         export_complete_action.triggered.connect(self.export_content_complete)
+        export_menu.addSeparator()
+        export_all_live_action = export_menu.addAction("Export All Live Channels")
+        export_all_live_action.triggered.connect(self.export_all_live_channels)
         self.export_button.setMenu(export_menu)
 
         bottom_layout.addWidget(self.export_button)
-
-        self.export_all_live_button = QPushButton("Export All Live")
-        self.export_all_live_button.clicked.connect(self.export_all_live_channels)
-        bottom_layout.addWidget(self.export_all_live_button)
 
         self.rescanlogo_button = QPushButton("Rescan Channel Logos")
         self.rescanlogo_button.clicked.connect(self.rescan_logos)
@@ -2202,7 +2200,6 @@ class ChannelList(QMainWindow):
         self.open_button.setEnabled(not loading)
         self.options_button.setEnabled(not loading)
         self.export_button.setEnabled(not loading)
-        self.export_all_live_button.setEnabled(not loading)
         self.update_button.setEnabled(not loading)
         self.back_button.setEnabled(not loading)
         self.progress_bar.setVisible(loading)
