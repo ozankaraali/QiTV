@@ -68,26 +68,33 @@ class STBCategoriesWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, base_url: str, headers: dict):
+    def __init__(self, base_url: str, headers: dict, content_type: str = "itv"):
         super().__init__()
         self.base_url = base_url
         self.headers = headers
+        self.content_type = content_type
 
     def run(self):
         try:
             url = URLObject(self.base_url)
             base = f"{url.scheme}://{url.netloc}"
-            fetchurl = f"{base}/server/load.php?type=itv&action=get_genres&JsHttpRequest=1-xml"
+
+            # Use correct action based on content type
+            action = "get_genres" if self.content_type == "itv" else "get_categories"
+            fetchurl = f"{base}/server/load.php?type={self.content_type}&action={action}&JsHttpRequest=1-xml"
             resp = requests.get(fetchurl, headers=self.headers, timeout=10)
             resp.raise_for_status()
             categories = resp.json()["js"]
 
-            fetchurl = (
-                f"{base}/server/load.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
-            )
-            resp = requests.get(fetchurl, headers=self.headers, timeout=10)
-            resp.raise_for_status()
-            all_channels = resp.json()["js"]["data"]
+            # Only fetch all channels for itv type
+            all_channels = []
+            if self.content_type == "itv":
+                fetchurl = (
+                    f"{base}/server/load.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
+                )
+                resp = requests.get(fetchurl, headers=self.headers, timeout=10)
+                resp.raise_for_status()
+                all_channels = resp.json()["js"]["data"]
 
             self.finished.emit({"categories": categories, "all_channels": all_channels})
         except Exception as e:
@@ -1639,7 +1646,7 @@ class ChannelList(QMainWindow):
         # Run network calls in a worker thread
         self.lock_ui_before_loading()
         thread = QThread()
-        worker = STBCategoriesWorker(url, headers)
+        worker = STBCategoriesWorker(url, headers, self.content_type)
         worker.moveToThread(thread)
 
         def on_started():
