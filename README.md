@@ -24,6 +24,15 @@ python main.py
 You could use this software as a IPTV player or as a STB client. It bundles [a list of publicly available IPTV channels](https://github.com/iptv-org/iptv) from around the world for you to start quickly using or test the application. You can delete that playlist entry if you want from your computer after registering your playlists / STB player details.
 For further usage you need to enter your M3U Playlist or IPTV provider's STB player details to "Settings". When you save, if your authentication works, you will directly see the channel lists on the left side. Select a channel and it will begin shortly.
 
+### Portable Mode
+
+By default, QiTV stores configuration and cache files in system-specific directories:
+- **Windows**: `%APPDATA%\qitv`
+- **macOS**: `~/Library/Application Support/qitv`
+- **Linux**: `~/.config/qitv`
+
+To enable **portable mode** (useful for USB drives or keeping everything in one folder), simply create an empty file named `portable.txt` in the same directory as the QiTV executable or script. When portable mode is enabled, all configuration and cache files will be stored in the program directory instead.
+
 ![Screenshot 2024-05-20 at 20 43 47](https://github.com/ozankaraali/QiTV/assets/19486728/5f8dc256-d359-44e1-a995-4bfc3c3be74a)
 
 

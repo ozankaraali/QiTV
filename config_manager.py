@@ -77,17 +77,33 @@ class ConfigManager:
         self.load_config()
 
     def _get_config_path(self):
-        app_name = "qitv"
-        if platform.system() == "Linux":
-            config_dir = os.path.join(os.getenv("HOME", ""), f".config/{app_name}")
-        elif platform.system() == "Darwin":  # macOS
-            config_dir = os.path.join(
-                os.getenv("HOME", ""), f"Library/Application Support/{app_name}"
-            )
-        elif platform.system() == "Windows":
-            config_dir = os.path.join(os.getenv("APPDATA", ""), app_name)
+        # Check for portable mode (portable.txt file in program directory)
+        # Get the directory where the script/executable is located
+        if getattr(sys, 'frozen', False):
+            # Running as compiled executable (PyInstaller)
+            program_dir = os.path.dirname(sys.executable)
         else:
-            raise RuntimeError("Unsupported operating system")
+            # Running as script
+            program_dir = os.path.dirname(os.path.abspath(__file__))
+
+        portable_flag = os.path.join(program_dir, "portable.txt")
+
+        if os.path.exists(portable_flag):
+            # Portable mode: use program directory
+            config_dir = program_dir
+        else:
+            # Normal mode: use system-specific directories
+            app_name = "qitv"
+            if platform.system() == "Linux":
+                config_dir = os.path.join(os.getenv("HOME", ""), f".config/{app_name}")
+            elif platform.system() == "Darwin":  # macOS
+                config_dir = os.path.join(
+                    os.getenv("HOME", ""), f"Library/Application Support/{app_name}"
+                )
+            elif platform.system() == "Windows":
+                config_dir = os.path.join(os.getenv("APPDATA", ""), app_name)
+            else:
+                raise RuntimeError("Unsupported operating system")
 
         os.makedirs(config_dir, exist_ok=True)
         return os.path.join(config_dir, "config.json")

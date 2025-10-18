@@ -63,6 +63,9 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Feature: Added portable mode support via `portable.txt` file (fixes #26) (config_manager.py:79-109; README.md:27-34)
+  - When `portable.txt` exists in program directory, config and cache are stored locally instead of system directories
+  - Works for both script and PyInstaller executable modes
 - Fix: PyInstaller spec files now use SPECPATH instead of __file__ (qitv-*.spec:10)
 - Fix: Updated to new UV dependency-groups format (pyproject.toml:49-50)
 - Fix: Delayed main window activation to prevent cursor blinking issues (main.py:60-64)
