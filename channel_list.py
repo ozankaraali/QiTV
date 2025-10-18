@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -393,43 +394,81 @@ class ChannelList(QMainWindow):
     def create_upper_panel(self):
         self.upper_layout = QWidget(self.container_widget)
         main_layout = QVBoxLayout(self.upper_layout)
-        main_layout.setContentsMargins(0, 0, 0, 0)  # Set margins to zero
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(8)  # Space between toolbar sections
 
-        # Top row
-        top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(6)  # Add consistent spacing between buttons
+        # Modern toolbar layout - single row with logical sections
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(12)  # Space between sections
+
+        # Section 1: Provider Selection
+        provider_section = QHBoxLayout()
+        provider_section.setSpacing(6)
+
+        provider_label = QLabel("Provider:")
+        provider_section.addWidget(provider_label)
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.setMinimumWidth(150)
+        self.provider_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
+        provider_section.addWidget(self.provider_combo)
+
+        self.options_button = QPushButton("⚙")  # Settings icon
+        self.options_button.setToolTip("Settings")
+        self.options_button.setFixedWidth(30)
+        self.options_button.clicked.connect(self.options_dialog)
+        provider_section.addWidget(self.options_button)
+
+        toolbar.addLayout(provider_section)
+
+        # Separator
+        toolbar.addSpacing(6)
+
+        # Section 2: File Operations
+        file_section = QHBoxLayout()
+        file_section.setSpacing(6)
 
         self.open_button = QPushButton("Open File")
         self.open_button.clicked.connect(self.open_file)
-        top_layout.addWidget(self.open_button)
+        file_section.addWidget(self.open_button)
 
-        self.options_button = QPushButton("Settings")
-        self.options_button.clicked.connect(self.options_dialog)
-        top_layout.addWidget(self.options_button)
+        toolbar.addLayout(file_section)
 
-        self.update_button = QPushButton("Update Content")
-        self.update_button.clicked.connect(lambda: self.set_provider(force_update=True))
-        top_layout.addWidget(self.update_button)
+        # Separator
+        toolbar.addSpacing(6)
 
-        self.resume_button = QPushButton("Resume Last Watched")
-        self.resume_button.clicked.connect(self.resume_last_watched)
-        top_layout.addWidget(self.resume_button)
+        # Section 3: Content Navigation
+        nav_section = QHBoxLayout()
+        nav_section.setSpacing(6)
 
         self.back_button = QPushButton("Back")
         self.back_button.clicked.connect(self.go_back)
         self.back_button.setVisible(False)
-        top_layout.addWidget(self.back_button)
+        nav_section.addWidget(self.back_button)
 
-        main_layout.addLayout(top_layout)
+        self.update_button = QPushButton("Update")
+        self.update_button.setToolTip("Update Content")
+        self.update_button.clicked.connect(lambda: self.set_provider(force_update=True))
+        nav_section.addWidget(self.update_button)
 
-        # Bottom row (export and utility buttons)
-        bottom_layout = QHBoxLayout()
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(6)  # Add consistent spacing between buttons
+        toolbar.addLayout(nav_section)
+
+        # Separator
+        toolbar.addSpacing(6)
+
+        # Section 4: Content Actions
+        actions_section = QHBoxLayout()
+        actions_section.setSpacing(6)
+
+        self.resume_button = QPushButton("Resume")
+        self.resume_button.setToolTip("Resume Last Watched")
+        self.resume_button.clicked.connect(self.resume_last_watched)
+        actions_section.addWidget(self.resume_button)
 
         # Export button with dropdown menu
-        self.export_button = QPushButton("Export")
+        self.export_button = QPushButton("Export ▼")
 
         # Create export menu
         export_menu = QMenu(self)
@@ -451,18 +490,52 @@ class ChannelList(QMainWindow):
         export_all_live_action.triggered.connect(self.export_all_live_channels)
 
         self.export_button.setMenu(export_menu)
+        self.export_button.clicked.connect(lambda: self.export_button.showMenu())
+        actions_section.addWidget(self.export_button)
 
-        bottom_layout.addWidget(self.export_button)
-
-        self.rescanlogo_button = QPushButton("Rescan Channel Logos")
+        self.rescanlogo_button = QPushButton("Rescan Logos")
+        self.rescanlogo_button.setToolTip("Rescan Channel Logos")
         self.rescanlogo_button.clicked.connect(self.rescan_logos)
         self.rescanlogo_button.setVisible(False)
-        bottom_layout.addWidget(self.rescanlogo_button)
+        actions_section.addWidget(self.rescanlogo_button)
 
-        # Add stretch to push buttons to the left, preventing excessive spacing
-        bottom_layout.addStretch()
+        toolbar.addLayout(actions_section)
 
-        main_layout.addLayout(bottom_layout)
+        # Push everything to the left
+        toolbar.addStretch()
+
+        main_layout.addLayout(toolbar)
+
+        # Populate provider combo box
+        self.populate_provider_combo()
+
+    def populate_provider_combo(self):
+        """Populate the provider dropdown with available providers."""
+        self.provider_combo.blockSignals(True)  # Prevent triggering change during population
+        self.provider_combo.clear()
+
+        for provider in self.provider_manager.providers:
+            self.provider_combo.addItem(provider["name"])
+
+        # Set current provider
+        current_name = self.config_manager.selected_provider_name
+        index = self.provider_combo.findText(current_name)
+        if index >= 0:
+            self.provider_combo.setCurrentIndex(index)
+
+        self.provider_combo.blockSignals(False)
+
+    def on_provider_changed(self, provider_name):
+        """Handle provider selection change from combo box."""
+        if not provider_name:
+            return
+
+        # Update config
+        self.config_manager.selected_provider_name = provider_name
+        self.config_manager.save_config()
+
+        # Reload provider
+        self.set_provider()
 
     def create_list_panel(self):
         self.list_panel = QWidget(self.container_widget)
@@ -1881,6 +1954,8 @@ class ChannelList(QMainWindow):
     def options_dialog(self):
         options = OptionsDialog(self)
         options.exec_()
+        # Refresh provider combo in case providers were added/removed/renamed
+        self.populate_provider_combo()
 
     # parse_m3u moved to services/m3u.py
 
