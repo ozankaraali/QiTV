@@ -111,6 +111,7 @@ class VideoPlayer(QMainWindow):
             click_position = event.position().x()
             seek_position = click_position / width
             self.media_player.set_position(seek_position)
+        event.accept()  # Prevent event from propagating to window (avoids dragging)
 
     def format_time(self, milliseconds):
         seconds = int(milliseconds / 1000)

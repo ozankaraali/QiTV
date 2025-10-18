@@ -55,6 +55,8 @@ if __name__ == "__main__":
         qdarktheme.setup_theme("auto")
         player.show()
         channel_list.show()
+        channel_list.raise_()  # Bring to front
+        channel_list.activateWindow()  # Give focus
 
         if config_manager.check_updates:
             check_for_updates()
