@@ -247,6 +247,7 @@ class ChannelList(QMainWindow):
         self.content_info_shown: Optional[str] = None
         self.image_loader: Optional[ImageLoader] = None
         self.content_loader: Optional[ContentLoader] = None
+        self._provider_combo_connected = False  # Track if signal is connected
 
         self.create_upper_panel()
         self.create_list_panel()
@@ -369,6 +370,11 @@ class ChannelList(QMainWindow):
             del self.set_provider_thread
         self.unlock_ui_after_loading()
 
+        # Connect provider combo signal after first initialization (deferred to main thread)
+        if not self._provider_combo_connected:
+            QTimer.singleShot(0, lambda: self._connect_provider_combo_signal())
+            self._provider_combo_connected = True
+
         # No need to switch content type if not STB
         selected_provider = self.provider_manager.current_provider
         config_type = selected_provider.get("type", "")
@@ -378,6 +384,15 @@ class ChannelList(QMainWindow):
             self.update_content()
         else:
             self.load_content()
+
+    def _connect_provider_combo_signal(self):
+        """Connect provider combo signal (called after initialization)."""
+        try:
+            self.provider_combo.currentTextChanged.disconnect()
+        except (TypeError, RuntimeError):
+            # Not connected yet, that's fine
+            pass
+        self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
 
     def update_splitter_ratio(self, pos, index):
         sizes = self.splitter.sizes()
@@ -412,7 +427,7 @@ class ChannelList(QMainWindow):
         self.provider_combo = QComboBox()
         self.provider_combo.setMinimumWidth(150)
         self.provider_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
+        # Signal connection happens in populate_provider_combo after initial setup
         provider_section.addWidget(self.provider_combo)
 
         self.options_button = QPushButton("⚙")  # Settings icon
