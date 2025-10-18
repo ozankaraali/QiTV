@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSizePolicy,
     QSplitter,
-    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -398,7 +397,8 @@ class ChannelList(QMainWindow):
 
         # Top row
         top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(0, 0, 0, 0)  # Set margins to zero
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(6)  # Add consistent spacing between buttons
 
         self.open_button = QPushButton("Open File")
         self.open_button.clicked.connect(self.open_file)
@@ -423,14 +423,13 @@ class ChannelList(QMainWindow):
 
         main_layout.addLayout(top_layout)
 
-        # Bottom row (export buttons)
+        # Bottom row (export and utility buttons)
         bottom_layout = QHBoxLayout()
-        bottom_layout.setContentsMargins(0, 0, 0, 0)  # Set margins to zero
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(6)  # Add consistent spacing between buttons
 
         # Export button with dropdown menu
-        self.export_button = QToolButton()
-        self.export_button.setText("Export")
-        self.export_button.setPopupMode(QToolButton.InstantPopup)
+        self.export_button = QPushButton("Export")
 
         # Create export menu
         export_menu = QMenu(self)
@@ -460,6 +459,9 @@ class ChannelList(QMainWindow):
         self.rescanlogo_button.setVisible(False)
         bottom_layout.addWidget(self.rescanlogo_button)
 
+        # Add stretch to push buttons to the left, preventing excessive spacing
+        bottom_layout.addStretch()
+
         main_layout.addLayout(bottom_layout)
 
     def create_list_panel(self):
@@ -470,7 +472,8 @@ class ChannelList(QMainWindow):
         # Add content type selection
         self.content_switch_group = QWidget(self.list_panel)
         content_switch_layout = QHBoxLayout(self.content_switch_group)
-        content_switch_layout.setContentsMargins(0, 0, 0, 0)  # Set margins to zero
+        content_switch_layout.setContentsMargins(0, 0, 0, 0)
+        content_switch_layout.setSpacing(6)  # Add consistent spacing
 
         self.channels_radio = QRadioButton("Channels")
         self.movies_radio = QRadioButton("Movies")
@@ -479,6 +482,7 @@ class ChannelList(QMainWindow):
         content_switch_layout.addWidget(self.channels_radio)
         content_switch_layout.addWidget(self.movies_radio)
         content_switch_layout.addWidget(self.series_radio)
+        content_switch_layout.addStretch()  # Push radio buttons to the left
 
         self.channels_radio.setChecked(True)
 
@@ -501,6 +505,7 @@ class ChannelList(QMainWindow):
 
         # Create a horizontal layout for the favorite button and checkbox
         self.favorite_layout = QHBoxLayout()
+        self.favorite_layout.setSpacing(6)  # Add consistent spacing
 
         # Add favorite button and action
         self.favorite_button = QPushButton("Favorite/Unfavorite")
@@ -525,6 +530,9 @@ class ChannelList(QMainWindow):
         self.vodinfo_checkbox.setChecked(self.config_manager.show_stb_content_info)
         self.vodinfo_checkbox.stateChanged.connect(self.show_vodinfo)
         self.favorite_layout.addWidget(self.vodinfo_checkbox)
+
+        # Add stretch to prevent excessive spacing
+        self.favorite_layout.addStretch()
 
         # Add the horizontal layout to the main vertical layout
         list_layout.addLayout(self.favorite_layout)

@@ -63,7 +63,14 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
-- Feature: Consolidated export functionality into single dropdown menu (fixes #27) (channel_list.py:430-446,1427-1650; README.md:36-46)
+- Fix: Removed incorrect @staticmethod decorator from load_stb_categories (channel_list.py:1877)
+  - Was causing AttributeError: 'str' object has no attribute 'provider_manager'
+  - The decorator caused parameter shift where self received url string instead of instance
+- Feature: Enhanced export validation and tooltips (channel_list.py:430-456,1467-1544)
+  - Added helpful tooltips to each export menu option
+  - Export Complete now shows informative messages for inappropriate content types
+  - Validates provider type and content type before attempting fetch operations
+- Feature: Consolidated export functionality into single dropdown menu (fixes #27) (channel_list.py:430-456,1467-1650; README.md:36-46)
   - Replaced "Export Browsed" and "Export All Live" buttons with unified "Export" dropdown menu
   - Export Cached Content: Quickly exports only browsed/cached content
   - Export Complete (Fetch All): For STB series, fetches all seasons/episodes before exporting with progress dialog
