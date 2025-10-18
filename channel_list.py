@@ -1941,8 +1941,8 @@ class ChannelList(QMainWindow):
             return
 
         # Check if the provider matches
-        current_provider = self.provider_manager.current_provider.get("name", "")
-        if last_watched.get("provider_name") != current_provider:
+        current_provider_name = self.provider_manager.current_provider.get("name", "")
+        if last_watched.get("provider_name") != current_provider_name:
             reply = QMessageBox.question(
                 self,
                 "Different Provider",
@@ -1958,12 +1958,18 @@ class ChannelList(QMainWindow):
         item_type = last_watched.get("item_type")
         is_episode = item_type == "episode"
 
-        # If we have a stored link and it's the same provider, use it directly
-        if last_watched.get("link"):
+        # For STB providers, always recreate the link (tokens expire)
+        # For M3U/stream providers, can use stored link directly
+        current_provider_type = self.provider_manager.current_provider.get("type", "")
+        if current_provider_type == "STB":
+            # Recreate link with fresh token
+            self.play_item(item_data, is_episode=is_episode, item_type=item_type)
+        elif last_watched.get("link"):
+            # Use stored link for non-STB providers
             self.link = last_watched["link"]
             self.player.play_video(self.link)
         else:
-            # Otherwise, recreate the link
+            # Fallback: recreate the link
             self.play_item(item_data, is_episode=is_episode, item_type=item_type)
 
     def cancel_loading(self):

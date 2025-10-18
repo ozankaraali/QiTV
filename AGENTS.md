@@ -63,7 +63,8 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
-- Feature: Added "Resume Last Watched" button to quickly resume previous content (channel_list.py:412-414,1921-1967; config_manager.py:131-134,205-211)
+- Feature: Added "Resume Last Watched" button to quickly resume previous content (channel_list.py:412-414,1921-1973; config_manager.py:131-134,205-211)
+- Fix: Resume Last Watched now recreates links for STB providers (tokens expire) (channel_list.py:1963-1966)
 - Fix: App now properly raises and activates on startup (main.py:58-59)
 - Fix: Progress bar seek no longer causes window drag (video_player.py:114)
 - Fix: Movies/Series content type switching now correctly fetches respective categories (channel_list.py:71-101,1649)
