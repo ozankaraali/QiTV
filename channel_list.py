@@ -23,12 +23,15 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QSizePolicy,
     QSplitter,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -424,8 +427,20 @@ class ChannelList(QMainWindow):
         bottom_layout = QHBoxLayout()
         bottom_layout.setContentsMargins(0, 0, 0, 0)  # Set margins to zero
 
-        self.export_button = QPushButton("Export Browsed")
-        self.export_button.clicked.connect(self.export_content)
+        # Export button with dropdown menu
+        self.export_button = QToolButton()
+        self.export_button.setText("Export Browsed")
+        self.export_button.setPopupMode(QToolButton.MenuButtonPopup)
+        self.export_button.clicked.connect(self.export_content_cached)
+
+        # Create export menu
+        export_menu = QMenu(self)
+        export_cached_action = export_menu.addAction("Export Cached")
+        export_cached_action.triggered.connect(self.export_content_cached)
+        export_complete_action = export_menu.addAction("Export Complete (Fetch All)")
+        export_complete_action.triggered.connect(self.export_content_complete)
+        self.export_button.setMenu(export_menu)
+
         bottom_layout.addWidget(self.export_button)
 
         self.export_all_live_button = QPushButton("Export All Live")
@@ -1410,11 +1425,14 @@ class ChannelList(QMainWindow):
         except IOError as e:
             logger.warning(f"Error saving channel list: {e}")
 
-    def export_content(self):
+    def export_content_cached(self):
+        """Export only the cached/browsed content that has already been loaded."""
         file_dialog = QFileDialog(self)
         file_dialog.setAcceptMode(QFileDialog.AcceptSave)
         file_dialog.setDefaultSuffix("m3u")
-        file_path, _ = file_dialog.getSaveFileName(self, "Export Content", "", "M3U files (*.m3u)")
+        file_path, _ = file_dialog.getSaveFileName(
+            self, "Export Cached Content", "", "M3U files (*.m3u)"
+        )
         if file_path:
             provider = self.provider_manager.current_provider
             # Get the content data from the provider manager on content type
@@ -1437,6 +1455,195 @@ class ChannelList(QMainWindow):
                 save_m3u_content(content_items, file_path)
             else:
                 logger.info(f"Unknown provider type: {config_type}")
+
+    def export_content_complete(self):
+        """Export all content by fetching all seasons/episodes for series (STB only)."""
+        provider = self.provider_manager.current_provider
+        config_type = provider.get("type", "")
+
+        # For non-STB or non-series content, just use cached export
+        if config_type != "STB" or self.content_type != "series":
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                "Complete export is only available for STB series content.\n"
+                "For other content types, use 'Export Cached'.",
+            )
+            return
+
+        file_dialog = QFileDialog(self)
+        file_dialog.setAcceptMode(QFileDialog.AcceptSave)
+        file_dialog.setDefaultSuffix("m3u")
+        file_path, _ = file_dialog.getSaveFileName(
+            self, "Export Complete Content (Fetch All)", "", "M3U files (*.m3u)"
+        )
+        if file_path:
+            self.fetch_and_export_all_series(file_path)
+
+    def fetch_and_export_all_series(self, file_path):
+        """Fetch all series, seasons, and episodes, then export to M3U."""
+        selected_provider = self.provider_manager.current_provider
+        url = selected_provider.get("url", "")
+        url = URLObject(url)
+        base_url = f"{url.scheme}://{url.netloc}"
+        mac = selected_provider.get("mac", "")
+
+        # Get the current content (series in categories)
+        provider_content = self.provider_manager.current_provider_content.get(self.content_type, {})
+        categories = provider_content.get("categories", [])
+
+        if not categories:
+            QMessageBox.warning(
+                self,
+                "Export Error",
+                "No series categories found. Please load content first.",
+            )
+            return
+
+        # Show progress dialog
+        progress = QProgressDialog("Fetching all series data...", "Cancel", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        all_episodes = []
+        total_series = 0
+
+        # Count total series across all categories
+        for cat_items in provider_content.get("contents", {}).values():
+            total_series += len(cat_items)
+
+        if total_series == 0:
+            progress.close()
+            QMessageBox.warning(
+                self,
+                "Export Error",
+                "No series found in loaded content.",
+            )
+            return
+
+        processed_series = 0
+
+        try:
+            # For each category
+            for category in categories:
+                category_id = category.get("id")
+                series_list = provider_content.get("contents", {}).get(category_id, [])
+
+                for series_item in series_list:
+                    if progress.wasCanceled():
+                        progress.close()
+                        return
+
+                    series_name = series_item.get("name", "Unknown")
+                    progress.setLabelText(f"Fetching: {series_name}")
+
+                    # Fetch seasons for this series
+                    seasons_data = self.fetch_seasons_sync(series_item)
+
+                    if seasons_data:
+                        seasons = seasons_data.get("data", [])
+                        for season in seasons:
+                            if progress.wasCanceled():
+                                progress.close()
+                                return
+
+                            # Fetch episodes for this season
+                            episodes_data = self.fetch_episodes_sync(series_item, season)
+
+                            if episodes_data:
+                                episodes = episodes_data.get("data", [])
+                                # Add series and season name to each episode for better identification
+                                for episode in episodes:
+                                    episode["series_name"] = series_name
+                                    episode["season_name"] = season.get("name", "")
+                                all_episodes.extend(episodes)
+
+                    processed_series += 1
+                    progress.setValue(int((processed_series / total_series) * 100))
+
+            progress.setValue(100)
+            progress.close()
+
+            # Now export all episodes
+            if all_episodes:
+                save_stb_content(base_url, all_episodes, mac, file_path)
+                QMessageBox.information(
+                    self,
+                    "Export Complete",
+                    f"Successfully exported {len(all_episodes)} episodes to {file_path}",
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Export Warning",
+                    "No episodes found to export.",
+                )
+
+        except Exception as e:
+            progress.close()
+            logger.error(f"Error during complete export: {e}")
+            QMessageBox.critical(
+                self,
+                "Export Error",
+                f"An error occurred during export: {str(e)}",
+            )
+
+    def fetch_seasons_sync(self, series_item):
+        """Synchronously fetch seasons for a series."""
+        selected_provider = self.provider_manager.current_provider
+        headers = self.provider_manager.headers
+        url = selected_provider.get("url", "")
+        url = URLObject(url)
+        base_url = f"{url.scheme}://{url.netloc}/server/load.php"
+
+        params = {
+            "type": "series",
+            "action": "get_ordered_list",
+            "category_id": series_item.get("category_id"),
+            "movie_id": series_item.get("id"),
+            "season_id": 0,
+            "sortby": "name",
+            "JsHttpRequest": "1-xml",
+        }
+
+        try:
+            response = requests.get(base_url, headers=headers, params=params, timeout=10)
+            if response.status_code == 200:
+                return response.json().get("js", {})
+        except Exception as e:
+            logger.warning(f"Error fetching seasons for {series_item.get('name')}: {e}")
+
+        return None
+
+    def fetch_episodes_sync(self, series_item, season_item):
+        """Synchronously fetch episodes for a season."""
+        selected_provider = self.provider_manager.current_provider
+        headers = self.provider_manager.headers
+        url = selected_provider.get("url", "")
+        url = URLObject(url)
+        base_url = f"{url.scheme}://{url.netloc}/server/load.php"
+
+        params = {
+            "type": "series",
+            "action": "get_ordered_list",
+            "category_id": series_item.get("category_id"),
+            "movie_id": series_item.get("id"),
+            "season_id": season_item.get("id"),
+            "sortby": "added",
+            "JsHttpRequest": "1-xml",
+        }
+
+        try:
+            response = requests.get(base_url, headers=headers, params=params, timeout=10)
+            if response.status_code == 200:
+                return response.json().get("js", {})
+        except Exception as e:
+            logger.warning(
+                f"Error fetching episodes for {series_item.get('name')} - {season_item.get('name')}: {e}"
+            )
+
+        return None
 
     # save_m3u_content and save_stb_content moved to services/export.py
 

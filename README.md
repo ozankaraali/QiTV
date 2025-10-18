@@ -33,6 +33,16 @@ By default, QiTV stores configuration and cache files in system-specific directo
 
 To enable **portable mode** (useful for USB drives or keeping everything in one folder), simply create an empty file named `portable.txt` in the same directory as the QiTV executable or script. When portable mode is enabled, all configuration and cache files will be stored in the program directory instead.
 
+###  Exporting Content to M3U
+
+QiTV allows you to export content to M3U format for use in VLC or other media players. The "Export Browsed" button has two modes:
+
+- **Export Cached**: Quickly exports only the content you've already browsed and loaded into the cache. This is fast but may not include all episodes if you haven't navigated through all seasons.
+
+- **Export Complete (Fetch All)**: For STB series content, this option fetches all seasons and episodes before exporting. It shows a progress dialog and may take some time depending on the number of series, but ensures a complete export. The exported M3U file contains direct stream URLs that can be played in VLC.
+
+Note: The exported links are unresolved URLs. VLC and most players can handle these M3U8 streams directly.
+
 ![Screenshot 2024-05-20 at 20 43 47](https://github.com/ozankaraali/QiTV/assets/19486728/5f8dc256-d359-44e1-a995-4bfc3c3be74a)
 
 

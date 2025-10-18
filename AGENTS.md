@@ -63,6 +63,11 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Feature: Added export dropdown with "Export Cached" and "Export Complete" options (fixes #27) (channel_list.py:429-443,1427-1650; README.md:36-44)
+  - Export Cached: Quickly exports only browsed/cached content
+  - Export Complete: For STB series, fetches all seasons/episodes before exporting with progress dialog
+  - Converted export button to QToolButton with dropdown menu
+  - Added synchronous fetch methods for seasons and episodes
 - Feature: Added portable mode support via `portable.txt` file (fixes #26) (config_manager.py:79-109; README.md:27-34)
   - When `portable.txt` exists in program directory, config and cache are stored locally instead of system directories
   - Works for both script and PyInstaller executable modes
