@@ -247,7 +247,8 @@ class VideoPlayer(QMainWindow):
             self.adjust_aspect_ratio()
             self.show()
             self.raise_()
-            self.activateWindow()
+            # Don't force activate - let user click to interact
+            # This prevents stealing focus from channel list
             self.playing.emit()
             QTimer.singleShot(5000, self.check_playback_status)
 

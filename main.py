@@ -5,7 +5,7 @@ import sys
 import warnings
 
 from PySide6 import QtGui
-from PySide6.QtCore import QLoggingCategory
+from PySide6.QtCore import QLoggingCategory, QTimer
 from PySide6.QtWidgets import QApplication
 import qdarktheme
 
@@ -55,8 +55,13 @@ if __name__ == "__main__":
         qdarktheme.setup_theme("auto")
         player.show()
         channel_list.show()
-        channel_list.raise_()  # Bring to front
-        channel_list.activateWindow()  # Give focus
+
+        # Delay activation to allow Qt to finish initialization
+        def activate_main_window():
+            channel_list.raise_()
+            channel_list.activateWindow()
+
+        QTimer.singleShot(100, activate_main_window)
 
         if config_manager.check_updates:
             check_for_updates()
