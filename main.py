@@ -1,11 +1,12 @@
 import ctypes
 import logging
+import os
 import platform
 import sys
 import warnings
 
 from PySide6 import QtGui
-from PySide6.QtCore import QLoggingCategory, QTimer
+from PySide6.QtCore import QLoggingCategory, QTimer, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 import qdarktheme
 
@@ -30,6 +31,19 @@ if __name__ == "__main__":
     # Reduce Qt info logs that are not actionable
     QLoggingCategory.setFilterRules("qt.accessibility.*=false\nqt.qpa.fonts.*=false")
     app = QApplication(sys.argv)
+
+    # Optional: capture Qt warnings to help debug thread/timer issues
+    def _qt_msg_handler(mode, context, message):
+        # Focus on timer/thread-related warnings only when enabled. Print directly to stderr to avoid recursion.
+        if "QBasicTimer::start" in message or "QObject::startTimer" in message:
+            try:
+                sys.stderr.write(f"Qt: {message}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+
+    if os.environ.get("QITV_DEBUG_QT", "0") == "1":
+        qInstallMessageHandler(_qt_msg_handler)
 
     icon_path = "assets/qitv.png"
 

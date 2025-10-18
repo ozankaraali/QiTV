@@ -23,13 +23,12 @@ class ImageLoader(QThread):
 
     async def fetch_image(self, session, image_rank, image_url):
         try:
-            # Use ImageManager to get QIcon or QPixmap
-            image = await self.image_manager.get_image_from_url(session, image_url, self.iconified)
-            if image:
-                if self.iconified:
-                    return {"rank": image_rank, "icon": image}
-                else:
-                    return {"pixmap": image}
+            # Cache image on disk in worker thread, avoid creating GUI objects here
+            cache_path = await self.image_manager.cache_image_from_url(
+                session, image_url, self.iconified
+            )
+            if cache_path:
+                return {"rank": image_rank, "cache_path": cache_path, "iconified": self.iconified}
         except Exception as e:
             logger.warning(f"Error fetching image {image_url}: {e}")
             raise
@@ -37,13 +36,10 @@ class ImageLoader(QThread):
 
     async def decode_base64_image(self, image_rank, image_str):
         try:
-            # Use ImageManager to get QIcon or QPixmap
-            image = await self.image_manager.get_image_from_base64(image_str, self.iconified)
-            if image:
-                if self.iconified:
-                    return {"rank": image_rank, "icon": image}
-                else:
-                    return {"pixmap": image}
+            # Cache decoded image on disk in worker thread
+            cache_path = await self.image_manager.cache_image_from_base64(image_str, self.iconified)
+            if cache_path:
+                return {"rank": image_rank, "cache_path": cache_path, "iconified": self.iconified}
         except Exception as e:
             logger.warning(f"Error decoding base64 image : {e}")
             raise
@@ -65,7 +61,7 @@ class ImageLoader(QThread):
                     image_item = await task
                 except Exception as e:
                     image_item = None
-                    logger.warning(f"Error processing image task: {e}")
+                    logger.info(f"Image task failed: {e}")
                 finally:
                     self.progress_updated.emit(i, image_count, image_item)
 

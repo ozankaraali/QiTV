@@ -1,8 +1,8 @@
 import logging
 from typing import List, Tuple
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtWidgets import QApplication, QMessageBox
 from packaging.version import parse
 import requests
 
@@ -51,10 +51,12 @@ def check_for_updates():
     def on_finished(result):
         thread.quit()
         if result:
-            # Ensure dialog runs on the GUI thread
-            from PySide6.QtCore import QTimer
-
-            QTimer.singleShot(0, lambda: show_update_dialog(result["version"], result["url"]))
+            # Ensure dialog runs on the GUI thread by targeting the app object
+            app = QApplication.instance()
+            if app is not None:
+                QTimer.singleShot(
+                    0, app, lambda: show_update_dialog(result["version"], result["url"])
+                )
 
     def on_error(msg):
         thread.quit()

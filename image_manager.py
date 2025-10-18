@@ -1,18 +1,18 @@
 import asyncio
 import base64
+from collections import OrderedDict
+from datetime import datetime
 import hashlib
+from io import BytesIO
 import json
 import logging
 import os
 import random
-from collections import OrderedDict
-from datetime import datetime
-from io import BytesIO
 
-import aiohttp
-import orjson
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
+import aiohttp
+import orjson
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +37,7 @@ class ImageManager:
         image_hash = self._hash_string(image_str + ext)
         if image_hash in self.cache:
             if self.cache[image_hash]:
-                self.cache[image_hash]["last_access"] = datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
+                self.cache[image_hash]["last_access"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self.cache.move_to_end(image_hash)  # Update access order
                 cache_path = os.path.join(self.cache_dir, f"{image_hash}.{ext}")
                 if os.path.exists(cache_path):
@@ -78,13 +76,9 @@ class ImageManager:
         image = QPixmap()
         if image.loadFromData(image_data):
             if iconified:
-                image = image.scaled(
-                    64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
+                image = image.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             else:
-                image = image.scaled(
-                    300, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
+                image = image.scaled(300, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             if image.save(cache_path, "PNG" if iconified else "JPG"):
                 if iconified:
                     image = QIcon(image)
@@ -101,17 +95,13 @@ class ImageManager:
         self.cache[image_hash] = None
         return None
 
-    async def get_image_from_url(
-        self, session, url, iconified, max_retries=2, timeout=5
-    ):
+    async def get_image_from_url(self, session, url, iconified, max_retries=2, timeout=5):
         image_type = "qicon" if iconified else "qpixmap"
         ext = "png" if iconified else "jpg"
         url_hash = self._hash_string(url + ext)
         if url_hash in self.cache:
             if self.cache[url_hash]:
-                self.cache[url_hash]["last_access"] = datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
+                self.cache[url_hash]["last_access"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self.cache.move_to_end(url_hash)  # Update access order
                 cache_path = os.path.join(self.cache_dir, f"{url_hash}.{ext}")
                 if os.path.exists(cache_path):
@@ -179,9 +169,7 @@ class ImageManager:
                                 self.cache[url_hash] = {
                                     image_type: image,
                                     "size": file_size,
-                                    "last_access": datetime.now().strftime(
-                                        "%Y-%m-%d %H:%M:%S"
-                                    ),
+                                    "last_access": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 }
                                 self.current_cache_size += file_size
                                 self.cache.move_to_end(url_hash)  # Update access order
@@ -193,7 +181,7 @@ class ImageManager:
                 aiohttp.ClientError,
                 asyncio.TimeoutError,
             ) as e:
-                logger.warning(f"Error fetching image: {e}")
+                logger.info(f"Error fetching image: {e}")
                 if attempt == max_retries - 1:
                     self.cache[url_hash] = None
                     return None
@@ -203,6 +191,89 @@ class ImageManager:
 
         self.cache[url_hash] = None
         return None
+
+    async def cache_image_from_url(self, session, url, iconified, max_retries=2, timeout=5):
+        """Download image bytes and store to cache on disk only.
+        Returns absolute cache file path or None.
+        Safe to call from worker threads (no GUI objects created).
+        """
+        ext = "png" if iconified else "jpg"
+        url_hash = self._hash_string(url + ext)
+        cache_path = os.path.join(self.cache_dir, f"{url_hash}.{ext}")
+
+        # If already cached on disk, update metadata and return
+        if os.path.exists(cache_path):
+            self._touch_cache_entry(url_hash, cache_path)
+            return cache_path
+
+        # Download and write to disk
+        for attempt in range(max_retries):
+            try:
+                async with session.get(url, timeout=timeout) as response:
+                    content = await response.read()
+                    if response.status == 503 or not content:
+                        if attempt == max_retries - 1:
+                            break
+                        wait_time = (2**attempt) + random.uniform(0, 1)
+                        logger.debug(
+                            f"Received error or empty response. Retrying in {wait_time:.2f} seconds..."
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+
+                    # Persist bytes. We skip pre-scaling here to avoid GUI usage off-thread.
+                    try:
+                        with open(cache_path, "wb") as f:
+                            f.write(content)
+                        self._touch_cache_entry(url_hash, cache_path)
+                        self._manage_cache_size()
+                        return cache_path
+                    except OSError as e:
+                        logger.warning(f"Error writing image to cache: {e}")
+                        return None
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.info(f"Error fetching image: {e}")
+                if attempt == max_retries - 1:
+                    break
+                wait_time = (2**attempt) + random.uniform(0, 1)
+                logger.debug(f"Retrying in {wait_time:.2f} seconds...")
+                await asyncio.sleep(wait_time)
+        return None
+
+    async def cache_image_from_base64(self, image_str, iconified):
+        """Decode base64 image and store to cache on disk only. Returns path or None."""
+        ext = "png" if iconified else "jpg"
+        image_hash = self._hash_string(image_str + ext)
+        cache_path = os.path.join(self.cache_dir, f"{image_hash}.{ext}")
+
+        if os.path.exists(cache_path):
+            self._touch_cache_entry(image_hash, cache_path)
+            return cache_path
+
+        try:
+            base64_data = image_str.split(",", 1)[1]
+            image_data = base64.b64decode(base64_data)
+            with open(cache_path, "wb") as f:
+                f.write(image_data)
+            self._touch_cache_entry(image_hash, cache_path)
+            self._manage_cache_size()
+            return cache_path
+        except Exception as e:
+            logger.warning(f"Error decoding/saving base64 image: {e}")
+            return None
+
+    def _touch_cache_entry(self, key_hash, cache_path):
+        # Update cache metadata without creating GUI objects
+        size = os.path.getsize(cache_path)
+        entry = self.cache.get(key_hash, {}) or {}
+        entry["size"] = size
+        entry["last_access"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.cache[key_hash] = entry
+        # maintain LRU order
+        try:
+            self.cache.move_to_end(key_hash)
+        except Exception:
+            pass
 
     def clear_cache(self):
         for filename in os.listdir(self.cache_dir):
@@ -255,23 +326,17 @@ class ImageManager:
                         "last_access": now,
                     }
 
-        self.current_cache_size = sum(
-            entry["size"] for entry in self.cache.values() if entry
-        )
+        self.current_cache_size = sum(entry["size"] for entry in self.cache.values() if entry)
 
     def save_index(self):
         index_data = {
             url: (
-                {k: v for k, v in data.items() if k not in ["qicon", "qpixmap"]}
-                if data
-                else None
+                {k: v for k, v in data.items() if k not in ["qicon", "qpixmap"]} if data else None
             )
             for url, data in self.cache.items()
         }
         with open(self.index_file, "w", encoding="utf-8") as f:
-            f.write(
-                orjson.dumps(index_data, option=orjson.OPT_INDENT_2).decode("utf-8")
-            )
+            f.write(orjson.dumps(index_data, option=orjson.OPT_INDENT_2).decode("utf-8"))
 
     def _manage_cache_size(self):
         # Remove oldest accessed items until cache size is within limits

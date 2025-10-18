@@ -27,7 +27,8 @@ Current Work Plan (Living TODO)
 2) Networking and responsiveness
    - [x] Identify and thread key `requests` (M3U load, STB categories, link creation)
    - [x] Standardize timeouts/retries across network calls (added timeouts; moved update check to QThread)
-   - [ ] Move remaining UI-thread `requests` to workers (exports OK as is)
+   - [x] Move remaining UI-thread `requests` to workers (exports OK as is)
+   - [x] Ensure all worker completions marshal back to the UI thread (no cross-thread timers)
    - [ ] Consolidate provider/EPG URL building and headers in one place
 
 3) Modularity and structure
@@ -35,11 +36,13 @@ Current Work Plan (Living TODO)
    - [x] Move M3U parsing to `services/m3u.py`
    - [x] Move export helpers to `services/export.py`
    - [ ] Split remaining `channel_list.py` into widgets/ (panels) and services/ (provider, epg)
-   - [ ] Move image caching and EPG parsing unit-testable logic out of UI code paths
+   - [ ] Move EPG parsing unit-testable logic out of UI code paths
+   - [x] Refactor image pipeline: workers only cache bytes; GUI builds QPixmap/QIcon on main thread
    - [ ] Consider a small event-bus/signal helper to decouple UI components
 
 4) Logging and error handling
-   - [ ] Add module-level loggers; remove stray prints
+   - [x] Add module-level loggers; remove stray prints
+   - [x] Downgrade transient image fetch errors to info; reduce log noise
    - [ ] Plumb important errors to the UI via signals (non-modal first, modal where necessary)
 
 5) Testing and stability
@@ -63,6 +66,12 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Fix: Eliminated cross-thread timer warnings by posting worker completions to the GUI thread (channel_list.py: M3U/STB/link creators; update_checker.py). Also avoided unconditional signal disconnects that caused warnings.
+- Refactor: Image loading pipeline avoids GUI objects in worker threads; workers cache files, GUI constructs QPixmap/QIcon (image_loader.py, image_manager.py, channel_list.py logos/posters).
+- UX: Export button now uses a clean label; dropdown arrow provided by Qt via setMenu (channel_list.py).
+- Fix: Robust list population (avoids None-to-Qt conversions) and EPG text handling; safer selectionChanged disconnects for program/content lists.
+- Debug: Optional Qt warning capture via `QITV_DEBUG_QT=1` prints timer/thread issues to stderr without crashing (main.py).
+- Feature: Resume Last Watched auto-switches provider on user confirmation, then resumes playback (channel_list.py).
 - Feature: Modern toolbar UI with quick provider switcher (channel_list.py:394-538)
   - Single-row toolbar with logical sections: Provider | File Ops | Navigation | Content Actions
   - Quick provider dropdown at start - switch providers without opening Settings
@@ -116,6 +125,7 @@ Conventions for New Code
 - Keep UI and data/services separate. Long-running network calls must run in QThread.
 - Avoid coupling VLC/player code to UI state more than necessary; use signals.
 - Prefer dataclasses or typed dicts for structured data passed between layers.
+ - Never create Qt GUI objects (QPixmap/QIcon) or start timers from worker threads; emit plain data and build UI in the main thread.
 
 How to Contribute
 - Update this AGENTS.md when you pick up or complete an item.

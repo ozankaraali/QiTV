@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote as url_quote
 
 from PySide6.QtCore import QBuffer, QObject, QRect, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -339,9 +339,11 @@ class ChannelList(QMainWindow):
                         progress = 0 if now < start_time else 100
                     progress = max(0, min(100, progress))
                     if epg_source == "STB":
-                        epg_text = f"{epg_item['name']}"
+                        epg_text = str(epg_item.get("name") or "")
                     else:
-                        epg_text = f"{epg_item['title'].get('__text')}"
+                        title = epg_item.get("title", {})
+                        text = title.get("__text") if isinstance(title, dict) else ""
+                        epg_text = str(text or "")
                     item.setData(2, Qt.UserRole, progress)
                     item.setData(3, Qt.UserRole, epg_text)
                 else:
@@ -358,9 +360,16 @@ class ChannelList(QMainWindow):
         if force_update:
             self.provider_manager.clear_current_provider_cache()
 
+        # Remember if this call was a forced update so we can use it in the
+        # UI-thread handler safely.
+        self._set_provider_force_update = force_update
+
         self.set_provider_thread = SetProviderThread(self.provider_manager, self.epg_manager)
         self.set_provider_thread.progress.connect(self.update_busy_progress)
-        self.set_provider_thread.finished.connect(lambda: self.set_provider_finished(force_update))
+        # Ensure the finished handler runs on the GUI thread (no lambda)
+        self.set_provider_thread.finished.connect(
+            self._on_set_provider_thread_finished, Qt.QueuedConnection
+        )
         self.set_provider_thread.start()
 
     def set_provider_finished(self, force_update=False):
@@ -385,14 +394,43 @@ class ChannelList(QMainWindow):
         else:
             self.load_content()
 
+        # If a resume operation was requested while switching provider, handle it now
+        pending = getattr(self, "_pending_resume", None)
+        if pending:
+            try:
+                item_data = pending.get("item_data")
+                item_type = pending.get("item_type")
+                is_episode = item_type == "episode"
+
+                # Ensure content_type matches the item being resumed
+                if item_type == "channel":
+                    self.content_type = "itv"
+                elif item_type == "movie":
+                    self.content_type = "vod"
+                elif item_type == "episode":
+                    self.content_type = "series"
+
+                current_provider_type = self.provider_manager.current_provider.get("type", "")
+                if current_provider_type == "STB":
+                    self.play_item(item_data, is_episode=is_episode, item_type=item_type)
+                elif pending.get("link"):
+                    self.link = pending["link"]
+                    self.player.play_video(self.link)
+                else:
+                    # Fallback: recreate the link
+                    self.play_item(item_data, is_episode=is_episode, item_type=item_type)
+            finally:
+                self._pending_resume = None
+
     def _connect_provider_combo_signal(self):
         """Connect provider combo signal (called after initialization)."""
-        try:
-            self.provider_combo.currentTextChanged.disconnect()
-        except (TypeError, RuntimeError):
-            # Not connected yet, that's fine
-            pass
+        # Avoid disconnecting when not connected (causes warnings); connect once.
         self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
+
+    def _on_set_provider_thread_finished(self):
+        # Called in the GUI thread after provider setup completes in background
+        force_update = getattr(self, "_set_provider_force_update", False)
+        self.set_provider_finished(force_update)
 
     def update_splitter_ratio(self, pos, index):
         sizes = self.splitter.sizes()
@@ -483,7 +521,7 @@ class ChannelList(QMainWindow):
         actions_section.addWidget(self.resume_button)
 
         # Export button with dropdown menu
-        self.export_button = QPushButton("Export ▼")
+        self.export_button = QPushButton("Export")
 
         # Create export menu
         export_menu = QMenu(self)
@@ -504,8 +542,8 @@ class ChannelList(QMainWindow):
         export_all_live_action.setToolTip("For STB: Export all live TV channels from cache")
         export_all_live_action.triggered.connect(self.export_all_live_channels)
 
+        # Use a clean label; Qt will add a dropdown arrow automatically
         self.export_button.setMenu(export_menu)
-        self.export_button.clicked.connect(lambda: self.export_button.showMenu())
         actions_section.addWidget(self.export_button)
 
         self.rescanlogo_button = QPushButton("Rescan Logos")
@@ -819,7 +857,10 @@ class ChannelList(QMainWindow):
             )
 
     def populate_channel_programs_content_info(self, item_data):
-        self.program_list.itemSelectionChanged.disconnect()
+        try:
+            self.program_list.itemSelectionChanged.disconnect()
+        except (TypeError, RuntimeError):
+            pass
         self.program_list.clear()
         self.program_list.itemSelectionChanged.connect(self.update_channel_program)
 
@@ -1133,9 +1174,12 @@ class ChannelList(QMainWindow):
 
     def display_categories(self, categories, select_first=True):
         # Unregister the content_list selection change event
-        self.content_list.itemSelectionChanged.disconnect(self.item_selected)
+        try:
+            self.content_list.itemSelectionChanged.disconnect(self.item_selected)
+        except (TypeError, RuntimeError):
+            pass
         self.content_list.clear()
-        # Re-egister the content_list selection change event
+        # Re-register the content_list selection change event
         self.content_list.itemSelectionChanged.connect(self.item_selected)
 
         # Stop refreshing content list
@@ -1187,7 +1231,10 @@ class ChannelList(QMainWindow):
 
     def display_content(self, items, content="m3ucontent", select_first=True):
         # Unregister the selection change event
-        self.content_list.itemSelectionChanged.disconnect(self.item_selected)
+        try:
+            self.content_list.itemSelectionChanged.disconnect(self.item_selected)
+        except (TypeError, RuntimeError):
+            pass
         self.content_list.clear()
         self.content_list.setSortingEnabled(False)
         # Re-register the selection change event
@@ -1268,11 +1315,13 @@ class ChannelList(QMainWindow):
                 list_item = QTreeWidgetItem(self.content_list)
 
             for i, key in enumerate(header_info[content]["keys"]):
+                raw_value = item_data.get(key)
                 if key == "added":
-                    # Change a date time from "YYYY-MM-DD HH:MM:SS" to "YYYY-MM-DD" only
-                    list_item.setText(i, html.unescape(item_data.get(key, "")).split()[0])
+                    # Show only date part if present
+                    text_value = str(raw_value).split()[0] if raw_value else ""
                 else:
-                    list_item.setText(i, html.unescape(item_data.get(key, "")))
+                    text_value = html.unescape(str(raw_value)) if raw_value is not None else ""
+                list_item.setText(i, text_value)
 
             list_item.setData(0, Qt.UserRole, {"type": content, "data": item_data})
 
@@ -1336,18 +1385,35 @@ class ChannelList(QMainWindow):
     def update_channel_logos(self, current, total, data):
         self.update_progress(current, total)
         if data:
-            qicon = data.get("icon", None)
-            if qicon:
-                logo_column = ChannelList.get_logo_column(self.current_list_content)
-                rank = data["rank"]
-                item = self.content_list.topLevelItem(rank)
-                item.setIcon(logo_column, qicon)
+            # Prefer using cache_path to construct GUI objects in the main thread
+            logo_column = ChannelList.get_logo_column(self.current_list_content)
+            rank = data.get("rank", 0)
+            item = (
+                self.content_list.topLevelItem(rank)
+                if rank < self.content_list.topLevelItemCount()
+                else None
+            )
+            if not item:
+                return
+            cache_path = data.get("cache_path")
+            if cache_path:
+                pix = QPixmap(cache_path)
+                if not pix.isNull():
+                    item.setIcon(logo_column, QIcon(pix))
+            else:
+                # Backward compatibility: if an icon was provided (older worker behavior)
+                qicon = data.get("icon", None)
+                if qicon:
+                    item.setIcon(logo_column, qicon)
 
     def update_poster(self, current, total, data):
         self.update_progress(current, total)
         if data:
-            pixmap = data.get("pixmap", None)
-            if pixmap:
+            cache_path = data.get("cache_path")
+            pixmap = None
+            if cache_path:
+                pixmap = QPixmap(cache_path)
+            if pixmap and not pixmap.isNull():
                 scaled_pixmap = pixmap.scaled(200, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 buffer = QBuffer()
                 buffer.open(QBuffer.ReadWrite)
@@ -1835,7 +1901,7 @@ class ChannelList(QMainWindow):
                 def on_started():
                     worker.run()
 
-                def on_finished(payload):
+                def handle_finished_ui(payload):
                     try:
                         content = payload.get("content", "")
                         parsed_content = parse_m3u(content)
@@ -1848,10 +1914,17 @@ class ChannelList(QMainWindow):
                         thread.quit()
                         self.unlock_ui_after_loading()
 
+                def on_finished(payload):
+                    # Ensure UI updates run in the main thread
+                    QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
+
                 def on_error(msg):
-                    logger.warning(f"Error loading M3U Playlist: {msg}")
-                    thread.quit()
-                    self.unlock_ui_after_loading()
+                    def handle_error_ui():
+                        logger.warning(f"Error loading M3U Playlist: {msg}")
+                        thread.quit()
+                        self.unlock_ui_after_loading()
+
+                    QTimer.singleShot(0, self, handle_error_ui)
 
                 def _cleanup():
                     try:
@@ -1994,7 +2067,7 @@ class ChannelList(QMainWindow):
         def on_started():
             worker.run()
 
-        def on_finished(payload):
+        def handle_finished_ui(payload):
             try:
                 categories = payload.get("categories", [])
                 if not categories:
@@ -2033,10 +2106,16 @@ class ChannelList(QMainWindow):
                 thread.quit()
                 self.unlock_ui_after_loading()
 
+        def on_finished(payload):
+            QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
+
         def on_error(msg):
-            logger.warning(f"Error loading STB categories: {msg}")
-            thread.quit()
-            self.unlock_ui_after_loading()
+            def handle_error_ui():
+                logger.warning(f"Error loading STB categories: {msg}")
+                thread.quit()
+                self.unlock_ui_after_loading()
+
+            QTimer.singleShot(0, self, handle_error_ui)
 
         def _cleanup():
             try:
@@ -2222,7 +2301,7 @@ class ChannelList(QMainWindow):
             def on_started():
                 worker.run()
 
-            def on_finished(payload):
+            def handle_finished_ui(payload):
                 try:
                     link = self.sanitize_url(payload.get("link", ""))
                     if link:
@@ -2236,10 +2315,16 @@ class ChannelList(QMainWindow):
                     thread.quit()
                     self.unlock_ui_after_loading()
 
+            def on_finished(payload):
+                QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
+
             def on_error(msg):
-                logger.warning(f"Error creating link: {msg}")
-                thread.quit()
-                self.unlock_ui_after_loading()
+                def handle_error_ui():
+                    logger.warning(f"Error creating link: {msg}")
+                    thread.quit()
+                    self.unlock_ui_after_loading()
+
+                QTimer.singleShot(0, self, handle_error_ui)
 
             def _cleanup():
                 try:
@@ -2290,6 +2375,18 @@ class ChannelList(QMainWindow):
             )
             if reply == QMessageBox.No:
                 return
+            # Switch provider automatically and resume after switching
+            target_name = last_watched.get("provider_name", "")
+            if target_name:
+                # If provider exists, switch to it
+                names = [p.get("name", "") for p in self.provider_manager.providers]
+                if target_name in names:
+                    self._pending_resume = last_watched
+                    self.config_manager.selected_provider_name = target_name
+                    self.config_manager.save_config()
+                    # Trigger provider switch; playback continues in set_provider_finished
+                    QTimer.singleShot(0, lambda: self.set_provider())
+                    return
 
         # Play the last watched item
         item_data = last_watched.get("item_data")
