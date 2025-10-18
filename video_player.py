@@ -82,6 +82,10 @@ class VideoPlayer(QMainWindow):
         self.mainFrame.setLayout(t_lay_parent)
         self.show()
 
+        # Enable mouse tracking for inactivity detection
+        self.setMouseTracking(True)
+        self.video_frame.setMouseTracking(True)
+
         self.resize_corner = None
 
         self.progress_bar = QProgressBar(self)
@@ -98,6 +102,12 @@ class VideoPlayer(QMainWindow):
         self.update_timer = QTimer(self)
         self.update_timer.setInterval(100)  # Update every 100ms
         self.update_timer.timeout.connect(self.update_progress)
+
+        # Timer for auto-hiding progress bar and cursor on inactivity
+        self.inactivity_timer = QTimer(self)
+        self.inactivity_timer.setInterval(3000)  # 3 seconds of inactivity
+        self.inactivity_timer.timeout.connect(self.on_inactivity)
+        self._ui_visible = True  # Track UI visibility state
 
         self.progress_bar.mousePressEvent = self.seek_video
 
@@ -235,13 +245,47 @@ class VideoPlayer(QMainWindow):
             self.media_player.set_nsobject(int(self.video_frame.winId()))
 
         self.media = self.instance.media_new(video_url)
-        # Helpful defaults for IPTV streams
+        # Improved options for IPTV streams to prevent freezing
         try:
+            # User agent
             self.media.add_option(":http-user-agent=VLC/3.0.20")
-            self.media.add_option(":network-caching=1200")
+
+            # Buffering settings (higher values help prevent freezing)
+            self.media.add_option(":network-caching=3000")  # Increased from 1200ms to 3000ms
+            self.media.add_option(":file-caching=2000")
+            self.media.add_option(":live-caching=2000")
+
+            # Connection settings
             self.media.add_option(":http-reconnect=true")
-        except Exception:
-            pass
+            self.media.add_option(":http-continuous=true")
+
+            # Performance settings
+            self.media.add_option(":clock-jitter=0")
+            self.media.add_option(":clock-synchro=0")
+
+            # Disable unused features for better performance
+            self.media.add_option(":no-audio-time-stretch")
+            self.media.add_option(":avcodec-fast")
+
+            # Hardware decoding (if available)
+            self.media.add_option(":avcodec-hw=any")
+
+            # Special handling for MKV/MP4 files over HTTP
+            if video_url and (
+                '.mkv' in video_url.lower()
+                or '.mp4' in video_url.lower()
+                or '.avi' in video_url.lower()
+            ):
+                # Better demuxer for MKV/MP4 files
+                self.media.add_option(":demux=avformat")
+                # Disable timeshift for better seeking
+                self.media.add_option(":no-input-timeshift-granularity")
+                # Increase network cache for VOD
+                self.media.add_option(":network-caching=5000")
+                # Enable HTTP byte-range for seeking
+                self.media.add_option(":http-forward-cookies=true")
+        except Exception as e:
+            logging.warning(f"Failed to set VLC options: {e}")
         self.media_player.set_media(self.media)
 
         events = self.media_player.event_manager()
@@ -260,6 +304,10 @@ class VideoPlayer(QMainWindow):
             self.playing.emit()
             QTimer.singleShot(5000, self.check_playback_status)
 
+            # Start inactivity timer for auto-hiding UI
+            self._ui_visible = True
+            self.inactivity_timer.start()
+
     def check_playback_status(self):
         state = self.media_player.get_state()
         if state == vlc.State.Playing:  # only check if media has not been paused, or stopped
@@ -275,6 +323,9 @@ class VideoPlayer(QMainWindow):
         self.media_player.stop()
         self.progress_bar.setVisible(False)
         self.update_timer.stop()
+        self.inactivity_timer.stop()
+        self.setCursor(Qt.ArrowCursor)  # Restore cursor
+        self._ui_visible = True
         self.stopped.emit()
 
     def toggle_mute(self):
@@ -345,6 +396,10 @@ class VideoPlayer(QMainWindow):
             event.accept()
 
     def mouseMoveEvent(self, event):
+        # Show UI on mouse movement
+        self.show_ui()
+        self.inactivity_timer.start()  # Restart inactivity timer
+
         if self.resizing:
             delta = event.globalPos() - self.drag_position
             new_width, new_height = self.start_size.width(), self.start_size.height()
@@ -462,6 +517,25 @@ class VideoPlayer(QMainWindow):
         self.progress_bar.setFormat(f"Error: {error_message}")
         self.progress_bar.setValue(0)
         self.update_timer.stop()
+
+    def show_ui(self):
+        """Show progress bar and cursor."""
+        if not self._ui_visible:
+            # Only update if state changed to avoid unnecessary operations
+            if not self._is_live:  # Only show progress bar for VOD content
+                self.progress_bar.setVisible(True)
+            self.setCursor(Qt.ArrowCursor)
+            self._ui_visible = True
+
+    def on_inactivity(self):
+        """Hide progress bar and cursor after inactivity period."""
+        if self._ui_visible:
+            # Only hide for VOD content (live streams don't show progress bar anyway)
+            if not self._is_live and self.isFullScreen():
+                self.progress_bar.setVisible(False)
+                self.setCursor(Qt.BlankCursor)
+                self._ui_visible = False
+            self.inactivity_timer.stop()
 
     def toggle_fullscreen(self):
         if self.windowState() == Qt.WindowNoState:
