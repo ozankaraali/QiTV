@@ -63,6 +63,7 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Feature: Added optional Serial Number and Device ID fields for STB providers (fixes #31) (options.py:179-187,362-363,408-411,424-431,525-530,537-538; provider_manager.py:115-118,77-82,175,189,197-207,217)
 - Feature: Added "Resume Last Watched" button to quickly resume previous content (channel_list.py:412-414,1921-1973; config_manager.py:131-134,205-211)
 - Fix: Resume Last Watched now recreates links for STB providers (tokens expire) (channel_list.py:1963-1966)
 - Fix: Video player now properly activates on playback start (resolves focus-dependent mouse events) (video_player.py:249-250)

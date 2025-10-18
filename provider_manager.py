@@ -74,7 +74,12 @@ class ProviderManager(QObject):
         if self.current_provider["type"] == "STB":
             progress_callback.emit("Performing handshake...")
             self.token = ""
-            self.do_handshake(self.current_provider["url"], self.current_provider["mac"])
+            self.do_handshake(
+                self.current_provider["url"],
+                self.current_provider["mac"],
+                serial_number=self.current_provider.get("serial_number", ""),
+                device_id=self.current_provider.get("device_id", ""),
+            )
 
         progress_callback.emit("Provider setup complete.")
 
@@ -111,9 +116,9 @@ class ProviderManager(QObject):
         with open(self._current_provider_cache_name(), "w", encoding="utf-8") as f:
             f.write(serialized.decode("utf-8"))
 
-    def do_handshake(self, url, mac, serverload="/portal.php"):
+    def do_handshake(self, url, mac, serverload="/portal.php", serial_number="", device_id=""):
         self.token = self.token if self.token else self.random_token()
-        self.headers = self.create_headers(url, mac, self.token)
+        self.headers = self.create_headers(url, mac, self.token, serial_number, device_id)
         try:
             prehash = "2614ddf9829ba9d284f389d88e8c669d81f6a5c2"
             fetchurl = f"{url}{serverload}?type=stb&action=handshake&prehash={prehash}&token=&JsHttpRequest=1-xml"
@@ -165,7 +170,7 @@ class ProviderManager(QObject):
         except Exception as e:
             if serverload != "/server/load.php" and "handshake" in fetchurl:
                 serverload = "/server/load.php"
-                return self.do_handshake(url, mac, serverload)
+                return self.do_handshake(url, mac, serverload, serial_number, device_id)
             logger.warning("Error in handshake: %s", e)
             return False
 
@@ -184,13 +189,26 @@ class ProviderManager(QObject):
         return "".join(random.choices(string.ascii_letters + string.digits, k=32))
 
     @staticmethod
-    def create_headers(url, mac, token):
+    def create_headers(url, mac, token, serial_number="", device_id=""):
         url = URLObject(url)
         # Use a robust string representation of local timezone
         try:
             timezone = str(tzlocal.get_localzone())
         except Exception:
             timezone = "UTC"
+
+        # Build cookie string with optional serial_number and device_id
+        cookie_parts = [
+            f"mac={mac}",
+            "stb_lang=en",
+            f"timezone={timezone}",
+            "PHPSESSID=null",
+        ]
+        if serial_number:
+            cookie_parts.append(f"sn={serial_number}")
+        if device_id:
+            cookie_parts.append(f"device_id={device_id}")
+
         headers = {
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
             "Accept-Charset": "UTF-8,*;q=0.8",
@@ -199,7 +217,7 @@ class ProviderManager(QObject):
             "Range": "bytes=0-",
             "Accept": "*/*",
             "Referer": f"{url}/c/" if not url.path else f"{url}/",
-            "Cookie": f"mac={mac}; stb_lang=en; timezone={timezone}; PHPSESSID=null;",
+            "Cookie": "; ".join(cookie_parts) + ";",
             "Authorization": f"Bearer {token}",
         }
         return headers

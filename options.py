@@ -176,6 +176,16 @@ class OptionsDialog(QDialog):
         self.mac_input = QLineEdit(self.providers_tab)
         self.providers_layout.addRow(self.mac_label, self.mac_input)
 
+        self.serial_label = QLabel("Serial Number (Optional):", self.providers_tab)
+        self.serial_input = QLineEdit(self.providers_tab)
+        self.serial_input.setPlaceholderText("Leave empty if not required")
+        self.providers_layout.addRow(self.serial_label, self.serial_input)
+
+        self.device_id_label = QLabel("Device ID (Optional):", self.providers_tab)
+        self.device_id_input = QLineEdit(self.providers_tab)
+        self.device_id_input.setPlaceholderText("Leave empty if not required")
+        self.providers_layout.addRow(self.device_id_label, self.device_id_input)
+
         self.file_button = QPushButton("Load File", self.providers_tab)
         self.file_button.clicked.connect(self.load_file)
         self.providers_layout.addWidget(self.file_button)
@@ -349,6 +359,8 @@ class OptionsDialog(QDialog):
         self.name_input.setText(self.edited_provider.get("name", ""))
         self.url_input.setText(self.edited_provider.get("url", ""))
         self.mac_input.setText(self.edited_provider.get("mac", ""))
+        self.serial_input.setText(self.edited_provider.get("serial_number", ""))
+        self.device_id_input.setText(self.edited_provider.get("device_id", ""))
         self.username_input.setText(self.edited_provider.get("username", ""))
         self.password_input.setText(self.edited_provider.get("password", ""))
         self.update_radio_buttons()
@@ -393,6 +405,10 @@ class OptionsDialog(QDialog):
     def update_inputs(self):
         self.mac_label.setVisible(self.type_STB.isChecked())
         self.mac_input.setVisible(self.type_STB.isChecked())
+        self.serial_label.setVisible(self.type_STB.isChecked())
+        self.serial_input.setVisible(self.type_STB.isChecked())
+        self.device_id_label.setVisible(self.type_STB.isChecked())
+        self.device_id_input.setVisible(self.type_STB.isChecked())
         self.file_button.setVisible(
             self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked()
         )
@@ -405,7 +421,14 @@ class OptionsDialog(QDialog):
         self.password_input.setVisible(self.type_XTREAM.isChecked())
 
     def add_new_provider(self):
-        new_provider = {"type": "STB", "name": "", "url": "", "mac": ""}
+        new_provider = {
+            "type": "STB",
+            "name": "",
+            "url": "",
+            "mac": "",
+            "serial_number": "",
+            "device_id": "",
+        }
         self.providers.append(new_provider)
         self.load_providers()
         self.provider_combo.setCurrentIndex(len(self.providers) - 1)
@@ -499,7 +522,12 @@ class OptionsDialog(QDialog):
         url = self.url_input.text()
 
         if self.type_STB.isChecked():
-            result = self.provider_manager.do_handshake(url, self.mac_input.text())
+            result = self.provider_manager.do_handshake(
+                url,
+                self.mac_input.text(),
+                serial_number=self.serial_input.text(),
+                device_id=self.device_id_input.text(),
+            )
         elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
             if url.startswith(("http://", "https://")):
                 result = self.verify_url(url)
@@ -522,6 +550,8 @@ class OptionsDialog(QDialog):
             if self.type_STB.isChecked():
                 self.edited_provider["type"] = "STB"
                 self.edited_provider["mac"] = self.mac_input.text()
+                self.edited_provider["serial_number"] = self.serial_input.text()
+                self.edited_provider["device_id"] = self.device_id_input.text()
             elif self.type_M3UPLAYLIST.isChecked():
                 self.edited_provider["type"] = "M3UPLAYLIST"
             elif self.type_M3USTREAM.isChecked():
