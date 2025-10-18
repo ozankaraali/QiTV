@@ -1,5 +1,5 @@
 python-vlc==3.0.20123
-requests==2.32.3
+requests==2.32.4
 urllib3==2.5.0
 URLObject~=2.4.3
 m3u-parser
