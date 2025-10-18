@@ -63,6 +63,14 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Feature: Modern toolbar UI with quick provider switcher (channel_list.py:394-538)
+  - Single-row toolbar with logical sections: Provider | File Ops | Navigation | Content Actions
+  - Quick provider dropdown at start - switch providers without opening Settings
+  - Compact gear icon (⚙) for Settings button
+  - Shortened button labels with tooltips (Update, Resume, Rescan Logos)
+  - Export button shows dropdown arrow (▼) and opens menu on click
+  - Visual section grouping with consistent 12px spacing between sections
+  - Auto-refreshes provider list after Settings dialog closes
 - Fix: Removed incorrect @staticmethod decorator from load_stb_categories (channel_list.py:1877)
   - Was causing AttributeError: 'str' object has no attribute 'provider_manager'
   - The decorator caused parameter shift where self received url string instead of instance
