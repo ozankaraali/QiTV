@@ -369,7 +369,7 @@ class VideoPlayer(QMainWindow):
                 # Only consider as a click if not dragging/resizing
                 if not self.dragging and not self.resizing:
                     # Defer single-click to allow double-click detection window
-                    interval = QGuiApplication.doubleClickInterval()
+                    interval = QGuiApplication.styleHints().mouseDoubleClickInterval()
                     self.click_timer.start(interval)
 
         self.dragging = False
