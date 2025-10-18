@@ -146,7 +146,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           python-version: '3.14'
-          enable-cache: true
+          enable-cache: false
       - name: Get Version
         id: get_version
         run: |
