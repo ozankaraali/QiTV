@@ -246,6 +246,8 @@ class VideoPlayer(QMainWindow):
         else:
             self.adjust_aspect_ratio()
             self.show()
+            self.raise_()
+            self.activateWindow()
             self.playing.emit()
             QTimer.singleShot(5000, self.check_playback_status)
 

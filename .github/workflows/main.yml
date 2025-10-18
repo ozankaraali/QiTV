@@ -182,7 +182,7 @@ jobs:
         with:
           tag_name: v${{ env.VERSION }}
           release_name: v${{ env.VERSION }}
-          body: ${{ steps.generate_changelog.outputs.changelog }}
+          body_path: changelog.md
           draft: false
           prerelease: true
       - name: Download all artifacts
