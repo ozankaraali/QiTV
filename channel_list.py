@@ -434,13 +434,23 @@ class ChannelList(QMainWindow):
 
         # Create export menu
         export_menu = QMenu(self)
+
         export_cached_action = export_menu.addAction("Export Cached Content")
+        export_cached_action.setToolTip("Quickly export only browsed/cached content")
         export_cached_action.triggered.connect(self.export_content_cached)
+
         export_complete_action = export_menu.addAction("Export Complete (Fetch All)")
+        export_complete_action.setToolTip(
+            "For STB series: Fetch all seasons/episodes before exporting"
+        )
         export_complete_action.triggered.connect(self.export_content_complete)
+
         export_menu.addSeparator()
+
         export_all_live_action = export_menu.addAction("Export All Live Channels")
+        export_all_live_action.setToolTip("For STB: Export all live TV channels from cache")
         export_all_live_action.triggered.connect(self.export_all_live_channels)
+
         self.export_button.setMenu(export_menu)
 
         bottom_layout.addWidget(self.export_button)
@@ -1459,14 +1469,32 @@ class ChannelList(QMainWindow):
         provider = self.provider_manager.current_provider
         config_type = provider.get("type", "")
 
-        # For non-STB or non-series content, just use cached export
-        if config_type != "STB" or self.content_type != "series":
+        # Check if this is appropriate content type
+        if config_type != "STB":
             QMessageBox.information(
                 self,
                 "Export Complete",
-                "Complete export is only available for STB series content.\n"
-                "For other content types, use 'Export Cached'.",
+                "Complete export is only available for STB providers.\n\n"
+                "For other provider types, use 'Export Cached Content'.",
             )
+            return
+
+        if self.content_type != "series":
+            if self.content_type == "itv":
+                QMessageBox.information(
+                    self,
+                    "Export Complete",
+                    "For live channels, please use 'Export All Live Channels' instead.\n\n"
+                    "Export Complete is designed for series with multiple seasons/episodes.",
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Export Complete",
+                    "Export Complete is only available for series content.\n\n"
+                    f"Current content type: {self.content_type}\n"
+                    "For movies or other content, use 'Export Cached Content'.",
+                )
             return
 
         file_dialog = QFileDialog(self)
@@ -1851,7 +1879,11 @@ class ChannelList(QMainWindow):
 
     def load_stb_categories(self, url: str, headers: Optional[dict] = None):
         if headers is None:
-            headers = self.provider_manager.headers
+            if hasattr(self, "provider_manager") and hasattr(self.provider_manager, "headers"):
+                headers = self.provider_manager.headers
+            else:
+                logger.error("Provider manager or headers not available")
+                return
         # Run network calls in a worker thread
         self.lock_ui_before_loading()
         thread = QThread()
