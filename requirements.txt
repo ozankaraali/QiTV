@@ -1,6 +1,6 @@
 python-vlc==3.0.20123
 requests==2.32.3
-urllib3==2.5.2
+urllib3==2.5.0
 URLObject~=2.4.3
 m3u-parser
 pyqtdarktheme==2.1.0
