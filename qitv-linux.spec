@@ -34,7 +34,9 @@ a = Analysis(
     binaries=[
         (os.path.join(VLC_PATH, 'vlc/plugins/*'), 'plugins'),
     ],
-    datas=[],
+    datas=[
+        ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

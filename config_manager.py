@@ -39,6 +39,13 @@ def get_app_version() -> str:
         Path(__file__).resolve().parent / "pyproject.toml",
         Path.cwd() / "pyproject.toml",
     ]
+
+    # 3) If running as PyInstaller bundle, check for bundled pyproject.toml
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # Running in a PyInstaller bundle
+        bundled_pyproject = Path(sys._MEIPASS) / "pyproject.toml"
+        candidates.insert(0, bundled_pyproject)
+
     for p in candidates:
         try:
             if p.exists():
@@ -51,7 +58,7 @@ def get_app_version() -> str:
         except Exception as e:
             logger.debug(f"Unable to read version from {p}: {e}")
 
-    # 3) Fallback
+    # 4) Fallback
     if _APP_VERSION is None:
         _APP_VERSION = "0.0.0"
     return _APP_VERSION

@@ -78,6 +78,7 @@ a = Analysis(
     ],
     datas=[
         ('assets/*', 'assets'),
+        ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
     ],
     hiddenimports=[],
     hookspath=[],
