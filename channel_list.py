@@ -925,7 +925,7 @@ class ChannelList(QMainWindow):
                     self.play_item(item_data, is_episode=is_episode, item_type=item_type)
                 elif pending.get("link"):
                     self.link = pending["link"]
-                    self.player.play_video(self.link)
+                    self._play_content(self.link)
                 else:
                     # Fallback: recreate the link
                     self.play_item(item_data, is_episode=is_episode, item_type=item_type)
@@ -2269,7 +2269,7 @@ class ChannelList(QMainWindow):
         file_dialog = QFileDialog(self)
         file_path, _ = file_dialog.getOpenFileName()
         if file_path:
-            self.player.play_video(file_path)
+            self._play_content(file_path)
 
     def export_all_live_channels(self):
         provider = self.provider_manager.current_provider
@@ -3400,7 +3400,7 @@ class ChannelList(QMainWindow):
         elif last_watched.get("link"):
             # Use stored link for non-STB providers
             self.link = last_watched["link"]
-            self.player.play_video(self.link)
+            self._play_content(self.link)
         else:
             # Fallback: recreate the link
             self.play_item(item_data, is_episode=is_episode, item_type=item_type)
