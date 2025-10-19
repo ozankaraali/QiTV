@@ -925,7 +925,7 @@ class ChannelList(QMainWindow):
                     self.play_item(item_data, is_episode=is_episode, item_type=item_type)
                 elif pending.get("link"):
                     self.link = pending["link"]
-                    self.player.play_video(self.link)
+                    self._play_content(self.link)
                 else:
                     # Fallback: recreate the link
                     self.play_item(item_data, is_episode=is_episode, item_type=item_type)
@@ -1213,10 +1213,8 @@ class ChannelList(QMainWindow):
 
         # Add checkbox to play in vlc
         self.play_in_vlc_checkbox = QCheckBox("Play in VLC")
-
-        self.play_in_vlc_checkbox.stateChanged.connect(
-            lambda: self.play_in_vlc()
-        )
+        self.play_in_vlc_checkbox.setChecked(getattr(self.config_manager, 'play_in_vlc', False))
+        self.play_in_vlc_checkbox.stateChanged.connect(lambda: self.play_in_vlc())
         self.favorite_layout.addWidget(self.play_in_vlc_checkbox)
 
         # Add checkbox to show EPG
@@ -2271,7 +2269,7 @@ class ChannelList(QMainWindow):
         file_dialog = QFileDialog(self)
         file_path, _ = file_dialog.getOpenFileName()
         if file_path:
-            self.player.play_video(file_path)
+            self._play_content(file_path)
 
     def export_all_live_channels(self):
         provider = self.provider_manager.current_provider
@@ -3172,7 +3170,7 @@ class ChannelList(QMainWindow):
             link = self.sanitize_url(payload.get("link", ""))
             if link:
                 self.link = link
-                self.player.play_video(link)
+                self._play_content(link)
                 if ctx:
                     self.save_last_watched(ctx["item_data"], ctx["item_type"], link)
             else:
@@ -3341,12 +3339,7 @@ class ChannelList(QMainWindow):
         else:
             cmd = item_data.get("cmd")
             self.link = cmd
-
-            if self.play_in_vlc_checkbox.isChecked():
-                subprocess.Popen(["vlc", cmd])
-            else:
-                self.player.play_video(cmd)
-
+            self._play_content(cmd)
             # Save last watched
             self.save_last_watched(item_data, item_type or "m3ucontent", cmd)
 
@@ -3407,7 +3400,7 @@ class ChannelList(QMainWindow):
         elif last_watched.get("link"):
             # Use stored link for non-STB providers
             self.link = last_watched["link"]
-            self.player.play_video(self.link)
+            self._play_content(self.link)
         else:
             # Fallback: recreate the link
             self.play_item(item_data, is_episode=is_episode, item_type=item_type)
@@ -3627,6 +3620,57 @@ class ChannelList(QMainWindow):
     def get_logo_column(item_type):
         return 0 if item_type == "m3ucontent" else 1
 
-    def play_in_vlc(self):
+    def _play_content(self, url):
+        """Play content either in VLC or built-in player based on checkbox state."""
         if self.play_in_vlc_checkbox.isChecked():
-            self.player.close()
+            self._launch_vlc(url)
+        else:
+            self.player.play_video(url)
+
+    def _launch_vlc(self, cmd):
+        """Launch VLC with error handling and platform support."""
+        vlc_cmd = None
+
+        # Platform-specific VLC detection
+        if platform.system() == "Darwin":  # macOS
+            # Check common macOS VLC locations
+            macos_vlc_path = "/Applications/VLC.app/Contents/MacOS/VLC"
+            if os.path.exists(macos_vlc_path):
+                vlc_cmd = macos_vlc_path
+            else:
+                # Try homebrew cask location
+                homebrew_vlc = os.path.expanduser("~/Applications/VLC.app/Contents/MacOS/VLC")
+                if os.path.exists(homebrew_vlc):
+                    vlc_cmd = homebrew_vlc
+        else:
+            # For Windows and Linux, try to find vlc in PATH
+            vlc_cmd = shutil.which('vlc')
+
+        if not vlc_cmd:
+            QMessageBox.warning(
+                self,
+                "VLC Not Found",
+                "VLC Media Player is not installed or not found.\n\n"
+                "Please install VLC:\n"
+                "• macOS: Download from https://www.videolan.org/vlc/\n"
+                "• Linux: Use your package manager (apt, yum, etc.)\n"
+                "• Windows: Download from https://www.videolan.org/vlc/",
+            )
+            return False
+
+        try:
+            subprocess.Popen([vlc_cmd, cmd])
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}")
+            return False
+
+    def play_in_vlc(self):
+        """Handle VLC checkbox state changes."""
+        if self.play_in_vlc_checkbox.isChecked():
+            # Only close if player is visible and playing something
+            if hasattr(self, 'player') and self.player.isVisible():
+                self.player.close()
+
+        # Save preference to config
+        self.config_manager.play_in_vlc = self.play_in_vlc_checkbox.isChecked()
