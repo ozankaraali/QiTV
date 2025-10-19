@@ -3170,10 +3170,7 @@ class ChannelList(QMainWindow):
             link = self.sanitize_url(payload.get("link", ""))
             if link:
                 self.link = link
-                if self.play_in_vlc_checkbox.isChecked():
-                    self._launch_vlc(link)
-                else:
-                    self.player.play_video(link)
+                self._play_content(link)
                 if ctx:
                     self.save_last_watched(ctx["item_data"], ctx["item_type"], link)
             else:
@@ -3342,12 +3339,7 @@ class ChannelList(QMainWindow):
         else:
             cmd = item_data.get("cmd")
             self.link = cmd
-
-            if self.play_in_vlc_checkbox.isChecked():
-                self._launch_vlc(cmd)
-            else:
-                self.player.play_video(cmd)
-
+            self._play_content(cmd)
             # Save last watched
             self.save_last_watched(item_data, item_type or "m3ucontent", cmd)
 
@@ -3627,6 +3619,13 @@ class ChannelList(QMainWindow):
     @staticmethod
     def get_logo_column(item_type):
         return 0 if item_type == "m3ucontent" else 1
+
+    def _play_content(self, url):
+        """Play content either in VLC or built-in player based on checkbox state."""
+        if self.play_in_vlc_checkbox.isChecked():
+            self._launch_vlc(url)
+        else:
+            self.player.play_video(url)
 
     def _launch_vlc(self, cmd):
         """Launch VLC with error handling and platform support."""
