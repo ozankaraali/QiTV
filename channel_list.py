@@ -1213,10 +1213,8 @@ class ChannelList(QMainWindow):
 
         # Add checkbox to play in vlc
         self.play_in_vlc_checkbox = QCheckBox("Play in VLC")
-
-        self.play_in_vlc_checkbox.stateChanged.connect(
-            lambda: self.play_in_vlc()
-        )
+        self.play_in_vlc_checkbox.setChecked(getattr(self.config_manager, 'play_in_vlc', False))
+        self.play_in_vlc_checkbox.stateChanged.connect(lambda: self.play_in_vlc())
         self.favorite_layout.addWidget(self.play_in_vlc_checkbox)
 
         # Add checkbox to show EPG
@@ -3343,7 +3341,7 @@ class ChannelList(QMainWindow):
             self.link = cmd
 
             if self.play_in_vlc_checkbox.isChecked():
-                subprocess.Popen(["vlc", cmd])
+                self._launch_vlc(cmd)
             else:
                 self.player.play_video(cmd)
 
@@ -3627,6 +3625,32 @@ class ChannelList(QMainWindow):
     def get_logo_column(item_type):
         return 0 if item_type == "m3ucontent" else 1
 
+    def _launch_vlc(self, cmd):
+        """Launch VLC with error handling and platform support."""
+        # Check if VLC is available
+        vlc_cmd = shutil.which('vlc')
+        if not vlc_cmd:
+            QMessageBox.warning(
+                self,
+                "VLC Not Found",
+                "VLC Media Player is not installed or not in PATH.\n\n"
+                "Please install VLC or add it to your system PATH.",
+            )
+            return False
+
+        try:
+            subprocess.Popen([vlc_cmd, cmd])
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}")
+            return False
+
     def play_in_vlc(self):
+        """Handle VLC checkbox state changes."""
         if self.play_in_vlc_checkbox.isChecked():
-            self.player.close()
+            # Only close if player is visible and playing something
+            if hasattr(self, 'player') and self.player.isVisible():
+                self.player.close()
+
+        # Save preference to config
+        self.config_manager.play_in_vlc = self.play_in_vlc_checkbox.isChecked()
