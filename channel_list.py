@@ -58,6 +58,48 @@ from services.export import save_m3u_content, save_stb_content
 from services.m3u import parse_m3u
 from widgets.delegates import ChannelItemDelegate, HtmlItemDelegate
 
+# --- Roman numeral helpers (conservative matching) ---
+_ROMAN_RE = re.compile(r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$")
+
+
+def roman_to_int(token: str) -> Optional[int]:
+    if not token or token != token.upper():
+        return None
+    if not _ROMAN_RE.match(token):
+        return None
+    values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+    total = 0
+    i = 0
+    while i < len(token):
+        if i + 1 < len(token) and values[token[i]] < values[token[i + 1]]:
+            total += values[token[i + 1]] - values[token[i]]
+            i += 2
+        else:
+            total += values[token[i]]
+            i += 1
+    return total if 1 <= total <= 3999 else None
+
+
+def find_roman_token(text: str) -> Optional[int]:
+    if not isinstance(text, str) or not text:
+        return None
+    # 1) Context keywords (Season/Episode/Part) followed by Roman numerals
+    m = re.search(r"(?i)\b(season|episode|part)\s+([MDCLXVI]+)\b", text)
+    if m:
+        token = m.group(2)
+        val = roman_to_int(token)
+        if val is not None:
+            return val
+    # 2) Trailing Roman numerals at end (e.g., "Rocky II")
+    m = re.search(r"\b([MDCLXVI]+)\)?\s*$", text)
+    if m:
+        token = m.group(1)
+        val = roman_to_int(token)
+        # Be conservative: avoid accepting single 'I' at end (too ambiguous)
+        if val is not None and val >= 2:
+            return val
+    return None
+
 
 class M3ULoaderWorker(QObject):
     finished = Signal(object)
@@ -453,8 +495,13 @@ class XtreamSeriesInfoWorker(QObject):
             info_resp.raise_for_status()
             series_data = info_resp.json() or {}
 
-            # Extract seasons and episodes
+            # Extract seasons and episodes with safety checks
+            if not isinstance(series_data, dict):
+                raise ValueError(f"Invalid series_data type: {type(series_data)}")
+
             episodes_dict = series_data.get("episodes", {})
+            if not isinstance(episodes_dict, dict):
+                episodes_dict = {}
             seasons_info_raw = series_data.get("seasons", [])
             series_info = series_data.get("info", {})
 
@@ -475,33 +522,45 @@ class XtreamSeriesInfoWorker(QObject):
 
             # Build seasons list
             seasons = []
-            for season_num in sorted(
-                episodes_dict.keys(), key=lambda x: int(x) if x.isdigit() else 0
-            ):
-                season_episodes = episodes_dict[season_num]
-                season_data = seasons_info.get(season_num, {})
+            if episodes_dict:
+                for season_num in sorted(
+                    episodes_dict.keys(), key=lambda x: int(x) if x.isdigit() else 0
+                ):
+                    season_episodes = episodes_dict.get(season_num, [])
+                    if not isinstance(season_episodes, list):
+                        continue
 
-                season_item = {
-                    "id": season_num,
-                    "name": season_data.get("name") or f"Season {season_num}",
-                    "cover": season_data.get("cover_big") or season_data.get("cover") or "",
-                    "overview": season_data.get("overview") or "",
-                    "air_date": season_data.get("air_date") or "",
-                    "episode_count": str(len(season_episodes)),
-                    "episodes": season_episodes,  # Store episodes with season
-                }
-                seasons.append(season_item)
+                    season_data = seasons_info.get(season_num, {})
+                    if not isinstance(season_data, dict):
+                        season_data = {}
 
+                    season_item = {
+                        "id": season_num,
+                        "name": season_data.get("name") or f"Season {season_num}",
+                        "cover": season_data.get("cover_big") or season_data.get("cover") or "",
+                        "overview": season_data.get("overview") or "",
+                        "air_date": season_data.get("air_date") or "",
+                        "episode_count": str(len(season_episodes)),
+                        "episodes": season_episodes,  # Store episodes with season
+                    }
+                    seasons.append(season_item)
+
+            # Explicitly convert to plain Python types
             result = {
-                "seasons": seasons,
-                "series_info": series_info,
-                "resolved_base": self.resolved_base,
+                "seasons": list(seasons),  # Ensure it's a plain list
+                "series_info": dict(series_info) if series_info else {},
+                "resolved_base": str(self.resolved_base) if self.resolved_base else "",
             }
 
+            # Emit result to UI
             self.finished.emit(result)
 
         except Exception as e:
-            self.error.emit(str(e))
+            logger.error(f"Worker error: {e}")
+            try:
+                self.error.emit(str(e))
+            except Exception as emit_err:
+                logger.error(f"Error emitting error: {emit_err}")
 
 
 class STBCategoriesWorker(QObject):
@@ -627,15 +686,28 @@ class ChannelTreeWidgetItem(QTreeWidgetItem):
 
 
 class NumberedTreeWidgetItem(QTreeWidgetItem):
-    # Modify the sorting by Number to used integer and not string (1 < 10, but "1" may not be < "10")
+    # Modify the sorting by Number to use integer and not string (1 < 10, but "1" may not be < "10")
     def __lt__(self, other):
         if not isinstance(other, NumberedTreeWidgetItem):
             return super(NumberedTreeWidgetItem, self).__lt__(other)
 
-        sort_column = self.treeWidget().sortColumn()
-        if sort_column == 0:  # Channel number
-            return int(self.text(sort_column)) < int(other.text(sort_column))
-        return self.text(sort_column) < other.text(sort_column)
+        # Safety check: ensure widget is available
+        try:
+            widget = self.treeWidget()
+            if not widget:
+                return super(NumberedTreeWidgetItem, self).__lt__(other)
+
+            sort_column = widget.sortColumn()
+            if sort_column == 0:  # Number column (channel/season/episode number)
+                # Safely convert to int, fallback to string comparison
+                try:
+                    return int(self.text(sort_column)) < int(other.text(sort_column))
+                except (ValueError, TypeError):
+                    return self.text(sort_column) < other.text(sort_column)
+            return self.text(sort_column) < other.text(sort_column)
+        except (RuntimeError, AttributeError):
+            # Widget deleted or in invalid state
+            return super(NumberedTreeWidgetItem, self).__lt__(other)
 
 
 ## Delegates moved to widgets/delegates.py
@@ -1725,18 +1797,33 @@ class ChannelList(QMainWindow):
                     self.content_list.scrollToItem(previous_selected[0], QTreeWidget.PositionAtTop)
 
     def display_content(self, items, content="m3ucontent", select_first=True):
-        # Unregister the selection change event
+        # Stop refreshing On Air content BEFORE any structural changes
+        try:
+            if self.refresh_on_air_timer.isActive():
+                self.refresh_on_air_timer.stop()
+        except Exception:
+            pass
+
+        # Unregister the selection change event during rebuild
         try:
             self.content_list.itemSelectionChanged.disconnect(self.item_selected)
         except (TypeError, RuntimeError):
             pass
-        self.content_list.clear()
-        self.content_list.setSortingEnabled(False)
-        # Re-register the selection change event
-        self.content_list.itemSelectionChanged.connect(self.item_selected)
 
-        # Stop refreshing On Air content
-        self.refresh_on_air_timer.stop()
+        # Disable widget updates during clear (but keep signals enabled to allow Qt internal cleanup)
+        self.content_list.setUpdatesEnabled(False)
+
+        try:
+            self.content_list.clear()
+        except Exception as e:
+            logger.error(f"Error clearing content_list: {e}", exc_info=True)
+
+        try:
+            self.content_list.setSortingEnabled(False)
+        except (RuntimeError, AttributeError):
+            pass
+
+        # Defer reconnecting itemSelectionChanged until population completes
 
         self.current_list_content = content
         need_logos = content in ["channel", "m3ucontent"] and self.config_manager.channel_logos
@@ -1747,10 +1834,17 @@ class ChannelList(QMainWindow):
         category_header = self.current_category.get("title", "") if self.current_category else ""
         serie_header = self.current_series.get("name", "") if self.current_series else ""
         season_header = self.current_season.get("name", "") if self.current_season else ""
+        try:
+            serie_headers_str = f"{category_header} > Series ({len(items)})"
+            serie_headers_shortened = self.shorten_header(serie_headers_str)
+        except Exception as e:
+            logger.error(f"display_content: Error creating serie headers: {e}", exc_info=True)
+            serie_headers_shortened = "Series"
+
         header_info = {
             "serie": {
                 "headers": [
-                    self.shorten_header(f"{category_header} > Series ({len(items)})"),
+                    serie_headers_shortened,
                     "Genre",
                     "Added",
                 ],
@@ -1767,7 +1861,11 @@ class ChannelList(QMainWindow):
             "season": {
                 "headers": [
                     "#",
-                    self.shorten_header(f"{category_header} > {serie_header} > Seasons"),
+                    (
+                        f"{category_header} > {serie_header} > Seasons"[:50]
+                        if len(f"{category_header} > {serie_header} > Seasons") > 50
+                        else f"{category_header} > {serie_header} > Seasons"
+                    ),
                     "Added",
                 ],
                 "keys": ["number", "o_name", "added"],
@@ -1794,29 +1892,44 @@ class ChannelList(QMainWindow):
                 "keys": ["name", "group"],
             },
         }
-        self.content_list.setColumnCount(len(header_info[content]["headers"]))
-        self.content_list.setHeaderLabels(header_info[content]["headers"])
+
+        # Get headers
+        headers = header_info[content]["headers"]
+        self.content_list.setColumnCount(len(headers))
+        try:
+            self.content_list.setHeaderLabels(headers)
+        except Exception as e:
+            logger.error(f"display_content: setHeaderLabels failed: {e}", exc_info=True)
+            raise
 
         # no favorites on seasons or episodes genre_sfolders
         check_fav = content in ["channel", "movie", "serie", "m3ucontent"]
+
         self.show_favorite_layout(check_fav)
 
-        for item_data in items:
+        # Disable updates during population to prevent Qt conflicts
+        self.content_list.setUpdatesEnabled(False)
+
+        for item_idx, item_data in enumerate(items):
+
+            # Create tree widget item based on content type
             if content == "channel":
                 list_item = ChannelTreeWidgetItem(self.content_list)
             elif content in ["season", "episode"]:
+                # Use NumberedTreeWidgetItem for seasons and episodes (numeric sorting)
                 list_item = NumberedTreeWidgetItem(self.content_list)
             else:
+                # Use plain QTreeWidgetItem for other content
                 list_item = QTreeWidgetItem(self.content_list)
 
-            for i, key in enumerate(header_info[content]["keys"]):
+            for col_idx, key in enumerate(header_info[content]["keys"]):
                 raw_value = item_data.get(key)
                 if key == "added":
                     # Show only date part if present
                     text_value = str(raw_value).split()[0] if raw_value else ""
                 else:
                     text_value = html.unescape(str(raw_value)) if raw_value is not None else ""
-                list_item.setText(i, text_value)
+                list_item.setText(col_idx, text_value)
 
             list_item.setData(0, Qt.UserRole, {"type": content, "data": item_data})
 
@@ -1829,12 +1942,20 @@ class ChannelList(QMainWindow):
             if check_fav and self.check_if_favorite(item_name):
                 list_item.setBackground(0, QColor(0, 0, 255, 20))
 
-        for i in range(len(header_info[content]["headers"])):
-            if i != 2:  # Don't auto-resize the progress column
-                self.content_list.resizeColumnToContents(i)
-
         self.content_list.sortItems(0, Qt.AscendingOrder)
         self.content_list.setSortingEnabled(True)
+
+        # Re-enable updates now that population and sorting are complete
+        self.content_list.setUpdatesEnabled(True)
+
+        # Resize columns AFTER re-enabling updates to avoid Qt timer conflicts
+        for i in range(len(header_info[content]["headers"])):
+            if i != 2:  # Don't auto-resize the progress column
+                try:
+                    self.content_list.resizeColumnToContents(i)
+                except Exception as e:
+                    logger.error(f"Error resizing column {i}: {e}", exc_info=True)
+
         self.back_button.setVisible(content != "m3ucontent")
         self.epg_checkbox.setVisible(self.can_show_epg(content))
         self.vodinfo_checkbox.setVisible(self.can_show_content_info(content))
@@ -1850,6 +1971,12 @@ class ChannelList(QMainWindow):
             # Start refreshing content list (currently aired program)
             self.refresh_on_air()
             self.refresh_on_air_timer.start(30000)
+
+        # Re-register the selection change event after rebuild
+        try:
+            self.content_list.itemSelectionChanged.connect(self.item_selected)
+        except Exception:
+            pass
 
         # Select an item in the list (first or a previously selected)
         if select_first:
@@ -2507,56 +2634,22 @@ class ChannelList(QMainWindow):
                 worker = M3ULoaderWorker(url)
                 worker.moveToThread(thread)
 
-                def on_started():
-                    worker.run()
-
-                def handle_finished_ui(payload):
-                    try:
-                        content = payload.get("content", "")
-                        # Parse with categorization enabled
-                        parsed_content = parse_m3u(content, categorize=True)
-
-                        # Check if we have categories (dict structure)
-                        if isinstance(parsed_content, dict) and "categories" in parsed_content:
-                            # Store categorized content
-                            self.provider_manager.current_provider_content[self.content_type] = (
-                                parsed_content
-                            )
-                            self.save_provider()
-                            # Display categories
-                            self.display_categories(parsed_content.get("categories", []))
-                        else:
-                            # Fallback to flat list (shouldn't happen with categorize=True)
-                            self.display_content(parsed_content)
-                            self.provider_manager.current_provider_content[self.content_type] = (
-                                parsed_content
-                            )
-                            self.save_provider()
-                    finally:
-                        thread.quit()
-                        self.unlock_ui_after_loading()
-
-                def on_finished(payload):
-                    # Ensure UI updates run in the main thread
-                    QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
-
-                def on_error(msg):
-                    def handle_error_ui():
-                        logger.warning(f"Error loading M3U Playlist: {msg}")
-                        thread.quit()
-                        self.unlock_ui_after_loading()
-
-                    QTimer.singleShot(0, self, handle_error_ui)
-
                 def _cleanup():
                     try:
                         self._bg_jobs.remove((thread, worker))
                     except ValueError:
                         pass
 
-                thread.started.connect(on_started)
-                worker.finished.connect(on_finished, Qt.QueuedConnection)
-                worker.error.connect(on_error, Qt.QueuedConnection)
+                # Start worker when thread starts
+                thread.started.connect(worker.run)
+                # Route results to UI thread
+                worker.finished.connect(self._on_m3u_loaded, Qt.QueuedConnection)
+                worker.error.connect(self._on_m3u_error, Qt.QueuedConnection)
+                # Ensure proper lifecycle
+                worker.finished.connect(thread.quit)
+                worker.error.connect(thread.quit)
+                thread.finished.connect(worker.deleteLater)
+                thread.finished.connect(thread.deleteLater)
                 thread.finished.connect(_cleanup)
                 thread.start()
                 self._bg_jobs.append((thread, worker))
@@ -2699,57 +2792,19 @@ class ChannelList(QMainWindow):
         worker = XtreamLoaderWorker(base_url, username, password, content_type)
         worker.moveToThread(thread)
 
-        def on_started():
-            worker.run()
-
-        def handle_finished_ui(payload):
-            try:
-                categories = payload.get("categories", [])
-                contents = payload.get("contents", [])
-                sorted_channels = payload.get("sorted_channels", {})
-
-                if not categories and not contents:
-                    logger.info("No content found.")
-                    return
-
-                provider_content = self.provider_manager.current_provider_content.setdefault(
-                    self.content_type, {}
-                )
-                provider_content["categories"] = categories
-                provider_content["contents"] = contents
-                provider_content["sorted_channels"] = sorted_channels
-
-                # Store stream settings for later use
-                provider_content["stream_base"] = payload.get("stream_base", "")
-                provider_content["stream_ext"] = payload.get("stream_ext", "")
-                provider_content["resolved_base"] = payload.get("resolved_base", "")
-
-                self.save_provider()
-                self.display_categories(categories)
-            finally:
-                thread.quit()
-                self.unlock_ui_after_loading()
-
-        def on_finished(payload):
-            QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
-
-        def on_error(msg):
-            def handle_error_ui():
-                logger.warning(f"Error loading Xtream content: {msg}")
-                thread.quit()
-                self.unlock_ui_after_loading()
-
-            QTimer.singleShot(0, self, handle_error_ui)
-
         def _cleanup():
             try:
                 self._bg_jobs.remove((thread, worker))
             except ValueError:
                 pass
 
-        thread.started.connect(on_started)
-        worker.finished.connect(on_finished, Qt.QueuedConnection)
-        worker.error.connect(on_error, Qt.QueuedConnection)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_xtream_content_loaded, Qt.QueuedConnection)
+        worker.error.connect(self._on_xtream_content_error, Qt.QueuedConnection)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(_cleanup)
         thread.start()
         self._bg_jobs.append((thread, worker))
@@ -2763,68 +2818,19 @@ class ChannelList(QMainWindow):
         worker = STBCategoriesWorker(url, headers, self.content_type)
         worker.moveToThread(thread)
 
-        def on_started():
-            worker.run()
-
-        def handle_finished_ui(payload):
-            try:
-                categories = payload.get("categories", [])
-                if not categories:
-                    logger.info("No categories found.")
-                    return
-                provider_content = self.provider_manager.current_provider_content.setdefault(
-                    self.content_type, {}
-                )
-                provider_content["categories"] = categories
-                provider_content["contents"] = {}
-
-                if self.content_type == "itv":
-                    provider_content["contents"] = payload.get("all_channels", [])
-
-                    sorted_channels: Dict[str, List[int]] = {}
-                    for i in range(len(provider_content["contents"])):
-                        genre_id = provider_content["contents"][i]["tv_genre_id"]
-                        category_id = str(genre_id)
-                        if category_id not in sorted_channels:
-                            sorted_channels[category_id] = []
-                        sorted_channels[category_id].append(i)
-
-                    for cat in sorted_channels:
-                        sorted_channels[cat].sort(
-                            key=lambda x: int(provider_content["contents"][x]["number"])
-                        )
-
-                    if "None" in sorted_channels:
-                        categories.append({"id": "None", "title": "Unknown Category"})
-
-                    provider_content["sorted_channels"] = sorted_channels
-
-                self.save_provider()
-                self.display_categories(categories)
-            finally:
-                thread.quit()
-                self.unlock_ui_after_loading()
-
-        def on_finished(payload):
-            QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
-
-        def on_error(msg):
-            def handle_error_ui():
-                logger.warning(f"Error loading STB categories: {msg}")
-                thread.quit()
-                self.unlock_ui_after_loading()
-
-            QTimer.singleShot(0, self, handle_error_ui)
-
         def _cleanup():
             try:
                 self._bg_jobs.remove((thread, worker))
             except ValueError:
                 pass
 
-        thread.started.connect(on_started)
-        worker.finished.connect(on_finished, Qt.QueuedConnection)
-        worker.error.connect(on_error, Qt.QueuedConnection)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_stb_categories_loaded, Qt.QueuedConnection)
+        worker.error.connect(self._on_stb_categories_error, Qt.QueuedConnection)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(_cleanup)
         thread.start()
         self._bg_jobs.append((thread, worker))
@@ -2967,8 +2973,28 @@ class ChannelList(QMainWindow):
         content_data = self.provider_manager.current_provider_content.get(self.content_type, {})
         resolved_base = content_data.get("resolved_base", "")
 
+        # Clean up any running background jobs before starting new one
+        for old_thread, old_worker in self._bg_jobs[
+            :
+        ]:  # Copy list to avoid modification during iteration
+            try:
+                if old_thread.isRunning():
+                    logger.info("Stopping previous worker thread")
+                    old_thread.quit()
+                    old_thread.wait(1000)  # Wait up to 1 second
+                    old_worker.deleteLater()
+                    old_thread.deleteLater()
+            except RuntimeError:
+                # Thread already deleted by Qt
+                pass
+            try:
+                self._bg_jobs.remove((old_thread, old_worker))
+            except ValueError:
+                # Already removed
+                pass
+
         self.lock_ui_before_loading()
-        thread = QThread()
+        thread = QThread(self)
         worker = XtreamSeriesInfoWorker(
             base_url=selected_provider.get("url", ""),
             username=selected_provider.get("username", ""),
@@ -2978,33 +3004,14 @@ class ChannelList(QMainWindow):
         )
         worker.moveToThread(thread)
 
-        def on_started():
-            worker.run()
+        # Remember selection behavior for UI handler
+        self._pending_series_select_first = select_first
 
-        def handle_finished_ui(payload):
-            try:
-                if payload and isinstance(payload, dict):
-                    seasons = payload.get("seasons", [])
-                    if seasons:
-                        self.update_seasons_list({"items": seasons}, select_first)
-                    else:
-                        logger.info("No seasons found for this series.")
-                else:
-                    logger.warning("Invalid or empty payload received for series info")
-            finally:
-                thread.quit()
-                self.unlock_ui_after_loading()
-
-        def on_finished(payload):
-            QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
+        # No nested UI handler; connect directly to a bound method
 
         def on_error(msg):
-            def handle_error_ui():
-                logger.warning(f"Error loading Xtream series info: {msg}")
-                thread.quit()
-                self.unlock_ui_after_loading()
-
-            QTimer.singleShot(0, self, handle_error_ui)
+            # Route to UI handler
+            self._on_xtream_series_error(msg)
 
         def _cleanup():
             try:
@@ -3012,12 +3019,165 @@ class ChannelList(QMainWindow):
             except ValueError:
                 pass
 
-        thread.started.connect(on_started)
-        worker.finished.connect(on_finished, Qt.QueuedConnection)
+        # Start worker when thread starts
+        thread.started.connect(worker.run)
+
+        # Route worker results to UI thread and ensure cleanup
+        worker.finished.connect(self._on_xtream_series_finished, Qt.QueuedConnection)
         worker.error.connect(on_error, Qt.QueuedConnection)
+
+        # Ensure proper thread/worker lifecycle
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        # Delete worker and thread objects in UI thread after finish
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         thread.finished.connect(_cleanup)
         thread.start()
         self._bg_jobs.append((thread, worker))
+
+    def _on_xtream_series_finished(self, payload):
+        """UI-thread handler for Xtream series info results."""
+        try:
+            if payload and isinstance(payload, dict):
+                seasons = payload.get("seasons", [])
+                if seasons:
+                    select_first = getattr(self, "_pending_series_select_first", True)
+                    self.update_seasons_list({"items": seasons}, select_first)
+            else:
+                logger.warning("Invalid payload from series worker")
+        except Exception as e:
+            logger.error(f"Series finished handler exception: {e}", exc_info=True)
+        finally:
+            # Ensure UI is unlocked even if cleanup signals race
+            self.unlock_ui_after_loading()
+
+    def _on_xtream_series_error(self, msg: str):
+        try:
+            logger.warning(f"Error loading Xtream series info: {msg}")
+        finally:
+            self.unlock_ui_after_loading()
+
+    def _on_m3u_loaded(self, payload):
+        try:
+            content = payload.get("content", "")
+            # Parse with categorization enabled
+            parsed_content = parse_m3u(content, categorize=True)
+
+            if isinstance(parsed_content, dict) and "categories" in parsed_content:
+                self.provider_manager.current_provider_content[self.content_type] = parsed_content
+                self.save_provider()
+                self.display_categories(parsed_content.get("categories", []))
+            else:
+                self.display_content(parsed_content)
+                self.provider_manager.current_provider_content[self.content_type] = parsed_content
+                self.save_provider()
+        finally:
+            self.unlock_ui_after_loading()
+
+    def _on_m3u_error(self, msg: str):
+        try:
+            logger.warning(f"Error loading M3U Playlist: {msg}")
+        finally:
+            self.unlock_ui_after_loading()
+
+    def _on_xtream_content_loaded(self, payload):
+        try:
+            categories = payload.get("categories", [])
+            contents = payload.get("contents", [])
+            sorted_channels = payload.get("sorted_channels", {})
+
+            if not categories and not contents:
+                logger.info("No content found.")
+                return
+
+            provider_content = self.provider_manager.current_provider_content.setdefault(
+                self.content_type, {}
+            )
+            provider_content["categories"] = categories
+            provider_content["contents"] = contents
+            provider_content["sorted_channels"] = sorted_channels
+
+            # Store stream settings for later use
+            provider_content["stream_base"] = payload.get("stream_base", "")
+            provider_content["stream_ext"] = payload.get("stream_ext", "")
+            provider_content["resolved_base"] = payload.get("resolved_base", "")
+
+            self.save_provider()
+            self.display_categories(categories)
+        finally:
+            self.unlock_ui_after_loading()
+
+    def _on_xtream_content_error(self, msg: str):
+        try:
+            logger.warning(f"Error loading Xtream content: {msg}")
+        finally:
+            self.unlock_ui_after_loading()
+
+    def _on_stb_categories_loaded(self, payload):
+        try:
+            categories = payload.get("categories", [])
+            if not categories:
+                logger.info("No categories found.")
+                return
+            provider_content = self.provider_manager.current_provider_content.setdefault(
+                self.content_type, {}
+            )
+            provider_content["categories"] = categories
+            provider_content["contents"] = {}
+
+            if self.content_type == "itv":
+                provider_content["contents"] = payload.get("all_channels", [])
+
+                sorted_channels: Dict[str, List[int]] = {}
+                for i in range(len(provider_content["contents"])):
+                    genre_id = provider_content["contents"][i]["tv_genre_id"]
+                    category_id = str(genre_id)
+                    if category_id not in sorted_channels:
+                        sorted_channels[category_id] = []
+                    sorted_channels[category_id].append(i)
+
+                for cat in sorted_channels:
+                    sorted_channels[cat].sort(
+                        key=lambda x: int(provider_content["contents"][x]["number"])
+                    )
+
+                if "None" in sorted_channels:
+                    categories.append({"id": "None", "title": "Unknown Category"})
+
+                provider_content["sorted_channels"] = sorted_channels
+
+            self.save_provider()
+            self.display_categories(categories)
+        finally:
+            self.unlock_ui_after_loading()
+
+    def _on_stb_categories_error(self, msg: str):
+        try:
+            logger.warning(f"Error loading STB categories: {msg}")
+        finally:
+            self.unlock_ui_after_loading()
+
+    def _on_link_created(self, payload):
+        try:
+            ctx = getattr(self, "_pending_link_ctx", None)
+            link = self.sanitize_url(payload.get("link", ""))
+            if link:
+                self.link = link
+                self.player.play_video(link)
+                if ctx:
+                    self.save_last_watched(ctx["item_data"], ctx["item_type"], link)
+            else:
+                logger.warning("Failed to create link.")
+        finally:
+            self.unlock_ui_after_loading()
+            self._pending_link_ctx = None
+
+    def _on_link_error(self, msg: str):
+        try:
+            logger.warning(f"Error creating link: {msg}")
+        finally:
+            self.unlock_ui_after_loading()
 
     def load_season_episodes(self, season_item, select_first=True):
         selected_provider = self.provider_manager.current_provider
@@ -3039,17 +3199,42 @@ class ChannelList(QMainWindow):
                 password = selected_provider.get("password", "")
 
                 formatted_episodes = []
-                for ep in episodes:
+                for idx, ep in enumerate(episodes, start=1):
                     episode_id = ep.get("id")
                     # Use container_extension from episode data, fallback to stream_ext
                     container_ext = ep.get("container_extension") or stream_ext
                     cmd = f"{stream_base}/series/{username}/{password}/{episode_id}.{container_ext}"
-                    episode_num = ep.get("episode_num", "")
+                    # Robust episode number extraction
+                    number_str = None
+                    for key in ("episode_num", "episode", "num"):
+                        val = ep.get(key)
+                        if val is not None:
+                            s = str(val)
+                            if s.isdigit():
+                                number_str = str(int(s))
+                                break
+                    if not number_str:
+                        title_text = ep.get("title") or ep.get("name") or ""
+                        m = re.search(r"\d+", str(title_text))
+                        if m:
+                            number_str = str(int(m.group(0)))
+                    if not number_str:
+                        # Try Roman numerals in title/name with conservative rules
+                        val = find_roman_token(title_text)
+                        if val is not None:
+                            number_str = str(val)
+                    if not number_str and episode_id is not None:
+                        s = str(episode_id)
+                        if s.isdigit():
+                            number_str = str(int(s))
+                    if not number_str:
+                        number_str = str(idx)
+
                     formatted_ep = {
                         "id": episode_id,
-                        "number": str(episode_num),
-                        "ename": ep.get("title") or f"Episode {episode_num}",
-                        "name": ep.get("title") or f"Episode {episode_num}",
+                        "number": number_str,
+                        "ename": ep.get("title") or f"Episode {number_str}",
+                        "name": ep.get("title") or f"Episode {number_str}",
                         "description": ep.get("info") or "",
                         "cmd": cmd,
                         "logo": (
@@ -3058,7 +3243,7 @@ class ChannelList(QMainWindow):
                             else ""
                         ),
                         "season": ep.get("season"),
-                        "episode_num": episode_num,
+                        "episode_num": number_str,
                         "container_extension": container_ext,
                     }
                     formatted_episodes.append(formatted_ep)
@@ -3122,33 +3307,12 @@ class ChannelList(QMainWindow):
             )
             worker.moveToThread(thread)
 
-            def on_started():
-                worker.run()
-
-            def handle_finished_ui(payload):
-                try:
-                    link = self.sanitize_url(payload.get("link", ""))
-                    if link:
-                        self.link = link
-                        self.player.play_video(link)
-                        # Save last watched
-                        self.save_last_watched(item_data, item_type or "channel", link)
-                    else:
-                        logger.warning("Failed to create link.")
-                finally:
-                    thread.quit()
-                    self.unlock_ui_after_loading()
-
-            def on_finished(payload):
-                QTimer.singleShot(0, self, lambda: handle_finished_ui(payload))
-
-            def on_error(msg):
-                def handle_error_ui():
-                    logger.warning(f"Error creating link: {msg}")
-                    thread.quit()
-                    self.unlock_ui_after_loading()
-
-                QTimer.singleShot(0, self, handle_error_ui)
+            # Store context for UI handler
+            self._pending_link_ctx = {
+                "item_data": item_data,
+                "item_type": item_type or "channel",
+                "is_episode": is_episode,
+            }
 
             def _cleanup():
                 try:
@@ -3156,9 +3320,13 @@ class ChannelList(QMainWindow):
                 except ValueError:
                     pass
 
-            thread.started.connect(on_started)
-            worker.finished.connect(on_finished, Qt.QueuedConnection)
-            worker.error.connect(on_error, Qt.QueuedConnection)
+            thread.started.connect(worker.run)
+            worker.finished.connect(self._on_link_created, Qt.QueuedConnection)
+            worker.error.connect(self._on_link_error, Qt.QueuedConnection)
+            worker.finished.connect(thread.quit)
+            worker.error.connect(thread.quit)
+            thread.finished.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
             thread.finished.connect(_cleanup)
             thread.start()
             self._bg_jobs.append((thread, worker))
@@ -3302,9 +3470,53 @@ class ChannelList(QMainWindow):
         if not items:
             logger.warning("No items in data when updating seasons list")
             return
-        for item in items:
-            item["number"] = item["name"].split(" ")[-1]
-            item["name"] = f'{self.current_series["name"]}.{item["name"]}'
+
+        for i, item in enumerate(items):
+            try:
+                # Store original name before modification
+                original_name = item.get("name", f"Season {i+1}")
+                item["o_name"] = original_name
+
+                # Derive a numeric season index for sorting/display
+                number_str = None
+                # Prefer explicit id/season_number if numeric
+                sid = str(item.get("id", ""))
+                if sid.isdigit():
+                    number_str = str(int(sid))
+                else:
+                    s_num = str(item.get("season_number", ""))
+                    if s_num.isdigit():
+                        number_str = str(int(s_num))
+                # Fallback: first integer found in the name (e.g., "Season 1", "1. Sezon", "S02")
+                if not number_str:
+                    m = re.search(r"\d+", original_name)
+                    if m:
+                        number_str = str(int(m.group(0)))
+                # Fallback: Roman numeral detection (e.g., "Season IV", "Rocky II")
+                if not number_str:
+                    val = find_roman_token(original_name)
+                    if val is not None:
+                        number_str = str(val)
+                # Final fallback: position index
+                if not number_str:
+                    number_str = str(i + 1)
+                item["number"] = number_str
+
+                # Create combined name
+                series_name = self.current_series.get("name", "Unknown Series")
+                item["name"] = f'{series_name}.{original_name}'
+
+                # Add "added" field if not present (use air_date or empty)
+                if "added" not in item:
+                    item["added"] = item.get("air_date", "")
+
+            except Exception as e:
+                logger.error(f"Error processing season {i}: {e}", exc_info=True)
+                # Set defaults if processing fails
+                item["o_name"] = item.get("name", f"Season {i+1}")
+                item["number"] = str(i + 1)
+                item["name"] = f'{self.current_series.get("name", "Unknown")}.Season {i+1}'
+                item["added"] = ""
         self.display_content(items, content="season", select_first=select_first)
 
     def update_episodes_list(self, data, select_first=True):
