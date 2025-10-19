@@ -3170,7 +3170,10 @@ class ChannelList(QMainWindow):
             link = self.sanitize_url(payload.get("link", ""))
             if link:
                 self.link = link
-                self.player.play_video(link)
+                if self.play_in_vlc_checkbox.isChecked():
+                    self._launch_vlc(link)
+                else:
+                    self.player.play_video(link)
                 if ctx:
                     self.save_last_watched(ctx["item_data"], ctx["item_type"], link)
             else:
