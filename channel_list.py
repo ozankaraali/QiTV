@@ -3630,14 +3630,32 @@ class ChannelList(QMainWindow):
 
     def _launch_vlc(self, cmd):
         """Launch VLC with error handling and platform support."""
-        # Check if VLC is available
-        vlc_cmd = shutil.which('vlc')
+        vlc_cmd = None
+
+        # Platform-specific VLC detection
+        if platform.system() == "Darwin":  # macOS
+            # Check common macOS VLC locations
+            macos_vlc_path = "/Applications/VLC.app/Contents/MacOS/VLC"
+            if os.path.exists(macos_vlc_path):
+                vlc_cmd = macos_vlc_path
+            else:
+                # Try homebrew cask location
+                homebrew_vlc = os.path.expanduser("~/Applications/VLC.app/Contents/MacOS/VLC")
+                if os.path.exists(homebrew_vlc):
+                    vlc_cmd = homebrew_vlc
+        else:
+            # For Windows and Linux, try to find vlc in PATH
+            vlc_cmd = shutil.which('vlc')
+
         if not vlc_cmd:
             QMessageBox.warning(
                 self,
                 "VLC Not Found",
-                "VLC Media Player is not installed or not in PATH.\n\n"
-                "Please install VLC or add it to your system PATH.",
+                "VLC Media Player is not installed or not found.\n\n"
+                "Please install VLC:\n"
+                "• macOS: Download from https://www.videolan.org/vlc/\n"
+                "• Linux: Use your package manager (apt, yum, etc.)\n"
+                "• Windows: Download from https://www.videolan.org/vlc/",
             )
             return False
 
