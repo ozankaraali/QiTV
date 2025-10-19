@@ -1211,6 +1211,14 @@ class ChannelList(QMainWindow):
         )
         self.favorite_layout.addWidget(self.favorites_only_checkbox)
 
+        # Add checkbox to play in vlc
+        self.play_in_vlc_checkbox = QCheckBox("Play in VLC")
+
+        self.play_in_vlc_checkbox.stateChanged.connect(
+            lambda: self.play_in_vlc()
+        )
+        self.favorite_layout.addWidget(self.play_in_vlc_checkbox)
+
         # Add checkbox to show EPG
         self.epg_checkbox = QCheckBox("Show EPG")
         self.epg_checkbox.setChecked(self.config_manager.channel_epg)
@@ -3333,7 +3341,12 @@ class ChannelList(QMainWindow):
         else:
             cmd = item_data.get("cmd")
             self.link = cmd
-            self.player.play_video(cmd)
+
+            if self.play_in_vlc_checkbox.isChecked():
+                subprocess.Popen(["vlc", cmd])
+            else:
+                self.player.play_video(cmd)
+
             # Save last watched
             self.save_last_watched(item_data, item_type or "m3ucontent", cmd)
 
@@ -3613,3 +3626,7 @@ class ChannelList(QMainWindow):
     @staticmethod
     def get_logo_column(item_type):
         return 0 if item_type == "m3ucontent" else 1
+
+    def play_in_vlc(self):
+        if self.play_in_vlc_checkbox.isChecked():
+            self.player.close()
