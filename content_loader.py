@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+from urllib.parse import quote, urlencode
 
 from PySide6.QtCore import QThread, Signal
 import aiohttp
@@ -57,6 +58,18 @@ class ContentLoader(QThread):
                 if attempt:
                     logger.debug(f"Retrying page {page}...")
                 params = self.get_params(page)
+                # For EPG debugging: emit a copy-paste-friendly curl with headers
+                # try:
+                #     if self.action in ("get_epg_info", "get_short_epg") and page == 1:
+                #         q = urlencode(params, doseq=True, quote_via=quote)
+                #         full_url = f"{self.url}?{q}" if q else self.url
+                #         def _esc(v: str) -> str:
+                #             return str(v).replace('"', '\\"')
+                #         hdrs = " ".join([f'-H "{_esc(k)}: {_esc(v)}"' for k, v in (self.headers or {}).items()])
+                #         curl_cmd = f"curl -sS -m {timeout} {hdrs} \"{full_url}\""
+                #         logger.info(f"EPG curl: {curl_cmd}")
+                # except Exception:
+                #     pass
                 async with session.get(
                     self.url, headers=self.headers, params=params, timeout=timeout
                 ) as response:
@@ -71,12 +84,9 @@ class ContentLoader(QThread):
                         await asyncio.sleep(wait_time)
                         continue
                     result = json.loads(content)
-                    if self.action == "get_short_epg":
-                        return (
-                            result["js"],
-                            1,
-                            1,
-                        )
+                    # Special-case EPG actions that return a non-paginated structure
+                    if self.action in ("get_short_epg", "get_epg_info"):
+                        return (result.get("js"), 1, 1)
                     ret = result.get("js", {})
                     if not isinstance(ret, dict):
                         logger.warning(f"Invalid response fetching page {page}")
