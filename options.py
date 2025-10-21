@@ -144,6 +144,35 @@ class OptionsDialog(QDialog):
         self.clear_image_cache_button.clicked.connect(self.clear_image_cache)
         self.settings_layout.addRow(self.clear_image_cache_button)
 
+        # Network security options
+        self.prefer_https_checkbox = QCheckBox(
+            "Prefer HTTPS when available (Xtream/STB/M3U)", self.settings_tab
+        )
+        self.prefer_https_checkbox.setToolTip(
+            "When enabled, the app will try HTTPS endpoints first when providers support them."
+        )
+        self.prefer_https_checkbox.setChecked(self.config_manager.prefer_https)
+        self.settings_layout.addRow(self.prefer_https_checkbox)
+
+        self.ssl_verify_checkbox = QCheckBox(
+            "Verify SSL certificates (recommended)", self.settings_tab
+        )
+        self.ssl_verify_checkbox.setToolTip(
+            "Disable only if your provider uses self-signed certificates."
+        )
+        self.ssl_verify_checkbox.setChecked(self.config_manager.ssl_verify)
+        self.settings_layout.addRow(self.ssl_verify_checkbox)
+
+        # Keyboard/Remote mode: use Up/Down to surf channels while playing
+        self.keyboard_remote_checkbox = QCheckBox(
+            "Keyboard/Remote Mode (Up/Down channel surf)", self.settings_tab
+        )
+        self.keyboard_remote_checkbox.setToolTip(
+            "When enabled, the video player will use Up/Down keys to switch to the previous/next playable item."
+        )
+        self.keyboard_remote_checkbox.setChecked(self.config_manager.keyboard_remote_mode)
+        self.settings_layout.addRow(self.keyboard_remote_checkbox)
+
     def create_providers_ui(self):
         self.providers_tab = QWidget(self)
         self.options_tab.addTab(self.providers_tab, "Providers")
@@ -197,6 +226,16 @@ class OptionsDialog(QDialog):
         self.password_label = QLabel("Password:", self.providers_tab)
         self.password_input = QLineEdit(self.providers_tab)
         self.providers_layout.addRow(self.password_label, self.password_input)
+
+        # Per-provider network preferences
+        self.provider_prefer_https_checkbox = QCheckBox(
+            "Prefer HTTPS for this provider", self.providers_tab
+        )
+        self.provider_ssl_verify_checkbox = QCheckBox(
+            "Verify SSL certificates for this provider", self.providers_tab
+        )
+        self.providers_layout.addRow(self.provider_prefer_https_checkbox)
+        self.providers_layout.addRow(self.provider_ssl_verify_checkbox)
 
         self.verify_apply_group = QWidget(self.providers_tab)
         self.verify_button = QPushButton("Verify Provider", self.verify_apply_group)
@@ -333,6 +372,17 @@ class OptionsDialog(QDialog):
         # Initial call to set visibility based on the current selection
         self.on_epg_source_changed()
 
+        # EPG list window (hours; 0 = unlimited)
+        self.epg_list_window_label = QLabel("EPG List Window (hours; 0 = unlimited)")
+        self.epg_list_window_spinner = QSpinBox()
+        self.epg_list_window_spinner.setMinimum(0)
+        self.epg_list_window_spinner.setMaximum(168)
+        try:
+            self.epg_list_window_spinner.setValue(int(self.config_manager.epg_list_window_hours))
+        except Exception:
+            self.epg_list_window_spinner.setValue(24)
+        self.epg_layout.addRow(self.epg_list_window_label, self.epg_list_window_spinner)
+
     def load_providers(self):
         self.provider_combo.blockSignals(True)
         self.provider_combo.clear()
@@ -363,6 +413,13 @@ class OptionsDialog(QDialog):
         self.device_id_input.setText(self.edited_provider.get("device_id", ""))
         self.username_input.setText(self.edited_provider.get("username", ""))
         self.password_input.setText(self.edited_provider.get("password", ""))
+        # Set per-provider network preferences with global fallbacks
+        self.provider_prefer_https_checkbox.setChecked(
+            self.edited_provider.get("prefer_https", self.config_manager.prefer_https)
+        )
+        self.provider_ssl_verify_checkbox.setChecked(
+            self.edited_provider.get("ssl_verify", self.config_manager.ssl_verify)
+        )
         self.update_radio_buttons()
         self.update_inputs()
 
@@ -453,6 +510,9 @@ class OptionsDialog(QDialog):
     def save_settings(self):
         self.config_manager.check_updates = self.check_updates_checkbox.isChecked()
         self.config_manager.max_cache_image_size = int(self.cache_image_size_input.text())
+        self.config_manager.prefer_https = self.prefer_https_checkbox.isChecked()
+        self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
+        self.config_manager.keyboard_remote_mode = self.keyboard_remote_checkbox.isChecked()
 
         need_to_refresh_content_list_size = False
         current_provider_changed = False
@@ -478,6 +538,12 @@ class OptionsDialog(QDialog):
         if self.config_manager.selected_provider_name != self.selected_provider_name:
             self.config_manager.selected_provider_name = self.selected_provider_name
             current_provider_changed = True
+
+        # Save EPG list window hours
+        try:
+            self.config_manager.epg_list_window_hours = int(self.epg_list_window_spinner.value())
+        except Exception:
+            pass
 
         # Save the configuration
         self.parent().save_config()
@@ -527,14 +593,24 @@ class OptionsDialog(QDialog):
                 self.mac_input.text(),
                 serial_number=self.serial_input.text(),
                 device_id=self.device_id_input.text(),
+                prefer_https_override=self.provider_prefer_https_checkbox.isChecked(),
+                ssl_verify_override=self.provider_ssl_verify_checkbox.isChecked(),
             )
         elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
             if url.startswith(("http://", "https://")):
-                result = self.verify_url(url)
+                result = self.verify_url(
+                    url,
+                    prefer_https=self.provider_prefer_https_checkbox.isChecked(),
+                    verify_ssl=self.provider_ssl_verify_checkbox.isChecked(),
+                )
             else:
                 result = os.path.isfile(url)
         elif self.type_XTREAM.isChecked():
-            result = self.verify_url(url)
+            result = self.verify_url(
+                url,
+                prefer_https=self.provider_prefer_https_checkbox.isChecked(),
+                verify_ssl=self.provider_ssl_verify_checkbox.isChecked(),
+            )
 
         self.verify_result.setText(
             "Provider verified successfully." if result else "Failed to verify provider."
@@ -560,6 +636,9 @@ class OptionsDialog(QDialog):
                 self.edited_provider["type"] = "XTREAM"
                 self.edited_provider["username"] = self.username_input.text()
                 self.edited_provider["password"] = self.password_input.text()
+            # Save per-provider network preferences
+            self.edited_provider["prefer_https"] = self.provider_prefer_https_checkbox.isChecked()
+            self.edited_provider["ssl_verify"] = self.provider_ssl_verify_checkbox.isChecked()
             self.selected_provider_name = self.edited_provider["name"]
             self.provider_combo.setItemText(
                 self.selected_provider_index,
@@ -720,12 +799,22 @@ class OptionsDialog(QDialog):
                 f.write(json.dumps(export, option=json.OPT_INDENT_2).decode("utf-8"))
 
     @staticmethod
-    def verify_url(url):
+    def verify_url(url, *, prefer_https=False, verify_ssl=True):
         if url.startswith(("http://", "https://")):
             try:
-                response = requests.head(url, timeout=5)
-                return response.status_code == 200
-            except requests.RequestException as e:
+                test_urls = []
+                if prefer_https and url.startswith("http://"):
+                    test_urls.append("https://" + url[len("http://") :])
+                test_urls.append(url)
+                for turl in test_urls:
+                    try:
+                        response = requests.head(turl, timeout=5, verify=verify_ssl)
+                        if response.status_code == 200:
+                            return True
+                    except requests.RequestException:
+                        continue
+                return False
+            except Exception as e:
                 logging.getLogger(__name__).warning(f"Error verifying URL: {e}")
                 return False
         else:

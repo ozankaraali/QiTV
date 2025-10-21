@@ -39,6 +39,10 @@ Current Work Plan (Living TODO)
    - [ ] Move EPG parsing unit-testable logic out of UI code paths
    - [x] Refactor image pipeline: workers only cache bytes; GUI builds QPixmap/QIcon on main thread
    - [ ] Consider a small event-bus/signal helper to decouple UI components
+ - [x] Add network security toggles (Prefer HTTPS, SSL verify) and plumb into requests/aiohttp (XTREAM/STB/M3U)
+ - [ ] Debug log EPG endpoints for providers (STB `load.php` get_epg_info, Xtream `xmltv.php`) to help diagnose ID mismatches
+ - [ ] Show all EPG entries in channel program list (no windowing), with local time formatting
+ - [ ] Investigate VideoPlayer seeking: prevent playback ending on seek; ensure double-clicking the progress slider controls the bar (not window drag)
 
 4) Logging and error handling
    - [x] Add module-level loggers; remove stray prints
@@ -110,6 +114,7 @@ Recent Changes (for context)
 - Fix: Video player now properly activates on playback start (resolves focus-dependent mouse events) (video_player.py:249-250)
 - Fix: CI changelog generation now uses body_path instead of non-existent output (.github/workflows/main.yml:185)
 - Fix: App now properly raises and activates on startup (main.py:58-59)
+ - Tweak: Removed manual window activation/raise calls to avoid focus stealing (main.py, video_player.py)
 - Fix: Progress bar seek no longer causes window drag (video_player.py:114)
 - Fix: Movies/Series content type switching now correctly fetches respective categories (channel_list.py:71-101,1649)
 - Fix: Single-click pause/play now works correctly; dragging only marked when mouse moves (video_player.py:340,369)
@@ -119,10 +124,14 @@ Recent Changes (for context)
 - Fix: Country field mapping typo in content info (channel_list.py)
 - Infra: Centralized logging config (main.py); replaced prints with loggers across modules
 - UX: Buffering progress bar visibility consistent for live/VOD (video_player.py)
+ - UX: Mouse Back/Forward buttons map to Back/Forward navigation (VideoPlayer emits backRequested/forwardRequested -> ChannelList.go_back/go_forward)
+ - UX: Optional "Keyboard/Remote Mode" setting moves list highlight with Up/Down; auto-plays when item is playable (options.py, video_player.py, channel_list.py)
 - Perf: Update checker moved to QThread and added network timeouts; added timeouts in several requests
 - Arch: Extracted delegates to `widgets/delegates.py`; moved M3U parsing to `services/m3u.py`; moved export helpers to `services/export.py`
 - Packaging: Added `__init__.py` to `services/` and `widgets/` to satisfy mypy package resolution
 - CI: Switched GitHub Actions to uv; centralized tool configs in `pyproject.toml`
+ - Feature: Added global Network settings: "Prefer HTTPS when available" and "Verify SSL certificates". Applied to Xtream, STB, and M3U fetchers (options.py, config_manager.py, channel_list.py, provider_manager.py, epg_manager.py, services/provider_api.py, content_loader.py, image_loader.py)
+ - Behavior: Xtream base resolution no longer auto-enforces HTTPS; respects entered scheme unless Prefer HTTPS is enabled (services/provider_api.py, channel_list.py)
 
 Conventions for New Code
 - Keep UI and data/services separate. Long-running network calls must run in QThread.

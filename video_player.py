@@ -23,6 +23,10 @@ class VLCLogger:
 class VideoPlayer(QMainWindow):
     playing = Signal()
     stopped = Signal()
+    backRequested = Signal()
+    forwardRequested = Signal()
+    channelNextRequested = Signal()
+    channelPrevRequested = Signal()
 
     def __init__(self, config_manager, *args, **kwargs):
         super(VideoPlayer, self).__init__(*args, **kwargs)
@@ -209,10 +213,26 @@ class VideoPlayer(QMainWindow):
             self.change_volume(-10)  # Decrease volume
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Up:
-            self.change_volume(10)
-        elif event.key() == Qt.Key_Down:
-            self.change_volume(-10)
+        # Optional keyboard/remote mode: Up/Down surf channels instead of volume
+        try:
+            remote_mode = bool(self.config_manager.keyboard_remote_mode)
+        except Exception:
+            remote_mode = False
+
+        if remote_mode:
+            if event.key() == Qt.Key_Up:
+                self.channelPrevRequested.emit()
+                return
+            elif event.key() == Qt.Key_Down:
+                self.channelNextRequested.emit()
+                return
+        else:
+            if event.key() == Qt.Key_Up:
+                self.change_volume(10)
+                return
+            elif event.key() == Qt.Key_Down:
+                self.change_volume(-10)
+                return
         super().keyPressEvent(event)
 
     def change_volume(self, step):
@@ -298,7 +318,6 @@ class VideoPlayer(QMainWindow):
         else:
             self.adjust_aspect_ratio()
             self.show()
-            self.raise_()
             # Don't force activate - let user click to interact
             # This prevents stealing focus from channel list
             self.playing.emit()
@@ -352,12 +371,29 @@ class VideoPlayer(QMainWindow):
             self.show()
 
         self.is_pip_mode = not self.is_pip_mode  # Toggle PiP mode
-        self.activateWindow()  # Ensure the PiP window is focused and on top
-        self.raise_()
 
         QGuiApplication.restoreOverrideCursor()
 
     def mousePressEvent(self, event):
+        # Map mouse Back/Forward buttons to navigation in the UI
+        try:
+            back_btn = Qt.MouseButton.BackButton
+        except Exception:
+            back_btn = getattr(Qt.MouseButton, "XButton1", None)
+        try:
+            fwd_btn = Qt.MouseButton.ForwardButton
+        except Exception:
+            fwd_btn = getattr(Qt.MouseButton, "XButton2", None)
+
+        if back_btn is not None and event.button() == back_btn:
+            self.backRequested.emit()
+            event.accept()
+            return
+        if fwd_btn is not None and event.button() == fwd_btn:
+            self.forwardRequested.emit()
+            event.accept()
+            return
+
         if event.button() == Qt.RightButton:
             self.toggle_pip_mode()
             return
@@ -542,8 +578,6 @@ class VideoPlayer(QMainWindow):
             QGuiApplication.setOverrideCursor(Qt.WaitCursor)
             self.video_frame.show()
             self.setWindowState(Qt.WindowFullScreen)
-            self.activateWindow()
-            self.raise_()
             QGuiApplication.restoreOverrideCursor()
         else:
             self.setWindowState(Qt.WindowNoState)

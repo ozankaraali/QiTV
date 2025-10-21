@@ -2,9 +2,9 @@ import asyncio
 import logging
 import random
 
+from PySide6.QtCore import QThread, Signal
 import aiohttp
 import orjson as json
-from PySide6.QtCore import QThread, Signal
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ class ContentLoader(QThread):
         sortby="name",
         max_retries=2,
         timeout=5,
+        verify_ssl=True,
     ):
         super().__init__()
         self.url = url
@@ -48,6 +49,7 @@ class ContentLoader(QThread):
         self.timeout = timeout
         self.items = []
         self.counter_page_not_fetched = 0
+        self.verify_ssl = verify_ssl
 
     async def fetch_page(self, session, page, max_retries=2, timeout=5):
         for attempt in range(max_retries):
@@ -60,9 +62,7 @@ class ContentLoader(QThread):
                 ) as response:
                     content = await response.read()
                     if response.status == 503 or not content:
-                        logger.warning(
-                            f"Received error or empty response fetching page {page}"
-                        )
+                        logger.warning(f"Received error or empty response fetching page {page}")
                         if attempt == max_retries - 1:
                             self.counter_page_not_fetched += 1
                             return [], 0, 0
@@ -157,7 +157,8 @@ class ContentLoader(QThread):
     async def load_content(self):
         semaphore = asyncio.Semaphore(10)  # Limit concurrent fetch_page calls
 
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
+        async with aiohttp.ClientSession(connector=connector) as session:
             # Fetch initial data to get total items and max page items
             page = 1
             page_items, total_items, max_page_items = await self.fetch_page(
@@ -179,9 +180,7 @@ class ContentLoader(QThread):
 
             async def fetch_with_semaphore(page_num):
                 async with semaphore:
-                    return await self.fetch_page(
-                        session, page_num, self.max_retries, self.timeout
-                    )
+                    return await self.fetch_page(session, page_num, self.max_retries, self.timeout)
 
             tasks = []
             for page_num in range(2, pages + 1):

@@ -5,12 +5,13 @@ import io
 import logging
 import os
 import pickle
-from typing import Any, Dict
+from typing import Any, Dict, List, Set
 import xml.etree.ElementTree as ET
 import zipfile
 
 import orjson as json
 import requests
+import tzlocal
 from urlobject import URLObject
 
 from content_loader import ContentLoader
@@ -90,9 +91,34 @@ class EpgManager:
         self.save_index()
 
     def _index_programs(self, xmltv_file):
+        """
+        Parse an XMLTV file and build a MultiKeyDict mapping channel identifiers to
+        their program lists. In addition to the canonical channel id, also map
+        common aliases (display-name values) to the same program list so lookups
+        can succeed even when providers don't supply xmltv_id.
+        """
         programs = MultiKeyDict()
 
         tree = ET.parse(xmltv_file).getroot()
+
+        # 1) Build channel -> alias names map from <channel> entries
+        alias_map: Dict[str, Set[str]] = {}
+        for ch in tree.findall("channel"):
+            ch_id = ch.get("id")
+            if not ch_id:
+                continue
+            names: Set[str] = alias_map.setdefault(ch_id, set())
+            for dn in ch.findall("display-name"):
+                txt = (dn.text or "").strip()
+                if not txt:
+                    continue
+                names.add(txt)
+                # Include a lowercase variant for more forgiving matching
+                names.add(txt.lower())
+
+        # 2) Iterate over programmes and accumulate per-channel lists using a stable
+        #     multikey tuple that includes id + aliases + any user-provided keys.
+        tmp_lists: Dict[str, List[Dict[str, Any]]] = {}
         for programme in tree.findall("programme"):
             channel_id = programme.get("channel")
             start_time = programme.get("start")
@@ -108,9 +134,27 @@ class EpgManager:
                     datetime.strptime(stop_time, "%Y%m%d%H%M%S %z") + timedelta(days=1)
                 ).strftime("%Y%m%d%H%M%S %z")
 
-            multikeys = self.config_manager.xmltv_channel_map.get_keys(channel_id, channel_id)
             program_data = xml_to_dict(programme)["programme"]
-            programs.setdefault(multikeys, []).append(program_data)
+            tmp_lists.setdefault(channel_id, []).append(program_data)
+
+        # 3) Commit lists into MultiKeyDict with expanded keys per channel
+        for ch_id, plist in tmp_lists.items():
+            # Start with user-provided key group if exists, otherwise the channel id
+            user_keys = self.config_manager.xmltv_channel_map.get_keys(ch_id)
+            if user_keys:
+                key_set: Set[str] = set(user_keys)
+            else:
+                key_set = {ch_id}
+
+            # Add display-name aliases for this channel
+            for alias in alias_map.get(ch_id, set()):
+                key_set.add(alias)
+
+            # Keep tuple stable: channel id first, then sorted others
+            other_keys = sorted(k for k in key_set if k != ch_id)
+            multikeys = (ch_id, *other_keys)
+            programs.setdefault(multikeys, []).extend(plist)
+
         return programs
 
     def reindex_programs(self):
@@ -205,7 +249,9 @@ class EpgManager:
                     epg_date = datetime.strptime(epg_info["date"], "%Y-%m-%d %H:%M:%S")
                     # Request the URL with "If-Modified-Since" header
                     headers = {"If-Modified-Since": epg_date.strftime("%a, %d %b %Y %H:%M:%S GMT")}
-                    r = requests.get(url, headers=headers, timeout=5)
+                    r = requests.get(
+                        url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify
+                    )
                     if r.status_code == 304:
                         # EPG is still fresh
                         self.index[url_hash]["last_access"] = current_time.strftime(
@@ -369,18 +415,39 @@ class EpgManager:
     def _fetch_epg_from_stb(self, provider_url, headers):
         provider_hash = hashlib.md5(provider_url.encode()).hexdigest()
         base = base_from_url(provider_url)
-        url = stb_endpoint(base)
-        period = 5
-        content_loader = ContentLoader(
-            url=url,
-            headers=headers,
-            content_type="itv",
-            action="get_epg_info",
-            period=period,
+        prefer_https = self.provider_manager.current_provider.get(
+            "prefer_https", self.config_manager.prefer_https
         )
-        content_loader.run()
-        if content_loader.items:
-            self.epg = content_loader.items[0]
+        verify_ssl = self.provider_manager.current_provider.get(
+            "ssl_verify", self.config_manager.ssl_verify
+        )
+        candidates = [base]
+        # Honor per-provider HTTPS preference with graceful fallback
+        try:
+            if prefer_https and base.startswith("http://"):
+                candidates = ["https://" + base[len("http://") :], base]
+        except Exception:
+            candidates = [base]
+
+        content_loader = None
+        for b in candidates:
+            url = stb_endpoint(b)
+            period = 5
+            logger.debug("STB EPG endpoint: %s?action=get_epg_info&period=%s", url, period)
+            content_loader = ContentLoader(
+                url=url,
+                headers=headers,
+                content_type="itv",
+                action="get_epg_info",
+                period=period,
+                verify_ssl=verify_ssl,
+            )
+            content_loader.run()
+            if getattr(content_loader, "items", None):
+                break
+        items = getattr(content_loader, "items", []) if content_loader else []
+        if items:
+            self.epg = items[0]
             cache_dir = self._cache_dir()
             epg_file = os.path.join(cache_dir, f"{provider_hash}.pkl")
             with open(epg_file, "wb") as f:
@@ -399,10 +466,31 @@ class EpgManager:
         """Fetch EPG from Xtream provider using XMLTV endpoint."""
         provider_hash = hashlib.md5(f"{provider_url}:{username}".encode()).hexdigest()
         xmltv_url = xtream_xmltv_url(provider_url, username, password)
+        logger.debug("Xtream XMLTV URL: %s", xmltv_url)
+        prefer_https = self.provider_manager.current_provider.get(
+            "prefer_https", self.config_manager.prefer_https
+        )
+        verify_ssl = self.provider_manager.current_provider.get(
+            "ssl_verify", self.config_manager.ssl_verify
+        )
+        urls = [xmltv_url]
+        if prefer_https and xmltv_url.startswith("http://"):
+            urls = ["https://" + xmltv_url[len("http://") :], xmltv_url]
 
         try:
-            # Fetch the XMLTV data from Xtream endpoint
-            r = requests.get(xmltv_url, stream=True, timeout=30)
+            # Fetch the XMLTV data from Xtream endpoint, trying HTTPS first if preferred
+            r = None
+            for _url in urls:
+                try:
+                    r = requests.get(_url, stream=True, timeout=30, verify=verify_ssl)
+                    if r.status_code == 200 and r.content:
+                        xmltv_url = _url
+                        break
+                except requests.RequestException:
+                    r = None
+                    continue
+            if r is None:
+                raise RuntimeError("Failed to fetch Xtream XMLTV EPG")
             if r.status_code == 200:
                 cache_dir = self._cache_dir()
                 xmltv_file_path = os.path.join(cache_dir, f"{provider_hash}_xtream.xml")
@@ -444,7 +532,9 @@ class EpgManager:
                     self.index[provider_hash] = None
                     self.epg = MultiKeyDict()
             else:
-                logger.warning(f"Failed to fetch Xtream EPG, status code: {r.status_code}")
+                logger.warning(
+                    f"Failed to fetch Xtream EPG, status code: {r.status_code} for URL: {xmltv_url}"
+                )
                 self.index[provider_hash] = None
                 self.epg = MultiKeyDict()
         except Exception as e:
@@ -455,7 +545,7 @@ class EpgManager:
         self.save_index()
 
     def _fetch_epg_from_url(self, url):
-        r = requests.get(url, stream=True, timeout=10)
+        r = requests.get(url, stream=True, timeout=10, verify=self.config_manager.ssl_verify)
         if r.status_code == 200:
             content_type = r.headers.get("Content-Type", "")
             xmltv_file_path = None
@@ -504,6 +594,34 @@ class EpgManager:
                     self.epg = MultiKeyDict()
         self.save_index()
 
+    def force_refresh_current_epg(self):
+        """Force refresh EPG cache for the active EPG source/provider.
+
+        Ignores expiration and overwrites the existing cache/index so that
+        subsequent lookups use freshly indexed data.
+        """
+        epg_source = self.config_manager.epg_source
+        provider_type = self.provider_manager.current_provider.get("type", "").upper()
+
+        if epg_source == "STB":
+            if provider_type == "STB":
+                self._fetch_epg_from_stb(
+                    self.provider_manager.current_provider.get("url", ""),
+                    self.provider_manager.headers,
+                )
+            elif provider_type == "XTREAM":
+                self._fetch_epg_from_xtream(
+                    self.provider_manager.current_provider.get("url", ""),
+                    self.provider_manager.current_provider.get("username", ""),
+                    self.provider_manager.current_provider.get("password", ""),
+                )
+        elif epg_source == "Local File":
+            xmltv_file = self.config_manager.epg_file
+            xmltv_filehash = hashlib.md5(xmltv_file.encode()).hexdigest()
+            self._fetch_epg_from_file(xmltv_filehash, xmltv_file)
+        elif epg_source == "URL":
+            self._fetch_epg_from_url(self.config_manager.epg_url)
+
     def get_programs_for_channel(self, channel_data, start_time=None, max_programs=5):
         epg_source = self.config_manager.epg_source
         provider_type = self.provider_manager.current_provider.get("type", "").upper()
@@ -513,45 +631,115 @@ class EpgManager:
             return self._get_programs_for_channel_from_stb(channel_id, start_time, max_programs)
         else:
             # For Xtream, Local File, and URL sources, use XMLTV format
-            channel_id = channel_data.get("xmltv_id", "")
-            return self._get_programs_for_channel_from_xmltv(channel_id, start_time, max_programs)
+            return self._get_programs_for_channel_from_xmltv(channel_data, start_time, max_programs)
 
     def _get_programs_for_channel_from_stb(self, channel_id, start_time, max_programs):
-        if start_time is None:
-            start_time = datetime.now()
-
         programs = self.epg.get(channel_id, [])
-        return self._filter_and_sort_programs(programs, start_time, max_programs)
-
-    def _get_programs_for_channel_from_xmltv(self, channel_id, start_time, max_programs):
+        # If unlimited requested and no windowing, return all entries sorted
+        if (not max_programs or max_programs <= 0) and start_time is None:
+            return sorted(
+                programs,
+                key=lambda program: datetime.strptime(program["time"], "%Y-%m-%d %H:%M:%S"),
+            )
         if start_time is None:
             start_time = datetime.now()
+        # Apply end-of-window limit based on config (0 = unlimited)
+        window_hours = 0
+        try:
+            window_hours = int(self.config_manager.epg_list_window_hours)
+        except Exception:
+            window_hours = 0
+        end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
+        filtered = []
+        for program in programs:
+            p_start = datetime.strptime(program["time"], "%Y-%m-%d %H:%M:%S")
+            p_stop = datetime.strptime(program["time_to"], "%Y-%m-%d %H:%M:%S")
+            if p_start >= start_time or p_stop > start_time:
+                if end_time is None or p_start < end_time:
+                    filtered.append(program)
+                    if max_programs and max_programs > 0 and len(filtered) >= max_programs:
+                        break
+        filtered.sort(key=lambda program: datetime.strptime(program["time"], "%Y-%m-%d %H:%M:%S"))
+        return filtered
 
-        if channel_id not in self.epg:
+    def _get_programs_for_channel_from_xmltv(self, channel_info, start_time, max_programs):
+        if start_time is None:
+            # Use local timezone-aware datetime to avoid naive/aware mismatches
+            try:
+                start_time = datetime.now(tzlocal.get_localzone())
+            except Exception:
+                start_time = datetime.now()
+
+        # Candidate keys in priority order: explicit xmltv_id, then channel name variants
+        candidates: List[str] = []
+        xmltv_id = (channel_info.get("xmltv_id") or "").strip()
+        if xmltv_id:
+            candidates.append(xmltv_id)
+
+        name = (channel_info.get("name") or "").strip()
+        if name and name not in candidates:
+            candidates.append(name)
+        lname = name.lower()
+        if lname and lname not in candidates:
+            candidates.append(lname)
+
+        chosen_key = None
+        for key in candidates:
+            if key in self.epg:
+                chosen_key = key
+                break
+            # Also consider user-provided mapping keys
+            mapped = self.config_manager.xmltv_channel_map.get_keys(key)
+            if mapped:
+                for mk in mapped:
+                    if mk in self.epg:
+                        chosen_key = mk
+                        break
+            if chosen_key:
+                break
+
+        if not chosen_key:
             return []
 
-        # search the timezone used by programs for channel_id by looking at very 1st program
-        ref_time_str = self.epg[channel_id][0]["@start"]
+        # search the timezone used by programs by looking at the first/last program
+        ref_time_str = self.epg[chosen_key][0]["@start"]
         ref_time = datetime.strptime(ref_time_str, "%Y%m%d%H%M%S %z")
         ref_timezone = ref_time.tzinfo
 
-        # check if timezone for last program is same, otherwise, we might be in time span with a DST
-        ref_time_str1 = self.epg[channel_id][-1]["@start"]
+        ref_time_str1 = self.epg[chosen_key][-1]["@start"]
         ref_time1 = datetime.strptime(ref_time_str1, "%Y%m%d%H%M%S %z")
         ref_timezone1 = ref_time1.tzinfo
         need_check_tz = ref_timezone1 != ref_timezone
+
+        # If unlimited requested and no windowing (window_hours <= 0), return all entries sorted
+        window_hours = 0
+        try:
+            window_hours = int(self.config_manager.epg_list_window_hours)
+        except Exception:
+            window_hours = 0
+        if (not max_programs or max_programs <= 0) and window_hours <= 0:
+            programs = list(self.epg[chosen_key])
+            programs.sort(key=lambda program: program["@start"])
+            return programs
 
         # Get the start time in the timezone of the programs
         start_time_str = start_time.astimezone(ref_timezone).strftime("%Y%m%d%H%M%S %z")
 
         programs = []
-        for entry in self.epg[channel_id]:
+        # Compute end-of-window cutoff if configured
+        end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
+        for entry in self.epg[chosen_key]:
             if need_check_tz:
                 tz = datetime.strptime(entry["@start"], "%Y%m%d%H%M%S %z").tzinfo
                 start_time_str = start_time.astimezone(tz).strftime("%Y%m%d%H%M%S %z")
             if entry["@start"] >= start_time_str or entry["@stop"] > start_time_str:
+                if end_time is not None:
+                    # Compare with end_time in the entry's timezone
+                    entry_start_dt = datetime.strptime(entry["@start"], "%Y%m%d%H%M%S %z")
+                    if entry_start_dt >= end_time.astimezone(entry_start_dt.tzinfo):
+                        continue
                 programs.append(entry)
-                if len(programs) >= max_programs:
+                if max_programs and max_programs > 0 and len(programs) >= max_programs:
                     break
 
         programs.sort(key=lambda program: program["@start"])
@@ -565,7 +753,7 @@ class EpgManager:
                 or datetime.strptime(program["time_to"], "%Y-%m-%d %H:%M:%S") > start_time
             ):
                 filtered_programs.append(program)
-                if len(filtered_programs) >= max_programs:
+                if max_programs and max_programs > 0 and len(filtered_programs) >= max_programs:
                     break
 
         filtered_programs.sort(

@@ -11,7 +11,7 @@ import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote as url_quote
 
-from PySide6.QtCore import QBuffer, QObject, QRect, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QBuffer, QEvent, QObject, QRect, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 import requests
+import tzlocal
 from urlobject import URLObject
 
 from services.provider_api import (
@@ -105,15 +106,31 @@ class M3ULoaderWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, verify_ssl: bool = True, prefer_https: bool = False):
         super().__init__()
         self.url = url
+        self.verify_ssl = verify_ssl
+        self.prefer_https = prefer_https
 
     def run(self):
         try:
-            response = requests.get(self.url, timeout=10)
-            response.raise_for_status()
-            self.finished.emit({"content": response.text})
+            candidate_urls = []
+            if self.prefer_https and self.url.startswith("http://"):
+                candidate_urls.append("https://" + self.url[len("http://") :])
+            candidate_urls.append(self.url)
+
+            last_exc = None
+            for u in candidate_urls:
+                try:
+                    response = requests.get(u, timeout=10, verify=self.verify_ssl)
+                    response.raise_for_status()
+                    self.finished.emit({"content": response.text})
+                    return
+                except requests.RequestException as e:
+                    last_exc = e
+                    continue
+            # If we got here, all attempts failed
+            raise last_exc or Exception("Failed to load M3U")
         except requests.RequestException as e:
             self.error.emit(str(e))
 
@@ -122,17 +139,26 @@ class XtreamAuthWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, base_url: str, username: str, password: str):
+    def __init__(
+        self,
+        base_url: str,
+        username: str,
+        password: str,
+        verify_ssl: bool = True,
+        prefer_https: bool = False,
+    ):
         super().__init__()
         self.base_url = base_url
         self.username = username
         self.password = password
+        self.verify_ssl = verify_ssl
+        self.prefer_https = prefer_https
 
     def run(self):
         try:
             # First authenticate to resolve the correct domain/ports
             auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
-            resp = requests.get(auth_url, timeout=10)
+            resp = requests.get(auth_url, timeout=10, verify=self.verify_ssl)
             resp.raise_for_status()
             body = resp.json()
             server_info = body.get("server_info", {}) if isinstance(body, dict) else {}
@@ -143,7 +169,9 @@ class XtreamAuthWorker(QObject):
             except Exception:
                 allowed = []
 
-            resolved_base = xtream_choose_resolved_base(server_info)
+            resolved_base = xtream_choose_resolved_base(
+                server_info, self.base_url, prefer_https=self.prefer_https
+            )
             if not resolved_base:
                 # Fall back to given base
                 url_obj = URLObject(self.base_url)
@@ -168,25 +196,37 @@ class XtreamLoaderWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, base_url: str, username: str, password: str, content_type: str = "itv"):
+    def __init__(
+        self,
+        base_url: str,
+        username: str,
+        password: str,
+        content_type: str = "itv",
+        verify_ssl: bool = True,
+        prefer_https: bool = False,
+    ):
         super().__init__()
         self.base_url = base_url
         self.username = username
         self.password = password
         self.content_type = content_type  # "itv", "vod", or "series"
+        self.verify_ssl = verify_ssl
+        self.prefer_https = prefer_https
 
     def run(self):
         try:
             # Step 1: Authenticate and resolve proper base + formats
             auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
-            auth_resp = requests.get(auth_url, timeout=10)
+            auth_resp = requests.get(auth_url, timeout=10, verify=self.verify_ssl)
             auth_resp.raise_for_status()
             auth_body = auth_resp.json() if auth_resp.content else {}
             server_info = auth_body.get("server_info", {}) if isinstance(auth_body, dict) else {}
             user_info = auth_body.get("user_info", {}) if isinstance(auth_body, dict) else {}
             allowed_formats = user_info.get("allowed_output_formats", []) or []
 
-            resolved_base = xtream_choose_resolved_base(server_info)
+            resolved_base = xtream_choose_resolved_base(
+                server_info, self.base_url, prefer_https=self.prefer_https
+            )
             if not resolved_base:
                 url_obj = URLObject(self.base_url)
                 resolved_base = f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip(
@@ -239,7 +279,7 @@ class XtreamLoaderWorker(QObject):
             categories = []
             categories_map = {}
             try:
-                cat_resp = requests.get(cat_url, timeout=10)
+                cat_resp = requests.get(cat_url, timeout=10, verify=self.verify_ssl)
                 if cat_resp.ok and cat_resp.content:
                     cats_data = cat_resp.json() or []
                     for c in cats_data:
@@ -257,7 +297,7 @@ class XtreamLoaderWorker(QObject):
             streams_url = xtream_player_api_url(
                 resolved_base, self.username, self.password, action=streams_action
             )
-            streams_resp = requests.get(streams_url, timeout=15)
+            streams_resp = requests.get(streams_url, timeout=15, verify=self.verify_ssl)
             streams_resp.raise_for_status()
             streams = streams_resp.json() or []
 
@@ -322,6 +362,7 @@ class XtreamLoaderWorker(QObject):
                                     headers=headers,
                                     timeout=6,
                                     allow_redirects=True,
+                                    verify=self.verify_ssl,
                                 )
                                 # Check status, content exists, and content-length > 0
                                 clen = r.headers.get("Content-Length", "1")
@@ -455,7 +496,14 @@ class XtreamSeriesInfoWorker(QObject):
     error = Signal(str)
 
     def __init__(
-        self, base_url: str, username: str, password: str, series_id: str, resolved_base: str = ""
+        self,
+        base_url: str,
+        username: str,
+        password: str,
+        series_id: str,
+        resolved_base: str = "",
+        verify_ssl: bool = True,
+        prefer_https: bool = False,
     ):
         super().__init__()
         self.base_url = base_url
@@ -463,19 +511,23 @@ class XtreamSeriesInfoWorker(QObject):
         self.password = password
         self.series_id = series_id
         self.resolved_base = resolved_base
+        self.verify_ssl = verify_ssl
+        self.prefer_https = prefer_https
 
     def run(self):
         try:
             # Use resolved_base if provided, otherwise determine from base_url
             if not self.resolved_base:
                 auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
-                auth_resp = requests.get(auth_url, timeout=10)
+                auth_resp = requests.get(auth_url, timeout=10, verify=self.verify_ssl)
                 auth_resp.raise_for_status()
                 auth_body = auth_resp.json() if auth_resp.content else {}
                 server_info = (
                     auth_body.get("server_info", {}) if isinstance(auth_body, dict) else {}
                 )
-                self.resolved_base = xtream_choose_resolved_base(server_info)
+                self.resolved_base = xtream_choose_resolved_base(
+                    server_info, self.base_url, prefer_https=self.prefer_https
+                )
 
             if not self.resolved_base:
                 url_obj = URLObject(self.base_url)
@@ -491,7 +543,7 @@ class XtreamSeriesInfoWorker(QObject):
                 action="get_series_info",
                 extra={"series_id": self.series_id},
             )
-            info_resp = requests.get(info_url, timeout=15)
+            info_resp = requests.get(info_url, timeout=15, verify=self.verify_ssl)
             info_resp.raise_for_status()
             series_data = info_resp.json() or {}
 
@@ -567,20 +619,31 @@ class STBCategoriesWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, base_url: str, headers: dict, content_type: str = "itv"):
+    def __init__(
+        self,
+        base_url: str,
+        headers: dict,
+        content_type: str = "itv",
+        verify_ssl: bool = True,
+        prefer_https: bool = False,
+    ):
         super().__init__()
         self.base_url = base_url
         self.headers = headers
         self.content_type = content_type
+        self.verify_ssl = verify_ssl
+        self.prefer_https = prefer_https
 
     def run(self):
         try:
             base = base_from_url(self.base_url)
+            if self.prefer_https and base.startswith("http://"):
+                base = "https://" + base[len("http://") :]
 
             # Use correct action based on content type
             action = "get_genres" if self.content_type == "itv" else "get_categories"
             fetchurl = stb_request_url(base, self.content_type, action)
-            resp = requests.get(fetchurl, headers=self.headers, timeout=10)
+            resp = requests.get(fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl)
             resp.raise_for_status()
             categories = resp.json()["js"]
 
@@ -588,7 +651,9 @@ class STBCategoriesWorker(QObject):
             all_channels = []
             if self.content_type == "itv":
                 fetchurl = stb_request_url(base, "itv", "get_all_channels")
-                resp = requests.get(fetchurl, headers=self.headers, timeout=10)
+                resp = requests.get(
+                    fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl
+                )
                 resp.raise_for_status()
                 all_channels = resp.json()["js"]["data"]
 
@@ -609,6 +674,8 @@ class LinkCreatorWorker(QObject):
         cmd: str,
         is_episode: bool = False,
         series_param: Optional[str] = None,
+        verify_ssl: bool = True,
+        prefer_https: bool = False,
     ):
         super().__init__()
         self.base_url = base_url
@@ -617,11 +684,16 @@ class LinkCreatorWorker(QObject):
         self.cmd = cmd
         self.is_episode = is_episode
         self.series_param = series_param
+        self.verify_ssl = verify_ssl
+        self.prefer_https = prefer_https
 
     def run(self):
         try:
             url = URLObject(self.base_url)
-            base = f"{url.scheme}://{url.netloc}"
+            scheme = url.scheme
+            if self.prefer_https and scheme == "http":
+                scheme = "https"
+            base = f"{scheme}://{url.netloc}"
             if self.is_episode:
                 fetchurl = (
                     f"{base}/server/load.php?type={'vod' if self.content_type == 'series' else self.content_type}&action=create_link"
@@ -632,7 +704,9 @@ class LinkCreatorWorker(QObject):
                     f"{base}/server/load.php?type={self.content_type}&action=create_link"
                     f"&cmd={url_quote(self.cmd)}&JsHttpRequest=1-xml"
                 )
-            response = requests.get(fetchurl, headers=self.headers, timeout=10)
+            response = requests.get(
+                fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl
+            )
             response.raise_for_status()
             result = response.json()
             link = result["js"]["cmd"].split(" ")[-1]
@@ -716,15 +790,23 @@ class NumberedTreeWidgetItem(QTreeWidgetItem):
 class SetProviderThread(QThread):
     progress = Signal(str)
 
-    def __init__(self, provider_manager, epg_manager):
+    def __init__(self, provider_manager, epg_manager, force_epg_refresh: bool = False):
         super().__init__()
         self.provider_manager = provider_manager
         self.epg_manager = epg_manager
+        self.force_epg_refresh = force_epg_refresh
 
     def run(self):
         try:
             self.provider_manager.set_current_provider(self.progress)
-            self.epg_manager.set_current_epg()
+            if self.force_epg_refresh:
+                try:
+                    self.progress.emit("Refreshing EPG…")
+                except Exception:
+                    pass
+                self.epg_manager.force_refresh_current_epg()
+            else:
+                self.epg_manager.set_current_epg()
         except Exception as e:
             logger.warning(f"Error in initializing provider: {e}")
 
@@ -783,10 +865,21 @@ class ChannelList(QMainWindow):
         self.current_series: Optional[Dict[str, Any]] = None
         self.current_season: Optional[Dict[str, Any]] = None
         self.navigation_stack = []  # To keep track of navigation for back button
+        self.forward_stack = []  # Forward history to undo last Back
+        self._suppress_forward_clear = False
 
         # Connect player signals to show/hide media controls
         self.player.playing.connect(self.show_media_controls)
         self.player.stopped.connect(self.hide_media_controls)
+
+        # Input integration from player: mouse back/forward and remote Up/Down
+        try:
+            self.player.backRequested.connect(self.go_back)
+            self.player.forwardRequested.connect(self.go_forward)
+            self.player.channelNextRequested.connect(self.channel_surf_next)
+            self.player.channelPrevRequested.connect(self.channel_surf_prev)
+        except Exception:
+            pass
 
         self.splitter.splitterMoved.connect(self.update_splitter_ratio)
         self.channels_radio.toggled.connect(self.toggle_content_type)
@@ -821,7 +914,6 @@ class ChannelList(QMainWindow):
         event.accept()
 
     def refresh_on_air(self):
-        epg_source = self.config_manager.epg_source
         for i in range(self.content_list.topLevelItemCount()):
             item = self.content_list.topLevelItem(i)
             item_data = item.data(0, Qt.UserRole)
@@ -831,12 +923,18 @@ class ChannelList(QMainWindow):
                 epg_data = self.epg_manager.get_programs_for_channel(item_data["data"], None, 1)
                 if epg_data:
                     epg_item = epg_data[0]
-                    if epg_source == "STB":
+                    # Determine format by keys (robust against mixed sources)
+                    if "time" in epg_item and "time_to" in epg_item:
                         start_time = datetime.strptime(epg_item["time"], "%Y-%m-%d %H:%M:%S")
                         end_time = datetime.strptime(epg_item["time_to"], "%Y-%m-%d %H:%M:%S")
-                    else:
+                    elif "@start" in epg_item and "@stop" in epg_item:
                         start_time = datetime.strptime(epg_item["@start"], "%Y%m%d%H%M%S %z")
                         end_time = datetime.strptime(epg_item["@stop"], "%Y%m%d%H%M%S %z")
+                    else:
+                        # Unknown structure; skip gracefully
+                        item.setData(2, Qt.UserRole, 0)
+                        item.setData(3, Qt.UserRole, "")
+                        continue
                     now = datetime.now(start_time.tzinfo)
                     if end_time != start_time:
                         progress = (
@@ -847,12 +945,33 @@ class ChannelList(QMainWindow):
                     else:
                         progress = 0 if now < start_time else 100
                     progress = max(0, min(100, progress))
-                    if epg_source == "STB":
-                        epg_text = str(epg_item.get("name") or "")
+                    if "title" in epg_item:  # XMLTV style
+                        title_val = epg_item.get("title")
+                        text = ""
+                        if isinstance(title_val, dict):
+                            text = title_val.get("__text") or ""
+                        elif isinstance(title_val, list) and title_val:
+                            # take first element's text if present
+                            first = title_val[0]
+                            if isinstance(first, dict):
+                                text = first.get("__text") or ""
+                        # Localize displayed times
+                        try:
+                            local_tz = tzlocal.get_localzone()
+                            ls = start_time.astimezone(local_tz).strftime("%H:%M")
+                            le = end_time.astimezone(local_tz).strftime("%H:%M")
+                            epg_text = f"{ls}-{le}  {str(text)}"
+                        except Exception:
+                            epg_text = str(text)
                     else:
-                        title = epg_item.get("title", {})
-                        text = title.get("__text") if isinstance(title, dict) else ""
-                        epg_text = str(text or "")
+                        # STB style: treat naive datetimes as local
+                        try:
+                            ls = start_time.strftime("%H:%M")
+                            le = end_time.strftime("%H:%M")
+                            name_txt = str(epg_item.get("name") or "")
+                            epg_text = f"{ls}-{le}  {name_txt}"
+                        except Exception:
+                            epg_text = str(epg_item.get("name") or "")
                     item.setData(2, Qt.UserRole, progress)
                     item.setData(3, Qt.UserRole, epg_text)
                 else:
@@ -869,11 +988,17 @@ class ChannelList(QMainWindow):
         if force_update:
             self.provider_manager.clear_current_provider_cache()
 
+        # Reset navigation histories on provider switch
+        self.navigation_stack.clear()
+        self.forward_stack.clear()
+
         # Remember if this call was a forced update so we can use it in the
         # UI-thread handler safely.
         self._set_provider_force_update = force_update
 
-        self.set_provider_thread = SetProviderThread(self.provider_manager, self.epg_manager)
+        self.set_provider_thread = SetProviderThread(
+            self.provider_manager, self.epg_manager, force_epg_refresh=bool(force_update)
+        )
         self.set_provider_thread.progress.connect(self.update_busy_progress)
         # Ensure the finished handler runs on the GUI thread (no lambda)
         self.set_provider_thread.finished.connect(
@@ -1120,6 +1245,77 @@ class ChannelList(QMainWindow):
         act_pip.triggered.connect(_pip)
         self.addAction(act_pip)
 
+        # Back navigation via keyboard (Backspace/Back keys)
+        act_back = QAction("Back", self)
+        act_back.setShortcutContext(Qt.ApplicationShortcut)
+        try:
+            act_back.setShortcuts([QKeySequence(Qt.Key_Backspace), QKeySequence(Qt.Key_Back)])
+        except Exception:
+            act_back.setShortcut(QKeySequence(Qt.Key_Backspace))
+        act_back.triggered.connect(self.go_back)
+        self.addAction(act_back)
+
+        # Forward navigation via keyboard (Forward key / Alt+Right fallback)
+        act_forward = QAction("Forward", self)
+        act_forward.setShortcutContext(Qt.ApplicationShortcut)
+        forward_shortcuts = []
+        try:
+            forward_shortcuts.append(QKeySequence(Qt.Key_Forward))
+        except Exception:
+            pass
+        try:
+            # StandardKey.Forward
+            forward_shortcuts.append(QKeySequence(QKeySequence.StandardKey.Forward))
+        except Exception:
+            pass
+        if not forward_shortcuts:
+            try:
+                forward_shortcuts = [QKeySequence(Qt.ALT | Qt.Key_Right)]
+            except Exception:
+                forward_shortcuts = []
+        if forward_shortcuts:
+            act_forward.setShortcuts(forward_shortcuts)
+        act_forward.triggered.connect(self.go_forward)
+        self.addAction(act_forward)
+
+    def _is_playable_item(self, item: QTreeWidgetItem) -> bool:
+        try:
+            data = item.data(0, Qt.UserRole)
+            t = data.get("type") if isinstance(data, dict) else None
+            return t in {"m3ucontent", "channel", "movie", "episode"}
+        except Exception:
+            return False
+
+    def channel_surf_next(self):
+        """Move selection down by one; auto-play only if playable (not folders)."""
+        cl = self.content_list
+        count = cl.topLevelItemCount()
+        if count == 0:
+            return
+        current = cl.currentItem()
+        idx = cl.indexOfTopLevelItem(current) if current else -1
+        idx = (idx + 1) % count
+        candidate = cl.topLevelItem(idx)
+        if candidate is not None:
+            cl.setCurrentItem(candidate)
+            if self._is_playable_item(candidate):
+                self.item_activated(candidate)
+
+    def channel_surf_prev(self):
+        """Move selection up by one; auto-play only if playable (not folders)."""
+        cl = self.content_list
+        count = cl.topLevelItemCount()
+        if count == 0:
+            return
+        current = cl.currentItem()
+        idx = cl.indexOfTopLevelItem(current) if current else 0
+        idx = (idx - 1) % count
+        candidate = cl.topLevelItem(idx)
+        if candidate is not None:
+            cl.setCurrentItem(candidate)
+            if self._is_playable_item(candidate):
+                self.item_activated(candidate)
+
     def populate_provider_combo(self):
         """Populate the provider dropdown with available providers."""
         # Block signals to prevent triggering change during population
@@ -1191,6 +1387,8 @@ class ChannelList(QMainWindow):
         self.content_list.setAlternatingRowColors(True)
         self.content_list.itemSelectionChanged.connect(self.item_selected)
         self.content_list.itemActivated.connect(self.item_activated)
+        # Enable keyboard surfing on the list when remote mode is on
+        self.content_list.installEventFilter(self)
         self.refresh_content_list_size()
 
         list_layout.addWidget(self.content_list, 1)
@@ -1222,6 +1420,17 @@ class ChannelList(QMainWindow):
         self.epg_checkbox.setChecked(self.config_manager.channel_epg)
         self.epg_checkbox.stateChanged.connect(self.show_epg)
         self.favorite_layout.addWidget(self.epg_checkbox)
+
+        # Add checkbox to include descriptions in search (default unchecked)
+        self.search_descriptions_checkbox = QCheckBox("Search descriptions")
+        self.search_descriptions_checkbox.setToolTip(
+            "Also match description/plot and current On Air text"
+        )
+        self.search_descriptions_checkbox.setChecked(False)
+        self.search_descriptions_checkbox.stateChanged.connect(
+            lambda: self.filter_content(self.search_box.text())
+        )
+        self.favorite_layout.addWidget(self.search_descriptions_checkbox)
 
         # Add checkbox to show vod/tvshow content info
         self.vodinfo_checkbox = QCheckBox("Show VOD Info")
@@ -1307,10 +1516,8 @@ class ChannelList(QMainWindow):
                 self.item_selected()
 
     def can_show_content_info(self, item_type):
-        return (
-            item_type in ["movie", "serie", "season", "episode"]
-            and self.provider_manager.current_provider["type"] == "STB"
-        )
+        # Show metadata panel for VOD/Series across STB and Xtream providers
+        return item_type in ["movie", "serie", "season", "episode"]
 
     def can_show_epg(self, item_type):
         if item_type in ["channel", "m3ucontent"]:
@@ -1438,26 +1645,83 @@ class ChannelList(QMainWindow):
         self.program_list.itemSelectionChanged.connect(self.update_channel_program)
 
         # Show EPG data for the selected channel
-        epg_data = self.epg_manager.get_programs_for_channel(item_data)
+        # Show full EPG list for the channel (no windowing)
+        epg_data = self.epg_manager.get_programs_for_channel(item_data, max_programs=0)
         if epg_data:
-            # Fill the program list
-            for epg_item in epg_data:
-                if self.config_manager.epg_source == "STB":
-                    epg_text = f"<b>{epg_item.get('t_time', 'start')}-{epg_item.get('t_time_to' ,'end')}</b>&nbsp;&nbsp;{epg_item['name']}"
+            # Fill the program list and try to select the currently playing entry
+            now_index = None
+            try:
+                import tzlocal as _tz
+
+                _local_now = datetime.now(_tz.get_localzone())
+            except Exception:
+                _local_now = datetime.now()
+            for idx, epg_item in enumerate(epg_data):
+                # Detect structure and format row text accordingly
+                if "@start" in epg_item and "@stop" in epg_item:
+                    try:
+                        local_tz = tzlocal.get_localzone()
+                        start_raw = datetime.strptime(epg_item.get("@start"), "%Y%m%d%H%M%S %z")
+                        stop_raw = datetime.strptime(epg_item.get("@stop"), "%Y%m%d%H%M%S %z")
+                        start_dt = start_raw.astimezone(local_tz)
+                        stop_dt = stop_raw.astimezone(local_tz)
+                        start_txt = start_dt.strftime("%H:%M")
+                        stop_txt = stop_dt.strftime("%H:%M")
+                        if (
+                            now_index is None
+                            and start_raw <= _local_now.astimezone(start_raw.tzinfo) < stop_raw
+                        ):
+                            now_index = idx
+                    except Exception:
+                        start_txt, stop_txt = "", ""
+                    title_val = epg_item.get("title")
+                    title_txt = ""
+                    if isinstance(title_val, dict):
+                        title_txt = title_val.get("__text") or ""
+                    elif isinstance(title_val, list) and title_val:
+                        first = title_val[0]
+                        if isinstance(first, dict):
+                            title_txt = first.get("__text") or ""
+                    epg_text = f"<b>{start_txt}-{stop_txt}</b>&nbsp;&nbsp;{title_txt}"
                 else:
-                    epg_text = f"<b>{datetime.strptime(epg_item.get('@start'), '%Y%m%d%H%M%S %z').strftime('%H:%M')}-{datetime.strptime(epg_item.get('@stop'), '%Y%m%d%H%M%S %z').strftime('%H:%M')}</b>&nbsp;&nbsp;{epg_item['title'].get('__text')}"
+                    # STB style: t_time fields may exist; fallback to parsed time/time_to
+                    start_txt = epg_item.get("t_time")
+                    stop_txt = epg_item.get("t_time_to")
+                    if (
+                        not (start_txt and stop_txt)
+                        and "time" in epg_item
+                        and "time_to" in epg_item
+                    ):
+                        try:
+                            start_dt = datetime.strptime(epg_item.get("time"), "%Y-%m-%d %H:%M:%S")
+                            stop_dt = datetime.strptime(
+                                epg_item.get("time_to"), "%Y-%m-%d %H:%M:%S"
+                            )
+                            start_txt = start_dt.strftime("%H:%M")
+                            stop_txt = stop_dt.strftime("%H:%M")
+                            if now_index is None and start_dt <= datetime.now() < stop_dt:
+                                now_index = idx
+                        except Exception:
+                            start_txt, stop_txt = "", ""
+                    epg_text = f"<b>{start_txt or ''}-{stop_txt or ''}</b>&nbsp;&nbsp;{epg_item.get('name','')}"
                 item = QListWidgetItem(f"{epg_text}")
                 item.setData(Qt.UserRole, epg_item)
                 self.program_list.addItem(item)
-            self.program_list.setCurrentRow(0)
+            if now_index is not None:
+                self.program_list.setCurrentRow(now_index)
+            else:
+                self.program_list.setCurrentRow(0)
         else:
             item = QListWidgetItem("Program not available")
             self.program_list.addItem(item)
             xmltv_id = item_data.get("xmltv_id", "")
+            ch_name = item_data.get("name", "")
             if xmltv_id:
                 self.content_info_text.setText(f'No EPG found for channel id "{xmltv_id}"')
+            elif ch_name:
+                self.content_info_text.setText(f'No EPG found for channel "{ch_name}"')
             else:
-                self.content_info_text.setText(f"Channel without id")
+                self.content_info_text.setText("Channel without id")
 
     def update_channel_program(self):
         selected_items = self.program_list.selectedItems()
@@ -1467,7 +1731,8 @@ class ChannelList(QMainWindow):
         selected_item = selected_items[0]
         item_data = selected_item.data(Qt.UserRole)
         if item_data:
-            if self.config_manager.epg_source == "STB":
+            # Decide formatting by epg item structure rather than global source
+            if "@start" not in item_data:
                 # Extract information from item_data
                 title = item_data.get("name", {})
                 desc = item_data.get("descr")
@@ -1601,6 +1866,7 @@ class ChannelList(QMainWindow):
                         ],
                         self.image_manager,
                         iconified=False,
+                        verify_ssl=self.config_manager.ssl_verify,
                     )
                     self.image_loader.progress_updated.connect(self.update_poster)
                     self.image_loader.finished.connect(self.image_loader_finished)
@@ -1610,7 +1876,10 @@ class ChannelList(QMainWindow):
             self.content_info_text.setText("No data available")
 
     def populate_movie_tvshow_content_info(self, item_data):
-        content_info_label = {
+        provider_type = self.provider_manager.current_provider.get("type", "").upper()
+
+        # Common labels; not all keys will be present for all providers
+        stb_labels = {
             "name": "Title",
             "rating_imdb": "Rating",
             "year": "Year",
@@ -1620,30 +1889,57 @@ class ChannelList(QMainWindow):
             "actors": "Actors",
             "description": "Summary",
         }
+        xtream_labels = {
+            "name": "Title",
+            "rating": "Rating",
+            "year": "Year",
+            "genre": "Genre",
+            "director": "Director",
+            "actors": "Actors",
+            "description": "Summary",
+            "plot": "Summary",
+        }
+
+        labels = stb_labels if provider_type == "STB" else xtream_labels
 
         info = ""
-        for key, label in content_info_label.items():
+        for key, label in labels.items():
             if key in item_data:
-                value = item_data[key]
-                # if string, check is not empty and not "na" or "n/a"
-                if value:
-                    if isinstance(value, str) and value.lower() in ["na", "n/a"]:
-                        continue
-                    info += f"<b>{label}:</b> {value}<br>"
-        self.content_info_text.setText(info)
+                value = item_data.get(key)
+                if not value:
+                    continue
+                # Normalize dict/list values from some APIs
+                if isinstance(value, dict) and "__text" in value:
+                    value = value.get("__text")
+                if isinstance(value, list):
+                    value = ", ".join(str(v) for v in value if v)
+                if isinstance(value, str) and value.strip().lower() in {
+                    "na",
+                    "n/a",
+                    "none",
+                    "null",
+                }:
+                    continue
+                info += f"<b>{label}:</b> {value}<br>"
 
-        # Load poster image if available
-        poster_url = item_data.get("screenshot_uri", "")
+        self.content_info_text.setText(info if info else "No data available")
+
+        # Poster/cover image
+        poster_url = ""
+        if provider_type == "STB":
+            poster_url = item_data.get("screenshot_uri", "")
+        else:  # XTREAM and others
+            poster_url = item_data.get("logo") or item_data.get("cover") or ""
+
         if poster_url:
             self.lock_ui_before_loading()
             if self.image_loader and self.image_loader.isRunning():
                 self.image_loader.wait()
             self.image_loader = ImageLoader(
-                [
-                    poster_url,
-                ],
+                [poster_url],
                 self.image_manager,
                 iconified=False,
+                verify_ssl=self.config_manager.ssl_verify,
             )
             self.image_loader.progress_updated.connect(self.update_poster)
             self.image_loader.finished.connect(self.image_loader_finished)
@@ -1714,7 +2010,9 @@ class ChannelList(QMainWindow):
         self.lock_ui_before_loading()
         if self.image_loader and self.image_loader.isRunning():
             self.image_loader.wait()
-        self.image_loader = ImageLoader(logo_urls, self.image_manager, iconified=True)
+        self.image_loader = ImageLoader(
+            logo_urls, self.image_manager, iconified=True, verify_ssl=self.config_manager.ssl_verify
+        )
         self.image_loader.progress_updated.connect(self.update_channel_logos)
         self.image_loader.finished.connect(self.image_loader_finished)
         self.image_loader.start()
@@ -1738,6 +2036,7 @@ class ChannelList(QMainWindow):
         self.current_series = None
         self.current_season = None
         self.navigation_stack.clear()
+        self.forward_stack.clear()
         self.load_content()
 
         # Clear search box after changing content type and force re-filtering if needed
@@ -2004,7 +2303,12 @@ class ChannelList(QMainWindow):
             self.lock_ui_before_loading()
             if self.image_loader and self.image_loader.isRunning():
                 self.image_loader.wait()
-            self.image_loader = ImageLoader(logo_urls, self.image_manager, iconified=True)
+            self.image_loader = ImageLoader(
+                logo_urls,
+                self.image_manager,
+                iconified=True,
+                verify_ssl=self.config_manager.ssl_verify,
+            )
             self.image_loader.progress_updated.connect(self.update_channel_logos)
             self.image_loader.finished.connect(self.image_loader_finished)
             self.image_loader.start()
@@ -2065,6 +2369,40 @@ class ChannelList(QMainWindow):
             item = self.content_list.topLevelItem(i)
             item_name = self.get_item_name(item, item_type)
             matches_search = search_text in item_name.lower()
+
+            # Optionally include metadata fields (description/plot, group, On Air EPG) in search
+            if (
+                not matches_search
+                and getattr(self, "search_descriptions_checkbox", None)
+                and self.search_descriptions_checkbox.isChecked()
+                and item_type in ["channel", "movie", "serie", "m3ucontent"]
+            ):
+                try:
+                    data = item.data(0, Qt.UserRole) or {}
+                    content = data.get("data", {}) if isinstance(data, dict) else {}
+                    description = content.get("description") or content.get("plot") or ""
+                    group = content.get("group", "")
+                    # Check textual metadata
+                    if (isinstance(description, str) and search_text in description.lower()) or (
+                        isinstance(group, str) and search_text in group.lower()
+                    ):
+                        matches_search = True
+                    # Check EPG "On Air" column text for channels/m3u when EPG is enabled
+                    if (
+                        not matches_search
+                        and item_type in ["channel", "m3ucontent"]
+                        and self.config_manager.channel_epg
+                        and self.can_show_epg(item_type)
+                    ):
+                        try:
+                            epg_text = item.data(3, Qt.UserRole) or ""
+                            if isinstance(epg_text, str) and search_text in epg_text.lower():
+                                matches_search = True
+                        except Exception:
+                            pass
+                except Exception:
+                    # Be conservative; ignore metadata if unexpected structure
+                    pass
 
             # For categories, check if any content inside matches and show dropdown
             if item_type == "category" and search_text:
@@ -2131,16 +2469,49 @@ class ChannelList(QMainWindow):
             # Find matching items
             search_lower = search_text.lower()
             matching = []
+            include_desc = (
+                getattr(self, "search_descriptions_checkbox", None)
+                and self.search_descriptions_checkbox.isChecked()
+            )
             for item in items:
                 # Check name
                 name = item.get("name", "")
                 matches_name = search_lower in name.lower()
 
-                # Also check description for movies/series
+                # Also check description for movies/series when enabled
                 description = item.get("description") or item.get("plot") or ""
-                matches_desc = search_lower in description.lower()
+                matches_desc = include_desc and search_lower in description.lower()
 
-                if matches_name or matches_desc:
+                # Optionally check current EPG program title when in live channels view
+                matches_epg = False
+                if (
+                    include_desc
+                    and self.content_type == "itv"
+                    and self.config_manager.channel_epg
+                    and self.can_show_epg("channel")
+                ):
+                    try:
+                        epg_list = self.epg_manager.get_programs_for_channel(item, None, 1) or []
+                        if epg_list:
+                            epg_item = epg_list[0]
+                            if "title" in epg_item:  # XMLTV style
+                                title_val = epg_item.get("title")
+                                epg_text = ""
+                                if isinstance(title_val, dict):
+                                    epg_text = title_val.get("__text") or ""
+                                elif isinstance(title_val, list) and title_val:
+                                    first = title_val[0]
+                                    if isinstance(first, dict):
+                                        epg_text = first.get("__text") or ""
+                                else:
+                                    epg_text = str(title_val or "")
+                            else:
+                                epg_text = str(epg_item.get("name") or "")
+                            matches_epg = search_lower in epg_text.lower()
+                    except Exception:
+                        matches_epg = False
+
+                if matches_name or matches_desc or matches_epg:
                     matching.append(item)
 
             return matching
@@ -2537,7 +2908,10 @@ class ChannelList(QMainWindow):
         headers = self.provider_manager.headers
         url = selected_provider.get("url", "")
         url = URLObject(url)
-        base_url = f"{url.scheme}://{url.netloc}/server/load.php"
+        scheme = url.scheme
+        if self.config_manager.prefer_https and scheme == "http":
+            scheme = "https"
+        base_url = f"{scheme}://{url.netloc}/server/load.php"
 
         params = {
             "type": "series",
@@ -2550,7 +2924,10 @@ class ChannelList(QMainWindow):
         }
 
         try:
-            response = requests.get(base_url, headers=headers, params=params, timeout=10)
+            verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
+            response = requests.get(
+                base_url, headers=headers, params=params, timeout=10, verify=verify_ssl
+            )
             if response.status_code == 200:
                 return response.json().get("js", {})
         except Exception as e:
@@ -2564,7 +2941,10 @@ class ChannelList(QMainWindow):
         headers = self.provider_manager.headers
         url = selected_provider.get("url", "")
         url = URLObject(url)
-        base_url = f"{url.scheme}://{url.netloc}/server/load.php"
+        scheme = url.scheme
+        if self.config_manager.prefer_https and scheme == "http":
+            scheme = "https"
+        base_url = f"{scheme}://{url.netloc}/server/load.php"
 
         params = {
             "type": "series",
@@ -2577,7 +2957,10 @@ class ChannelList(QMainWindow):
         }
 
         try:
-            response = requests.get(base_url, headers=headers, params=params, timeout=10)
+            verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
+            response = requests.get(
+                base_url, headers=headers, params=params, timeout=10, verify=verify_ssl
+            )
             if response.status_code == 200:
                 return response.json().get("js", {})
         except Exception as e:
@@ -2637,7 +3020,10 @@ class ChannelList(QMainWindow):
                 # Run network download in a worker thread
                 self.lock_ui_before_loading()
                 thread = QThread()
-                worker = M3ULoaderWorker(url)
+                provider = self.provider_manager.current_provider
+                prefer_https = provider.get("prefer_https", self.config_manager.prefer_https)
+                verify_ssl = provider.get("ssl_verify", self.config_manager.ssl_verify)
+                worker = M3ULoaderWorker(url, verify_ssl=verify_ssl, prefer_https=prefer_https)
                 worker.moveToThread(thread)
 
                 def _cleanup():
@@ -2719,6 +3105,10 @@ class ChannelList(QMainWindow):
             item_data = data["data"]
             item_type = item.data(0, Qt.UserRole)["type"]
 
+            # Clear forward history unless we are performing a programmatic forward
+            if not getattr(self, "_suppress_forward_clear", False):
+                self.forward_stack.clear()
+
             nav_len = len(self.navigation_stack)
             if item_type == "category":
                 self.navigation_stack.append(("root", self.current_category, item.text(0)))
@@ -2754,6 +3144,8 @@ class ChannelList(QMainWindow):
     def go_back(self):
         if self.navigation_stack:
             nav_type, previous_data, previous_selected_id = self.navigation_stack.pop()
+            # Save to forward stack so we can undo this Back
+            self.forward_stack.append((nav_type, previous_data, previous_selected_id))
             if nav_type == "root":
                 # Display root categories
                 content = self.provider_manager.current_provider_content.setdefault(
@@ -2783,6 +3175,20 @@ class ChannelList(QMainWindow):
             # Already at the root level
             pass
 
+    def go_forward(self):
+        if not self.forward_stack:
+            return
+        nav_type, previous_data, previous_selected_id = self.forward_stack.pop()
+        # Redo the last navigation by selecting the same item again
+        try:
+            self._suppress_forward_clear = True
+            items = self.content_list.findItems(previous_selected_id or "", Qt.MatchExactly, 0)
+            if items:
+                self.content_list.setCurrentItem(items[0])
+                self.item_activated(items[0])
+        finally:
+            self._suppress_forward_clear = False
+
     def options_dialog(self):
         options = OptionsDialog(self)
         options.exec_()
@@ -2795,7 +3201,17 @@ class ChannelList(QMainWindow):
         """Load Xtream content (Live/VOD/Series) using Player API v2 with categories."""
         self.lock_ui_before_loading()
         thread = QThread()
-        worker = XtreamLoaderWorker(base_url, username, password, content_type)
+        provider = self.provider_manager.current_provider
+        prefer_https = provider.get("prefer_https", self.config_manager.prefer_https)
+        verify_ssl = provider.get("ssl_verify", self.config_manager.ssl_verify)
+        worker = XtreamLoaderWorker(
+            base_url,
+            username,
+            password,
+            content_type,
+            verify_ssl=verify_ssl,
+            prefer_https=prefer_https,
+        )
         worker.moveToThread(thread)
 
         def _cleanup():
@@ -2815,13 +3231,37 @@ class ChannelList(QMainWindow):
         thread.start()
         self._bg_jobs.append((thread, worker))
 
+    def eventFilter(self, obj, event):
+        try:
+            if obj is self.content_list and event.type() == QEvent.KeyPress:
+                # Honor Keyboard/Remote Mode for list as well
+                if bool(self.config_manager.keyboard_remote_mode):
+                    if event.key() == Qt.Key_Up:
+                        self.channel_surf_prev()
+                        return True
+                    elif event.key() == Qt.Key_Down:
+                        self.channel_surf_next()
+                        return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
     def load_stb_categories(self, url: str, headers: Optional[dict] = None):
         if headers is None:
             headers = self.provider_manager.headers
         # Run network calls in a worker thread
         self.lock_ui_before_loading()
         thread = QThread()
-        worker = STBCategoriesWorker(url, headers, self.content_type)
+        provider = self.provider_manager.current_provider
+        prefer_https = provider.get("prefer_https", self.config_manager.prefer_https)
+        verify_ssl = provider.get("ssl_verify", self.config_manager.ssl_verify)
+        worker = STBCategoriesWorker(
+            url,
+            headers,
+            self.content_type,
+            verify_ssl=verify_ssl,
+            prefer_https=prefer_https,
+        )
         worker.moveToThread(thread)
 
         def _cleanup():
@@ -2919,13 +3359,20 @@ class ChannelList(QMainWindow):
         headers = self.provider_manager.headers
         url = selected_provider.get("url", "")
         url = URLObject(url)
-        url = f"{url.scheme}://{url.netloc}/server/load.php"
+        scheme = url.scheme
+        if (
+            selected_provider.get("prefer_https", self.config_manager.prefer_https)
+            and scheme == "http"
+        ):
+            scheme = "https"
+        url = f"{scheme}://{url.netloc}/server/load.php"
 
         self.lock_ui_before_loading()
         if self.content_loader and self.content_loader.isRunning():
             self.content_loader.wait()
+        verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
         self.content_loader = ContentLoader(
-            url, headers, self.content_type, category_id=category_id
+            url, headers, self.content_type, category_id=category_id, verify_ssl=verify_ssl
         )
         self.content_loader.content_loaded.connect(
             lambda data: self.update_content_list(data, select_first)
@@ -2949,11 +3396,18 @@ class ChannelList(QMainWindow):
             headers = self.provider_manager.headers
             url = selected_provider.get("url", "")
             url = URLObject(url)
-            url = f"{url.scheme}://{url.netloc}/server/load.php"
+            scheme = url.scheme
+            if (
+                selected_provider.get("prefer_https", self.config_manager.prefer_https)
+                and scheme == "http"
+            ):
+                scheme = "https"
+            url = f"{scheme}://{url.netloc}/server/load.php"
 
             self.lock_ui_before_loading()
             if self.content_loader and self.content_loader.isRunning():
                 self.content_loader.wait()
+            verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
             self.content_loader = ContentLoader(
                 url=url,
                 headers=headers,
@@ -2963,6 +3417,7 @@ class ChannelList(QMainWindow):
                 season_id=0,
                 action="get_ordered_list",
                 sortby="name",
+                verify_ssl=verify_ssl,
             )
 
             self.content_loader.content_loaded.connect(
@@ -3001,12 +3456,16 @@ class ChannelList(QMainWindow):
 
         self.lock_ui_before_loading()
         thread = QThread(self)
+        prefer_https = selected_provider.get("prefer_https", self.config_manager.prefer_https)
+        verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
         worker = XtreamSeriesInfoWorker(
             base_url=selected_provider.get("url", ""),
             username=selected_provider.get("username", ""),
             password=selected_provider.get("password", ""),
             series_id=str(series_item["id"]),
             resolved_base=resolved_base,
+            verify_ssl=verify_ssl,
+            prefer_https=prefer_https,
         )
         worker.moveToThread(thread)
 
@@ -3274,6 +3733,7 @@ class ChannelList(QMainWindow):
             self.lock_ui_before_loading()
             if self.content_loader and self.content_loader.isRunning():
                 self.content_loader.wait()
+            verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
             self.content_loader = ContentLoader(
                 url=url,
                 headers=headers,
@@ -3283,6 +3743,7 @@ class ChannelList(QMainWindow):
                 season_id=season_item["id"],  # Season ID
                 action="get_ordered_list",
                 sortby="added",
+                verify_ssl=verify_ssl,
             )
             self.content_loader.content_loaded.connect(
                 lambda data: self.update_episodes_list(data, select_first)
@@ -3303,6 +3764,8 @@ class ChannelList(QMainWindow):
 
             self.lock_ui_before_loading()
             thread = QThread()
+            prefer_https = selected_provider.get("prefer_https", self.config_manager.prefer_https)
+            verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
             worker = LinkCreatorWorker(
                 base_url=base_url,
                 headers=headers,
@@ -3310,6 +3773,8 @@ class ChannelList(QMainWindow):
                 cmd=cmd,
                 is_episode=is_episode,
                 series_param=series_param,
+                verify_ssl=verify_ssl,
+                prefer_https=prefer_https,
             )
             worker.moveToThread(thread)
 
@@ -3569,7 +4034,10 @@ class ChannelList(QMainWindow):
             headers = self.provider_manager.headers
             url = selected_provider.get("url", "")
             url = URLObject(url)
-            url = f"{url.scheme}://{url.netloc}"
+            scheme = url.scheme
+            if self.config_manager.prefer_https and scheme == "http":
+                scheme = "https"
+            url = f"{scheme}://{url.netloc}"
             cmd = item.get("cmd")
             if is_episode:
                 # For episodes, we need to pass 'series' parameter
@@ -3583,7 +4051,8 @@ class ChannelList(QMainWindow):
                     f"{url}/server/load.php?type={self.content_type}&action=create_link"
                     f"&cmd={url_quote(cmd)}&JsHttpRequest=1-xml"
                 )
-            response = requests.get(fetchurl, headers=headers, timeout=5)
+            verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
+            response = requests.get(fetchurl, headers=headers, timeout=5, verify=verify_ssl)
             if response.status_code != 200 or not response.content:
                 logger.warning(
                     f"Error creating link: status code {response.status_code}, response content empty"

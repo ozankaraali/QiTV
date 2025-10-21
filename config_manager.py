@@ -67,7 +67,7 @@ def get_app_version() -> str:
 class ConfigManager:
 
     DEFAULT_OPTION_CHECKUPDATE = True
-    DEFAULT_OPTION_STB_CONTENT_INFO = False
+    DEFAULT_OPTION_STB_CONTENT_INFO = True
     DEFAULT_OPTION_CHANNEL_EPG = False
     DEFAULT_OPTION_CHANNEL_LOGO = False
     DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE = 100
@@ -76,6 +76,10 @@ class ConfigManager:
     DEFAULT_OPTION_EPG_FILE = ""
     DEFAULT_OPTION_EPG_EXPIRATION_VALUE = 2
     DEFAULT_OPTION_EPG_EXPIRATION_UNIT = "Hours"
+    DEFAULT_OPTION_PREFER_HTTPS = False
+    DEFAULT_OPTION_SSL_VERIFY = True
+    DEFAULT_OPTION_KEYBOARD_REMOTE_MODE = False
+    DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
 
     def __init__(self):
         self.config = {}
@@ -204,6 +208,23 @@ class ConfigManager:
         # add xmltv_channel_map to the loaded config if it doesn't exist
         if "xmltv_channel_map" not in self.config:
             self.config["xmltv_channel_map"] = MultiKeyDict()
+            need_update = True
+
+        # add network security options if missing
+        if "prefer_https" not in self.config:
+            self.prefer_https = ConfigManager.DEFAULT_OPTION_PREFER_HTTPS
+            need_update = True
+        if "ssl_verify" not in self.config:
+            self.ssl_verify = ConfigManager.DEFAULT_OPTION_SSL_VERIFY
+            need_update = True
+
+        # add keyboard_remote_mode if missing
+        if "keyboard_remote_mode" not in self.config:
+            self.keyboard_remote_mode = ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE
+            need_update = True
+        # add epg_list_window_hours if missing
+        if "epg_list_window_hours" not in self.config:
+            self.epg_list_window_hours = ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
             need_update = True
 
         if need_update:
@@ -343,11 +364,41 @@ class ConfigManager:
     def xmltv_channel_map(self, value):
         self.config["xmltv_channel_map"] = value
 
+    @property
+    def prefer_https(self) -> bool:
+        return bool(self.config.get("prefer_https", ConfigManager.DEFAULT_OPTION_PREFER_HTTPS))
+
+    @prefer_https.setter
+    def prefer_https(self, value: bool) -> None:
+        self.config["prefer_https"] = bool(value)
+
+    @property
+    def ssl_verify(self) -> bool:
+        return bool(self.config.get("ssl_verify", ConfigManager.DEFAULT_OPTION_SSL_VERIFY))
+
+    @ssl_verify.setter
+    def ssl_verify(self, value: bool) -> None:
+        self.config["ssl_verify"] = bool(value)
+
+    @property
+    def keyboard_remote_mode(self) -> bool:
+        return bool(
+            self.config.get(
+                "keyboard_remote_mode", ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE
+            )
+        )
+
+    @keyboard_remote_mode.setter
+    def keyboard_remote_mode(self, value: bool) -> None:
+        self.config["keyboard_remote_mode"] = bool(value)
+
     @staticmethod
     def default_config():
         return {
             "selected_provider_name": "iptv-org.github.io",
             "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
+            "prefer_https": ConfigManager.DEFAULT_OPTION_PREFER_HTTPS,
+            "ssl_verify": ConfigManager.DEFAULT_OPTION_SSL_VERIFY,
             "data": [
                 {
                     "type": "M3UPLAYLIST",
@@ -372,6 +423,8 @@ class ConfigManager:
             "channel_epg": ConfigManager.DEFAULT_OPTION_CHANNEL_EPG,
             "xmltv_channel_map": MultiKeyDict(),
             "max_cache_image_size": ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE,
+            "keyboard_remote_mode": ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE,
+            "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
         }
 
     def save_window_settings(self, window, window_name):
@@ -405,3 +458,25 @@ class ConfigManager:
             f.write(serialized_config.decode("utf-8"))
 
         self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
+
+    # EPG list time window (hours); 0 = unlimited
+    @property
+    def epg_list_window_hours(self) -> int:
+        try:
+            v = int(
+                self.config.get(
+                    "epg_list_window_hours", ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
+                )
+            )
+        except Exception:
+            v = ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
+        return v
+
+    @epg_list_window_hours.setter
+    def epg_list_window_hours(self, value: int) -> None:
+        try:
+            self.config["epg_list_window_hours"] = int(value)
+        except Exception:
+            self.config["epg_list_window_hours"] = (
+                ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
+            )

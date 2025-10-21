@@ -70,12 +70,7 @@ if __name__ == "__main__":
         player.show()
         channel_list.show()
 
-        # Delay activation to allow Qt to finish initialization
-        def activate_main_window():
-            channel_list.raise_()
-            channel_list.activateWindow()
-
-        QTimer.singleShot(100, activate_main_window)
+        # Do not force focus/activation; let the window manager handle it
 
         if config_manager.check_updates:
             check_for_updates()

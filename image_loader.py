@@ -15,11 +15,13 @@ class ImageLoader(QThread):
         image_urls,
         image_manager,
         iconified=False,
+        verify_ssl=True,
     ):
         super().__init__()
         self.image_urls = image_urls
         self.image_manager = image_manager
         self.iconified = iconified
+        self.verify_ssl = verify_ssl
 
     async def fetch_image(self, session, image_rank, image_url):
         try:
@@ -46,7 +48,8 @@ class ImageLoader(QThread):
         return None
 
     async def load_images(self):
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
+        async with aiohttp.ClientSession(connector=connector) as session:
             tasks = []
             for image_rank, url in enumerate(self.image_urls):
                 if url:

@@ -99,25 +99,60 @@ def xtream_get_php_url(
     return f"{base}/get.php?{urlencode(query, doseq=True, quote_via=quote)}"
 
 
-def xtream_choose_resolved_base(server_info: Dict[str, str]) -> str:
+def xtream_choose_resolved_base(
+    server_info: Dict[str, str], input_base: Optional[str] = None, prefer_https: bool = False
+) -> str:
     """Choose the correct base from Player API server_info payload.
 
-    Prefers https when https_port is provided; falls back to the advertised
-    server_protocol and port.
+    Respect the user's original scheme when provided (do not auto-upgrade to
+    HTTPS). If no input_base is given, use the panel-advertised server_protocol.
+
+    This avoids forcing HTTPS on providers that only serve HTTP or present
+    self-signed certificates.
     """
     try:
-        host = server_info.get("url") or ""
-        # prefer https if available
-        https_port = str(server_info.get("https_port") or "").strip()
-        if https_port and https_port != "0":
-            port = https_port
+        host = (server_info.get("url") or "").strip()
+        if not host:
+            return ""
+
+        # Determine preferred scheme from input_base if provided
+        preferred_scheme = None
+        preferred_port = None
+        if input_base:
+            try:
+                b = base_from_url(_ensure_base(input_base))  # scheme://netloc
+                scheme_sep = b.find("://")
+                if scheme_sep != -1:
+                    preferred_scheme = b[:scheme_sep]
+                    netloc = b[scheme_sep + 3 :]
+                    if ":" in netloc:
+                        preferred_port = netloc.split(":", 1)[1]
+            except Exception:
+                pass
+
+        # Determine scheme preference
+        if prefer_https:
             scheme = "https"
         else:
-            scheme = server_info.get("server_protocol") or "http"
+            # Fall back to server-advertised protocol if no user preference
+            scheme = (preferred_scheme or server_info.get("server_protocol") or "http").strip()
+
+        # Choose port based on chosen scheme, prioritizing user's input port
+        if preferred_port:
+            port = preferred_port
+        elif scheme == "https":
+            # Prefer https_port only when scheme is explicitly https
+            port = (
+                str(server_info.get("https_port") or "").strip()
+                or str(server_info.get("port") or "").strip()
+            )
+        else:
             port = str(server_info.get("port") or "").strip()
 
-        # default ports: omit if standard
-        if (scheme == "https" and port in ("", "443")) or (scheme == "http" and port in ("", "80")):
+        # Omit standard ports
+        if (scheme == "https" and port in ("", "443", "0")) or (
+            scheme == "http" and port in ("", "80", "0")
+        ):
             return f"{scheme}://{host}"
         return f"{scheme}://{host}:{port}"
     except Exception:
