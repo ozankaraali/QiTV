@@ -41,8 +41,8 @@ Current Work Plan (Living TODO)
    - [ ] Consider a small event-bus/signal helper to decouple UI components
  - [x] Add network security toggles (Prefer HTTPS, SSL verify) and plumb into requests/aiohttp (XTREAM/STB/M3U)
  - [ ] Debug log EPG endpoints for providers (STB `load.php` get_epg_info, Xtream `xmltv.php`) to help diagnose ID mismatches
- - [ ] Show all EPG entries in channel program list (no windowing), with local time formatting
- - [ ] Investigate VideoPlayer seeking: prevent playback ending on seek; ensure double-clicking the progress slider controls the bar (not window drag)
+ - [x] Show all EPG entries in channel program list (no windowing), with local time formatting
+ - [x] Investigate VideoPlayer seeking: prevent playback ending on seek; ensure double-clicking the progress slider controls the bar (not window drag)
 
 4) Logging and error handling
    - [x] Add module-level loggers; remove stray prints
@@ -132,6 +132,9 @@ Recent Changes (for context)
 - CI: Switched GitHub Actions to uv; centralized tool configs in `pyproject.toml`
  - Feature: Added global Network settings: "Prefer HTTPS when available" and "Verify SSL certificates". Applied to Xtream, STB, and M3U fetchers (options.py, config_manager.py, channel_list.py, provider_manager.py, epg_manager.py, services/provider_api.py, content_loader.py, image_loader.py)
  - Behavior: Xtream base resolution no longer auto-enforces HTTPS; respects entered scheme unless Prefer HTTPS is enabled (services/provider_api.py, channel_list.py)
+ - Player: Replaced plain `QProgressBar` with seekable progress bar subclass; drag/double-click seeks without window drag. Seeking clamps near end to avoid playback ending.
+ - EPG UX: Program list highlights the currently airing entry with a "▶ Now" prefix and a light blue background; times are localized.
+ - EPG: Added Settings control for STB EPG server fetch period (hours); loader now uses `epg_stb_period_hours` instead of fixed 5.
 
 Conventions for New Code
 - Keep UI and data/services separate. Long-running network calls must run in QThread.

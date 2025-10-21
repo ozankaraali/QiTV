@@ -1204,10 +1204,14 @@ class ChannelList(QMainWindow):
             w = QApplication.focusWidget()
             return not isinstance(w, (QLineEdit, QTextEdit, QPlainTextEdit))
 
+        # Playback shortcuts: mirror on ChannelList with Window scope
+        # so they work when this window is active, without colliding
+        # with VideoPlayer's own shortcuts when it has focus.
+
         # Fullscreen
         act_full = QAction("Fullscreen", self)
         act_full.setShortcut(QKeySequence(Qt.Key_F))
-        act_full.setShortcutContext(Qt.ApplicationShortcut)
+        act_full.setShortcutContext(Qt.WindowShortcut)
         act_full.triggered.connect(
             lambda: self.player.toggle_fullscreen() if not_in_text_input() else None
         )
@@ -1216,7 +1220,7 @@ class ChannelList(QMainWindow):
         # Mute
         act_mute = QAction("Mute", self)
         act_mute.setShortcut(QKeySequence(Qt.Key_M))
-        act_mute.setShortcutContext(Qt.ApplicationShortcut)
+        act_mute.setShortcutContext(Qt.WindowShortcut)
         act_mute.triggered.connect(
             lambda: self.player.toggle_mute() if not_in_text_input() else None
         )
@@ -1225,7 +1229,7 @@ class ChannelList(QMainWindow):
         # Play/Pause
         act_play = QAction("Play/Pause", self)
         act_play.setShortcut(QKeySequence(Qt.Key_Space))
-        act_play.setShortcutContext(Qt.ApplicationShortcut)
+        act_play.setShortcutContext(Qt.WindowShortcut)
         act_play.triggered.connect(
             lambda: self.player.toggle_play_pause() if not_in_text_input() else None
         )
@@ -1234,7 +1238,7 @@ class ChannelList(QMainWindow):
         # Picture-in-Picture
         act_pip = QAction("PiP", self)
         act_pip.setShortcut(QKeySequence(Qt.ALT | Qt.Key_P))
-        act_pip.setShortcutContext(Qt.ApplicationShortcut)
+        act_pip.setShortcutContext(Qt.WindowShortcut)
 
         def _pip():
             if not_in_text_input():
@@ -1707,7 +1711,25 @@ class ChannelList(QMainWindow):
                 item = QListWidgetItem(f"{epg_text}")
                 item.setData(Qt.UserRole, epg_item)
                 self.program_list.addItem(item)
+            # Visually highlight the currently airing program
             if now_index is not None:
+                try:
+                    now_item = self.program_list.item(now_index)
+                    if now_item is not None:
+                        # Prefix with a play arrow for visibility
+                        try:
+                            current_text = now_item.text()
+                            if not current_text.lstrip().startswith("▶ Now"):
+                                now_item.setText(f"▶ Now  {current_text}")
+                        except Exception:
+                            pass
+                        # Light blue background tint
+                        try:
+                            now_item.setBackground(QColor(51, 153, 255, 40))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 self.program_list.setCurrentRow(now_index)
             else:
                 self.program_list.setCurrentRow(0)

@@ -432,7 +432,10 @@ class EpgManager:
         content_loader = None
         for b in candidates:
             url = stb_endpoint(b)
-            period = 5
+            try:
+                period = int(self.config_manager.epg_stb_period_hours)
+            except Exception:
+                period = 5
             logger.debug("STB EPG endpoint: %s?action=get_epg_info&period=%s", url, period)
             content_loader = ContentLoader(
                 url=url,
@@ -743,6 +746,9 @@ class EpgManager:
                     break
 
         programs.sort(key=lambda program: program["@start"])
+        # If unlimited requested (max_programs <= 0), return full filtered list
+        if not max_programs or max_programs <= 0:
+            return programs
         return programs[:max_programs]
 
     def _filter_and_sort_programs(self, programs, start_time, max_programs):

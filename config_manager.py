@@ -80,6 +80,8 @@ class ConfigManager:
     DEFAULT_OPTION_SSL_VERIFY = True
     DEFAULT_OPTION_KEYBOARD_REMOTE_MODE = False
     DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
+    DEFAULT_OPTION_EPG_STB_PERIOD_HOURS = 5
+    DEFAULT_OPTION_SMOOTH_PAUSED_SEEK = True
 
     def __init__(self):
         self.config = {}
@@ -222,9 +224,17 @@ class ConfigManager:
         if "keyboard_remote_mode" not in self.config:
             self.keyboard_remote_mode = ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE
             need_update = True
+        # add smooth_paused_seek if missing
+        if "smooth_paused_seek" not in self.config:
+            self.smooth_paused_seek = ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK
+            need_update = True
         # add epg_list_window_hours if missing
         if "epg_list_window_hours" not in self.config:
             self.epg_list_window_hours = ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
+            need_update = True
+        # add epg_stb_period_hours if missing
+        if "epg_stb_period_hours" not in self.config:
+            self.epg_stb_period_hours = ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS
             need_update = True
 
         if need_update:
@@ -392,6 +402,16 @@ class ConfigManager:
     def keyboard_remote_mode(self, value: bool) -> None:
         self.config["keyboard_remote_mode"] = bool(value)
 
+    @property
+    def smooth_paused_seek(self) -> bool:
+        return bool(
+            self.config.get("smooth_paused_seek", ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK)
+        )
+
+    @smooth_paused_seek.setter
+    def smooth_paused_seek(self, value: bool) -> None:
+        self.config["smooth_paused_seek"] = bool(value)
+
     @staticmethod
     def default_config():
         return {
@@ -424,7 +444,9 @@ class ConfigManager:
             "xmltv_channel_map": MultiKeyDict(),
             "max_cache_image_size": ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE,
             "keyboard_remote_mode": ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE,
+            "smooth_paused_seek": ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK,
             "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
+            "epg_stb_period_hours": ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
         }
 
     def save_window_settings(self, window, window_name):
@@ -480,3 +502,23 @@ class ConfigManager:
             self.config["epg_list_window_hours"] = (
                 ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
             )
+
+    # STB EPG fetch period (provider-side hours)
+    @property
+    def epg_stb_period_hours(self) -> int:
+        try:
+            v = int(
+                self.config.get(
+                    "epg_stb_period_hours", ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS
+                )
+            )
+        except Exception:
+            v = ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS
+        return max(1, min(168, v))
+
+    @epg_stb_period_hours.setter
+    def epg_stb_period_hours(self, value: int) -> None:
+        try:
+            self.config["epg_stb_period_hours"] = int(value)
+        except Exception:
+            self.config["epg_stb_period_hours"] = ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS

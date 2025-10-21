@@ -69,6 +69,8 @@ class VideoPlayer(QMainWindow):
         self.media_player = self.instance.media_player_new()
         self.media_player.video_set_mouse_input(False)
         self.media_player.video_set_key_input(False)
+        self._last_url: str | None = None
+        self._seek_retry_done: bool = False
 
         # Set up event manager for logging
         self.event_manager = self.media_player.event_manager()
@@ -92,7 +94,51 @@ class VideoPlayer(QMainWindow):
 
         self.resize_corner = None
 
-        self.progress_bar = QProgressBar(self)
+        # Seekable progress bar (handles press/move/dblclick without bubbling)
+        class _SeekProgressBar(QProgressBar):
+            def __init__(self, parent=None, on_seek=None):
+                super().__init__(parent)
+                self._on_seek = on_seek
+                self.setMouseTracking(True)
+
+            def _emit_seek(self, event):
+                try:
+                    w = self.width() or 1
+                    # Support QPointF (position) and QPoint (pos)
+                    x = (
+                        event.position().x()
+                        if hasattr(event, "position")
+                        else float(event.pos().x())
+                    )
+                    frac = max(0.0, min(1.0, x / float(w)))
+                    if callable(self._on_seek):
+                        self._on_seek(frac)
+                except Exception:
+                    pass
+
+            def mousePressEvent(self, event):
+                if event.buttons() & Qt.LeftButton:
+                    self._emit_seek(event)
+                    event.accept()
+                    return
+                super().mousePressEvent(event)
+
+            def mouseMoveEvent(self, event):
+                if event.buttons() & Qt.LeftButton:
+                    self._emit_seek(event)
+                    event.accept()
+                    return
+                super().mouseMoveEvent(event)
+
+            def mouseDoubleClickEvent(self, event):
+                # Treat double-click as a seek action; do not bubble to parent/window
+                if event.buttons() & Qt.LeftButton or event.button() == Qt.LeftButton:
+                    self._emit_seek(event)
+                    event.accept()
+                    return
+                super().mouseDoubleClickEvent(event)
+
+        self.progress_bar = _SeekProgressBar(self, on_seek=self._on_seek_fraction)
         self.progress_bar.setRange(0, 1000)  # Use 1000 steps for smoother updates
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
@@ -102,6 +148,7 @@ class VideoPlayer(QMainWindow):
 
         # Track content type to reduce repeated progress bar toggles
         self._is_live = None  # type: bool | None
+        self._seekable = True
 
         self.update_timer = QTimer(self)
         self.update_timer.setInterval(100)  # Update every 100ms
@@ -113,7 +160,7 @@ class VideoPlayer(QMainWindow):
         self.inactivity_timer.timeout.connect(self.on_inactivity)
         self._ui_visible = True  # Track UI visibility state
 
-        self.progress_bar.mousePressEvent = self.seek_video
+        # Deprecated direct handler; interactive behavior handled by _SeekProgressBar above
 
         # Single vs double click handling
         self.click_position = None
@@ -126,28 +173,37 @@ class VideoPlayer(QMainWindow):
         self._setup_actions()
 
     def _setup_actions(self):
+        # Note: Global application-level shortcuts are defined in ChannelList
+        # to work regardless of focus. Avoid duplicating shortcuts here to
+        # prevent "Ambiguous shortcut overload" warnings.
+
         action_play_pause = QAction("Play/Pause", self)
         action_play_pause.setShortcut(QKeySequence(Qt.Key_Space))
+        action_play_pause.setShortcutContext(Qt.WindowShortcut)
         action_play_pause.triggered.connect(self.toggle_play_pause)
         self.addAction(action_play_pause)
 
         action_mute = QAction("Mute", self)
         action_mute.setShortcut(QKeySequence(Qt.Key_M))
+        action_mute.setShortcutContext(Qt.WindowShortcut)
         action_mute.triggered.connect(self.toggle_mute)
         self.addAction(action_mute)
 
         action_fullscreen = QAction("Fullscreen", self)
         action_fullscreen.setShortcut(QKeySequence(Qt.Key_F))
+        action_fullscreen.setShortcutContext(Qt.WindowShortcut)
         action_fullscreen.triggered.connect(self.toggle_fullscreen)
         self.addAction(action_fullscreen)
 
         action_exit_fullscreen = QAction("Exit Fullscreen", self)
+        # Keep Escape local to the player window for exiting fullscreen
         action_exit_fullscreen.setShortcut(QKeySequence(Qt.Key_Escape))
         action_exit_fullscreen.triggered.connect(lambda: self.setWindowState(Qt.WindowNoState))
         self.addAction(action_exit_fullscreen)
 
         action_pip = QAction("Picture in Picture", self)
         action_pip.setShortcut(QKeySequence(Qt.ALT | Qt.Key_P))
+        action_pip.setShortcutContext(Qt.WindowShortcut)
         action_pip.triggered.connect(self._action_toggle_pip)
         self.addAction(action_pip)
 
@@ -156,13 +212,69 @@ class VideoPlayer(QMainWindow):
             self.setWindowState(Qt.WindowNoState)
         self.toggle_pip_mode()
 
-    def seek_video(self, event):
-        if self.media_player.is_playing():
-            width = self.progress_bar.width()
-            click_position = event.position().x()
-            seek_position = click_position / width
-            self.media_player.set_position(seek_position)
-        event.accept()  # Prevent event from propagating to window (avoids dragging)
+    def _on_seek_fraction(self, fraction: float) -> None:
+        # Only seek when media is seekable and not live
+        if getattr(self, "_seekable", None) is False or self._is_live is True:
+            return
+        try:
+            media = getattr(self, "media", None)
+            duration = media.get_duration() if media is not None else 0
+        except Exception:
+            duration = 0
+        # Prefer time-based seek to avoid libVLC treating 1.0 as Ended
+        if duration and duration > 0:
+            # Clamp to slightly before end (avoid Ended firing on boundary)
+            target_ms = max(
+                0, min(int(duration - 1000), int(duration * max(0.0, min(1.0, fraction))))
+            )
+            try:
+                paused = self.media_player.get_state() == vlc.State.Paused
+            except Exception:
+                paused = False
+
+            if paused and getattr(self.config_manager, "smooth_paused_seek", False):
+                # Temporarily resume to let demux advance, then pause again
+                try:
+                    self.media_player.play()
+                    QTimer.singleShot(60, lambda: self.media_player.set_time(target_ms))
+                    QTimer.singleShot(140, lambda: self.media_player.pause())
+                except Exception:
+                    # Fallback to direct seek
+                    try:
+                        self.media_player.set_time(target_ms)
+                    except Exception:
+                        pos = max(0.0, min(0.999, float(fraction)))
+                        self.media_player.set_position(pos)
+            else:
+                try:
+                    self.media_player.set_time(target_ms)
+                except Exception:
+                    # Fallback to position API with clamp
+                    pos = max(0.0, min(0.999, float(fraction)))
+                    self.media_player.set_position(pos)
+        else:
+            # Unknown duration; fallback to position with clamp
+            pos = max(0.0, min(0.999, float(fraction)))
+            try:
+                paused = self.media_player.get_state() == vlc.State.Paused
+            except Exception:
+                paused = False
+
+            if paused and getattr(self.config_manager, "smooth_paused_seek", False):
+                try:
+                    self.media_player.play()
+                    QTimer.singleShot(60, lambda: self.media_player.set_position(pos))
+                    QTimer.singleShot(140, lambda: self.media_player.pause())
+                except Exception:
+                    try:
+                        self.media_player.set_position(pos)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    self.media_player.set_position(pos)
+                except Exception:
+                    pass
 
     def format_time(self, milliseconds):
         seconds = int(milliseconds / 1000)
@@ -264,6 +376,8 @@ class VideoPlayer(QMainWindow):
         elif platform.system() == "Darwin":
             self.media_player.set_nsobject(int(self.video_frame.winId()))
 
+        self._last_url = video_url
+        self._seek_retry_done = False
         self.media = self.instance.media_new(video_url)
         # Improved options for IPTV streams to prevent freezing
         try:
@@ -277,11 +391,8 @@ class VideoPlayer(QMainWindow):
 
             # Connection settings
             self.media.add_option(":http-reconnect=true")
-            self.media.add_option(":http-continuous=true")
 
-            # Performance settings
-            self.media.add_option(":clock-jitter=0")
-            self.media.add_option(":clock-synchro=0")
+            # Performance settings (keep defaults; avoid aggressive clock tweaks that can affect PTS)
 
             # Disable unused features for better performance
             self.media.add_option(":no-audio-time-stretch")
@@ -290,18 +401,19 @@ class VideoPlayer(QMainWindow):
             # Hardware decoding (if available)
             self.media.add_option(":avcodec-hw=any")
 
-            # Special handling for MKV/MP4 files over HTTP
+            # Special handling for VOD/HTTP containers: keep options minimal and safe
             if video_url and (
                 '.mkv' in video_url.lower()
                 or '.mp4' in video_url.lower()
                 or '.avi' in video_url.lower()
+                or '.webm' in video_url.lower()
             ):
-                # Better demuxer for MKV/MP4 files
-                self.media.add_option(":demux=avformat")
-                # Disable timeshift for better seeking
-                self.media.add_option(":no-input-timeshift-granularity")
-                # Increase network cache for VOD
-                self.media.add_option(":network-caching=5000")
+                # Disable timeshift (it conflicts with paced streams on some servers)
+                self.media.add_option(":input-timeshift-granularity=0")
+                # Increase network cache for VOD a bit
+                self.media.add_option(":network-caching=4000")
+                # Prefer fast seek to reduce heavy prefetch
+                self.media.add_option(":input-fast-seek")
                 # Enable HTTP byte-range for seeking
                 self.media.add_option(":http-forward-cookies=true")
         except Exception as e:
@@ -523,12 +635,24 @@ class VideoPlayer(QMainWindow):
     def media_length_changed(self):
         duration = self.media.get_duration()
         self._is_live = duration <= 0
+        try:
+            self._seekable = bool(self.media_player.is_seekable()) and not self._is_live
+        except Exception:
+            self._seekable = not self._is_live
         if not self._is_live:  # VOD content
             if not self.progress_bar.isVisible():
                 self.progress_bar.setVisible(True)
             self.progress_bar.setRange(0, 1000)
             self.progress_bar.setFormat("00:00 / " + self.format_time(duration))
+            try:
+                self.progress_bar.setEnabled(bool(self._seekable))
+            except Exception:
+                pass
             self.update_timer.start()
+            # If VOD is reported non-seekable, retry once with a minimal option profile
+            if not self._seekable and not self._seek_retry_done:
+                self._seek_retry_done = True
+                QTimer.singleShot(0, self._retry_minimal_vod_profile)
         else:  # Live content
             self.update_timer.stop()
             if self.progress_bar.isVisible():
@@ -581,3 +705,29 @@ class VideoPlayer(QMainWindow):
             QGuiApplication.restoreOverrideCursor()
         else:
             self.setWindowState(Qt.WindowNoState)
+
+    def _retry_minimal_vod_profile(self):
+        try:
+            if not self._last_url:
+                return
+            last_pos = 0
+            try:
+                last_pos = max(0, int(self.media_player.get_time()))
+            except Exception:
+                last_pos = 0
+            self.media_player.stop()
+            # Rebuild media with minimal, VLC-default-friendly options
+            m = self.instance.media_new(self._last_url)
+            try:
+                m.add_option(":http-user-agent=VLC/3.0.20")
+                m.add_option(":input-timeshift-granularity=0")
+                m.add_option(":network-caching=3000")
+            except Exception:
+                pass
+            self.media = m
+            self.media_player.set_media(self.media)
+            self.media_player.play()
+            if last_pos > 0:
+                QTimer.singleShot(1200, lambda: self.media_player.set_time(last_pos))
+        except Exception:
+            pass

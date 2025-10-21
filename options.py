@@ -173,6 +173,16 @@ class OptionsDialog(QDialog):
         self.keyboard_remote_checkbox.setChecked(self.config_manager.keyboard_remote_mode)
         self.settings_layout.addRow(self.keyboard_remote_checkbox)
 
+        # Smooth seeking while paused: briefly resume to seek, then pause again
+        self.smooth_paused_seek_checkbox = QCheckBox(
+            "Smooth seeking while paused (briefly resume to seek)", self.settings_tab
+        )
+        self.smooth_paused_seek_checkbox.setToolTip(
+            "Reduces timestamp errors during paused seeking by resuming momentarily."
+        )
+        self.smooth_paused_seek_checkbox.setChecked(self.config_manager.smooth_paused_seek)
+        self.settings_layout.addRow(self.smooth_paused_seek_checkbox)
+
     def create_providers_ui(self):
         self.providers_tab = QWidget(self)
         self.options_tab.addTab(self.providers_tab, "Providers")
@@ -369,9 +379,6 @@ class OptionsDialog(QDialog):
 
         self.epg_layout.addRow(self.xmltv_group_widget)
 
-        # Initial call to set visibility based on the current selection
-        self.on_epg_source_changed()
-
         # EPG list window (hours; 0 = unlimited)
         self.epg_list_window_label = QLabel("EPG List Window (hours; 0 = unlimited)")
         self.epg_list_window_spinner = QSpinBox()
@@ -382,6 +389,21 @@ class OptionsDialog(QDialog):
         except Exception:
             self.epg_list_window_spinner.setValue(24)
         self.epg_layout.addRow(self.epg_list_window_label, self.epg_list_window_spinner)
+
+        # STB EPG fetch period (server period in hours)
+        self.epg_stb_period_label = QLabel("STB EPG Server Fetch Period (hours)")
+        self.epg_stb_period_spinner = QSpinBox()
+        self.epg_stb_period_spinner.setMinimum(1)
+        self.epg_stb_period_spinner.setMaximum(168)
+        try:
+            self.epg_stb_period_spinner.setValue(int(self.config_manager.epg_stb_period_hours))
+        except Exception:
+            self.epg_stb_period_spinner.setValue(5)
+        self.epg_layout.addRow(self.epg_stb_period_label, self.epg_stb_period_spinner)
+
+        # Initial call to set visibility based on the current selection
+        # (after all dependent widgets are created)
+        self.on_epg_source_changed()
 
     def load_providers(self):
         self.provider_combo.blockSignals(True)
@@ -435,6 +457,9 @@ class OptionsDialog(QDialog):
         self.epg_file_input.hide()
         self.epg_file_button.hide()
         self.xmltv_group_widget.hide()
+        # Hide STB-period controls by default and toggle per source
+        self.epg_stb_period_label.hide()
+        self.epg_stb_period_spinner.hide()
 
         if epg_source == "URL":
             self.epg_url_label.show()
@@ -448,6 +473,9 @@ class OptionsDialog(QDialog):
             self.epg_expiration_label.show()
             self.epg_expiration_spinner.show()
             self.epg_expiration_combo.show()
+            if epg_source == "STB":
+                self.epg_stb_period_label.show()
+                self.epg_stb_period_spinner.show()
 
         if epg_source not in ["STB", "No Source"]:
             self.xmltv_group_widget.show()
@@ -513,6 +541,7 @@ class OptionsDialog(QDialog):
         self.config_manager.prefer_https = self.prefer_https_checkbox.isChecked()
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.keyboard_remote_mode = self.keyboard_remote_checkbox.isChecked()
+        self.config_manager.smooth_paused_seek = self.smooth_paused_seek_checkbox.isChecked()
 
         need_to_refresh_content_list_size = False
         current_provider_changed = False
@@ -542,6 +571,10 @@ class OptionsDialog(QDialog):
         # Save EPG list window hours
         try:
             self.config_manager.epg_list_window_hours = int(self.epg_list_window_spinner.value())
+        except Exception:
+            pass
+        try:
+            self.config_manager.epg_stb_period_hours = int(self.epg_stb_period_spinner.value())
         except Exception:
             pass
 

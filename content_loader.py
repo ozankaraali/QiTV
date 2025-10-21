@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import random
 from urllib.parse import quote, urlencode
 
@@ -58,18 +59,26 @@ class ContentLoader(QThread):
                 if attempt:
                     logger.debug(f"Retrying page {page}...")
                 params = self.get_params(page)
-                # For EPG debugging: emit a copy-paste-friendly curl with headers
-                # try:
-                #     if self.action in ("get_epg_info", "get_short_epg") and page == 1:
-                #         q = urlencode(params, doseq=True, quote_via=quote)
-                #         full_url = f"{self.url}?{q}" if q else self.url
-                #         def _esc(v: str) -> str:
-                #             return str(v).replace('"', '\\"')
-                #         hdrs = " ".join([f'-H "{_esc(k)}: {_esc(v)}"' for k, v in (self.headers or {}).items()])
-                #         curl_cmd = f"curl -sS -m {timeout} {hdrs} \"{full_url}\""
-                #         logger.info(f"EPG curl: {curl_cmd}")
-                # except Exception:
-                #     pass
+                # For EPG debugging: emit a copy-paste-friendly curl with headers when enabled
+                try:
+                    if (
+                        os.getenv("QITV_DEBUG_CURL")
+                        and self.action in ("get_epg_info", "get_short_epg")
+                        and page == 1
+                    ):
+                        q = urlencode(params, doseq=True, quote_via=quote)
+                        full_url = f"{self.url}?{q}" if q else self.url
+
+                        def _esc(v: str) -> str:
+                            return str(v).replace('"', '\\"')
+
+                        hdrs = " ".join(
+                            [f'-H "{_esc(k)}: {_esc(v)}"' for k, v in (self.headers or {}).items()]
+                        )
+                        curl_cmd = f"curl -sS -m {timeout} {hdrs} \"{full_url}\""
+                        logger.info(f"EPG curl: {curl_cmd}")
+                except Exception:
+                    pass
                 async with session.get(
                     self.url, headers=self.headers, params=params, timeout=timeout
                 ) as response:
