@@ -85,7 +85,7 @@ Simplify and refine the QiTV codebase by reducing boilerplate, extracting helper
       "Verify no other files use standard json inconsistently",
       "Test image caching still works"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "cleanup",

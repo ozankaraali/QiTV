@@ -4,7 +4,6 @@ from collections import OrderedDict
 from datetime import datetime
 import hashlib
 from io import BytesIO
-import json
 import logging
 import os
 import random
@@ -12,7 +11,7 @@ import random
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
 import aiohttp
-import orjson
+import orjson as json
 
 logger = logging.getLogger(__name__)
 
@@ -298,9 +297,10 @@ class ImageManager:
     def _load_index(self):
         self.cache.clear()
         if os.path.exists(self.index_file):
-            with open(self.index_file, "r") as f:
+            with open(self.index_file, "r", encoding="utf-8") as f:
                 try:
-                    self.cache = json.load(f, object_pairs_hook=OrderedDict)
+                    data = json.loads(f.read())
+                    self.cache = OrderedDict(data) if data else OrderedDict()
                 except (json.JSONDecodeError, IOError) as e:
                     logger.warning(f"Error loading index file: {e}")
 
@@ -332,7 +332,7 @@ class ImageManager:
             for url, data in self.cache.items()
         }
         with open(self.index_file, "w", encoding="utf-8") as f:
-            f.write(orjson.dumps(index_data, option=orjson.OPT_INDENT_2).decode("utf-8"))
+            f.write(json.dumps(index_data, option=json.OPT_INDENT_2).decode("utf-8"))
 
     def _manage_cache_size(self):
         # Remove oldest accessed items until cache size is within limits

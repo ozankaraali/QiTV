@@ -2,7 +2,7 @@
 
 ## Current Status
 **Last Updated:** 2026-01-27
-**Tasks Completed:** 6/8
+**Tasks Completed:** 7/8
 **Current Task:** None
 
 ---
@@ -140,3 +140,24 @@
 - Eliminated duplicated try/except, file.write("#EXTM3U"), count tracking, and logger.info calls
 
 **Verified:** Module imports successfully, main module imports correctly, syntax valid
+
+---
+
+### 2026-01-27 - Standardize json imports across codebase
+
+**Completed:** Task 7 - Standardize json imports
+
+**Changes made:**
+- Changed `image_manager.py` to use `import orjson as json` instead of importing both `json` and `orjson` separately
+- Removed redundant `import json` (standard library)
+- Changed `import orjson` to `import orjson as json` to match codebase convention
+- Updated `_load_index()` to use `json.loads(f.read())` with `OrderedDict()` wrapper (orjson doesn't support `object_pairs_hook`)
+- Updated `save_index()` to use aliased `json.dumps()` and `json.OPT_INDENT_2` instead of explicit `orjson` references
+- Added `encoding="utf-8"` to `_load_index()` file open for consistency
+
+**Codebase consistency:**
+- All 6 files now use the same pattern: `import orjson as json`
+- Files using this pattern: config_manager.py, content_loader.py, epg_manager.py, image_manager.py, options.py, provider_manager.py
+- No files use standard library `json` anymore
+
+**Verified:** Module imports successfully, ImageManager instantiates correctly, cache loads properly
