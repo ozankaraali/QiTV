@@ -28,6 +28,10 @@ class VideoPlayer(QMainWindow):
     channelNextRequested = Signal()
     channelPrevRequested = Signal()
 
+    # Timing constants for smooth paused seek (resume → seek → pause)
+    _SEEK_RESUME_DELAY_MS = 60  # Delay before setting position after resume
+    _SEEK_PAUSE_DELAY_MS = 140  # Delay before pausing after seek
+
     def __init__(self, config_manager, *args, **kwargs):
         super(VideoPlayer, self).__init__(*args, **kwargs)
         self.config_manager = config_manager
@@ -212,6 +216,40 @@ class VideoPlayer(QMainWindow):
             self.setWindowState(Qt.WindowNoState)
         self.toggle_pip_mode()
 
+    def _try_seek(self, target, fallback, use_time: bool = True) -> None:
+        """Attempt a seek operation with fallback on failure.
+
+        Args:
+            target: Primary seek value (milliseconds if use_time, else position 0.0-1.0)
+            fallback: Fallback position value (0.0-1.0) if primary fails
+            use_time: If True, use set_time(target); otherwise use set_position(target)
+        """
+        try:
+            if use_time:
+                self.media_player.set_time(target)
+            else:
+                self.media_player.set_position(target)
+        except Exception:
+            try:
+                self.media_player.set_position(fallback)
+            except Exception:
+                pass
+
+    def _smooth_paused_seek(self, target, fallback, use_time: bool = True) -> None:
+        """Seek while paused by briefly resuming playback.
+
+        Temporarily resumes playback, seeks, then pauses again to avoid
+        timestamp errors in some VLC demuxers.
+        """
+        try:
+            self.media_player.play()
+            QTimer.singleShot(
+                self._SEEK_RESUME_DELAY_MS, lambda: self._try_seek(target, fallback, use_time)
+            )
+            QTimer.singleShot(self._SEEK_PAUSE_DELAY_MS, lambda: self.media_player.pause())
+        except Exception:
+            self._try_seek(target, fallback, use_time)
+
     def _on_seek_fraction(self, fraction: float) -> None:
         # Only seek when media is seekable and not live
         if getattr(self, "_seekable", None) is False or self._is_live is True:
@@ -221,60 +259,33 @@ class VideoPlayer(QMainWindow):
             duration = media.get_duration() if media is not None else 0
         except Exception:
             duration = 0
-        # Prefer time-based seek to avoid libVLC treating 1.0 as Ended
+
+        # Compute fallback position (clamped to avoid Ended state at 1.0)
+        fallback_pos = max(0.0, min(0.999, float(fraction)))
+
+        # Check if paused for smooth seek behavior
+        try:
+            paused = self.media_player.get_state() == vlc.State.Paused
+        except Exception:
+            paused = False
+        use_smooth = paused and getattr(self.config_manager, "smooth_paused_seek", False)
+
+        # Prefer time-based seek when duration is known
         if duration and duration > 0:
             # Clamp to slightly before end (avoid Ended firing on boundary)
             target_ms = max(
                 0, min(int(duration - 1000), int(duration * max(0.0, min(1.0, fraction))))
             )
-            try:
-                paused = self.media_player.get_state() == vlc.State.Paused
-            except Exception:
-                paused = False
-
-            if paused and getattr(self.config_manager, "smooth_paused_seek", False):
-                # Temporarily resume to let demux advance, then pause again
-                try:
-                    self.media_player.play()
-                    QTimer.singleShot(60, lambda: self.media_player.set_time(target_ms))
-                    QTimer.singleShot(140, lambda: self.media_player.pause())
-                except Exception:
-                    # Fallback to direct seek
-                    try:
-                        self.media_player.set_time(target_ms)
-                    except Exception:
-                        pos = max(0.0, min(0.999, float(fraction)))
-                        self.media_player.set_position(pos)
+            if use_smooth:
+                self._smooth_paused_seek(target_ms, fallback_pos, use_time=True)
             else:
-                try:
-                    self.media_player.set_time(target_ms)
-                except Exception:
-                    # Fallback to position API with clamp
-                    pos = max(0.0, min(0.999, float(fraction)))
-                    self.media_player.set_position(pos)
+                self._try_seek(target_ms, fallback_pos, use_time=True)
         else:
-            # Unknown duration; fallback to position with clamp
-            pos = max(0.0, min(0.999, float(fraction)))
-            try:
-                paused = self.media_player.get_state() == vlc.State.Paused
-            except Exception:
-                paused = False
-
-            if paused and getattr(self.config_manager, "smooth_paused_seek", False):
-                try:
-                    self.media_player.play()
-                    QTimer.singleShot(60, lambda: self.media_player.set_position(pos))
-                    QTimer.singleShot(140, lambda: self.media_player.pause())
-                except Exception:
-                    try:
-                        self.media_player.set_position(pos)
-                    except Exception:
-                        pass
+            # Unknown duration; use position-based seek
+            if use_smooth:
+                self._smooth_paused_seek(fallback_pos, fallback_pos, use_time=False)
             else:
-                try:
-                    self.media_player.set_position(pos)
-                except Exception:
-                    pass
+                self._try_seek(fallback_pos, fallback_pos, use_time=False)
 
     def format_time(self, milliseconds):
         seconds = int(milliseconds / 1000)

@@ -31,7 +31,7 @@ Simplify and refine the QiTV codebase by reducing boilerplate, extracting helper
       "Extract magic numbers (60ms, 140ms) into named constants",
       "Test that seeking still works in the video player"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "refactor",

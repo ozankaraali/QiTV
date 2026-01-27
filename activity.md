@@ -2,7 +2,7 @@
 
 ## Current Status
 **Last Updated:** 2026-01-27
-**Tasks Completed:** 1/8
+**Tasks Completed:** 2/8
 **Current Task:** None
 
 ---
@@ -27,3 +27,22 @@
 - Int-coerced: epg_list_window_hours
 
 **Verified:** Config loads, reads, and writes correctly
+
+---
+
+### 2026-01-27 - Extract seek helper in video_player.py
+
+**Completed:** Task 2 - Extract seek helper
+
+**Changes made:**
+- Added class constants `_SEEK_RESUME_DELAY_MS` (60) and `_SEEK_PAUSE_DELAY_MS` (140) for timing magic numbers
+- Created `_try_seek(target, fallback, use_time)` helper method that attempts a seek with fallback on failure
+- Created `_smooth_paused_seek(target, fallback, use_time)` helper for the resume→seek→pause pattern when seeking while paused
+- Refactored `_on_seek_fraction()` from ~63 lines to ~34 lines by using the new helpers
+- Removed 4 duplicated try/except seek patterns
+
+**Code reduction:**
+- Before: 4 separate try/except blocks with duplicated logic for time-based and position-based seeking
+- After: Single `_try_seek` helper handles fallback; `_smooth_paused_seek` handles the paused state pattern
+
+**Verified:** Module imports successfully, syntax valid, constants and methods properly defined
