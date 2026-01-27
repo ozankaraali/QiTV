@@ -53,7 +53,7 @@ Simplify and refine the QiTV codebase by reducing boilerplate, extracting helper
       "Refactor get_image_from_base64, get_image_from_url, cache_image_from_url to use helpers",
       "Verify images still load and cache correctly"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "refactor",

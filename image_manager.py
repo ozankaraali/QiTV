@@ -35,39 +35,19 @@ class ImageManager:
         image_type = "qicon" if iconified else "qpixmap"
         ext = "png" if iconified else "jpg"
         image_hash = self._hash_string(image_str + ext)
-        if image_hash in self.cache:
-            if self.cache[image_hash]:
-                self.cache[image_hash]["last_access"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.cache.move_to_end(image_hash)  # Update access order
-                cache_path = os.path.join(self.cache_dir, f"{image_hash}.{ext}")
-                if os.path.exists(cache_path):
-                    if image_type in self.cache[image_hash]:
-                        return self.cache[image_hash][image_type]
-                    else:
-                        image = QPixmap(cache_path, "PNG" if iconified else "JPG")
-                        if iconified:
-                            image = QIcon(image)
-                        self.cache[image_hash][image_type] = image
-                        return image
-                else:
-                    # File doesn't exist, remove the entry from cache
-                    entry = self.cache.pop(image_hash)
-                    if entry:
-                        self.current_cache_size -= entry.get("size", 0)
-            else:
-                return None
 
+        # Check cache first
+        cached_image, found = self._get_cached(image_hash, ext, image_type)
+        if found:
+            return cached_image
+
+        # Check if file exists on disk but not in memory cache
         cache_path = os.path.join(self.cache_dir, f"{image_hash}.{ext}")
         if os.path.exists(cache_path):
             image = QPixmap(cache_path, "PNG" if iconified else "JPG")
             if iconified:
                 image = QIcon(image)
-            self.cache[image_hash] = {
-                image_type: image,
-                "size": os.path.getsize(cache_path),
-                "last_access": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            self.cache.move_to_end(image_hash)  # Update access order
+            self._store_cached(image_hash, image_type, image, os.path.getsize(cache_path))
             return image
 
         # Extract and decode base64 data from the image string
@@ -82,15 +62,7 @@ class ImageManager:
             if image.save(cache_path, "PNG" if iconified else "JPG"):
                 if iconified:
                     image = QIcon(image)
-                file_size = os.path.getsize(cache_path)
-                self.cache[image_hash] = {
-                    image_type: image,
-                    "size": file_size,
-                    "last_access": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                }
-                self.current_cache_size += file_size
-                self.cache.move_to_end(image_hash)  # Update access order
-                self._manage_cache_size()
+                self._store_cached(image_hash, image_type, image, os.path.getsize(cache_path))
                 return image
         self.cache[image_hash] = None
         return None
@@ -99,39 +71,21 @@ class ImageManager:
         image_type = "qicon" if iconified else "qpixmap"
         ext = "png" if iconified else "jpg"
         url_hash = self._hash_string(url + ext)
-        if url_hash in self.cache:
-            if self.cache[url_hash]:
-                self.cache[url_hash]["last_access"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.cache.move_to_end(url_hash)  # Update access order
-                cache_path = os.path.join(self.cache_dir, f"{url_hash}.{ext}")
-                if os.path.exists(cache_path):
-                    if image_type in self.cache[url_hash]:
-                        return self.cache[url_hash][image_type]
-                    else:
-                        image = QPixmap(cache_path, "PNG" if iconified else "JPG")
-                        if iconified:
-                            image = QIcon(image)
-                        self.cache[url_hash][image_type] = image
-                        return image
-                else:
-                    # File doesn't exist, remove the entry from cache
-                    self.current_cache_size -= self.cache[url_hash]["size"]
-                    self.cache.pop(url_hash)
-            else:
-                return None
 
+        # Check cache first
+        cached_image, found = self._get_cached(url_hash, ext, image_type)
+        if found:
+            return cached_image
+
+        # Check if file exists on disk but not in memory cache
         cache_path = os.path.join(self.cache_dir, f"{url_hash}.{ext}")
         if os.path.exists(cache_path):
             image = QPixmap(cache_path, "PNG" if iconified else "JPG")
             if iconified:
                 image = QIcon(image)
-            self.cache[url_hash] = {
-                image_type: image,
-                "size": os.path.getsize(cache_path),
-                "last_access": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            self.cache.move_to_end(url_hash)  # Update access order
+            self._store_cached(url_hash, image_type, image, os.path.getsize(cache_path))
             return image
+
         for attempt in range(max_retries):
             try:
                 async with session.get(url, timeout=timeout) as response:
@@ -165,15 +119,9 @@ class ImageManager:
                             if image.save(cache_path, "PNG" if iconified else "JPG"):
                                 if iconified:
                                     image = QIcon(image)
-                                file_size = os.path.getsize(cache_path)
-                                self.cache[url_hash] = {
-                                    image_type: image,
-                                    "size": file_size,
-                                    "last_access": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                }
-                                self.current_cache_size += file_size
-                                self.cache.move_to_end(url_hash)  # Update access order
-                                self._manage_cache_size()
+                                self._store_cached(
+                                    url_hash, image_type, image, os.path.getsize(cache_path)
+                                )
                                 return image
                     self.cache[url_hash] = None
                     return None
@@ -298,6 +246,54 @@ class ImageManager:
 
     def _hash_string(self, url):
         return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+    def _get_cached(self, cache_hash, ext, image_type):
+        """Look up cache entry, update LRU order, and return cached image or None.
+
+        Returns a tuple (image_or_none, found_in_cache). If found_in_cache is True
+        but image_or_none is None, the entry was a negative cache hit (previously failed).
+        If found_in_cache is False, the caller should attempt to fetch/decode the image.
+        """
+        if cache_hash not in self.cache:
+            return None, False
+
+        entry = self.cache[cache_hash]
+        if entry is None:
+            # Negative cache hit - previously failed to load
+            return None, True
+
+        # Update LRU metadata
+        entry["last_access"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.cache.move_to_end(cache_hash)
+
+        cache_path = os.path.join(self.cache_dir, f"{cache_hash}.{ext}")
+        if not os.path.exists(cache_path):
+            # File was deleted externally; remove stale entry
+            self.current_cache_size -= entry.get("size", 0)
+            self.cache.pop(cache_hash)
+            return None, False
+
+        # Return cached image object if already loaded
+        if image_type in entry:
+            return entry[image_type], True
+
+        # Load from disk and cache the object
+        image = QPixmap(cache_path, "PNG" if ext == "png" else "JPG")
+        if ext == "png":
+            image = QIcon(image)
+        entry[image_type] = image
+        return image, True
+
+    def _store_cached(self, cache_hash, image_type, image, file_size):
+        """Store an image in the cache with LRU tracking and size management."""
+        self.cache[cache_hash] = {
+            image_type: image,
+            "size": file_size,
+            "last_access": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.current_cache_size += file_size
+        self.cache.move_to_end(cache_hash)
+        self._manage_cache_size()
 
     def _load_index(self):
         self.cache.clear()
