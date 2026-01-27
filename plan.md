@@ -95,7 +95,7 @@ Simplify and refine the QiTV codebase by reducing boilerplate, extracting helper
       "Replace all hardcoded 10-pixel checks with constant",
       "Add brief comment explaining the constant"
     ],
-    "passes": false
+    "passes": true
   }
 ]
 ```

@@ -32,6 +32,9 @@ class VideoPlayer(QMainWindow):
     _SEEK_RESUME_DELAY_MS = 60  # Delay before setting position after resume
     _SEEK_PAUSE_DELAY_MS = 140  # Delay before pausing after seek
 
+    # Resize edge detection threshold (pixels from window edge to trigger resize cursor)
+    _RESIZE_EDGE_PIXELS = 10
+
     def __init__(self, config_manager, *args, **kwargs):
         super(VideoPlayer, self).__init__(*args, **kwargs)
         self.config_manager = config_manager
@@ -530,23 +533,24 @@ class VideoPlayer(QMainWindow):
             self.click_position = event.globalPos()
 
             # Determine the resize type (edges or corners)
-            if event.pos().x() <= 10:  # Left
-                if event.pos().y() <= 10:  # Top-left corner
+            edge = self._RESIZE_EDGE_PIXELS
+            if event.pos().x() <= edge:  # Left
+                if event.pos().y() <= edge:  # Top-left corner
                     self.resize_corner = "top_left"
-                elif event.pos().y() >= self.height() - 10:  # Bottom-left corner
+                elif event.pos().y() >= self.height() - edge:  # Bottom-left corner
                     self.resize_corner = "bottom_left"
                 else:  # Left edge
                     self.resize_corner = "left"
-            elif event.pos().x() >= self.width() - 10:  # Right
-                if event.pos().y() <= 10:  # Top-right corner
+            elif event.pos().x() >= self.width() - edge:  # Right
+                if event.pos().y() <= edge:  # Top-right corner
                     self.resize_corner = "top_right"
-                elif event.pos().y() >= self.height() - 10:  # Bottom-right corner
+                elif event.pos().y() >= self.height() - edge:  # Bottom-right corner
                     self.resize_corner = "bottom_right"
                 else:  # Right edge
                     self.resize_corner = "right"
-            elif event.pos().y() <= 10:  # Top edge
+            elif event.pos().y() <= edge:  # Top edge
                 self.resize_corner = "top"
-            elif event.pos().y() >= self.height() - 10:  # Bottom edge
+            elif event.pos().y() >= self.height() - edge:  # Bottom edge
                 self.resize_corner = "bottom"
             else:  # Center area - may be a click or drag, wait for mouseMoveEvent
                 self.drag_position = event.globalPos() - self.frameGeometry().topLeft()

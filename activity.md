@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-01-27
-**Tasks Completed:** 7/8
-**Current Task:** None
+**Tasks Completed:** 8/8
+**Current Task:** None (All tasks complete)
 
 ---
 
@@ -161,3 +161,21 @@
 - No files use standard library `json` anymore
 
 **Verified:** Module imports successfully, ImageManager instantiates correctly, cache loads properly
+
+---
+
+### 2026-01-27 - Extract resize edge constants in video_player.py
+
+**Completed:** Task 8 - Extract resize edge constants
+
+**Changes made:**
+- Created `_RESIZE_EDGE_PIXELS = 10` class constant (line 36) for resize edge detection threshold
+- Added brief comment explaining the constant's purpose
+- Replaced 8 hardcoded `10` values in `mousePressEvent()` with `edge` local variable referencing the constant
+- The local `edge` variable improves readability within the resize detection block
+
+**Code clarity:**
+- Before: Magic number `10` repeated 8 times with no explanation of its meaning
+- After: Named constant clearly indicates this is a pixel threshold for resize cursor activation
+
+**Verified:** Module imports successfully, constant accessible on class (`VideoPlayer._RESIZE_EDGE_PIXELS == 10`)
