@@ -2,7 +2,7 @@
 
 ## Current Status
 **Last Updated:** 2026-01-27
-**Tasks Completed:** 5/8
+**Tasks Completed:** 6/8
 **Current Task:** None
 
 ---
@@ -119,3 +119,24 @@
 - Eliminated 4 redundant calls to `_ensure_base()` and `urlencode()`
 
 **Verified:** Module imports successfully, all URL functions produce correct output, syntax valid
+
+---
+
+### 2026-01-27 - Consolidate export functions in services/export.py
+
+**Completed:** Task 6 - Consolidate export functions
+
+**Changes made:**
+- Created `_write_export_file(content_data, file_path, url_formatter, extinf_formatter)` helper (lines 7-30)
+  - Handles common file I/O: open file, write `#EXTM3U` header, iterate items, count exports, log results
+  - Takes two callback functions: `url_formatter` for URL transformation, `extinf_formatter` for EXTINF line building
+  - Skips items where `url_formatter` returns None/falsy
+- Refactored `save_m3u_content()` (lines 33-44) to use helper with simple formatters
+- Refactored `save_stb_content()` (lines 47-67) to use helper with closures capturing `base_url` and `mac`
+
+**Code reduction:**
+- Before: 2 functions with ~20 lines each of duplicated file I/O, iteration, counting, and logging
+- After: 1 helper (24 lines) + 2 thin wrapper functions (~12 lines each) with focused formatter logic
+- Eliminated duplicated try/except, file.write("#EXTM3U"), count tracking, and logger.info calls
+
+**Verified:** Module imports successfully, main module imports correctly, syntax valid

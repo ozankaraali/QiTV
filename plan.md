@@ -75,7 +75,7 @@ Simplify and refine the QiTV codebase by reducing boilerplate, extracting helper
       "Pass URL formatter as callback parameter",
       "Test export functionality still works"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "cleanup",
