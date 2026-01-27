@@ -18,6 +18,39 @@ except Exception:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
+def _config_property(key: str, default, *, coerce=None, clamp=None):
+    """
+    Factory to generate config property getter/setter pairs.
+
+    Args:
+        key: The config dictionary key
+        default: Default value if key is missing
+        coerce: Optional callable to coerce values (e.g., bool, int)
+        clamp: Optional (min, max) tuple for clamping numeric values
+    """
+
+    def getter(self):
+        value = self.config.get(key, default)
+        if coerce is not None:
+            try:
+                value = coerce(value)
+            except Exception:
+                value = default
+        if clamp is not None:
+            value = max(clamp[0], min(clamp[1], value))
+        return value
+
+    def setter(self, value):
+        if coerce is not None:
+            try:
+                value = coerce(value)
+            except Exception:
+                value = default
+        self.config[key] = value
+
+    return property(getter, setter)
+
+
 _APP_VERSION: str | None = None
 
 
@@ -240,117 +273,28 @@ class ConfigManager:
         if need_update:
             self.save_config()
 
-    @property
-    def check_updates(self):
-        return self.config.get("check_updates", ConfigManager.DEFAULT_OPTION_CHECKUPDATE)
-
-    @check_updates.setter
-    def check_updates(self, value):
-        self.config["check_updates"] = value
-
-    @property
-    def favorites(self):
-        return self.config.get("favorites", [])
-
-    @favorites.setter
-    def favorites(self, value):
-        self.config["favorites"] = value
-
-    @property
-    def last_watched(self):
-        return self.config.get("last_watched", None)
-
-    @last_watched.setter
-    def last_watched(self, value):
-        self.config["last_watched"] = value
-
-    @property
-    def show_stb_content_info(self):
-        return self.config.get(
-            "show_stb_content_info", ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO
-        )
-
-    @show_stb_content_info.setter
-    def show_stb_content_info(self, value):
-        self.config["show_stb_content_info"] = value
-
-    @property
-    def selected_provider_name(self):
-        return self.config.get("selected_provider_name", "iptv-org.github.io")
-
-    @selected_provider_name.setter
-    def selected_provider_name(self, value):
-        self.config["selected_provider_name"] = value
-
-    @property
-    def channel_epg(self):
-        return self.config.get("channel_epg", ConfigManager.DEFAULT_OPTION_CHANNEL_EPG)
-
-    @channel_epg.setter
-    def channel_epg(self, value):
-        self.config["channel_epg"] = value
-
-    @property
-    def channel_logos(self):
-        return self.config.get("channel_logos", ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO)
-
-    @channel_logos.setter
-    def channel_logos(self, value):
-        self.config["channel_logos"] = value
-
-    @property
-    def max_cache_image_size(self):
-        return self.config.get(
-            "max_cache_image_size", ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
-        )
-
-    @max_cache_image_size.setter
-    def max_cache_image_size(self, value):
-        self.config["max_cache_image_size"] = value
-
-    @property
-    def epg_source(self):
-        return self.config.get("epg_source", ConfigManager.DEFAULT_OPTION_EPG_SOURCE)
-
-    @epg_source.setter
-    def epg_source(self, value):
-        self.config["epg_source"] = value
-
-    @property
-    def epg_url(self):
-        return self.config.get("epg_url", ConfigManager.DEFAULT_OPTION_EPG_URL)
-
-    @epg_url.setter
-    def epg_url(self, value):
-        self.config["epg_url"] = value
-
-    @property
-    def epg_file(self):
-        return self.config.get("epg_file", ConfigManager.DEFAULT_OPTION_EPG_FILE)
-
-    @epg_file.setter
-    def epg_file(self, value):
-        self.config["epg_file"] = value
-
-    @property
-    def epg_expiration_value(self):
-        return self.config.get(
-            "epg_expiration_value", ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE
-        )
-
-    @epg_expiration_value.setter
-    def epg_expiration_value(self, value):
-        self.config["epg_expiration_value"] = value
-
-    @property
-    def epg_expiration_unit(self):
-        return self.config.get(
-            "epg_expiration_unit", ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_UNIT
-        )
-
-    @epg_expiration_unit.setter
-    def epg_expiration_unit(self, value):
-        self.config["epg_expiration_unit"] = value
+    # Simple config properties using factory
+    check_updates = _config_property("check_updates", DEFAULT_OPTION_CHECKUPDATE)
+    favorites = _config_property("favorites", [])
+    last_watched = _config_property("last_watched", None)
+    show_stb_content_info = _config_property(
+        "show_stb_content_info", DEFAULT_OPTION_STB_CONTENT_INFO
+    )
+    selected_provider_name = _config_property("selected_provider_name", "iptv-org.github.io")
+    channel_epg = _config_property("channel_epg", DEFAULT_OPTION_CHANNEL_EPG)
+    channel_logos = _config_property("channel_logos", DEFAULT_OPTION_CHANNEL_LOGO)
+    max_cache_image_size = _config_property(
+        "max_cache_image_size", DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
+    )
+    epg_source = _config_property("epg_source", DEFAULT_OPTION_EPG_SOURCE)
+    epg_url = _config_property("epg_url", DEFAULT_OPTION_EPG_URL)
+    epg_file = _config_property("epg_file", DEFAULT_OPTION_EPG_FILE)
+    epg_expiration_value = _config_property(
+        "epg_expiration_value", DEFAULT_OPTION_EPG_EXPIRATION_VALUE
+    )
+    epg_expiration_unit = _config_property(
+        "epg_expiration_unit", DEFAULT_OPTION_EPG_EXPIRATION_UNIT
+    )
 
     @property
     def epg_expiration(self):
@@ -366,51 +310,17 @@ class ConfigManager:
         else:
             raise ValueError(f"Unsupported expiration unit: {self.epg_expiration_unit}")
 
-    @property
-    def xmltv_channel_map(self):
-        return self.config.get("xmltv_channel_map", MultiKeyDict())
+    xmltv_channel_map = _config_property("xmltv_channel_map", MultiKeyDict())
 
-    @xmltv_channel_map.setter
-    def xmltv_channel_map(self, value):
-        self.config["xmltv_channel_map"] = value
-
-    @property
-    def prefer_https(self) -> bool:
-        return bool(self.config.get("prefer_https", ConfigManager.DEFAULT_OPTION_PREFER_HTTPS))
-
-    @prefer_https.setter
-    def prefer_https(self, value: bool) -> None:
-        self.config["prefer_https"] = bool(value)
-
-    @property
-    def ssl_verify(self) -> bool:
-        return bool(self.config.get("ssl_verify", ConfigManager.DEFAULT_OPTION_SSL_VERIFY))
-
-    @ssl_verify.setter
-    def ssl_verify(self, value: bool) -> None:
-        self.config["ssl_verify"] = bool(value)
-
-    @property
-    def keyboard_remote_mode(self) -> bool:
-        return bool(
-            self.config.get(
-                "keyboard_remote_mode", ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE
-            )
-        )
-
-    @keyboard_remote_mode.setter
-    def keyboard_remote_mode(self, value: bool) -> None:
-        self.config["keyboard_remote_mode"] = bool(value)
-
-    @property
-    def smooth_paused_seek(self) -> bool:
-        return bool(
-            self.config.get("smooth_paused_seek", ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK)
-        )
-
-    @smooth_paused_seek.setter
-    def smooth_paused_seek(self, value: bool) -> None:
-        self.config["smooth_paused_seek"] = bool(value)
+    # Boolean config properties using factory with coercion
+    prefer_https = _config_property("prefer_https", DEFAULT_OPTION_PREFER_HTTPS, coerce=bool)
+    ssl_verify = _config_property("ssl_verify", DEFAULT_OPTION_SSL_VERIFY, coerce=bool)
+    keyboard_remote_mode = _config_property(
+        "keyboard_remote_mode", DEFAULT_OPTION_KEYBOARD_REMOTE_MODE, coerce=bool
+    )
+    smooth_paused_seek = _config_property(
+        "smooth_paused_seek", DEFAULT_OPTION_SMOOTH_PAUSED_SEEK, coerce=bool
+    )
 
     @staticmethod
     def default_config():
@@ -481,44 +391,10 @@ class ConfigManager:
 
         self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
 
-    # EPG list time window (hours); 0 = unlimited
-    @property
-    def epg_list_window_hours(self) -> int:
-        try:
-            v = int(
-                self.config.get(
-                    "epg_list_window_hours", ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
-                )
-            )
-        except Exception:
-            v = ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
-        return v
-
-    @epg_list_window_hours.setter
-    def epg_list_window_hours(self, value: int) -> None:
-        try:
-            self.config["epg_list_window_hours"] = int(value)
-        except Exception:
-            self.config["epg_list_window_hours"] = (
-                ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
-            )
-
-    # STB EPG fetch period (provider-side hours)
-    @property
-    def epg_stb_period_hours(self) -> int:
-        try:
-            v = int(
-                self.config.get(
-                    "epg_stb_period_hours", ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS
-                )
-            )
-        except Exception:
-            v = ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS
-        return max(1, min(168, v))
-
-    @epg_stb_period_hours.setter
-    def epg_stb_period_hours(self, value: int) -> None:
-        try:
-            self.config["epg_stb_period_hours"] = int(value)
-        except Exception:
-            self.config["epg_stb_period_hours"] = ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS
+    # Integer config properties using factory with coercion
+    epg_list_window_hours = _config_property(
+        "epg_list_window_hours", DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS, coerce=int
+    )
+    epg_stb_period_hours = _config_property(
+        "epg_stb_period_hours", DEFAULT_OPTION_EPG_STB_PERIOD_HOURS, coerce=int, clamp=(1, 168)
+    )
