@@ -64,7 +64,7 @@ Simplify and refine the QiTV codebase by reducing boilerplate, extracting helper
       "Keep same function signatures for backwards compatibility",
       "Verify Xtream provider still works"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "refactor",

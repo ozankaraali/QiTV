@@ -65,6 +65,25 @@ def _ensure_base(url: str) -> str:
         return url
 
 
+def _build_xtream_url(
+    base: str,
+    endpoint: str,
+    username: str,
+    password: str,
+    extra: Optional[Dict[str, str]] = None,
+) -> str:
+    """Build an Xtream Codes URL with consistent query encoding.
+
+    All Xtream URLs follow the pattern: {base}/{endpoint}?username=U&password=P[&extra...]
+    This factory centralizes URL construction and query encoding.
+    """
+    base = _ensure_base(base)
+    query = {"username": username, "password": password}
+    if extra:
+        query.update(extra)
+    return f"{base}/{endpoint}?{urlencode(query, doseq=True, quote_via=quote)}"
+
+
 def xtream_player_api_url(
     base: str,
     username: str,
@@ -76,13 +95,12 @@ def xtream_player_api_url(
 
     Example: {base}/player_api.php?username=U&password=P[&action=...]
     """
-    base = _ensure_base(base)
-    query = {"username": username, "password": password}
+    params = {}
     if action:
-        query["action"] = action
+        params["action"] = action
     if extra:
-        query.update(extra)
-    return f"{base}/player_api.php?{urlencode(query, doseq=True, quote_via=quote)}"
+        params.update(extra)
+    return _build_xtream_url(base, "player_api.php", username, password, params or None)
 
 
 def xtream_get_php_url(
@@ -92,11 +110,7 @@ def xtream_get_php_url(
 
     Example: {base}/get.php?username=U&password=P&type=m3u
     """
-    base = _ensure_base(base)
-    query = {"username": username, "password": password}
-    if extra:
-        query.update(extra)
-    return f"{base}/get.php?{urlencode(query, doseq=True, quote_via=quote)}"
+    return _build_xtream_url(base, "get.php", username, password, extra)
 
 
 def xtream_choose_resolved_base(
@@ -184,9 +198,7 @@ def xtream_xmltv_url(base: str, username: str, password: str) -> str:
     Returns full EPG list for all streams in XMLTV format.
     Example: {base}/xmltv.php?username=U&password=P
     """
-    base = _ensure_base(base)
-    query = {"username": username, "password": password}
-    return f"{base}/xmltv.php?{urlencode(query, doseq=True, quote_via=quote)}"
+    return _build_xtream_url(base, "xmltv.php", username, password)
 
 
 def xtream_epg_url(
@@ -197,13 +209,7 @@ def xtream_epg_url(
     Gets all EPG listings for a single stream (like STB portal).
     Example: {base}/player_api.php?username=U&password=P&action=get_simple_data_table&stream_id=XXX&limit=X
     """
-    base = _ensure_base(base)
-    query = {
-        "username": username,
-        "password": password,
-        "action": "get_simple_data_table",
-        "stream_id": stream_id,
-    }
+    extra: Dict[str, str] = {"action": "get_simple_data_table", "stream_id": stream_id}
     if limit is not None:
-        query["limit"] = str(limit)
-    return f"{base}/player_api.php?{urlencode(query, doseq=True, quote_via=quote)}"
+        extra["limit"] = str(limit)
+    return _build_xtream_url(base, "player_api.php", username, password, extra)

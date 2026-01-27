@@ -2,7 +2,7 @@
 
 ## Current Status
 **Last Updated:** 2026-01-27
-**Tasks Completed:** 4/8
+**Tasks Completed:** 5/8
 **Current Task:** None
 
 ---
@@ -96,3 +96,26 @@
 - After: Single `_get_cached` helper + single `_store_cached` helper consolidate all cache operations
 
 **Verified:** Module imports successfully, ImageManager instantiates correctly, syntax valid
+
+---
+
+### 2026-01-27 - Create Xtream URL builder factory in provider_api.py
+
+**Completed:** Task 5 - Create Xtream URL builder factory
+
+**Changes made:**
+- Created `_build_xtream_url(base, endpoint, username, password, extra)` helper factory (lines 68-80)
+  - Centralizes the pattern: normalize base → build query dict → urlencode → return URL
+  - Handles optional extra parameters dictionary
+- Refactored 4 Xtream URL functions to use the factory:
+  - `xtream_player_api_url()`: Builds params dict from action+extra, delegates to factory
+  - `xtream_get_php_url()`: Single line delegation to factory
+  - `xtream_xmltv_url()`: Single line delegation to factory
+  - `xtream_epg_url()`: Builds extra dict with action/stream_id/limit, delegates to factory
+
+**Code reduction:**
+- Before: 4 functions each with ~6-10 lines of duplicated URL building logic
+- After: 1 factory (13 lines) + 4 thin wrapper functions (~1-5 lines each)
+- Eliminated 4 redundant calls to `_ensure_base()` and `urlencode()`
+
+**Verified:** Module imports successfully, all URL functions produce correct output, syntax valid
