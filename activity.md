@@ -2,7 +2,7 @@
 
 ## Current Status
 **Last Updated:** 2026-01-27
-**Tasks Completed:** 2/8
+**Tasks Completed:** 3/8
 **Current Task:** None
 
 ---
@@ -46,3 +46,26 @@
 - After: Single `_try_seek` helper handles fallback; `_smooth_paused_seek` handles the paused state pattern
 
 **Verified:** Module imports successfully, syntax valid, constants and methods properly defined
+
+---
+
+### 2026-01-27 - Simplify widget show/hide cascade in options.py
+
+**Completed:** Task 3 - Simplify widget show/hide cascade
+
+**Changes made:**
+- Created `WidgetGroup` helper class (lines 34-54) with `show()` and `hide()` methods
+- Class stores a list of widgets and provides `add()` method to extend the group
+- Created 4 widget groups in `create_epg_ui()`:
+  - `_epg_url_group`: URL label + input
+  - `_epg_file_group`: File label + input + browse button
+  - `_epg_expiration_group`: Expiration label + spinner + combo
+  - `_epg_stb_period_group`: STB period label + spinner
+- Refactored `on_epg_source_changed()` to use widget groups
+
+**Code reduction:**
+- Before: 12 individual `hide()` calls + scattered conditional `show()` calls
+- After: 5 `hide()` calls (4 groups + 1 standalone) with clear per-source visibility blocks
+- Logic is now explicit per EPG source type rather than scattered conditions
+
+**Verified:** Module imports successfully, WidgetGroup tests pass, syntax valid

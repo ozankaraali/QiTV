@@ -31,6 +31,27 @@ from config_manager import MultiKeyDict
 from update_checker import check_for_updates
 
 
+class WidgetGroup:
+    """Helper class to show/hide a group of related widgets together."""
+
+    def __init__(self, *widgets):
+        self._widgets = list(widgets)
+
+    def add(self, *widgets):
+        """Add widgets to the group."""
+        self._widgets.extend(widgets)
+
+    def show(self):
+        """Show all widgets in the group."""
+        for widget in self._widgets:
+            widget.show()
+
+    def hide(self):
+        """Hide all widgets in the group."""
+        for widget in self._widgets:
+            widget.hide()
+
+
 class AddXmltvMappingDialog(QDialog):
     def __init__(self, parent=None, channel_name="", logo_url="", channel_ids=""):
         super().__init__(parent)
@@ -401,6 +422,18 @@ class OptionsDialog(QDialog):
             self.epg_stb_period_spinner.setValue(5)
         self.epg_layout.addRow(self.epg_stb_period_label, self.epg_stb_period_spinner)
 
+        # Create widget groups for EPG source visibility toggling
+        self._epg_url_group = WidgetGroup(self.epg_url_label, self.epg_url_input)
+        self._epg_file_group = WidgetGroup(
+            self.epg_file_label, self.epg_file_input, self.epg_file_button
+        )
+        self._epg_expiration_group = WidgetGroup(
+            self.epg_expiration_label, self.epg_expiration_spinner, self.epg_expiration_combo
+        )
+        self._epg_stb_period_group = WidgetGroup(
+            self.epg_stb_period_label, self.epg_stb_period_spinner
+        )
+
         # Initial call to set visibility based on the current selection
         # (after all dependent widgets are created)
         self.on_epg_source_changed()
@@ -448,37 +481,24 @@ class OptionsDialog(QDialog):
     def on_epg_source_changed(self):
         epg_source = self.epg_source_combo.currentText()
 
-        self.epg_url_label.hide()
-        self.epg_url_input.hide()
-        self.epg_expiration_label.hide()
-        self.epg_expiration_spinner.hide()
-        self.epg_expiration_combo.hide()
-        self.epg_file_label.hide()
-        self.epg_file_input.hide()
-        self.epg_file_button.hide()
+        # Hide all EPG-related widget groups by default
+        self._epg_url_group.hide()
+        self._epg_file_group.hide()
+        self._epg_expiration_group.hide()
+        self._epg_stb_period_group.hide()
         self.xmltv_group_widget.hide()
-        # Hide STB-period controls by default and toggle per source
-        self.epg_stb_period_label.hide()
-        self.epg_stb_period_spinner.hide()
 
+        # Show relevant widgets based on EPG source
         if epg_source == "URL":
-            self.epg_url_label.show()
-            self.epg_url_input.show()
-
-        if epg_source == "Local File":
-            self.epg_file_label.show()
-            self.epg_file_input.show()
-            self.epg_file_button.show()
-        elif epg_source != "No Source":
-            self.epg_expiration_label.show()
-            self.epg_expiration_spinner.show()
-            self.epg_expiration_combo.show()
-            if epg_source == "STB":
-                self.epg_stb_period_label.show()
-                self.epg_stb_period_spinner.show()
-
-        if epg_source not in ["STB", "No Source"]:
+            self._epg_url_group.show()
+            self._epg_expiration_group.show()
             self.xmltv_group_widget.show()
+        elif epg_source == "Local File":
+            self._epg_file_group.show()
+            self.xmltv_group_widget.show()
+        elif epg_source == "STB":
+            self._epg_expiration_group.show()
+            self._epg_stb_period_group.show()
 
     def update_radio_buttons(self):
         provider_type = self.edited_provider.get("type", "")

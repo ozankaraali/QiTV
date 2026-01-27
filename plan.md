@@ -42,7 +42,7 @@ Simplify and refine the QiTV codebase by reducing boilerplate, extracting helper
       "Replace verbose show/hide calls in on_epg_source_changed()",
       "Verify EPG source switching still works in options dialog"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "refactor",
