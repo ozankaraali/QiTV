@@ -1,11 +1,11 @@
 python-vlc==3.0.20123
-requests==2.32.4
-urllib3==2.5.0
+requests>=2.32.5
+urllib3>=2.6.3
 URLObject~=2.4.3
 m3u-parser
 pyqtdarktheme==2.1.0
 PySide6
-orjson
+orjson>=3.11.5
 tzlocal
-aiohttp[speedups]
+aiohttp[speedups]>=3.13.3
 packaging
