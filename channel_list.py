@@ -1103,9 +1103,7 @@ class ChannelList(QMainWindow):
         # Signal connection happens in populate_provider_combo after initial setup
         provider_section.addWidget(self.provider_combo)
 
-        self.options_button = QPushButton("⚙")  # Settings icon
-        self.options_button.setToolTip("Settings")
-        self.options_button.setFixedWidth(30)
+        self.options_button = QPushButton("Settings")
         self.options_button.clicked.connect(self.options_dialog)
         provider_section.addWidget(self.options_button)
 
