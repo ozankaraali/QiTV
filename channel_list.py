@@ -1413,9 +1413,15 @@ class ChannelList(QMainWindow):
 
         # Add checkbox to play in vlc
         self.play_in_vlc_checkbox = QCheckBox("Play in VLC")
-        self.play_in_vlc_checkbox.setChecked(getattr(self.config_manager, 'play_in_vlc', False))
-        self.play_in_vlc_checkbox.stateChanged.connect(lambda: self.play_in_vlc())
+        self.play_in_vlc_checkbox.setChecked(self.config_manager.play_in_vlc)
+        self.play_in_vlc_checkbox.stateChanged.connect(self.on_play_in_vlc_changed)
         self.favorite_layout.addWidget(self.play_in_vlc_checkbox)
+
+        # Add checkbox to play in mpv
+        self.play_in_mpv_checkbox = QCheckBox("Play in MPV")
+        self.play_in_mpv_checkbox.setChecked(self.config_manager.play_in_mpv)
+        self.play_in_mpv_checkbox.stateChanged.connect(self.on_play_in_mpv_changed)
+        self.favorite_layout.addWidget(self.play_in_mpv_checkbox)
 
         # Add checkbox to show EPG
         self.epg_checkbox = QCheckBox("Show EPG")
@@ -4110,10 +4116,13 @@ class ChannelList(QMainWindow):
         return 0 if item_type == "m3ucontent" else 1
 
     def _play_content(self, url):
-        """Play content either in VLC or built-in player based on checkbox state."""
+        """Play content in VLC, MPV, or built-in player based on checkbox state."""
         if self.play_in_vlc_checkbox.isChecked():
             self._launch_vlc(url)
+        elif self.play_in_mpv_checkbox.isChecked():
+            self._launch_mpv(url)
         else:
+            # Use built-in player
             # Determine is_live hint based on provider type
             # STB/XTREAM APIs explicitly separate live (itv) from VOD content
             # M3U playlists don't distinguish, so let VLC auto-detect
@@ -4177,12 +4186,104 @@ class ChannelList(QMainWindow):
             QMessageBox.warning(self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}")
             return False
 
-    def play_in_vlc(self):
+    def on_play_in_vlc_changed(self):
         """Handle VLC checkbox state changes."""
         if self.play_in_vlc_checkbox.isChecked():
-            # Only close if player is visible and playing something
+            # Uncheck MPV if VLC is checked (mutually exclusive)
+            self.play_in_mpv_checkbox.blockSignals(True)
+            self.play_in_mpv_checkbox.setChecked(False)
+            self.play_in_mpv_checkbox.blockSignals(False)
+            self.config_manager.play_in_mpv = False
+            # Close built-in player if visible
             if hasattr(self, 'player') and self.player.isVisible():
                 self.player.close()
 
-        # Save preference to config
+        # Save preferences to config
         self.config_manager.play_in_vlc = self.play_in_vlc_checkbox.isChecked()
+        self.save_config()
+
+    def on_play_in_mpv_changed(self):
+        """Handle MPV checkbox state changes."""
+        if self.play_in_mpv_checkbox.isChecked():
+            # Uncheck VLC if MPV is checked (mutually exclusive)
+            self.play_in_vlc_checkbox.blockSignals(True)
+            self.play_in_vlc_checkbox.setChecked(False)
+            self.play_in_vlc_checkbox.blockSignals(False)
+            self.config_manager.play_in_vlc = False
+            # Close built-in player if visible
+            if hasattr(self, 'player') and self.player.isVisible():
+                self.player.close()
+
+        # Save preferences to config
+        self.config_manager.play_in_mpv = self.play_in_mpv_checkbox.isChecked()
+        self.save_config()
+
+    def _launch_mpv(self, cmd):
+        """Launch MPV with error handling and platform support."""
+        mpv_cmd = None
+
+        # Platform-specific MPV detection
+        if platform.system() == "Darwin":  # macOS
+            # Check common macOS MPV locations
+            macos_mpv_paths = [
+                "/Applications/mpv.app/Contents/MacOS/mpv",
+                os.path.expanduser("~/Applications/mpv.app/Contents/MacOS/mpv"),
+                "/opt/homebrew/bin/mpv",  # Homebrew ARM
+                "/usr/local/bin/mpv",  # Homebrew Intel
+            ]
+            for path in macos_mpv_paths:
+                if os.path.exists(path):
+                    mpv_cmd = path
+                    break
+            if not mpv_cmd:
+                mpv_cmd = shutil.which('mpv')
+        elif platform.system() == "Windows":
+            # Try PATH first, then check common installation locations
+            mpv_cmd = shutil.which('mpv')
+            if not mpv_cmd:
+                # Check common Windows installation paths
+                possible_paths = [
+                    os.path.join(
+                        os.environ.get("ProgramFiles", r"C:\Program Files"), "mpv", "mpv.exe"
+                    ),
+                    os.path.join(
+                        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                        "mpv",
+                        "mpv.exe",
+                    ),
+                    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "mpv", "mpv.exe"),
+                    os.path.join(
+                        os.environ.get("USERPROFILE", ""),
+                        "scoop",
+                        "apps",
+                        "mpv",
+                        "current",
+                        "mpv.exe",
+                    ),
+                ]
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        mpv_cmd = path
+                        break
+        else:
+            # Linux: try to find mpv in PATH
+            mpv_cmd = shutil.which('mpv')
+
+        if not mpv_cmd:
+            QMessageBox.warning(
+                self,
+                "MPV Not Found",
+                "MPV Media Player is not installed or not found.\n\n"
+                "Please install MPV:\n"
+                "• macOS: brew install mpv\n"
+                "• Linux: Use your package manager (apt, yum, etc.)\n"
+                "• Windows: Download from https://mpv.io/installation/",
+            )
+            return False
+
+        try:
+            subprocess.Popen([mpv_cmd, cmd])
+            return True
+        except Exception as e:
+            QMessageBox.warning(self, "MPV Launch Failed", f"Failed to launch MPV: {str(e)}")
+            return False

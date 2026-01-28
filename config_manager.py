@@ -115,6 +115,8 @@ class ConfigManager:
     DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
     DEFAULT_OPTION_EPG_STB_PERIOD_HOURS = 5
     DEFAULT_OPTION_SMOOTH_PAUSED_SEEK = True
+    DEFAULT_OPTION_PLAY_IN_VLC = False
+    DEFAULT_OPTION_PLAY_IN_MPV = False
 
     def __init__(self):
         self.config = {}
@@ -321,6 +323,8 @@ class ConfigManager:
     smooth_paused_seek = _config_property(
         "smooth_paused_seek", DEFAULT_OPTION_SMOOTH_PAUSED_SEEK, coerce=bool
     )
+    play_in_vlc = _config_property("play_in_vlc", DEFAULT_OPTION_PLAY_IN_VLC, coerce=bool)
+    play_in_mpv = _config_property("play_in_mpv", DEFAULT_OPTION_PLAY_IN_MPV, coerce=bool)
 
     @staticmethod
     def default_config():
