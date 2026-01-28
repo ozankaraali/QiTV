@@ -155,6 +155,7 @@ class VideoPlayer(QMainWindow):
 
         # Track content type to reduce repeated progress bar toggles
         self._is_live = None  # type: bool | None
+        self._is_live_hint = None  # type: bool | None
         self._seekable = True
 
         self.update_timer = QTimer(self)
@@ -382,7 +383,13 @@ class VideoPlayer(QMainWindow):
         self.hide()
         event.ignore()
 
-    def play_video(self, video_url):
+    def play_video(self, video_url, is_live=None):
+        """Play a video URL.
+
+        Args:
+            video_url: The URL to play
+            is_live: Hint for live detection. True=live stream, False=VOD, None=auto-detect
+        """
         if platform.system() == "Linux":
             self.media_player.set_xwindow(self.video_frame.winId())
         elif platform.system() == "Windows":
@@ -391,6 +398,7 @@ class VideoPlayer(QMainWindow):
             self.media_player.set_nsobject(int(self.video_frame.winId()))
 
         self._last_url = video_url
+        self._is_live_hint = is_live  # Store hint for use in media_length_changed
         self._seek_retry_done = False
         self.media = self.instance.media_new(video_url)
         # Improved options for IPTV streams to prevent freezing
@@ -584,8 +592,8 @@ class VideoPlayer(QMainWindow):
                 new_width = int(new_height * self.aspect_ratio)
 
             self.setGeometry(new_x, new_y, new_width, new_height)
-        elif event.buttons() & Qt.LeftButton and not self.resize_corner:
-            # Mark as dragging only when mouse actually moves
+        elif event.buttons() & Qt.LeftButton and not self.resize_corner and not self.isFullScreen():
+            # Mark as dragging only when mouse actually moves (disabled in fullscreen)
             self.dragging = True
             self.move(event.globalPos() - self.drag_position)
         event.accept()
@@ -649,14 +657,36 @@ class VideoPlayer(QMainWindow):
     @Slot()
     def media_length_changed(self):
         duration = self.media.get_duration()
-        self._is_live = duration <= 0
+
+        # Check VLC's seekability - best indicator for HLS VOD vs live
+        # HLS VOD has #EXT-X-ENDLIST, VLC detects this and reports seekable
         try:
-            self._seekable = bool(self.media_player.is_seekable()) and not self._is_live
+            vlc_seekable = bool(self.media_player.is_seekable())
         except Exception:
-            self._seekable = not self._is_live
+            vlc_seekable = False
+
+        # Determine if content is live using this priority:
+        # 1. Explicit hint from content_type (STB/Xtream APIs know their content)
+        # 2. VLC seekability (most reliable for HLS - checks #EXT-X-ENDLIST)
+        # 3. Duration heuristic (fallback)
+        if getattr(self, "_is_live_hint", None) is not None:
+            self._is_live = self._is_live_hint
+        elif vlc_seekable:
+            # VLC says seekable = VOD (even if duration looks small)
+            self._is_live = False
+        elif duration <= 0:
+            # No duration and not seekable = live
+            self._is_live = True
+        elif duration < 60000:
+            # Small duration (<60s) and not seekable = likely live buffer
+            self._is_live = True
+        else:
+            # Long duration = probably VOD even if not seekable
+            self._is_live = False
+
+        self._seekable = vlc_seekable and not self._is_live
         if not self._is_live:  # VOD content
-            if not self.progress_bar.isVisible():
-                self.progress_bar.setVisible(True)
+            # Configure progress bar but keep hidden until hover/activity
             self.progress_bar.setRange(0, 1000)
             self.progress_bar.setFormat("00:00 / " + self.format_time(duration))
             try:
@@ -670,9 +700,10 @@ class VideoPlayer(QMainWindow):
                 QTimer.singleShot(0, self._retry_minimal_vod_profile)
         else:  # Live content
             self.update_timer.stop()
-            if self.progress_bar.isVisible():
-                self.progress_bar.setVisible(False)
             self.progress_bar.setFormat("Live")
+        # Always start with progress bar hidden - show on hover/activity
+        self.progress_bar.setVisible(False)
+        self._ui_visible = False
 
     def on_vlc_error(self, event):
         # We don't use event data here, just log that an error occurred
@@ -694,23 +725,23 @@ class VideoPlayer(QMainWindow):
         self.update_timer.stop()
 
     def show_ui(self):
-        """Show progress bar and cursor."""
+        """Show progress bar and cursor on mouse activity."""
         if not self._ui_visible:
-            # Only update if state changed to avoid unnecessary operations
-            if not self._is_live:  # Only show progress bar for VOD content
-                self.progress_bar.setVisible(True)
+            # Show progress bar for both live and VOD (shows "Live" or time)
+            self.progress_bar.setVisible(True)
             self.setCursor(Qt.ArrowCursor)
             self._ui_visible = True
 
     def on_inactivity(self):
         """Hide progress bar and cursor after inactivity period."""
         if self._ui_visible:
-            # Only hide for VOD content (live streams don't show progress bar anyway)
-            if not self._is_live and self.isFullScreen():
-                self.progress_bar.setVisible(False)
+            # Always hide progress bar on inactivity (windowed or fullscreen)
+            self.progress_bar.setVisible(False)
+            # Only hide cursor in fullscreen
+            if self.isFullScreen():
                 self.setCursor(Qt.BlankCursor)
-                self._ui_visible = False
-            self.inactivity_timer.stop()
+            self._ui_visible = False
+        self.inactivity_timer.stop()
 
     def toggle_fullscreen(self):
         if self.windowState() == Qt.WindowNoState:
@@ -719,6 +750,9 @@ class VideoPlayer(QMainWindow):
             self.setWindowState(Qt.WindowFullScreen)
             QGuiApplication.restoreOverrideCursor()
         else:
+            # Exiting fullscreen - reset drag state to prevent window sticking to cursor
+            self.dragging = False
+            self.resizing = False
             self.setWindowState(Qt.WindowNoState)
 
     def _retry_minimal_vod_profile(self):

@@ -4114,7 +4114,16 @@ class ChannelList(QMainWindow):
         if self.play_in_vlc_checkbox.isChecked():
             self._launch_vlc(url)
         else:
-            self.player.play_video(url)
+            # Determine is_live hint based on provider type
+            # STB/XTREAM APIs explicitly separate live (itv) from VOD content
+            # M3U playlists don't distinguish, so let VLC auto-detect
+            provider_type = self.provider_manager.current_provider.get("type", "").upper()
+            if provider_type in ("STB", "XTREAM"):
+                is_live = self.content_type == "itv"
+            else:
+                # M3UPLAYLIST, M3USTREAM, etc. - let VLC detect via seekability
+                is_live = None
+            self.player.play_video(url, is_live=is_live)
 
     def _launch_vlc(self, cmd):
         """Launch VLC with error handling and platform support."""
