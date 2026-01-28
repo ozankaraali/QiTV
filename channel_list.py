@@ -4140,8 +4140,22 @@ class ChannelList(QMainWindow):
                 homebrew_vlc = os.path.expanduser("~/Applications/VLC.app/Contents/MacOS/VLC")
                 if os.path.exists(homebrew_vlc):
                     vlc_cmd = homebrew_vlc
+        elif platform.system() == "Windows":
+            # Try PATH first, then check common installation locations
+            vlc_cmd = shutil.which('vlc')
+            if not vlc_cmd:
+                # Check standard installation paths
+                program_files_paths = [
+                    os.environ.get("ProgramFiles", r"C:\Program Files"),
+                    os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                ]
+                for pf in program_files_paths:
+                    candidate = os.path.join(pf, "VideoLAN", "VLC", "vlc.exe")
+                    if os.path.exists(candidate):
+                        vlc_cmd = candidate
+                        break
         else:
-            # For Windows and Linux, try to find vlc in PATH
+            # Linux: try to find vlc in PATH
             vlc_cmd = shutil.which('vlc')
 
         if not vlc_cmd:
