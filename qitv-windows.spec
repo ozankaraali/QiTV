@@ -91,7 +91,10 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries + [("libVLC.dll", os.path.join(VLC_PATH, 'libVLC.dll'), "BINARY")],
+    a.binaries + [
+        ("libvlc.dll", os.path.join(VLC_PATH, 'libvlc.dll'), "BINARY"),
+        ("libvlccore.dll", os.path.join(VLC_PATH, 'libvlccore.dll'), "BINARY"),
+    ],
     a.datas,
     [],
     name='qitv.exe',
