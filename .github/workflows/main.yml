@@ -50,7 +50,7 @@ jobs:
       #     [System.Net.ServicePointManager]::SecurityProtocol = 'Tls12'
       #     iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
       - name: Install VLC using Chocolatey
-        run: choco install vlc -y
+        run: choco install vlc --version=3.0.21 -y
       - name: Sync dependencies with uv
         run: uv sync --frozen --dev
       - name: Package App with PyInstaller for Windows

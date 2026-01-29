@@ -1,6 +1,6 @@
 [project]
 name = "qitv"
-version = "1.11.1"
+version = "1.11.2"
 description = "A cross-platform STB and IPTV player client"
 requires-python = ">=3.14"
 dependencies = [
@@ -10,7 +10,7 @@ dependencies = [
     "packaging>=25.0",
     "pyqtdarktheme==2.1.0",
     "pyside6>=6.10.0",
-    "python-vlc==3.0.20123",
+    "python-vlc==3.0.21203",
     "requests>=2.32.5",
     "tzlocal>=5.3.1",
     "urllib3>=2.6.3",
