@@ -204,6 +204,28 @@ class OptionsDialog(QDialog):
         self.smooth_paused_seek_checkbox.setChecked(self.config_manager.smooth_paused_seek)
         self.settings_layout.addRow(self.smooth_paused_seek_checkbox)
 
+        # Auto-play settings section
+        self.autoplay_section_label = QLabel("<b>Auto-Play Settings</b>", self.settings_tab)
+        self.settings_layout.addRow(self.autoplay_section_label)
+
+        self.auto_play_episodes_checkbox = QCheckBox(
+            "Auto-play next episode (5s countdown)", self.settings_tab
+        )
+        self.auto_play_episodes_checkbox.setToolTip(
+            "Automatically play the next episode when one ends. Shows a 5-second countdown to cancel."
+        )
+        self.auto_play_episodes_checkbox.setChecked(self.config_manager.auto_play_episodes)
+        self.settings_layout.addRow(self.auto_play_episodes_checkbox)
+
+        self.auto_play_movies_checkbox = QCheckBox(
+            "Suggest next movie from category (10s countdown)", self.settings_tab
+        )
+        self.auto_play_movies_checkbox.setToolTip(
+            "After a movie ends, suggest another from the same category. Shows a 10-second countdown."
+        )
+        self.auto_play_movies_checkbox.setChecked(self.config_manager.auto_play_movies)
+        self.settings_layout.addRow(self.auto_play_movies_checkbox)
+
     def create_providers_ui(self):
         self.providers_tab = QWidget(self)
         self.options_tab.addTab(self.providers_tab, "Providers")
@@ -562,6 +584,8 @@ class OptionsDialog(QDialog):
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.keyboard_remote_mode = self.keyboard_remote_checkbox.isChecked()
         self.config_manager.smooth_paused_seek = self.smooth_paused_seek_checkbox.isChecked()
+        self.config_manager.auto_play_episodes = self.auto_play_episodes_checkbox.isChecked()
+        self.config_manager.auto_play_movies = self.auto_play_movies_checkbox.isChecked()
 
         need_to_refresh_content_list_size = False
         current_provider_changed = False

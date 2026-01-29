@@ -27,6 +27,8 @@ class VideoPlayer(QMainWindow):
     forwardRequested = Signal()
     channelNextRequested = Signal()
     channelPrevRequested = Signal()
+    mediaEnded = Signal()  # Emitted when playback ends naturally
+    positionChanged = Signal(int, int)  # (position_ms, duration_ms) for saving progress
 
     # Timing constants for smooth paused seek (resume → seek → pause)
     _SEEK_RESUME_DELAY_MS = 60  # Delay before setting position after resume
@@ -157,6 +159,16 @@ class VideoPlayer(QMainWindow):
         self._is_live = None  # type: bool | None
         self._is_live_hint = None  # type: bool | None
         self._seekable = True
+
+        # Auto-play support: prevent multiple mediaEnded emissions
+        self._ended_emitted = False
+        self._content_id: str | None = None
+        self._resume_position: int | None = None
+
+        # Position save timer for watch tracking (15 second interval)
+        self.position_save_timer = QTimer(self)
+        self.position_save_timer.setInterval(15000)  # 15 seconds
+        self.position_save_timer.timeout.connect(self._emit_position_changed)
 
         self.update_timer = QTimer(self)
         self.update_timer.setInterval(100)  # Update every 100ms
@@ -321,6 +333,10 @@ class VideoPlayer(QMainWindow):
             if self._is_live is False:
                 self.progress_bar.setFormat("Playback ended")
                 self.progress_bar.setValue(1000)
+                # Emit mediaEnded signal once per playback
+                if not self._ended_emitted:
+                    self._ended_emitted = True
+                    self.mediaEnded.emit()
         elif state == vlc.State.Opening:
             if self._is_live is False:
                 self.progress_bar.setFormat("Opening...")
@@ -383,13 +399,19 @@ class VideoPlayer(QMainWindow):
         self.hide()
         event.ignore()
 
-    def play_video(self, video_url, is_live=None):
+    def play_video(self, video_url, is_live=None, content_id=None, resume_position=None):
         """Play a video URL.
 
         Args:
             video_url: The URL to play
             is_live: Hint for live detection. True=live stream, False=VOD, None=auto-detect
+            content_id: Unique identifier for tracking playback position
+            resume_position: Position in milliseconds to resume from
         """
+        # Reset auto-play flag for new playback
+        self._ended_emitted = False
+        self._content_id = content_id
+        self._resume_position = resume_position
         if platform.system() == "Linux":
             self.media_player.set_xwindow(self.video_frame.winId())
         elif platform.system() == "Windows":
@@ -476,9 +498,11 @@ class VideoPlayer(QMainWindow):
         self.media_player.stop()
         self.progress_bar.setVisible(False)
         self.update_timer.stop()
+        self.position_save_timer.stop()  # Stop position tracking
         self.inactivity_timer.stop()
         self.setCursor(Qt.ArrowCursor)  # Restore cursor
         self._ui_visible = True
+        self._ended_emitted = False  # Reset for next playback
         self.stopped.emit()
 
     def toggle_mute(self):
@@ -694,12 +718,18 @@ class VideoPlayer(QMainWindow):
             except Exception:
                 pass
             self.update_timer.start()
+            # Start position save timer for VOD content
+            self.position_save_timer.start()
             # If VOD is reported non-seekable, retry once with a minimal option profile
             if not self._seekable and not self._seek_retry_done:
                 self._seek_retry_done = True
                 QTimer.singleShot(0, self._retry_minimal_vod_profile)
+            # Handle resume position if set
+            if self._resume_position is not None and self._resume_position > 0:
+                QTimer.singleShot(500, self._apply_resume_position)
         else:  # Live content
             self.update_timer.stop()
+            self.position_save_timer.stop()  # No position tracking for live
             self.progress_bar.setFormat("Live")
         # Always start with progress bar hidden - show on hover/activity
         self.progress_bar.setVisible(False)
@@ -778,5 +808,28 @@ class VideoPlayer(QMainWindow):
             self.media_player.play()
             if last_pos > 0:
                 QTimer.singleShot(1200, lambda: self.media_player.set_time(last_pos))
+        except Exception:
+            pass
+
+    def _emit_position_changed(self):
+        """Emit position for progress tracking (called by position_save_timer)."""
+        try:
+            if self._is_live:
+                return
+            state = self.media_player.get_state()
+            if state not in (vlc.State.Playing, vlc.State.Paused):
+                return
+            position_ms = self.media_player.get_time()
+            duration_ms = self.media.get_duration() if self.media else 0
+            if position_ms > 0 and duration_ms > 0:
+                self.positionChanged.emit(position_ms, duration_ms)
+        except Exception:
+            pass
+
+    def _apply_resume_position(self):
+        """Seek to the stored resume position after playback starts."""
+        try:
+            if self._resume_position is not None and self._resume_position > 0:
+                self.media_player.set_time(self._resume_position)
         except Exception:
             pass

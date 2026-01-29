@@ -117,6 +117,14 @@ class ConfigManager:
     DEFAULT_OPTION_SMOOTH_PAUSED_SEEK = True
     DEFAULT_OPTION_PLAY_IN_VLC = False
     DEFAULT_OPTION_PLAY_IN_MPV = False
+    # Auto-play settings
+    DEFAULT_OPTION_AUTO_PLAY_EPISODES = True
+    DEFAULT_OPTION_AUTO_PLAY_MOVIES = True
+    DEFAULT_OPTION_EPISODE_COUNTDOWN = 5  # seconds
+    DEFAULT_OPTION_MOVIE_COUNTDOWN = 10  # seconds
+    DEFAULT_OPTION_RESUME_COUNTDOWN = 10  # seconds
+    DEFAULT_WATCH_HISTORY_LIMIT = 100
+    DEFAULT_WATCHED_THRESHOLD = 0.90  # 90% = watched
 
     def __init__(self):
         self.config = {}
@@ -326,6 +334,16 @@ class ConfigManager:
     play_in_vlc = _config_property("play_in_vlc", DEFAULT_OPTION_PLAY_IN_VLC, coerce=bool)
     play_in_mpv = _config_property("play_in_mpv", DEFAULT_OPTION_PLAY_IN_MPV, coerce=bool)
 
+    # Auto-play settings
+    auto_play_episodes = _config_property(
+        "auto_play_episodes", DEFAULT_OPTION_AUTO_PLAY_EPISODES, coerce=bool
+    )
+    auto_play_movies = _config_property(
+        "auto_play_movies", DEFAULT_OPTION_AUTO_PLAY_MOVIES, coerce=bool
+    )
+    watch_history = _config_property("watch_history", [])
+    playback_positions = _config_property("playback_positions", {})
+
     @staticmethod
     def default_config():
         return {
@@ -402,3 +420,132 @@ class ConfigManager:
     epg_stb_period_hours = _config_property(
         "epg_stb_period_hours", DEFAULT_OPTION_EPG_STB_PERIOD_HOURS, coerce=int, clamp=(1, 168)
     )
+
+    # --- Watch Tracking Helper Methods ---
+
+    def _generate_content_id(self, item_data: dict, provider_name: str) -> str:
+        """Generate a unique content ID for tracking playback position.
+
+        Args:
+            item_data: The item data dict (channel, movie, episode, etc.)
+            provider_name: Current provider name
+
+        Returns:
+            A unique string ID for the content
+        """
+        # Use stream_id/id from item_data, with provider prefix for uniqueness
+        item_id = item_data.get("id") or item_data.get("stream_id") or item_data.get("series_id")
+        if not item_id:
+            # Fallback to cmd or name
+            item_id = item_data.get("cmd") or item_data.get("name") or str(hash(str(item_data)))
+        return f"{provider_name}:{item_id}"
+
+    def add_to_watch_history(
+        self, item_data: dict, item_type: str, link: str, provider_name: str
+    ) -> None:
+        """Add an item to watch history.
+
+        Args:
+            item_data: The item data dict
+            item_type: Type of content (channel, movie, episode, etc.)
+            link: The playback URL
+            provider_name: Current provider name
+        """
+        from datetime import datetime
+
+        content_id = self._generate_content_id(item_data, provider_name)
+
+        history_entry = {
+            "content_id": content_id,
+            "item_data": item_data,
+            "item_type": item_type,
+            "link": link,
+            "provider_name": provider_name,
+            "timestamp": datetime.now().isoformat(),
+            "name": item_data.get("name") or item_data.get("ename") or "Unknown",
+        }
+
+        # Get current history and remove duplicate if exists
+        history = self.watch_history or []
+        history = [h for h in history if h.get("content_id") != content_id]
+
+        # Add to front
+        history.insert(0, history_entry)
+
+        # Trim to limit
+        if len(history) > self.DEFAULT_WATCH_HISTORY_LIMIT:
+            history = history[: self.DEFAULT_WATCH_HISTORY_LIMIT]
+
+        self.watch_history = history
+
+    def save_playback_position(self, content_id: str, position_ms: int, duration_ms: int) -> None:
+        """Save playback position for a content item.
+
+        Args:
+            content_id: Unique content identifier
+            position_ms: Current position in milliseconds
+            duration_ms: Total duration in milliseconds
+        """
+        from datetime import datetime
+
+        positions = self.playback_positions or {}
+        positions[content_id] = {
+            "position": position_ms,
+            "duration": duration_ms,
+            "timestamp": datetime.now().isoformat(),
+        }
+        self.playback_positions = positions
+
+    def get_playback_position(self, content_id: str) -> int | None:
+        """Get saved playback position for content.
+
+        Args:
+            content_id: Unique content identifier
+
+        Returns:
+            Position in milliseconds, or None if not found
+        """
+        positions = self.playback_positions or {}
+        entry = positions.get(content_id)
+        if entry:
+            pos = entry.get("position")
+            return int(pos) if pos is not None else None
+        return None
+
+    def get_watched_status(self, content_id: str) -> str:
+        """Get the watched status of content.
+
+        Args:
+            content_id: Unique content identifier
+
+        Returns:
+            "watched" if >90% complete, "partial" if started, "unwatched" otherwise
+        """
+        positions = self.playback_positions or {}
+        entry = positions.get(content_id)
+        if not entry:
+            return "unwatched"
+
+        position = entry.get("position", 0)
+        duration = entry.get("duration", 0)
+
+        if duration <= 0:
+            return "unwatched"
+
+        ratio = position / duration
+        if ratio >= self.DEFAULT_WATCHED_THRESHOLD:
+            return "watched"
+        elif ratio > 0.01:  # More than 1% watched
+            return "partial"
+        return "unwatched"
+
+    def clear_playback_position(self, content_id: str) -> None:
+        """Clear saved playback position for content.
+
+        Args:
+            content_id: Unique content identifier
+        """
+        positions = self.playback_positions or {}
+        if content_id in positions:
+            del positions[content_id]
+            self.playback_positions = positions
