@@ -1418,6 +1418,9 @@ class ChannelList(QMainWindow):
         self.content_list.itemActivated.connect(self.item_activated)
         # Enable keyboard surfing on the list when remote mode is on
         self.content_list.installEventFilter(self)
+        # Enable right-click context menu
+        self.content_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.content_list.customContextMenuRequested.connect(self.show_content_context_menu)
         self.refresh_content_list_size()
 
         list_layout.addWidget(self.content_list, 1)
@@ -2651,6 +2654,53 @@ class ChannelList(QMainWindow):
         self.player.stop_video()
         self.hide_media_controls()
 
+    def show_content_context_menu(self, position):
+        """Show context menu on right-click in content list."""
+        item = self.content_list.itemAt(position)
+        if not item:
+            return
+
+        item_data = item.data(0, Qt.UserRole)
+        if not item_data:
+            return
+
+        menu = QMenu(self)
+
+        # Copy URL action - only for playable content (not folders)
+        content_type = item_data.get("type", "")
+        if content_type not in ["category", "series"]:
+            url = self._get_stream_url_for_item(item_data)
+            if url:
+                copy_url_action = menu.addAction("Copy URL to Clipboard")
+                copy_url_action.triggered.connect(lambda: self._copy_url_to_clipboard(url))
+
+        # Only show menu if it has actions
+        if menu.actions():
+            menu.exec_(self.content_list.viewport().mapToGlobal(position))
+
+    def _get_stream_url_for_item(self, item_data):
+        """Get the stream URL for an item without playing it."""
+        content_type = item_data.get("type", "")
+        provider = self.provider_manager.current_provider
+
+        if content_type == "live":
+            stream_id = item_data.get("stream_id")
+            if stream_id and provider:
+                return self.api_service.get_stream_url(provider, stream_id, "live")
+        elif content_type in ["movie", "episode"]:
+            stream_id = item_data.get("stream_id")
+            ext = item_data.get("container_extension", "mp4")
+            if stream_id and provider:
+                return self.api_service.get_stream_url(provider, stream_id, "vod", ext)
+
+        return None
+
+    def _copy_url_to_clipboard(self, url):
+        """Copy URL to system clipboard."""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(url)
+        logger.info(f"URL copied to clipboard: {url}")
+
     def open_in_vlc(self):
         # Invoke user's VLC player to open the current stream
         if self.link:
@@ -2661,7 +2711,9 @@ class ChannelList(QMainWindow):
                     if not vlc_path:
                         program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
                         vlc_path = os.path.join(program_files, "VideoLAN", "VLC", "vlc.exe")
-                    subprocess.Popen([vlc_path, self.link])
+                    # Use VLC's directory as cwd to avoid DLL conflicts with bundled libvlc
+                    vlc_dir = os.path.dirname(vlc_path)
+                    subprocess.Popen([vlc_path, self.link], cwd=vlc_dir)
                 elif platform.system() == "Darwin":  # macOS
                     vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
                     if not vlc_path:
@@ -2676,12 +2728,14 @@ class ChannelList(QMainWindow):
                                 break
                     if not vlc_path:
                         raise FileNotFoundError("VLC not found")
-                    subprocess.Popen([vlc_path, self.link])
+                    vlc_dir = os.path.dirname(vlc_path)
+                    subprocess.Popen([vlc_path, self.link], cwd=vlc_dir)
                 else:  # Assuming Linux or other Unix-like OS
                     vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
                     if not vlc_path:
                         raise FileNotFoundError("VLC not found")
-                    subprocess.Popen([vlc_path, self.link])
+                    vlc_dir = os.path.dirname(vlc_path)
+                    subprocess.Popen([vlc_path, self.link], cwd=vlc_dir)
                 # when VLC opens, stop running video on self.player
                 self.player.stop_video()
             except FileNotFoundError as fnf_error:
@@ -4328,7 +4382,9 @@ class ChannelList(QMainWindow):
             return False
 
         try:
-            subprocess.Popen([vlc_cmd, cmd])
+            # Use VLC's directory as cwd to avoid DLL conflicts with bundled libvlc
+            vlc_dir = os.path.dirname(vlc_cmd)
+            subprocess.Popen([vlc_cmd, cmd], cwd=vlc_dir)
             return True
         except Exception as e:
             QMessageBox.warning(self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}")
@@ -4430,7 +4486,9 @@ class ChannelList(QMainWindow):
             return False
 
         try:
-            subprocess.Popen([mpv_cmd, cmd])
+            # Use MPV's directory as cwd to avoid DLL conflicts
+            mpv_dir = os.path.dirname(mpv_cmd)
+            subprocess.Popen([mpv_cmd, cmd], cwd=mpv_dir)
             return True
         except Exception as e:
             QMessageBox.warning(self, "MPV Launch Failed", f"Failed to launch MPV: {str(e)}")
