@@ -2,7 +2,9 @@ import ctypes
 import logging
 import os
 import platform
+import shutil
 import sys
+import time
 import warnings
 
 from PySide6 import QtGui
@@ -19,12 +21,50 @@ from sleep_manager import allow_sleep, prevent_sleep
 from update_checker import check_for_updates
 from video_player import VideoPlayer
 
+
+def handle_replace_flag():
+    """Handle --replace flag for Windows auto-update.
+
+    When launched with --replace <old_exe_path>, this function:
+    1. Waits for the old process to exit
+    2. Copies this executable to the old location
+    3. Optionally cleans up the downloaded file
+    """
+    if "--replace" not in sys.argv:
+        return
+
+    try:
+        replace_index = sys.argv.index("--replace")
+        if replace_index + 1 >= len(sys.argv):
+            return
+
+        old_exe_path = sys.argv[replace_index + 1]
+        current_exe = sys.executable
+
+        # Wait for old process to exit
+        time.sleep(1.5)
+
+        # Copy current executable to old location
+        shutil.copy2(current_exe, old_exe_path)
+        logging.info(f"Updated {old_exe_path} successfully")
+
+        # Note: We can't delete the currently running exe on Windows
+        # The downloaded file in Downloads will remain - user can delete manually
+
+    except Exception as e:
+        logging.error(f"Failed to perform update replacement: {e}")
+
+
 if __name__ == "__main__":
     # Basic logging configuration (tweak level as needed)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    # Handle Windows auto-update replacement if launched with --replace flag
+    if platform.system() == "Windows":
+        handle_replace_flag()
 
     # Suppress noisy third-party warnings
     warnings.filterwarnings("ignore", category=SyntaxWarning, module="vlc")

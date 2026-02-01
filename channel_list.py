@@ -4481,6 +4481,20 @@ class ChannelList(QMainWindow):
         elif platform.system() == "Windows":
             mpv_cmd = shutil.which("mpv")
             if not mpv_cmd:
+                # Check Windows Registry App Paths (set by mpv-install.bat)
+                try:
+                    import winreg
+
+                    with winreg.OpenKey(  # type: ignore[attr-defined]
+                        winreg.HKEY_LOCAL_MACHINE,  # type: ignore[attr-defined]
+                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\mpv.exe",
+                    ) as key:
+                        reg_path = winreg.QueryValue(key, None)  # type: ignore[attr-defined]
+                        if reg_path and os.path.exists(reg_path):
+                            mpv_cmd = reg_path
+                except Exception:
+                    pass
+            if not mpv_cmd:
                 possible_paths = [
                     os.path.join(
                         os.environ.get("ProgramFiles", r"C:\Program Files"), "mpv", "mpv.exe"
