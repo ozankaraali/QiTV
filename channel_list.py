@@ -2689,7 +2689,17 @@ class ChannelList(QMainWindow):
 
     def _get_stream_url_for_item(self, item_data):
         """Get the stream URL for an item without playing it."""
-        return item_data.get("cmd")
+        # item_data is {"type": "...", "data": actual_item}
+        actual_data = item_data.get("data", {})
+        item_type = item_data.get("type", "")
+
+        if self.provider_manager.current_provider.get("type") == "STB":
+            # STB: need to create link via API
+            is_episode = item_type == "episode"
+            return self.create_link(actual_data, is_episode=is_episode)
+        else:
+            # M3U: cmd is the direct URL
+            return actual_data.get("cmd") or actual_data.get("url")
 
     def _copy_url_to_clipboard(self, url):
         """Copy URL to system clipboard."""
@@ -4333,30 +4343,67 @@ class ChannelList(QMainWindow):
             self.player.play_video(url, is_live=is_live, content_id=self._current_content_id)
 
     def _launch_vlc(self, url):
-        """Launch VLC using python-vlc for single-instance behavior."""
-        try:
-            import vlc
-        except ImportError:
+        """Launch VLC with platform-specific handling."""
+        vlc_cmd = None
+
+        if platform.system() == "Darwin":
+            # macOS: use 'open -a VLC' which reuses existing instance
+            vlc_paths = [
+                "/Applications/VLC.app",
+                os.path.expanduser("~/Applications/VLC.app"),
+            ]
+            for path in vlc_paths:
+                if os.path.exists(path):
+                    try:
+                        subprocess.Popen(["open", "-a", path, url])
+                        return True
+                    except Exception as e:
+                        QMessageBox.warning(
+                            self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}"
+                        )
+                        return False
+
+        elif platform.system() == "Windows":
+            # Windows: find VLC executable
+            vlc_cmd = shutil.which("vlc")
+            if not vlc_cmd:
+                possible_paths = [
+                    os.path.join(
+                        os.environ.get("ProgramFiles", r"C:\Program Files"),
+                        "VideoLAN",
+                        "VLC",
+                        "vlc.exe",
+                    ),
+                    os.path.join(
+                        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                        "VideoLAN",
+                        "VLC",
+                        "vlc.exe",
+                    ),
+                ]
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        vlc_cmd = path
+                        break
+        else:
+            # Linux
+            vlc_cmd = shutil.which("vlc")
+
+        if not vlc_cmd:
             QMessageBox.warning(
                 self,
-                "VLC Not Available",
-                "python-vlc library is not available.\n\n"
-                "Please install VLC Media Player:\n"
+                "VLC Not Found",
+                "VLC Media Player is not installed.\n\n"
+                "Please install VLC:\n"
                 "• macOS: Download from https://www.videolan.org/vlc/\n"
-                "• Linux: Use your package manager (apt, yum, etc.)\n"
+                "• Linux: Use your package manager (apt install vlc)\n"
                 "• Windows: Download from https://www.videolan.org/vlc/",
             )
             return False
 
         try:
-            if self._external_vlc_player is None:
-                self._external_vlc_instance = vlc.Instance()
-                self._external_vlc_player = self._external_vlc_instance.media_player_new()
-
-            assert self._external_vlc_instance is not None
-            media = self._external_vlc_instance.media_new(url)
-            self._external_vlc_player.set_media(media)
-            self._external_vlc_player.play()
+            # --started-from-file sends URL to existing VLC instance (replaces current)
+            subprocess.Popen([vlc_cmd, "--started-from-file", url])
             return True
         except Exception as e:
             QMessageBox.warning(self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}")
@@ -4395,22 +4442,11 @@ class ChannelList(QMainWindow):
         self.save_config()
 
     def _launch_mpv(self, url):
-        """Launch MPV using python-mpv for single-instance behavior."""
+        """Launch MPV - try python-mpv first, fall back to subprocess."""
+        # Try python-mpv for single-instance behavior
         try:
             import mpv
-        except (ImportError, OSError):
-            QMessageBox.warning(
-                self,
-                "MPV Not Available",
-                "libmpv library is not installed on your system.\n\n"
-                "Please install MPV:\n"
-                "• macOS: brew install mpv\n"
-                "• Linux: Use your package manager (apt install mpv, etc.)\n"
-                "• Windows: Download from https://mpv.io/installation/",
-            )
-            return False
 
-        try:
             if self._external_mpv_player is None:
                 self._external_mpv_player = mpv.MPV(
                     input_default_bindings=True,
@@ -4419,6 +4455,73 @@ class ChannelList(QMainWindow):
                 )
 
             self._external_mpv_player.play(url)
+            return True
+        except (ImportError, OSError, Exception):
+            # python-mpv not available or failed, fall back to subprocess
+            pass
+
+        # Subprocess fallback with platform-specific paths
+        mpv_cmd = None
+
+        if platform.system() == "Darwin":
+            # macOS: check app bundle and brew paths
+            macos_paths = [
+                "/Applications/mpv.app/Contents/MacOS/mpv",
+                os.path.expanduser("~/Applications/mpv.app/Contents/MacOS/mpv"),
+                "/opt/homebrew/bin/mpv",
+                "/usr/local/bin/mpv",
+            ]
+            for path in macos_paths:
+                if os.path.exists(path):
+                    mpv_cmd = path
+                    break
+            if not mpv_cmd:
+                mpv_cmd = shutil.which("mpv")
+
+        elif platform.system() == "Windows":
+            mpv_cmd = shutil.which("mpv")
+            if not mpv_cmd:
+                possible_paths = [
+                    os.path.join(
+                        os.environ.get("ProgramFiles", r"C:\Program Files"), "mpv", "mpv.exe"
+                    ),
+                    os.path.join(
+                        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                        "mpv",
+                        "mpv.exe",
+                    ),
+                    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "mpv", "mpv.exe"),
+                    os.path.join(
+                        os.environ.get("USERPROFILE", ""),
+                        "scoop",
+                        "apps",
+                        "mpv",
+                        "current",
+                        "mpv.exe",
+                    ),
+                ]
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        mpv_cmd = path
+                        break
+        else:
+            # Linux
+            mpv_cmd = shutil.which("mpv")
+
+        if not mpv_cmd:
+            QMessageBox.warning(
+                self,
+                "MPV Not Found",
+                "MPV Media Player is not installed.\n\n"
+                "Please install MPV:\n"
+                "• macOS: brew install mpv\n"
+                "• Linux: Use your package manager (apt install mpv)\n"
+                "• Windows: Download from https://mpv.io/installation/",
+            )
+            return False
+
+        try:
+            subprocess.Popen([mpv_cmd, url])
             return True
         except Exception as e:
             QMessageBox.warning(self, "MPV Launch Failed", f"Failed to launch MPV: {str(e)}")
