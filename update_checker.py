@@ -164,12 +164,14 @@ class UpdateDownloader(QObject):
             filename = self.url.split("/")[-1]
             download_path = get_downloads_folder() / filename
 
-            response = requests.get(self.url, stream=True, timeout=30)
+            # Use longer read timeout for large files
+            response = requests.get(self.url, stream=True, timeout=(30, 120))
             response.raise_for_status()
 
             total_size = int(response.headers.get("content-length", self.expected_size))
             downloaded = 0
-            chunk_size = 8192
+            last_progress_update = 0
+            chunk_size = 65536  # 64KB chunks for better performance
 
             with open(download_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=chunk_size):
@@ -182,7 +184,10 @@ class UpdateDownloader(QObject):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        self.progress.emit(downloaded, total_size)
+                        # Throttle progress updates to every 500KB to avoid overwhelming Qt event loop
+                        if downloaded - last_progress_update >= 512 * 1024 or downloaded >= total_size:
+                            self.progress.emit(downloaded, total_size)
+                            last_progress_update = downloaded
 
             # Verify download size
             if total_size > 0 and downloaded < total_size * 0.9:
