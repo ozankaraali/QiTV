@@ -2680,20 +2680,7 @@ class ChannelList(QMainWindow):
 
     def _get_stream_url_for_item(self, item_data):
         """Get the stream URL for an item without playing it."""
-        content_type = item_data.get("type", "")
-        provider = self.provider_manager.current_provider
-
-        if content_type == "live":
-            stream_id = item_data.get("stream_id")
-            if stream_id and provider:
-                return self.api_service.get_stream_url(provider, stream_id, "live")
-        elif content_type in ["movie", "episode"]:
-            stream_id = item_data.get("stream_id")
-            ext = item_data.get("container_extension", "mp4")
-            if stream_id and provider:
-                return self.api_service.get_stream_url(provider, stream_id, "vod", ext)
-
-        return None
+        return item_data.get("cmd")
 
     def _copy_url_to_clipboard(self, url):
         """Copy URL to system clipboard."""
@@ -4383,8 +4370,10 @@ class ChannelList(QMainWindow):
 
         try:
             # Use VLC's directory as cwd to avoid DLL conflicts with bundled libvlc
+            # --one-instance: reuse existing VLC window instead of spawning new ones
+            # --playlist-enqueue: add to playlist instead of replacing
             vlc_dir = os.path.dirname(vlc_cmd)
-            subprocess.Popen([vlc_cmd, cmd], cwd=vlc_dir)
+            subprocess.Popen([vlc_cmd, "--one-instance", "--playlist-enqueue", cmd], cwd=vlc_dir)
             return True
         except Exception as e:
             QMessageBox.warning(self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}")
@@ -4442,8 +4431,22 @@ class ChannelList(QMainWindow):
             if not mpv_cmd:
                 mpv_cmd = shutil.which('mpv')
         elif platform.system() == "Windows":
-            # Try PATH first, then check common installation locations
+            # Try PATH first
             mpv_cmd = shutil.which('mpv')
+            if not mpv_cmd:
+                # Check Windows Registry App Paths (set by mpv-install.bat)
+                try:
+                    import winreg
+
+                    with winreg.OpenKey(  # type: ignore[attr-defined]
+                        winreg.HKEY_LOCAL_MACHINE,  # type: ignore[attr-defined]
+                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\mpv.exe",
+                    ) as key:
+                        reg_path = winreg.QueryValue(key, None)  # type: ignore[attr-defined]
+                        if reg_path and os.path.exists(reg_path):
+                            mpv_cmd = reg_path
+                except Exception:
+                    pass
             if not mpv_cmd:
                 # Check common Windows installation paths
                 possible_paths = [
