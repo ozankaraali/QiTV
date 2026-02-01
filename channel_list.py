@@ -4482,20 +4482,28 @@ class ChannelList(QMainWindow):
             mpv_cmd = shutil.which("mpv")
             if not mpv_cmd:
                 # Check Windows Registry App Paths (set by mpv-install.bat)
+                # Try both HKEY_LOCAL_MACHINE and HKEY_CURRENT_USER
                 try:
                     import winreg
 
-                    with winreg.OpenKey(  # type: ignore[attr-defined]
-                        winreg.HKEY_LOCAL_MACHINE,  # type: ignore[attr-defined]
-                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\mpv.exe",
-                    ) as key:
-                        reg_path = winreg.QueryValue(key, None)  # type: ignore[attr-defined]
-                        if reg_path and os.path.exists(reg_path):
-                            mpv_cmd = reg_path
+                    for hkey in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:  # type: ignore[attr-defined]
+                        try:
+                            with winreg.OpenKey(  # type: ignore[attr-defined]
+                                hkey,
+                                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\mpv.exe",
+                            ) as key:
+                                reg_path = winreg.QueryValue(key, None)  # type: ignore[attr-defined]
+                                if reg_path and os.path.exists(reg_path):
+                                    mpv_cmd = reg_path
+                                    break
+                        except Exception:
+                            continue
                 except Exception:
                     pass
             if not mpv_cmd:
+                user_profile = os.environ.get("USERPROFILE", "")
                 possible_paths = [
+                    # Common installation paths
                     os.path.join(
                         os.environ.get("ProgramFiles", r"C:\Program Files"), "mpv", "mpv.exe"
                     ),
@@ -4505,17 +4513,25 @@ class ChannelList(QMainWindow):
                         "mpv.exe",
                     ),
                     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "mpv", "mpv.exe"),
+                    # Scoop package manager
+                    os.path.join(user_profile, "scoop", "apps", "mpv", "current", "mpv.exe"),
+                    # Chocolatey package manager
                     os.path.join(
-                        os.environ.get("USERPROFILE", ""),
-                        "scoop",
-                        "apps",
-                        "mpv",
-                        "current",
+                        os.environ.get("ProgramData", r"C:\ProgramData"),
+                        "chocolatey",
+                        "bin",
                         "mpv.exe",
                     ),
+                    # Portable/extracted mpv (common locations)
+                    r"C:\mpv\mpv.exe",
+                    os.path.join(user_profile, "mpv", "mpv.exe"),
+                    os.path.join(user_profile, "Downloads", "mpv", "mpv.exe"),
+                    os.path.join(user_profile, "Desktop", "mpv", "mpv.exe"),
+                    # Winget default location
+                    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages", "mpv.net_Mpv.net", "mpv", "mpv.exe"),
                 ]
                 for path in possible_paths:
-                    if os.path.exists(path):
+                    if path and os.path.exists(path):
                         mpv_cmd = path
                         break
         else:
