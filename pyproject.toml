@@ -1,11 +1,12 @@
 [project]
 name = "qitv"
-version = "1.11.4"
+version = "1.11.5"
 description = "A cross-platform STB and IPTV player client"
 requires-python = ">=3.14"
 dependencies = [
     "aiohttp[speedups]>=3.13.3",
     "m3u-parser>=0.4.2",
+    "mpv>=1.0.7",
     "orjson>=3.11.5",
     "packaging>=25.0",
     "pyqtdarktheme==2.1.0",

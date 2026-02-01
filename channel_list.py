@@ -886,6 +886,13 @@ class ChannelList(QMainWindow):
         self._current_content_id: Optional[str] = None
         self._autoplay_dialog: Optional[QDialog] = None
 
+        # External VLC player instance (for single-instance behavior)
+        self._external_vlc_instance = None
+        self._external_vlc_player = None
+
+        # External MPV player instance (for single-instance behavior)
+        self._external_mpv_player = None
+
         # Connect player signals to show/hide media controls
         self.player.playing.connect(self.show_media_controls)
         self.player.stopped.connect(self.hide_media_controls)
@@ -2672,7 +2679,9 @@ class ChannelList(QMainWindow):
             url = self._get_stream_url_for_item(item_data)
             if url:
                 copy_url_action = menu.addAction("Copy URL to Clipboard")
-                copy_url_action.triggered.connect(lambda: self._copy_url_to_clipboard(url))
+                copy_url_action.triggered.connect(
+                    lambda checked=False, u=url: self._copy_url_to_clipboard(u)
+                )
 
         # Only show menu if it has actions
         if menu.actions():
@@ -4323,45 +4332,16 @@ class ChannelList(QMainWindow):
                 is_live = None
             self.player.play_video(url, is_live=is_live, content_id=self._current_content_id)
 
-    def _launch_vlc(self, cmd):
-        """Launch VLC with error handling and platform support."""
-        vlc_cmd = None
-
-        # Platform-specific VLC detection
-        if platform.system() == "Darwin":  # macOS
-            # Check common macOS VLC locations
-            macos_vlc_path = "/Applications/VLC.app/Contents/MacOS/VLC"
-            if os.path.exists(macos_vlc_path):
-                vlc_cmd = macos_vlc_path
-            else:
-                # Try homebrew cask location
-                homebrew_vlc = os.path.expanduser("~/Applications/VLC.app/Contents/MacOS/VLC")
-                if os.path.exists(homebrew_vlc):
-                    vlc_cmd = homebrew_vlc
-        elif platform.system() == "Windows":
-            # Try PATH first, then check common installation locations
-            vlc_cmd = shutil.which('vlc')
-            if not vlc_cmd:
-                # Check standard installation paths
-                program_files_paths = [
-                    os.environ.get("ProgramFiles", r"C:\Program Files"),
-                    os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-                ]
-                for pf in program_files_paths:
-                    candidate = os.path.join(pf, "VideoLAN", "VLC", "vlc.exe")
-                    if os.path.exists(candidate):
-                        vlc_cmd = candidate
-                        break
-        else:
-            # Linux: try to find vlc in PATH
-            vlc_cmd = shutil.which('vlc')
-
-        if not vlc_cmd:
+    def _launch_vlc(self, url):
+        """Launch VLC using python-vlc for single-instance behavior."""
+        try:
+            import vlc
+        except ImportError:
             QMessageBox.warning(
                 self,
-                "VLC Not Found",
-                "VLC Media Player is not installed or not found.\n\n"
-                "Please install VLC:\n"
+                "VLC Not Available",
+                "python-vlc library is not available.\n\n"
+                "Please install VLC Media Player:\n"
                 "• macOS: Download from https://www.videolan.org/vlc/\n"
                 "• Linux: Use your package manager (apt, yum, etc.)\n"
                 "• Windows: Download from https://www.videolan.org/vlc/",
@@ -4369,11 +4349,14 @@ class ChannelList(QMainWindow):
             return False
 
         try:
-            # Use VLC's directory as cwd to avoid DLL conflicts with bundled libvlc
-            # --one-instance: reuse existing VLC window instead of spawning new ones
-            # --playlist-enqueue: add to playlist instead of replacing
-            vlc_dir = os.path.dirname(vlc_cmd)
-            subprocess.Popen([vlc_cmd, "--one-instance", "--playlist-enqueue", cmd], cwd=vlc_dir)
+            if self._external_vlc_player is None:
+                self._external_vlc_instance = vlc.Instance()
+                self._external_vlc_player = self._external_vlc_instance.media_player_new()
+
+            assert self._external_vlc_instance is not None
+            media = self._external_vlc_instance.media_new(url)
+            self._external_vlc_player.set_media(media)
+            self._external_vlc_player.play()
             return True
         except Exception as e:
             QMessageBox.warning(self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}")
@@ -4411,87 +4394,31 @@ class ChannelList(QMainWindow):
         self.config_manager.play_in_mpv = self.play_in_mpv_checkbox.isChecked()
         self.save_config()
 
-    def _launch_mpv(self, cmd):
-        """Launch MPV with error handling and platform support."""
-        mpv_cmd = None
-
-        # Platform-specific MPV detection
-        if platform.system() == "Darwin":  # macOS
-            # Check common macOS MPV locations
-            macos_mpv_paths = [
-                "/Applications/mpv.app/Contents/MacOS/mpv",
-                os.path.expanduser("~/Applications/mpv.app/Contents/MacOS/mpv"),
-                "/opt/homebrew/bin/mpv",  # Homebrew ARM
-                "/usr/local/bin/mpv",  # Homebrew Intel
-            ]
-            for path in macos_mpv_paths:
-                if os.path.exists(path):
-                    mpv_cmd = path
-                    break
-            if not mpv_cmd:
-                mpv_cmd = shutil.which('mpv')
-        elif platform.system() == "Windows":
-            # Try PATH first
-            mpv_cmd = shutil.which('mpv')
-            if not mpv_cmd:
-                # Check Windows Registry App Paths (set by mpv-install.bat)
-                try:
-                    import winreg
-
-                    with winreg.OpenKey(  # type: ignore[attr-defined]
-                        winreg.HKEY_LOCAL_MACHINE,  # type: ignore[attr-defined]
-                        r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\mpv.exe",
-                    ) as key:
-                        reg_path = winreg.QueryValue(key, None)  # type: ignore[attr-defined]
-                        if reg_path and os.path.exists(reg_path):
-                            mpv_cmd = reg_path
-                except Exception:
-                    pass
-            if not mpv_cmd:
-                # Check common Windows installation paths
-                possible_paths = [
-                    os.path.join(
-                        os.environ.get("ProgramFiles", r"C:\Program Files"), "mpv", "mpv.exe"
-                    ),
-                    os.path.join(
-                        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-                        "mpv",
-                        "mpv.exe",
-                    ),
-                    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "mpv", "mpv.exe"),
-                    os.path.join(
-                        os.environ.get("USERPROFILE", ""),
-                        "scoop",
-                        "apps",
-                        "mpv",
-                        "current",
-                        "mpv.exe",
-                    ),
-                ]
-                for path in possible_paths:
-                    if os.path.exists(path):
-                        mpv_cmd = path
-                        break
-        else:
-            # Linux: try to find mpv in PATH
-            mpv_cmd = shutil.which('mpv')
-
-        if not mpv_cmd:
+    def _launch_mpv(self, url):
+        """Launch MPV using python-mpv for single-instance behavior."""
+        try:
+            import mpv
+        except (ImportError, OSError):
             QMessageBox.warning(
                 self,
-                "MPV Not Found",
-                "MPV Media Player is not installed or not found.\n\n"
+                "MPV Not Available",
+                "libmpv library is not installed on your system.\n\n"
                 "Please install MPV:\n"
                 "• macOS: brew install mpv\n"
-                "• Linux: Use your package manager (apt, yum, etc.)\n"
+                "• Linux: Use your package manager (apt install mpv, etc.)\n"
                 "• Windows: Download from https://mpv.io/installation/",
             )
             return False
 
         try:
-            # Use MPV's directory as cwd to avoid DLL conflicts
-            mpv_dir = os.path.dirname(mpv_cmd)
-            subprocess.Popen([mpv_cmd, cmd], cwd=mpv_dir)
+            if self._external_mpv_player is None:
+                self._external_mpv_player = mpv.MPV(
+                    input_default_bindings=True,
+                    input_vo_keyboard=True,
+                    osc=True,
+                )
+
+            self._external_mpv_player.play(url)
             return True
         except Exception as e:
             QMessageBox.warning(self, "MPV Launch Failed", f"Failed to launch MPV: {str(e)}")
