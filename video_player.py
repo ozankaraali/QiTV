@@ -95,7 +95,7 @@ class VideoPlayer(QMainWindow):
             self.media_player.set_nsobject(int(self.video_frame.winId()))
 
         self.mainFrame.setLayout(t_lay_parent)
-        self.show()
+        # Don't auto-show - let caller decide when to show the player
 
         # Enable mouse tracking for inactivity detection
         self.setMouseTracking(True)
