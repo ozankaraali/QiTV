@@ -107,7 +107,9 @@ if __name__ == "__main__":
             app, player, config_manager, provider_manager, image_manager, epg_manager
         )
         qdarktheme.setup_theme("auto")
-        player.show()
+        # Skip showing embedded player if external player (VLC/MPV) is enabled
+        if not config_manager.play_in_vlc and not config_manager.play_in_mpv:
+            player.show()
         channel_list.show()
 
         # Do not force focus/activation; let the window manager handle it
