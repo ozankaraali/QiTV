@@ -182,6 +182,15 @@ class VideoPlayer(QMainWindow):
 
         # Deprecated direct handler; interactive behavior handled by _SeekProgressBar above
 
+        # Stall detection watchdog: auto-restart when playback freezes
+        # (e.g., during HLS intro→content transitions that break audio)
+        self._stall_last_time = -1  # Last observed media time (ms)
+        self._stall_count = 0  # Consecutive stall ticks
+        self._auto_retry_count = 0  # Prevent infinite retry loops
+        self._stall_timer = QTimer(self)
+        self._stall_timer.setInterval(2000)  # Check every 2 seconds
+        self._stall_timer.timeout.connect(self._check_stall)
+
         # Single vs double click handling
         self.click_position = None
         self.click_timer = QTimer(self)
@@ -226,6 +235,18 @@ class VideoPlayer(QMainWindow):
         action_pip.setShortcutContext(Qt.WindowShortcut)
         action_pip.triggered.connect(self._action_toggle_pip)
         self.addAction(action_pip)
+
+        action_audio_track = QAction("Cycle Audio Track", self)
+        action_audio_track.setShortcut(QKeySequence(Qt.Key_A))
+        action_audio_track.setShortcutContext(Qt.WindowShortcut)
+        action_audio_track.triggered.connect(self.cycle_audio_track)
+        self.addAction(action_audio_track)
+
+        action_subtitle_track = QAction("Cycle Subtitle Track", self)
+        action_subtitle_track.setShortcut(QKeySequence(Qt.Key_J))
+        action_subtitle_track.setShortcutContext(Qt.WindowShortcut)
+        action_subtitle_track.triggered.connect(self.cycle_subtitle_track)
+        self.addAction(action_subtitle_track)
 
     def _action_toggle_pip(self):
         if self.windowState() == Qt.WindowFullScreen:
@@ -422,44 +443,52 @@ class VideoPlayer(QMainWindow):
         self._last_url = video_url
         self._is_live_hint = is_live  # Store hint for use in media_length_changed
         self._seek_retry_done = False
+        self._auto_retry_count = 0
+        self._stall_timer.stop()
         self.media = self.instance.media_new(video_url)
-        # Improved options for IPTV streams to prevent freezing
         try:
             # User agent
             self.media.add_option(":http-user-agent=VLC/3.0.20")
 
-            # Buffering settings (higher values help prevent freezing)
-            self.media.add_option(":network-caching=3000")  # Increased from 1200ms to 3000ms
-            self.media.add_option(":file-caching=2000")
-            self.media.add_option(":live-caching=2000")
-
-            # Connection settings
-            self.media.add_option(":http-reconnect=true")
-
-            # Performance settings (keep defaults; avoid aggressive clock tweaks that can affect PTS)
-
-            # Disable unused features for better performance
-            self.media.add_option(":no-audio-time-stretch")
-            self.media.add_option(":avcodec-fast")
-
             # Hardware decoding (if available)
             self.media.add_option(":avcodec-hw=any")
+            self.media.add_option(":avcodec-fast")
+            self.media.add_option(":no-audio-time-stretch")
 
-            # Special handling for VOD/HTTP containers: keep options minimal and safe
-            if video_url and (
+            is_vod_container = video_url and (
                 '.mkv' in video_url.lower()
                 or '.mp4' in video_url.lower()
                 or '.avi' in video_url.lower()
                 or '.webm' in video_url.lower()
-            ):
-                # Disable timeshift (it conflicts with paced streams on some servers)
-                self.media.add_option(":input-timeshift-granularity=0")
-                # Increase network cache for VOD a bit
+            )
+
+            if is_live is True:
+                # Live streams: keep caching low for fast start.
+                # High caching causes VLC to stall waiting for data
+                # when some CDN servers in the HLS manifest are down.
+                self.media.add_option(":network-caching=1000")
+                self.media.add_option(":live-caching=500")
+                self.media.add_option(":http-reconnect=true")
+                # Adaptive streaming: start with lowest bandwidth to
+                # begin playback quickly, then adapt upward.
+                self.media.add_option(":adaptive-logic=lowest")
+                # Reduce clock jitter sensitivity for streams with PCR
+                # discontinuities (common during intro→content transitions).
+                self.media.add_option(":clock-jitter=0")
+            elif is_vod_container:
+                # VOD file containers: higher caching for smooth seeking
                 self.media.add_option(":network-caching=4000")
-                # Prefer fast seek to reduce heavy prefetch
+                self.media.add_option(":file-caching=2000")
+                self.media.add_option(":http-reconnect=true")
+                self.media.add_option(":input-timeshift-granularity=0")
                 self.media.add_option(":input-fast-seek")
-                # Enable HTTP byte-range for seeking
                 self.media.add_option(":http-forward-cookies=true")
+            else:
+                # VOD streams (m3u8/ts) or unknown: moderate caching
+                self.media.add_option(":network-caching=2000")
+                self.media.add_option(":file-caching=1500")
+                self.media.add_option(":live-caching=1000")
+                self.media.add_option(":http-reconnect=true")
         except Exception as e:
             logging.warning(f"Failed to set VLC options: {e}")
         self.media_player.set_media(self.media)
@@ -479,6 +508,12 @@ class VideoPlayer(QMainWindow):
             self.playing.emit()
             QTimer.singleShot(5000, self.check_playback_status)
 
+            # Start stall watchdog for live streams (intro clip recovery)
+            self._stall_last_time = -1
+            self._stall_count = 0
+            if is_live is True:
+                self._stall_timer.start()
+
             # Start inactivity timer for auto-hiding UI
             self._ui_visible = True
             self.inactivity_timer.start()
@@ -494,11 +529,96 @@ class VideoPlayer(QMainWindow):
                     self.handle_error("Failed to start playback")
                 self.stopped.emit()
 
+    def _check_stall(self):
+        """Watchdog: detect stalled playback and recover.
+
+        IPTV streams with server-side intro clips can stall VLC when the
+        stream format changes mid-playback (audio sample rate becomes 0).
+        Recovery strategy:
+          1st stall → cycle audio track off/on to force decoder reinit
+          2nd stall → full restart (last resort)
+        """
+        try:
+            state = self.media_player.get_state()
+            if state not in (vlc.State.Playing, vlc.State.Buffering):
+                self._stall_count = 0
+                self._stall_last_time = -1
+                return
+
+            current_time = self.media_player.get_time()
+            if current_time <= 0 and self._stall_last_time <= 0:
+                # Still opening / not started yet — don't count
+                return
+
+            if current_time == self._stall_last_time:
+                self._stall_count += 1
+            else:
+                self._stall_count = 0
+                self._stall_last_time = current_time
+                return
+
+            self._stall_last_time = current_time
+
+            # 3 consecutive stall checks × 2s = 6 seconds frozen
+            if self._stall_count >= 3 and self._auto_retry_count < 3:
+                self._auto_retry_count += 1
+                self._stall_count = 0
+
+                if self._auto_retry_count <= 2:
+                    # First attempts: cycle audio track to reinit decoder
+                    logging.warning(
+                        "Stall detected (time=%s, attempt #%d) — cycling audio track",
+                        current_time,
+                        self._auto_retry_count,
+                    )
+                    self._recover_audio()
+                else:
+                    # Last resort: full restart
+                    logging.warning(
+                        "Stall detected (time=%s, attempt #%d) — restarting playback",
+                        current_time,
+                        self._auto_retry_count,
+                    )
+                    self._restart_playback()
+        except Exception as e:
+            logging.debug("Stall watchdog error: %s", e)
+
+    def _recover_audio(self):
+        """Cycle audio track off then back on to force VLC to reinit the decoder."""
+        try:
+            current_track = self.media_player.audio_get_track()
+            # Disable audio
+            self.media_player.audio_set_track(-1)
+            # Re-enable after a short delay so VLC picks up new stream params
+            QTimer.singleShot(500, lambda: self.media_player.audio_set_track(current_track))
+        except Exception as e:
+            logging.debug("Audio recovery failed: %s", e)
+
+    def _restart_playback(self):
+        """Stop and restart playback of the current URL."""
+        url = self._last_url
+        if not url:
+            return
+        is_live = self._is_live_hint
+        content_id = self._content_id
+        retry_count = self._auto_retry_count  # Preserve across restart
+        self.media_player.stop()
+        self._stall_timer.stop()
+
+        def _do_restart():
+            self.play_video(url, is_live=is_live, content_id=content_id)
+            self._auto_retry_count = retry_count  # Restore retry count
+
+        # Short delay to let VLC clean up, then replay
+        QTimer.singleShot(300, _do_restart)
+
     def stop_video(self):
         self.media_player.stop()
         self.progress_bar.setVisible(False)
         self.update_timer.stop()
         self.position_save_timer.stop()  # Stop position tracking
+        self._stall_timer.stop()
+        self._auto_retry_count = 0
         self.inactivity_timer.stop()
         self.setCursor(Qt.ArrowCursor)  # Restore cursor
         self._ui_visible = True
@@ -508,6 +628,49 @@ class VideoPlayer(QMainWindow):
     def toggle_mute(self):
         state = self.media_player.audio_get_mute()
         self.media_player.audio_set_mute(not state)
+
+    def _show_osd(self, text: str, duration_ms: int = 2000):
+        """Briefly show a message on the progress bar as an OSD overlay."""
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setFormat(text)
+        self._ui_visible = True
+        self.inactivity_timer.start(duration_ms)
+
+    def cycle_audio_track(self):
+        try:
+            descriptions = self.media_player.audio_get_track_description()
+            if not descriptions or len(descriptions) < 2:
+                self._show_osd("No alternate audio tracks")
+                return
+            current = self.media_player.audio_get_track()
+            ids = [d[0] for d in descriptions]
+            idx = ids.index(current) if current in ids else 0
+            next_idx = (idx + 1) % len(ids)
+            self.media_player.audio_set_track(ids[next_idx])
+            name = descriptions[next_idx][1]
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="replace")
+            self._show_osd(f"Audio: {name}")
+        except Exception as e:
+            logging.warning(f"Failed to cycle audio track: {e}")
+
+    def cycle_subtitle_track(self):
+        try:
+            descriptions = self.media_player.video_get_spu_description()
+            if not descriptions:
+                self._show_osd("No subtitles available")
+                return
+            current = self.media_player.video_get_spu()
+            ids = [d[0] for d in descriptions]
+            idx = ids.index(current) if current in ids else -1
+            next_idx = (idx + 1) % len(ids)
+            self.media_player.video_set_spu(ids[next_idx])
+            name = descriptions[next_idx][1]
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="replace")
+            self._show_osd(f"Subtitle: {name}")
+        except Exception as e:
+            logging.warning(f"Failed to cycle subtitle track: {e}")
 
     def toggle_play_pause(self):
         state = self.media_player.get_state()
