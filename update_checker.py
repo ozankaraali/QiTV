@@ -185,7 +185,10 @@ class UpdateDownloader(QObject):
                         f.write(chunk)
                         downloaded += len(chunk)
                         # Throttle progress updates to every 500KB to avoid overwhelming Qt event loop
-                        if downloaded - last_progress_update >= 512 * 1024 or downloaded >= total_size:
+                        if (
+                            downloaded - last_progress_update >= 512 * 1024
+                            or downloaded >= total_size
+                        ):
                             self.progress.emit(downloaded, total_size)
                             last_progress_update = downloaded
 
@@ -258,26 +261,46 @@ def start_download(download_url: str, file_size: int, release_url: str):
     downloader = UpdateDownloader(download_url, file_size)
     downloader.moveToThread(thread)
 
+    # QTimer.singleShot(0, app, fn) ensures fn runs on the main/GUI thread.
+    # Signals from a blocking worker delivered via QueuedConnection to Python
+    # closures lack thread affinity and may run on the worker thread, which
+    # crashes macOS (NSWindow operations must be on the Main Thread).
+    app = QApplication.instance()
+
     def on_progress(downloaded: int, total: int):
-        if total > 0:
-            percent = int(downloaded * 100 / total)
-            progress.setValue(percent)
-            mb_downloaded = downloaded / (1024 * 1024)
-            mb_total = total / (1024 * 1024)
-            progress.setLabelText(f"Downloading update... {mb_downloaded:.1f} / {mb_total:.1f} MB")
+        def _update():
+            if total > 0:
+                percent = int(downloaded * 100 / total)
+                progress.setValue(percent)
+                mb_downloaded = downloaded / (1024 * 1024)
+                mb_total = total / (1024 * 1024)
+                progress.setLabelText(
+                    f"Downloading update... {mb_downloaded:.1f} / {mb_total:.1f} MB"
+                )
+
+        if app:
+            QTimer.singleShot(0, app, _update)
 
     def on_finished(path: str):
-        thread.quit()
-        progress.close()
-        perform_update(path, release_url)
-        _cleanup()
+        def _handle():
+            thread.quit()
+            progress.close()
+            perform_update(path, release_url)
+            _cleanup()
+
+        if app:
+            QTimer.singleShot(0, app, _handle)
 
     def on_error(error_msg: str):
-        thread.quit()
-        progress.close()
-        _cleanup()
-        if "cancelled" not in error_msg.lower():
-            _show_download_error(error_msg, release_url)
+        def _handle():
+            thread.quit()
+            progress.close()
+            _cleanup()
+            if "cancelled" not in error_msg.lower():
+                _show_download_error(error_msg, release_url)
+
+        if app:
+            QTimer.singleShot(0, app, _handle)
 
     def on_cancelled():
         downloader.cancel()
@@ -289,9 +312,9 @@ def start_download(download_url: str, file_size: int, release_url: str):
             pass
 
     thread.started.connect(downloader.run)
-    downloader.progress.connect(on_progress, Qt.QueuedConnection)
-    downloader.finished.connect(on_finished, Qt.QueuedConnection)
-    downloader.error.connect(on_error, Qt.QueuedConnection)
+    downloader.progress.connect(on_progress)
+    downloader.finished.connect(on_finished)
+    downloader.error.connect(on_error)
     progress.canceled.connect(on_cancelled)
 
     _download_jobs.append((thread, downloader, progress))
