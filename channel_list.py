@@ -222,10 +222,14 @@ class XtreamLoaderWorker(QObject):
         self.prefer_https = prefer_https
 
     def run(self):
+        # Use a single Session so connections are reused and properly
+        # closed when the worker finishes (avoids leaking connections
+        # against providers with strict connection limits).
+        session = requests.Session()
         try:
             # Step 1: Authenticate and resolve proper base + formats
             auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
-            auth_resp = requests.get(auth_url, timeout=10, verify=self.verify_ssl)
+            auth_resp = session.get(auth_url, timeout=10, verify=self.verify_ssl)
             auth_resp.raise_for_status()
             auth_body = auth_resp.json() if auth_resp.content else {}
             server_info = auth_body.get("server_info", {}) if isinstance(auth_body, dict) else {}
@@ -287,7 +291,7 @@ class XtreamLoaderWorker(QObject):
             categories = []
             categories_map = {}
             try:
-                cat_resp = requests.get(cat_url, timeout=10, verify=self.verify_ssl)
+                cat_resp = session.get(cat_url, timeout=10, verify=self.verify_ssl)
                 if cat_resp.ok and cat_resp.content:
                     cats_data = cat_resp.json() or []
                     for c in cats_data:
@@ -305,7 +309,7 @@ class XtreamLoaderWorker(QObject):
             streams_url = xtream_player_api_url(
                 resolved_base, self.username, self.password, action=streams_action
             )
-            streams_resp = requests.get(streams_url, timeout=15, verify=self.verify_ssl)
+            streams_resp = session.get(streams_url, timeout=15, verify=self.verify_ssl)
             streams_resp.raise_for_status()
             streams = streams_resp.json() or []
 
@@ -349,11 +353,11 @@ class XtreamLoaderWorker(QObject):
 
                     for b in bases_pref:
                         worked = False
-                        # Prefer ext order depending on scheme (https -> m3u8 first)
-                        if b.startswith("https://"):
-                            ext_order = [ext for ext in ("m3u8", "ts") if ext in exts_pref]
-                        else:
-                            ext_order = [ext for ext in ("ts", "m3u8") if ext in exts_pref]
+                        # Prefer TS over HLS for live streams.
+                        # The HLS adaptive demuxer struggles with mid-stream
+                        # format changes (e.g. intro clip transitions), while
+                        # VLC's TS demuxer handles them inline more gracefully.
+                        ext_order = [ext for ext in ("ts", "m3u8") if ext in exts_pref]
                         for ext in ext_order:
                             test_url = f"{b}/{url_prefix}/{self.username}/{self.password}/{sample_id}.{ext}"
                             try:
@@ -361,30 +365,36 @@ class XtreamLoaderWorker(QObject):
                                     "User-Agent": "VLC/3.0.20",
                                 }
                                 # Fetch a small range sufficient to identify TS or M3U
+                                read_size = 188 if ext == "ts" else 1024
                                 if ext == "ts":
                                     headers["Range"] = "bytes=0-187"
                                 else:
                                     headers["Range"] = "bytes=0-1023"
-                                r = requests.get(
+                                # Use stream=True to avoid downloading entire
+                                # live streams when the server ignores Range.
+                                r = session.get(
                                     test_url,
                                     headers=headers,
                                     timeout=6,
                                     allow_redirects=True,
                                     verify=self.verify_ssl,
+                                    stream=True,
                                 )
-                                # Check status, content exists, and content-length > 0
+                                # Read only the bytes we need, then close
+                                probe_bytes = r.raw.read(read_size)
+                                ctype = r.headers.get("Content-Type", "")
                                 clen = r.headers.get("Content-Length", "1")
+                                r.close()
                                 if (
                                     r.status_code in (200, 206)
-                                    and r.content
-                                    and len(r.content) > 0
+                                    and probe_bytes
+                                    and len(probe_bytes) > 0
                                     and clen != "0"
                                 ):
-                                    ctype = r.headers.get("Content-Type", "")
                                     ok = (
-                                        looks_like_m3u8(r.content, ctype)
+                                        looks_like_m3u8(probe_bytes, ctype)
                                         if ext == "m3u8"
-                                        else looks_like_ts(r.content, ctype)
+                                        else looks_like_ts(probe_bytes, ctype)
                                     )
                                     if ok:
                                         pick_base, pick_ext = b, ext
@@ -495,6 +505,8 @@ class XtreamLoaderWorker(QObject):
 
         except Exception as e:
             self.error.emit(str(e))
+        finally:
+            session.close()
 
 
 class XtreamSeriesInfoWorker(QObject):
@@ -4528,7 +4540,15 @@ class ChannelList(QMainWindow):
                     os.path.join(user_profile, "Downloads", "mpv", "mpv.exe"),
                     os.path.join(user_profile, "Desktop", "mpv", "mpv.exe"),
                     # Winget default location
-                    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages", "mpv.net_Mpv.net", "mpv", "mpv.exe"),
+                    os.path.join(
+                        os.environ.get("LOCALAPPDATA", ""),
+                        "Microsoft",
+                        "WinGet",
+                        "Packages",
+                        "mpv.net_Mpv.net",
+                        "mpv",
+                        "mpv.exe",
+                    ),
                 ]
                 for path in possible_paths:
                     if path and os.path.exists(path):
