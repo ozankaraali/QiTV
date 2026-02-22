@@ -87,6 +87,13 @@ if __name__ == "__main__":
 
     icon_path = "assets/qitv.png"
 
+    # Resolve icon path for PyInstaller bundles
+    if hasattr(sys, "_MEIPASS"):
+        if platform.system() == "Windows":
+            icon_path = os.path.join(sys._MEIPASS, "assets", "qitv.ico")
+        else:
+            icon_path = os.path.join(sys._MEIPASS, "assets", "qitv.png")
+
     config_manager = ConfigManager()
     image_manager = ImageManager(config_manager, config_manager.max_cache_image_size * 1024 * 1024)
     provider_manager = ProviderManager(config_manager)
@@ -95,8 +102,6 @@ if __name__ == "__main__":
     if platform.system() == "Windows":
         myappid = f"com.ozankaraali.qitv.{get_app_version()}"
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)  # type: ignore
-        if hasattr(sys, "_MEIPASS"):
-            icon_path = sys._MEIPASS + "\\assets\\qitv.ico"
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
 

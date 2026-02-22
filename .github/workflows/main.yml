@@ -18,8 +18,8 @@ jobs:
           enable-cache: true
       - name: Check OpenSSL Version
         run: uv run python -c "import ssl; print(ssl.OPENSSL_VERSION)"
-      - name: Install VLC
-        run: sudo apt-get update && sudo apt-get install -y vlc
+      - name: Install VLC and xcb dependencies
+        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0
       - name: Sync dependencies with uv
         run: uv sync --frozen --dev
       - name: Package App with PyInstaller for Linux

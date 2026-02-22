@@ -19,6 +19,30 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### Linux Desktop Integration
+
+After downloading the release binary or cloning the repo, you can install QiTV into your application menu so it persists across reboots:
+
+**Using the release binary:**
+```bash
+chmod +x qitv-linux
+git clone https://github.com/ozankaraali/QiTV/  # needed for install script and icon
+cd QiTV
+./scripts/install-linux.sh /path/to/qitv-linux
+```
+
+**Using the development (venv) setup:**
+```bash
+# After the initial setup above:
+./scripts/install-linux.sh
+```
+
+This installs a desktop entry and icon so QiTV appears in your application menu. The desktop entry uses absolute paths, so it works after rebooting without needing to re-activate the virtual environment.
+
+**Troubleshooting on Linux:**
+- If the release binary fails with Qt/xcb plugin errors, install xcb-cursor: `sudo apt install libxcb-cursor0` (Debian/Ubuntu) or `sudo dnf install xcb-util-cursor` (Fedora).
+- Make sure `~/.local/bin` is in your PATH. Add `export PATH="$HOME/.local/bin:$PATH"` to your `~/.bashrc` if needed.
+
 ## Usage
 
 You could use this software as a IPTV player or as a STB client. It bundles [a list of publicly available IPTV channels](https://github.com/iptv-org/iptv) from around the world for you to start quickly using or test the application. You can delete that playlist entry if you want from your computer after registering your playlists / STB player details.

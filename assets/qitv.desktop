@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=QiTV
+Comment=A cross-platform IPTV and STB player client
+Exec=qitv-linux
+Icon=qitv
+Terminal=false
+Type=Application
+Categories=AudioVideo;Video;Player;TV;
+Keywords=IPTV;STB;TV;streaming;video;
+StartupWMClass=qitv
