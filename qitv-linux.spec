@@ -28,6 +28,14 @@ for file in os.listdir(VLC_PATH):
     if file.startswith("libvlccore.so"):
         libvlccore_version = file
 
+# Find libxcb-cursor (required by Qt xcb platform plugin on many distros)
+xcb_cursor_binaries = []
+for file in os.listdir(VLC_PATH):
+    if file.startswith("libxcb-cursor.so"):
+        xcb_cursor_binaries.append(
+            (file, os.path.join(VLC_PATH, file), "BINARY")
+        )
+
 a = Analysis(
     ['main.py'],
     pathex=[VLC_PATH],
@@ -36,6 +44,7 @@ a = Analysis(
     ],
     datas=[
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
+        ('assets', 'assets'),  # Include icons and desktop file
     ],
     hiddenimports=[],
     hookspath=[],
@@ -56,8 +65,8 @@ exe = EXE(
     a.scripts,
     a.binaries + [
         (libvlc_version, os.path.join(VLC_PATH, libvlc_version), "BINARY"),
-        (libvlccore_version, os.path.join(VLC_PATH, libvlccore_version), "BINARY")
-    ],
+        (libvlccore_version, os.path.join(VLC_PATH, libvlccore_version), "BINARY"),
+    ] + xcb_cursor_binaries,
     a.datas,
     [],
     name='qitv',
