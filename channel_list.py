@@ -16,7 +16,6 @@ from PySide6.QtCore import QBuffer, QEvent, QObject, QRect, QSize, Qt, QThread, 
 from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -31,7 +30,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QProgressDialog,
     QPushButton,
-    QRadioButton,
     QSizePolicy,
     QSplitter,
     QTreeWidget,
@@ -67,6 +65,9 @@ from widgets.autoplay_dialogs import (
     SeriesCompleteDialog,
 )
 from widgets.delegates import ChannelItemDelegate, HtmlItemDelegate
+from widgets.menu_bar import AppMenuBar
+from widgets.sidebar import Sidebar
+from widgets.top_bar import TopBar
 
 # --- Roman numeral helpers (conservative matching) ---
 _ROMAN_RE = re.compile(r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$")
@@ -857,27 +858,52 @@ class ChannelList(QMainWindow):
         self.image_loader: Optional[ImageLoader] = None
         self.content_loader: Optional[ContentLoader] = None
         self._provider_combo_connected = False  # Track if signal is connected
+        self._all_providers_mode = False
 
-        self.create_upper_panel()
+        # Create UI components
+        self.create_top_bar()
+        self.sidebar = Sidebar(self.container_widget)
         self.create_list_panel()
         self.create_content_info_panel()
         self.create_media_controls()
 
-        self.main_layout = QVBoxLayout()
-        self.main_layout.addWidget(self.upper_layout)
-        self.main_layout.addWidget(self.list_panel)
+        # Build the menu bar
+        self.app_menu = AppMenuBar(self)
+        self._connect_menu_actions()
+
+        # Right side: top bar + content list
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        right_layout.addWidget(self.top_bar)
+        right_layout.addWidget(self.list_panel)
 
         widget_top = QWidget()
-        widget_top.setLayout(self.main_layout)
+        top_layout = QHBoxLayout(widget_top)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(0)
+        top_layout.addWidget(self.sidebar)
+        top_layout.addWidget(right_panel, 1)
 
         # Splitter with content info part
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.addWidget(widget_top)
         self.splitter.addWidget(self.content_info_panel)
         self.splitter.setSizes([1, 0])
+        self.splitter.setHandleWidth(5)
+        self.splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: rgba(128, 128, 128, 0.2);
+                border-radius: 2px;
+            }
+            QSplitter::handle:hover {
+                background-color: rgba(128, 128, 128, 0.4);
+            }
+        """)
 
         container_layout = QVBoxLayout(self.container_widget)
-        container_layout.setContentsMargins(0, 0, 0, 0)  # Set margins to zero
+        container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.addWidget(self.splitter)
         container_layout.addWidget(self.media_controls)
 
@@ -924,12 +950,9 @@ class ChannelList(QMainWindow):
             pass
 
         self.splitter.splitterMoved.connect(self.update_splitter_ratio)
-        self.channels_radio.toggled.connect(self.toggle_content_type)
-        self.movies_radio.toggled.connect(self.toggle_content_type)
 
         # Global shortcuts mirrored on main window
         self._setup_global_shortcuts()
-        self.series_radio.toggled.connect(self.toggle_content_type)
 
         # Create a timer to update "On Air" status
         self.refresh_on_air_timer = QTimer(self)
@@ -1063,8 +1086,6 @@ class ChannelList(QMainWindow):
         # No need to switch content type if not STB
         selected_provider = self.provider_manager.current_provider
         config_type = selected_provider.get("type", "")
-        # Show content type switches for STB and XTREAM providers
-        self.content_switch_group.setVisible(config_type in ("STB", "XTREAM"))
 
         if force_update:
             self.update_content()
@@ -1121,129 +1142,14 @@ class ChannelList(QMainWindow):
         if total_size:
             self.splitter_content_info_ratio = sizes[0] / total_size
 
-    def create_upper_panel(self):
-        self.upper_layout = QWidget(self.container_widget)
-        main_layout = QVBoxLayout(self.upper_layout)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(8)  # Space between toolbar sections
+    def create_top_bar(self):
+        self.top_bar = TopBar(self.container_widget)
+        self.top_bar.back_clicked.connect(self.go_back)
+        self.top_bar.search_changed.connect(self.filter_content)
 
-        # Modern toolbar layout - single row with logical sections
-        toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(0, 0, 0, 0)
-        toolbar.setSpacing(12)  # Space between sections
-
-        # Section 1: Provider Selection
-        provider_section = QHBoxLayout()
-        provider_section.setSpacing(6)
-
-        provider_label = QLabel("Provider:")
-        provider_section.addWidget(provider_label)
-
+        # Hidden provider combo kept for data-population compatibility
         self.provider_combo = QComboBox()
-        self.provider_combo.setMinimumWidth(150)
-        self.provider_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        # Signal connection happens in populate_provider_combo after initial setup
-        provider_section.addWidget(self.provider_combo)
-
-        self.options_button = QPushButton("Settings")
-        self.options_button.clicked.connect(self.options_dialog)
-        provider_section.addWidget(self.options_button)
-
-        toolbar.addLayout(provider_section)
-
-        # Separator
-        toolbar.addSpacing(6)
-
-        # Section 2: File Operations
-        file_section = QHBoxLayout()
-        file_section.setSpacing(6)
-
-        self.open_button = QPushButton("Open File")
-        self.open_button.clicked.connect(self.open_file)
-        file_section.addWidget(self.open_button)
-
-        toolbar.addLayout(file_section)
-
-        # Separator
-        toolbar.addSpacing(6)
-
-        # Section 3: Content Navigation
-        nav_section = QHBoxLayout()
-        nav_section.setSpacing(6)
-
-        self.back_button = QPushButton("Back")
-        self.back_button.clicked.connect(self.go_back)
-        self.back_button.setVisible(False)
-        nav_section.addWidget(self.back_button)
-
-        self.update_button = QPushButton("Update")
-        self.update_button.setToolTip("Update Content")
-        self.update_button.clicked.connect(lambda: self.set_provider(force_update=True))
-        nav_section.addWidget(self.update_button)
-
-        toolbar.addLayout(nav_section)
-
-        # Separator
-        toolbar.addSpacing(6)
-
-        # Section 4: Content Actions
-        actions_section = QHBoxLayout()
-        actions_section.setSpacing(6)
-
-        self.resume_button = QPushButton("Resume")
-        self.resume_button.setToolTip("Resume Last Watched")
-        self.resume_button.clicked.connect(self.resume_last_watched)
-        actions_section.addWidget(self.resume_button)
-
-        self.history_button = QPushButton("History")
-        self.history_button.setToolTip("View Watch History")
-        self.history_button.clicked.connect(self.show_watch_history)
-        actions_section.addWidget(self.history_button)
-
-        # Export button with dropdown menu
-        self.export_button = QPushButton("Export")
-
-        # Create export menu
-        export_menu = QMenu(self)
-
-        export_shown_action = export_menu.addAction("Export Shown Channels")
-        export_shown_action.setToolTip("Export the channels currently shown in the list")
-        export_shown_action.triggered.connect(self.export_shown_channels)
-
-        export_menu.addSeparator()
-
-        export_cached_action = export_menu.addAction("Export Cached Content")
-        export_cached_action.setToolTip("Quickly export only browsed/cached content")
-        export_cached_action.triggered.connect(self.export_content_cached)
-
-        export_complete_action = export_menu.addAction("Export Complete (Fetch All)")
-        export_complete_action.setToolTip(
-            "For STB series: Fetch all seasons/episodes before exporting"
-        )
-        export_complete_action.triggered.connect(self.export_content_complete)
-
-        export_menu.addSeparator()
-
-        export_all_live_action = export_menu.addAction("Export All Live Channels")
-        export_all_live_action.setToolTip("For STB: Export all live TV channels from cache")
-        export_all_live_action.triggered.connect(self.export_all_live_channels)
-
-        # Use a clean label; Qt will add a dropdown arrow automatically
-        self.export_button.setMenu(export_menu)
-        actions_section.addWidget(self.export_button)
-
-        self.rescanlogo_button = QPushButton("Rescan Logos")
-        self.rescanlogo_button.setToolTip("Rescan Channel Logos")
-        self.rescanlogo_button.clicked.connect(self.rescan_logos)
-        self.rescanlogo_button.setVisible(False)
-        actions_section.addWidget(self.rescanlogo_button)
-
-        toolbar.addLayout(actions_section)
-
-        # Push everything to the left
-        toolbar.addStretch()
-
-        main_layout.addLayout(toolbar)
+        self.provider_combo.setVisible(False)
 
         # Populate provider combo box
         self.populate_provider_combo()
@@ -1391,6 +1297,13 @@ class ChannelList(QMainWindow):
             # Restore previous signal blocking state
             self.provider_combo.blockSignals(was_blocked)
 
+        # Also populate sidebar and menu bar if they exist
+        provider_names = [self.provider_combo.itemText(i) for i in range(self.provider_combo.count())]
+        if hasattr(self, 'sidebar'):
+            self.sidebar.set_providers(provider_names)
+        if hasattr(self, 'app_menu'):
+            self.app_menu.set_providers(provider_names, self.config_manager.selected_provider_name)
+
     def on_provider_changed(self, provider_name):
         """Handle provider selection change from combo box."""
         if not provider_name:
@@ -1407,34 +1320,140 @@ class ChannelList(QMainWindow):
         # Reload provider (use QTimer to ensure we're in the main thread)
         QTimer.singleShot(0, lambda: self.set_provider())
 
+    def _connect_menu_actions(self):
+        """Connect menu bar actions to existing handler methods."""
+        m = self.app_menu
+
+        # File menu
+        m.open_file_action.triggered.connect(self.open_file)
+        m.export_shown_action.triggered.connect(self.export_shown_channels)
+        m.export_cached_action.triggered.connect(self.export_content_cached)
+        m.export_complete_action.triggered.connect(self.export_content_complete)
+        m.export_all_live_action.triggered.connect(self.export_all_live_channels)
+        m.settings_action.triggered.connect(self.options_dialog)
+
+        # Edit menu
+        m.update_action.triggered.connect(lambda: self.set_provider(force_update=True))
+        m.rescan_logos_action.triggered.connect(self.rescan_logos)
+        m.search_descriptions_action.toggled.connect(
+            lambda checked: self.filter_content(self.top_bar.search_text())
+        )
+
+        # View menu
+        m.show_epg_action.toggled.connect(self._on_menu_epg_toggled)
+        m.show_vod_info_action.toggled.connect(self._on_menu_vod_info_toggled)
+        m.player_internal_action.triggered.connect(lambda: self._set_player_mode("internal"))
+        m.player_vlc_action.triggered.connect(lambda: self._set_player_mode("vlc"))
+        m.player_mpv_action.triggered.connect(lambda: self._set_player_mode("mpv"))
+
+        # Providers menu
+        m.add_provider_action.triggered.connect(self.options_dialog)
+        m.edit_providers_action.triggered.connect(self.options_dialog)
+        m._provider_action_group.triggered.connect(
+            lambda action: self._on_menu_provider_selected(action.text())
+        )
+
+        # Help menu
+        m.about_action.triggered.connect(self._show_about)
+
+        # Sidebar signals
+        self.sidebar.provider_selected.connect(self._on_sidebar_provider_selected)
+        self.sidebar.content_type_changed.connect(self._on_sidebar_content_type)
+        self.sidebar.favorites_toggled.connect(self._on_sidebar_favorites)
+        self.sidebar.history_clicked.connect(self.show_watch_history)
+        self.sidebar.resume_clicked.connect(self.resume_last_watched)
+
+        # Populate hamburger menu (subset of menu bar)
+        hm = self.top_bar.hamburger_menu
+        hm.addAction(m.settings_action)
+        hm.addAction(m.update_action)
+        hm.addMenu(m.export_menu)
+        hm.addSeparator()
+        # Player mode submenu in hamburger
+        play_menu = hm.addMenu("Play with")
+        play_menu.addAction(m.player_internal_action)
+        play_menu.addAction(m.player_vlc_action)
+        play_menu.addAction(m.player_mpv_action)
+
+        # Sync initial state from config
+        m.sync_from_config(self.config_manager)
+
+    def _on_menu_epg_toggled(self, checked):
+        self.config_manager.channel_epg = checked
+        self.save_config()
+        self.epg_manager.set_current_epg()
+        self.refresh_channels()
+
+    def _on_menu_vod_info_toggled(self, checked):
+        self.config_manager.show_stb_content_info = checked
+        self.save_config()
+        self.item_selected()
+
+    def _set_player_mode(self, mode):
+        self.config_manager.play_in_vlc = (mode == "vlc")
+        self.config_manager.play_in_mpv = (mode == "mpv")
+        self.save_config()
+        if mode == "internal":
+            pass  # Player will open on next play
+        else:
+            if hasattr(self, 'player') and self.player.isVisible():
+                self.player.close()
+
+    def _on_menu_provider_selected(self, provider_name):
+        self.sidebar.select_provider(provider_name)
+        self._switch_provider(provider_name)
+
+    def _on_sidebar_provider_selected(self, name):
+        if name == "all":
+            self._enter_all_providers_mode()
+            return
+        self._exit_all_providers_mode()
+        self.app_menu.select_provider(name)
+        self._switch_provider(name)
+
+    def _switch_provider(self, provider_name):
+        if provider_name == self.config_manager.selected_provider_name:
+            return
+        self.config_manager.selected_provider_name = provider_name
+        self.config_manager.save_config()
+        QTimer.singleShot(0, lambda: self.set_provider())
+
+    def _on_sidebar_content_type(self, content_type):
+        self.content_type = content_type
+        self.current_category = None
+        self.current_series = None
+        self.current_season = None
+        self.navigation_stack.clear()
+        self.forward_stack.clear()
+        self.load_content()
+        self.top_bar.clear_search()
+
+    def _on_sidebar_favorites(self, checked):
+        self.filter_content(self.top_bar.search_text())
+
+    def _show_about(self):
+        from config_manager import get_app_version
+        QMessageBox.about(self, "About qiTV",
+            f"qiTV v{get_app_version()}\nA cross-platform IPTV player")
+
+    def _enter_all_providers_mode(self):
+        """Enter cross-provider search mode."""
+        self._all_providers_mode = True
+        self.content_list.clear()
+        self.content_list.setColumnCount(1)
+        self.content_list.setHeaderLabels(["Type to search across all providers..."])
+        self.top_bar.search_box.setPlaceholderText("Search all providers (3+ chars)...")
+        self.top_bar.search_box.setFocus()
+
+    def _exit_all_providers_mode(self):
+        """Exit cross-provider search mode."""
+        self._all_providers_mode = False
+        self.top_bar.search_box.setPlaceholderText("Search content...")
+
     def create_list_panel(self):
         self.list_panel = QWidget(self.container_widget)
         list_layout = QVBoxLayout(self.list_panel)
-        list_layout.setContentsMargins(0, 0, 0, 0)  # Set margins to zero
-
-        # Add content type selection
-        self.content_switch_group = QWidget(self.list_panel)
-        content_switch_layout = QHBoxLayout(self.content_switch_group)
-        content_switch_layout.setContentsMargins(0, 0, 0, 0)
-        content_switch_layout.setSpacing(6)  # Add consistent spacing
-
-        self.channels_radio = QRadioButton("Channels")
-        self.movies_radio = QRadioButton("Movies")
-        self.series_radio = QRadioButton("Series")
-
-        content_switch_layout.addWidget(self.channels_radio)
-        content_switch_layout.addWidget(self.movies_radio)
-        content_switch_layout.addWidget(self.series_radio)
-        content_switch_layout.addStretch()  # Push radio buttons to the left
-
-        self.channels_radio.setChecked(True)
-
-        list_layout.addWidget(self.content_switch_group)
-
-        self.search_box = QLineEdit(self.list_panel)
-        self.search_box.setPlaceholderText("Search content...")
-        self.search_box.textChanged.connect(lambda: self.filter_content(self.search_box.text()))
-        list_layout.addWidget(self.search_box)
+        list_layout.setContentsMargins(0, 0, 0, 0)
 
         self.content_list = QTreeWidget(self.list_panel)
         self.content_list.setSelectionMode(QTreeWidget.SingleSelection)
@@ -1442,70 +1461,28 @@ class ChannelList(QMainWindow):
         self.content_list.setAlternatingRowColors(True)
         self.content_list.itemSelectionChanged.connect(self.item_selected)
         self.content_list.itemActivated.connect(self.item_activated)
-        # Enable keyboard surfing on the list when remote mode is on
         self.content_list.installEventFilter(self)
-        # Enable right-click context menu
         self.content_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.content_list.customContextMenuRequested.connect(self.show_content_context_menu)
+        self.content_list.setStyleSheet("""
+            QTreeWidget {
+                border: none;
+            }
+            QTreeWidget::item {
+                padding: 4px 0px;
+            }
+        """)
         self.refresh_content_list_size()
 
         list_layout.addWidget(self.content_list, 1)
 
-        # Create a horizontal layout for the favorite button and checkbox
+        # Favorite button (kept in a horizontal bar below list)
         self.favorite_layout = QHBoxLayout()
-        self.favorite_layout.setSpacing(6)  # Add consistent spacing
-
-        # Add favorite button and action
+        self.favorite_layout.setSpacing(6)
         self.favorite_button = QPushButton("Favorite/Unfavorite")
         self.favorite_button.clicked.connect(self.toggle_favorite)
         self.favorite_layout.addWidget(self.favorite_button)
-
-        # Add checkbox to show only favorites
-        self.favorites_only_checkbox = QCheckBox("Show only favorites")
-        self.favorites_only_checkbox.stateChanged.connect(
-            lambda: self.filter_content(self.search_box.text())
-        )
-        self.favorite_layout.addWidget(self.favorites_only_checkbox)
-
-        # Add checkbox to play in vlc
-        self.play_in_vlc_checkbox = QCheckBox("Play in VLC")
-        self.play_in_vlc_checkbox.setChecked(self.config_manager.play_in_vlc)
-        self.play_in_vlc_checkbox.stateChanged.connect(self.on_play_in_vlc_changed)
-        self.favorite_layout.addWidget(self.play_in_vlc_checkbox)
-
-        # Add checkbox to play in mpv
-        self.play_in_mpv_checkbox = QCheckBox("Play in MPV")
-        self.play_in_mpv_checkbox.setChecked(self.config_manager.play_in_mpv)
-        self.play_in_mpv_checkbox.stateChanged.connect(self.on_play_in_mpv_changed)
-        self.favorite_layout.addWidget(self.play_in_mpv_checkbox)
-
-        # Add checkbox to show EPG
-        self.epg_checkbox = QCheckBox("Show EPG")
-        self.epg_checkbox.setChecked(self.config_manager.channel_epg)
-        self.epg_checkbox.stateChanged.connect(self.show_epg)
-        self.favorite_layout.addWidget(self.epg_checkbox)
-
-        # Add checkbox to include descriptions in search (default unchecked)
-        self.search_descriptions_checkbox = QCheckBox("Search descriptions")
-        self.search_descriptions_checkbox.setToolTip(
-            "Also match description/plot and current On Air text"
-        )
-        self.search_descriptions_checkbox.setChecked(False)
-        self.search_descriptions_checkbox.stateChanged.connect(
-            lambda: self.filter_content(self.search_box.text())
-        )
-        self.favorite_layout.addWidget(self.search_descriptions_checkbox)
-
-        # Add checkbox to show vod/tvshow content info
-        self.vodinfo_checkbox = QCheckBox("Show VOD Info")
-        self.vodinfo_checkbox.setChecked(self.config_manager.show_stb_content_info)
-        self.vodinfo_checkbox.stateChanged.connect(self.show_vodinfo)
-        self.favorite_layout.addWidget(self.vodinfo_checkbox)
-
-        # Add stretch to prevent excessive spacing
         self.favorite_layout.addStretch()
-
-        # Add the horizontal layout to the main vertical layout
         list_layout.addLayout(self.favorite_layout)
 
         self.progress_bar = QProgressBar(self)
@@ -1520,12 +1497,12 @@ class ChannelList(QMainWindow):
         list_layout.addWidget(self.cancel_button)
 
     def show_vodinfo(self):
-        self.config_manager.show_stb_content_info = self.vodinfo_checkbox.isChecked()
+        self.config_manager.show_stb_content_info = self.app_menu.show_vod_info_action.isChecked()
         self.save_config()
         self.item_selected()
 
     def show_epg(self):
-        self.config_manager.channel_epg = self.epg_checkbox.isChecked()
+        self.config_manager.channel_epg = self.app_menu.show_epg_action.isChecked()
         self.save_config()
 
         # Refresh the EPG data
@@ -1659,17 +1636,12 @@ class ChannelList(QMainWindow):
         self.update_layout()
 
     def update_layout(self):
+        # Layout margins are handled by individual widgets (sidebar, top_bar)
         if self.content_info_panel.isVisible():
-            self.main_layout.setContentsMargins(8, 8, 8, 4)
             if self.media_controls.isVisible():
                 self.content_info_layout.setContentsMargins(8, 4, 8, 0)
             else:
                 self.content_info_layout.setContentsMargins(8, 4, 8, 8)
-        else:
-            if self.media_controls.isVisible():
-                self.main_layout.setContentsMargins(8, 8, 8, 0)
-            else:
-                self.main_layout.setContentsMargins(8, 8, 8, 8)
 
     @staticmethod
     def clear_layout(layout):
@@ -2064,7 +2036,7 @@ class ChannelList(QMainWindow):
                 self.remove_from_favorites(item_name)
             else:
                 self.add_to_favorites(item_name)
-            self.filter_content(self.search_box.text())
+            self.filter_content(self.top_bar.search_text())
 
     def add_to_favorites(self, item_name):
         if item_name not in self.config_manager.favorites:
@@ -2100,31 +2072,17 @@ class ChannelList(QMainWindow):
         self.image_loader.start()
         self.cancel_button.setText("Cancel fetching channel logos...")
 
-    def toggle_content_type(self):
-        # Checking only when receiving event of something checked
-        # Ignore when receiving event of something unchecked
-        rb = self.sender()
-        if not rb.isChecked():
-            return
-
-        if self.channels_radio.isChecked():
-            self.content_type = "itv"
-        elif self.movies_radio.isChecked():
-            self.content_type = "vod"
-        elif self.series_radio.isChecked():
-            self.content_type = "series"
-
+    def toggle_content_type(self, content_type=None):
+        """Switch content type. Called by sidebar or legacy code."""
+        if content_type:
+            self.content_type = content_type
         self.current_category = None
         self.current_series = None
         self.current_season = None
         self.navigation_stack.clear()
         self.forward_stack.clear()
         self.load_content()
-
-        # Clear search box after changing content type and force re-filtering if needed
-        self.search_box.clear()
-        if not self.search_box.isModified():
-            self.filter_content(self.search_box.text())
+        self.top_bar.clear_search()
 
     def display_categories(self, categories, select_first=True):
         # Unregister the content_list selection change event
@@ -2151,9 +2109,6 @@ class ChannelList(QMainWindow):
             self.content_list.setHeaderLabels([f"Serie Categories ({len(categories)})"])
 
         self.show_favorite_layout(True)
-        self.rescanlogo_button.setVisible(False)
-        self.epg_checkbox.setVisible(False)
-        self.vodinfo_checkbox.setVisible(False)
 
         for category in categories:
             item = CategoryTreeWidgetItem(self.content_list)
@@ -2165,7 +2120,7 @@ class ChannelList(QMainWindow):
 
         self.content_list.sortItems(0, Qt.AscendingOrder)
         self.content_list.setSortingEnabled(True)
-        self.back_button.setVisible(False)
+        self.top_bar.set_back_visible(False)
 
         self.clear_content_info_panel()
 
@@ -2343,9 +2298,7 @@ class ChannelList(QMainWindow):
                 except Exception as e:
                     logger.error(f"Error resizing column {i}: {e}", exc_info=True)
 
-        self.back_button.setVisible(content != "m3ucontent")
-        self.epg_checkbox.setVisible(self.can_show_epg(content))
-        self.vodinfo_checkbox.setVisible(self.can_show_content_info(content))
+        self.top_bar.set_back_visible(content != "m3ucontent")
 
         if use_epg:
             self.content_list.setItemDelegate(ChannelItemDelegate())
@@ -2380,7 +2333,6 @@ class ChannelList(QMainWindow):
                     self.content_list.scrollToItem(previous_selected[0], QTreeWidget.PositionAtTop)
 
         # Load channel logos if needed
-        self.rescanlogo_button.setVisible(need_logos)
         if need_logos:
             self.lock_ui_before_loading()
             if self.image_loader and self.image_loader.isRunning():
@@ -2438,7 +2390,12 @@ class ChannelList(QMainWindow):
                 self.content_info_text.setText(img_tag + self.content_info_text.text())
 
     def filter_content(self, text=""):
-        show_favorites = self.favorites_only_checkbox.isChecked()
+        # Cross-provider search mode
+        if getattr(self, '_all_providers_mode', False):
+            self._fusion_search(text)
+            return
+
+        show_favorites = self.sidebar.favorites_btn.isChecked()
         search_text = text.lower() if isinstance(text, str) else ""
 
         # retrieve items type first
@@ -2455,8 +2412,8 @@ class ChannelList(QMainWindow):
             # Optionally include metadata fields (description/plot, group, On Air EPG) in search
             if (
                 not matches_search
-                and getattr(self, "search_descriptions_checkbox", None)
-                and self.search_descriptions_checkbox.isChecked()
+                and hasattr(self, "app_menu")
+                and self.app_menu.search_descriptions_action.isChecked()
                 and item_type in ["channel", "movie", "serie", "m3ucontent"]
             ):
                 try:
@@ -2517,6 +2474,66 @@ class ChannelList(QMainWindow):
                 # For season, episode, only filter by search text
                 item.setHidden(not matches_search)
 
+    def _fusion_search(self, text):
+        """Search across all providers' cached content."""
+        self.content_list.clear()
+
+        if not text or len(text) < 3:
+            self.content_list.setColumnCount(1)
+            self.content_list.setHeaderLabels(["Type to search across all providers..."])
+            return
+
+        search_text = text.lower()
+        self.content_list.setHeaderLabels([f'Search results for "{text}"'])
+        self.content_list.setSortingEnabled(False)
+        self.content_list.setColumnCount(1)
+
+        total_results = 0
+        for provider_name, cache in self.provider_manager.get_all_providers_cached_content():
+            matches = []
+            for content_type in ["itv", "vod", "series"]:
+                content_data = cache.get(content_type, {})
+                if not isinstance(content_data, dict):
+                    continue
+                items = content_data.get("contents", content_data)
+                if isinstance(items, dict):
+                    # Could be category-based
+                    for cat_name, cat_items in items.items():
+                        if isinstance(cat_items, list):
+                            for item in cat_items:
+                                name = item.get("name", item.get("title", ""))
+                                if isinstance(name, str) and search_text in name.lower():
+                                    matches.append((content_type, item))
+                elif isinstance(items, list):
+                    for item in items:
+                        name = item.get("name", item.get("title", ""))
+                        if isinstance(name, str) and search_text in name.lower():
+                            matches.append((content_type, item))
+
+            if matches:
+                # Create provider group header
+                provider_header = CategoryTreeWidgetItem(self.content_list)
+                provider_header.setText(0, f"{provider_name} ({len(matches)} results)")
+                provider_header.setExpanded(True)
+                font = provider_header.font(0)
+                font.setBold(True)
+                provider_header.setFont(0, font)
+
+                for content_type, item_data in matches[:50]:  # Limit per provider
+                    child = QTreeWidgetItem(provider_header)
+                    name = item_data.get("name", item_data.get("title", "Unknown"))
+                    type_prefix = {"itv": "[CH]", "vod": "[MOV]", "series": "[SER]"}.get(content_type, "")
+                    child.setText(0, f"{type_prefix} {name}")
+                    child.setData(0, Qt.UserRole, {
+                        "data": item_data,
+                        "type": content_type,
+                        "provider": provider_name,
+                    })
+                    total_results += 1
+
+        if total_results == 0:
+            self.content_list.setHeaderLabels([f'No results for "{text}"'])
+
     def _get_matching_items_in_category(self, category_item, search_text):
         """Get items in category that match the search text.
 
@@ -2552,8 +2569,8 @@ class ChannelList(QMainWindow):
             search_lower = search_text.lower()
             matching = []
             include_desc = (
-                getattr(self, "search_descriptions_checkbox", None)
-                and self.search_descriptions_checkbox.isChecked()
+                hasattr(self, "app_menu")
+                and self.app_menu.search_descriptions_action.isChecked()
             )
             for item in items:
                 # Check name
@@ -2648,19 +2665,19 @@ class ChannelList(QMainWindow):
     def create_media_controls(self):
         self.media_controls = QWidget(self.container_widget)
         control_layout = QHBoxLayout(self.media_controls)
-        control_layout.setContentsMargins(8, 0, 8, 8)
+        control_layout.setContentsMargins(8, 4, 8, 8)
 
-        self.play_button = QPushButton("Play/Pause")
+        self.play_button = QPushButton("\u25B6 / \u23F8")
+        self.play_button.setToolTip("Play/Pause")
         self.play_button.clicked.connect(self.toggle_play_pause)
         control_layout.addWidget(self.play_button)
 
-        self.stop_button = QPushButton("Stop")
+        self.stop_button = QPushButton("\u23F9")
+        self.stop_button.setToolTip("Stop")
         self.stop_button.clicked.connect(self.stop_video)
         control_layout.addWidget(self.stop_button)
 
-        self.vlc_button = QPushButton("Open in VLC")
-        self.vlc_button.clicked.connect(self.open_in_vlc)
-        control_layout.addWidget(self.vlc_button)
+        control_layout.addStretch()
 
         self.media_controls.setVisible(False)  # Initially hidden
 
@@ -3288,9 +3305,9 @@ class ChannelList(QMainWindow):
 
             # Clear search box after navigating and force re-filtering if needed
             if len(self.navigation_stack) != nav_len:
-                self.search_box.clear()
-                if not self.search_box.isModified():
-                    self.filter_content(self.search_box.text())
+                self.top_bar.clear_search()
+                if not self.top_bar.search_box.isModified():
+                    self.filter_content(self.top_bar.search_text())
         else:
             logger.info("Item with no type selected.")
 
@@ -3321,9 +3338,9 @@ class ChannelList(QMainWindow):
                 self.current_season = None
 
             # Clear search box after navigating backward and force re-filtering if needed
-            self.search_box.clear()
-            if not self.search_box.isModified():
-                self.filter_content(self.search_box.text())
+            self.top_bar.clear_search()
+            if not self.top_bar.search_box.isModified():
+                self.filter_content(self.top_bar.search_text())
         else:
             # Already at the root level
             pass
@@ -4065,9 +4082,9 @@ class ChannelList(QMainWindow):
 
     def _play_content_with_position(self, url: str, resume_position: int):
         """Play content with resume position."""
-        if self.play_in_vlc_checkbox.isChecked():
+        if self.config_manager.play_in_vlc:
             self._launch_vlc(url)
-        elif self.play_in_mpv_checkbox.isChecked():
+        elif self.config_manager.play_in_mpv:
             self._launch_mpv(url)
         else:
             provider_type = self.provider_manager.current_provider.get("type", "").upper()
@@ -4164,14 +4181,9 @@ class ChannelList(QMainWindow):
         self.update_ui_on_loading(loading=False)
 
     def update_ui_on_loading(self, loading):
-        self.open_button.setEnabled(not loading)
-        self.options_button.setEnabled(not loading)
-        self.export_button.setEnabled(not loading)
-        self.update_button.setEnabled(not loading)
-        self.back_button.setEnabled(not loading)
+        self.top_bar.back_button.setEnabled(not loading)
         self.progress_bar.setVisible(loading)
         self.cancel_button.setVisible(loading)
-        self.content_switch_group.setEnabled(not loading)
         if loading:
             self.content_list.setSelectionMode(QListWidget.NoSelection)
         else:
@@ -4365,9 +4377,9 @@ class ChannelList(QMainWindow):
 
     def _play_content(self, url):
         """Play content in VLC, MPV, or built-in player based on checkbox state."""
-        if self.play_in_vlc_checkbox.isChecked():
+        if self.config_manager.play_in_vlc:
             self._launch_vlc(url)
-        elif self.play_in_mpv_checkbox.isChecked():
+        elif self.config_manager.play_in_mpv:
             self._launch_mpv(url)
         else:
             # Use built-in player
@@ -4448,38 +4460,6 @@ class ChannelList(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}")
             return False
-
-    def on_play_in_vlc_changed(self):
-        """Handle VLC checkbox state changes."""
-        if self.play_in_vlc_checkbox.isChecked():
-            # Uncheck MPV if VLC is checked (mutually exclusive)
-            self.play_in_mpv_checkbox.blockSignals(True)
-            self.play_in_mpv_checkbox.setChecked(False)
-            self.play_in_mpv_checkbox.blockSignals(False)
-            self.config_manager.play_in_mpv = False
-            # Close built-in player if visible
-            if hasattr(self, 'player') and self.player.isVisible():
-                self.player.close()
-
-        # Save preferences to config
-        self.config_manager.play_in_vlc = self.play_in_vlc_checkbox.isChecked()
-        self.save_config()
-
-    def on_play_in_mpv_changed(self):
-        """Handle MPV checkbox state changes."""
-        if self.play_in_mpv_checkbox.isChecked():
-            # Uncheck VLC if MPV is checked (mutually exclusive)
-            self.play_in_vlc_checkbox.blockSignals(True)
-            self.play_in_vlc_checkbox.setChecked(False)
-            self.play_in_vlc_checkbox.blockSignals(False)
-            self.config_manager.play_in_vlc = False
-            # Close built-in player if visible
-            if hasattr(self, 'player') and self.player.isVisible():
-                self.player.close()
-
-        # Save preferences to config
-        self.config_manager.play_in_mpv = self.play_in_mpv_checkbox.isChecked()
-        self.save_config()
 
     def _launch_mpv(self, url):
         """Launch MPV - try python-mpv first, fall back to subprocess."""
@@ -4610,7 +4590,7 @@ class ChannelList(QMainWindow):
     def on_media_ended(self):
         """Handle media ended signal - trigger auto-play if enabled."""
         # Don't auto-play if using external player
-        if self.play_in_vlc_checkbox.isChecked() or self.play_in_mpv_checkbox.isChecked():
+        if self.config_manager.play_in_vlc or self.config_manager.play_in_mpv:
             return
 
         if not self._current_playing_item or not self._current_playing_type:
