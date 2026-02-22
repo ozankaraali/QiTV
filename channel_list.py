@@ -3,6 +3,7 @@ from datetime import datetime
 import html
 import logging
 import os
+from pathlib import Path
 import platform
 import re
 import shutil
@@ -1204,6 +1205,12 @@ class ChannelList(QMainWindow):
 
         # Create export menu
         export_menu = QMenu(self)
+
+        export_shown_action = export_menu.addAction("Export Shown Channels")
+        export_shown_action.setToolTip("Export the channels currently shown in the list")
+        export_shown_action.triggered.connect(self.export_shown_channels)
+
+        export_menu.addSeparator()
 
         export_cached_action = export_menu.addAction("Export Cached Content")
         export_cached_action.setToolTip("Quickly export only browsed/cached content")
@@ -2762,8 +2769,7 @@ class ChannelList(QMainWindow):
                 logger.warning(f"Error opening VLC: {e}")
 
     def open_file(self):
-        file_dialog = QFileDialog(self)
-        file_path, _ = file_dialog.getOpenFileName()
+        file_path, _ = QFileDialog.getOpenFileName(self)
         if file_path:
             self._play_content(file_path)
 
@@ -2777,11 +2783,9 @@ class ChannelList(QMainWindow):
             )
             return
 
-        file_dialog = QFileDialog(self)
-        file_dialog.setAcceptMode(QFileDialog.AcceptSave)
-        file_dialog.setDefaultSuffix("m3u")
-        file_path, _ = file_dialog.getSaveFileName(
-            self, "Export All Live Channels", "", "M3U files (*.m3u)"
+        default_dir = str(Path.home() / "Downloads")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export All Live Channels", default_dir, "M3U files (*.m3u)"
         )
         if file_path:
             self.fetch_and_export_all_live_channels(file_path)
@@ -2845,13 +2849,39 @@ class ChannelList(QMainWindow):
         except IOError as e:
             logger.warning(f"Error saving channel list: {e}")
 
+    def export_shown_channels(self):
+        """Export the channels currently displayed in the list."""
+        items = []
+        for i in range(self.content_list.topLevelItemCount()):
+            tree_item = self.content_list.topLevelItem(i)
+            if tree_item:
+                user_data = tree_item.data(0, Qt.UserRole)
+                if user_data and "data" in user_data:
+                    items.append(user_data["data"])
+
+        if not items:
+            QMessageBox.warning(self, "Export", "No channels to export.")
+            return
+
+        default_dir = str(Path.home() / "Downloads")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Shown Channels", default_dir, "M3U files (*.m3u)"
+        )
+        if file_path:
+            provider = self.provider_manager.current_provider
+            config_type = provider.get("type", "")
+            if config_type == "STB":
+                base_url = provider.get("url", "")
+                mac = provider.get("mac", "")
+                save_stb_content(base_url, items, mac, file_path)
+            else:
+                save_m3u_content(items, file_path)
+
     def export_content_cached(self):
         """Export only the cached/browsed content that has already been loaded."""
-        file_dialog = QFileDialog(self)
-        file_dialog.setAcceptMode(QFileDialog.AcceptSave)
-        file_dialog.setDefaultSuffix("m3u")
-        file_path, _ = file_dialog.getSaveFileName(
-            self, "Export Cached Content", "", "M3U files (*.m3u)"
+        default_dir = str(Path.home() / "Downloads")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Cached Content", default_dir, "M3U files (*.m3u)"
         )
         if file_path:
             provider = self.provider_manager.current_provider
@@ -2909,11 +2939,9 @@ class ChannelList(QMainWindow):
                 )
             return
 
-        file_dialog = QFileDialog(self)
-        file_dialog.setAcceptMode(QFileDialog.AcceptSave)
-        file_dialog.setDefaultSuffix("m3u")
-        file_path, _ = file_dialog.getSaveFileName(
-            self, "Export Complete Content (Fetch All)", "", "M3U files (*.m3u)"
+        default_dir = str(Path.home() / "Downloads")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Complete Content (Fetch All)", default_dir, "M3U files (*.m3u)"
         )
         if file_path:
             self.fetch_and_export_all_series(file_path)

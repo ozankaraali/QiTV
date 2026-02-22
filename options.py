@@ -572,8 +572,7 @@ class OptionsDialog(QDialog):
         self.providers_modified = True
 
     def browse_epg_file(self):
-        file_dialog = QFileDialog(self)
-        file_path, _ = file_dialog.getOpenFileName()
+        file_path, _ = QFileDialog.getOpenFileName(self)
         if file_path:
             self.epg_file_input.setText(file_path)
 
@@ -652,8 +651,7 @@ class OptionsDialog(QDialog):
         return total_size / (1024 * 1024)  # Convert to MB
 
     def load_file(self):
-        file_dialog = QFileDialog(self)
-        file_path, _ = file_dialog.getOpenFileName()
+        file_path, _ = QFileDialog.getOpenFileName(self)
         if file_path:
             self.url_input.setText(file_path)
             self.file_button.setVisible(False)
@@ -840,8 +838,7 @@ class OptionsDialog(QDialog):
         self.load_xmltv_channel_mapping()
 
     def import_xmltv_mapping(self):
-        file_dialog = QFileDialog(self)
-        file_path, _ = file_dialog.getOpenFileName()
+        file_path, _ = QFileDialog.getOpenFileName(self)
         if file_path:
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -860,8 +857,7 @@ class OptionsDialog(QDialog):
                 pass
 
     def export_xmltv_mapping(self):
-        file_dialog = QFileDialog(self)
-        file_path, _ = file_dialog.getSaveFileName()
+        file_path, _ = QFileDialog.getSaveFileName(self)
         if file_path:
             with open(
                 file_path if file_path.endswith(".json") else file_path + ".json",
