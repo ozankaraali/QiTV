@@ -127,7 +127,19 @@ class AppMenuBar:
 
     # --- State sync ---
     def sync_from_config(self, config_manager):
-        """Set initial checked states from config."""
+        """Set initial checked states from config without triggering signals."""
+        # Block signals during initial sync to prevent handlers firing
+        # before the full UI is ready
+        actions = [
+            self.show_epg_action,
+            self.show_vod_info_action,
+            self.search_descriptions_action,
+            self.player_internal_action,
+            self.player_vlc_action,
+            self.player_mpv_action,
+        ]
+        old_states = [a.blockSignals(True) for a in actions]
+
         self.show_epg_action.setChecked(config_manager.channel_epg)
         self.show_vod_info_action.setChecked(config_manager.show_stb_content_info)
         self.search_descriptions_action.setChecked(False)
@@ -138,3 +150,6 @@ class AppMenuBar:
             self.player_mpv_action.setChecked(True)
         else:
             self.player_internal_action.setChecked(True)
+
+        for action, old in zip(actions, old_states):
+            action.blockSignals(old)

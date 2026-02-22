@@ -860,6 +860,31 @@ class ChannelList(QMainWindow):
         self._provider_combo_connected = False  # Track if signal is connected
         self._all_providers_mode = False
 
+        self.link: Optional[str] = None
+        self.current_category: Optional[Dict[str, Any]] = None  # For back navigation
+        self.current_series: Optional[Dict[str, Any]] = None
+        self.current_season: Optional[Dict[str, Any]] = None
+        self.navigation_stack = []  # To keep track of navigation for back button
+        self.forward_stack = []  # Forward history to undo last Back
+        self._suppress_forward_clear = False
+
+        # Auto-play state tracking
+        self._current_playing_item: Optional[Dict[str, Any]] = None
+        self._current_playing_type: Optional[str] = None
+        self._current_episode_index: int = -1
+        self._current_episode_list: List[Dict[str, Any]] = []
+        self._current_seasons_list: List[Dict[str, Any]] = []
+        self._current_category_movies: List[Dict[str, Any]] = []
+        self._current_content_id: Optional[str] = None
+        self._autoplay_dialog: Optional[QDialog] = None
+
+        # External VLC player instance (for single-instance behavior)
+        self._external_vlc_instance = None
+        self._external_vlc_player = None
+
+        # External MPV player instance (for single-instance behavior)
+        self._external_mpv_player = None
+
         # Create UI components
         self.create_top_bar()
         self.sidebar = Sidebar(self.container_widget)
@@ -906,31 +931,6 @@ class ChannelList(QMainWindow):
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.addWidget(self.splitter)
         container_layout.addWidget(self.media_controls)
-
-        self.link: Optional[str] = None
-        self.current_category: Optional[Dict[str, Any]] = None  # For back navigation
-        self.current_series: Optional[Dict[str, Any]] = None
-        self.current_season: Optional[Dict[str, Any]] = None
-        self.navigation_stack = []  # To keep track of navigation for back button
-        self.forward_stack = []  # Forward history to undo last Back
-        self._suppress_forward_clear = False
-
-        # Auto-play state tracking
-        self._current_playing_item: Optional[Dict[str, Any]] = None
-        self._current_playing_type: Optional[str] = None
-        self._current_episode_index: int = -1
-        self._current_episode_list: List[Dict[str, Any]] = []
-        self._current_seasons_list: List[Dict[str, Any]] = []
-        self._current_category_movies: List[Dict[str, Any]] = []
-        self._current_content_id: Optional[str] = None
-        self._autoplay_dialog: Optional[QDialog] = None
-
-        # External VLC player instance (for single-instance behavior)
-        self._external_vlc_instance = None
-        self._external_vlc_player = None
-
-        # External MPV player instance (for single-instance behavior)
-        self._external_mpv_player = None
 
         # Connect player signals to show/hide media controls
         self.player.playing.connect(self.show_media_controls)
