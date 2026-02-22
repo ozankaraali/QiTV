@@ -378,6 +378,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mpv"
+version = "1.0.8"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/d2/4ede498dff29520abb40d2b197bcb4188db4a03981d734ceb990a6532260/mpv-1.0.8.tar.gz", hash = "sha256:95dbd4d869cd8de7a27914ad33e776accc0f01cb82a6d5b31ca439ade2208ffb", size = 48014, upload-time = "2025-04-25T09:51:19.031Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f4/cf/0d5f52753366ecf2c3d763e331dcda54b0f20a1a8e52b175feb9c625399d/mpv-1.0.8-py3-none-any.whl", hash = "sha256:dcf77f612e3f5ce49bd89393f37d286de7ac290db6b0800f1fdcfe0aeb5ba9b8", size = 46078, upload-time = "2025-04-25T09:51:17.087Z" },
+]
+
+[[package]]
 name = "multidict"
 version = "6.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -718,11 +727,11 @@ wheels = [
 
 [[package]]
 name = "python-vlc"
-version = "3.0.20123"
+version = "3.0.21203"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f5/fc/6e4f1dd5ee3a86db172d7100f5a28cd9d8a57ad65cfda09eb114d3b9aaaa/python-vlc-3.0.20123.tar.gz", hash = "sha256:244fbb9e392a0326841fca926d6d12a2a36c546982191f493f148fa19e66b1d4", size = 159444, upload-time = "2023-11-04T16:12:30.938Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4b/5b/f9ce6f0c9877b6fe5eafbade55e0dcb6b2b30f1c2c95837aef40e390d63b/python_vlc-3.0.21203.tar.gz", hash = "sha256:52d0544b276b11e58b6c0b748c3e0518f94f74b1b4cd328c83a59eacabead1ec", size = 162211, upload-time = "2024-10-07T14:39:54.755Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/31/c0/00eb4c1ac241835224e34b7005143a0788353b8b56286660317cb82cdf94/python_vlc-3.0.20123-py3-none-any.whl", hash = "sha256:903b3dc3602804958837c69907f3d3485921ef8424c254c7314db3d6037f8d62", size = 79876, upload-time = "2023-11-04T16:12:26.758Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/ee/7d76eb3b50ccb1397621f32ede0fb4d17aa55a9aa2251bc34e6b9929fdce/python_vlc-3.0.21203-py3-none-any.whl", hash = "sha256:1613451a31b692ec276296ceeae0c0ba82bfc2d094dabf9aceb70f58944a6320", size = 87651, upload-time = "2024-10-07T14:39:50.021Z" },
 ]
 
 [[package]]
@@ -745,11 +754,12 @@ wheels = [
 
 [[package]]
 name = "qitv"
-version = "1.10.4"
+version = "1.12.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp", extra = ["speedups"] },
     { name = "m3u-parser" },
+    { name = "mpv" },
     { name = "orjson" },
     { name = "packaging" },
     { name = "pyqtdarktheme" },
@@ -776,11 +786,12 @@ dev = [
 requires-dist = [
     { name = "aiohttp", extras = ["speedups"], specifier = ">=3.13.3" },
     { name = "m3u-parser", specifier = ">=0.4.2" },
+    { name = "mpv", specifier = ">=1.0.7" },
     { name = "orjson", specifier = ">=3.11.5" },
     { name = "packaging", specifier = ">=25.0" },
     { name = "pyqtdarktheme", specifier = "==2.1.0" },
     { name = "pyside6", specifier = ">=6.10.0" },
-    { name = "python-vlc", specifier = "==3.0.20123" },
+    { name = "python-vlc", specifier = "==3.0.21203" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "tzlocal", specifier = ">=5.3.1" },
     { name = "urllib3", specifier = ">=2.6.3" },

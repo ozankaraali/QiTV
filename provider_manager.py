@@ -83,6 +83,26 @@ class ProviderManager(QObject):
 
         progress_callback.emit("Provider setup complete.")
 
+    def get_all_providers_cached_content(self):
+        """Return cached content for all configured providers.
+
+        Returns list of (provider_name, content_dict) tuples.
+        Only includes providers that have been loaded/cached.
+        """
+        results = []
+        for provider in self.providers:
+            name = provider.get("name", "Unknown")
+            hashed_name = hashlib.sha256(name.encode("utf-8")).hexdigest()
+            cache_path = os.path.join(self.provider_dir, f"{hashed_name}.json")
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cache = json.loads(f.read())
+                if cache:
+                    results.append((name, cache))
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+        return results
+
     def save_providers(self):
         serialized = json.dumps(self.providers, option=json.OPT_INDENT_2)
         with open(self.index_file, "w", encoding="utf-8") as f:

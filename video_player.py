@@ -2,10 +2,23 @@ import logging
 import platform
 import sys
 
-from PySide6.QtCore import QMetaObject, QPoint, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QMetaObject, QPoint, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import QFrame, QMainWindow, QProgressBar, QVBoxLayout
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QProgressBar,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 import vlc
+
+logger = logging.getLogger(__name__)
 
 
 class VLCLogger:
@@ -14,7 +27,7 @@ class VLCLogger:
 
     def log(self, message):
         self.latest_error = message
-        logging.error(f"VLC Error: {message}")
+        logger.error(f"VLC Error: {message}")
 
     def get_latest_error(self):
         return self.latest_error
@@ -52,6 +65,7 @@ class VideoPlayer(QMainWindow):
 
         self.dragging = False
         self.resizing = False
+        self._drag_from_video = False
         self.drag_position = QPoint()
 
         self.config_manager.apply_window_settings("video_player", self)
@@ -64,7 +78,7 @@ class VideoPlayer(QMainWindow):
 
         self.video_frame = QFrame()
         self.video_frame.mouseDoubleClickEvent = self.mouseDoubleClickEvent
-        # Note: No custom eventFilter implemented; avoid installing unused event filter
+        # eventFilter is installed below to show/hide transport bar on mouse activity
         t_lay_parent.addWidget(self.video_frame)
 
         # Custom user-agent string
@@ -150,10 +164,141 @@ class VideoPlayer(QMainWindow):
         self.progress_bar = _SeekProgressBar(self, on_seek=self._on_seek_fraction)
         self.progress_bar.setRange(0, 1000)  # Use 1000 steps for smoother updates
         self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("00:00 / 00:00")
-        self.mainFrame.layout().addWidget(self.progress_bar)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(12)
+        self.progress_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.progress_bar.setMinimumWidth(220)
+        self.progress_bar.setStyleSheet(
+            """
+            QProgressBar {
+                background-color: rgba(255, 255, 255, 0.2);
+                border: none;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background-color: rgba(201, 107, 67, 0.9);
+                border-radius: 4px;
+            }
+        """
+        )
+
+        self.transport_bar = QWidget(self.mainFrame)
+        self.transport_bar.setObjectName("transportBar")
+        controls_layout = QHBoxLayout(self.transport_bar)
+        controls_layout.setContentsMargins(8, 2, 8, 2)
+        controls_layout.setSpacing(8)
+
+        self.play_pause_button = QPushButton("\u25b6")
+        self.play_pause_button.setToolTip("Play/Pause")
+        self.play_pause_button.setFixedSize(30, 24)
+        self.play_pause_button.clicked.connect(self.toggle_play_pause)
+        controls_layout.addWidget(self.play_pause_button)
+
+        self.stop_button = QPushButton("\u23f9")
+        self.stop_button.setToolTip("Stop")
+        self.stop_button.setFixedSize(30, 24)
+        self.stop_button.clicked.connect(self.stop_video)
+        controls_layout.addWidget(self.stop_button)
+
+        self.play_state_label = QLabel("STOP")
+        self.play_state_label.setFixedWidth(38)
+        self.play_state_label.setAlignment(Qt.AlignCenter)
+        controls_layout.addWidget(self.play_state_label)
+
+        controls_layout.addWidget(self.progress_bar, 7)
+
+        self.time_label = QLabel("00:00 / 00:00")
+        self.time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.time_label.setFixedWidth(100)
+        controls_layout.addWidget(self.time_label)
+
+        self.mute_button = QPushButton("M")
+        self.mute_button.setToolTip("Mute")
+        self.mute_button.setFixedSize(24, 24)
+        self.mute_button.clicked.connect(self.toggle_mute)
+        controls_layout.addWidget(self.mute_button)
+
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setFixedWidth(86)
+        self.volume_slider.setFixedHeight(20)
+        self.volume_slider.valueChanged.connect(self._on_volume_slider_changed)
+        controls_layout.addWidget(self.volume_slider)
+
+        self.transport_bar.setFixedHeight(30)
+        self.transport_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.transport_bar.setStyleSheet(
+            """
+            QWidget#transportBar {
+                background: transparent;
+            }
+            QPushButton {
+                border: none;
+                border-radius: 4px;
+                padding: 0px;
+                background: rgba(255, 255, 255, 0.14);
+                color: #f5f5f5;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background: rgba(201, 107, 67, 0.42);
+            }
+            QLabel {
+                color: #f0f0f0;
+                font-size: 11px;
+            }
+            QSlider::groove:horizontal {
+                border: none;
+                height: 4px;
+                background: rgba(255, 255, 255, 0.25);
+                border-radius: 2px;
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(201, 107, 67, 0.95);
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                width: 10px;
+                margin: -4px 0;
+                border-radius: 5px;
+                background: #f2f2f2;
+            }
+        """
+        )
+        self.transport_bar.setVisible(False)
+        self.mainFrame.layout().addWidget(self.transport_bar)
+
+        self.video_frame.installEventFilter(self)
+        self.transport_bar.installEventFilter(self)
+        self.progress_bar.installEventFilter(self)
+        self.volume_slider.installEventFilter(self)
+
+        self._setting_volume_from_player = False
+        self._last_nonzero_volume = 100
+        self._sync_volume_controls(self._safe_player_volume(), muted=False)
+
+        # OSD label for volume/status feedback overlay
+        # Parent to mainFrame (not video_frame) so it renders above the VLC surface
+        self._osd_label = QLabel(self.mainFrame)
+        self._osd_label.setAlignment(Qt.AlignCenter)
+        self._osd_label.setStyleSheet(
+            """
+            QLabel {
+                background-color: rgba(0, 0, 0, 0.7);
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+                border-radius: 8px;
+                padding: 8px 16px;
+            }
+        """
+        )
+        self._osd_label.setVisible(False)
+        self._osd_label.setFixedSize(180, 40)
+        self._osd_timer = QTimer(self)
+        self._osd_timer.setSingleShot(True)
+        self._osd_timer.timeout.connect(lambda: self._osd_label.setVisible(False))
 
         # Track content type to reduce repeated progress bar toggles
         self._is_live = None  # type: bool | None
@@ -190,6 +335,13 @@ class VideoPlayer(QMainWindow):
         self._stall_timer = QTimer(self)
         self._stall_timer.setInterval(2000)  # Check every 2 seconds
         self._stall_timer.timeout.connect(self._check_stall)
+
+        # Re-check stream type a few times after start to avoid
+        # early live/VOD misclassification on slow manifests.
+        self._stream_detect_attempts_left = 0
+        self._stream_detect_timer = QTimer(self)
+        self._stream_detect_timer.setInterval(1200)
+        self._stream_detect_timer.timeout.connect(self._recheck_stream_type)
 
         # Single vs double click handling
         self.click_position = None
@@ -253,6 +405,84 @@ class VideoPlayer(QMainWindow):
             self.setWindowState(Qt.WindowNoState)
         self.toggle_pip_mode()
 
+    def _safe_player_volume(self) -> int:
+        try:
+            value = int(self.media_player.audio_get_volume())
+            if value < 0:
+                return 100
+            return max(0, min(100, value))
+        except Exception:
+            return 100
+
+    def _sync_volume_controls(self, volume: int, muted: bool) -> None:
+        self._setting_volume_from_player = True
+        try:
+            self.volume_slider.setValue(max(0, min(100, int(volume))))
+        finally:
+            self._setting_volume_from_player = False
+
+        if volume > 0:
+            self._last_nonzero_volume = volume
+
+        self.mute_button.setText("U" if muted else "M")
+
+    def _on_volume_slider_changed(self, value: int) -> None:
+        if self._setting_volume_from_player:
+            return
+        try:
+            self.media_player.audio_set_volume(int(value))
+            if int(value) > 0:
+                self._last_nonzero_volume = int(value)
+            self.media_player.audio_set_mute(False)
+            self._sync_volume_controls(int(value), muted=False)
+        except Exception:
+            pass
+
+    def _update_play_state_label(self, state=None) -> None:
+        state = state if state is not None else self.media_player.get_state()
+        if state == vlc.State.Playing:
+            self.play_state_label.setText("LIVE" if self._is_live else "PLAY")
+            self.play_pause_button.setText("\u23f8")
+        elif state == vlc.State.Paused:
+            self.play_state_label.setText("PAUSE")
+            self.play_pause_button.setText("\u25b6")
+        elif state == vlc.State.Buffering:
+            self.play_state_label.setText("BUF")
+        elif state == vlc.State.Opening:
+            self.play_state_label.setText("OPEN")
+        elif state == vlc.State.Error:
+            self.play_state_label.setText("ERR")
+        elif state == vlc.State.Ended:
+            self.play_state_label.setText("END")
+            self.play_pause_button.setText("\u25b6")
+        else:
+            self.play_state_label.setText("STOP")
+            self.play_pause_button.setText("\u25b6")
+
+    def _recheck_stream_type(self) -> None:
+        if self._is_live_hint is not None:
+            self._stream_detect_timer.stop()
+            return
+        if self._stream_detect_attempts_left <= 0:
+            self._stream_detect_timer.stop()
+            return
+
+        self._stream_detect_attempts_left -= 1
+        try:
+            duration = self.media.get_duration() if getattr(self, "media", None) else 0
+            seekable = bool(self.media_player.is_seekable())
+            if seekable or duration > 180000:
+                if self._is_live is True:
+                    self._is_live = False
+                    self._seekable = seekable
+                    self.progress_bar.setEnabled(bool(self._seekable))
+                    self.time_label.setText("00:00 / " + self.format_time(duration))
+                    self.position_save_timer.start()
+                    self.update_progress()
+                self._stream_detect_timer.stop()
+        except Exception:
+            pass
+
     def _try_seek(self, target, fallback, use_time: bool = True) -> None:
         """Attempt a seek operation with fallback on failure.
 
@@ -281,7 +511,8 @@ class VideoPlayer(QMainWindow):
         try:
             self.media_player.play()
             QTimer.singleShot(
-                self._SEEK_RESUME_DELAY_MS, lambda: self._try_seek(target, fallback, use_time)
+                self._SEEK_RESUME_DELAY_MS,
+                lambda: self._try_seek(target, fallback, use_time),
             )
             QTimer.singleShot(self._SEEK_PAUSE_DELAY_MS, lambda: self.media_player.pause())
         except Exception:
@@ -311,7 +542,8 @@ class VideoPlayer(QMainWindow):
         if duration and duration > 0:
             # Clamp to slightly before end (avoid Ended firing on boundary)
             target_ms = max(
-                0, min(int(duration - 1000), int(duration * max(0.0, min(1.0, fraction))))
+                0,
+                min(int(duration - 1000), int(duration * max(0.0, min(1.0, fraction)))),
             )
             if use_smooth:
                 self._smooth_paused_seek(target_ms, fallback_pos, use_time=True)
@@ -335,37 +567,58 @@ class VideoPlayer(QMainWindow):
 
     def update_progress(self):
         state = self.media_player.get_state()
-        # Only update the progress bar value/text here to avoid repeated visibility toggles
-        if state == vlc.State.Playing:
+        self._update_play_state_label(state)
+
+        if state in (vlc.State.Playing, vlc.State.Paused):
             if self._is_live is False and getattr(self, "media", None):
                 current_time = self.media_player.get_time()
                 total_time = self.media.get_duration()
                 if total_time and 0 <= current_time <= total_time:
                     formatted_current = self.format_time(current_time)
                     formatted_total = self.format_time(total_time)
-                    self.progress_bar.setFormat(f"{formatted_current} / {formatted_total}")
+                    self.time_label.setText(f"{formatted_current} / {formatted_total}")
                     try:
                         self.progress_bar.setValue(int(current_time * 1000 / total_time))
                     except ZeroDivisionError:
                         self.progress_bar.setValue(0)
+            else:
+                self.time_label.setText("LIVE")
         elif state == vlc.State.Error:
             self.handle_error("Playback error")
         elif state == vlc.State.Ended:
             if self._is_live is False:
-                self.progress_bar.setFormat("Playback ended")
+                self.time_label.setText("Ended")
                 self.progress_bar.setValue(1000)
                 # Emit mediaEnded signal once per playback
                 if not self._ended_emitted:
                     self._ended_emitted = True
                     self.mediaEnded.emit()
         elif state == vlc.State.Opening:
-            if self._is_live is False:
-                self.progress_bar.setFormat("Opening...")
-                self.progress_bar.setValue(0)
+            self.time_label.setText("Opening...")
+            self.progress_bar.setValue(0)
         elif state == vlc.State.Buffering:
-            if self._is_live is False:
-                self.progress_bar.setFormat("Buffering...")
-                self.progress_bar.setValue(0)
+            self.time_label.setText("Buffering...")
+            self.progress_bar.setValue(0)
+
+    def eventFilter(self, obj, event):
+        try:
+            if obj in (
+                self.video_frame,
+                self.transport_bar,
+                self.progress_bar,
+                self.volume_slider,
+            ):
+                if event.type() in (
+                    QEvent.Enter,
+                    QEvent.MouseMove,
+                    QEvent.MouseButtonPress,
+                    QEvent.Wheel,
+                ):
+                    self.show_ui()
+                    self.inactivity_timer.start()
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -400,11 +653,16 @@ class VideoPlayer(QMainWindow):
         super().keyPressEvent(event)
 
     def change_volume(self, step):
-        current_volume = self.media_player.audio_get_volume()
+        current_volume = self._safe_player_volume()
         new_volume = max(0, min(100, current_volume + step))
         self.media_player.audio_set_volume(new_volume)
+        self.media_player.audio_set_mute(False)
+        self._sync_volume_controls(new_volume, muted=False)
+        self._show_osd(f"Volume: {new_volume}%")
 
     def mouseDoubleClickEvent(self, event):
+        if not self._event_in_video_frame(event):
+            return super().mouseDoubleClickEvent(event)
         if event.button() == Qt.LeftButton:
             # Suppress any pending single-click action
             if self.click_timer.isActive():
@@ -445,6 +703,8 @@ class VideoPlayer(QMainWindow):
         self._seek_retry_done = False
         self._auto_retry_count = 0
         self._stall_timer.stop()
+        self._stream_detect_timer.stop()
+        self._stream_detect_attempts_left = 0
         self.media = self.instance.media_new(video_url)
         try:
             # User agent
@@ -456,10 +716,10 @@ class VideoPlayer(QMainWindow):
             self.media.add_option(":no-audio-time-stretch")
 
             is_vod_container = video_url and (
-                '.mkv' in video_url.lower()
-                or '.mp4' in video_url.lower()
-                or '.avi' in video_url.lower()
-                or '.webm' in video_url.lower()
+                ".mkv" in video_url.lower()
+                or ".mp4" in video_url.lower()
+                or ".avi" in video_url.lower()
+                or ".webm" in video_url.lower()
             )
 
             if is_live is True:
@@ -490,7 +750,7 @@ class VideoPlayer(QMainWindow):
                 self.media.add_option(":live-caching=1000")
                 self.media.add_option(":http-reconnect=true")
         except Exception as e:
-            logging.warning(f"Failed to set VLC options: {e}")
+            logger.warning(f"Failed to set VLC options: {e}")
         self.media_player.set_media(self.media)
 
         events = self.media_player.event_manager()
@@ -503,8 +763,8 @@ class VideoPlayer(QMainWindow):
         else:
             self.adjust_aspect_ratio()
             self.show()
-            # Don't force activate - let user click to interact
-            # This prevents stealing focus from channel list
+            self.raise_()
+            self.activateWindow()
             self.playing.emit()
             QTimer.singleShot(5000, self.check_playback_status)
 
@@ -515,8 +775,13 @@ class VideoPlayer(QMainWindow):
                 self._stall_timer.start()
 
             # Start inactivity timer for auto-hiding UI
-            self._ui_visible = True
+            self._set_overlay_visible(True)
             self.inactivity_timer.start()
+
+            self._sync_volume_controls(
+                self._safe_player_volume(),
+                muted=bool(self.media_player.audio_get_mute()),
+            )
 
     def check_playback_status(self):
         state = self.media_player.get_state()
@@ -566,7 +831,7 @@ class VideoPlayer(QMainWindow):
 
                 if self._auto_retry_count <= 2:
                     # First attempts: cycle audio track to reinit decoder
-                    logging.warning(
+                    logger.warning(
                         "Stall detected (time=%s, attempt #%d) — cycling audio track",
                         current_time,
                         self._auto_retry_count,
@@ -574,14 +839,14 @@ class VideoPlayer(QMainWindow):
                     self._recover_audio()
                 else:
                     # Last resort: full restart
-                    logging.warning(
+                    logger.warning(
                         "Stall detected (time=%s, attempt #%d) — restarting playback",
                         current_time,
                         self._auto_retry_count,
                     )
                     self._restart_playback()
         except Exception as e:
-            logging.debug("Stall watchdog error: %s", e)
+            logger.debug("Stall watchdog error: %s", e)
 
     def _recover_audio(self):
         """Cycle audio track off then back on to force VLC to reinit the decoder."""
@@ -592,7 +857,7 @@ class VideoPlayer(QMainWindow):
             # Re-enable after a short delay so VLC picks up new stream params
             QTimer.singleShot(500, lambda: self.media_player.audio_set_track(current_track))
         except Exception as e:
-            logging.debug("Audio recovery failed: %s", e)
+            logger.debug("Audio recovery failed: %s", e)
 
     def _restart_playback(self):
         """Stop and restart playback of the current URL."""
@@ -614,27 +879,56 @@ class VideoPlayer(QMainWindow):
 
     def stop_video(self):
         self.media_player.stop()
-        self.progress_bar.setVisible(False)
+        self._set_overlay_visible(False)
         self.update_timer.stop()
         self.position_save_timer.stop()  # Stop position tracking
         self._stall_timer.stop()
+        self._stream_detect_timer.stop()
         self._auto_retry_count = 0
         self.inactivity_timer.stop()
         self.setCursor(Qt.ArrowCursor)  # Restore cursor
-        self._ui_visible = True
         self._ended_emitted = False  # Reset for next playback
+        self.progress_bar.setValue(0)
+        self.time_label.setText("00:00 / 00:00")
+        self._update_play_state_label(vlc.State.Stopped)
+        self._show_osd("\u23f9 Stopped")
         self.stopped.emit()
 
     def toggle_mute(self):
-        state = self.media_player.audio_get_mute()
-        self.media_player.audio_set_mute(not state)
+        was_muted = bool(self.media_player.audio_get_mute())
+        if was_muted:
+            self.media_player.audio_set_mute(False)
+            restore = self._last_nonzero_volume or 30
+            self.media_player.audio_set_volume(int(restore))
+            self._sync_volume_controls(int(restore), muted=False)
+            self._show_osd(f"Volume: {int(restore)}%")
+        else:
+            current = self._safe_player_volume()
+            if current > 0:
+                self._last_nonzero_volume = current
+            self.media_player.audio_set_mute(True)
+            self._sync_volume_controls(current, muted=True)
+            self._show_osd("Muted")
 
     def _show_osd(self, text: str, duration_ms: int = 2000):
-        """Briefly show a message on the progress bar as an OSD overlay."""
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setFormat(text)
-        self._ui_visible = True
-        self.inactivity_timer.start(duration_ms)
+        """Briefly show a floating OSD message over the video frame."""
+        self._osd_label.setText(text)
+        # Calculate size from font metrics (not sizeHint) to avoid growth feedback loop
+        fm = self._osd_label.fontMetrics()
+        text_width = fm.horizontalAdvance(text)
+        text_height = fm.height()
+        self._osd_label.setFixedSize(
+            max(180, text_width + 48),
+            max(40, text_height + 20),
+        )
+        vf = self.mainFrame
+        self._osd_label.move(
+            (vf.width() - self._osd_label.width()) // 2,
+            (vf.height() - self._osd_label.height()) // 2,
+        )
+        self._osd_label.setVisible(True)
+        self._osd_label.raise_()
+        self._osd_timer.start(duration_ms)
 
     def cycle_audio_track(self):
         try:
@@ -652,7 +946,7 @@ class VideoPlayer(QMainWindow):
                 name = name.decode("utf-8", errors="replace")
             self._show_osd(f"Audio: {name}")
         except Exception as e:
-            logging.warning(f"Failed to cycle audio track: {e}")
+            logger.warning(f"Failed to cycle audio track: {e}")
 
     def cycle_subtitle_track(self):
         try:
@@ -670,14 +964,18 @@ class VideoPlayer(QMainWindow):
                 name = name.decode("utf-8", errors="replace")
             self._show_osd(f"Subtitle: {name}")
         except Exception as e:
-            logging.warning(f"Failed to cycle subtitle track: {e}")
+            logger.warning(f"Failed to cycle subtitle track: {e}")
 
     def toggle_play_pause(self):
         state = self.media_player.get_state()
         if state == vlc.State.Playing:
             self.media_player.pause()
+            self._update_play_state_label(vlc.State.Paused)
+            self._show_osd("\u23f8 Paused")
         else:
             self.media_player.play()
+            self._update_play_state_label(vlc.State.Playing)
+            self._show_osd("\u25b6 Playing")
 
     def toggle_pip_mode(self):
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
@@ -694,6 +992,17 @@ class VideoPlayer(QMainWindow):
         self.is_pip_mode = not self.is_pip_mode  # Toggle PiP mode
 
         QGuiApplication.restoreOverrideCursor()
+
+    def _event_in_video_frame(self, event) -> bool:
+        try:
+            if hasattr(event, "globalPosition"):
+                global_pos = event.globalPosition().toPoint()
+            else:
+                global_pos = event.globalPos()
+            local_pos = self.video_frame.mapFromGlobal(global_pos)
+            return bool(self.video_frame.rect().contains(local_pos))
+        except Exception:
+            return False
 
     def mousePressEvent(self, event):
         # Map mouse Back/Forward buttons to navigation in the UI
@@ -716,10 +1025,16 @@ class VideoPlayer(QMainWindow):
             return
 
         if event.button() == Qt.RightButton:
+            if not self._event_in_video_frame(event):
+                return super().mousePressEvent(event)
             self.toggle_pip_mode()
             return
 
         if event.button() == Qt.LeftButton:
+            self._drag_from_video = self._event_in_video_frame(event)
+            if not self._drag_from_video:
+                return super().mousePressEvent(event)
+
             self.dragging = False
             self.resizing = False
             self.start_size = self.size()
@@ -779,14 +1094,24 @@ class VideoPlayer(QMainWindow):
                 new_width = int(new_height * self.aspect_ratio)
 
             self.setGeometry(new_x, new_y, new_width, new_height)
-        elif event.buttons() & Qt.LeftButton and not self.resize_corner and not self.isFullScreen():
+        elif (
+            self._drag_from_video
+            and event.buttons() & Qt.LeftButton
+            and not self.resize_corner
+            and not self.isFullScreen()
+        ):
             # Mark as dragging only when mouse actually moves (disabled in fullscreen)
             self.dragging = True
             self.move(event.globalPos() - self.drag_position)
+        else:
+            return super().mouseMoveEvent(event)
         event.accept()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
+            if not self._drag_from_video:
+                return super().mouseReleaseEvent(event)
+
             # If a double-click was just handled, ignore this release
             if self._ignore_single_click:
                 self._ignore_single_click = False
@@ -800,6 +1125,7 @@ class VideoPlayer(QMainWindow):
         self.dragging = False
         self.resizing = False
         self.resize_corner = None
+        self._drag_from_video = False
 
     def handle_click(self):
         # This method is called when a single click is detected
@@ -829,6 +1155,14 @@ class VideoPlayer(QMainWindow):
     def resizeEvent(self, event):
         if self.is_pip_mode:
             self.resize_to_aspect_ratio()
+        # Re-center OSD label in main frame
+        if hasattr(self, "_osd_label"):
+            vf = self.mainFrame
+            lbl = self._osd_label
+            lbl.move(
+                (vf.width() - lbl.width()) // 2,
+                (vf.height() - lbl.height()) // 2,
+            )
         super().resizeEvent(event)
 
     def adjust_aspect_ratio(self):
@@ -864,24 +1198,23 @@ class VideoPlayer(QMainWindow):
         elif duration <= 0:
             # No duration and not seekable = live
             self._is_live = True
-        elif duration < 60000:
-            # Small duration (<60s) and not seekable = likely live buffer
+        elif duration < 15000:
+            # Very short duration (<15s) and not seekable = likely live buffer
             self._is_live = True
         else:
             # Long duration = probably VOD even if not seekable
             self._is_live = False
 
         self._seekable = vlc_seekable and not self._is_live
+        self.progress_bar.setRange(0, 1000)
+        try:
+            self.progress_bar.setEnabled(bool(self._seekable))
+        except Exception:
+            pass
+        self.update_timer.start()
+
         if not self._is_live:  # VOD content
-            # Configure progress bar but keep hidden until hover/activity
-            self.progress_bar.setRange(0, 1000)
-            self.progress_bar.setFormat("00:00 / " + self.format_time(duration))
-            try:
-                self.progress_bar.setEnabled(bool(self._seekable))
-            except Exception:
-                pass
-            self.update_timer.start()
-            # Start position save timer for VOD content
+            self.time_label.setText("00:00 / " + self.format_time(duration))
             self.position_save_timer.start()
             # If VOD is reported non-seekable, retry once with a minimal option profile
             if not self._seekable and not self._seek_retry_done:
@@ -890,13 +1223,19 @@ class VideoPlayer(QMainWindow):
             # Handle resume position if set
             if self._resume_position is not None and self._resume_position > 0:
                 QTimer.singleShot(500, self._apply_resume_position)
+            self._stream_detect_timer.stop()
         else:  # Live content
-            self.update_timer.stop()
+            self.time_label.setText("LIVE")
             self.position_save_timer.stop()  # No position tracking for live
-            self.progress_bar.setFormat("Live")
+            if self._is_live_hint is None:
+                self._stream_detect_attempts_left = 10
+                self._stream_detect_timer.start()
+            else:
+                self._stream_detect_timer.stop()
+
+        self._update_play_state_label()
         # Always start with progress bar hidden - show on hover/activity
-        self.progress_bar.setVisible(False)
-        self._ui_visible = False
+        self._set_overlay_visible(False)
 
     def on_vlc_error(self, event):
         # We don't use event data here, just log that an error occurred
@@ -911,29 +1250,34 @@ class VideoPlayer(QMainWindow):
         vlc_error = self.vlc_logger.get_latest_error()
         if vlc_error:
             error_message += f": {vlc_error}"
-        logging.error(f"VLC Error: {error_message}")
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setFormat(f"Error: {error_message}")
+        logger.error(f"VLC Error: {error_message}")
+        self._set_overlay_visible(True)
         self.progress_bar.setValue(0)
+        self.time_label.setText("Error")
+        self._update_play_state_label(vlc.State.Error)
+        self._show_osd("Playback Error", duration_ms=4000)
         self.update_timer.stop()
 
     def show_ui(self):
         """Show progress bar and cursor on mouse activity."""
         if not self._ui_visible:
             # Show progress bar for both live and VOD (shows "Live" or time)
-            self.progress_bar.setVisible(True)
-            self.setCursor(Qt.ArrowCursor)
-            self._ui_visible = True
+            self._set_overlay_visible(True)
+        # Always restore cursor (may have been hidden by inactivity even if overlay is visible)
+        self.setCursor(Qt.ArrowCursor)
+
+    def _set_overlay_visible(self, visible: bool):
+        self.transport_bar.setVisible(visible)
+        self._ui_visible = visible
 
     def on_inactivity(self):
         """Hide progress bar and cursor after inactivity period."""
         if self._ui_visible:
             # Always hide progress bar on inactivity (windowed or fullscreen)
-            self.progress_bar.setVisible(False)
+            self._set_overlay_visible(False)
             # Only hide cursor in fullscreen
             if self.isFullScreen():
                 self.setCursor(Qt.BlankCursor)
-            self._ui_visible = False
         self.inactivity_timer.stop()
 
     def toggle_fullscreen(self):
