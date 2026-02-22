@@ -1,4 +1,5 @@
 """Left navigation sidebar for qiTV."""
+
 import logging
 
 from PySide6.QtCore import Qt, Signal
@@ -25,7 +26,8 @@ class SidebarButton(QPushButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumHeight(32)
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
             QPushButton {
                 text-align: left;
                 padding: 6px 12px;
@@ -34,22 +36,23 @@ class SidebarButton(QPushButton):
                 font-size: 13px;
             }
             QPushButton:checked {
-                background-color: rgba(0, 191, 165, 0.18);
-                color: #00BFA5;
+                background-color: rgba(201, 107, 67, 0.24);
+                color: #C96B43;
                 font-weight: bold;
             }
             QPushButton:hover:!checked {
                 background-color: rgba(255, 255, 255, 0.06);
             }
-        """)
+        """
+        )
 
 
 class Sidebar(QWidget):
     """Left navigation sidebar with content types, quick actions, and provider switcher."""
 
-    provider_selected = Signal(str)       # provider name or "all"
-    content_type_changed = Signal(str)    # "itv", "vod", "series"
-    favorites_toggled = Signal(bool)      # favorites filter on/off
+    provider_selected = Signal(str)  # provider name or "all"
+    content_type_changed = Signal(str)  # "itv", "vod", "series"
+    favorites_toggled = Signal(bool)  # favorites filter on/off
     history_clicked = Signal()
     resume_clicked = Signal()
 
@@ -64,7 +67,11 @@ class Sidebar(QWidget):
 
         # --- Content type section ---
         self._type_buttons = {}
-        for label, content_type in [("Channels", "itv"), ("Movies", "vod"), ("Series", "series")]:
+        for label, content_type in [
+            ("Channels", "itv"),
+            ("Movies", "vod"),
+            ("Series", "series"),
+        ]:
             btn = SidebarButton(label)
             btn.clicked.connect(lambda checked, ct=content_type: self._on_content_type(ct))
             self._type_buttons[content_type] = btn
@@ -78,16 +85,14 @@ class Sidebar(QWidget):
 
         # --- Quick actions ---
         self.favorites_btn = SidebarButton("\u2605 Favorites")
-        self.favorites_btn.clicked.connect(
-            lambda checked: self.favorites_toggled.emit(checked)
-        )
+        self.favorites_btn.clicked.connect(lambda checked: self.favorites_toggled.emit(checked))
         layout.addWidget(self.favorites_btn)
 
-        self.history_btn = SidebarButton("\u23F1 History", checkable=False)
+        self.history_btn = SidebarButton("\u23f1 History", checkable=False)
         self.history_btn.clicked.connect(self.history_clicked.emit)
         layout.addWidget(self.history_btn)
 
-        self.resume_btn = SidebarButton("\u25B6 Resume", checkable=False)
+        self.resume_btn = SidebarButton("\u25b6 Resume", checkable=False)
         self.resume_btn.clicked.connect(self.resume_clicked.emit)
         layout.addWidget(self.resume_btn)
 
@@ -97,7 +102,7 @@ class Sidebar(QWidget):
         layout.addSpacing(4)
 
         # --- Search all providers ---
-        self.all_btn = SidebarButton("\U0001F50D Search All", checkable=False)
+        self.all_btn = SidebarButton("\U0001f50d Search All", checkable=False)
         self.all_btn.clicked.connect(lambda: self.provider_selected.emit("all"))
         layout.addWidget(self.all_btn)
 
@@ -108,20 +113,28 @@ class Sidebar(QWidget):
         layout.addSpacing(4)
 
         provider_label = QLabel("Provider")
-        provider_label.setStyleSheet("font-size: 11px; color: rgba(255,255,255,0.5); padding-left: 4px;")
+        provider_label.setStyleSheet(
+            "font-size: 11px; color: rgba(255,255,255,0.5); padding-left: 4px;"
+        )
         layout.addWidget(provider_label)
         layout.addSpacing(2)
 
         self.provider_combo = QComboBox()
         self.provider_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.provider_combo.setMinimumHeight(28)
-        self.provider_combo.setStyleSheet("""
+        self.provider_combo.setStyleSheet(
+            """
             QComboBox {
                 border-radius: 6px;
                 padding: 4px 8px;
                 font-size: 12px;
+                border: 1px solid rgba(201, 107, 67, 0.35);
             }
-        """)
+            QComboBox:hover {
+                border: 1px solid rgba(201, 107, 67, 0.55);
+            }
+        """
+        )
         self.provider_combo.currentTextChanged.connect(self._on_combo_provider_changed)
         layout.addWidget(self.provider_combo)
 

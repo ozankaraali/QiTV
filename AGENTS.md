@@ -43,6 +43,7 @@ Current Work Plan (Living TODO)
  - [ ] Debug log EPG endpoints for providers (STB `load.php` get_epg_info, Xtream `xmltv.php`) to help diagnose ID mismatches
  - [x] Show all EPG entries in channel program list (no windowing), with local time formatting
  - [x] Investigate VideoPlayer seeking: prevent playback ending on seek; ensure double-clicking the progress slider controls the bar (not window drag)
+ - [ ] Investigate optional VLC quality enhancements for low-bitrate streams (audio compressor/equalizer and lightweight upscaling/sharpening), gated by settings and disabled by default
 
 4) Logging and error handling
    - [x] Add module-level loggers; remove stray prints

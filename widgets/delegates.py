@@ -1,11 +1,6 @@
 from PySide6.QtCore import QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QTextCursor, QTextDocument, QTextOption
-from PySide6.QtWidgets import (
-    QApplication,
-    QStyle,
-    QStyledItemDelegate,
-    QStyleOptionViewItem,
-)
+from PySide6.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 
 class HtmlItemDelegate(QStyledItemDelegate):
@@ -86,12 +81,8 @@ class ChannelItemDelegate(QStyledItemDelegate):
             if progress is not None:
                 options = QStyleOptionViewItem(inOption)
                 self.initStyleOption(options, index)
-                style = (
-                    options.widget.style() if options.widget else QApplication.style()
-                )
-                style.drawPrimitive(
-                    QStyle.PE_PanelItemViewItem, options, painter, options.widget
-                )
+                style = options.widget.style() if options.widget else QApplication.style()
+                style.drawPrimitive(QStyle.PE_PanelItemViewItem, options, painter, options.widget)
                 painter.save()
                 painter.setRenderHint(painter.RenderHint.Antialiasing)
                 padding = 4
@@ -102,10 +93,8 @@ class ChannelItemDelegate(QStyledItemDelegate):
                 painter.drawRoundedRect(rect, radius, radius)
                 if progress > 0:
                     progress_width = rect.width() * progress / 100.0
-                    progress_rect = QRectF(
-                        rect.x(), rect.y(), progress_width, rect.height()
-                    )
-                    painter.setBrush(QColor(0, 191, 165))
+                    progress_rect = QRectF(rect.x(), rect.y(), progress_width, rect.height())
+                    painter.setBrush(QColor(201, 107, 67))
                     painter.drawRoundedRect(progress_rect, radius, radius)
                 painter.restore()
             else:
@@ -115,13 +104,9 @@ class ChannelItemDelegate(QStyledItemDelegate):
             if epg_text:
                 options = QStyleOptionViewItem(inOption)
                 self.initStyleOption(options, index)
-                style = (
-                    options.widget.style() if options.widget else QApplication.style()
-                )
+                style = options.widget.style() if options.widget else QApplication.style()
                 options.text = epg_text
-                style.drawControl(
-                    QStyle.CE_ItemViewItem, options, painter, inOption.widget
-                )
+                style.drawControl(QStyle.CE_ItemViewItem, options, painter, inOption.widget)
             else:
                 super().paint(painter, inOption, index)
         else:

@@ -106,13 +106,26 @@ if __name__ == "__main__":
         channel_list = ChannelList(
             app, player, config_manager, provider_manager, image_manager, epg_manager
         )
-        qdarktheme.setup_theme("auto", custom_colors={"primary": "#00BFA5"})
+        qdarktheme.setup_theme("auto", custom_colors={"primary": "#C96B43"})
         # Skip showing embedded player if external player (VLC/MPV) is enabled
         if not config_manager.play_in_vlc and not config_manager.play_in_mpv:
             player.show()
         channel_list.show()
 
-        # Do not force focus/activation; let the window manager handle it
+        def _bring_main_window_to_front():
+            try:
+                if channel_list.isMinimized():
+                    channel_list.showNormal()
+                channel_list.raise_()
+                channel_list.activateWindow()
+                app.setActiveWindow(channel_list)
+            except Exception:
+                pass
+
+        # Bring the app to foreground on startup. A second delayed attempt
+        # helps on desktops where theme/app init races with activation.
+        QTimer.singleShot(0, _bring_main_window_to_front)
+        QTimer.singleShot(250, _bring_main_window_to_front)
 
         if config_manager.check_updates:
             check_for_updates()

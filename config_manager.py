@@ -114,6 +114,7 @@ class ConfigManager:
     DEFAULT_OPTION_KEYBOARD_REMOTE_MODE = False
     DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
     DEFAULT_OPTION_EPG_STB_PERIOD_HOURS = 5
+    DEFAULT_OPTION_SHOW_INFO_PANEL = True
     DEFAULT_OPTION_SMOOTH_PAUSED_SEEK = True
     DEFAULT_OPTION_PLAY_IN_VLC = False
     DEFAULT_OPTION_PLAY_IN_MPV = False
@@ -215,6 +216,10 @@ class ConfigManager:
             self.show_stb_content_info = ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO
             need_update = True
 
+        if "show_info_panel" not in self.config:
+            self.show_info_panel = ConfigManager.DEFAULT_OPTION_SHOW_INFO_PANEL
+            need_update = True
+
         # add channel logo to the loaded config if it doesn't exist
         if "channel_logos" not in self.config:
             self.channel_logos = ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO
@@ -290,6 +295,7 @@ class ConfigManager:
     show_stb_content_info = _config_property(
         "show_stb_content_info", DEFAULT_OPTION_STB_CONTENT_INFO
     )
+    show_info_panel = _config_property("show_info_panel", DEFAULT_OPTION_SHOW_INFO_PANEL)
     selected_provider_name = _config_property("selected_provider_name", "iptv-org.github.io")
     channel_epg = _config_property("channel_epg", DEFAULT_OPTION_CHANNEL_EPG)
     channel_logos = _config_property("channel_logos", DEFAULT_OPTION_CHANNEL_LOGO)
@@ -371,6 +377,7 @@ class ConfigManager:
             },
             "favorites": [],
             "show_stb_content_info": ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO,
+            "show_info_panel": ConfigManager.DEFAULT_OPTION_SHOW_INFO_PANEL,
             "channel_logos": ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO,
             "channel_epg": ConfigManager.DEFAULT_OPTION_CHANNEL_EPG,
             "xmltv_channel_map": MultiKeyDict(),

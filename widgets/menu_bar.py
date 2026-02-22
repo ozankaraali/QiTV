@@ -1,6 +1,6 @@
 """Native menu bar for qiTV main window."""
+
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
-from PySide6.QtWidgets import QMenu, QMenuBar
 
 
 class AppMenuBar:
@@ -9,8 +9,8 @@ class AppMenuBar:
     def __init__(self, parent_window):
         self.window = parent_window
         self.menu_bar = parent_window.menuBar()
-        self._provider_action_group = None
-        self._provider_actions = {}
+        self._provider_action_group: QActionGroup | None = None
+        self._provider_actions: dict[str, QAction] = {}
 
         self._build_file_menu()
         self._build_edit_menu()
@@ -100,6 +100,7 @@ class AppMenuBar:
     def set_providers(self, provider_names, selected_name=None):
         """Update the provider radio items in the Providers menu."""
         # Remove old provider actions
+        assert self._provider_action_group is not None
         for action in self._provider_actions.values():
             self._provider_action_group.removeAction(action)
             self.providers_menu.removeAction(action)
@@ -133,6 +134,7 @@ class AppMenuBar:
         actions = [
             self.show_epg_action,
             self.show_vod_info_action,
+            self.show_info_panel_action,
             self.search_descriptions_action,
             self.player_internal_action,
             self.player_vlc_action,
@@ -142,6 +144,7 @@ class AppMenuBar:
 
         self.show_epg_action.setChecked(config_manager.channel_epg)
         self.show_vod_info_action.setChecked(config_manager.show_stb_content_info)
+        self.show_info_panel_action.setChecked(config_manager.show_info_panel)
         self.search_descriptions_action.setChecked(False)
 
         if config_manager.play_in_vlc:
