@@ -3,8 +3,9 @@ import logging
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
-    QHBoxLayout,
+    QLabel,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -33,17 +34,18 @@ class SidebarButton(QPushButton):
                 font-size: 13px;
             }
             QPushButton:checked {
-                background-color: rgba(51, 153, 255, 0.15);
+                background-color: rgba(0, 191, 165, 0.18);
+                color: #00BFA5;
                 font-weight: bold;
             }
             QPushButton:hover:!checked {
-                background-color: rgba(128, 128, 128, 0.1);
+                background-color: rgba(255, 255, 255, 0.06);
             }
         """)
 
 
 class Sidebar(QWidget):
-    """Left navigation sidebar with providers, content types, and quick actions."""
+    """Left navigation sidebar with content types, quick actions, and provider switcher."""
 
     provider_selected = Signal(str)       # provider name or "all"
     content_type_changed = Signal(str)    # "itv", "vod", "series"
@@ -53,22 +55,12 @@ class Sidebar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(140)
+        self.setFixedWidth(150)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 4, 8)
         layout.setSpacing(2)
-
-        # --- Provider section ---
-        self._provider_buttons = {}
-        self._provider_section = QVBoxLayout()
-        self._provider_section.setSpacing(2)
-        layout.addLayout(self._provider_section)
-
-        # --- Separator ---
-        layout.addWidget(self._make_separator())
-        layout.addSpacing(4)
 
         # --- Content type section ---
         self._type_buttons = {}
@@ -99,50 +91,64 @@ class Sidebar(QWidget):
         self.resume_btn.clicked.connect(self.resume_clicked.emit)
         layout.addWidget(self.resume_btn)
 
+        # --- Separator ---
+        layout.addSpacing(4)
+        layout.addWidget(self._make_separator())
+        layout.addSpacing(4)
+
+        # --- Search all providers ---
+        self.all_btn = SidebarButton("\U0001F50D Search All", checkable=False)
+        self.all_btn.clicked.connect(lambda: self.provider_selected.emit("all"))
+        layout.addWidget(self.all_btn)
+
         layout.addStretch()
 
+        # --- Provider switcher at bottom ---
+        layout.addWidget(self._make_separator())
+        layout.addSpacing(4)
+
+        provider_label = QLabel("Provider")
+        provider_label.setStyleSheet("font-size: 11px; color: rgba(255,255,255,0.5); padding-left: 4px;")
+        layout.addWidget(provider_label)
+        layout.addSpacing(2)
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.provider_combo.setMinimumHeight(28)
+        self.provider_combo.setStyleSheet("""
+            QComboBox {
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 12px;
+            }
+        """)
+        self.provider_combo.currentTextChanged.connect(self._on_combo_provider_changed)
+        layout.addWidget(self.provider_combo)
+
     def set_providers(self, provider_names):
-        """Populate the provider section with 'All' + individual providers."""
-        # Clear existing
-        for btn in self._provider_buttons.values():
-            btn.setParent(None)
-            btn.deleteLater()
-        self._provider_buttons.clear()
-
-        # "All" button
-        all_btn = SidebarButton("All")
-        all_btn.clicked.connect(lambda: self._on_provider("all"))
-        self._provider_section.addWidget(all_btn)
-        self._provider_buttons["all"] = all_btn
-
+        """Populate the provider dropdown."""
+        self.provider_combo.blockSignals(True)
+        self.provider_combo.clear()
         for name in provider_names:
-            btn = SidebarButton(name)
-            btn.clicked.connect(lambda checked, n=name: self._on_provider(n))
-            self._provider_section.addWidget(btn)
-            self._provider_buttons[name] = btn
-
-        # Select first real provider by default (not "All")
-        if provider_names:
-            self._select_provider(provider_names[0])
-        elif self._provider_buttons:
-            self._select_provider("all")
+            self.provider_combo.addItem(name)
+        self.provider_combo.blockSignals(False)
 
     def select_provider(self, name):
         """Externally set the active provider."""
-        self._select_provider(name)
+        self.provider_combo.blockSignals(True)
+        index = self.provider_combo.findText(name)
+        if index >= 0:
+            self.provider_combo.setCurrentIndex(index)
+        self.provider_combo.blockSignals(False)
 
     def select_content_type(self, content_type):
         """Externally set the active content type without emitting signal."""
         for ct, btn in self._type_buttons.items():
             btn.setChecked(ct == content_type)
 
-    def _on_provider(self, name):
-        self._select_provider(name)
-        self.provider_selected.emit(name)
-
-    def _select_provider(self, name):
-        for n, btn in self._provider_buttons.items():
-            btn.setChecked(n == name)
+    def _on_combo_provider_changed(self, name):
+        if name:
+            self.provider_selected.emit(name)
 
     def _on_content_type(self, content_type):
         for ct, btn in self._type_buttons.items():

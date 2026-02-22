@@ -4,7 +4,7 @@ import sys
 
 from PySide6.QtCore import QMetaObject, QPoint, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import QFrame, QMainWindow, QProgressBar, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QLabel, QMainWindow, QProgressBar, QVBoxLayout
 import vlc
 
 
@@ -153,7 +153,40 @@ class VideoPlayer(QMainWindow):
         self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("00:00 / 00:00")
+        self.progress_bar.setFixedHeight(22)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: rgba(0, 0, 0, 0.6);
+                border: none;
+                color: white;
+                font-size: 12px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background-color: rgba(0, 191, 165, 0.85);
+                border-radius: 0px;
+            }
+        """)
         self.mainFrame.layout().addWidget(self.progress_bar)
+
+        # OSD label for volume/status feedback overlay
+        self._osd_label = QLabel(self.video_frame)
+        self._osd_label.setAlignment(Qt.AlignCenter)
+        self._osd_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 0.7);
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+                border-radius: 8px;
+                padding: 8px 16px;
+            }
+        """)
+        self._osd_label.setVisible(False)
+        self._osd_label.setFixedSize(180, 40)
+        self._osd_timer = QTimer(self)
+        self._osd_timer.setSingleShot(True)
+        self._osd_timer.timeout.connect(lambda: self._osd_label.setVisible(False))
 
         # Track content type to reduce repeated progress bar toggles
         self._is_live = None  # type: bool | None
@@ -403,6 +436,7 @@ class VideoPlayer(QMainWindow):
         current_volume = self.media_player.audio_get_volume()
         new_volume = max(0, min(100, current_volume + step))
         self.media_player.audio_set_volume(new_volume)
+        self._show_osd(f"Volume: {new_volume}%")
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -628,13 +662,25 @@ class VideoPlayer(QMainWindow):
     def toggle_mute(self):
         state = self.media_player.audio_get_mute()
         self.media_player.audio_set_mute(not state)
+        self._show_osd("Muted" if not state else "Unmuted")
 
     def _show_osd(self, text: str, duration_ms: int = 2000):
-        """Briefly show a message on the progress bar as an OSD overlay."""
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setFormat(text)
-        self._ui_visible = True
-        self.inactivity_timer.start(duration_ms)
+        """Briefly show a floating OSD message over the video frame."""
+        self._osd_label.setText(text)
+        # Resize to fit text then center on video frame
+        self._osd_label.adjustSize()
+        self._osd_label.setFixedSize(
+            max(180, self._osd_label.sizeHint().width() + 32),
+            max(40, self._osd_label.sizeHint().height() + 16),
+        )
+        vf = self.video_frame
+        self._osd_label.move(
+            (vf.width() - self._osd_label.width()) // 2,
+            (vf.height() - self._osd_label.height()) // 2,
+        )
+        self._osd_label.setVisible(True)
+        self._osd_label.raise_()
+        self._osd_timer.start(duration_ms)
 
     def cycle_audio_track(self):
         try:
@@ -676,8 +722,10 @@ class VideoPlayer(QMainWindow):
         state = self.media_player.get_state()
         if state == vlc.State.Playing:
             self.media_player.pause()
+            self._show_osd("\u23F8 Paused")
         else:
             self.media_player.play()
+            self._show_osd("\u25B6 Playing")
 
     def toggle_pip_mode(self):
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
@@ -829,6 +877,14 @@ class VideoPlayer(QMainWindow):
     def resizeEvent(self, event):
         if self.is_pip_mode:
             self.resize_to_aspect_ratio()
+        # Re-center OSD label in video frame
+        if hasattr(self, '_osd_label'):
+            vf = self.video_frame
+            lbl = self._osd_label
+            lbl.move(
+                (vf.width() - lbl.width()) // 2,
+                (vf.height() - lbl.height()) // 2,
+            )
         super().resizeEvent(event)
 
     def adjust_aspect_ratio(self):

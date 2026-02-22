@@ -1,5 +1,5 @@
-from PySide6.QtCore import QRect, QSize, Qt
-from PySide6.QtGui import QFont, QFontMetrics, QTextCursor, QTextDocument, QTextOption
+from PySide6.QtCore import QRect, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QTextCursor, QTextDocument, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -93,18 +93,20 @@ class ChannelItemDelegate(QStyledItemDelegate):
                     QStyle.PE_PanelItemViewItem, options, painter, options.widget
                 )
                 painter.save()
+                painter.setRenderHint(painter.RenderHint.Antialiasing)
                 padding = 4
-                rect = options.rect.adjusted(padding, padding, -padding, -padding)
+                rect = QRectF(options.rect.adjusted(padding, padding, -padding, -padding))
+                radius = 3.0
                 painter.setPen(Qt.NoPen)
-                painter.setBrush(Qt.gray)
-                painter.drawRect(rect)
+                painter.setBrush(QColor(128, 128, 128, 60))
+                painter.drawRoundedRect(rect, radius, radius)
                 if progress > 0:
-                    progress_width = int((rect.width() * progress) / 100)
-                    progress_rect = QRect(
+                    progress_width = rect.width() * progress / 100.0
+                    progress_rect = QRectF(
                         rect.x(), rect.y(), progress_width, rect.height()
                     )
-                    painter.setBrush(Qt.blue)
-                    painter.drawRect(progress_rect)
+                    painter.setBrush(QColor(0, 191, 165))
+                    painter.drawRoundedRect(progress_rect, radius, radius)
                 painter.restore()
             else:
                 super().paint(painter, inOption, index)

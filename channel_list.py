@@ -896,6 +896,9 @@ class ChannelList(QMainWindow):
         self.app_menu = AppMenuBar(self)
         self._connect_menu_actions()
 
+        # Populate providers into combo, sidebar, and menu (after all UI exists)
+        self.populate_provider_combo()
+
         # Right side: top bar + content list
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -1151,9 +1154,6 @@ class ChannelList(QMainWindow):
         self.provider_combo = QComboBox()
         self.provider_combo.setVisible(False)
 
-        # Populate provider combo box
-        self.populate_provider_combo()
-
     def _setup_global_shortcuts(self):
         def not_in_text_input():
             from PySide6.QtWidgets import QLineEdit, QPlainTextEdit, QTextEdit
@@ -1299,10 +1299,13 @@ class ChannelList(QMainWindow):
 
         # Also populate sidebar and menu bar if they exist
         provider_names = [self.provider_combo.itemText(i) for i in range(self.provider_combo.count())]
+        current_name = self.config_manager.selected_provider_name
         if hasattr(self, 'sidebar'):
             self.sidebar.set_providers(provider_names)
+            if current_name:
+                self.sidebar.select_provider(current_name)
         if hasattr(self, 'app_menu'):
-            self.app_menu.set_providers(provider_names, self.config_manager.selected_provider_name)
+            self.app_menu.set_providers(provider_names, current_name)
 
     def on_provider_changed(self, provider_name):
         """Handle provider selection change from combo box."""
@@ -1475,15 +1478,6 @@ class ChannelList(QMainWindow):
         self.refresh_content_list_size()
 
         list_layout.addWidget(self.content_list, 1)
-
-        # Favorite button (kept in a horizontal bar below list)
-        self.favorite_layout = QHBoxLayout()
-        self.favorite_layout.setSpacing(6)
-        self.favorite_button = QPushButton("Favorite/Unfavorite")
-        self.favorite_button.clicked.connect(self.toggle_favorite)
-        self.favorite_layout.addWidget(self.favorite_button)
-        self.favorite_layout.addStretch()
-        list_layout.addLayout(self.favorite_layout)
 
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setRange(0, 100)
@@ -1757,7 +1751,7 @@ class ChannelList(QMainWindow):
                             pass
                         # Light blue background tint
                         try:
-                            now_item.setBackground(QColor(51, 153, 255, 40))
+                            now_item.setBackground(QColor(0, 191, 165, 40))
                         except Exception:
                             pass
                 except Exception:
@@ -2020,12 +2014,6 @@ class ChannelList(QMainWindow):
         header_font.setBold(True)
         self.content_list.header().setFont(header_font)
 
-    def show_favorite_layout(self, show):
-        for i in range(self.favorite_layout.count()):
-            item = self.favorite_layout.itemAt(i)
-            if item.widget():
-                item.widget().setVisible(show)
-
     def toggle_favorite(self):
         selected_item = self.content_list.currentItem()
         if selected_item:
@@ -2108,15 +2096,13 @@ class ChannelList(QMainWindow):
         elif self.content_type == "series":
             self.content_list.setHeaderLabels([f"Serie Categories ({len(categories)})"])
 
-        self.show_favorite_layout(True)
-
         for category in categories:
             item = CategoryTreeWidgetItem(self.content_list)
             item.setText(0, category.get("title", "Unknown Category"))
             item.setData(0, Qt.UserRole, {"type": "category", "data": category})
             # Highlight favorite items
             if self.check_if_favorite(category.get("title", "")):
-                item.setBackground(0, QColor(0, 0, 255, 20))
+                item.setBackground(0, QColor(0, 191, 165, 20))
 
         self.content_list.sortItems(0, Qt.AscendingOrder)
         self.content_list.setSortingEnabled(True)
@@ -2247,8 +2233,6 @@ class ChannelList(QMainWindow):
         # no favorites on seasons or episodes genre_sfolders
         check_fav = content in ["channel", "movie", "serie", "m3ucontent"]
 
-        self.show_favorite_layout(check_fav)
-
         # Disable updates during population to prevent Qt conflicts
         self.content_list.setUpdatesEnabled(False)
 
@@ -2282,7 +2266,7 @@ class ChannelList(QMainWindow):
             # Highlight favorite items
             item_name = item_data.get("name") or item_data.get("title")
             if check_fav and self.check_if_favorite(item_name):
-                list_item.setBackground(0, QColor(0, 0, 255, 20))
+                list_item.setBackground(0, QColor(0, 191, 165, 20))
 
         self.content_list.sortItems(0, Qt.AscendingOrder)
         self.content_list.setSortingEnabled(True)
@@ -2709,19 +2693,26 @@ class ChannelList(QMainWindow):
 
         menu = QMenu(self)
 
+        # Favorite/Unfavorite action
+        item_type = self.get_item_type(item)
+        item_name = self.get_item_name(item, item_type)
+        is_fav = self.check_if_favorite(item_name)
+        fav_label = "\u2606 Remove from Favorites" if is_fav else "\u2605 Add to Favorites"
+        fav_action = menu.addAction(fav_label)
+        fav_action.triggered.connect(self.toggle_favorite)
+
         # Copy URL action - only for playable content (not folders)
         content_type = item_data.get("type", "")
         if content_type not in ["category", "series"]:
             url = self._get_stream_url_for_item(item_data)
             if url:
+                menu.addSeparator()
                 copy_url_action = menu.addAction("Copy URL to Clipboard")
                 copy_url_action.triggered.connect(
                     lambda checked=False, u=url: self._copy_url_to_clipboard(u)
                 )
 
-        # Only show menu if it has actions
-        if menu.actions():
-            menu.exec_(self.content_list.viewport().mapToGlobal(position))
+        menu.exec_(self.content_list.viewport().mapToGlobal(position))
 
     def _get_stream_url_for_item(self, item_data):
         """Get the stream URL for an item without playing it."""
