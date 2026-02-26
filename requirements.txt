@@ -3,7 +3,7 @@ requests>=2.32.5
 urllib3>=2.6.3
 URLObject~=2.4.3
 m3u-parser
-pyqtdarktheme==2.1.0
+pyqtdarktheme-fork>=2.3.4
 PySide6
 orjson>=3.11.5
 tzlocal
