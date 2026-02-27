@@ -129,24 +129,26 @@ class AppMenuBar:
     # --- State sync ---
     def sync_from_config(self, config_manager):
         """Set initial checked states from config without triggering signals."""
-        # Block signals during initial sync to prevent handlers firing
-        # before the full UI is ready
-        actions = [
+        # Block signals on toggle actions to prevent handlers firing
+        # before the full UI is ready.  Do NOT block player actions:
+        # QActionGroup needs their `toggled` signals for mutual exclusivity,
+        # and `setChecked` only emits `toggled` (not `triggered`), so the
+        # _set_player_mode handlers won't fire anyway.
+        toggle_actions = [
             self.show_epg_action,
             self.show_vod_info_action,
             self.show_info_panel_action,
             self.search_descriptions_action,
-            self.player_internal_action,
-            self.player_vlc_action,
-            self.player_mpv_action,
         ]
-        old_states = [a.blockSignals(True) for a in actions]
+        old_states = [a.blockSignals(True) for a in toggle_actions]
 
         self.show_epg_action.setChecked(config_manager.channel_epg)
         self.show_vod_info_action.setChecked(config_manager.show_stb_content_info)
         self.show_info_panel_action.setChecked(config_manager.show_info_panel)
         self.search_descriptions_action.setChecked(False)
 
+        # Player mode: let QActionGroup see the toggled signals so it
+        # correctly tracks which action is checked (mutual exclusivity).
         if config_manager.play_in_vlc:
             self.player_vlc_action.setChecked(True)
         elif config_manager.play_in_mpv:
@@ -154,5 +156,5 @@ class AppMenuBar:
         else:
             self.player_internal_action.setChecked(True)
 
-        for action, old in zip(actions, old_states):
+        for action, old in zip(toggle_actions, old_states):
             action.blockSignals(old)
