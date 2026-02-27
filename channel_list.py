@@ -1458,7 +1458,56 @@ class ChannelList(QMainWindow):
         self.top_bar.clear_search()
 
     def _on_sidebar_favorites(self, checked):
-        self.filter_content(self.top_bar.search_text())
+        if checked and self.current_list_content == "category":
+            # At category level – show a flat list of only favorited items
+            self._show_favorites_flat()
+        elif not checked and self.current_category is None:
+            # Turning off favorites at root level – restore category view
+            self.load_content()
+        else:
+            # Inside a category or other view – just re-filter the current list
+            self.filter_content(self.top_bar.search_text())
+
+    def _show_favorites_flat(self):
+        """Load all content across categories and display only favorites."""
+        content_data = self.provider_manager.current_provider_content.get(self.content_type, {})
+        if not isinstance(content_data, dict):
+            return
+
+        # Gather all items from all categories
+        all_items = []
+        if "sorted_channels" in content_data:
+            all_items = content_data.get("contents", [])
+        elif isinstance(content_data.get("contents"), dict):
+            for cat_items in content_data["contents"].values():
+                if isinstance(cat_items, list):
+                    all_items.extend(cat_items)
+
+        if not all_items:
+            return
+
+        # Filter to favorites only
+        favorites = set(self.config_manager.favorites)
+        fav_items = [
+            item
+            for item in all_items
+            if (item.get("name") or item.get("title", "")) in favorites
+        ]
+
+        # Determine display content type
+        content_type_map = {"itv": "channel", "series": "serie", "vod": "movie"}
+        display_type = content_type_map.get(self.content_type, "m3ucontent")
+
+        if not fav_items:
+            # Show empty state
+            self.content_list.clear()
+            self.content_list.setColumnCount(1)
+            self.content_list.setHeaderLabels([f"No favorites in {display_type}s"])
+            return
+
+        self.display_content(fav_items, content=display_type)
+        # Hide back button – we're still at root level, not inside a category
+        self.top_bar.set_back_visible(False)
 
     def _show_about(self):
         from config_manager import get_app_version
@@ -2405,6 +2454,11 @@ class ChannelList(QMainWindow):
 
         show_favorites = self.sidebar.favorites_btn.isChecked()
         search_text = text.lower() if isinstance(text, str) else ""
+
+        # When favorites is active at category level, switch to flat favorites view
+        if show_favorites and self.current_list_content == "category":
+            self._show_favorites_flat()
+            return
 
         # retrieve items type first
         item_type = None

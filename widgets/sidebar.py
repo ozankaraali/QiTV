@@ -4,6 +4,7 @@ import logging
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QFrame,
     QLabel,
@@ -67,6 +68,8 @@ class Sidebar(QWidget):
 
         # --- Content type section ---
         self._type_buttons = {}
+        self._type_button_group = QButtonGroup(self)
+        self._type_button_group.setExclusive(True)
         for label, content_type in [
             ("Channels", "itv"),
             ("Movies", "vod"),
@@ -74,6 +77,7 @@ class Sidebar(QWidget):
         ]:
             btn = SidebarButton(label)
             btn.clicked.connect(lambda checked, ct=content_type: self._on_content_type(ct))
+            self._type_button_group.addButton(btn)
             self._type_buttons[content_type] = btn
             layout.addWidget(btn)
         self._type_buttons["itv"].setChecked(True)
