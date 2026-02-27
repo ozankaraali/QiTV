@@ -206,6 +206,17 @@ class UpdateDownloader(QObject):
             self.error.emit(f"Failed to save file: {e}")
 
 
+def _polish_msgbox(msg: QMessageBox):
+    """Reduce icon-to-text spacing and ensure buttons are not truncated."""
+    msg.setStyleSheet(
+        "QLabel{min-width: 300px;}"
+        "QPushButton{min-width: 90px; padding: 4px 12px;}"
+    )
+    layout = msg.layout()
+    if layout:
+        layout.setHorizontalSpacing(10)
+
+
 def show_update_dialog(update_info: dict):
     """Show update dialog with download option if available."""
     version = update_info["version"]
@@ -227,8 +238,7 @@ def show_update_dialog(update_info: dict):
         browser_btn = msg.addButton("Open Release Page", QMessageBox.ActionRole)
         msg.addButton(QMessageBox.Cancel)
 
-        # Ensure dialog is wide enough so buttons are not truncated
-        msg.setStyleSheet("QLabel{min-width: 350px;}")
+        _polish_msgbox(msg)
         msg.exec_()
         clicked = msg.clickedButton()
 
@@ -242,7 +252,7 @@ def show_update_dialog(update_info: dict):
         # Fallback: running from source or no download URL available
         msg.setInformativeText("Would you like to open the release page?")
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg.setStyleSheet("QLabel{min-width: 300px;}")
+        _polish_msgbox(msg)
         if msg.exec_() == QMessageBox.Yes:
             import webbrowser
 
@@ -336,7 +346,7 @@ def _show_download_error(error_msg: str, release_url: str):
     error_dialog.setInformativeText(error_msg)
     open_btn = error_dialog.addButton("Open Release Page", QMessageBox.ActionRole)
     error_dialog.addButton(QMessageBox.Close)
-    error_dialog.setStyleSheet("QLabel{min-width: 300px;}")
+    _polish_msgbox(error_dialog)
 
     error_dialog.exec_()
     if error_dialog.clickedButton() == open_btn:
@@ -382,7 +392,7 @@ def _perform_windows_update(downloaded_path: str, release_url: str):
         error_dialog.setInformativeText(f"The update was downloaded to:\n{downloaded_path}")
         open_btn = error_dialog.addButton("Open Release Page", QMessageBox.ActionRole)
         error_dialog.addButton(QMessageBox.Close)
-        error_dialog.setStyleSheet("QLabel{min-width: 300px;}")
+        _polish_msgbox(error_dialog)
 
         error_dialog.exec_()
         if error_dialog.clickedButton() == open_btn:
@@ -401,6 +411,7 @@ def _perform_unix_update(downloaded_path: str):
         f"The new version has been saved to:\n{downloaded_path}\n\n"
         "Please replace the current application with the downloaded file."
     )
+    _polish_msgbox(msg)
     msg.exec_()
 
     # Open the Downloads folder
