@@ -176,5 +176,6 @@ class Sidebar(QWidget):
     def _make_separator():
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
-        sep.setFrameShadow(QFrame.Sunken)
+        sep.setFrameShadow(QFrame.Plain)
+        sep.setStyleSheet("background-color: rgba(201, 107, 67, 0.3); max-height: 1px;")
         return sep

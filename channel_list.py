@@ -1388,11 +1388,10 @@ class ChannelList(QMainWindow):
         hm.addAction(m.update_action)
         hm.addMenu(m.export_menu)
         hm.addSeparator()
-        # Player mode submenu in hamburger
-        play_menu = hm.addMenu("Play with")
-        play_menu.addAction(m.player_internal_action)
-        play_menu.addAction(m.player_vlc_action)
-        play_menu.addAction(m.player_mpv_action)
+        # Player mode actions directly in hamburger (no submenu for reliable hover)
+        hm.addAction(m.player_internal_action)
+        hm.addAction(m.player_vlc_action)
+        hm.addAction(m.player_mpv_action)
 
         # Sync initial state from config
         m.sync_from_config(self.config_manager)
@@ -2576,13 +2575,15 @@ class ChannelList(QMainWindow):
                             matches.append((content_type, item))
 
             if matches:
-                # Create provider group header
+                # Create provider group header styled as orange bar
                 provider_header = CategoryTreeWidgetItem(self.content_list)
-                provider_header.setText(0, f"{provider_name} ({len(matches)} results)")
+                provider_header.setText(0, f"  {provider_name} ({len(matches)} results)")
                 provider_header.setExpanded(True)
                 font = provider_header.font(0)
                 font.setBold(True)
                 provider_header.setFont(0, font)
+                provider_header.setBackground(0, QColor(201, 107, 67, 180))
+                provider_header.setForeground(0, QColor(255, 255, 255))
 
                 for content_type, item_data in matches[:50]:  # Limit per provider
                     child = QTreeWidgetItem(provider_header)
