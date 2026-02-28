@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 from packaging.version import parse
 import requests
 
-from config_manager import get_app_version
+from config_manager import ConfigManager, get_app_version
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +54,16 @@ class UpdateWorker(QObject):
             self.error.emit(str(e))
 
 
-def check_for_updates():
-    # Run update check in a worker thread to avoid blocking UI
+def check_for_updates(config_manager: Optional[ConfigManager] = None, manual: bool = False):
+    """Check for updates in background.
+
+    Args:
+        config_manager: Used to persist skip-version and reminder preferences.
+        manual: If True, bypass skipped-version check and show "up to date"
+                or error dialogs. Automatic checks (manual=False) are silent
+                when no newer version is available and honour the skipped
+                version stored in config.
+    """
     thread = QThread()
     worker = UpdateWorker()
     worker.moveToThread(thread)
@@ -65,15 +73,31 @@ def check_for_updates():
 
     def on_finished(result):
         thread.quit()
+        app = QApplication.instance()
+        if app is None:
+            return
         if result:
-            # Ensure dialog runs on the GUI thread by targeting the app object
-            app = QApplication.instance()
-            if app is not None:
-                QTimer.singleShot(0, app, lambda: show_update_dialog(result))
+            version = result.get("version", "")
+            # For automatic checks, skip if user previously chose to skip this version
+            if (
+                not manual
+                and config_manager
+                and version
+                and config_manager.skipped_update_version == version
+            ):
+                logger.debug("Skipping update dialog for version %s (user skipped)", version)
+                return
+            QTimer.singleShot(0, app, lambda: show_update_dialog(result, config_manager, manual))
+        elif manual:
+            QTimer.singleShot(0, app, _show_up_to_date)
 
     def on_error(msg):
         thread.quit()
         logger.warning(f"Error checking for updates: {msg}")
+        if manual:
+            app = QApplication.instance()
+            if app:
+                QTimer.singleShot(0, app, lambda: _show_check_error(msg))
 
     def _cleanup():
         try:
@@ -87,6 +111,48 @@ def check_for_updates():
     thread.finished.connect(_cleanup)
     thread.start()
     _update_jobs.append((thread, worker))
+
+
+def _skip_version(config_manager: Optional[ConfigManager], version: str):
+    """Record a version to skip in future automatic checks."""
+    if config_manager is None:
+        logger.warning("Cannot skip version: no config_manager provided")
+        return
+    config_manager.skipped_update_version = version
+    config_manager.save_config()
+    logger.info("Skipping future prompts for version %s", version)
+
+
+def _disable_update_reminders(config_manager: Optional[ConfigManager]):
+    """Turn off automatic update checks entirely.
+
+    Re-enable in Settings or via Help > Check for Updates.
+    """
+    if config_manager is None:
+        logger.warning("Cannot disable update reminders: no config_manager provided")
+        return
+    config_manager.check_updates = False
+    config_manager.save_config()
+    logger.info("Automatic update reminders disabled")
+
+
+def _show_up_to_date():
+    msg = QMessageBox()
+    msg.setIcon(QMessageBox.Information)
+    msg.setWindowTitle("No Updates")
+    msg.setText(f"You're running the latest version ({get_app_version()}).")
+    _polish_msgbox(msg)
+    msg.exec_()
+
+
+def _show_check_error(error_msg: str):
+    msg = QMessageBox()
+    msg.setIcon(QMessageBox.Warning)
+    msg.setWindowTitle("Update Check Failed")
+    msg.setText("Could not check for updates.")
+    msg.setInformativeText(error_msg)
+    _polish_msgbox(msg)
+    msg.exec_()
 
 
 def extract_version_from_tag(tag):
@@ -207,18 +273,68 @@ class UpdateDownloader(QObject):
 
 
 def _polish_msgbox(msg: QMessageBox):
-    """Reduce icon-to-text spacing and ensure buttons are not truncated."""
-    msg.setStyleSheet(
-        "QLabel{min-width: 300px;}"
-        "QPushButton{min-width: 90px; padding: 4px 12px;}"
-    )
+    """Reduce icon-to-text spacing and ensure buttons are not truncated.
+
+    Button sizing is deferred to the first show event so that font metrics
+    are fully resolved by the platform style.
+    """
+    from PySide6.QtWidgets import QGridLayout
+
     layout = msg.layout()
     if layout:
         layout.setHorizontalSpacing(10)
+        layout.setContentsMargins(10, 10, 10, 10)
+        if isinstance(layout, QGridLayout):
+            layout.setColumnMinimumWidth(0, 0)
+            layout.setColumnStretch(0, 0)
+            layout.setColumnStretch(1, 1)
+
+    # Defer button width calculation until after the dialog is laid out,
+    # so font metrics are resolved by the platform style engine.
+    original_show = msg.showEvent
+
+    def _on_show(event):
+        original_show(event)
+        total_buttons_width = 0
+        for btn in msg.buttons():
+            fm = btn.fontMetrics()
+            # Strip & accelerator markers for accurate text measurement
+            display_text = btn.text().replace("&&", "\x00").replace("&", "").replace("\x00", "&")
+            text_width = fm.horizontalAdvance(display_text) + 32
+            btn.setMinimumWidth(text_width)
+            total_buttons_width += text_width + 8  # 8px spacing between buttons
+
+        min_dialog_width = max(400, total_buttons_width + 80)
+        msg.setMinimumWidth(min_dialog_width)
+
+    msg.showEvent = _on_show
 
 
-def show_update_dialog(update_info: dict):
-    """Show update dialog with download option if available."""
+def show_update_dialog(
+    update_info: dict,
+    config_manager: Optional[ConfigManager] = None,
+    manual: bool = False,
+):
+    """Show update dialog with download option if available.
+
+    Buttons:
+        - Download & Install  (frozen builds with a download URL)
+        - Open Release Page
+        - Skip This Version   (records the version so automatic checks won't show it again)
+
+    Checkbox:
+        - "Do not remind me about updates"  — if checked when the dialog is
+          dismissed via *Skip This Version*, automatic update checks are
+          disabled entirely (not just for this version).
+
+    Args:
+        update_info: Dict with keys ``version``, ``url``, and optionally
+                     ``download_url`` / ``file_size``.
+        config_manager: Persists skip-version and reminder preferences.
+        manual: True when the user triggered the check explicitly.
+    """
+    from PySide6.QtWidgets import QCheckBox
+
     version = update_info["version"]
     release_url = update_info["url"]
     download_url = update_info.get("download_url")
@@ -232,31 +348,57 @@ def show_update_dialog(update_info: dict):
     msg.setText(f"A new version ({version}) is available!")
     msg.setWindowTitle("Update Available")
 
+    # "Do not remind me" checkbox — only shown for automatic checks
+    mute_checkbox: Optional[QCheckBox] = None
+    if not manual and config_manager is not None:
+        mute_checkbox = QCheckBox("Do not remind me about updates")
+        msg.setCheckBox(mute_checkbox)
+
     if download_url and is_frozen:
         msg.setInformativeText("Would you like to download and install the update?")
         download_btn = msg.addButton("Download && Install", QMessageBox.AcceptRole)
         browser_btn = msg.addButton("Open Release Page", QMessageBox.ActionRole)
-        msg.addButton(QMessageBox.Cancel)
+        skip_btn = msg.addButton("Skip This Version", QMessageBox.RejectRole)
 
         _polish_msgbox(msg)
         msg.exec_()
         clicked = msg.clickedButton()
 
         if clicked == download_btn:
+            # Clear any previous skip for this version so it doesn't block
+            # future checks after the download is complete / cancelled.
+            if config_manager:
+                config_manager.skipped_update_version = ""
+                config_manager.save_config()
             start_download(download_url, file_size, release_url)
         elif clicked == browser_btn:
             import webbrowser
 
             webbrowser.open(release_url)
+        elif clicked == skip_btn:
+            if mute_checkbox and mute_checkbox.isChecked():
+                _disable_update_reminders(config_manager)
+            else:
+                _skip_version(config_manager, version)
     else:
         # Fallback: running from source or no download URL available
         msg.setInformativeText("Would you like to open the release page?")
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        open_btn = msg.addButton("Open Release Page", QMessageBox.AcceptRole)
+        skip_btn = msg.addButton("Skip This Version", QMessageBox.RejectRole)
+
         _polish_msgbox(msg)
-        if msg.exec_() == QMessageBox.Yes:
+        msg.exec_()
+        clicked = msg.clickedButton()
+
+        if clicked == open_btn:
             import webbrowser
 
             webbrowser.open(release_url)
+        elif clicked == skip_btn:
+            if mute_checkbox and mute_checkbox.isChecked():
+                _disable_update_reminders(config_manager)
+            else:
+                _skip_version(config_manager, version)
 
 
 # Keep reference to download jobs to avoid GC
@@ -375,7 +517,8 @@ def _perform_windows_update(downloaded_path: str, release_url: str):
         # Launch the downloaded exe with --replace flag
         subprocess.Popen(
             [downloaded_path, "--replace", original_exe],
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+            creationflags=subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
         )
 
         # Quit the current application

@@ -74,7 +74,7 @@ def get_app_version() -> str:
     ]
 
     # 3) If running as PyInstaller bundle, check for bundled pyproject.toml
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         # Running in a PyInstaller bundle
         bundled_pyproject = Path(sys._MEIPASS) / "pyproject.toml"
         candidates.insert(0, bundled_pyproject)
@@ -98,7 +98,6 @@ def get_app_version() -> str:
 
 
 class ConfigManager:
-
     DEFAULT_OPTION_CHECKUPDATE = True
     DEFAULT_OPTION_STB_CONTENT_INFO = True
     DEFAULT_OPTION_CHANNEL_EPG = False
@@ -136,7 +135,7 @@ class ConfigManager:
     def _get_config_path(self):
         # Check for portable mode (portable.txt file in program directory)
         # Get the directory where the script/executable is located
-        if getattr(sys, 'frozen', False):
+        if getattr(sys, "frozen", False):
             # Running as compiled executable (PyInstaller)
             program_dir = os.path.dirname(sys.executable)
         else:
@@ -193,7 +192,6 @@ class ConfigManager:
         self.update_patcher()
 
     def update_patcher(self):
-
         need_update = False
 
         # add favorites to the loaded config if it doesn't exist
@@ -290,6 +288,7 @@ class ConfigManager:
 
     # Simple config properties using factory
     check_updates = _config_property("check_updates", DEFAULT_OPTION_CHECKUPDATE)
+    skipped_update_version = _config_property("skipped_update_version", "")
     favorites = _config_property("favorites", [])
     last_watched = _config_property("last_watched", None)
     show_stb_content_info = _config_property(
@@ -425,7 +424,10 @@ class ConfigManager:
         "epg_list_window_hours", DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS, coerce=int
     )
     epg_stb_period_hours = _config_property(
-        "epg_stb_period_hours", DEFAULT_OPTION_EPG_STB_PERIOD_HOURS, coerce=int, clamp=(1, 168)
+        "epg_stb_period_hours",
+        DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
+        coerce=int,
+        clamp=(1, 168),
     )
 
     # --- Watch Tracking Helper Methods ---

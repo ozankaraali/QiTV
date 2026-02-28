@@ -1,16 +1,15 @@
 """Playback, auto-play, resume, VLC/MPV launch, and watch history methods."""
 
+from datetime import datetime
 import logging
 import os
 import platform
 import shutil
 import subprocess
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import quote as url_quote
 
-import requests
-from PySide6.QtCore import QThread, QTimer, Qt
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QVBoxLayout,
 )
+import requests
 from urlobject import URLObject
 
 from widgets.autoplay_dialogs import (
@@ -30,11 +30,45 @@ from widgets.autoplay_dialogs import (
     SeriesCompleteDialog,
 )
 
+if TYPE_CHECKING:
+    from config_manager import ConfigManager
+    from provider_manager import ProviderManager
+    from video_player import VideoPlayer
+
 logger = logging.getLogger(__name__)
 
 
 class PlaybackMixin:
     """Mixin providing playback, auto-play, resume, and watch history functionality."""
+
+    # Provided by ChannelList at runtime
+    provider_manager: "ProviderManager"
+    config_manager: "ConfigManager"
+    player: "VideoPlayer"
+    content_type: str
+    link: Optional[str]
+    current_category: Optional[Dict[str, Any]]
+    current_series: Optional[Dict[str, Any]]
+    current_season: Optional[Dict[str, Any]]
+    _bg_jobs: List[Any]
+    _current_content_id: Optional[str]
+    _current_playing_item: Optional[Dict[str, Any]]
+    _current_playing_type: Optional[str]
+    _current_episode_index: int
+    _current_episode_list: List[Dict[str, Any]]
+    _current_seasons_list: List[Dict[str, Any]]
+    _current_category_movies: List[Dict[str, Any]]
+    _autoplay_dialog: Optional[QDialog]
+    _external_mpv_player: Optional[Any]
+    _pending_link_ctx: Optional[Dict[str, Any]]
+
+    # Methods provided by other mixins / ChannelList
+    def lock_ui_before_loading(self) -> None: ...
+    def unlock_ui_after_loading(self) -> None: ...
+    def _on_link_created(self, payload: Any) -> None: ...
+    def _on_link_error(self, msg: str) -> None: ...
+    def sanitize_url(self, url: str) -> str: ...
+    def set_provider(self, force_update: bool = False) -> None: ...
 
     def play_item(self, item_data, is_episode=False, item_type=None):
         # Track current playing item for auto-play
@@ -151,12 +185,17 @@ class PlaybackMixin:
     def _play_content_with_resume_check(self, url: str, item_data: Dict[str, Any]):
         """Play content, checking for resume position first."""
         # Check for saved position
-        saved_position = self.config_manager.get_playback_position(self._current_content_id)
+        content_id = self._current_content_id
+        if not content_id:
+            self._play_content(url)
+            return
+
+        saved_position = self.config_manager.get_playback_position(content_id)
 
         if saved_position and saved_position > 5000:  # More than 5 seconds
             # Check if near the end (don't resume if >90% watched)
             positions = self.config_manager.playback_positions or {}
-            entry = positions.get(self._current_content_id, {})
+            entry = positions.get(content_id, {})
             duration = entry.get("duration", 0)
 
             if duration > 0:
@@ -173,7 +212,7 @@ class PlaybackMixin:
                 self._play_content_with_position(url, saved_position)
 
             def on_start_over():
-                self.config_manager.clear_playback_position(self._current_content_id)
+                self.config_manager.clear_playback_position(content_id)
                 self._play_content(url)
 
             self._show_resume_dialog(content_name, saved_position, on_resume, on_start_over)
@@ -851,7 +890,11 @@ class PlaybackMixin:
             # Get progress info
             content_id = entry.get("content_id", "")
             status = self.config_manager.get_watched_status(content_id)
-            status_text = {"watched": "\u2713", "partial": "\u25d0", "unwatched": ""}.get(status, "")
+            status_text = {
+                "watched": "\u2713",
+                "partial": "\u25d0",
+                "unwatched": "",
+            }.get(status, "")
 
             display_text = f"{status_text} {name} [{item_type}] - {provider} ({timestamp})"
             list_item = QListWidgetItem(display_text)

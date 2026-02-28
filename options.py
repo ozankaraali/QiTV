@@ -734,7 +734,7 @@ class OptionsDialog(QDialog):
 
     def on_check_updates_toggled(self):
         if self.check_updates_checkbox.isChecked():
-            check_for_updates()
+            check_for_updates(config_manager=self.config_manager, manual=True)
 
     def load_xmltv_channel_mapping(self):
         self.xmltv_mapping_table.setRowCount(len(self.config_manager.xmltv_channel_map))

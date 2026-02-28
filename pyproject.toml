@@ -1,6 +1,6 @@
 [project]
 name = "qitv"
-version = "1.13.2"
+version = "1.13.3"
 description = "A cross-platform STB and IPTV player client"
 requires-python = ">=3.14"
 dependencies = [
@@ -40,6 +40,16 @@ disallow_any_generics = false
 ignore_missing_imports = true
 strict_equality = true
 plugins = []
+# PySide6 stubs are incomplete for Python 3.14 — enum members (Qt.UserRole,
+# QMessageBox.Yes, etc.) and widget attributes are not recognised.
+# Only disable error codes that are directly caused by broken stubs.
+disable_error_code = ["attr-defined", "call-overload", "union-attr"]
+
+# Mixin classes use stub method bodies (``def foo(self): ...``) to declare
+# the interface that the concrete host class provides at runtime.
+[[tool.mypy.overrides]]
+module = "mixins.*"
+disable_error_code = ["empty-body"]
 
 [tool.flake8]
 max-line-length = 100

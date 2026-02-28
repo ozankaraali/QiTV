@@ -3,14 +3,15 @@
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from PySide6.QtCore import Qt, QThread
+from PySide6.QtWidgets import QListWidget, QMessageBox, QProgressBar, QPushButton, QTreeWidget
 import requests
-from PySide6.QtCore import QThread, Qt
-from PySide6.QtWidgets import QListWidget, QMessageBox
 from urlobject import URLObject
 
 from content_loader import ContentLoader
+from image_loader import ImageLoader
 from services.m3u import parse_m3u
 from workers import (
     M3ULoaderWorker,
@@ -20,11 +21,47 @@ from workers import (
     find_roman_token,
 )
 
+if TYPE_CHECKING:
+    from config_manager import ConfigManager
+    from image_manager import ImageManager
+    from provider_manager import ProviderManager
+    from widgets.top_bar import TopBar
+
 logger = logging.getLogger(__name__)
 
 
 class ContentLoadingMixin:
     """Mixin providing content loading, worker callbacks, and progress functionality."""
+
+    # Provided by ChannelList at runtime
+    provider_manager: "ProviderManager"
+    config_manager: "ConfigManager"
+    image_manager: "ImageManager"
+    content_type: str
+    content_list: QTreeWidget
+    progress_bar: QProgressBar
+    cancel_button: QPushButton
+    top_bar: "TopBar"
+    image_loader: Optional[ImageLoader]
+    content_loader: Optional[ContentLoader]
+    current_category: Optional[Dict[str, Any]]
+    current_series: Optional[Dict[str, Any]]
+    current_season: Optional[Dict[str, Any]]
+    _bg_jobs: List[Any]
+    _current_seasons_list: List[Dict[str, Any]]
+    _pending_link_ctx: Optional[Dict[str, Any]]
+    _pending_series_select_first: bool
+    link: Optional[str]
+
+    # Methods provided by other mixins / ChannelList
+    def display_categories(self, categories: Any, select_first: bool = True) -> None: ...
+    def display_content(
+        self, items: Any, content: str = "m3ucontent", select_first: bool = True
+    ) -> None: ...
+    def save_provider(self) -> None: ...
+    def sanitize_url(self, url: str) -> str: ...
+    def _play_content(self, url: str) -> None: ...
+    def save_last_watched(self, item_data: Any, item_type: str, link: str) -> None: ...
 
     def load_content(self):
         selected_provider = self.provider_manager.current_provider

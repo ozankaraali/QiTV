@@ -123,6 +123,8 @@ class AppMenuBar:
     # --- Help menu ---
     def _build_help_menu(self):
         menu = self.menu_bar.addMenu("&Help")
+        self.check_updates_action = menu.addAction("Check for &Updates...")
+        menu.addSeparator()
         self.shortcuts_action = menu.addAction("&Keyboard Shortcuts")
         self.about_action = menu.addAction("&About qiTV")
 

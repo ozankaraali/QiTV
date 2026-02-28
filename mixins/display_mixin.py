@@ -1,13 +1,12 @@
 """Content display, filtering, info panel, favorites, and logo methods."""
 
 import base64
+from datetime import datetime
 import html
 import logging
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-import tzlocal
-from PySide6.QtCore import QBuffer, QSize, Qt
+from PySide6.QtCore import QBuffer, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -15,21 +14,80 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QProgressBar,
+    QPushButton,
     QSizePolicy,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
+    QWidget,
 )
+import tzlocal
 
 from image_loader import ImageLoader
 from widgets.delegates import ChannelItemDelegate, HtmlItemDelegate
 from workers import CategoryTreeWidgetItem, ChannelTreeWidgetItem, NumberedTreeWidgetItem
+
+if TYPE_CHECKING:
+    from config_manager import ConfigManager
+    from epg_manager import EpgManager
+    from image_manager import ImageManager
+    from provider_manager import ProviderManager
+    from widgets.sidebar import Sidebar
+    from widgets.top_bar import TopBar
 
 logger = logging.getLogger(__name__)
 
 
 class DisplayMixin:
     """Mixin providing display, filtering, info panel, favorites, and logo functionality."""
+
+    # Provided by ChannelList at runtime
+    provider_manager: "ProviderManager"
+    config_manager: "ConfigManager"
+    image_manager: "ImageManager"
+    epg_manager: "EpgManager"
+    content_type: str
+    content_list: QTreeWidget
+    content_info_panel: QWidget
+    content_info_text: QLabel
+    content_info_shown: Optional[str]
+    top_bar: "TopBar"
+    sidebar: "Sidebar"
+    progress_bar: QProgressBar
+    cancel_button: QPushButton
+    splitter: QSplitter
+    container_widget: QWidget
+    splitter_ratio: float
+    program_list: QListWidget
+    refresh_on_air_timer: QTimer
+    navigation_stack: List[Any]
+    forward_stack: List[Any]
+    _suppress_forward_clear: bool
+    current_list_content: Optional[str]
+    current_category: Optional[Dict[str, Any]]
+    current_series: Optional[Dict[str, Any]]
+    current_season: Optional[Dict[str, Any]]
+    image_loader: Optional[ImageLoader]
+    _all_provider_cache_snapshot: List[Any]
+
+    # Methods provided by other mixins / ChannelList
+    def load_content(self) -> None: ...
+    def item_selected(self) -> None: ...
+    def clear_content_info_panel(self) -> None: ...
+    def _show_favorites_flat(self) -> None: ...
+    def lock_ui_before_loading(self) -> None: ...
+    def image_loader_finished(self) -> None: ...
+    def update_progress(self, current: int, total: int) -> None: ...
+    def can_show_epg(self, item_type: str) -> bool: ...
+    def shorten_header(self, s: str) -> str: ...
+    def get_item_type(self, item: Any) -> str: ...
+    def get_item_name(self, item: Any, item_type: Optional[str]) -> str: ...
+    def refresh_on_air(self) -> None: ...
+    def create_link(self, item: Any, is_episode: bool = False) -> Optional[str]: ...
+    def save_config(self) -> None: ...
+    def setup_channel_program_content_info(self) -> None: ...
+    def setup_movie_tvshow_content_info(self) -> None: ...
 
     def toggle_content_type(self, content_type=None):
         """Switch content type. Called by sidebar or legacy code."""

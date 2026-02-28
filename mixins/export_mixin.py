@@ -1,22 +1,32 @@
 """Export and save channel list methods."""
 
 import logging
-import re
 from pathlib import Path
-from typing import Dict, List
+import re
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-import requests
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog, QTreeWidget
+import requests
 from urlobject import URLObject
 
 from services.export import save_m3u_content, save_stb_content
+
+if TYPE_CHECKING:
+    from config_manager import ConfigManager
+    from provider_manager import ProviderManager
 
 logger = logging.getLogger(__name__)
 
 
 class ExportMixin:
     """Mixin providing export and save functionality."""
+
+    # Provided by ChannelList at runtime
+    provider_manager: "ProviderManager"
+    config_manager: "ConfigManager"
+    content_list: QTreeWidget
+    content_type: str
 
     def export_all_live_channels(self):
         provider = self.provider_manager.current_provider

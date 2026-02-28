@@ -678,6 +678,7 @@ class ChannelList(
         )
 
         # Help menu
+        m.check_updates_action.triggered.connect(self._manual_check_for_updates)
         m.about_action.triggered.connect(self._show_about)
 
         # Sidebar signals
@@ -793,9 +794,7 @@ class ChannelList(
         # Filter to favorites only
         favorites = set(self.config_manager.favorites)
         fav_items = [
-            item
-            for item in all_items
-            if (item.get("name") or item.get("title", "")) in favorites
+            item for item in all_items if (item.get("name") or item.get("title", "")) in favorites
         ]
 
         # Determine display content type
@@ -812,6 +811,11 @@ class ChannelList(
         self.display_content(fav_items, content=display_type)
         # Hide back button – we're still at root level, not inside a category
         self.top_bar.set_back_visible(False)
+
+    def _manual_check_for_updates(self):
+        from update_checker import check_for_updates
+
+        check_for_updates(config_manager=self.config_manager, manual=True)
 
     def _show_about(self):
         from config_manager import get_app_version

@@ -123,7 +123,6 @@ if __name__ == "__main__":
                     channel_list.showNormal()
                 channel_list.raise_()
                 channel_list.activateWindow()
-                app.setActiveWindow(channel_list)
             except Exception:
                 pass
 
@@ -133,7 +132,7 @@ if __name__ == "__main__":
         QTimer.singleShot(250, _bring_main_window_to_front)
 
         if config_manager.check_updates:
-            check_for_updates()
+            check_for_updates(config_manager=config_manager)
 
         sys.exit(app.exec())
     finally:

@@ -5,9 +5,9 @@ import re
 import time
 from typing import Dict, List, Optional
 
-import requests
-from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import QTreeWidgetItem
+import requests
 from urlobject import URLObject
 
 from services.provider_api import (
