@@ -16,20 +16,19 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true
-      - name: Check OpenSSL Version
-        run: uv run python -c "import ssl; print(ssl.OPENSSL_VERSION)"
       - name: Install VLC and xcb dependencies
         run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0
-      - name: Sync dependencies with uv
+      - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Package App with PyInstaller for Linux
-        run: |
-          uv run pyinstaller qitv-linux.spec
+        run: uv run pyinstaller qitv-linux.spec
+      - name: Rename binary
+        run: mv dist/qitv dist/qitv-linux
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: packaged-app-linux
-          path: dist/qitv
+          path: dist/qitv-linux
 
   build-windows:
     runs-on: windows-latest
@@ -41,26 +40,32 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true
-      - name: Check OpenSSL Version
-        run: uv run python -c "import ssl; print(ssl.OPENSSL_VERSION)"
-      # - name: Install Chocolatey
-      #   shell: powershell
-      #   run: |
-      #     Set-ExecutionPolicy Bypass -Scope Process -Force
-      #     [System.Net.ServicePointManager]::SecurityProtocol = 'Tls12'
-      #     iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+      - name: Get latest VLC version
+        id: vlc-version
+        shell: powershell
+        run: |
+          $info = choco info vlc --limit-output
+          $version = ($info -split '\|')[1]
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Cache VLC installer
+        id: vlc-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\vlc-cache
+          key: vlc-windows-${{ steps.vlc-version.outputs.version }}
       - name: Install VLC using Chocolatey
-        run: choco install vlc --version=3.0.21 -y
-      - name: Sync dependencies with uv
+        run: choco install vlc -y --cache-location=C:\vlc-cache
+      - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Package App with PyInstaller for Windows
-        run: |
-          uv run pyinstaller qitv-windows.spec
+        run: uv run pyinstaller qitv-windows.spec
+      - name: Rename binary
+        run: ren dist\qitv.exe qitv-windows.exe
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: packaged-app-windows
-          path: dist/qitv.exe
+          path: dist/qitv-windows.exe
 
   build-macos-universal:
     runs-on: macos-latest
@@ -72,27 +77,28 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true
-      - name: Check OpenSSL Version
-        run: uv run python -c "import ssl; print(ssl.OPENSSL_VERSION)"
+      - name: Get latest VLC version
+        id: vlc-version
+        run: |
+          VLC_VERSION=$(brew info --json=v2 --cask vlc | python3 -c "import sys,json; print(json.load(sys.stdin)['casks'][0]['version'])")
+          echo "version=$VLC_VERSION" >> $GITHUB_OUTPUT
+      - name: Cache VLC.app
+        id: vlc-cache
+        uses: actions/cache@v4
+        with:
+          path: /Applications/VLC.app
+          key: vlc-macos-arm64-${{ steps.vlc-version.outputs.version }}
       - name: Install VLC
+        if: steps.vlc-cache.outputs.cache-hit != 'true'
         run: brew install --cask vlc
-      - name: Sync dependencies with uv
+      - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Package App with PyInstaller for macOS
-        run: |
-          uv run pyinstaller qitv-macos.spec
-#      - name: Rename the executable
-#        run: mv dist/qitv.app/Contents/MacOS/qitv dist/qitv.app/Contents/MacOS/qitv_cli
-#      - name: Create launcher script
-#        run: |
-#          printf '#!/bin/bash\nopen -n "$(dirname "$0")/qitv_cli"\n' > dist/qitv.app/Contents/MacOS/qitv
-#          chmod +x dist/qitv.app/Contents/MacOS/qitv
+        run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         run: codesign --force --deep --sign - dist/qitv.app
       - name: Zip macOS App
-        run: |
-          cd dist
-          zip -r qitv-macos-universal.zip qitv.app
+        run: cd dist && zip -r qitv-macos-universal.zip qitv.app
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
@@ -109,27 +115,28 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true
-      - name: Check OpenSSL Version
-        run: uv run python -c "import ssl; print(ssl.OPENSSL_VERSION)"
+      - name: Get latest VLC version
+        id: vlc-version
+        run: |
+          VLC_VERSION=$(brew info --json=v2 --cask vlc | python3 -c "import sys,json; print(json.load(sys.stdin)['casks'][0]['version'])")
+          echo "version=$VLC_VERSION" >> $GITHUB_OUTPUT
+      - name: Cache VLC.app
+        id: vlc-cache
+        uses: actions/cache@v4
+        with:
+          path: /Applications/VLC.app
+          key: vlc-macos-intel-${{ steps.vlc-version.outputs.version }}
       - name: Install VLC
+        if: steps.vlc-cache.outputs.cache-hit != 'true'
         run: brew install --cask vlc
-      - name: Sync dependencies with uv
+      - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Package App with PyInstaller for macOS (Intel)
-        run: |
-          uv run pyinstaller qitv-macos.spec
-#      - name: Rename the executable
-#        run: mv dist/qitv.app/Contents/MacOS/qitv dist/qitv.app/Contents/MacOS/qitv_cli
-#      - name: Create launcher script
-#        run: |
-#          printf '#!/bin/bash\nopen -n "$(dirname "$0")/qitv_cli"\n' > dist/qitv.app/Contents/MacOS/qitv
-#          chmod +x dist/qitv.app/Contents/MacOS/qitv
+        run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         run: codesign --force --deep --sign - dist/qitv.app
       - name: Zip macOS App
-        run: |
-          cd dist
-          zip -r qitv-macos-intel.zip qitv.app
+        run: cd dist && zip -r qitv-macos-intel.zip qitv.app
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
@@ -139,87 +146,36 @@ jobs:
   release:
     needs: [build-linux, build-windows, build-macos-universal, build-macos-intel]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup uv and Python
-        uses: astral-sh/setup-uv@v4
-        with:
-          python-version: '3.14'
-          enable-cache: false
       - name: Get Version
         id: get_version
         run: |
-          version=$(python - <<'PY'
+          version=$(python3 -c "
           import tomllib
           with open('pyproject.toml','rb') as f:
               print(tomllib.load(f)['project']['version'])
-          PY
-          )
+          ")
           echo "VERSION=$version" >> $GITHUB_ENV
-      - name: Get Previous Version
-        id: get_previous_version
-        run: |
-          previous_version=$(git tag --sort=-v:refname | head -n 2 | tail -n 1)
-          echo "PREVIOUS_VERSION=$previous_version" >> $GITHUB_ENV
-      - name: Generate Changelog
-        id: generate_changelog
-        run: |
-          echo "## Please always download this free software from [RELEASES](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware. Always keep the [original repository](https://github.com/ozankaraali/QiTV) for the reference." > changelog.md
-          echo "" >> changelog.md
-          echo "Security updates." >> changelog.md
-          echo "" >> changelog.md
-          echo "**Full Changelog**: https://github.com/ozankaraali/QiTV/compare/${{ env.PREVIOUS_VERSION }}...v${{ env.VERSION }}" >> changelog.md
-          echo "" >> changelog.md
-          echo "### Commits" >> changelog.md
-          echo "" >> changelog.md
-          git log --pretty=format:"- %s" ${{ env.PREVIOUS_VERSION }}...HEAD >> changelog.md
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          tag_name: v${{ env.VERSION }}
-          release_name: v${{ env.VERSION }}
-          body_path: changelog.md
-          draft: false
-          prerelease: true
       - name: Download all artifacts
         uses: actions/download-artifact@v4
-      - name: Upload Linux Release Asset
-        uses: actions/upload-release-asset@v1
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }}
+          body: |
+            > **Please always download this free software from [Releases](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware. Always keep the [original repository](https://github.com/ozankaraali/QiTV) as reference.**
+          generate_release_notes: true
+          draft: false
+          prerelease: true
+          files: |
+            packaged-app-linux/qitv-linux
+            packaged-app-windows/qitv-windows.exe
+            packaged-app-macos-universal/qitv-macos-universal.zip
+            packaged-app-macos-intel/qitv-macos-intel.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: packaged-app-linux/qitv
-          asset_name: qitv-linux
-          asset_content_type: application/octet-stream
-      - name: Upload Windows Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: packaged-app-windows/qitv.exe
-          asset_name: qitv-windows.exe
-          asset_content_type: application/octet-stream
-      - name: Upload macOS Universal Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: packaged-app-macos-universal/qitv-macos-universal.zip
-          asset_name: qitv-macos-universal.zip
-          asset_content_type: application/zip
-      - name: Upload macOS Intel Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: packaged-app-macos-intel/qitv-macos-intel.zip
-          asset_name: qitv-macos-intel.zip
-          asset_content_type: application/zip
