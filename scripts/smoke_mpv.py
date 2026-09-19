@@ -33,7 +33,7 @@ class SmokeMpvPlayer(MpvPlayer):
 
     def _mpv_arguments(self):
         # Exercise native graphics with software-friendly settings on virtual CI GPUs.
-        video = ['--profile=fast', '--geometry=640x480'] if self.render else ['--vo=null']
+        video = ['--profile=fast', '--geometry=640x480+0+0'] if self.render else ['--vo=null']
         diagnostics = (
             ['--log-file=' + str(self.log_path), '--msg-level=all=debug'] if self.log_path else []
         )
@@ -261,7 +261,7 @@ class Smoke:
         commands: list[tuple[str, Any]] = [
             (name, ['get_property', name]) for name in self.PROPERTIES
         ]
-        if self.phase == 'starting' and not self.ui_probe_sent:
+        if self.phase == 'starting' and not self.ui_probe_sent and self.player.playback_restarted:
             self.ui_probe_sent = True
             commands.extend(
                 [
@@ -298,9 +298,22 @@ class Smoke:
             self.render_probe_sent = True
             self.result['capture_state'] = dict(self.properties)
             self.result['capture_requested_after_seconds'] = time.monotonic() - self.started
-            commands.append(
-                ('rendered-frame', ['screenshot-to-file', str(self.render_path), 'window'])
-            )
+            if sys.platform.startswith('linux'):
+                # X11's MPV screenshot command falls back to an unpresented CPU image.
+                # Capture the real display instead; the smoke pins the window at 0,0.
+                screen = self.app.primaryScreen()
+                if self.app.platformName() != 'xcb' or screen is None:
+                    raise RuntimeError('Linux render smoke requires an X11 Qt display')
+                if not screen.grabWindow(0, 0, 0, 640, 480).save(str(self.render_path)):
+                    raise RuntimeError('Could not capture the native X11 window')
+                self.result['capture_source'] = 'x11-display'
+                self.result['capture_completed_after_seconds'] = time.monotonic() - self.started
+                self.properties['rendered-frame'] = True
+            else:
+                self.result['capture_source'] = 'mpv-renderer'
+                commands.append(
+                    ('rendered-frame', ['screenshot-to-file', str(self.render_path), 'window'])
+                )
         for name, command in commands:
             self.request_id += 1
             self.pending[self.request_id] = name
@@ -441,6 +454,16 @@ class Smoke:
             self.result['rendered_mean_peak'] = brightness / samples
             if brightness < 40 * samples:
                 raise RuntimeError('Native window did not display the colored video fixture')
+            # The colored fixture has no white text in the window-title region.
+            # Requiring uosc there catches a working decoder with a missing overlay.
+            title_pixels = 0
+            for y in range(image.height() // 80, image.height() // 10):
+                for x in range(image.width() // 40, image.width() // 5):
+                    pixel = image.pixelColor(x, y)
+                    title_pixels += min(pixel.red(), pixel.green(), pixel.blue()) >= 220
+            self.result['uosc_title_pixels'] = title_pixels
+            if title_pixels < 20:
+                raise RuntimeError('uosc controls are missing from the native window capture')
             self.result['rendered_frame'] = str(self.render_path)
             self.initial_ontop = p['ontop']
             self._check('native_window_render_and_uosc_screenshot')

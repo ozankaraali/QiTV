@@ -1,4 +1,4 @@
-name: Probe Windows native overlays
+name: Probe native overlays from existing artifacts
 
 on:
   push:
@@ -12,11 +12,28 @@ permissions:
 
 jobs:
   render:
-    runs-on: windows-2022
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-22.04
+            asset: qitv-linux
+          - name: windows
+            runner: windows-2022
+            asset: qitv-windows.exe
+          - name: macos-arm64
+            runner: macos-15
+            asset: qitv-macos-arm64.zip
+          - name: macos-intel
+            runner: macos-15-intel
+            asset: qitv-macos-intel.zip
     env:
       GH_TOKEN: ${{ github.token }}
       QT_QPA_PLATFORM: offscreen
+      PROBE_ASSET: ${{ matrix.asset }}
     defaults:
       run:
         shell: bash
@@ -26,35 +43,53 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true
+      - name: Install Linux display runtime
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxcb-cursor0 libxpresent1 libxss1
       - name: Prepare Python and download the existing native binary
         run: |
           uv sync --frozen --dev
-          gh run download 35474154424 --name packaged-app-windows --dir probe
+          gh run download 35474154424 --name packaged-app-${{ matrix.name }} --dir probe
       - name: Extract the unchanged native runtime from the existing app
         run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            ditto -x -k "probe/$PROBE_ASSET" probe
+          fi
           uv run --frozen --no-sync python - <<'PY'
+          import os
+          import shutil
+          import sys
           from pathlib import Path
           from PyInstaller.archive.readers import CArchiveReader
-          archive = CArchiveReader('probe/qitv-windows.exe')
-          for member in archive.toc:
-              name = member.replace('\\', '/')
-              if name.startswith('native/mpv/'):
-                  destination = Path(name)
-                  destination.parent.mkdir(parents=True, exist_ok=True)
-                  destination.write_bytes(archive.extract(member))
+          if sys.platform == 'darwin':
+              shutil.copytree('probe/QiTV.app/Contents/Resources/native/mpv', 'native/mpv')
+          else:
+              archive = CArchiveReader(str(Path('probe') / os.environ['PROBE_ASSET']))
+              for member in archive.toc:
+                  name = member.replace('\\', '/')
+                  if name.startswith('native/mpv/'):
+                      destination = Path(name)
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      destination.write_bytes(archive.extract(member))
+          if sys.platform != 'win32':
+              for name in ('mpv', 'ziggy'):
+                  (Path('native/mpv/bin') / name).chmod(0o755)
           PY
-      - name: Exercise native overlays with directly lockable default-pool textures
+      - name: Verify native video and visible controls
         run: |
-          uv run --frozen --no-sync python - <<'PY'
-          from scripts import smoke_mpv
-          original = smoke_mpv.SmokeMpvPlayer._mpv_arguments
-          smoke_mpv.SmokeMpvPlayer._mpv_arguments = lambda self: original(self) + ['--vo-direct3d-texture-memory=default-pool']
-          raise SystemExit(smoke_mpv.main(['--render', '--fixture', 'tests/fixtures/mpv-smoke.mp4', '--report', 'build/mpv-probe/default-pool.json']))
-          PY
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py \
+              --render --fixture tests/fixtures/mpv-smoke.mp4 --report build/mpv-probe/render.json
+          else
+            uv run --frozen --no-sync python scripts/smoke_mpv.py \
+              --render --fixture tests/fixtures/mpv-smoke.mp4 --report build/mpv-probe/render.json
+          fi
       - name: Upload the rendered result and native log
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: windows-overlay-probe
+          name: native-overlay-${{ matrix.name }}
           path: build/mpv-probe/
           if-no-files-found: error

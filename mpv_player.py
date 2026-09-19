@@ -248,6 +248,9 @@ class MpvPlayer(QObject):
         if sys.platform == "darwin":
             # Keep fullscreen/PiP on this desktop, without asynchronous Spaces transitions.
             arguments.append("--native-fs=no")
+        elif sys.platform == "win32":
+            # Avoid unreliable system-memory texture advertising in the D3D fallback.
+            arguments.append("--vo-direct3d-texture-memory=default-pool")
         return arguments
 
     def _process_started(self, process):

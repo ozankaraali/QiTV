@@ -92,7 +92,7 @@ jobs:
         timeout-minutes: 2
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
-            xvfb-run -a uv run scripts/smoke_mpv.py --render --fixture tests/fixtures/mpv-smoke.mp4 \
+            QT_QPA_PLATFORM=xcb xvfb-run -a uv run scripts/smoke_mpv.py --render --fixture tests/fixtures/mpv-smoke.mp4 \
               --report build/mpv-smoke/source-render.json
           else
             uv run scripts/smoke_mpv.py --render --fixture tests/fixtures/mpv-smoke.mp4 \
@@ -113,7 +113,7 @@ jobs:
           trap 'mv "$GITHUB_WORKSPACE/native/.mpv-source-only" "$GITHUB_WORKSPACE/native/mpv"' EXIT
           mkdir -p "$RUNNER_TEMP/qitv-frozen-smoke"
           cd "$RUNNER_TEMP/qitv-frozen-smoke"
-          xvfb-run -a "$GITHUB_WORKSPACE/dist/qitv" --smoke-mpv --render \
+          QT_QPA_PLATFORM=xcb xvfb-run -a "$GITHUB_WORKSPACE/dist/qitv" --smoke-mpv --render \
             --fixture "$GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4" \
             --report "$GITHUB_WORKSPACE/build/mpv-smoke/frozen.json"
       - name: Smoke frozen macOS app without source runtime
