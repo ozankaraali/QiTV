@@ -549,7 +549,12 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
             f"-Dswift-flags=-target {architecture}-apple-macosx13.0",
         ]
     elif target_name.startswith("windows"):
-        options += ["-Dgl-win32=enabled", "-Dwasapi=enabled", "-Dwin32-threads=enabled"]
+        options += [
+            "-Dgl-win32=enabled",
+            "-Ddirect3d=enabled",
+            "-Dwasapi=enabled",
+            "-Dwin32-threads=enabled",
+        ]
     else:
         options += ["-Dx11=enabled", "-Dgl-x11=enabled", "-Dsdl2-audio=enabled"]
     run(
