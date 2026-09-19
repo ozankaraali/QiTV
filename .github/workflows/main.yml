@@ -63,7 +63,8 @@ jobs:
           sudo apt-get install -y build-essential cmake ninja-build pkg-config nasm \
             autoconf autoconf-archive automake libtool libltdl-dev libx11-dev libxext-dev libxrandr-dev \
             libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxpresent-dev libxkbcommon-dev \
-            libgl1-mesa-dev libasound2-dev libpulse-dev libxcb-cursor0 xvfb
+            libgl1-mesa-dev libegl1 libasound2-dev libpulse-dev libxcb-cursor0 xvfb \
+            libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 libxcb-xinerama0
       - name: Install macOS native build tools
         if: runner.os == 'macOS'
         run: brew install cmake ninja nasm autoconf autoconf-archive automake libtool pkgconf

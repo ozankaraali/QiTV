@@ -150,6 +150,7 @@ class Smoke:
         'ontop',
         'current-vo',
         'options/script-opts',
+        'user-data/osc/margins',
     )
 
     def __init__(self, app, fixture, data_directory, render_path=None):
@@ -289,11 +290,15 @@ class Smoke:
                     ),
                 ]
             )
+        # uosc publishes margins after submitting its overlay, unlike message dispatch.
+        margins = self.properties.get('user-data/osc/margins')
         if (
             self.phase == 'rendering'
             and self.render_path
             and not self.render_probe_sent
             and self.properties.get('pause') is False
+            and isinstance(margins, dict)
+            and margins.get('t', 0) > 0
         ):
             self.render_probe_sent = True
             self.result['capture_state'] = dict(self.properties)

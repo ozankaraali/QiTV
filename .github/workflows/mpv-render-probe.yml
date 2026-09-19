@@ -47,7 +47,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libxcb-cursor0 libxpresent1 libxss1
+          sudo apt-get install -y xvfb libgl1 libegl1 libxcb-cursor0 libxpresent1 libxss1 \
+            libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 libxcb-xinerama0
       - name: Prepare Python and download the existing native binary
         run: |
           uv sync --frozen --dev
