@@ -28,6 +28,11 @@ inventories, and the Meson configuration/build provenance. These are the
 preferred forms for modifying and rebuilding the separate MPV executable;
 there is no intentionally withheld library patch or proprietary media library.
 
+The recipe also contains the pinned uosc runtime, complete upstream source ZIP,
+expanded Ziggy helper source, and vendored Go module dependencies. The helper
+is rebuilt for each target with the Go version in the manifest. Its LGPL-2.1,
+dependency and font notices are retained under assets/mpv/uosc/ and licenses/.
+
 To rebuild, unpack the source archive and use recipe/scripts/prepare_mpv.py
 with recipe/native/mpv-manifest.json and the platform compiler/build tools
 listed in the script. uv run scripts/prepare_mpv.py is run from recipe/.
@@ -48,11 +53,3 @@ Platform system libraries and GPU/audio drivers are supplied by the user's
 operating system, not copied from the build runner. They are not represented
 as included media dependencies. Native dependency metadata is inspected at
 preparation time to reject accidental Homebrew/vcpkg shared-library linkage.
-
-Diagnostic downloads
---------------------
-The optional --prebuilt Intel macOS download is only for local development
-verification on older macOS devices. It contains an older FFmpeg and lacks a
-complete distributor-provided corresponding-source closure. It is marked
-redistributable=false and MUST NOT be packaged or published as a QiTV release.
-The default preparation command builds current pinned sources instead.

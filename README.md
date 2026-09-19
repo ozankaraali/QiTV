@@ -2,13 +2,15 @@
 
 ## Please always download this free software from [RELEASES](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware.
 
-A cross-platform IPTV and STB player client. This time in Python with QT and LibVLC.
+A cross-platform IPTV and STB client built with Python and Qt, using a bundled standalone MPV player with the uosc interface.
 
 ## Installation
 
-You could download the software from [RELEASES](https://github.com/ozankaraali/QiTV/releases).
+Download the application for your platform from [RELEASES](https://github.com/ozankaraali/QiTV/releases). Internal playback includes MPV and does not require an installed MPV or VLC. The native runtime targets Windows 10 or newer, macOS 13 or newer (separate Intel and Apple Silicon downloads), and Linux x86-64 with glibc 2.35 or newer and X11/XWayland.
 
-Source installs require Python 3.14 and VLC (including libVLC). The current Qt build requires macOS 13 or newer on Mac; Python 3.15 is not yet supported by the Qt/theme dependencies.
+### Running from source
+
+Source installs require Python 3.14. Python 3.15 is not yet supported by the Qt/theme dependencies. Building the private player also requires native build tools; see below.
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 
@@ -16,10 +18,21 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
 git clone https://github.com/ozankaraali/QiTV/
 cd QiTV
 uv sync --frozen
+uv run --frozen python scripts/prepare_mpv.py
 uv run --frozen python main.py
 ```
 
 `uv sync` creates `.venv` and selects Python 3.14 from the project's requirements, installing the interpreter when needed. It does not depend on which interpreter your shell calls `python3`.
+
+`python3` is a command name, not a guarantee that the latest Python is installed. Use `uv run python` to run QiTV with the project's selected interpreter.
+
+The one-time native preparation builds pinned MPV, FFmpeg, libraries, and the uosc helper from source. Install C/C++ build tools, CMake, Ninja, NASM, Git, and Go 1.21 or newer first; the recipe selects its pinned Go toolchain automatically.
+
+- **macOS:** Xcode 15 or newer command-line tools, plus `brew install cmake ninja nasm autoconf autoconf-archive automake libtool pkgconf`.
+- **Linux:** a C/C++ compiler, `cmake ninja-build pkg-config nasm autoconf autoconf-archive automake libtool libltdl-dev`, and X11/OpenGL/ALSA/PulseAudio development headers. The exact Ubuntu package list is in [the build workflow](.github/workflows/main.yml).
+- **Windows:** an x64 Visual Studio developer shell, LLVM (`clang`, `clang++`, `lld-link`, `llvm-rc`), CMake, Ninja, and NASM on PATH.
+
+The recipe writes `native/mpv/` and a matching `native/mpv-sources-<target>.tar.gz`. PyInstaller packages this private runtime; it never searches the build machine for a replacement MPV installation. See [native redistribution instructions](native/REDISTRIBUTION.txt) for licenses and rebuilding.
 
 ### Linux Desktop Integration
 
@@ -49,6 +62,16 @@ This installs a desktop entry and icon so QiTV appears in your application menu.
 
 You could use this software as a IPTV player or as a STB client. It bundles [a list of publicly available IPTV channels](https://github.com/iptv-org/iptv) from around the world for you to start quickly using or test the application. You can delete that playlist entry if you want from your computer after registering your playlists / STB player details.
 For further usage you need to enter your M3U Playlist or IPTV provider's STB player details to "Settings". When you save, if your authentication works, you will directly see the channel lists on the left side. Select a channel and it will begin shortly.
+
+### Player modes
+
+- **Internal (Bundled MPV):** QiTV launches its private MPV executable in MPV's own window, with bundled [uosc](https://github.com/tomasklaen/uosc) controls. This is not an embedded Qt video surface. Personal MPV configuration and scripts are not loaded.
+- **VLC (External):** launches your installed VLC.
+- **MPV (User Configuration):** launches your installed MPV with its normal configuration and scripts.
+
+In the internal player, use the timeline to seek, right-click for the uosc menu, Space to pause, F or double-click for fullscreen, and Alt+P for picture-in-picture. QiTV manages resume positions and stops its private player when switching modes or closing the application.
+
+uosc subtitle downloads go to QiTV's configuration directory under `subtitles/`. On Linux, clipboard actions additionally require `xclip` or `xsel` on X11, or `wl-clipboard` on Wayland. Thumbnail previews and yt-dlp stream-quality selection are not bundled.
 
 ### Automatic Content Refresh
 
@@ -105,8 +128,10 @@ uv export --frozen --no-dev --no-emit-project --output-file requirements.txt
 
 ## Acknowledgements
 
-### LibVLC
-This software uses code of <a href=https://www.videolan.org/vlc/libvlc.html>LibVLC</a> licensed under the <a href=https://www.gnu.org/licenses/lgpl-2.1.html>LGPLv2.1</a> and its source can be downloaded <a href=https://github.com/ozankaraali/QiTV>here</a>
+### MPV, FFmpeg, and uosc
+QiTV ships a separate [MPV](https://mpv.io/) executable built with FFmpeg and native media libraries. The combined player is distributed under GPLv3-or-later; component licenses and build provenance accompany it. Every release includes the matching `mpv-sources-<target>.tar.gz` archives.
+
+The bundled [uosc](https://github.com/tomasklaen/uosc) interface and Ziggy helper are LGPLv2.1, with additional notices for their dependencies and fonts. Their source archive and licenses are included in `assets/mpv/uosc/`. See [the uosc notice](assets/mpv/uosc/NOTICE.txt) and [native redistribution instructions](native/REDISTRIBUTION.txt).
 
 ### PySide6
 PySide6 is available under both Open Source (LGPLv3/GPLv3) and commercial license. Using PyPi is the recommended installation source, because the content of the wheels is valid for both cases. For more information, refer to the <a href=https://www.qt.io/licensing/>Qt Licensing page</a>.

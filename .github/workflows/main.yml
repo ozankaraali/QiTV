@@ -62,7 +62,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build pkg-config nasm \
             autoconf autoconf-archive automake libtool libltdl-dev libx11-dev libxext-dev libxrandr-dev \
-            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxkbcommon-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxpresent-dev libxkbcommon-dev \
             libgl1-mesa-dev libasound2-dev libpulse-dev libxcb-cursor0 xvfb
       - name: Install macOS native build tools
         if: runner.os == 'macOS'
@@ -209,9 +209,10 @@ jobs:
       - name: Create prerelease and publish binaries with corresponding sources
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ github.token }}
           tag_name: v${{ env.VERSION }}
           name: v${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
           body: |
             > **Please always download this free software from [Releases](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware. Always keep the [original repository](https://github.com/ozankaraali/QiTV) as reference.**
 

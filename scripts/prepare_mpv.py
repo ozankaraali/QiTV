@@ -228,6 +228,16 @@ def inspect_dependencies(executable, target_name):
             "libgcc_s.so.1",
             "libstdc++.so.6",
             "ld-linux-x86-64.so.2",
+            "libX11.so.6",
+            "libXext.so.6",
+            "libXfixes.so.3",
+            "libXss.so.1",
+            "libXpresent.so.1",
+            "libXrandr.so.2",
+            "libxcb.so.1",
+            "libXau.so.6",
+            "libXdmcp.so.6",
+            "libGL.so.1",
         }
         unexpected = [name for name in dependencies if name not in system_libraries]
         metadata = {"dependencies": dependencies, "dynamic_section": linked}
@@ -410,9 +420,7 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
         {"name": "pkgconf", "host": True},
     ]
     if target_name.startswith("linux"):
-        dependencies.append(
-            {"name": "sdl2", "default-features": False, "features": ["x11", "alsa"]}
-        )
+        dependencies.append({"name": "sdl2", "default-features": False, "features": ["alsa"]})
     write_json(
         recipe / "vcpkg.json",
         {"name": "qitv-native-mpv", "version-string": "1", "dependencies": dependencies},
@@ -469,6 +477,17 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
     )
     # No Homebrew/user libraries may accidentally satisfy an optional dependency.
     env["PKG_CONFIG_LIBDIR"] = env["PKG_CONFIG_PATH"]
+    if target_name.startswith("linux"):
+        # X11 and OpenGL are distro/driver APIs, not bundled media libraries.
+        # Exclude /usr/local so user-installed libraries cannot satisfy the build.
+        env["PKG_CONFIG_LIBDIR"] += os.pathsep + os.pathsep.join(
+            [
+                "/usr/lib/x86_64-linux-gnu/pkgconfig",
+                "/usr/lib64/pkgconfig",
+                "/usr/lib/pkgconfig",
+                "/usr/share/pkgconfig",
+            ]
+        )
     env.pop("PKG_CONFIG_SYSROOT_DIR", None)
     env["CMAKE_PREFIX_PATH"] = str(prefix)
     env["PATH"] = str(pkgconf.parent) + os.pathsep + env["PATH"]
@@ -528,7 +547,7 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
     elif target_name.startswith("windows"):
         options += ["-Dgl-win32=enabled", "-Dwasapi=enabled"]
     else:
-        options += ["-Dsdl2-video=enabled", "-Dsdl2-audio=enabled"]
+        options += ["-Dx11=enabled", "-Dgl-x11=enabled", "-Dsdl2-audio=enabled"]
     run(
         meson + ["setup", mpv_build, mpv, f"--prefix={stage}"] + common + options, cwd=work, env=env
     )
