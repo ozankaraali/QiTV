@@ -32,7 +32,8 @@ class SmokeMpvPlayer(MpvPlayer):
     playback_restarted = False
 
     def _mpv_arguments(self):
-        video = ['--geometry=640x480'] if self.render else ['--vo=null']
+        # Exercise native graphics with software-friendly settings on virtual CI GPUs.
+        video = ['--profile=fast', '--geometry=640x480'] if self.render else ['--vo=null']
         diagnostics = (
             ['--log-file=' + str(self.log_path), '--msg-level=all=debug'] if self.log_path else []
         )

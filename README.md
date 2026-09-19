@@ -128,6 +128,8 @@ Dependency versions are maintained in `pyproject.toml` and `uv.lock`. Use `uv sy
 uv export --frozen --no-dev --no-emit-project --output-file requirements.txt
 ```
 
+The native playback smoke uses a small synthetic H.264/AAC fixture and MPV's `fast` rendering profile for software-rendered CI environments. It verifies playback, window controls and packaging isolation, not GPU performance or picture quality. Normal internal playback retains MPV's default rendering settings.
+
 ## Acknowledgements
 
 ### MPV, FFmpeg, and uosc
