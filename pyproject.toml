@@ -1,26 +1,26 @@
 [project]
 name = "qitv"
-version = "1.13.5"
+version = "1.13.6"
 description = "A cross-platform STB and IPTV player client"
-requires-python = ">=3.14"
+# Qt and the theme package currently support Python 3.14, but not 3.15.
+requires-python = ">=3.14,<3.15"
 dependencies = [
-    "aiohttp[speedups]>=3.13.3",
-    "m3u-parser>=0.4.2",
-    "mpv>=1.0.7",
-    "orjson>=3.11.5",
-    "packaging>=25.0",
-    "pyqtdarktheme-fork>=2.3.4",
-    "pyside6>=6.10.0",
+    "aiohttp[speedups]>=3.14.3",
+    "mpv>=1.0.8",
+    "orjson>=3.12.0",
+    "packaging>=26.3",
+    "pyqtdarktheme-fork>=2.3.6",
+    "pyside6>=6.11.2",
     "python-vlc==3.0.21203",
-    "requests>=2.32.5",
-    "tzlocal>=5.3.1",
-    "urllib3>=2.6.3",
-    "urlobject~=2.4.3",
+    "requests>=2.34.2",
+    "tzlocal>=5.4.4",
+    "urllib3>=2.8.0",
+    "urlobject>=3.0.0",
 ]
 
 [tool.black]
 line-length = 100
-target-version = ["py312"]
+target-version = ["py314"]
 skip-string-normalization = true
 
 [tool.isort]
@@ -59,11 +59,10 @@ select = ["E9", "F63", "F7", "F82"]
 # Developer tools used in CI and locally
 [dependency-groups]
 dev = [
-  "pyinstaller>=6.10",
-  "black==25.9.0",
-  "isort==5.13.2",
-  "mypy==1.11.2",
-  "flake8==7.0.0",
-  "types-requests",
-  "types-tzlocal",
+  "pyinstaller>=6.22.3",
+  "black==26.5.1",
+  "isort==9.0.1",
+  "mypy==2.3.1",
+  "flake8==7.3.0",
+  "types-requests==2.33.0.20260906",
 ]

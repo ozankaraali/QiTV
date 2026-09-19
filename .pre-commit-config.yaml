@@ -1,6 +1,6 @@
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v6.0.0
     hooks:
     -   id: check-yaml
     -   id: end-of-file-fixer
@@ -8,32 +8,31 @@ repos:
     -   id: check-added-large-files
     -   id: check-merge-conflict
 -   repo: https://github.com/psf/black
-    rev: 24.3.0
+    rev: 26.5.1
     hooks:
     -   id: black
         name: Black Linter
         exclude: ^.*\b(migrations)\b.*$
 -   repo: https://github.com/pycqa/flake8
-    rev: 7.0.0
+    rev: 7.3.0
     hooks:
     -   id: flake8
         name: Flake8 syntax errors or undefined names
         exclude: ^.*\b(migrations)\b.*$
-        args: [--count, --select=E9, --select=F63, --select=F7, --select=F82, --show-source, --statistics]
+        args: [--count, "--select=E9,F63,F7,F82", --show-source, --statistics]
     -   id: flake8
         name: Flake8 exit-zero treats all errors as warnings, the GitHub editor is 127 chars wide
         exclude: ^.*\b(migrations)\b.*$
         args: [--count, --exit-zero, --max-complexity=10, --max-line-length=127, --statistics]
 -   repo: https://github.com/pre-commit/mirrors-mypy
-    rev: 'v1.11.2'
+    rev: 'v2.3.1'
     hooks:
     -   id: mypy
         additional_dependencies:
-              - types-requests
-              - types-tzlocal
+              - types-requests==2.33.0.20260906
         exclude: ^.*\b(migrations)\b.*$
 -   repo: https://github.com/pycqa/isort
-    rev: 5.13.2
+    rev: 9.0.1
     hooks:
       - id: isort
         args: ["--profile", "black", "--filter-files"]

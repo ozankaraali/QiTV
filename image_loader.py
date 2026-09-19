@@ -91,9 +91,9 @@ class ImageLoader(QThread):
                         tasks.append(asyncio.create_task(coroutine))
                     image_count = len(tasks)
 
-                    for current, task in enumerate(asyncio.as_completed(tasks), 1):
+                    for current, completion in enumerate(asyncio.as_completed(tasks), 1):
                         try:
-                            image_item = await task
+                            image_item = await completion
                         except Exception as e:
                             image_item = None
                             logger.info(f"Image task failed: {e}")

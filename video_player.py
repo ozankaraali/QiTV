@@ -77,7 +77,6 @@ class VideoPlayer(QMainWindow):
         t_lay_parent.setContentsMargins(0, 0, 0, 0)
 
         self.video_frame = QFrame()
-        self.video_frame.mouseDoubleClickEvent = self.mouseDoubleClickEvent
         # eventFilter is installed below to show/hide transport bar on mouse activity
         t_lay_parent.addWidget(self.video_frame)
 
@@ -168,8 +167,7 @@ class VideoPlayer(QMainWindow):
         self.progress_bar.setFixedHeight(12)
         self.progress_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.progress_bar.setMinimumWidth(220)
-        self.progress_bar.setStyleSheet(
-            """
+        self.progress_bar.setStyleSheet("""
             QProgressBar {
                 background-color: rgba(255, 255, 255, 0.2);
                 border: none;
@@ -179,8 +177,7 @@ class VideoPlayer(QMainWindow):
                 background-color: rgba(201, 107, 67, 0.9);
                 border-radius: 4px;
             }
-        """
-        )
+        """)
 
         self.transport_bar = QWidget(self.mainFrame)
         self.transport_bar.setObjectName("transportBar")
@@ -228,8 +225,7 @@ class VideoPlayer(QMainWindow):
         self.transport_bar.setFixedHeight(30)
         self.transport_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        self.transport_bar.setStyleSheet(
-            """
+        self.transport_bar.setStyleSheet("""
             QWidget#transportBar {
                 background: transparent;
             }
@@ -264,8 +260,7 @@ class VideoPlayer(QMainWindow):
                 border-radius: 5px;
                 background: #f2f2f2;
             }
-        """
-        )
+        """)
         self.transport_bar.setVisible(False)
         self.mainFrame.layout().addWidget(self.transport_bar)
 
@@ -282,8 +277,7 @@ class VideoPlayer(QMainWindow):
         # Parent to mainFrame (not video_frame) so it renders above the VLC surface
         self._osd_label = QLabel(self.mainFrame)
         self._osd_label.setAlignment(Qt.AlignCenter)
-        self._osd_label.setStyleSheet(
-            """
+        self._osd_label.setStyleSheet("""
             QLabel {
                 background-color: rgba(0, 0, 0, 0.7);
                 color: white;
@@ -292,8 +286,7 @@ class VideoPlayer(QMainWindow):
                 border-radius: 8px;
                 padding: 8px 16px;
             }
-        """
-        )
+        """)
         self._osd_label.setVisible(False)
         self._osd_label.setFixedSize(180, 40)
         self._osd_timer = QTimer(self)
@@ -602,6 +595,9 @@ class VideoPlayer(QMainWindow):
 
     def eventFilter(self, obj, event):
         try:
+            if obj is self.video_frame and event.type() == QEvent.MouseButtonDblClick:
+                self.mouseDoubleClickEvent(event)
+                return True
             if obj in (
                 self.video_frame,
                 self.transport_bar,
@@ -755,7 +751,8 @@ class VideoPlayer(QMainWindow):
 
         events = self.media_player.event_manager()
         events.event_attach(vlc.EventType.MediaPlayerLengthChanged, self.on_media_length_changed)
-        self.media.parse_with_options(1, 0)
+        # Let playback discover tracks/duration and follow redirects. Network
+        # preparsing opens a separate connection before the actual playback.
 
         play_result = self.media_player.play()
         if play_result == -1:
@@ -986,6 +983,7 @@ class VideoPlayer(QMainWindow):
             self.show()
         else:
             self.setWindowFlags(Qt.Window)
+            assert self.normal_geometry is not None
             self.setGeometry(self.normal_geometry)
             self.show()
 
@@ -1006,20 +1004,11 @@ class VideoPlayer(QMainWindow):
 
     def mousePressEvent(self, event):
         # Map mouse Back/Forward buttons to navigation in the UI
-        try:
-            back_btn = Qt.MouseButton.BackButton
-        except Exception:
-            back_btn = getattr(Qt.MouseButton, "XButton1", None)
-        try:
-            fwd_btn = Qt.MouseButton.ForwardButton
-        except Exception:
-            fwd_btn = getattr(Qt.MouseButton, "XButton2", None)
-
-        if back_btn is not None and event.button() == back_btn:
+        if event.button() == Qt.MouseButton.BackButton:
             self.backRequested.emit()
             event.accept()
             return
-        if fwd_btn is not None and event.button() == fwd_btn:
+        if event.button() == Qt.MouseButton.ForwardButton:
             self.forwardRequested.emit()
             event.accept()
             return

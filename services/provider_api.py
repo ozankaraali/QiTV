@@ -174,24 +174,6 @@ def xtream_choose_resolved_base(
         return ""
 
 
-def xtream_choose_stream_base(server_info: Dict[str, str]) -> str:
-    """Choose the preferred streaming base.
-
-    Many panels expose API over HTTPS but deliver stream over HTTP.
-    Prefer http://host:port when a port is provided; otherwise fall back
-    to the resolved base selection.
-    """
-    try:
-        host = server_info.get("url") or ""
-        port = str(server_info.get("port") or "").strip()
-        if port and port != "0":
-            return f"http://{host}:{port}"
-        # Fallback to resolved base (may be https)
-        return xtream_choose_resolved_base(server_info)
-    except Exception:
-        return ""
-
-
 def xtream_xmltv_url(base: str, username: str, password: str) -> str:
     """Build the XMLTV EPG URL for Xtream providers.
 

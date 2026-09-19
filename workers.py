@@ -15,7 +15,6 @@ from services.provider_api import (
     base_from_url,
     stb_request_url,
     xtream_choose_resolved_base,
-    xtream_choose_stream_base,
     xtream_player_api_url,
 )
 
@@ -204,28 +203,14 @@ class XtreamLoaderWorker(QObject):
                     "/"
                 )
 
-            stream_base = xtream_choose_stream_base(server_info) or resolved_base
-
-            # Build candidate ext/base combinations
-            exts_pref = []
-            if not allowed_formats:
-                exts_pref = ["ts", "m3u8"]
+            # Select from provider metadata only. Opening a media URL here consumes
+            # a playback connection before the user has selected anything.
+            if not allowed_formats or "ts" in allowed_formats:
+                stream_ext = "ts"
+            elif "m3u8" in allowed_formats:
+                stream_ext = "m3u8"
             else:
-                # Prefer TS if present, then m3u8
-                if "ts" in allowed_formats:
-                    exts_pref.append("ts")
-                if "m3u8" in allowed_formats:
-                    exts_pref.append("m3u8")
-                # Ensure at least one
-                if not exts_pref:
-                    exts_pref = ["ts"]
-
-            bases_pref = []
-            # Per API doc: prefer HTTPS when available for API & player requests
-            if resolved_base:
-                bases_pref.append(resolved_base)
-            if stream_base and stream_base not in bases_pref:
-                bases_pref.append(stream_base)
+                stream_ext = allowed_formats[0]
 
             # Step 2: Determine API actions based on content type
             if self.content_type == "itv":
@@ -272,110 +257,7 @@ class XtreamLoaderWorker(QObject):
             streams_resp.raise_for_status()
             streams = streams_resp.json() or []
 
-            # Step 5: Probe a working combination for live/vod (not needed for series metadata)
-            pick_base = bases_pref[0] if bases_pref else resolved_base
-            pick_ext = exts_pref[0]
-
-            if self.content_type in ("itv", "vod"):
-                sample_id = None
-                for s in streams:
-                    sid = s.get("stream_id")
-                    if sid:
-                        sample_id = sid
-                        break
-
-                if sample_id:
-
-                    def looks_like_m3u8(rbytes, ctype):
-                        if ctype:
-                            ctype = ctype.lower()
-                            if (
-                                "application/vnd.apple.mpegurl" in ctype
-                                or "application/x-mpegurl" in ctype
-                            ):
-                                return True
-                            if "text/plain" in ctype and rbytes.startswith(b"#EXTM3U"):
-                                return True
-                        return rbytes.startswith(b"#EXTM3U")
-
-                    def looks_like_ts(rbytes, ctype):
-                        # First byte of TS packet is 0x47 (sync byte) every 188 bytes
-                        if not rbytes:
-                            return False
-                        if rbytes[0:1] == b"\x47":
-                            return True
-                        if ctype:
-                            ctype = ctype.lower()
-                            if "video/" in ctype or "application/octet-stream" in ctype:
-                                return True
-                        return False
-
-                    for b in bases_pref:
-                        worked = False
-                        # Prefer TS over HLS for live streams.
-                        # The HLS adaptive demuxer struggles with mid-stream
-                        # format changes (e.g. intro clip transitions), while
-                        # VLC's TS demuxer handles them inline more gracefully.
-                        ext_order = [ext for ext in ("ts", "m3u8") if ext in exts_pref]
-                        for ext in ext_order:
-                            test_url = f"{b}/{url_prefix}/{self.username}/{self.password}/{sample_id}.{ext}"
-                            try:
-                                headers = {
-                                    "User-Agent": "VLC/3.0.20",
-                                }
-                                # Fetch a small range sufficient to identify TS or M3U
-                                read_size = 188 if ext == "ts" else 1024
-                                if ext == "ts":
-                                    headers["Range"] = "bytes=0-187"
-                                else:
-                                    headers["Range"] = "bytes=0-1023"
-                                # Use stream=True to avoid downloading entire
-                                # live streams when the server ignores Range.
-                                r = session.get(
-                                    test_url,
-                                    headers=headers,
-                                    timeout=6,
-                                    allow_redirects=True,
-                                    verify=self.verify_ssl,
-                                    stream=True,
-                                )
-                                # Read only the bytes we need, then close
-                                probe_bytes = r.raw.read(read_size)
-                                ctype = r.headers.get("Content-Type", "")
-                                clen = r.headers.get("Content-Length", "1")
-                                r.close()
-                                if (
-                                    r.status_code in (200, 206)
-                                    and probe_bytes
-                                    and len(probe_bytes) > 0
-                                    and clen != "0"
-                                ):
-                                    ok = (
-                                        looks_like_m3u8(probe_bytes, ctype)
-                                        if ext == "m3u8"
-                                        else looks_like_ts(probe_bytes, ctype)
-                                    )
-                                    if ok:
-                                        pick_base, pick_ext = b, ext
-                                        worked = True
-                                        break
-                            except Exception:
-                                pass
-                        if worked:
-                            break
-
-                try:
-                    logger.info(
-                        "Xtream stream probe picked base=%s ext=%s (candidates bases=%s, exts=%s)",
-                        pick_base,
-                        pick_ext,
-                        bases_pref,
-                        exts_pref,
-                    )
-                except Exception:
-                    pass
-
-            # Step 6: Build items list with category mapping
+            # Step 5: Build items list with category mapping
             items: List[Dict] = []
             sorted_channels: Dict[str, List[int]] = {}
 
@@ -401,11 +283,11 @@ class XtreamLoaderWorker(QObject):
                         cmd = ""  # Will be populated when episodes are fetched
                     elif self.content_type == "vod":
                         # For VOD, use container_extension from stream data
-                        container_ext = s.get("container_extension") or pick_ext
-                        cmd = f"{pick_base}/{url_prefix}/{self.username}/{self.password}/{stream_id}.{container_ext}"
+                        container_ext = s.get("container_extension") or stream_ext
+                        cmd = f"{resolved_base}/{url_prefix}/{self.username}/{self.password}/{stream_id}.{container_ext}"
                     else:
-                        # For live streams (itv), use probed extension
-                        cmd = f"{pick_base}/{url_prefix}/{self.username}/{self.password}/{stream_id}.{pick_ext}"
+                        # For live streams, prefer TS when the provider supports it.
+                        cmd = f"{resolved_base}/{url_prefix}/{self.username}/{self.password}/{stream_id}.{stream_ext}"
 
                     item = {
                         "id": stream_id,
@@ -424,7 +306,7 @@ class XtreamLoaderWorker(QObject):
                         item["rating"] = s.get("rating") or ""
                         item["year"] = s.get("releasedate") or ""
                         # Store container extension for reference
-                        item["container_extension"] = s.get("container_extension") or pick_ext
+                        item["container_extension"] = s.get("container_extension") or stream_ext
                     elif self.content_type == "series":
                         item["plot"] = s.get("plot") or ""
                         item["rating"] = s.get("rating") or ""
@@ -456,8 +338,8 @@ class XtreamLoaderWorker(QObject):
                 "contents": items,
                 "sorted_channels": sorted_channels,
                 "resolved_base": resolved_base,
-                "stream_base": pick_base,
-                "stream_ext": pick_ext,
+                "stream_base": resolved_base,
+                "stream_ext": stream_ext,
             }
 
             self.finished.emit(result)
