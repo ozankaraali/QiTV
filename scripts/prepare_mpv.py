@@ -499,19 +499,23 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
         for executable in ("clang", "clang++", "lld-link", "llvm-rc"):
             if not shutil.which(executable):
                 raise RuntimeError(f"LLVM build tool missing: {executable}")
+        # Meson's prefer_static file search misses SDK libraries in LIB with
+        # GNU-mode Clang. Allow normal SDK linker lookup below, while forcing
+        # pkgconf's private dependency closure for the static-only media prefix.
         env.update(
             CC="clang --target=x86_64-pc-windows-msvc",
             CXX="clang++ --target=x86_64-pc-windows-msvc",
             CC_LD="lld-link",
             CXX_LD="lld-link",
             WINDRES="llvm-rc",
+            PKG_CONFIG=subprocess.list2cmdline([str(pkgconf), "--static"]),
         )
     meson = ["uv", "tool", "run", "--from", f"meson=={manifest['meson_version']}", "meson"]
     common = [
         "--buildtype=release",
         "--wrap-mode=nodownload",
         "-Ddefault_library=static",
-        "-Dprefer_static=true",
+        "-Dprefer_static=false" if target_name.startswith("windows") else "-Dprefer_static=true",
         "-Dauto_features=disabled",
     ]
     if target_name.startswith("windows"):

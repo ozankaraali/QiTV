@@ -72,6 +72,8 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Experiment v1.14.0 (`verify/bundled-mpv`, not main): Internal playback uses a private standalone MPV process with bundled uosc; external VLC and user-configured MPV remain separate modes. Removed the embedded Qt/libVLC player and its packaging paths.
+- Verification: Native and frozen Intel macOS playback, IPC lifecycle, configuration isolation, uosc/helper loading, and TLS checks passed. Four-platform CI and package-size comparison remain the experiment's acceptance gates. Do not merge or publish to main without the owner's decision; reusable runtimes, caching, and upstream binaries are deferred.
 - Release v1.13.6: Dependency/security upgrades and the Xtream duplicate-request fix (#51). Verified 11 regressions, 11-module type checks, native macOS single-request playback and VOD resume, asynchronous image loading, and the macOS bundle build.
 - Fix #51: Xtream catalog loading no longer probes media URLs, and the embedded player no longer requests network preparsing before playback. Provider metadata determines stream URLs/formats; native playback, redirects, reconnects, and VOD error/seek handling remain intact. `tests/test_xtream_requests.py` covers API-only live/VOD catalog requests, explicit scheme/port precedence, HLS-only providers, and VOD container metadata.
 - Dependencies: Updated runtime/tooling pins and all transitive dependencies, aligned pre-commit tool versions, and pinned supported CI action releases by commit SHA. Removed unused m3u-parser/asyncio and obsolete tzlocal stubs. Python is constrained to 3.14 by current Qt/theme support; requirements.txt is generated with hashes from uv.lock.
