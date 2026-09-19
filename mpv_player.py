@@ -10,11 +10,11 @@ import tempfile
 import time
 import uuid
 
-from PySide6.QtCore import QObject, QProcess, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 from PySide6.QtNetwork import QLocalSocket
 import certifi
 
-from services.mpv_runtime import get_bundled_mpv_path
+from services.mpv_runtime import get_bundled_mpv_path, get_resource_root
 
 
 @dataclass
@@ -68,7 +68,7 @@ class MpvPlayer(QObject):
         self._started_at = 0.0
         self._quit_at = None
         self._quit_stage = 0
-        self._heartbeat_at = 0.0
+        self._settings_checked_at = 0.0
         self._remote_mode = None
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(100)
@@ -140,12 +140,34 @@ class MpvPlayer(QObject):
             self._send(command)
 
     def _start(self):
-        root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        root = get_resource_root()
         script = root / "assets" / "mpv" / "qitv.lua"
         try:
             executable = get_bundled_mpv_path()
             if not script.is_file():
                 raise FileNotFoundError("QiTV's MPV control script is missing. Reinstall QiTV.")
+            helper = (
+                root
+                / "native"
+                / "mpv"
+                / "bin"
+                / ("ziggy.exe" if sys.platform == "win32" else "ziggy")
+            )
+            for asset in (
+                helper,
+                root / "assets/mpv/uosc/main.lua",
+                root / "assets/mpv/uosc/input.conf",
+                root / "assets/mpv/fonts/uosc_icons.otf",
+                root / "assets/mpv/fonts/uosc_textures.ttf",
+            ):
+                if not asset.is_file():
+                    raise FileNotFoundError(
+                        f"QiTV's bundled uosc interface is incomplete ({asset.name}). "
+                        "Prepare the native runtime again or reinstall QiTV."
+                    )
+            (Path(self.config_manager.get_config_dir()) / "subtitles").mkdir(
+                parents=True, exist_ok=True
+            )
             # Watch-later output, including explicit MPV commands, stays private.
             self._directory = tempfile.mkdtemp(
                 prefix="qitv-", dir=None if sys.platform == "win32" else "/tmp"
@@ -167,6 +189,10 @@ class MpvPlayer(QObject):
         self._requests.clear()
         process = QProcess(self)
         self._process = process
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.insert("MPV_UOSC_ZIGGY", str(helper))
+        environment.insert("SSL_CERT_FILE", certifi.where())
+        process.setProcessEnvironment(environment)
         # Never collect MPV diagnostics containing URL paths, queries or credentials.
         process.setStandardOutputFile(QProcess.nullDevice())
         process.setStandardErrorFile(QProcess.nullDevice())
@@ -180,13 +206,29 @@ class MpvPlayer(QObject):
         process.start()
 
     def _mpv_arguments(self):
-        root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        root = get_resource_root()
         assert self._directory is not None
+        controls = (
+            "menu,gap,<video,audio>subtitles,<has_many_audio>audio,<has_many_video>video,"
+            "<has_many_edition>editions,gap,space,<video,audio>speed,space,shuffle,"
+            "loop-playlist,loop-file,gap,prev,items,next,gap,fullscreen"
+        )
+        # uosc's ! prefix keeps downloaded subtitles in managed storage for local files too.
+        subtitles = "!" + str(Path(self.config_manager.get_config_dir()) / "subtitles")
         return [
             "--no-config",
             "--load-scripts=no",
             "--ytdl=no",
-            "--osc=yes",
+            "--osc=no",
+            "--osd-bar=no",
+            "--border=no",
+            "--title-bar=no",
+            "--input-conf=" + str(root / "assets/mpv/uosc/input.conf"),
+            "--osd-fonts-dir=" + str(root / "assets/mpv/fonts"),
+            "--script=" + str(root / "assets/mpv/uosc"),
+            # MPV's byte-count escaping preserves commas and Unicode in option values.
+            f"--script-opts-append=uosc-controls=%{len(controls.encode('utf-8'))}%{controls}",
+            f"--script-opts-append=uosc-subtitles_directory=%{len(subtitles.encode('utf-8'))}%{subtitles}",
             "--input-default-bindings=yes",
             "--input-terminal=no",
             "--terminal=no",
@@ -281,8 +323,8 @@ class MpvPlayer(QObject):
                 "MPV could not stop the previous media. Select the media again to restart it."
             )
             return
-        if now - self._heartbeat_at >= 2:
-            self._heartbeat_at = now
+        if now - self._settings_checked_at >= 2:
+            self._settings_checked_at = now
             remote = bool(getattr(self.config_manager, "keyboard_remote_mode", False))
             if remote != self._remote_mode:
                 self._remote_mode = remote
@@ -336,7 +378,7 @@ class MpvPlayer(QObject):
             if args == ["qitv", "ready"] and not self._closing:
                 self._ready = True
                 self._position_timer.start()
-                self._heartbeat_at = 0.0
+                self._settings_checked_at = 0.0
                 self._tick()
                 self._advance()
             elif len(args) == 2 and args[0] == "qitv" and not self._closing:

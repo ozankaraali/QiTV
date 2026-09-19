@@ -1,0 +1,14 @@
+--- a/video/out/mac/view.swift
++++ b/video/out/mac/view.swift
+@@ -29,9 +29,11 @@
+     override var acceptsFirstResponder: Bool { return true }
+ 
+     override var isOpaque: Bool {
++        #if HAVE_VULKAN
+         if let metalLayer = layer as? MetalLayer {
+             return !metalLayer.isOpaque
+         }
++        #endif
+ 
+         return true
+     }

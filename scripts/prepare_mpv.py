@@ -3,12 +3,13 @@
 
 Usage: uv run scripts/prepare_mpv.py
 
-Requires C/C++ build tools, CMake, Ninja, nasm, and (on Unix) autoconf,
-automake, libtool, pkg-config. Windows requires an x64 MSVC developer shell.
-Linux additionally requires X11/OpenGL and ALSA/PulseAudio development headers
-for SDL2's desktop drivers. No installed MPV or FFmpeg is used.
-
---prebuilt is ONLY a diagnostic macOS Intel download, never a release input.
+Requires C/C++ build tools, CMake, Ninja, nasm, git, uv and Go 1.21 or newer.
+The pinned Go toolchain is downloaded automatically. Unix builds also require
+autoconf, autoconf-archive, automake, libtool and pkg-config. Windows requires
+an x64 MSVC developer shell plus LLVM (clang, clang++, lld-link and llvm-rc).
+macOS requires Xcode 15 or newer command-line tools. Linux additionally needs
+X11/OpenGL and ALSA/PulseAudio development headers for SDL2's desktop drivers.
+No installed MPV or FFmpeg is used.
 """
 
 import argparse
@@ -140,6 +141,38 @@ def make_triplet(path, target):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def dependency_sources(downloads, inventory):
+    """Select matching source inputs, not the binary build tools in vcpkg's cache."""
+    required = set()
+    for document in inventory:
+        for package in document["packages"]:
+            if not package["SPDXID"].startswith("SPDXRef-resource-"):
+                continue
+            checksums = [
+                entry["checksumValue"].lower()
+                for entry in package.get("checksums", [])
+                if entry["algorithm"] == "SHA512"
+            ]
+            if not checksums:
+                raise RuntimeError(f"Dependency source lacks a SHA512 checksum: {package['name']}")
+            required.update(checksums)
+    selected = []
+    found = set()
+    for path in sorted(downloads.iterdir()):
+        if not path.is_file():
+            continue
+        with path.open("rb") as stream:
+            checksum = hashlib.file_digest(stream, "sha512").hexdigest()
+        if checksum in required:
+            selected.append((path, f"dependency-downloads/{path.name}"))
+            found.add(checksum)
+    if missing := required - found:
+        raise RuntimeError(
+            f"Corresponding dependency source archives are missing: {sorted(missing)}"
+        )
+    return selected
+
+
 def make_source_archive(destination, paths):
     """Ship original source archives, vcpkg patches/recipes and build provenance.
 
@@ -254,22 +287,70 @@ def inspect_dependencies(executable, target_name):
             and not name.lower().startswith(("api-ms-win-", "ext-ms-win-"))
         ]
         metadata = {"dependencies": dependencies, "pe_imports": linked}
-    if not dependencies:
+    if not dependencies and not (
+        target_name.startswith("linux") and "There is no dynamic section" in linked
+    ):
         raise RuntimeError("Could not inspect native executable's dependency table")
     if unexpected:
         raise RuntimeError(f"Unbundled non-system native dependencies: {unexpected}")
     return metadata
 
 
+def build_uosc_helper(manifest, target_name, stage):
+    """Compile the bundled UI helper instead of redistributing an old Go runtime."""
+    if not shutil.which("go"):
+        raise RuntimeError("Go 1.21 or newer is required to build uosc's native helper.")
+    source = ROOT / "assets" / "mpv" / "uosc" / "sources" / "ziggy"
+    helper = stage / "bin" / ("ziggy.exe" if target_name.startswith("windows") else "ziggy")
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env.update(
+        GOTOOLCHAIN=f"go{manifest['go_version']}",
+        GOWORK="off",
+        CGO_ENABLED="0",
+        GOOS=target_name.split("-")[0],
+        GOARCH="arm64" if target_name.endswith("arm64") else "amd64",
+    )
+    run(
+        [
+            "go",
+            "build",
+            "-trimpath",
+            "-mod=vendor" if (source / "vendor").is_dir() else "-mod=readonly",
+            "-buildvcs=false",
+            "-ldflags=-s -w",
+            "-o",
+            helper,
+            "./src/ziggy/ziggy.go",
+        ],
+        cwd=source,
+        env=env,
+    )
+    if target_name.startswith("darwin"):
+        run(["codesign", "--force", "--sign", "-", helper], cwd=source, env=env)
+    metadata = {
+        "executable": helper.relative_to(stage).as_posix(),
+        "sha256": sha256(helper),
+        "go_build_info": subprocess.check_output(
+            ["go", "version", "-m", helper], env=env, text=True
+        ),
+        "source_provenance_sha256": sha256(ROOT / "assets" / "mpv" / "uosc" / "PROVENANCE.json"),
+        "native_dependencies": inspect_dependencies(helper, target_name),
+    }
+    write_json(stage / "uosc-build.json", metadata)
+    return metadata
+
+
 def build_runtime(manifest, target_name, cache, stage, source_output):
     target = manifest["targets"][target_name]
-    for executable in ("cmake", "ninja", "nasm", "uv"):
+    for executable in ("cmake", "ninja", "nasm", "uv", "git"):
         if not shutil.which(executable):
             raise RuntimeError(
                 f"Required native build tool missing: {executable}. See this script's docstring."
             )
     if target_name.startswith("windows") and not shutil.which("cl"):
         raise RuntimeError("Run preparation from a Visual Studio 2022 x64 developer shell.")
+    uosc = build_uosc_helper(manifest, target_name, stage)
     # Keep failed work/logs for diagnosis. A successful rerun uses a new workdir,
     # avoiding artifacts built with changed compiler flags or source pins.
     work = Path(tempfile.mkdtemp(prefix=f"build-{target_name}-", dir=cache))
@@ -296,6 +377,13 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
     shutil.copy2(__file__, recipe / "scripts" / "prepare_mpv.py")
     shutil.copy2(MANIFEST, recipe / "native" / "mpv-manifest.json")
     shutil.copy2(ROOT / "native" / "REDISTRIBUTION.txt", recipe / "native" / "REDISTRIBUTION.txt")
+    shutil.copytree(ROOT / "native" / "patches", recipe / "native" / "patches")
+    shutil.copytree(ROOT / "assets" / "mpv", recipe / "assets" / "mpv")
+    helper_source = recipe / "assets" / "mpv" / "uosc" / "sources" / "ziggy"
+    helper_env = os.environ.copy()
+    helper_env.update(GOTOOLCHAIN=f"go{manifest['go_version']}", GOWORK="off")
+    run(["go", "mod", "vendor"], cwd=helper_source, env=helper_env)
+    write_json(recipe / "uosc-build.json", uosc)
     triplets = recipe / "triplets"
     triplets.mkdir()
     make_triplet(triplets / f"{target['triplet']}.cmake", target)
@@ -342,6 +430,9 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
             "MACOSX_DEPLOYMENT_TARGET": "13.0",
         }
     )
+    for component, source in (("vcpkg", vcpkg), ("mpv", mpv)):
+        for patch in sorted((recipe / "native" / "patches" / component).glob("*.patch")):
+            run(["git", "apply", patch], cwd=source, env=env)
     if target_name.startswith("windows"):
         run(["cmd", "/c", vcpkg / "bootstrap-vcpkg.bat", "-disableMetrics"], cwd=vcpkg, env=env)
         tool = vcpkg / "vcpkg.exe"
@@ -385,6 +476,17 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
         env["CFLAGS"] = "-mmacosx-version-min=13.0"
         env["CXXFLAGS"] = "-mmacosx-version-min=13.0"
         env["LDFLAGS"] = "-mmacosx-version-min=13.0"
+    elif target_name.startswith("windows"):
+        for executable in ("clang", "clang++", "lld-link", "llvm-rc"):
+            if not shutil.which(executable):
+                raise RuntimeError(f"LLVM build tool missing: {executable}")
+        env.update(
+            CC="clang --target=x86_64-pc-windows-msvc",
+            CXX="clang++ --target=x86_64-pc-windows-msvc",
+            CC_LD="lld-link",
+            CXX_LD="lld-link",
+            WINDRES="llvm-rc",
+        )
     meson = ["uv", "tool", "run", "--from", f"meson=={manifest['meson_version']}", "meson"]
     common = [
         "--buildtype=release",
@@ -418,6 +520,7 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
         options += [
             "-Dcocoa=enabled",
             "-Dgl-cocoa=enabled",
+            "-Dmacos-cocoa-cb=enabled",
             "-Dcoreaudio=enabled",
             "-Dswift-build=enabled",
             f"-Dswift-flags=-target {architecture}-apple-macosx13.0",
@@ -432,7 +535,7 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
     run(meson + ["compile", "-C", mpv_build], cwd=work, env=env)
     executable_name = "mpv.exe" if target_name.startswith("windows") else "mpv"
     executable = stage / "bin" / executable_name
-    executable.parent.mkdir(parents=True)
+    executable.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(mpv_build / executable_name, executable)
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     if target_name.startswith("darwin"):
@@ -444,6 +547,7 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
     copy_licenses(prefix / "share", licenses / "dependencies")
     copy_licenses(mpv, licenses / "mpv")
     copy_licenses(placebo, licenses / "libplacebo")
+    copy_licenses(helper_source / "vendor", licenses / "uosc-dependencies")
     shutil.copy2(ROOT / "native" / "REDISTRIBUTION.txt", licenses / "REDISTRIBUTION.txt")
     # SPDX port manifests retain the exact installed versions and source hashes.
     inventory = []
@@ -460,10 +564,10 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
         source_output,
         [
             (originals, "original-sources"),
-            (downloads, "dependency-downloads"),
             (recipe, "recipe"),
             (licenses, "licenses"),
-        ],
+        ]
+        + dependency_sources(downloads, inventory),
     )
     return {
         "executable": executable.relative_to(stage).as_posix(),
@@ -474,6 +578,7 @@ def build_runtime(manifest, target_name, cache, stage, source_output):
         "minimum_os": target["minimum_os"],
         "build_workspace": str(work),
         "source_manifest_sha256": sha256(MANIFEST),
+        "uosc": uosc,
         "system_dependencies": "OS SDK/runtime and desktop audio/display drivers; all media libraries statically linked",
     }
 
@@ -502,11 +607,6 @@ def main():
     )
     parser.add_argument("--target", default=host_target())
     parser.add_argument("--cache-dir", type=Path, default=Path.home() / ".cache" / "qitv" / "mpv")
-    parser.add_argument(
-        "--prebuilt",
-        action="store_true",
-        help="Stage Intel macOS diagnostic runtime only; NOT redistributable",
-    )
     args = parser.parse_args()
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     if args.target not in manifest["targets"]:
@@ -532,19 +632,8 @@ def main():
         with tempfile.TemporaryDirectory(prefix=".mpv-", dir=destination.parent) as temporary:
             stage = Path(temporary) / "runtime"
             stage.mkdir()
-            if args.prebuilt:
-                artifact = manifest["diagnostic_prebuilt"].get(args.target)
-                if artifact is None:
-                    raise RuntimeError(
-                        "Diagnostic prebuilt is available only for macOS Intel; use the default source build."
-                    )
-                unpack(download(artifact, args.cache_dir / "archives"), stage)
-                metadata = dict(artifact)
-                print(artifact["reason"], file=sys.stderr)
-                write_json(stage / "DIAGNOSTIC-NOT-FOR-REDISTRIBUTION.json", artifact)
-            else:
-                sources = destination.parent / f"mpv-sources-{args.target}.tar.gz"
-                metadata = build_runtime(manifest, args.target, args.cache_dir, stage, sources)
+            sources = destination.parent / f"mpv-sources-{args.target}.tar.gz"
+            metadata = build_runtime(manifest, args.target, args.cache_dir, stage, sources)
             metadata.update({"schema": 1, "target": args.target})
             metadata["runtime_bytes"] = sum(
                 p.stat().st_size for p in stage.rglob("*") if p.is_file()

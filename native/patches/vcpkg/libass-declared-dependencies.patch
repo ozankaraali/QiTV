@@ -1,0 +1,21 @@
+--- a/ports/libass/portfile.cmake
++++ b/ports/libass/portfile.cmake
+@@ -18,11 +18,18 @@
+     -Dfuzz=disabled
+     -Dprofile=disabled
+     -Dtest=disabled
++    -Dlibunibreak=disabled
+ )
+ 
+ if(NOT VCPKG_TARGET_IS_WINDOWS AND NOT VCPKG_TARGET_IS_OSX AND NOT VCPKG_TARGET_IS_LINUX)
+     list(APPEND options -Drequire-system-font-provider=false)
+ endif()
++
++if(VCPKG_TARGET_IS_LINUX)
++    list(APPEND options -Dfontconfig=enabled)
++else()
++    list(APPEND options -Dfontconfig=disabled)
++endif()
+ 
+ set(asm_option disabled)
+ set(additional_binaries "")

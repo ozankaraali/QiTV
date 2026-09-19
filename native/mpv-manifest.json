@@ -5,6 +5,7 @@
   "vcpkg_commit": "dc1dbc7d46ceb78858f26d21fd22ee4d530e30ea",
   "libplacebo_version": "7.360.1",
   "meson_version": "1.12.0",
+  "go_version": "1.27.1",
   "sources": {
     "vcpkg.tar.gz": {
       "url": "https://codeload.github.com/microsoft/vcpkg/tar.gz/dc1dbc7d46ceb78858f26d21fd22ee4d530e30ea",
@@ -75,18 +76,6 @@
       "architecture": "x64",
       "cmake_system": "Linux",
       "minimum_os": "glibc 2.35; X11 desktop or XWayland"
-    }
-  },
-  "diagnostic_prebuilt": {
-    "darwin-x86_64": {
-      "url": "https://laboratory.stolendata.net/~djinn/mpv_osx/mpv-0.39.0.tar.gz",
-      "sha256": "35ec81ad86a97b24956a8d0f4fa1ba2690b44ae7741c920e923620bcd7bd402a",
-      "size": 23791174,
-      "executable": "mpv.app/Contents/MacOS/mpv",
-      "minimum_os": "11.0",
-      "version": "0.39.0",
-      "redistributable": false,
-      "reason": "Diagnostic only. Contains old FFmpeg6.1.2 and distributor does not provide complete matching dependency source/build recipes. Release preparation MUST use source builds."
     }
   }
 }

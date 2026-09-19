@@ -18,6 +18,7 @@ if __package__ in (None, '') and not getattr(sys, 'frozen', False):
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QProcess, QTimer
+from PySide6.QtGui import QImage
 from PySide6.QtNetwork import QHostAddress, QLocalSocket, QTcpServer
 from PySide6.QtWidgets import QApplication
 
@@ -25,9 +26,12 @@ from mpv_player import MpvPlayer
 from services.mpv_runtime import get_bundled_mpv_path
 
 
-class HeadlessMpvPlayer(MpvPlayer):
+class SmokeMpvPlayer(MpvPlayer):
+    render = False
+
     def _mpv_arguments(self):
-        return super()._mpv_arguments() + ['--vo=null', '--ao=null', '--hwdec=no']
+        video = ['--geometry=640x480'] if self.render else ['--vo=null']
+        return super()._mpv_arguments() + ['--ao=null', '--hwdec=no'] + video
 
 
 class LocalMediaServer(QTcpServer):
@@ -36,6 +40,7 @@ class LocalMediaServer(QTcpServer):
         self.media = fixture.read_bytes()
         self.fail = fail
         self.requests = []
+        self.helper_requests = 0
         self.buffers = {}
         self.newConnection.connect(self._accept)
         if not self.listen(QHostAddress.SpecialAddress.LocalHost, 0):
@@ -70,6 +75,17 @@ class LocalMediaServer(QTcpServer):
         headers = dict(line.split(':', 1) for line in lines[1:] if ':' in line)
         headers = {key.lower(): value.strip() for key, value in headers.items()}
         user_agent = headers.get('user-agent', '')
+        if path == '/uosc-helper' and method == 'GET' and user_agent == 'uosc/ziggy':
+            self.helper_requests += 1
+            payload = b'QiTV uosc helper'
+            socket.write(
+                b'HTTP/1.1 200 OK\r\nContent-Length: '
+                + str(len(payload)).encode()
+                + b'\r\nConnection: close\r\n\r\n'
+                + payload
+            )
+            socket.disconnectFromHost()
+            return
         self.requests.append({'method': method, 'path': path, 'user_agent': user_agent})
         if method != 'GET' or not re.search(r'mpv|lavf', user_agent, re.I):
             self.fail(f'Application HTTP preflight/non-MPV request: {method} {user_agent!r}')
@@ -118,14 +134,20 @@ class Smoke:
         'mute',
         'fullscreen',
         'ontop',
+        'current-vo',
     )
 
-    def __init__(self, app, fixture):
+    def __init__(self, app, fixture, data_directory, render_path=None):
         self.app = app
         self.started = time.monotonic()
         self.phase = 'starting'
+        self.phase_started = self.started
         self.failure = None
         self.completed = False
+        self.render_path = render_path
+        self.render_probe_sent = False
+        if render_path:
+            render_path.parent.mkdir(parents=True, exist_ok=True)
         self.result: dict[str, Any] = {'frozen': bool(getattr(sys, 'frozen', False)), 'checks': []}
         self.positions = []
         self.ended = []
@@ -135,12 +157,18 @@ class Smoke:
         self.pending = {}
         self.request_id = 0
         self.last_query = 0.0
+        self.ui_probe_sent = False
         self.buffer = bytearray()
         self.processes = []
         self.server = LocalMediaServer(fixture, self.fail)
-        self.player = HeadlessMpvPlayer(
-            SimpleNamespace(keyboard_remote_mode=False, ssl_verify=True)
+        self.player = SmokeMpvPlayer(
+            SimpleNamespace(
+                keyboard_remote_mode=False,
+                ssl_verify=True,
+                get_config_dir=lambda: data_directory,
+            )
         )
+        self.player.render = render_path is not None
         self.player.playing.connect(self._playing)
         self.player.stopped.connect(self._stopped)
         self.player.errorOccurred.connect(self.fail)
@@ -169,6 +197,9 @@ class Smoke:
             raise RuntimeError('QiTV MPV Lua asset is missing from resource root')
         self.result['executable'] = str(executable)
         self.result['fixture'] = str(self.server.url)
+        self.helper = str(
+            native_root / 'bin' / ('ziggy.exe' if sys.platform == 'win32' else 'ziggy')
+        )
         self.deadline.start(45000)
         self.timer.start()
         self.player.play(self.server.url, is_live=False, content_id='first', resume_position=2000)
@@ -203,14 +234,51 @@ class Smoke:
     def _query(self):
         if self.probe.state() != QLocalSocket.LocalSocketState.ConnectedState:
             return
-        for name in self.PROPERTIES:
+        commands: list[tuple[str, Any]] = [
+            (name, ['get_property', name]) for name in self.PROPERTIES
+        ]
+        if self.phase == 'starting' and not self.ui_probe_sent:
+            self.ui_probe_sent = True
+            commands.extend(
+                [
+                    (
+                        'uosc-ready',
+                        [
+                            'script-message-to',
+                            'uosc',
+                            'set-min-visibility',
+                            '1' if self.render_path else '0',
+                        ],
+                    ),
+                    (
+                        'uosc-helper',
+                        {
+                            'name': 'subprocess',
+                            'args': [
+                                self.helper,
+                                'http-get',
+                                self.server.url.rsplit('/', 1)[0] + '/uosc-helper',
+                            ],
+                            # IPC JSON cannot represent the binary arrays returned by capture_stdout/stderr.
+                            'playback_only': False,
+                        },
+                    ),
+                ]
+            )
+        if self.phase == 'pausing' and self.render_path and not self.render_probe_sent:
+            self.render_probe_sent = True
+            commands.append(
+                ('rendered-frame', ['screenshot-to-file', str(self.render_path), 'window'])
+            )
+        for name, command in commands:
             self.request_id += 1
             self.pending[self.request_id] = name
             self.probe.write(
                 (
                     json.dumps(
                         {
-                            'command': ['get_property', name],
+                            'command': command,
+                            'async': True,
                             'request_id': self.request_id,
                         }
                     )
@@ -223,6 +291,7 @@ class Smoke:
 
     def _change(self, phase, action):
         self.phase = phase
+        self.phase_started = time.monotonic()
         self.properties.clear()
         self.pending.clear()
         action()
@@ -258,8 +327,22 @@ class Smoke:
         if now - self.last_query >= 0.2:
             self._query()
             self.last_query = now
+        if (
+            self.render_path
+            and self.phase
+            in {'fullscreen', 'pip-api', 'fullscreen-api', 'pip-native', 'fullscreen-native'}
+            and now - self.phase_started < 2
+        ):
+            return  # Let native fullscreen animations settle before the next transition.
         p = self.properties
         if self.phase == 'starting':
+            if 'uosc-ready' not in p or 'uosc-helper' not in p:
+                return
+            helper = p['uosc-helper']
+            if helper.get('status') != 0:
+                raise RuntimeError(f'Bundled uosc helper exited with status {helper.get("status")}')
+            if self.server.helper_requests != 1:
+                raise RuntimeError('Bundled uosc helper failed the localhost HTTP exercise')
             if not (self.playing_count and p.get('video-frame-info') and p.get('audio-params')):
                 return
             video = p.get('video-out-params') or {}
@@ -277,8 +360,21 @@ class Smoke:
             self.result['decoded_audio'] = audio
             self._check('real_h264_aac_decode_and_resume_position')
             self._check('isolated_user_config_and_scripts')
+            self._check('bundled_uosc_lua_and_native_helper')
             self._change('pausing', self.player.toggle_pause)
         elif self.phase == 'pausing' and p.get('pause') is True:
+            if self.render_path:
+                if 'rendered-frame' not in p:
+                    return
+                image = QImage(str(self.render_path))
+                if image.isNull() or image.width() <= 64 or image.height() <= 48:
+                    raise RuntimeError('Native renderer did not produce a window-sized image')
+                if p.get('current-vo') in (None, 'null'):
+                    raise RuntimeError('No real video output was initialized')
+                self.result['renderer'] = p['current-vo']
+                self.result['rendered_frame'] = str(self.render_path)
+                self.initial_ontop = p['ontop']
+                self._check('native_window_render_and_uosc_screenshot')
             self._check('public_pause_command')
             self._change('muting', self.player.toggle_mute)
         elif self.phase == 'muting' and p.get('mute') is True:
@@ -286,7 +382,29 @@ class Smoke:
             self._change('fullscreen', self.player.toggle_fullscreen)
         elif self.phase == 'fullscreen' and p.get('fullscreen') is True:
             self._check('public_fullscreen_command')
-            # PiP needs a real window; Main verifies it on the visible GUI.
+            if self.render_path:
+                self._change('pip-api', self.player.toggle_pip)
+            else:
+                self._change('resuming', self.player.toggle_pause)
+        elif self.phase == 'pip-api' and p.get('fullscreen') is False and p.get('ontop') is True:
+            self._change('fullscreen-api', self.player.toggle_fullscreen)
+        elif (
+            self.phase == 'fullscreen-api'
+            and p.get('fullscreen') is True
+            and p.get('ontop') == self.initial_ontop
+        ):
+            self._change('pip-native', self.player.toggle_pip)
+        elif self.phase == 'pip-native' and p.get('fullscreen') is False and p.get('ontop') is True:
+            self._change(
+                'fullscreen-native',
+                lambda: self.probe.write(b'{"command":["keypress","f"]}\n'),
+            )
+        elif (
+            self.phase == 'fullscreen-native'
+            and p.get('fullscreen') is True
+            and p.get('ontop') == self.initial_ontop
+        ):
+            self._check('fullscreen_exits_pip_through_qitv_and_native_controls')
             self._change('resuming', self.player.toggle_pause)
         elif self.phase == 'resuming' and p.get('pause') is False:
             self._check('public_resume_command')
@@ -405,6 +523,11 @@ def main(argv=None):
         required=True,
         help='JSON result (also works for windowed frozen apps)',
     )
+    parser.add_argument(
+        '--render',
+        action='store_true',
+        help='Exercise the real video window and save a PNG beside the report',
+    )
     args = parser.parse_args(argv)
     result: dict[str, Any] = {'ok': False}
     exit_code = 1
@@ -423,7 +546,12 @@ def main(argv=None):
             os.environ['MPV_HOME'] = directory
             app = QApplication.instance() or QApplication(['qitv-mpv-smoke'])
             app.setQuitOnLastWindowClosed(False)
-            smoke = Smoke(app, args.fixture.resolve(strict=True))
+            smoke = Smoke(
+                app,
+                args.fixture.resolve(strict=True),
+                home / 'QiTV, Türkçe',
+                args.report.resolve().with_suffix('.png') if args.render else None,
+            )
             sys.excepthook = lambda kind, value, traceback: smoke.fail(f'{kind.__name__}: {value}')
             QTimer.singleShot(0, smoke.start)
             exit_code = app.exec()

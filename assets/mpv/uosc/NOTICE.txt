@@ -1,0 +1,136 @@
+QiTV bundled uosc 5.12.0
+=======================
+
+Origin and modifications
+------------------------
+Project: https://github.com/tomasklaen/uosc
+Release: https://github.com/tomasklaen/uosc/releases/tag/5.12.0
+Source commit: 748bb238a962f8aecd0af51ee4b46651b58f6c51
+Annotated tag object: 2b8011a6c20844591267411beb641b7772e3f30c
+The upstream tag is unsigned. The release ZIP was downloaded directly from
+upstream over HTTPS and its SHA-256 matched GitHub's published asset digest.
+Exact URLs, hashes and file inventory are recorded in PROVENANCE.json.
+
+Every upstream runtime Lua, JSON, font and helper source file is unmodified.
+input.conf is QiTV's supported custom menu configuration, not an upstream patch.
+The menu omits self-update, personal configuration-directory access, destructive
+file deletion, screenshots without a managed output directory, and stream-quality
+selection without a bundled yt-dlp dependency. The uosc updater is not bound to
+any key or exposed by this menu. Upstream updater code is retained unchanged;
+this is UI hiding, not a security boundary against arbitrary script messages.
+QiTV must keep loading this explicit menu, rather than uosc's default menu.
+
+The reference installation was uosc 5.12.0 with an unmodified main.lua. All active
+uosc.conf preferences matched this upstream release's defaults. No personal
+configuration was copied. Defaults preserve the proximity-based controls,
+40-pixel line timeline, right volume, no-border top bar, and fullscreen scale 1.3.
+
+Licensing and corresponding source
+----------------------------------
+uosc and Ziggy: upstream LICENSE.LGPL (GNU LGPL version 2.1).
+The entire unmodified corresponding source, font sources and build tools are in:
+  sources/uosc-748bb238a962f8aecd0af51ee4b46651b58f6c51.zip
+Public corresponding source:
+  https://github.com/tomasklaen/uosc/tree/748bb238a962f8aecd0af51ee4b46651b58f6c51
+Preserve this source archive and all license notices when distributing helpers.
+The ready-to-build helper source subset is also expanded in sources/ziggy/.
+Users may modify/rebuild the LGPL components under that license; the supported
+MPV_UOSC_ZIGGY environment variable also selects an alternative helper path.
+
+lib/fzy.lua retains Seth Warn's 2020 MIT notice; a copy is in
+licenses/LICENSE.fzy-MIT.txt. lib/utils.lua contains attributed thumbfast Win32
+FFI code under MPL 2.0; see licenses/LICENSE.MPL-2.0.txt. Its corresponding source
+is included verbatim in the runtime and full source archive. Font attribution
+and the Material Icons Apache license are in ../fonts/NOTICE.txt.
+
+Ziggy uses github.com/atotto/clipboard v0.1.4 and github.com/pkg/browser
+v0.0.0-20240102092130-5ac0b6a4141c; Windows also uses golang.org/x/sys v0.28.0.
+Their BSD licenses and the Go runtime license are in licenses/. The source
+archive and sources/ziggy/ include exact go.mod/go.sum versions and hashes.
+Additional go.mod entries for build tools are not linked into these helpers.
+
+Launch contract
+---------------
+Use absolute, separately quoted argv entries, resolving ASSETS and DATA in QiTV:
+  --no-config
+  --load-scripts=no
+  --script=ASSETS/mpv/uosc
+  --input-conf=ASSETS/mpv/uosc/input.conf
+  --osd-fonts-dir=ASSETS/mpv/fonts
+  --osc=no
+  --osd-bar=no
+  --border=no
+  --title-bar=no
+  --script-opts-append=uosc-subtitles_directory=DATA/subtitles
+
+ASSETS and DATA above describe application-resolved directories, not literal
+values. DATA/subtitles must be a writable application data location outside
+signed/read-only assets. An exclamation prefix on that option forces all
+subtitle downloads there, rather than only downloads for streamed media.
+Escape commas in dictionary option values according to mpv's option syntax.
+
+Pass the uosc DIRECTORY, not main.lua: mpv directory-script loading provides
+module search paths and mp.get_script_directory(). Explicit script, input-conf,
+fonts and script-opts loading works with --no-config. No user mpv.conf or
+script-opts file is required or should be loaded. Do not rely on ~~ expansion
+for writable data with --no-config. --sub-fonts-dir alone does not select the
+OSD font directory. Lua scripting and libass must be enabled in mpv.
+
+The upstream controls bar includes stream-quality by default. When QiTV does
+not ship yt-dlp, override uosc-controls with the default value minus
+<stream>stream-quality using --script-opts (dictionary value escaping required):
+menu,gap,<video,audio>subtitles,<has_many_audio>audio,<has_many_video>video,<has_many_edition>editions,gap,space,<video,audio>speed,space,shuffle,loop-playlist,loop-file,gap,prev,items,next,gap,fullscreen
+
+Do not set osd-font to the icon font: use the platform's normal text font.
+Timeline previews require the optional thumbfast script, which is not bundled;
+uosc renders a normal seek tooltip without it. YouTube heatmaps and stream
+quality depend on mpv's yt-dlp integration, not on Ziggy. Regular IPTV playback,
+seeking, volume, chapters, playlist and local track selection do not need yt-dlp
+or thumbfast. The subtitle menu's search/download and clipboard operations do
+need Ziggy, so omitting the helper would leave visible features nonfunctional.
+
+Native helpers and packaging
+----------------------------
+uosc selects bin/ziggy-darwin, bin/ziggy-linux or bin/ziggy-windows.exe by OS.
+MPV_UOSC_ZIGGY can override this with an absolute helper path.
+No prebuilt helpers are shipped in this source tree. The upstream release
+helpers were inspected, but intentionally excluded: all are x86-64 and embed
+Go 1.23.1. Its Darwin helper is not ARM/universal (deployment target macOS 11).
+QiTV builds fresh helpers from the same pinned source with a maintained pinned
+Go toolchain rather than shipping this old runtime or requiring Rosetta.
+
+Working directory: assets/mpv/uosc/sources/ziggy
+Build command (environment names and OUTPUT describe build-supplied values):
+  CGO_ENABLED=0 GOOS=TARGET_OS GOARCH=TARGET_ARCH go build -trimpath -mod=readonly -ldflags="-s -w" -o OUTPUT ./src/ziggy/ziggy.go
+Target matrix:
+  macOS Intel: TARGET_OS=darwin, TARGET_ARCH=amd64, filename ziggy-darwin
+  macOS ARM:   TARGET_OS=darwin, TARGET_ARCH=arm64, filename ziggy-darwin
+  Linux x64:   TARGET_OS=linux, TARGET_ARCH=amd64, filename ziggy-linux
+  Windows x64: TARGET_OS=windows, TARGET_ARCH=amd64, filename ziggy-windows.exe
+Place the target helper in the packaged uosc/bin/ directory, or provide its
+absolute path using MPV_UOSC_ZIGGY. Do not execute the cross-compiled output
+on the build host. The Go toolchain must support the app's OS deployment
+minimum; go.mod declares Go 1.21.3. Upstream tools/build hardcodes amd64 and
+is therefore not an ARM build recipe.
+
+For a universal macOS app, build both slices and use lipo -create to combine
+them at the same filename. Preserve executable mode and sign the resulting
+Mach-O before signing/notarizing the app. Record built/signed binary hashes
+and Go toolchain version in the distribution's generated build provenance.
+Do not mutate the signed app to self-update uosc.
+
+Core UI rendering is pure Lua and works on each target without native helpers.
+Linux clipboard features additionally need xclip or xsel on X11, or both
+wl-copy and wl-paste (wl-clipboard) on Wayland. The pinned clipboard dependency
+uses those system programs; Ziggy does not embed a Linux clipboard backend.
+macOS uses system pbcopy/pbpaste; Windows uses native clipboard APIs. Optional
+Open Subtitles requests require network/CA availability and are subject to
+upstream service limits. No downloaded executable was run while vendoring.
+
+Verification scope
+------------------
+The release archive digest, exact source/runtime byte equality, binary headers,
+embedded Go build metadata and active reference preferences were inspected.
+No runtime execution, builds, linters or tests were performed by the asset
+vendor. Playback/UI smoke checks, helper builds for all targets and signing are
+integration/build owner's responsibilities.

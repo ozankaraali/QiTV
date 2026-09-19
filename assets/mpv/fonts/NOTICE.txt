@@ -1,0 +1,24 @@
+QiTV bundled uosc fonts
+
+These files are unmodified fonts from uosc 5.12.0, upstream source commit
+748bb238a962f8aecd0af51ee4b46651b58f6c51:
+https://github.com/tomasklaen/uosc/tree/748bb238a962f8aecd0af51ee4b46651b58f6c51/src/fonts
+
+uosc_icons.otf:
+  Embedded family: Material Icons Round
+  Embedded version: 2022-07-12T15:13:44.824056
+  Copyright 2019 Google LLC. All Rights Reserved.
+  Apache License 2.0; see LICENSE.Material-Icons-Apache-2.0.txt.
+  Primary font project: https://github.com/google/material-design-icons
+  License source revision: 68e015dbbb6b730b5fe4934e8507cd5a465c8a3d
+  https://raw.githubusercontent.com/google/material-design-icons/68e015dbbb6b730b5fe4934e8507cd5a465c8a3d/LICENSE
+
+uosc_textures.ttf:
+  Embedded family: uosc_textures; version 1.0.
+  Distributed as part of uosc under its LGPL 2.1 license.
+  See ../uosc/LICENSE.LGPL. Font sources and generation tools are preserved in
+  ../uosc/sources/uosc-748bb238a962f8aecd0af51ee4b46651b58f6c51.zip.
+
+See ../uosc/PROVENANCE.json for original archive and per-file SHA-256 digests.
+Use mpv --osd-fonts-dir with the absolute path to this directory. These are
+icon/texture fonts, not a replacement for the normal osd-font text family.

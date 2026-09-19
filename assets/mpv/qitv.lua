@@ -1,4 +1,4 @@
--- Only QiTV additions: the stock OSC, keyboard and mouse controls stay enabled.
+-- QiTV lifecycle/navigation additions; uosc supplies the managed interface.
 local mp = require 'mp'
 local owner = nil
 local started_at = mp.get_time()
@@ -24,14 +24,16 @@ mp.add_periodic_timer(2, function()
     end
 end)
 
-local function restore_pip()
+local function restore_pip(restore_fullscreen)
     if not pip then return end
     local saved = pip
     pip = nil
     mp.set_property_native('border', saved.border)
     mp.set_property_native('ontop', saved.ontop)
     mp.set_property_number('current-window-scale', saved.scale)
-    mp.set_property_native('fullscreen', saved.fullscreen)
+    if restore_fullscreen ~= false then
+        mp.set_property_native('fullscreen', saved.fullscreen)
+    end
 end
 
 local function toggle_pip()
@@ -58,8 +60,13 @@ end
 
 mp.register_script_message('pip', toggle_pip)
 mp.register_script_message('fullscreen', function()
-    if pip then restore_pip() end
-    mp.commandv('cycle', 'fullscreen')
+    local fullscreen = not mp.get_property_native('fullscreen')
+    if pip then restore_pip(false) end
+    mp.set_property_native('fullscreen', fullscreen)
+end)
+-- Native f/double-click and uosc's fullscreen button must leave PiP as well.
+mp.observe_property('fullscreen', 'bool', function(_, fullscreen)
+    if fullscreen and pip then restore_pip(false) end
 end)
 mp.add_key_binding('Alt+p', 'qitv-pip', toggle_pip)
 mp.add_key_binding('MBTN_BACK', 'qitv-back', function() notify('back') end)

@@ -895,6 +895,7 @@ version = "1.13.6"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp", extra = ["speedups"] },
+    { name = "certifi" },
     { name = "orjson" },
     { name = "packaging" },
     { name = "pyqtdarktheme-fork" },
@@ -918,6 +919,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", extras = ["speedups"], specifier = ">=3.14.3" },
+    { name = "certifi", specifier = ">=2026.7.22" },
     { name = "orjson", specifier = ">=3.12.0" },
     { name = "packaging", specifier = ">=26.3" },
     { name = "pyqtdarktheme-fork", specifier = ">=2.3.6" },

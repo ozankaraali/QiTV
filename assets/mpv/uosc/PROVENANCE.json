@@ -1,0 +1,320 @@
+{
+  "component": "uosc",
+  "version": "5.12.0",
+  "repository": "https://github.com/tomasklaen/uosc",
+  "source_commit": "748bb238a962f8aecd0af51ee4b46651b58f6c51",
+  "annotated_tag_object": "2b8011a6c20844591267411beb641b7772e3f30c",
+  "tag_signature": "unsigned",
+  "release_asset": {
+    "url": "https://github.com/tomasklaen/uosc/releases/download/5.12.0/uosc.zip",
+    "github_asset_id": 292879398,
+    "size": 8158692,
+    "sha256": "ce5cf6bd1552de4b7cb166804f596cda678694f813041da89565171600385165",
+    "digest_verified_against": "https://api.github.com/repos/tomasklaen/uosc/releases/tags/5.12.0"
+  },
+  "source_archive": {
+    "url": "https://codeload.github.com/tomasklaen/uosc/zip/748bb238a962f8aecd0af51ee4b46651b58f6c51",
+    "path": "sources/uosc-748bb238a962f8aecd0af51ee4b46651b58f6c51.zip",
+    "size": 2645401,
+    "sha256": "ebb115729486ab2093625a848ac66c9c7b22d609c932b9c6ca629ab636c87efa"
+  },
+  "helper": {
+    "source_directory": "sources/ziggy",
+    "prebuilt_binaries_vendored": false,
+    "upstream_release_go_version": "go1.23.1",
+    "build_command": "go build -trimpath -mod=readonly -ldflags=\"-s -w\" -o OUTPUT ./src/ziggy/ziggy.go",
+    "environment": {
+      "CGO_ENABLED": "0",
+      "GOOS": "target OS",
+      "GOARCH": "target architecture"
+    },
+    "targets": [
+      {
+        "goos": "darwin",
+        "goarch": "amd64",
+        "filename": "ziggy-darwin"
+      },
+      {
+        "goos": "darwin",
+        "goarch": "arm64",
+        "filename": "ziggy-darwin"
+      },
+      {
+        "goos": "linux",
+        "goarch": "amd64",
+        "filename": "ziggy-linux"
+      },
+      {
+        "goos": "windows",
+        "goarch": "amd64",
+        "filename": "ziggy-windows.exe"
+      }
+    ],
+    "binary_hash_policy": "Generated and signed helper hashes and current pinned Go version must be recorded by the application build."
+  },
+  "reference_preferences": {
+    "version": "5.12.0",
+    "main_lua_matches_upstream": true,
+    "nondefault_uosc_options": {}
+  },
+  "runtime_source_modifications": [],
+  "qitv_configuration": [
+    "input.conf"
+  ],
+  "license_sources": {
+    "../fonts/LICENSE.Material-Icons-Apache-2.0.txt": {
+      "url": "https://raw.githubusercontent.com/google/material-design-icons/68e015dbbb6b730b5fe4934e8507cd5a465c8a3d/LICENSE",
+      "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"
+    },
+    "licenses/LICENSE.clipboard.txt": {
+      "url": "https://raw.githubusercontent.com/atotto/clipboard/v0.1.4/LICENSE",
+      "sha256": "2c4bac8e2a97180d6e7758c37de85d1cda1859aaf85b56da15d935d2d9a5564f"
+    },
+    "licenses/LICENSE.browser.txt": {
+      "url": "https://raw.githubusercontent.com/pkg/browser/5ac0b6a4141c/LICENSE",
+      "sha256": "4801bb0c5d70b980b3e1f63d1d2df8d84fec22548e3d73f03a68df1fb808791f"
+    },
+    "licenses/LICENSE.golang-sys.txt": {
+      "url": "https://raw.githubusercontent.com/golang/sys/v0.28.0/LICENSE",
+      "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    "licenses/LICENSE.Go.txt": {
+      "url": "https://raw.githubusercontent.com/golang/go/go1.23.1/LICENSE",
+      "sha256": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067"
+    },
+    "licenses/LICENSE.MPL-2.0.txt": {
+      "url": "https://www.mozilla.org/media/MPL/2.0/index.txt",
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+    }
+  },
+  "files": {
+    "char-conv/zh.json": {
+      "source": "src/uosc/char-conv/zh.json",
+      "sha256": "1e250ec50866529b57d273fa90bd8fc56f22b4371d5ea641ce3bebc832dd9889"
+    },
+    "elements/BufferingIndicator.lua": {
+      "source": "src/uosc/elements/BufferingIndicator.lua",
+      "sha256": "f7ceb7c88916e49ee5aef2a8c45d53ee5a6f9931b7977898ecf96ebfa543c1c4"
+    },
+    "elements/Button.lua": {
+      "source": "src/uosc/elements/Button.lua",
+      "sha256": "c5b9f1df2025a010f6606c708144abe383c99be485c51fae1dbdc7ee17f94f63"
+    },
+    "elements/Controls.lua": {
+      "source": "src/uosc/elements/Controls.lua",
+      "sha256": "8dc03eb0f248b9b4cc7213eeb2d9dcb5abb6e137484ecf7702f4800ba71dfd1b"
+    },
+    "elements/Curtain.lua": {
+      "source": "src/uosc/elements/Curtain.lua",
+      "sha256": "7f965119a6fc70d8cce70cf025db764a5d83433321da79a7734c691afdbb1e32"
+    },
+    "elements/CycleButton.lua": {
+      "source": "src/uosc/elements/CycleButton.lua",
+      "sha256": "e49e20110bf84d852ce4d85f26e36a24330ef9a54f28f0886cc658352e09aa75"
+    },
+    "elements/Element.lua": {
+      "source": "src/uosc/elements/Element.lua",
+      "sha256": "381141cd760a42769c0abdf7cfdf7ef26930249e133fa9800e7c8623f55bc016"
+    },
+    "elements/Elements.lua": {
+      "source": "src/uosc/elements/Elements.lua",
+      "sha256": "f44e57ea4c4c60f82f3775df9337064fdbcb7cb4bc157b47a5c07a12ee8a62c7"
+    },
+    "elements/ManagedButton.lua": {
+      "source": "src/uosc/elements/ManagedButton.lua",
+      "sha256": "da1c1ecf4d145e5c06fb7077a654b1c58412ae106e54b3f5946b919dabd01446"
+    },
+    "elements/Menu.lua": {
+      "source": "src/uosc/elements/Menu.lua",
+      "sha256": "1c1b021adab4602ea965460f2d3795559fee764238dfc686cad440df2d29ccb9"
+    },
+    "elements/PauseIndicator.lua": {
+      "source": "src/uosc/elements/PauseIndicator.lua",
+      "sha256": "3f15a46b1a7e74e1f0e23942ff1814b44c2f5fd9d7c9337222a9743271f090c6"
+    },
+    "elements/Speed.lua": {
+      "source": "src/uosc/elements/Speed.lua",
+      "sha256": "fee532d01e108cb4d74fbfdedaf91ea2fff81af3b4f3f4e3543fd8aaefa92326"
+    },
+    "elements/Timeline.lua": {
+      "source": "src/uosc/elements/Timeline.lua",
+      "sha256": "696637de58fecf46035cc688bafdddc34b3bc39c393b356689d101a2a256182a"
+    },
+    "elements/TopBar.lua": {
+      "source": "src/uosc/elements/TopBar.lua",
+      "sha256": "c8dd9a3e8dde88023f267f7ffdf72a69c78524fa0ac488fcbff7864048459993"
+    },
+    "elements/Updater.lua": {
+      "source": "src/uosc/elements/Updater.lua",
+      "sha256": "41ecb02fb396d9a05f16db16b3970986bd21b31d4d5e32db9ed072338d9bc065"
+    },
+    "elements/Volume.lua": {
+      "source": "src/uosc/elements/Volume.lua",
+      "sha256": "fa16d0cd19df402ef631931d49787ccc7fdf06adf3e86913deb5bafcd3266c7a"
+    },
+    "elements/WindowBorder.lua": {
+      "source": "src/uosc/elements/WindowBorder.lua",
+      "sha256": "61435c9c6172d47cf24c6bddf65f3e0081939cd88a20b0ae4b4a103aa613a3a2"
+    },
+    "intl/de.json": {
+      "source": "src/uosc/intl/de.json",
+      "sha256": "606d296d7d0dd010cb732722a0c9e28abc9c0d09d962e959212c29bfdf2a125e"
+    },
+    "intl/es.json": {
+      "source": "src/uosc/intl/es.json",
+      "sha256": "cc38c03c9b954c8711b23eddfedb83ba6c9653a133c3ad7e432cfecdd089a999"
+    },
+    "intl/fr.json": {
+      "source": "src/uosc/intl/fr.json",
+      "sha256": "a8ec21232c1fbb5c3de5a90f1f92ec1e4258ea9827f9eff87989f20471552c3b"
+    },
+    "intl/pl.json": {
+      "source": "src/uosc/intl/pl.json",
+      "sha256": "c3733a695296104618683f4b705b1e03493d1cd96ba5fe98c339020b3cd95cdd"
+    },
+    "intl/ro.json": {
+      "source": "src/uosc/intl/ro.json",
+      "sha256": "22c90c139b53e0b417a62987baa4e46b010195df8e85bd076861b7044dd3ab1e"
+    },
+    "intl/ru.json": {
+      "source": "src/uosc/intl/ru.json",
+      "sha256": "ac86fd3ae167e79cc51aec8bd12f04dc9491613fecdba6820f3388db6671b9a6"
+    },
+    "intl/tr.json": {
+      "source": "src/uosc/intl/tr.json",
+      "sha256": "1081a7e970764e0ff438c3d8c2164543732cc10f6feb8e11fa670b741d3d896e"
+    },
+    "intl/uk.json": {
+      "source": "src/uosc/intl/uk.json",
+      "sha256": "e57d8cbc32b5b8e92b50cde0b2eb06cb405f87a138ebd88b5cb962d84be8e4a8"
+    },
+    "intl/zh-hans.json": {
+      "source": "src/uosc/intl/zh-hans.json",
+      "sha256": "d3339e658874530f4275c70d0837986746f98a9abca453d4bb2bde285c5dde31"
+    },
+    "lib/ass.lua": {
+      "source": "src/uosc/lib/ass.lua",
+      "sha256": "e0eab05a8924cb184867c965aefdcabd5b11989335dd1d24aa9d4a44e2346694"
+    },
+    "lib/buttons.lua": {
+      "source": "src/uosc/lib/buttons.lua",
+      "sha256": "f79302eda925010a8ccbfa7e960e0fc7760114b920d641897474ed91ea318f73"
+    },
+    "lib/char_conv.lua": {
+      "source": "src/uosc/lib/char_conv.lua",
+      "sha256": "57dca5a0498d254826d8c18a1fc800b3556a6f49318e7ad0fbefc51b7167660f"
+    },
+    "lib/cursor.lua": {
+      "source": "src/uosc/lib/cursor.lua",
+      "sha256": "8a9f7bb14eae92f4b171c5655899c9954f4050a897c08db42aa90f72a84a3c0c"
+    },
+    "lib/fzy.lua": {
+      "source": "src/uosc/lib/fzy.lua",
+      "sha256": "5b1b53aaf56c8b51bd3507f6f6b76c042b92ceb55eaac8533277754158426711"
+    },
+    "lib/intl.lua": {
+      "source": "src/uosc/lib/intl.lua",
+      "sha256": "234df27c1e6a27089b04e156c3146669bbe4fcb3960169692b222c9e4867110d"
+    },
+    "lib/menus.lua": {
+      "source": "src/uosc/lib/menus.lua",
+      "sha256": "08181fa05c2a0dd0c5146c0a0e02e44a690732f84a08e3c5bfdd06ff68e0f79e"
+    },
+    "lib/std.lua": {
+      "source": "src/uosc/lib/std.lua",
+      "sha256": "fdaedd93bdb9b716dbd99ec1c8cff08b3d316c9fdc793718e2b4ee7a504799f5"
+    },
+    "lib/text.lua": {
+      "source": "src/uosc/lib/text.lua",
+      "sha256": "f4e040412b2e3c2d276d8098aa1eea01e020e916123336470dd2480a5968eb07"
+    },
+    "lib/utils.lua": {
+      "source": "src/uosc/lib/utils.lua",
+      "sha256": "29b9b56c00e7402c9ced88b942f1145f5d1fa4ba7fcfe83342c8016857e84fed"
+    },
+    "main.lua": {
+      "source": "src/uosc/main.lua",
+      "sha256": "609326e88a69b5dcb2b2c8c8931ff806d0cbf3c62ee76294d99d0bf6b429a296"
+    },
+    "../fonts/uosc_icons.otf": {
+      "source": "src/fonts/uosc_icons.otf",
+      "sha256": "a853f50913597e67f76facd269ff230c2f3038f9acadec04dd653080785dee25"
+    },
+    "../fonts/uosc_textures.ttf": {
+      "source": "src/fonts/uosc_textures.ttf",
+      "sha256": "ccc0660f284dfceb5ab31eb363ccb2355df30fcdf628e781ee374b7d4172ada5"
+    },
+    "sources/ziggy/go.mod": {
+      "source": "go.mod",
+      "sha256": "e5a12cd201a2b8a1e9b3c4517c0e78f8da752d500d38f03e2caf676e24f7feee"
+    },
+    "sources/ziggy/go.sum": {
+      "source": "go.sum",
+      "sha256": "077be33157c94b3af32eee61d91921dd38f88785b3346bc4f45fc715f72d6bea"
+    },
+    "sources/ziggy/src/ziggy/commands/clipboard.go": {
+      "source": "src/ziggy/commands/clipboard.go",
+      "sha256": "2843f99c056e21c1c5a3b54ffbd9007c83b70dd6e23ee3d3695bb05dcadecd08"
+    },
+    "sources/ziggy/src/ziggy/commands/download.go": {
+      "source": "src/ziggy/commands/download.go",
+      "sha256": "b3485f191673409da95df35ccb2291e8efd3e3302f05c4839321ccf815bc3b56"
+    },
+    "sources/ziggy/src/ziggy/commands/http.go": {
+      "source": "src/ziggy/commands/http.go",
+      "sha256": "57232d5333afa03ca10eb8e99af8dd9997d0200e08a72e00bcea19005a506816"
+    },
+    "sources/ziggy/src/ziggy/commands/open.go": {
+      "source": "src/ziggy/commands/open.go",
+      "sha256": "f260052b6e9fd51fb4c0b3c00f28a8b787ec0452aa675096fb769667764034a4"
+    },
+    "sources/ziggy/src/ziggy/commands/subtitles.go": {
+      "source": "src/ziggy/commands/subtitles.go",
+      "sha256": "f8126605af185d000fe7e0241b1ad6938229180936fc9aad9657e0cd48813c24"
+    },
+    "sources/ziggy/src/ziggy/lib/utils.go": {
+      "source": "src/ziggy/lib/utils.go",
+      "sha256": "b7d3ba06770bc165a25437e2b6b4d3792b975b0723dcbd2d7488be027f3e6e7e"
+    },
+    "sources/ziggy/src/ziggy/ziggy.go": {
+      "source": "src/ziggy/ziggy.go",
+      "sha256": "b0eb813fd5121ce2fd24a06f47f7f5d3a84436df9dfcfa324c9642bf8c127e33"
+    },
+    "../fonts/LICENSE.Material-Icons-Apache-2.0.txt": {
+      "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"
+    },
+    "licenses/LICENSE.clipboard.txt": {
+      "sha256": "2c4bac8e2a97180d6e7758c37de85d1cda1859aaf85b56da15d935d2d9a5564f"
+    },
+    "licenses/LICENSE.browser.txt": {
+      "sha256": "4801bb0c5d70b980b3e1f63d1d2df8d84fec22548e3d73f03a68df1fb808791f"
+    },
+    "licenses/LICENSE.golang-sys.txt": {
+      "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+    },
+    "licenses/LICENSE.Go.txt": {
+      "sha256": "2d36597f7117c38b006835ae7f537487207d8ec407aa9d9980794b2030cbc067"
+    },
+    "licenses/LICENSE.MPL-2.0.txt": {
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+    },
+    "LICENSE.LGPL": {
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+    },
+    "licenses/LICENSE.fzy-MIT.txt": {
+      "sha256": "8ab073f53c6d52e5fce8a62a75925c455b522a3e6cd15ecc58605813de1b1977"
+    },
+    "input.conf": {
+      "source": "QiTV integration",
+      "sha256": "28f4e668d14feec726f2d66f714fa0af545ae4c6f802eea418a9771323397c50"
+    },
+    "NOTICE.txt": {
+      "source": "QiTV integration",
+      "sha256": "a5ef8dd4a75acb96d3facd3792598b307f8ad560e0612904b773775c44134efa"
+    },
+    "../fonts/NOTICE.txt": {
+      "source": "QiTV integration",
+      "sha256": "3db55b4b2135e5f16e1edee7def0f30b0d550f38c427853c536c68a8d407f70f"
+    }
+  }
+}

@@ -51,28 +51,34 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true
+      - name: Install pinned Go toolchain for uosc
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: assets/mpv/uosc/sources/ziggy/go.sum
       - name: Install Linux native build and Qt dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build pkg-config nasm \
-            autoconf automake libtool libltdl-dev libx11-dev libxext-dev libxrandr-dev \
+            autoconf autoconf-archive automake libtool libltdl-dev libx11-dev libxext-dev libxrandr-dev \
             libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxkbcommon-dev \
-            libgl1-mesa-dev libasound2-dev libpulse-dev libxcb-cursor0
+            libgl1-mesa-dev libasound2-dev libpulse-dev libxcb-cursor0 xvfb
       - name: Install macOS native build tools
         if: runner.os == 'macOS'
-        run: brew install cmake ninja nasm autoconf automake libtool pkgconf
+        run: brew install cmake ninja nasm autoconf autoconf-archive automake libtool pkgconf
       - name: Select Windows x64 compiler
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: x64
-      - name: Install Windows assembler
+      - name: Install Windows assembler and select LLVM tools
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install nasm --yes --no-progress
           "$env:ProgramFiles\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Sync Python dependencies
         run: uv sync --frozen --dev
       - name: Prepare pinned standalone MPV and corresponding sources
@@ -82,6 +88,16 @@ jobs:
         run: |
           uv run scripts/smoke_mpv.py --fixture tests/fixtures/mpv-smoke.mp4 \
             --report build/mpv-smoke/source.json
+      - name: Exercise actual native video output
+        timeout-minutes: 2
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run -a uv run scripts/smoke_mpv.py --render --fixture tests/fixtures/mpv-smoke.mp4 \
+              --report build/mpv-smoke/source-render.json
+          else
+            uv run scripts/smoke_mpv.py --render --fixture tests/fixtures/mpv-smoke.mp4 \
+              --report build/mpv-smoke/source-render.json
+          fi
       - name: Package app with prepared native runtime
         run: uv run pyinstaller --noconfirm --clean ${{ matrix.spec }}
       - name: Sign macOS application
@@ -97,7 +113,7 @@ jobs:
           trap 'mv "$GITHUB_WORKSPACE/native/.mpv-source-only" "$GITHUB_WORKSPACE/native/mpv"' EXIT
           mkdir -p "$RUNNER_TEMP/qitv-frozen-smoke"
           cd "$RUNNER_TEMP/qitv-frozen-smoke"
-          "$GITHUB_WORKSPACE/dist/qitv" --smoke-mpv \
+          xvfb-run -a "$GITHUB_WORKSPACE/dist/qitv" --smoke-mpv --render \
             --fixture "$GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4" \
             --report "$GITHUB_WORKSPACE/build/mpv-smoke/frozen.json"
       - name: Smoke frozen macOS app without source runtime
@@ -108,7 +124,7 @@ jobs:
           trap 'mv "$GITHUB_WORKSPACE/native/.mpv-source-only" "$GITHUB_WORKSPACE/native/mpv"' EXIT
           mkdir -p "$RUNNER_TEMP/qitv-frozen-smoke"
           cd "$RUNNER_TEMP/qitv-frozen-smoke"
-          "$GITHUB_WORKSPACE/dist/QiTV.app/Contents/MacOS/QiTV" --smoke-mpv \
+          "$GITHUB_WORKSPACE/dist/QiTV.app/Contents/MacOS/QiTV" --smoke-mpv --render \
             --fixture "$GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4" \
             --report "$GITHUB_WORKSPACE/build/mpv-smoke/frozen.json"
       - name: Smoke frozen Windows app without source runtime
@@ -123,7 +139,7 @@ jobs:
             $fixture = "$env:GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4"
             $report = "$env:GITHUB_WORKSPACE/build/mpv-smoke/frozen.json"
             $process = Start-Process -FilePath $exe -WorkingDirectory "$env:RUNNER_TEMP/qitv-frozen-smoke" `
-              -ArgumentList @('--smoke-mpv', '--fixture', "`"$fixture`"", '--report', "`"$report`"") -PassThru
+              -ArgumentList @('--smoke-mpv', '--render', '--fixture', "`"$fixture`"", '--report', "`"$report`"") -PassThru
             if (-not $process.WaitForExit(90000)) {
               taskkill /PID $process.Id /T /F
               throw 'Frozen MPV smoke exceeded 90 seconds'
@@ -160,7 +176,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mpv-smoke-${{ matrix.name }}
-          path: build/mpv-smoke/*.json
+          path: |
+            build/mpv-smoke/*.json
+            build/mpv-smoke/*.png
           if-no-files-found: warn
 
   release:

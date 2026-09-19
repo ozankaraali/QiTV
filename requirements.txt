@@ -89,7 +89,9 @@ brotlicffi==1.2.0.2 ; platform_python_implementation != 'CPython' \
 certifi==2026.7.22 \
     --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \
     --hash=sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55
-    # via requests
+    # via
+    #   qitv
+    #   requests
 cffi==2.1.1 ; (platform_python_implementation != 'CPython' and sys_platform == 'android') or (platform_python_implementation != 'CPython' and sys_platform == 'ios') or (sys_platform != 'android' and sys_platform != 'ios') \
     --hash=sha256:0beceaabe56af686895136a2de78db54ecd8e4046b236b8fd6d6cb61389e9bf2 \
     --hash=sha256:1a18a57b58cfb21fc28d72e876acf10eaed67a1ed96226f92af4df681d571c4c \
