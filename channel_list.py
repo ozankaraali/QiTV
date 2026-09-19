@@ -76,6 +76,10 @@ class ChannelList(
         self._all_provider_cache_snapshot: List[tuple[str, dict]] = []
         self._pending_cross_provider_activation: Optional[Dict[str, Any]] = None
         self._info_panel_enabled = True
+        self._bg_jobs = []
+        self._active_content_worker = None
+        self._provider_setup_running = False
+        self._queued_provider_refresh = None
 
         self.link: Optional[str] = None
         self.current_category: Optional[Dict[str, Any]] = None  # For back navigation
@@ -178,17 +182,41 @@ class ChannelList(
 
         self.set_provider()
 
-        # Keep references to background jobs (threads/workers)
-        self._bg_jobs = []
+        # Check the visible catalog periodically; series navigation uses its cached
+        # snapshot until the user returns to the catalog.
+        self.content_refresh_timer = QTimer(self)
+        self.content_refresh_timer.setInterval(5 * 60 * 1000)
+        self.content_refresh_timer.timeout.connect(self.refresh_stale_content)
+        self.content_refresh_timer.start()
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
+        from options import _verification_jobs
+
+        self._closing = True
+        self._queued_provider_refresh = None
+        self.cancel_content_loading()
+        self.stop_image_loading()
+        self.content_refresh_timer.stop()
         # Stop and delete timer
         if self.refresh_on_air_timer.isActive():
             self.refresh_on_air_timer.stop()
+        if (
+            self._bg_jobs
+            or self._provider_setup_running
+            or getattr(self, "_retired_image_loaders", [])
+            or _verification_jobs
+        ):
+            # Keep delivering queued completions until every QThread has stopped.
+            # Never destroy a running thread or block the GUI in wait().
+            self.setEnabled(False)
+            self.statusBar().showMessage("Closing after background requests finish...")
+            QTimer.singleShot(100, self.close)
+            event.ignore()
+            return
         self.refresh_on_air_timer.deleteLater()
 
         self.app.quit()
@@ -202,8 +230,10 @@ class ChannelList(
     # EPG refresh
     # ------------------------------------------------------------------
 
-    def refresh_on_air(self):
-        for i in range(self.content_list.topLevelItemCount()):
+    def refresh_on_air(self, first=0, end=None):
+        if end is None:
+            end = self.content_list.topLevelItemCount()
+        for i in range(first, end):
             item = self.content_list.topLevelItem(i)
             item_data = item.data(0, Qt.UserRole)
             content_type = item_data.get("type")
@@ -274,13 +304,35 @@ class ChannelList(
     # Provider management
     # ------------------------------------------------------------------
 
+    def refresh_stale_content(self):
+        if (
+            self._provider_setup_running
+            or self._active_content_worker is not None
+            or self.current_series is not None
+            or self._all_providers_mode
+            or QApplication.activeModalWidget() is not None
+        ):
+            return
+        if self.provider_manager.is_content_stale(self.content_type):
+            self.update_content()
+
     def set_provider(self, force_update=False):
+        self.cancel_content_loading()
+        self.stop_image_loading()
+        if self._provider_setup_running:
+            self._queued_provider_refresh = bool(self._queued_provider_refresh or force_update)
+            return
+        self._provider_setup_running = True
+        self._exit_all_providers_mode()
+        self.current_category = None
+        self.current_series = None
+        self.current_season = None
+        self.content_list.clear()
         self.lock_ui_before_loading()
         self.progress_bar.setRange(0, 0)  # busy indicator
 
-        if force_update:
-            self.provider_manager.clear_current_provider_cache()
-
+        self.sidebar.setEnabled(False)
+        self.app_menu.settings_action.setEnabled(False)
         # Reset navigation histories on provider switch
         self.navigation_stack.clear()
         self.forward_stack.clear()
@@ -306,6 +358,16 @@ class ChannelList(
         if hasattr(self, "set_provider_thread"):
             self.set_provider_thread.deleteLater()
             del self.set_provider_thread
+        self._provider_setup_running = False
+        if getattr(self, "_closing", False):
+            return
+        if self._queued_provider_refresh is not None:
+            queued_force = self._queued_provider_refresh
+            self._queued_provider_refresh = None
+            self.set_provider(force_update=queued_force)
+            return
+        self.sidebar.setEnabled(True)
+        self.app_menu.settings_action.setEnabled(True)
         self.unlock_ui_after_loading()
 
         # Connect provider combo signal after first initialization (deferred to main thread)
@@ -540,6 +602,7 @@ class ChannelList(
         list_layout.setContentsMargins(0, 0, 0, 0)
 
         self.content_list = QTreeWidget(self.list_panel)
+        self.content_list.header().setResizeContentsPrecision(250)
         self.content_list.setSelectionMode(QTreeWidget.SingleSelection)
         self.content_list.setIndentation(0)
         self.content_list.setAlternatingRowColors(True)
@@ -603,6 +666,7 @@ class ChannelList(
         self.splitter_content_info.splitterMoved.connect(self.update_splitter_content_info_ratio)
 
     def clear_content_info_panel(self):
+        self.stop_poster_loading()
         # Clear all widgets from the content_info layout
         for i in reversed(range(self.content_info_layout.count())):
             widget = self.content_info_layout.itemAt(i).widget()
@@ -753,6 +817,10 @@ class ChannelList(
         QTimer.singleShot(0, lambda: self.set_provider())
 
     def _on_sidebar_content_type(self, content_type):
+        if self._provider_setup_running:
+            return
+        self.cancel_content_loading()
+        self.stop_image_loading()
         self.content_type = content_type
         self.current_category = None
         self.current_series = None
@@ -775,6 +843,7 @@ class ChannelList(
 
     def _show_favorites_flat(self):
         """Load all content across categories and display only favorites."""
+        self.cancel_content_render()
         content_data = self.provider_manager.current_provider_content.get(self.content_type, {})
         if not isinstance(content_data, dict):
             return
@@ -828,6 +897,8 @@ class ChannelList(
 
     def _enter_all_providers_mode(self):
         """Enter cross-provider search mode."""
+        self.cancel_content_loading()
+        self.stop_image_loading()
         self._all_providers_mode = True
         self._all_provider_cache_snapshot = self.provider_manager.get_all_providers_cached_content()
         self.content_list.clear()
@@ -860,51 +931,48 @@ class ChannelList(
         self.refresh_channels()
 
     def refresh_channels(self):
-        # No refresh for content other than itv
-        if self.content_type != "itv":
+        if self.content_type != "itv" or self.current_list_content not in ("channel", "m3ucontent"):
             return
-        # No refresh from itv list of categories
-        selected_provider = self.provider_manager.current_provider
-        config_type = selected_provider.get("type", "").upper()
-        if config_type == "STB" and not self.current_category:
-            return
-
-        # Get the index of the selected item in the content list
-        selected_item = self.content_list.selectedItems()
-        selected_row = None
-        if selected_item:
-            selected_row = self.content_list.indexOfTopLevelItem(selected_item[0])
-
-        # Store how was sorted the content list
+        current_item = self.content_list.currentItem()
+        selected_id = (
+            current_item.data(0, Qt.UserRole)["data"].get("id")
+            if current_item is not None
+            else None
+        )
         sort_column = self.content_list.sortColumn()
-
-        # Update the content list
-        if config_type != "STB":
-            # For non-STB (Xtream or M3U), display content directly
-            content_data = self.provider_manager.current_provider_content.get(self.content_type, {})
-            # Get the items from either 'contents' or the content_data itself
-            items = content_data.get("contents", content_data)
-
-            # Determine content type for display
-            if config_type == "XTREAM":
-                content_type_name = "channel"
-            else:
-                content_type_name = "m3ucontent"
-
-            self.display_content(items, content=content_type_name, select_first=False)
+        sort_order = self.content_list.header().sortIndicatorOrder()
+        content_data = self.provider_manager.current_provider_content.get("itv", {})
+        if isinstance(content_data, list):
+            items = content_data
         else:
-            # Reload the current category
-            self.load_content_in_category(self.current_category)
+            contents = content_data.get("contents", [])
+            category_id = (
+                str(self.current_category.get("id", "*")) if self.current_category else "*"
+            )
+            if isinstance(contents, dict):
+                items = contents.get(category_id, [])
+            elif category_id == "*":
+                items = contents
+            else:
+                indices = content_data.get("sorted_channels", {}).get(category_id, [])
+                items = [contents[index] for index in indices]
 
-        # Restore the sorting
-        self.content_list.sortItems(sort_column, self.content_list.header().sortIndicatorOrder())
+        def restore_view():
+            column = sort_column if sort_column < self.content_list.columnCount() else 0
+            self.content_list.header().setSortIndicator(column, sort_order)
+            if selected_id is not None:
+                for row in range(self.content_list.topLevelItemCount()):
+                    item = self.content_list.topLevelItem(row)
+                    if (
+                        item is not None
+                        and item.data(0, Qt.UserRole)["data"].get("id") == selected_id
+                    ):
+                        self.content_list.setCurrentItem(item)
+                        break
 
-        # Restore the selected item
-        if selected_row is not None:
-            item = self.content_list.topLevelItem(selected_row)
-            if item:
-                self.content_list.setCurrentItem(item)
-                self.item_selected()
+        self.display_content(
+            items, content=self.current_list_content, select_first=False, on_complete=restore_view
+        )
 
     def can_show_content_info(self, item_type):
         # Show metadata panel for VOD/Series across STB and Xtream providers
@@ -927,6 +995,7 @@ class ChannelList(
     # ------------------------------------------------------------------
 
     def item_selected(self):
+        self.stop_poster_loading()
         if not self._info_panel_enabled:
             self.clear_content_info_panel()
             return
@@ -953,6 +1022,8 @@ class ChannelList(
                 self.update_layout()
 
     def item_activated(self, item):
+        if self._provider_setup_running:
+            return
         data = item.data(0, Qt.UserRole)
         if data and "type" in data:
             item_data = data["data"]
@@ -1048,6 +1119,8 @@ class ChannelList(
 
     def go_back(self):
         if self.navigation_stack:
+            self.cancel_content_loading()
+            self.stop_image_loading()
             nav_type, previous_data, previous_selected_id = self.navigation_stack.pop()
             # Save to forward stack so we can undo this Back
             self.forward_stack.append((nav_type, previous_data, previous_selected_id))
@@ -1057,8 +1130,13 @@ class ChannelList(
                     self.content_type, {}
                 )
                 categories = content.get("categories", [])
-                self.display_categories(categories, select_first=previous_selected_id)
                 self.current_category = None
+                self.current_series = None
+                self.current_season = None
+                if self.provider_manager.is_content_stale(self.content_type):
+                    self.update_content()
+                else:
+                    self.display_categories(categories, select_first=previous_selected_id)
             elif nav_type == "category":
                 # Go back to category content
                 self.current_category = previous_data
@@ -1150,6 +1228,8 @@ class ChannelList(
                             return True
 
                 if event.type() == QEvent.MouseButtonPress:
+                    back_btn: Qt.MouseButton | None
+                    fwd_btn: Qt.MouseButton | None
                     try:
                         back_btn = Qt.MouseButton.BackButton
                     except Exception:
@@ -1182,6 +1262,7 @@ class ChannelList(
     def options_dialog(self):
         options = OptionsDialog(self)
         options.exec_()
+        self.refresh_stale_content()
         # Refresh provider combo in case providers were added/removed/renamed
         self.populate_provider_combo()
 

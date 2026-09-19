@@ -1,12 +1,15 @@
 """Content display, filtering, info panel, favorites, and logo methods."""
 
 import base64
+from collections.abc import Buffer, Generator
+from contextlib import contextmanager
 from datetime import datetime
 import html
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from time import monotonic
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
-from PySide6.QtCore import QBuffer, QSize, Qt, QTimer
+from PySide6.QtCore import QBuffer, QObject, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -70,6 +73,53 @@ class DisplayMixin:
     current_season: Optional[Dict[str, Any]]
     image_loader: Optional[ImageLoader]
     _all_provider_cache_snapshot: List[Any]
+    _retired_image_loaders: List[ImageLoader]
+    _content_renderer: Optional[Generator[None, None, None]] = None
+    _render_generation = 0
+
+    def cancel_content_render(self):
+        self._render_generation += 1
+        timer = getattr(self, "_content_render_timer", None)
+        if timer is not None:
+            timer.stop()
+        renderer = self._content_renderer
+        self._content_renderer = None
+        if renderer is not None:
+            renderer.close()
+
+    def _continue_content_render(self):
+        renderer = self._content_renderer
+        if renderer is None:
+            return
+        generation = self._render_generation
+        # A completion callback may navigate again; never close a running generator.
+        self._content_renderer = None
+        try:
+            next(renderer)
+        except StopIteration:
+            return
+        if generation != self._render_generation:
+            renderer.close()
+            return
+        self._content_renderer = renderer
+        self._content_render_timer.start(1)
+
+    @contextmanager
+    def _batch_content_updates(self, sorting=None):
+        """Keep selection callbacks and repaints out of structural tree changes."""
+        updates_enabled = self.content_list.updatesEnabled()
+        signals_blocked = self.content_list.blockSignals(True)
+        # Filtering changes visibility only; do not re-sort the entire catalog.
+        self.content_list.setUpdatesEnabled(False)
+        if sorting is not None:
+            self.content_list.setSortingEnabled(False)
+        try:
+            yield
+        finally:
+            if sorting is not None:
+                self.content_list.setSortingEnabled(sorting)
+            self.content_list.blockSignals(signals_blocked)
+            self.content_list.setUpdatesEnabled(updates_enabled)
 
     def toggle_content_type(self, content_type=None):
         """Switch content type. Called by sidebar or legacy code."""
@@ -84,39 +134,30 @@ class DisplayMixin:
         self.top_bar.clear_search()
 
     def display_categories(self, categories, select_first=True):
-        # Unregister the content_list selection change event
-        try:
-            self.content_list.itemSelectionChanged.disconnect(self.item_selected)
-        except (TypeError, RuntimeError):
-            pass
-        self.content_list.clear()
-        # Re-register the content_list selection change event
-        self.content_list.itemSelectionChanged.connect(self.item_selected)
-
-        # Stop refreshing content list
+        self.cancel_content_render()
+        self.stop_image_loading()
         self.refresh_on_air_timer.stop()
-
         self.current_list_content = "category"
+        favorites = set(self.config_manager.favorites)
 
-        self.content_list.setSortingEnabled(False)
-        self.content_list.setColumnCount(1)
-        if self.content_type == "itv":
-            self.content_list.setHeaderLabels([f"Channel Categories ({len(categories)})"])
-        elif self.content_type == "vod":
-            self.content_list.setHeaderLabels([f"Movie Categories ({len(categories)})"])
-        elif self.content_type == "series":
-            self.content_list.setHeaderLabels([f"Serie Categories ({len(categories)})"])
+        with self._batch_content_updates(sorting=True):
+            self.content_list.clear()
+            self.content_list.setColumnCount(1)
+            if self.content_type == "itv":
+                self.content_list.setHeaderLabels([f"Channel Categories ({len(categories)})"])
+            elif self.content_type == "vod":
+                self.content_list.setHeaderLabels([f"Movie Categories ({len(categories)})"])
+            elif self.content_type == "series":
+                self.content_list.setHeaderLabels([f"Serie Categories ({len(categories)})"])
 
-        for category in categories:
-            item = CategoryTreeWidgetItem(self.content_list)
-            item.setText(0, category.get("title", "Unknown Category"))
-            item.setData(0, Qt.UserRole, {"type": "category", "data": category})
-            # Highlight favorite items
-            if self.check_if_favorite(category.get("title", "")):
-                item.setBackground(0, QColor(201, 107, 67, 24))
+            for category in categories:
+                item = CategoryTreeWidgetItem(self.content_list)
+                item.setText(0, category.get("title", "Unknown Category"))
+                item.setData(0, Qt.UserRole, {"type": "category", "data": category})
+                if category.get("title", "") in favorites:
+                    item.setBackground(0, QColor(201, 107, 67, 24))
 
-        self.content_list.sortItems(0, Qt.AscendingOrder)
-        self.content_list.setSortingEnabled(True)
+            self.content_list.header().setSortIndicator(0, Qt.AscendingOrder)
         self.top_bar.set_back_visible(False)
 
         self.clear_content_info_panel()
@@ -124,8 +165,9 @@ class DisplayMixin:
         # Select an item in the list (first or a previously selected)
         if select_first:
             if select_first == True:
-                if self.content_list.topLevelItemCount() > 0:
-                    self.content_list.setCurrentItem(self.content_list.topLevelItem(0))
+                first_item = self.content_list.topLevelItem(0)
+                if first_item is not None:
+                    self.content_list.setCurrentItem(first_item)
             else:
                 previous_selected_id = select_first
                 previous_selected = self.content_list.findItems(
@@ -135,38 +177,16 @@ class DisplayMixin:
                     self.content_list.setCurrentItem(previous_selected[0])
                     self.content_list.scrollToItem(previous_selected[0], QTreeWidget.PositionAtTop)
 
-    def display_content(self, items, content="m3ucontent", select_first=True):
-        # Stop refreshing On Air content BEFORE any structural changes
-        try:
-            if self.refresh_on_air_timer.isActive():
-                self.refresh_on_air_timer.stop()
-        except Exception:
-            pass
-
-        # Unregister the selection change event during rebuild
-        try:
-            self.content_list.itemSelectionChanged.disconnect(self.item_selected)
-        except (TypeError, RuntimeError):
-            pass
-
-        # Disable widget updates during clear (but keep signals enabled to allow Qt internal cleanup)
-        self.content_list.setUpdatesEnabled(False)
-
-        try:
-            self.content_list.clear()
-        except Exception as e:
-            logger.error(f"Error clearing content_list: {e}", exc_info=True)
-
-        try:
-            self.content_list.setSortingEnabled(False)
-        except (RuntimeError, AttributeError):
-            pass
-
-        # Defer reconnecting itemSelectionChanged until population completes
+    def display_content(self, items, content="m3ucontent", select_first=True, on_complete=None):
+        self.cancel_content_render()
+        self.stop_image_loading()
+        self.refresh_on_air_timer.stop()
+        self.clear_content_info_panel()
 
         self.current_list_content = content
         need_logos = content in ["channel", "m3ucontent"] and self.config_manager.channel_logos
         logo_urls = []
+        logo_items = []
         use_epg = self.can_show_epg(content) and self.config_manager.channel_epg
 
         # Define headers for different content types
@@ -232,91 +252,101 @@ class DisplayMixin:
             },
         }
 
-        # Get headers
         headers = header_info[content]["headers"]
-        self.content_list.setColumnCount(len(headers))
-        try:
-            self.content_list.setHeaderLabels(headers)
-        except Exception as e:
-            logger.error(f"display_content: setHeaderLabels failed: {e}", exc_info=True)
-            raise
-
-        # no favorites on seasons or episodes genre_sfolders
         check_fav = content in ["channel", "movie", "serie", "m3ucontent"]
+        favorites = set(self.config_manager.favorites) if check_fav else set()
 
-        # Disable updates during population to prevent Qt conflicts
-        self.content_list.setUpdatesEnabled(False)
+        with self._batch_content_updates(sorting=False):
+            self.content_list.clear()
+            self.content_list.setColumnCount(len(headers))
+            self.content_list.setHeaderLabels(headers)
+            self.content_list.header().setSortIndicator(0, Qt.AscendingOrder)
+        self.top_bar.set_back_visible(content != "m3ucontent")
+        if use_epg:
+            self.content_list.setItemDelegate(ChannelItemDelegate())
+            self.content_list.setColumnWidth(2, 100)
+            self.content_list.header().setMinimumSectionSize(100)
 
-        for item_idx, item_data in enumerate(items):
-            # Create tree widget item based on content type
-            if content == "channel":
-                list_item = ChannelTreeWidgetItem(self.content_list)
-            elif content in ["season", "episode"]:
-                # Use NumberedTreeWidgetItem for seasons and episodes (numeric sorting)
-                list_item = NumberedTreeWidgetItem(self.content_list)
-            else:
-                # Use plain QTreeWidgetItem for other content
-                list_item = QTreeWidgetItem(self.content_list)
+        def populate():
+            position = 0
+            while position < len(items):
+                first = position
+                deadline = monotonic() + 0.008
+                batch: List[QTreeWidgetItem] = []
+                # Build detached items: one insertion notification per batch,
+                # rather than model updates for every field on every row.
+                while position < len(items) and len(batch) < 1000:
+                    item_data = items[position]
+                    texts = []
+                    for key in header_info[content]["keys"]:
+                        raw_value = item_data.get(key)
+                        if key == "added":
+                            text_value = str(raw_value).split()[0] if raw_value else ""
+                        else:
+                            text_value = (
+                                html.unescape(str(raw_value)) if raw_value is not None else ""
+                            )
+                        texts.append(text_value)
+                    list_item: QTreeWidgetItem
+                    if content == "channel":
+                        list_item = ChannelTreeWidgetItem(texts)
+                    elif content in ["season", "episode"]:
+                        list_item = NumberedTreeWidgetItem(texts)
+                    else:
+                        list_item = QTreeWidgetItem(texts)
+                    list_item.setData(0, Qt.UserRole, {"type": content, "data": item_data})
+                    if need_logos:
+                        logo_urls.append(item_data.get("logo", ""))
+                        logo_items.append(list_item)
+                    if check_fav and (item_data.get("name") or item_data.get("title")) in favorites:
+                        list_item.setBackground(0, QColor(201, 107, 67, 24))
+                    batch.append(list_item)
+                    position += 1
+                    if monotonic() >= deadline:
+                        break
+                with self._batch_content_updates():
+                    self.content_list.addTopLevelItems(batch)
+                    if use_epg:
+                        self.refresh_on_air(first, position)
+                if position < len(items):
+                    self.content_list.headerItem().setText(0, f"{headers[0]} (loading...)")
+                    yield
+            with self._batch_content_updates(sorting=True):
+                self.content_list.setHeaderLabels(headers)
+            self._finish_content_render(
+                headers, select_first, use_epg, logo_urls, logo_items, on_complete
+            )
 
-            for col_idx, key in enumerate(header_info[content]["keys"]):
-                raw_value = item_data.get(key)
-                if key == "added":
-                    # Show only date part if present
-                    text_value = str(raw_value).split()[0] if raw_value else ""
-                else:
-                    text_value = html.unescape(str(raw_value)) if raw_value is not None else ""
-                list_item.setText(col_idx, text_value)
+        if not hasattr(self, "_content_render_timer"):
+            self._content_render_timer = QTimer(cast(QObject, self))
+            self._content_render_timer.setSingleShot(True)
+            self._content_render_timer.timeout.connect(self._continue_content_render)
+        self._content_renderer = populate()
+        self._continue_content_render()
 
-            list_item.setData(0, Qt.UserRole, {"type": content, "data": item_data})
-
-            # If content type is channel, collect the logo urls from the image_manager
-            if need_logos:
-                logo_urls.append(item_data.get("logo", ""))
-
-            # Highlight favorite items
-            item_name = item_data.get("name") or item_data.get("title")
-            if check_fav and self.check_if_favorite(item_name):
-                list_item.setBackground(0, QColor(201, 107, 67, 24))
-
-        self.content_list.sortItems(0, Qt.AscendingOrder)
-        self.content_list.setSortingEnabled(True)
-
-        # Re-enable updates now that population and sorting are complete
-        self.content_list.setUpdatesEnabled(True)
+    def _finish_content_render(
+        self, headers, select_first, use_epg, logo_urls, logo_items, on_complete
+    ):
 
         # Resize columns AFTER re-enabling updates to avoid Qt timer conflicts
-        for i in range(len(header_info[content]["headers"])):
+        for i in range(len(headers)):
             if i != 2:  # Don't auto-resize the progress column
                 try:
                     self.content_list.resizeColumnToContents(i)
                 except Exception as e:
                     logger.error(f"Error resizing column {i}: {e}", exc_info=True)
 
-        self.top_bar.set_back_visible(content != "m3ucontent")
-
         if use_epg:
-            self.content_list.setItemDelegate(ChannelItemDelegate())
-            # Set a fixed width for the progress column
-            self.content_list.setColumnWidth(
-                2, 100
-            )  # Force column 2 (progress) to be 100 pixels wide
-            # Prevent user from resizing the progress column too small
-            self.content_list.header().setMinimumSectionSize(100)
-            # Start refreshing content list (currently aired program)
-            self.refresh_on_air()
             self.refresh_on_air_timer.start(30000)
-
-        # Re-register the selection change event after rebuild
-        try:
-            self.content_list.itemSelectionChanged.connect(self.item_selected)
-        except Exception:
-            pass
+        if self.top_bar.search_text() or self.sidebar.favorites_btn.isChecked():
+            self.filter_content(self.top_bar.search_text())
 
         # Select an item in the list (first or a previously selected)
-        if select_first:
+        if select_first and self.content_list.currentItem() is None:
             if select_first == True:
-                if self.content_list.topLevelItemCount() > 0:
-                    self.content_list.setCurrentItem(self.content_list.topLevelItem(0))
+                first_item = self.content_list.topLevelItem(0)
+                if first_item is not None:
+                    self.content_list.setCurrentItem(first_item)
             else:
                 previous_selected_id = select_first
                 previous_selected = self.content_list.findItems(
@@ -327,61 +357,38 @@ class DisplayMixin:
                     self.content_list.scrollToItem(previous_selected[0], QTreeWidget.PositionAtTop)
 
         # Load channel logos if needed
-        if need_logos:
-            self.lock_ui_before_loading()
-            if self.image_loader and self.image_loader.isRunning():
-                self.image_loader.wait()
-            self.image_loader = ImageLoader(
-                logo_urls,
-                self.image_manager,
-                iconified=True,
-                verify_ssl=self.config_manager.ssl_verify,
-            )
-            self.image_loader.progress_updated.connect(self.update_channel_logos)
-            self.image_loader.finished.connect(self.image_loader_finished)
-            self.image_loader.start()
-            self.cancel_button.setText("Cancel fetching channel logos...")
+        if logo_urls:
+            self._start_logo_loading(logo_urls, logo_items)
+        if on_complete is not None:
+            on_complete()
 
     def update_channel_logos(self, current, total, data):
-        self.update_progress(current, total)
-        if data:
-            # Prefer using cache_path to construct GUI objects in the main thread
-            from channel_list import ChannelList
-
-            logo_column = ChannelList.get_logo_column(self.current_list_content)
-            rank = data.get("rank", 0)
-            item = (
-                self.content_list.topLevelItem(rank)
-                if rank < self.content_list.topLevelItemCount()
-                else None
-            )
-            if not item:
-                return
-            cache_path = data.get("cache_path")
-            if cache_path:
-                pix = QPixmap(cache_path)
-                if not pix.isNull():
-                    item.setIcon(logo_column, QIcon(pix))
-            else:
-                # Backward compatibility: if an icon was provided (older worker behavior)
-                qicon = data.get("icon", None)
-                if qicon:
-                    item.setIcon(logo_column, qicon)
+        if self.sender() is not self.image_loader or not data:
+            return
+        rank = data.get("rank")
+        if not isinstance(rank, int) or not 0 <= rank < len(self._logo_items):
+            return
+        # Ranks refer to the request order, not the tree's current sort order.
+        item = self._logo_items[rank]
+        cache_path = data.get("cache_path")
+        if cache_path:
+            pixmap = QPixmap(cache_path)
+            if not pixmap.isNull():
+                item.setIcon(self._logo_column, QIcon(pixmap))
 
     def update_poster(self, current, total, data):
-        self.update_progress(current, total)
-        if data:
-            cache_path = data.get("cache_path")
-            pixmap = None
-            if cache_path:
-                pixmap = QPixmap(cache_path)
+        if self.sender() is not getattr(self, "_poster_loader", None) or not data:
+            return
+        cache_path = data.get("cache_path")
+        if cache_path:
+            pixmap = QPixmap(cache_path)
             if pixmap and not pixmap.isNull():
                 scaled_pixmap = pixmap.scaled(200, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 buffer = QBuffer()
                 buffer.open(QBuffer.ReadWrite)
                 scaled_pixmap.save(buffer, "PNG")
                 buffer.close()
-                base64_data = base64.b64encode(buffer.data()).decode("utf-8")
+                base64_data = base64.b64encode(cast(Buffer, buffer.data())).decode("utf-8")
                 img_tag = f'<img src="data:image/png;base64,{base64_data}" alt="Poster Image" style="float:right; margin: 0 0 10px 10px;">'
                 self.content_info_text.setText(img_tag + self.content_info_text.text())
 
@@ -393,6 +400,7 @@ class DisplayMixin:
 
         show_favorites = self.sidebar.favorites_btn.isChecked()
         search_text = text.lower() if isinstance(text, str) else ""
+        favorites = set(self.config_manager.favorites) if show_favorites else set()
 
         # When favorites is active at category level, switch to flat favorites view
         if show_favorites and self.current_list_content == "category":
@@ -405,78 +413,67 @@ class DisplayMixin:
             item = self.content_list.topLevelItem(0)
             item_type = self.get_item_type(item)
 
-        for i in range(self.content_list.topLevelItemCount()):
-            item = self.content_list.topLevelItem(i)
-            item_name = self.get_item_name(item, item_type)
-            matches_search = search_text in item_name.lower()
+        with self._batch_content_updates():
+            for i in range(self.content_list.topLevelItemCount()):
+                item = self.content_list.topLevelItem(i)
+                item_name = self.get_item_name(item, item_type)
+                matches_search = search_text in item_name.lower()
 
-            # Optionally include metadata fields (description/plot, group, On Air EPG) in search
-            if (
-                not matches_search
-                and hasattr(self, "app_menu")
-                and self.app_menu.search_descriptions_action.isChecked()
-                and item_type in ["channel", "movie", "serie", "m3ucontent"]
-            ):
-                try:
-                    data = item.data(0, Qt.UserRole) or {}
-                    content = data.get("data", {}) if isinstance(data, dict) else {}
-                    description = content.get("description") or content.get("plot") or ""
-                    group = content.get("group", "")
-                    # Check textual metadata
-                    if (isinstance(description, str) and search_text in description.lower()) or (
-                        isinstance(group, str) and search_text in group.lower()
-                    ):
-                        matches_search = True
-                    # Check EPG "On Air" column text for channels/m3u when EPG is enabled
-                    if (
-                        not matches_search
-                        and item_type in ["channel", "m3ucontent"]
-                        and self.config_manager.channel_epg
-                        and self.can_show_epg(item_type)
-                    ):
-                        try:
+                # Optionally include descriptions, group names, and On Air EPG.
+                if (
+                    not matches_search
+                    and hasattr(self, "app_menu")
+                    and self.app_menu.search_descriptions_action.isChecked()
+                    and item_type in ["channel", "movie", "serie", "m3ucontent"]
+                ):
+                    try:
+                        data = item.data(0, Qt.UserRole) or {}
+                        content = data.get("data", {}) if isinstance(data, dict) else {}
+                        description = content.get("description") or content.get("plot") or ""
+                        group = content.get("group", "")
+                        if (
+                            isinstance(description, str) and search_text in description.lower()
+                        ) or (isinstance(group, str) and search_text in group.lower()):
+                            matches_search = True
+                        if (
+                            not matches_search
+                            and item_type in ["channel", "m3ucontent"]
+                            and self.config_manager.channel_epg
+                            and self.can_show_epg(item_type)
+                        ):
                             epg_text = item.data(3, Qt.UserRole) or ""
                             if isinstance(epg_text, str) and search_text in epg_text.lower():
                                 matches_search = True
-                        except Exception:
-                            pass
-                except Exception:
-                    # Be conservative; ignore metadata if unexpected structure
-                    pass
+                    except Exception:
+                        # Ignore metadata with an unexpected structure.
+                        pass
 
-            # For categories, check if any content inside matches and show dropdown
-            if item_type == "category" and search_text:
-                matching_items = self._get_matching_items_in_category(item, search_text)
-                if matching_items:
-                    matches_search = True
-                    # Populate category with matching items as children
-                    self._populate_category_dropdown(item, matching_items)
-                    item.setExpanded(True)  # Auto-expand to show matches
-                else:
-                    # Category name matches but no content inside
-                    # Clear any existing children
-                    item.takeChildren()
-                    if not matches_search:
-                        item.setExpanded(False)
-            else:
-                # Not searching or not a category - clear children
-                if item_type == "category":
+                if item_type == "category" and search_text:
+                    matching_items = self._get_matching_items_in_category(item, search_text)
+                    if matching_items:
+                        matches_search = True
+                        self._populate_category_dropdown(item, matching_items)
+                        item.setExpanded(True)
+                    else:
+                        item.takeChildren()
+                        if not matches_search:
+                            item.setExpanded(False)
+                elif item_type == "category":
                     item.takeChildren()
                     item.setExpanded(False)
 
-            if item_type in ["category", "channel", "movie", "serie", "m3ucontent"]:
-                # For category, channel, movie, serie and generic content, filter by search text and favorite
-                is_favorite = self.check_if_favorite(item_name)
-                if show_favorites and not is_favorite:
-                    item.setHidden(True)
+                if item_type in ["category", "channel", "movie", "serie", "m3ucontent"]:
+                    item.setHidden(
+                        not matches_search or (show_favorites and item_name not in favorites)
+                    )
                 else:
                     item.setHidden(not matches_search)
-            else:
-                # For season, episode, only filter by search text
-                item.setHidden(not matches_search)
 
     def _fusion_search(self, text):
         """Search across all providers' cached content."""
+        self.cancel_content_render()
+        self.stop_image_loading()
+        self.clear_content_info_panel()
         self.content_list.clear()
 
         if not text or len(text) < 3:
@@ -756,29 +753,85 @@ class DisplayMixin:
 
     # --- Logo / image loading ---
 
-    def rescan_logos(self):
-        # Loop on content_list items to get logos and delete them from image_manager
-        logo_urls = []
-        for i in range(self.content_list.topLevelItemCount()):
-            item = self.content_list.topLevelItem(i)
-            url_logo = item.data(0, Qt.UserRole)["data"].get("logo", "")
-            logo_urls.append(url_logo)
-            if url_logo:
-                self.image_manager.remove_icon_from_cache(url_logo)
+    def _retire_image_loader(self, loader):
+        if loader is None:
+            return
+        if loader is self.image_loader:
+            self.image_loader = None
+            self._logo_items = []
+        if loader is getattr(self, "_poster_loader", None):
+            self._poster_loader = None
+        if not hasattr(self, "_retired_image_loaders"):
+            self._retired_image_loaders = []
+        if loader not in self._retired_image_loaders:
+            self._retired_image_loaders.append(loader)
+            loader.cancel()
 
-        self.lock_ui_before_loading()
-        if self.image_loader and self.image_loader.isRunning():
-            self.image_loader.wait()
+    def stop_image_loading(self):
+        """Detach results immediately; retain each thread until its finished signal."""
+        self._retire_image_loader(self.image_loader)
+        self.stop_poster_loading()
+
+    def stop_poster_loading(self):
+        self._retire_image_loader(getattr(self, "_poster_loader", None))
+
+    def image_loader_finished(self):
+        loader = self.sender()
+        if loader is None:
+            return
+        if loader is self.image_loader:
+            self.image_loader = None
+            self._logo_items = []
+        elif loader is getattr(self, "_poster_loader", None):
+            self._poster_loader = None
+        elif loader in getattr(self, "_retired_image_loaders", ()):
+            self._retired_image_loaders.remove(loader)
+        else:
+            return
+        # Image downloads do not own navigation, selection, or content progress UI.
+        loader.deleteLater()
+
+    def _start_logo_loading(self, logo_urls, logo_items, refresh_cache=False):
+        self._retire_image_loader(self.image_loader)
+        if not any(logo_urls):
+            return
+        self._logo_items = logo_items
+        self._logo_column = self.get_logo_column(self.current_list_content)
         self.image_loader = ImageLoader(
             logo_urls,
             self.image_manager,
             iconified=True,
             verify_ssl=self.config_manager.ssl_verify,
+            refresh_cache=refresh_cache,
         )
-        self.image_loader.progress_updated.connect(self.update_channel_logos)
-        self.image_loader.finished.connect(self.image_loader_finished)
+        self.image_loader.progress_updated.connect(self.update_channel_logos, Qt.QueuedConnection)
+        self.image_loader.finished.connect(self.image_loader_finished, Qt.QueuedConnection)
         self.image_loader.start()
-        self.cancel_button.setText("Cancel fetching channel logos...")
+
+    def _start_poster_loading(self, poster_url):
+        self.stop_poster_loading()
+        self._poster_loader = ImageLoader(
+            [poster_url],
+            self.image_manager,
+            iconified=False,
+            verify_ssl=self.config_manager.ssl_verify,
+        )
+        self._poster_loader.progress_updated.connect(self.update_poster, Qt.QueuedConnection)
+        self._poster_loader.finished.connect(self.image_loader_finished, Qt.QueuedConnection)
+        self._poster_loader.start()
+
+    def rescan_logos(self):
+        if self.current_list_content not in ("channel", "m3ucontent"):
+            return
+        self._retire_image_loader(self.image_loader)
+        logo_urls = []
+        logo_items = []
+        for i in range(self.content_list.topLevelItemCount()):
+            item = self.content_list.topLevelItem(i)
+            url_logo = item.data(0, Qt.UserRole)["data"].get("logo", "")
+            logo_urls.append(url_logo)
+            logo_items.append(item)
+        self._start_logo_loading(logo_urls, logo_items, refresh_cache=True)
 
     def refresh_content_list_size(self):
         font_size = 12
@@ -928,6 +981,7 @@ class DisplayMixin:
                 self.content_info_text.setText("Channel without id")
 
     def update_channel_program(self):
+        self.stop_poster_loading()
         selected_items = self.program_list.selectedItems()
         if not selected_items:
             self.content_info_text.setText("No program selected")
@@ -1061,25 +1115,12 @@ class DisplayMixin:
                 # Load poster image if available
                 icon_url = item_data.get("icon", {}).get("@src")
                 if icon_url:
-                    self.lock_ui_before_loading()
-                    if self.image_loader and self.image_loader.isRunning():
-                        self.image_loader.wait()
-                    self.image_loader = ImageLoader(
-                        [
-                            icon_url,
-                        ],
-                        self.image_manager,
-                        iconified=False,
-                        verify_ssl=self.config_manager.ssl_verify,
-                    )
-                    self.image_loader.progress_updated.connect(self.update_poster)
-                    self.image_loader.finished.connect(self.image_loader_finished)
-                    self.image_loader.start()
-                    self.cancel_button.setText("Cancel fetching poster...")
+                    self._start_poster_loading(icon_url)
         else:
             self.content_info_text.setText("No data available")
 
     def populate_movie_tvshow_content_info(self, item_data):
+        self.stop_poster_loading()
         provider_type = self.provider_manager.current_provider.get("type", "").upper()
 
         # Common labels; not all keys will be present for all providers
@@ -1136,16 +1177,4 @@ class DisplayMixin:
             poster_url = item_data.get("logo") or item_data.get("cover") or ""
 
         if poster_url:
-            self.lock_ui_before_loading()
-            if self.image_loader and self.image_loader.isRunning():
-                self.image_loader.wait()
-            self.image_loader = ImageLoader(
-                [poster_url],
-                self.image_manager,
-                iconified=False,
-                verify_ssl=self.config_manager.ssl_verify,
-            )
-            self.image_loader.progress_updated.connect(self.update_poster)
-            self.image_loader.finished.connect(self.image_loader_finished)
-            self.image_loader.start()
-            self.cancel_button.setText("Cancel fetching poster...")
+            self._start_poster_loading(poster_url)

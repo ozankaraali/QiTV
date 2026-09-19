@@ -1,7 +1,8 @@
+from copy import deepcopy
 import logging
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -28,7 +29,74 @@ import orjson as json
 import requests
 
 from config_manager import MultiKeyDict
+from provider_manager import StbHandshake
 from update_checker import check_for_updates
+
+# Jobs outlive a closed dialog; a running QThread must never be owned by that dialog.
+_verification_jobs: list[tuple[QThread, QObject]] = []
+
+
+class ProviderVerificationWorker(QObject):
+    result = Signal(int, object, bool)
+    finished = Signal()
+
+    def __init__(self, request_id, provider, prefer_https, ssl_verify):
+        super().__init__()
+        self.request_id = request_id
+        self.provider = provider
+        self.prefer_https = prefer_https
+        self.ssl_verify = ssl_verify
+
+    @Slot()
+    def run(self):
+        verified = False
+        try:
+            provider = self.provider
+            if provider["type"] == "STB":
+                session = StbHandshake(prefer_https=self.prefer_https, ssl_verify=self.ssl_verify)
+                verified = session.run(
+                    provider["url"],
+                    provider.get("mac", ""),
+                    serial_number=provider.get("serial_number", ""),
+                    device_id=provider.get("device_id", ""),
+                )
+            elif provider["type"] in ("M3UPLAYLIST", "M3USTREAM", "XTREAM"):
+                verified = self.verify_url(
+                    provider["url"],
+                    prefer_https=self.prefer_https,
+                    verify_ssl=self.ssl_verify,
+                )
+        except Exception:
+            logging.getLogger(__name__).exception("Provider verification failed")
+        finally:
+            self.result.emit(self.request_id, self.provider, verified)
+            self.finished.emit()
+
+    @staticmethod
+    def verify_url(url, *, prefer_https=False, verify_ssl=True):
+        if url.startswith(("http://", "https://")):
+            try:
+                test_urls = []
+                if prefer_https and url.startswith("http://"):
+                    test_urls.append("https://" + url[len("http://") :])
+                test_urls.append(url)
+                for turl in test_urls:
+                    try:
+                        response = requests.head(turl, timeout=5, verify=verify_ssl)
+                        if response.status_code == 200:
+                            return True
+                    except requests.RequestException:
+                        continue
+                return False
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Error verifying URL: {e}")
+                return False
+        else:
+            return os.path.isfile(url)
+
+
+def _release_verification_job(thread, worker):
+    _verification_jobs.remove((thread, worker))
 
 
 class WidgetGroup:
@@ -57,19 +125,19 @@ class AddXmltvMappingDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Add/Edit XMLTV Mapping")
 
-        self.layout = QFormLayout(self)
+        form_layout = QFormLayout(self)
 
         self.channel_name_input = QLineEdit(self)
         self.channel_name_input.setText(channel_name)
-        self.layout.addRow("Channel Name:", self.channel_name_input)
+        form_layout.addRow("Channel Name:", self.channel_name_input)
 
         self.logo_url_input = QLineEdit(self)
         self.logo_url_input.setText(logo_url)
-        self.layout.addRow("Logo URL:", self.logo_url_input)
+        form_layout.addRow("Logo URL:", self.logo_url_input)
 
         self.channel_ids_input = QLineEdit(self)
         self.channel_ids_input.setText(channel_ids)
-        self.layout.addRow("Channel IDs (comma-separated):", self.channel_ids_input)
+        form_layout.addRow("Channel IDs (comma-separated):", self.channel_ids_input)
 
         self.button_box = QHBoxLayout()
         self.ok_button = QPushButton("OK", self)
@@ -79,7 +147,7 @@ class AddXmltvMappingDialog(QDialog):
         self.button_box.addWidget(self.ok_button)
         self.button_box.addWidget(self.cancel_button)
 
-        self.layout.addRow(self.button_box)
+        form_layout.addRow(self.button_box)
 
     def get_data(self):
         return (
@@ -98,13 +166,22 @@ class OptionsDialog(QDialog):
         self.config_manager = parent.config_manager
         self.provider_manager = parent.provider_manager
         self.epg_manager = parent.epg_manager
-        self.providers = self.provider_manager.providers
+        self.providers = deepcopy(self.provider_manager.providers)
+        self._original_providers = deepcopy(self.providers)
+        self._original_provider_identities = {
+            provider["name"]: self.provider_manager.provider_cache_identity(provider)
+            for provider in self.providers
+        }
+        self.edited_provider = None
+        self._refresh_provider_ids = set()
+        self._verification_request = 0
+        self._verification_closed = False
         self.selected_provider_name = self.config_manager.selected_provider_name
         self.selected_provider_index = 0
         self.epg_settings_modified = False
         self.xmltv_mapping_modified = False
         self.providers_modified = False
-        self.current_provider_changed = False
+        self._original_selected_provider_name = self.selected_provider_name
 
         for i in range(len(self.providers)):
             if self.providers[i]["name"] == self.config_manager.selected_provider_name:
@@ -471,13 +548,18 @@ class OptionsDialog(QDialog):
                 else provider["name"]
             )
             self.provider_combo.addItem(f"{i + 1}: {prov}", userData=provider)
-        self.provider_combo.blockSignals(False)
         self.provider_combo.setCurrentIndex(self.selected_provider_index)
+        self.provider_combo.blockSignals(False)
         self.load_provider_settings(self.selected_provider_index)
 
     def load_provider_settings(self, index):
         if index == -1 or index >= len(self.providers):
             return
+        if self.edited_provider is not None and self.providers[index] is not self.edited_provider:
+            self._store_provider_edits()
+        self._verification_request += 1
+        self.verify_button.setEnabled(True)
+        self.verify_result.clear()
         self.selected_provider_name = self.providers[index].get(
             "name", self.providers[index].get("url", "")
         )
@@ -492,11 +574,15 @@ class OptionsDialog(QDialog):
         self.password_input.setText(self.edited_provider.get("password", ""))
         # Set per-provider network preferences with global fallbacks
         self.provider_prefer_https_checkbox.setChecked(
-            self.edited_provider.get("prefer_https", self.config_manager.prefer_https)
+            self.edited_provider.get("prefer_https", self.prefer_https_checkbox.isChecked())
         )
         self.provider_ssl_verify_checkbox.setChecked(
-            self.edited_provider.get("ssl_verify", self.config_manager.ssl_verify)
+            self.edited_provider.get("ssl_verify", self.ssl_verify_checkbox.isChecked())
         )
+        self._loaded_provider_network = {
+            "prefer_https": self.provider_prefer_https_checkbox.isChecked(),
+            "ssl_verify": self.provider_ssl_verify_checkbox.isChecked(),
+        }
         self.update_radio_buttons()
         self.update_inputs()
 
@@ -548,6 +634,7 @@ class OptionsDialog(QDialog):
         self.password_input.setVisible(self.type_XTREAM.isChecked())
 
     def add_new_provider(self):
+        self._store_provider_edits()
         new_provider = {
             "type": "STB",
             "name": "",
@@ -557,18 +644,18 @@ class OptionsDialog(QDialog):
             "device_id": "",
         }
         self.providers.append(new_provider)
+        self.selected_provider_index = len(self.providers) - 1
+        self.edited_provider = None
         self.load_providers()
-        self.provider_combo.setCurrentIndex(len(self.providers) - 1)
         self.providers_modified = True
 
     def remove_provider(self):
         if len(self.providers) == 1:
             return
         del self.providers[self.provider_combo.currentIndex()]
+        self.edited_provider = None
+        self.selected_provider_index = min(self.selected_provider_index, len(self.providers) - 1)
         self.load_providers()
-        self.provider_combo.setCurrentIndex(
-            min(self.selected_provider_index, len(self.providers) - 1)
-        )
         self.providers_modified = True
 
     def browse_epg_file(self):
@@ -577,6 +664,29 @@ class OptionsDialog(QDialog):
             self.epg_file_input.setText(file_path)
 
     def save_settings(self):
+        self._store_provider_edits()
+        new_identities = {
+            provider["name"]: self.provider_manager.provider_cache_identity(
+                provider,
+                prefer_https=self.prefer_https_checkbox.isChecked(),
+                ssl_verify=self.ssl_verify_checkbox.isChecked(),
+            )
+            for provider in self.providers
+        }
+        changed_names = {
+            name
+            for name in self._original_provider_identities.keys() | new_identities.keys()
+            if self._original_provider_identities.get(name) != new_identities.get(name)
+        }
+        changed_names.update(
+            provider["name"]
+            for provider in self.providers
+            if id(provider) in self._refresh_provider_ids
+        )
+        force_provider_refresh = self.selected_provider_name in changed_names
+        current_provider_changed = (
+            self._original_selected_provider_name != self.selected_provider_name
+        )
         self.config_manager.check_updates = self.check_updates_checkbox.isChecked()
         self.config_manager.max_cache_image_size = int(self.cache_image_size_input.text())
         self.config_manager.prefer_https = self.prefer_https_checkbox.isChecked()
@@ -587,7 +697,6 @@ class OptionsDialog(QDialog):
         self.config_manager.auto_play_movies = self.auto_play_movies_checkbox.isChecked()
 
         need_to_refresh_content_list_size = False
-        current_provider_changed = False
 
         if self.config_manager.channel_logos != self.channel_logos_checkbox.isChecked():
             self.config_manager.channel_logos = self.channel_logos_checkbox.isChecked()
@@ -607,9 +716,7 @@ class OptionsDialog(QDialog):
         if self.config_manager.epg_expiration_unit != self.epg_expiration_combo.currentText():
             self.config_manager.epg_expiration_unit = self.epg_expiration_combo.currentText()
 
-        if self.config_manager.selected_provider_name != self.selected_provider_name:
-            self.config_manager.selected_provider_name = self.selected_provider_name
-            current_provider_changed = True
+        self.config_manager.selected_provider_name = self.selected_provider_name
 
         # Save EPG list window hours
         try:
@@ -624,11 +731,17 @@ class OptionsDialog(QDialog):
         # Save the configuration
         self.parent().save_config()
 
+        self.providers_modified = self.providers != self._original_providers
         if self.providers_modified:
+            self.provider_manager.providers = deepcopy(self.providers)
             self.provider_manager.save_providers()
+        for name in changed_names:
+            # The selected provider is invalidated after setup is serialized by the parent.
+            if name != self.selected_provider_name:
+                self.provider_manager.invalidate_provider_cache(name)
 
-        if current_provider_changed:
-            self.parent().set_provider()
+        if current_provider_changed or force_provider_refresh:
+            self.parent().set_provider(force_update=force_provider_refresh)
         elif self.epg_settings_modified:
             self.epg_manager.set_current_epg()
             self.parent().refresh_channels()
@@ -657,69 +770,96 @@ class OptionsDialog(QDialog):
             self.file_button.setVisible(False)
 
     def verify_provider(self):
+        provider = self._verification_provider()
+        self._verification_request += 1
+        request_id = self._verification_request
         self.verify_result.setText("Verifying...")
-        self.verify_result.repaint()
-        result = False
-        url = self.url_input.text()
-
-        if self.type_STB.isChecked():
-            result = self.provider_manager.do_handshake(
-                url,
-                self.mac_input.text(),
-                serial_number=self.serial_input.text(),
-                device_id=self.device_id_input.text(),
-                prefer_https_override=self.provider_prefer_https_checkbox.isChecked(),
-                ssl_verify_override=self.provider_ssl_verify_checkbox.isChecked(),
-            )
-        elif self.type_M3UPLAYLIST.isChecked() or self.type_M3USTREAM.isChecked():
-            if url.startswith(("http://", "https://")):
-                result = self.verify_url(
-                    url,
-                    prefer_https=self.provider_prefer_https_checkbox.isChecked(),
-                    verify_ssl=self.provider_ssl_verify_checkbox.isChecked(),
-                )
-            else:
-                result = os.path.isfile(url)
-        elif self.type_XTREAM.isChecked():
-            result = self.verify_url(
-                url,
-                prefer_https=self.provider_prefer_https_checkbox.isChecked(),
-                verify_ssl=self.provider_ssl_verify_checkbox.isChecked(),
-            )
-
-        self.verify_result.setText(
-            "Provider verified successfully." if result else "Failed to verify provider."
+        self.verify_result.setStyleSheet("")
+        self.verify_button.setEnabled(False)
+        thread = QThread()
+        worker = ProviderVerificationWorker(
+            request_id,
+            provider,
+            provider.get("prefer_https", self.prefer_https_checkbox.isChecked()),
+            provider.get("ssl_verify", self.ssl_verify_checkbox.isChecked()),
         )
-        self.verify_result.setStyleSheet("color: green;" if result else "color: red;")
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.result.connect(self._provider_verified, Qt.QueuedConnection)
+        worker.finished.connect(thread.quit, Qt.DirectConnection)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda: _release_verification_job(thread, worker))
+        thread.finished.connect(thread.deleteLater)
+        _verification_jobs.append((thread, worker))
+        thread.start()
+
+    @Slot(int, object, bool)
+    def _provider_verified(self, request_id, provider, verified):
+        if self._verification_closed or request_id != self._verification_request:
+            return
+        self.verify_button.setEnabled(True)
+        if provider != self._verification_provider():
+            self.verify_result.clear()
+            return
+        if verified:
+            self._refresh_provider_ids.add(id(self.edited_provider))
+        self.verify_result.setText(
+            "Provider verified successfully." if verified else "Failed to verify provider."
+        )
+        self.verify_result.setStyleSheet("color: green;" if verified else "color: red;")
+
+    def done(self, result):
+        self._verification_closed = True
+        self._verification_request += 1
+        super().done(result)
+
+    def _verification_provider(self):
+        provider = self._provider_from_inputs()
+        provider.setdefault("prefer_https", self.prefer_https_checkbox.isChecked())
+        provider.setdefault("ssl_verify", self.ssl_verify_checkbox.isChecked())
+        return provider
+
+    def _provider_from_inputs(self):
+        provider = dict(self.edited_provider or {})
+        provider["url"] = self.url_input.text()
+        provider["name"] = self.name_input.text() or provider["url"]
+        if self.type_STB.isChecked():
+            provider["type"] = "STB"
+            provider["mac"] = self.mac_input.text()
+            provider["serial_number"] = self.serial_input.text()
+            provider["device_id"] = self.device_id_input.text()
+        elif self.type_M3UPLAYLIST.isChecked():
+            provider["type"] = "M3UPLAYLIST"
+        elif self.type_M3USTREAM.isChecked():
+            provider["type"] = "M3USTREAM"
+        elif self.type_XTREAM.isChecked():
+            provider["type"] = "XTREAM"
+            provider["username"] = self.username_input.text()
+            provider["password"] = self.password_input.text()
+        for key, checkbox in (
+            ("prefer_https", self.provider_prefer_https_checkbox),
+            ("ssl_verify", self.provider_ssl_verify_checkbox),
+        ):
+            # Preserve inheritance when merely viewing or saving an unchanged provider.
+            if key in provider or checkbox.isChecked() != self._loaded_provider_network[key]:
+                provider[key] = checkbox.isChecked()
+        return provider
+
+    def _store_provider_edits(self):
+        if self.edited_provider is None:
+            return
+        provider = self._provider_from_inputs()
+        self.edited_provider.clear()
+        self.edited_provider.update(provider)
+        self.selected_provider_name = provider["name"]
+        self.provider_combo.setItemText(
+            self.selected_provider_index,
+            f"{self.selected_provider_index + 1}: {provider['name']}",
+        )
 
     def apply_provider(self):
-        if self.edited_provider:
-            self.edited_provider["name"] = self.name_input.text()
-            self.edited_provider["url"] = self.url_input.text()
-            if not self.edited_provider["name"]:
-                self.edited_provider["name"] = self.edited_provider["url"]
-            if self.type_STB.isChecked():
-                self.edited_provider["type"] = "STB"
-                self.edited_provider["mac"] = self.mac_input.text()
-                self.edited_provider["serial_number"] = self.serial_input.text()
-                self.edited_provider["device_id"] = self.device_id_input.text()
-            elif self.type_M3UPLAYLIST.isChecked():
-                self.edited_provider["type"] = "M3UPLAYLIST"
-            elif self.type_M3USTREAM.isChecked():
-                self.edited_provider["type"] = "M3USTREAM"
-            elif self.type_XTREAM.isChecked():
-                self.edited_provider["type"] = "XTREAM"
-                self.edited_provider["username"] = self.username_input.text()
-                self.edited_provider["password"] = self.password_input.text()
-            # Save per-provider network preferences
-            self.edited_provider["prefer_https"] = self.provider_prefer_https_checkbox.isChecked()
-            self.edited_provider["ssl_verify"] = self.provider_ssl_verify_checkbox.isChecked()
-            self.selected_provider_name = self.edited_provider["name"]
-            self.provider_combo.setItemText(
-                self.selected_provider_index,
-                f"{self.selected_provider_index + 1}: {self.edited_provider['name']}",
-            )
-            self.providers_modified = True
+        self._store_provider_edits()
+        self._refresh_provider_ids.add(id(self.edited_provider))
 
     def clear_image_cache(self):
         self.parent().image_manager.clear_cache()
@@ -870,25 +1010,3 @@ class OptionsDialog(QDialog):
                     export[mainKey] = v
                     export[mainKey]["xmltv_id"] = list(k)
                 f.write(json.dumps(export, option=json.OPT_INDENT_2).decode("utf-8"))
-
-    @staticmethod
-    def verify_url(url, *, prefer_https=False, verify_ssl=True):
-        if url.startswith(("http://", "https://")):
-            try:
-                test_urls = []
-                if prefer_https and url.startswith("http://"):
-                    test_urls.append("https://" + url[len("http://") :])
-                test_urls.append(url)
-                for turl in test_urls:
-                    try:
-                        response = requests.head(turl, timeout=5, verify=verify_ssl)
-                        if response.status_code == 200:
-                            return True
-                    except requests.RequestException:
-                        continue
-                return False
-            except Exception as e:
-                logging.getLogger(__name__).warning(f"Error verifying URL: {e}")
-                return False
-        else:
-            return os.path.isfile(url)

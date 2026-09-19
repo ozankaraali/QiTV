@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 class ContentLoader(QThread):
     content_loaded = Signal(dict)
     progress_updated = Signal(int, int)
+    error = Signal(str)
     counter_page_not_fetched = 0
 
     def __init__(
@@ -55,6 +56,8 @@ class ContentLoader(QThread):
 
     async def fetch_page(self, session, page, max_retries=2, timeout=5):
         for attempt in range(max_retries):
+            if self.isInterruptionRequested():
+                raise asyncio.CancelledError()
             try:
                 if attempt:
                     logger.debug(f"Retrying page {page}...")
@@ -92,14 +95,14 @@ class ContentLoader(QThread):
                         logger.debug(f"Retrying in {wait_time:.2f} seconds...")
                         await asyncio.sleep(wait_time)
                         continue
+                    response.raise_for_status()
                     result = json.loads(content)
                     # Special-case EPG actions that return a non-paginated structure
                     if self.action in ("get_short_epg", "get_epg_info"):
                         return (result.get("js"), 1, 1)
                     ret = result.get("js", {})
                     if not isinstance(ret, dict):
-                        logger.warning(f"Invalid response fetching page {page}")
-                        return [], 0, 0
+                        raise ValueError(f"Invalid response fetching page {page}")
                     return (
                         ret.get("data", []),
                         int(ret.get("total_items", 0)),
@@ -181,7 +184,7 @@ class ContentLoader(QThread):
             # Fetch initial data to get total items and max page items
             page = 1
             page_items, total_items, max_page_items = await self.fetch_page(
-                session, page, self.timeout
+                session, page, self.max_retries, self.timeout
             )
             # if page_items is list, extend items
             if isinstance(page_items, list):
@@ -199,21 +202,31 @@ class ContentLoader(QThread):
 
             async def fetch_with_semaphore(page_num):
                 async with semaphore:
-                    return await self.fetch_page(session, page_num, self.max_retries, self.timeout)
+                    result = await self.fetch_page(
+                        session, page_num, self.max_retries, self.timeout
+                    )
+                    return result[0]
 
-            tasks = []
-            for page_num in range(2, pages + 1):
-                tasks.append(fetch_with_semaphore(page_num))
+            # Preserve provider page order, regardless of network completion order.
+            # Only ten requests run at once; cancelled jobs never publish partial data.
+            tasks = [
+                asyncio.create_task(fetch_with_semaphore(page_num))
+                for page_num in range(2, pages + 1)
+            ]
+            try:
+                for i, task in enumerate(tasks, 2):
+                    self.items.extend(await task)
+                    self.progress_updated.emit(i, pages)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
-            for i, task in enumerate(asyncio.as_completed(tasks), 2):
-                page_items, _, _ = await task
-                self.items.extend(page_items)
-                self.progress_updated.emit(i, pages)
-
-            if self.counter_page_not_fetched and pages:
-                logger.warning(
-                    f"Failed to fetch {self.counter_page_not_fetched} pages ({self.counter_page_not_fetched/pages*100:.2f}%)"
-                )
+            if self.isInterruptionRequested():
+                return
+            if self.counter_page_not_fetched:
+                raise RuntimeError(f"Failed to fetch {self.counter_page_not_fetched} pages")
 
             # Emit all items once done
             self.content_loaded.emit(
@@ -230,5 +243,8 @@ class ContentLoader(QThread):
     def run(self):
         try:
             asyncio.run(self.load_content())
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             logger.exception(f"Error in content loading: {e}")
+            self.error.emit(str(e))

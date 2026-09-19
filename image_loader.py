@@ -16,12 +16,28 @@ class ImageLoader(QThread):
         image_manager,
         iconified=False,
         verify_ssl=True,
+        refresh_cache=False,
     ):
         super().__init__()
         self.image_urls = image_urls
         self.image_manager = image_manager
         self.iconified = iconified
         self.verify_ssl = verify_ssl
+        self.refresh_cache = refresh_cache
+        self._loop = None
+        self._load_task = None
+
+    def cancel(self):
+        """Interrupt pending I/O without blocking the GUI thread."""
+        self.requestInterruption()
+        loop = self._loop
+        task = self._load_task
+        if loop is not None and task is not None:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                # The loop can finish between reading it and posting cancellation.
+                pass
 
     async def fetch_image(self, session, image_rank, image_url):
         try:
@@ -48,28 +64,56 @@ class ImageLoader(QThread):
         return None
 
     async def load_images(self):
-        connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            tasks = []
-            for image_rank, url in enumerate(self.image_urls):
-                if url:
-                    if url.startswith(("http://", "https://")):
-                        tasks.append(self.fetch_image(session, image_rank, url))
-                    elif url.startswith("data:image"):
-                        tasks.append(self.decode_base64_image(image_rank, url))
-            image_count = len(tasks)
-
-            for i, task in enumerate(asyncio.as_completed(tasks), 1):
+        self._loop = asyncio.get_running_loop()
+        self._load_task = asyncio.current_task()
+        tasks = []
+        invalidated: set[str] | None = set() if self.refresh_cache else None
+        try:
+            if self.isInterruptionRequested():
+                return
+            connector = aiohttp.TCPConnector(ssl=self.verify_ssl)
+            async with aiohttp.ClientSession(connector=connector) as session:
                 try:
-                    image_item = await task
-                except Exception as e:
-                    image_item = None
-                    logger.info(f"Image task failed: {e}")
+                    for image_rank, url in enumerate(self.image_urls):
+                        if self.isInterruptionRequested():
+                            return
+                        if not url:
+                            continue
+                        if invalidated is not None and url not in invalidated:
+                            self.image_manager.remove_icon_from_cache(url)
+                            invalidated.add(url)
+                        if url.startswith(("http://", "https://")):
+                            coroutine = self.fetch_image(session, image_rank, url)
+                        elif url.startswith("data:image"):
+                            coroutine = self.decode_base64_image(image_rank, url)
+                        else:
+                            continue
+                        tasks.append(asyncio.create_task(coroutine))
+                    image_count = len(tasks)
+
+                    for current, task in enumerate(asyncio.as_completed(tasks), 1):
+                        try:
+                            image_item = await task
+                        except Exception as e:
+                            image_item = None
+                            logger.info(f"Image task failed: {e}")
+                        if self.isInterruptionRequested():
+                            return
+                        self.progress_updated.emit(current, image_count, image_item or {})
                 finally:
-                    self.progress_updated.emit(i, image_count, image_item)
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self._load_task = None
+            self._loop = None
 
     def run(self):
         try:
             asyncio.run(self.load_images())
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             logger.warning(f"Error in image loading: {e}")

@@ -76,7 +76,7 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
     # Group items by category
     for idx, item in enumerate(items):
         group = item.get("group") or "Uncategorized"
-        category_id = str(abs(hash(group)) % 1000000)  # Generate stable category ID
+        category_id = group  # Stable across refreshes/processes; no hash collisions.
 
         # Add to categories map
         if category_id not in categories_map:

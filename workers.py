@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QTreeWidgetItem
 import requests
 from urlobject import URLObject
 
+from services.m3u import parse_m3u
 from services.provider_api import (
     base_from_url,
     stb_request_url,
@@ -76,6 +77,10 @@ class M3ULoaderWorker(QObject):
 
     def run(self):
         try:
+            if not self.url.startswith(("http://", "https://")):
+                with open(self.url, encoding="utf-8") as file:
+                    self.finished.emit(parse_m3u(file.read(), categorize=True))
+                return
             candidate_urls = []
             if self.prefer_https and self.url.startswith("http://"):
                 candidate_urls.append("https://" + self.url[len("http://") :])
@@ -86,14 +91,14 @@ class M3ULoaderWorker(QObject):
                 try:
                     response = requests.get(u, timeout=10, verify=self.verify_ssl)
                     response.raise_for_status()
-                    self.finished.emit({"content": response.text})
+                    self.finished.emit(parse_m3u(response.text, categorize=True))
                     return
                 except requests.RequestException as e:
                     last_exc = e
                     continue
             # If we got here, all attempts failed
             raise last_exc or Exception("Failed to load M3U")
-        except requests.RequestException as e:
+        except (requests.RequestException, OSError, ValueError) as e:
             self.error.emit(str(e))
 
 
@@ -631,7 +636,17 @@ class STBCategoriesWorker(QObject):
                 resp.raise_for_status()
                 all_channels = resp.json()["js"]["data"]
 
-            self.finished.emit({"categories": categories, "all_channels": all_channels})
+            result = {"categories": categories, "contents": {}}
+            if self.content_type == "itv":
+                sorted_channels: Dict[str, List[int]] = {}
+                for index, channel in enumerate(all_channels):
+                    category_id = str(channel.get("tv_genre_id"))
+                    sorted_channels.setdefault(category_id, []).append(index)
+                if "None" in sorted_channels:
+                    categories.append({"id": "None", "title": "Unknown Category"})
+                result["contents"] = all_channels
+                result["sorted_channels"] = sorted_channels
+            self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -711,53 +726,40 @@ class CategoryTreeWidgetItem(QTreeWidgetItem):
         return t1 < t2
 
 
-class ChannelTreeWidgetItem(QTreeWidgetItem):
-    # Modify the sorting by Channel Number to used integer and not string (1 < 10, but "1" may not be < "10")
-    # Modify the sorting by Program Progress to read the progress in item data
-    def __lt__(self, other):
-        if not isinstance(other, ChannelTreeWidgetItem):
-            return super(ChannelTreeWidgetItem, self).__lt__(other)
-
-        sort_column = self.treeWidget().sortColumn()
-        if sort_column == 0:  # Channel number
-            return int(self.text(sort_column)) < int(other.text(sort_column))
-        elif sort_column == 2:  # EPG Program progress
-            p1 = self.data(sort_column, Qt.UserRole)
-            if p1 is None:
-                return False
-            p2 = other.data(sort_column, Qt.UserRole)
-            if p2 is None:
-                return True
-            return self.data(sort_column, Qt.UserRole) < other.data(sort_column, Qt.UserRole)
-        elif sort_column == 3:  # EPG Program name
-            return self.data(sort_column, Qt.UserRole) < other.data(sort_column, Qt.UserRole)
-
-        return self.text(sort_column) < other.text(sort_column)
-
-
 class NumberedTreeWidgetItem(QTreeWidgetItem):
-    # Modify the sorting by Number to use integer and not string (1 < 10, but "1" may not be < "10")
-    def __lt__(self, other):
-        if not isinstance(other, NumberedTreeWidgetItem):
-            return super(NumberedTreeWidgetItem, self).__lt__(other)
+    """Keep numeric sort values in Python instead of parsing Qt text per comparison."""
 
-        # Safety check: ensure widget is available
+    _number_key: tuple[int, int | str] = (1, "")
+    _epg_columns = False
+
+    def __init__(self, texts):
+        super().__init__(texts)
         try:
-            widget = self.treeWidget()
-            if not widget:
-                return super(NumberedTreeWidgetItem, self).__lt__(other)
+            self._number_key = (0, int(texts[0]))
+        except ValueError:
+            self._number_key = (1, texts[0])
 
-            sort_column = widget.sortColumn()
-            if sort_column == 0:  # Number column (channel/season/episode number)
-                # Safely convert to int, fallback to string comparison
-                try:
-                    return int(self.text(sort_column)) < int(other.text(sort_column))
-                except (ValueError, TypeError):
-                    return self.text(sort_column) < other.text(sort_column)
-            return self.text(sort_column) < other.text(sort_column)
-        except (RuntimeError, AttributeError):
-            # Widget deleted or in invalid state
-            return super(NumberedTreeWidgetItem, self).__lt__(other)
+    def __lt__(self, other):
+        widget = self.treeWidget()
+        if widget is None or not isinstance(other, NumberedTreeWidgetItem):
+            return self.text(0) < other.text(0)
+        column = widget.sortColumn()
+        if column == 0:
+            return self._number_key < other._number_key
+        if self._epg_columns and other._epg_columns:
+            if column == 2:
+                left = self.data(column, Qt.UserRole)
+                right = other.data(column, Qt.UserRole)
+                return (left is None, left or 0) < (right is None, right or 0)
+            if column == 3:
+                return (self.data(column, Qt.UserRole) or "") < (
+                    other.data(column, Qt.UserRole) or ""
+                )
+        return self.text(column) < other.text(column)
+
+
+class ChannelTreeWidgetItem(NumberedTreeWidgetItem):
+    _epg_columns = True
 
 
 class SetProviderThread(QThread):
@@ -772,6 +774,8 @@ class SetProviderThread(QThread):
     def run(self):
         try:
             self.provider_manager.set_current_provider(self.progress)
+            if self.force_epg_refresh:
+                self.provider_manager.clear_current_provider_cache()
             if self.force_epg_refresh:
                 try:
                     self.progress.emit("Refreshing EPG…")

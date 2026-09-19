@@ -71,6 +71,11 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Release v1.13.5: Large content lists populate in cancellable GUI batches with an eight-millisecond row-construction budget. Detached row construction reduces model notifications; numeric sort values are cached and initial sorting runs once. EPG rows populate per batch, and display refresh preserves category, selected item identity, and sort order.
+- Fix: Catalog refresh/navigation uses nonblocking workers, rejects superseded results, reuses cached STB/Xtream seasons and STB episodes, and batches list updates. Logo/poster jobs never lock navigation and map results to item identity after sorting.
+- Feature: Provider connection changes and Apply/Verify followed by Save trigger automatic content refresh. Provider drafts are isolated until Save; verification runs in an isolated background session.
+- Cache: Six-hour per-content freshness with connection identity checks; five-minute visible-catalog checks defer while inside a series. Cache serialization/writes are ordered, asynchronous, atomic, and invalidation-safe. Local M3U parsing and STB category indexing run in workers.
+- Verification: Eight focused regressions in `tests/test_catalog_refresh.py` cover cache expiry, same-name provider edits, pending-write invalidation, cached/interrupted Back navigation, sorted/retired logos, numeric/EPG sorting, and refresh selection restoration (`uv run python -m unittest discover -s tests -v`).
 - UX: Added QActions for playback controls (Space: Play/Pause, M: Mute, F: Fullscreen, Alt+P: PiP) for future menu/toolbar binding (video_player.py)
 - UX: Normalized VOD vs Live progress behavior; avoid repeated visibility toggles and only update values on VOD (video_player.py)
 - Refactor: Centralized STB URL building in `services/provider_api.py`; updated STB workers and EPG to use it (channel_list.py, epg_manager.py)

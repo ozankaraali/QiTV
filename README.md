@@ -48,6 +48,16 @@ This installs a desktop entry and icon so QiTV appears in your application menu.
 You could use this software as a IPTV player or as a STB client. It bundles [a list of publicly available IPTV channels](https://github.com/iptv-org/iptv) from around the world for you to start quickly using or test the application. You can delete that playlist entry if you want from your computer after registering your playlists / STB player details.
 For further usage you need to enter your M3U Playlist or IPTV provider's STB player details to "Settings". When you save, if your authentication works, you will directly see the channel lists on the left side. Select a channel and it will begin shortly.
 
+### Automatic Content Refresh
+
+Saving provider connection changes reloads its content even when the provider name stays the same. Applying a provider or successfully verifying it, then saving, also requests a refresh. Unsaved provider edits are discarded when Settings is closed.
+
+Channel, movie, and series catalogs are cached for six hours. QiTV checks freshness when opening a catalog and every five minutes while browsing a catalog or category. An open series keeps its cached seasons and episodes until you return to the catalog, so Back does not re-fetch them. Failed background refreshes leave the previous list available.
+
+Refresh Content remains available to force an immediate reload. Logos and posters load independently and do not disable Back or list selection.
+
+Large channel lists populate progressively, keeping Back and selection available while rows are added. Navigating away cancels the pending population; sorting, search, and selection are restored when the list is complete.
+
 ### Portable Mode
 
 By default, QiTV stores configuration and cache files in system-specific directories:
