@@ -71,6 +71,8 @@ For further usage you need to enter your M3U Playlist or IPTV provider's STB pla
 
 In the internal player, use the timeline to seek, right-click for the uosc menu, Space to pause, F or double-click for fullscreen, and Alt+P for picture-in-picture. QiTV manages resume positions and stops its private player when switching modes or closing the application.
 
+On macOS, internal playback uses borderless fullscreen on the current desktop rather than a separate native fullscreen Space, keeping fullscreen/PiP transitions within MPV's window.
+
 uosc subtitle downloads go to QiTV's configuration directory under `subtitles/`. On Linux, clipboard actions additionally require `xclip` or `xsel` on X11, or `wl-clipboard` on Wayland. Thumbnail previews and yt-dlp stream-quality selection are not bundled.
 
 ### Automatic Content Refresh

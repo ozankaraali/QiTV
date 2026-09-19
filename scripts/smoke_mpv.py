@@ -265,7 +265,13 @@ class Smoke:
                     ),
                 ]
             )
-        if self.phase == 'pausing' and self.render_path and not self.render_probe_sent:
+        if (
+            self.phase == 'pausing'
+            and self.render_path
+            and not self.render_probe_sent
+            and self.properties.get('pause') is True
+            and time.monotonic() - self.phase_started >= 1
+        ):
             self.render_probe_sent = True
             commands.append(
                 ('rendered-frame', ['screenshot-to-file', str(self.render_path), 'window'])
@@ -371,6 +377,17 @@ class Smoke:
                     raise RuntimeError('Native renderer did not produce a window-sized image')
                 if p.get('current-vo') in (None, 'null'):
                     raise RuntimeError('No real video output was initialized')
+                # Inspect the colored fixture, not just the window dimensions.
+                # Sample with a non-power-of-two stride to avoid aliasing a bad tiled frame.
+                brightness = samples = 0
+                for y in range(image.height() // 4, image.height() * 7 // 8, 7):
+                    for x in range(image.width() // 8, image.width() * 3 // 4, 7):
+                        pixel = image.pixelColor(x, y)
+                        brightness += max(pixel.red(), pixel.green(), pixel.blue())
+                        samples += 1
+                self.result['rendered_mean_peak'] = brightness / samples
+                if brightness < 40 * samples:
+                    raise RuntimeError('Native window did not display the colored video fixture')
                 self.result['renderer'] = p['current-vo']
                 self.result['rendered_frame'] = str(self.render_path)
                 self.initial_ontop = p['ontop']

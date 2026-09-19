@@ -215,7 +215,7 @@ class MpvPlayer(QObject):
         )
         # uosc's ! prefix keeps downloaded subtitles in managed storage for local files too.
         subtitles = "!" + str(Path(self.config_manager.get_config_dir()) / "subtitles")
-        return [
+        arguments = [
             "--no-config",
             "--load-scripts=no",
             "--ytdl=no",
@@ -245,6 +245,10 @@ class MpvPlayer(QObject):
             "--input-ipc-server=" + self._endpoint,
             "--script=" + str(root / "assets" / "mpv" / "qitv.lua"),
         ]
+        if sys.platform == "darwin":
+            # Keep fullscreen/PiP on this desktop, without asynchronous Spaces transitions.
+            arguments.append("--native-fs=no")
+        return arguments
 
     def _process_started(self, process):
         if process is not self._process:
