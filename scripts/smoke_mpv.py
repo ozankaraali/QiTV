@@ -149,10 +149,13 @@ class Smoke:
         'fullscreen',
         'ontop',
         'current-vo',
+        'options/script-opts',
     )
 
     def __init__(self, app, fixture, data_directory, render_path=None):
         self.app = app
+        self.subtitle_directory = Path(data_directory) / 'subtitles'
+        self.subtitle_directory.mkdir(parents=True, exist_ok=True)
         self.started = time.monotonic()
         self.phase = 'starting'
         self.phase_started = self.started
@@ -390,6 +393,23 @@ class Smoke:
                 for key, pos, duration in self.positions
             ):
                 return
+            script_options = p.get('options/script-opts')
+            if not isinstance(script_options, dict):
+                return
+            self.result['native_script_options'] = script_options
+            directory = script_options.get('uosc-subtitles_directory')
+            configured = (
+                Path(directory[1:])
+                if isinstance(directory, str) and directory.startswith('!')
+                else None
+            )
+            if (
+                configured is None
+                or not configured.is_dir()
+                or not configured.samefile(self.subtitle_directory)
+            ):
+                raise RuntimeError('MPV changed the managed subtitle path during option parsing')
+            self._check('native_uosc_options_preserve_managed_unicode_paths')
             self.result['decoded_video'] = video
             self.result['decoded_audio'] = audio
             self._check('real_h264_aac_decode_and_resume_position')
@@ -539,6 +559,13 @@ class Smoke:
         QTimer.singleShot(1000, lambda: self.app.exit(1))
 
     def report(self):
+        log_path = self.player.log_path
+        if not self.failure and log_path and log_path.is_file():
+            with log_path.open(encoding='utf-8', errors='replace') as log:
+                for line in log:
+                    if '][e][uosc]' in line or '][e][qitv]' in line:
+                        self.failure = f'MPV interface script failed: {line.strip()}'
+                        break
         self.result.update(
             {
                 'ok': self.failure is None,

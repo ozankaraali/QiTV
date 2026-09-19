@@ -1,0 +1,60 @@
+name: Probe Windows native overlays
+
+on:
+  push:
+    branches: [verify/bundled-mpv]
+    paths: [.github/workflows/mpv-render-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  render:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      QT_QPA_PLATFORM: offscreen
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
+        with:
+          python-version: '3.14'
+          enable-cache: true
+      - name: Prepare Python and download the existing native binary
+        run: |
+          uv sync --frozen --dev
+          gh run download 35474154424 --name packaged-app-windows --dir probe
+      - name: Extract the unchanged native runtime from the existing app
+        run: |
+          uv run --frozen --no-sync python - <<'PY'
+          from pathlib import Path
+          from PyInstaller.archive.readers import CArchiveReader
+          archive = CArchiveReader('probe/qitv-windows.exe')
+          for member in archive.toc:
+              name = member.replace('\\', '/')
+              if name.startswith('native/mpv/'):
+                  destination = Path(name)
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_bytes(archive.extract(member))
+          PY
+      - name: Exercise native overlays with directly lockable default-pool textures
+        run: |
+          uv run --frozen --no-sync python - <<'PY'
+          from scripts import smoke_mpv
+          original = smoke_mpv.SmokeMpvPlayer._mpv_arguments
+          smoke_mpv.SmokeMpvPlayer._mpv_arguments = lambda self: original(self) + ['--vo-direct3d-texture-memory=default-pool']
+          raise SystemExit(smoke_mpv.main(['--render', '--fixture', 'tests/fixtures/mpv-smoke.mp4', '--report', 'build/mpv-probe/default-pool.json']))
+          PY
+      - name: Upload the rendered result and native log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-overlay-probe
+          path: build/mpv-probe/
+          if-no-files-found: error

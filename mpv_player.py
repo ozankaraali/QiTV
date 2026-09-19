@@ -226,9 +226,9 @@ class MpvPlayer(QObject):
             "--input-conf=" + str(root / "assets/mpv/uosc/input.conf"),
             "--osd-fonts-dir=" + str(root / "assets/mpv/fonts"),
             "--script=" + str(root / "assets/mpv/uosc"),
-            # MPV's byte-count escaping preserves commas and Unicode in option values.
-            f"--script-opts-append=uosc-controls=%{len(controls.encode('utf-8'))}%{controls}",
-            f"--script-opts-append=uosc-subtitles_directory=%{len(subtitles.encode('utf-8'))}%{subtitles}",
+            # -append accepts one literal value, including commas and Unicode.
+            "--script-opts-append=uosc-controls=" + controls,
+            "--script-opts-append=uosc-subtitles_directory=" + subtitles,
             "--input-default-bindings=yes",
             "--input-terminal=no",
             "--terminal=no",
