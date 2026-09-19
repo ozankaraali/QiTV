@@ -28,10 +28,23 @@ from services.mpv_runtime import get_bundled_mpv_path
 
 class SmokeMpvPlayer(MpvPlayer):
     render = False
+    log_path: Path | None = None
+    playback_restarted = False
 
     def _mpv_arguments(self):
         video = ['--geometry=640x480'] if self.render else ['--vo=null']
-        return super()._mpv_arguments() + ['--ao=null', '--hwdec=no'] + video
+        diagnostics = (
+            ['--log-file=' + str(self.log_path), '--msg-level=all=debug'] if self.log_path else []
+        )
+        return super()._mpv_arguments() + ['--ao=null', '--hwdec=no'] + video + diagnostics
+
+    def _message(self, message):
+        event = message.get('event')
+        if event == 'start-file':
+            self.playback_restarted = False
+        elif event == 'playback-restart':
+            self.playback_restarted = True
+        super()._message(message)
 
 
 class LocalMediaServer(QTcpServer):
@@ -169,6 +182,10 @@ class Smoke:
             )
         )
         self.player.render = render_path is not None
+        if render_path:
+            # Only this synthetic localhost fixture is logged; production stays private.
+            self.player.log_path = render_path.with_suffix('.log')
+            self.result['mpv_log'] = str(self.player.log_path)
         self.player.playing.connect(self._playing)
         self.player.stopped.connect(self._stopped)
         self.player.errorOccurred.connect(self.fail)
@@ -228,6 +245,9 @@ class Smoke:
                 continue
             message = json.loads(line)
             name = self.pending.pop(message.get('request_id'), None)
+            if name == 'rendered-frame':
+                self.result['capture_reply'] = message
+                self.result['capture_completed_after_seconds'] = time.monotonic() - self.started
             if name and message.get('error') == 'success':
                 self.properties[name] = message.get('data')
 
@@ -266,13 +286,14 @@ class Smoke:
                 ]
             )
         if (
-            self.phase == 'pausing'
+            self.phase == 'rendering'
             and self.render_path
             and not self.render_probe_sent
-            and self.properties.get('pause') is True
-            and time.monotonic() - self.phase_started >= 1
+            and self.properties.get('pause') is False
         ):
             self.render_probe_sent = True
+            self.result['capture_state'] = dict(self.properties)
+            self.result['capture_requested_after_seconds'] = time.monotonic() - self.started
             commands.append(
                 ('rendered-frame', ['screenshot-to-file', str(self.render_path), 'window'])
             )
@@ -295,12 +316,13 @@ class Smoke:
     def _check(self, name):
         self.result['checks'].append(name)
 
-    def _change(self, phase, action):
+    def _change(self, phase, action=None):
         self.phase = phase
         self.phase_started = time.monotonic()
         self.properties.clear()
         self.pending.clear()
-        action()
+        if action:
+            action()
         self.last_query = 0.0
 
     def _tick(self):
@@ -349,7 +371,12 @@ class Smoke:
                 raise RuntimeError(f'Bundled uosc helper exited with status {helper.get("status")}')
             if self.server.helper_requests != 1:
                 raise RuntimeError('Bundled uosc helper failed the localhost HTTP exercise')
-            if not (self.playing_count and p.get('video-frame-info') and p.get('audio-params')):
+            if not (
+                self.playing_count
+                and self.player.playback_restarted
+                and p.get('video-frame-info')
+                and p.get('audio-params')
+            ):
                 return
             video = p.get('video-out-params') or {}
             audio = p['audio-params']
@@ -367,31 +394,37 @@ class Smoke:
             self._check('real_h264_aac_decode_and_resume_position')
             self._check('isolated_user_config_and_scripts')
             self._check('bundled_uosc_lua_and_native_helper')
+            if self.render_path:
+                # Decode metadata can precede a native draw. Do not pause the render
+                # loop before the resumed playback has produced its window capture.
+                self._change('rendering')
+            else:
+                self._change('pausing', self.player.toggle_pause)
+        elif self.phase == 'rendering':
+            if 'rendered-frame' not in p:
+                return
+            self.result['renderer'] = p.get('current-vo')
+            image = QImage(str(self.render_path))
+            if image.isNull() or image.width() <= 64 or image.height() <= 48:
+                raise RuntimeError('Native renderer did not produce a window-sized image')
+            if p.get('current-vo') in (None, 'null'):
+                raise RuntimeError('No real video output was initialized')
+            # Inspect the colored fixture, not just the window dimensions.
+            # Sample with a non-power-of-two stride to avoid aliasing a bad tiled frame.
+            brightness = samples = 0
+            for y in range(image.height() // 4, image.height() * 7 // 8, 7):
+                for x in range(image.width() // 8, image.width() * 3 // 4, 7):
+                    pixel = image.pixelColor(x, y)
+                    brightness += max(pixel.red(), pixel.green(), pixel.blue())
+                    samples += 1
+            self.result['rendered_mean_peak'] = brightness / samples
+            if brightness < 40 * samples:
+                raise RuntimeError('Native window did not display the colored video fixture')
+            self.result['rendered_frame'] = str(self.render_path)
+            self.initial_ontop = p['ontop']
+            self._check('native_window_render_and_uosc_screenshot')
             self._change('pausing', self.player.toggle_pause)
         elif self.phase == 'pausing' and p.get('pause') is True:
-            if self.render_path:
-                if 'rendered-frame' not in p:
-                    return
-                image = QImage(str(self.render_path))
-                if image.isNull() or image.width() <= 64 or image.height() <= 48:
-                    raise RuntimeError('Native renderer did not produce a window-sized image')
-                if p.get('current-vo') in (None, 'null'):
-                    raise RuntimeError('No real video output was initialized')
-                # Inspect the colored fixture, not just the window dimensions.
-                # Sample with a non-power-of-two stride to avoid aliasing a bad tiled frame.
-                brightness = samples = 0
-                for y in range(image.height() // 4, image.height() * 7 // 8, 7):
-                    for x in range(image.width() // 8, image.width() * 3 // 4, 7):
-                        pixel = image.pixelColor(x, y)
-                        brightness += max(pixel.red(), pixel.green(), pixel.blue())
-                        samples += 1
-                self.result['rendered_mean_peak'] = brightness / samples
-                if brightness < 40 * samples:
-                    raise RuntimeError('Native window did not display the colored video fixture')
-                self.result['renderer'] = p['current-vo']
-                self.result['rendered_frame'] = str(self.render_path)
-                self.initial_ontop = p['ontop']
-                self._check('native_window_render_and_uosc_screenshot')
             self._check('public_pause_command')
             self._change('muting', self.player.toggle_mute)
         elif self.phase == 'muting' and p.get('mute') is True:

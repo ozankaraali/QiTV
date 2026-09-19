@@ -179,6 +179,7 @@ jobs:
           path: |
             build/mpv-smoke/*.json
             build/mpv-smoke/*.png
+            build/mpv-smoke/*.log
           if-no-files-found: warn
 
   release:
