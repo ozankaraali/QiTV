@@ -26,6 +26,10 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# Vendored uosc modules and native-helper source, not Python build outputs
+!/assets/mpv/uosc/lib/
+!/assets/mpv/uosc/sources/ziggy/src/ziggy/lib/
+
 # Prepared native runtimes (specifications remain tracked)
 /native/mpv/
 /native/.mpv-*/
