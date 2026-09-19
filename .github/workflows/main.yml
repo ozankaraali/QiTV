@@ -1,13 +1,48 @@
-name: Build and Package App (uv)
+name: Build and verify bundled MPV
 
 on:
   push:
-    branches:
-      - main
+    branches: [main, verify/bundled-mpv]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
+  build:
+    name: Build and smoke ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-22.04
+            target: linux-x86_64
+            spec: qitv-linux.spec
+            artifact: qitv-linux
+          - name: windows
+            runner: windows-2022
+            target: windows-x86_64
+            spec: qitv-windows.spec
+            artifact: qitv-windows.exe
+          - name: macos-arm64
+            runner: macos-15
+            target: darwin-arm64
+            spec: qitv-macos.spec
+            artifact: qitv-macos-arm64.zip
+          - name: macos-intel
+            runner: macos-15-intel
+            target: darwin-x86_64
+            spec: qitv-macos.spec
+            artifact: qitv-macos-intel.zip
+    defaults:
+      run:
+        shell: bash
+    env:
+      QT_QPA_PLATFORM: offscreen
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -16,153 +51,144 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true
-      - name: Install VLC and xcb dependencies
-        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0
-      - name: Sync dependencies
+      - name: Install Linux native build and Qt dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config nasm \
+            autoconf automake libtool libltdl-dev libx11-dev libxext-dev libxrandr-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxkbcommon-dev \
+            libgl1-mesa-dev libasound2-dev libpulse-dev libxcb-cursor0
+      - name: Install macOS native build tools
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja nasm autoconf automake libtool pkgconf
+      - name: Select Windows x64 compiler
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+      - name: Install Windows assembler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --yes --no-progress
+          "$env:ProgramFiles\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Sync Python dependencies
         run: uv sync --frozen --dev
-      - name: Package App with PyInstaller for Linux
-        run: uv run pyinstaller qitv-linux.spec
-      - name: Rename binary
+      - name: Prepare pinned standalone MPV and corresponding sources
+        run: uv run scripts/prepare_mpv.py
+      - name: Smoke source backend against real bundled MPV
+        timeout-minutes: 2
+        run: |
+          uv run scripts/smoke_mpv.py --fixture tests/fixtures/mpv-smoke.mp4 \
+            --report build/mpv-smoke/source.json
+      - name: Package app with prepared native runtime
+        run: uv run pyinstaller --noconfirm --clean ${{ matrix.spec }}
+      - name: Sign macOS application
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - dist/QiTV.app
+          codesign --verify --deep --strict --verbose=2 dist/QiTV.app
+      - name: Smoke frozen Linux app without source runtime
+        timeout-minutes: 2
+        if: runner.os == 'Linux'
+        run: |
+          mv native/mpv native/.mpv-source-only
+          trap 'mv "$GITHUB_WORKSPACE/native/.mpv-source-only" "$GITHUB_WORKSPACE/native/mpv"' EXIT
+          mkdir -p "$RUNNER_TEMP/qitv-frozen-smoke"
+          cd "$RUNNER_TEMP/qitv-frozen-smoke"
+          "$GITHUB_WORKSPACE/dist/qitv" --smoke-mpv \
+            --fixture "$GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4" \
+            --report "$GITHUB_WORKSPACE/build/mpv-smoke/frozen.json"
+      - name: Smoke frozen macOS app without source runtime
+        timeout-minutes: 2
+        if: runner.os == 'macOS'
+        run: |
+          mv native/mpv native/.mpv-source-only
+          trap 'mv "$GITHUB_WORKSPACE/native/.mpv-source-only" "$GITHUB_WORKSPACE/native/mpv"' EXIT
+          mkdir -p "$RUNNER_TEMP/qitv-frozen-smoke"
+          cd "$RUNNER_TEMP/qitv-frozen-smoke"
+          "$GITHUB_WORKSPACE/dist/QiTV.app/Contents/MacOS/QiTV" --smoke-mpv \
+            --fixture "$GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4" \
+            --report "$GITHUB_WORKSPACE/build/mpv-smoke/frozen.json"
+      - name: Smoke frozen Windows app without source runtime
+        timeout-minutes: 2
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Move-Item native/mpv native/.mpv-source-only
+          try {
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/qitv-frozen-smoke" | Out-Null
+            $exe = "$env:GITHUB_WORKSPACE/dist/qitv.exe"
+            $fixture = "$env:GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4"
+            $report = "$env:GITHUB_WORKSPACE/build/mpv-smoke/frozen.json"
+            $process = Start-Process -FilePath $exe -WorkingDirectory "$env:RUNNER_TEMP/qitv-frozen-smoke" `
+              -ArgumentList @('--smoke-mpv', '--fixture', "`"$fixture`"", '--report', "`"$report`"") -PassThru
+            if (-not $process.WaitForExit(90000)) {
+              taskkill /PID $process.Id /T /F
+              throw 'Frozen MPV smoke exceeded 90 seconds'
+            }
+            if ($process.ExitCode -ne 0) { throw "Frozen MPV smoke exited $($process.ExitCode)" }
+            if (-not (Get-Content $report -Raw | ConvertFrom-Json).ok) { throw 'Frozen MPV smoke reported failure' }
+          } finally {
+            Move-Item "$env:GITHUB_WORKSPACE/native/.mpv-source-only" "$env:GITHUB_WORKSPACE/native/mpv"
+          }
+      - name: Name Linux release artifact
+        if: runner.os == 'Linux'
         run: mv dist/qitv dist/qitv-linux
-      - name: Upload Linux artifact
+      - name: Name Windows release artifact
+        if: runner.os == 'Windows'
+        run: mv dist/qitv.exe dist/qitv-windows.exe
+      - name: Archive macOS release application
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/QiTV.app dist/${{ matrix.artifact }}
+      - name: Upload runnable app
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: packaged-app-linux
-          path: dist/qitv-linux
-
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup uv and Python
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          python-version: '3.14'
-          enable-cache: true
-      - name: Get latest VLC version
-        id: vlc-version
-        shell: powershell
-        run: |
-          $info = choco info vlc --limit-output
-          $version = ($info -split '\|')[1]
-          echo "version=$version" >> $env:GITHUB_OUTPUT
-      - name: Cache VLC installer
-        id: vlc-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: C:\vlc-cache
-          key: vlc-windows-${{ steps.vlc-version.outputs.version }}
-      - name: Install VLC using Chocolatey
-        run: choco install vlc -y --cache-location=C:\vlc-cache
-      - name: Sync dependencies
-        run: uv sync --frozen --dev
-      - name: Package App with PyInstaller for Windows
-        run: uv run pyinstaller qitv-windows.spec
-      - name: Rename binary
-        run: ren dist\qitv.exe qitv-windows.exe
-      - name: Upload Windows artifact
+          name: packaged-app-${{ matrix.name }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+      - name: Upload matching native source archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: packaged-app-windows
-          path: dist/qitv-windows.exe
-
-  build-macos-universal:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup uv and Python
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          python-version: '3.14'
-          enable-cache: true
-      - name: Get latest VLC version
-        id: vlc-version
-        run: |
-          VLC_VERSION=$(brew info --json=v2 --cask vlc | python3 -c "import sys,json; print(json.load(sys.stdin)['casks'][0]['version'])")
-          echo "version=$VLC_VERSION" >> $GITHUB_OUTPUT
-      - name: Cache VLC.app
-        id: vlc-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /Applications/VLC.app
-          key: vlc-macos-arm64-${{ steps.vlc-version.outputs.version }}
-      - name: Install VLC
-        if: steps.vlc-cache.outputs.cache-hit != 'true'
-        run: brew install --cask vlc
-      - name: Sync dependencies
-        run: uv sync --frozen --dev
-      - name: Package App with PyInstaller for macOS
-        run: uv run pyinstaller qitv-macos.spec
-      - name: Ad-Hoc Sign the app
-        run: codesign --force --deep --sign - dist/qitv.app
-      - name: Zip macOS App
-        run: cd dist && zip -r qitv-macos-universal.zip qitv.app
-      - name: Upload macOS artifact
+          name: mpv-sources-${{ matrix.target }}
+          path: native/mpv-sources-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+      - name: Upload actual source and frozen smoke evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: packaged-app-macos-universal
-          path: dist/qitv-macos-universal.zip
-
-  build-macos-intel:
-    runs-on: macos-15-intel
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Setup uv and Python
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          python-version: '3.14'
-          enable-cache: true
-      - name: Get latest VLC version
-        id: vlc-version
-        run: |
-          VLC_VERSION=$(brew info --json=v2 --cask vlc | python3 -c "import sys,json; print(json.load(sys.stdin)['casks'][0]['version'])")
-          echo "version=$VLC_VERSION" >> $GITHUB_OUTPUT
-      - name: Cache VLC.app
-        id: vlc-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /Applications/VLC.app
-          key: vlc-macos-intel-${{ steps.vlc-version.outputs.version }}
-      - name: Install VLC
-        if: steps.vlc-cache.outputs.cache-hit != 'true'
-        run: brew install --cask vlc
-      - name: Sync dependencies
-        run: uv sync --frozen --dev
-      - name: Package App with PyInstaller for macOS (Intel)
-        run: uv run pyinstaller qitv-macos.spec
-      - name: Ad-Hoc Sign the app
-        run: codesign --force --deep --sign - dist/qitv.app
-      - name: Zip macOS App
-        run: cd dist && zip -r qitv-macos-intel.zip qitv.app
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: packaged-app-macos-intel
-          path: dist/qitv-macos-intel.zip
+          name: mpv-smoke-${{ matrix.name }}
+          path: build/mpv-smoke/*.json
+          if-no-files-found: warn
 
   release:
-    needs: [build-linux, build-windows, build-macos-universal, build-macos-intel]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Get Version
-        id: get_version
+      - name: Read release version
         run: |
-          version=$(python3 -c "
-          import tomllib
-          with open('pyproject.toml','rb') as f:
-              print(tomllib.load(f)['project']['version'])
-          ")
-          echo "VERSION=$version" >> $GITHUB_ENV
-      - name: Download all artifacts
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Download all four app artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      - name: Create Release and Upload Assets
+        with:
+          pattern: packaged-app-*
+          merge-multiple: true
+          path: release-assets
+      - name: Download matching native source archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: mpv-sources-*
+          merge-multiple: true
+          path: release-assets
+      - name: Create prerelease and publish binaries with corresponding sources
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           token: ${{ secrets.GH_TOKEN }}
@@ -170,11 +196,18 @@ jobs:
           name: v${{ env.VERSION }}
           body: |
             > **Please always download this free software from [Releases](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware. Always keep the [original repository](https://github.com/ozankaraali/QiTV) as reference.**
+
+            Each platform includes QiTV's standalone MPV runtime. Its matching native source archive is published below; native licenses and build provenance are included inside the app.
           generate_release_notes: true
           draft: false
           prerelease: true
+          fail_on_unmatched_files: true
           files: |
-            packaged-app-linux/qitv-linux
-            packaged-app-windows/qitv-windows.exe
-            packaged-app-macos-universal/qitv-macos-universal.zip
-            packaged-app-macos-intel/qitv-macos-intel.zip
+            release-assets/qitv-linux
+            release-assets/qitv-windows.exe
+            release-assets/qitv-macos-arm64.zip
+            release-assets/qitv-macos-intel.zip
+            release-assets/mpv-sources-linux-x86_64.tar.gz
+            release-assets/mpv-sources-windows-x86_64.tar.gz
+            release-assets/mpv-sources-darwin-arm64.tar.gz
+            release-assets/mpv-sources-darwin-x86_64.tar.gz

@@ -5,7 +5,6 @@ import platform
 import shutil
 import sys
 import time
-import warnings
 
 from PySide6 import QtGui
 from PySide6.QtCore import QLoggingCategory, QTimer, qInstallMessageHandler
@@ -16,10 +15,10 @@ from channel_list import ChannelList
 from config_manager import ConfigManager, get_app_version
 from epg_manager import EpgManager
 from image_manager import ImageManager
+from mpv_player import MpvPlayer
 from provider_manager import ProviderManager
 from sleep_manager import allow_sleep, prevent_sleep
 from update_checker import check_for_updates
-from video_player import VideoPlayer
 
 
 def handle_replace_flag():
@@ -56,6 +55,11 @@ def handle_replace_flag():
 
 
 if __name__ == "__main__":
+    if "--smoke-mpv" in sys.argv:
+        from scripts.smoke_mpv import main as smoke_main
+
+        sys.exit(smoke_main([arg for arg in sys.argv[1:] if arg != "--smoke-mpv"]))
+
     # Basic logging configuration (tweak level as needed)
     logging.basicConfig(
         level=logging.INFO,
@@ -66,8 +70,6 @@ if __name__ == "__main__":
     if platform.system() == "Windows":
         handle_replace_flag()
 
-    # Suppress noisy third-party warnings
-    warnings.filterwarnings("ignore", category=SyntaxWarning, module="vlc")
     # Reduce Qt info logs that are not actionable
     QLoggingCategory.setFilterRules("qt.accessibility.*=false\nqt.qpa.fonts.*=false")
     app = QApplication(sys.argv)
@@ -101,20 +103,17 @@ if __name__ == "__main__":
 
     if platform.system() == "Windows":
         myappid = f"com.ozankaraali.qitv.{get_app_version()}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)  # type: ignore
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
 
     prevent_sleep()
     try:
-        player = VideoPlayer(config_manager)
+        player = MpvPlayer(config_manager, parent=app)
         channel_list = ChannelList(
             app, player, config_manager, provider_manager, image_manager, epg_manager
         )
         qdarktheme.setup_theme("auto", custom_colors={"primary": "#C96B43"})
-        # Skip showing embedded player if external player (VLC/MPV) is enabled
-        if not config_manager.play_in_vlc and not config_manager.play_in_mpv:
-            player.show()
         channel_list.show()
 
         def _bring_main_window_to_front():

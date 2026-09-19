@@ -10,14 +10,16 @@ You could download the software from [RELEASES](https://github.com/ozankaraali/Q
 
 Source installs require Python 3.14 and VLC (including libVLC). The current Qt build requires macOS 13 or newer on Mac; Python 3.15 is not yet supported by the Qt/theme dependencies.
 
-```
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
+
+```bash
 git clone https://github.com/ozankaraali/QiTV/
 cd QiTV
-python3.14 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python main.py
+uv sync --frozen
+uv run --frozen python main.py
 ```
+
+`uv sync` creates `.venv` and selects Python 3.14 from the project's requirements, installing the interpreter when needed. It does not depend on which interpreter your shell calls `python3`.
 
 ### Linux Desktop Integration
 
@@ -47,12 +49,6 @@ This installs a desktop entry and icon so QiTV appears in your application menu.
 
 You could use this software as a IPTV player or as a STB client. It bundles [a list of publicly available IPTV channels](https://github.com/iptv-org/iptv) from around the world for you to start quickly using or test the application. You can delete that playlist entry if you want from your computer after registering your playlists / STB player details.
 For further usage you need to enter your M3U Playlist or IPTV provider's STB player details to "Settings". When you save, if your authentication works, you will directly see the channel lists on the left side. Select a channel and it will begin shortly.
-
-### Xtream Playback
-
-Catalog loading only requests the Xtream Player API, never sample media streams. Playback URLs use the provider metadata and network settings, then go directly to the selected player without a separate network preparse. This avoids the extra initial stream connections reported in [issue #51](https://github.com/ozankaraali/QiTV/issues/51).
-
-Normal player requests for HLS playlists/segments, redirects, seeking, or reconnection still apply; this is not a one-request limit on the playback engine.
 
 ### Automatic Content Refresh
 

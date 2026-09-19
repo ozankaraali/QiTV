@@ -6,7 +6,7 @@ import os
 import platform
 import shutil
 import subprocess
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 from urllib.parse import quote as url_quote
 
 from PySide6.QtCore import Qt, QThread, QTimer
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 import requests
 from urlobject import URLObject
@@ -32,8 +33,8 @@ from widgets.autoplay_dialogs import (
 
 if TYPE_CHECKING:
     from config_manager import ConfigManager
+    from mpv_player import MpvPlayer
     from provider_manager import ProviderManager
-    from video_player import VideoPlayer
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ class PlaybackMixin:
     # Provided by ChannelList at runtime
     provider_manager: "ProviderManager"
     config_manager: "ConfigManager"
-    player: "VideoPlayer"
+    player: "MpvPlayer"
     content_type: str
     link: Optional[str]
     current_category: Optional[Dict[str, Any]]
@@ -59,7 +60,6 @@ class PlaybackMixin:
     _current_seasons_list: List[Dict[str, Any]]
     _current_category_movies: List[Dict[str, Any]]
     _autoplay_dialog: Optional[QDialog]
-    _external_mpv_player: Optional[Any]
     _pending_link_ctx: Optional[Dict[str, Any]]
 
     def play_item(self, item_data, is_episode=False, item_type=None):
@@ -223,7 +223,7 @@ class PlaybackMixin:
                 is_live = self.content_type == "itv"
             else:
                 is_live = None
-            self.player.play_video(
+            self.player.play(
                 url,
                 is_live=is_live,
                 content_id=self._current_content_id,
@@ -245,14 +245,16 @@ class PlaybackMixin:
         """Resume playing the last watched item"""
         last_watched = self.config_manager.last_watched
         if not last_watched:
-            QMessageBox.information(self, "No History", "No previously watched content found.")
+            QMessageBox.information(
+                cast(QWidget, self), "No History", "No previously watched content found."
+            )
             return
 
         # Check if the provider matches
         current_provider_name = self.provider_manager.current_provider.get("name", "")
         if last_watched.get("provider_name") != current_provider_name:
             reply = QMessageBox.question(
-                self,
+                cast(QWidget, self),
                 "Different Provider",
                 f"Last watched content was from provider '{last_watched.get('provider_name')}'. Continue anyway?",
                 QMessageBox.Yes | QMessageBox.No,
@@ -332,23 +334,23 @@ class PlaybackMixin:
             return None
 
     def _play_content(self, url):
-        """Play content in VLC, MPV, or built-in player based on checkbox state."""
+        """Play through bundled MPV or the user's chosen external player."""
         if self.config_manager.play_in_vlc:
             self._launch_vlc(url)
         elif self.config_manager.play_in_mpv:
             self._launch_mpv(url)
         else:
-            # Use built-in player
+            # Use QiTV's managed bundled MPV.
             # Determine is_live hint based on provider type
             # STB/XTREAM APIs explicitly separate live (itv) from VOD content
-            # M3U playlists don't distinguish, so let VLC auto-detect
+            # M3U playlists don't distinguish; MPV discovers their metadata.
             provider_type = self.provider_manager.current_provider.get("type", "").upper()
             if provider_type in ("STB", "XTREAM"):
                 is_live = self.content_type == "itv"
             else:
-                # M3UPLAYLIST, M3USTREAM, etc. - let VLC detect via seekability
+                # M3UPLAYLIST, M3USTREAM, etc. have no explicit live hint.
                 is_live = None
-            self.player.play_video(url, is_live=is_live, content_id=self._current_content_id)
+            self.player.play(url, is_live=is_live, content_id=self._current_content_id)
 
     def _launch_vlc(self, url):
         """Launch VLC with platform-specific handling."""
@@ -367,7 +369,9 @@ class PlaybackMixin:
                         return True
                     except Exception as e:
                         QMessageBox.warning(
-                            self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}"
+                            cast(QWidget, self),
+                            "VLC Launch Failed",
+                            f"Failed to launch VLC: {str(e)}",
                         )
                         return False
 
@@ -399,7 +403,7 @@ class PlaybackMixin:
 
         if not vlc_cmd:
             QMessageBox.warning(
-                self,
+                cast(QWidget, self),
                 "VLC Not Found",
                 "VLC Media Player is not installed.\n\n"
                 "Please install VLC:\n"
@@ -414,29 +418,15 @@ class PlaybackMixin:
             subprocess.Popen([vlc_cmd, "--started-from-file", url])
             return True
         except Exception as e:
-            QMessageBox.warning(self, "VLC Launch Failed", f"Failed to launch VLC: {str(e)}")
+            QMessageBox.warning(
+                cast(QWidget, self), "VLC Launch Failed", f"Failed to launch VLC: {str(e)}"
+            )
             return False
 
     def _launch_mpv(self, url):
-        """Launch MPV - try python-mpv first, fall back to subprocess."""
-        # Try python-mpv for single-instance behavior
-        try:
-            import mpv
+        """Launch the user's MPV executable with its normal configuration."""
 
-            if self._external_mpv_player is None:
-                self._external_mpv_player = mpv.MPV(
-                    input_default_bindings=True,
-                    input_vo_keyboard=True,
-                    osc=True,
-                )
-
-            self._external_mpv_player.play(url)
-            return True
-        except (ImportError, OSError, Exception):
-            # python-mpv not available or failed, fall back to subprocess
-            pass
-
-        # Subprocess fallback with platform-specific paths
+        # Locate an installed player, never QiTV's private bundled copy.
         mpv_cmd = None
 
         if platform.system() == "Darwin":
@@ -462,13 +452,13 @@ class PlaybackMixin:
                 try:
                     import winreg
 
-                    for hkey in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:  # type: ignore[attr-defined]
+                    for hkey in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
                         try:
-                            with winreg.OpenKey(  # type: ignore[attr-defined]
+                            with winreg.OpenKey(
                                 hkey,
                                 r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\mpv.exe",
                             ) as key:
-                                reg_path = winreg.QueryValue(key, None)  # type: ignore[attr-defined]
+                                reg_path = winreg.QueryValue(key, None)
                                 if reg_path and os.path.exists(reg_path):
                                     mpv_cmd = reg_path
                                     break
@@ -526,7 +516,7 @@ class PlaybackMixin:
 
         if not mpv_cmd:
             QMessageBox.warning(
-                self,
+                cast(QWidget, self),
                 "MPV Not Found",
                 "MPV Media Player is not installed.\n\n"
                 "Please install MPV:\n"
@@ -540,64 +530,33 @@ class PlaybackMixin:
             subprocess.Popen([mpv_cmd, url])
             return True
         except Exception as e:
-            QMessageBox.warning(self, "MPV Launch Failed", f"Failed to launch MPV: {str(e)}")
+            QMessageBox.warning(
+                cast(QWidget, self), "MPV Launch Failed", f"Failed to launch MPV: {str(e)}"
+            )
             return False
 
     def open_in_vlc(self):
-        # Invoke user's VLC player to open the current stream
-        if self.link:
-            logger.warning(f"Opening VLC for link: {self.link}")
-            try:
-                if platform.system() == "Windows":
-                    vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
-                    if not vlc_path:
-                        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
-                        vlc_path = os.path.join(program_files, "VideoLAN", "VLC", "vlc.exe")
-                    # Use VLC's directory as cwd to avoid DLL conflicts with bundled libvlc
-                    vlc_dir = os.path.dirname(vlc_path)
-                    subprocess.Popen([vlc_path, self.link], cwd=vlc_dir)
-                elif platform.system() == "Darwin":  # macOS
-                    vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
-                    if not vlc_path:
-                        common_paths = [
-                            "/Applications/VLC.app/Contents/MacOS/VLC",
-                            "~/Applications/VLC.app/Contents/MacOS/VLC",
-                        ]
-                        for path in common_paths:
-                            expanded_path = os.path.expanduser(path)
-                            if os.path.exists(expanded_path):
-                                vlc_path = expanded_path
-                                break
-                    if not vlc_path:
-                        raise FileNotFoundError("VLC not found")
-                    vlc_dir = os.path.dirname(vlc_path)
-                    subprocess.Popen([vlc_path, self.link], cwd=vlc_dir)
-                else:  # Assuming Linux or other Unix-like OS
-                    vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
-                    if not vlc_path:
-                        raise FileNotFoundError("VLC not found")
-                    vlc_dir = os.path.dirname(vlc_path)
-                    subprocess.Popen([vlc_path, self.link], cwd=vlc_dir)
-                # when VLC opens, stop running video on self.player
-                self.player.stop_video()
-            except FileNotFoundError as fnf_error:
-                logger.warning("VLC not found: %s", fnf_error)
-            except Exception as e:
-                logger.warning(f"Error opening VLC: {e}")
+        if self.link and self._launch_vlc(self.link):
+            self.player.stop()
 
     def open_file(self):
         from PySide6.QtWidgets import QFileDialog
 
-        file_path, _ = QFileDialog.getOpenFileName(self)
+        file_path, _ = QFileDialog.getOpenFileName(cast(QWidget, self))
         if file_path:
+            self._current_content_id = None
+            self._current_playing_item = None
+            self._current_playing_type = None
             self._play_content(file_path)
 
     # --- Auto-Play Methods ---
 
-    def on_media_ended(self):
+    def on_media_ended(self, content_id: str):
         """Handle media ended signal - trigger auto-play if enabled."""
         # Don't auto-play if using external player
         if self.config_manager.play_in_vlc or self.config_manager.play_in_mpv:
+            return
+        if content_id != self._current_content_id:
             return
 
         if not self._current_playing_item or not self._current_playing_type:
@@ -610,12 +569,13 @@ class PlaybackMixin:
             if self.config_manager.auto_play_movies:
                 self._show_next_movie_dialog()
 
-    def on_position_changed(self, position_ms: int, duration_ms: int):
-        """Handle position changed signal - save playback position."""
-        if self._current_content_id and position_ms > 0 and duration_ms > 0:
-            self.config_manager.save_playback_position(
-                self._current_content_id, position_ms, duration_ms
-            )
+    def on_position_changed(self, content_id: str, position_ms: int, duration_ms: int):
+        """Save against the originating item, never the latest UI selection."""
+        if content_id and position_ms > 0 and duration_ms > 0:
+            self.config_manager.save_playback_position(content_id, position_ms, duration_ms)
+
+    def on_playback_error(self, message: str):
+        self.statusBar().showMessage(f"Playback error: {message}", 15000)
 
     def _show_next_episode_dialog(self):
         """Show dialog for auto-playing next episode."""
@@ -863,10 +823,12 @@ class PlaybackMixin:
         """Show watch history dialog."""
         history = self.config_manager.watch_history or []
         if not history:
-            QMessageBox.information(self, "Watch History", "No watch history available.")
+            QMessageBox.information(
+                cast(QWidget, self), "Watch History", "No watch history available."
+            )
             return
 
-        dialog = QDialog(self)
+        dialog = QDialog(cast(QWidget, self))
         dialog.setWindowTitle("Watch History")
         dialog.setMinimumSize(500, 400)
 
@@ -950,7 +912,7 @@ class PlaybackMixin:
                 return
             else:
                 QMessageBox.warning(
-                    self,
+                    cast(QWidget, self),
                     "Provider Not Found",
                     f"Provider '{provider_name}' is no longer available.",
                 )

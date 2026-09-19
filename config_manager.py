@@ -114,7 +114,6 @@ class ConfigManager:
     DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
     DEFAULT_OPTION_EPG_STB_PERIOD_HOURS = 5
     DEFAULT_OPTION_SHOW_INFO_PANEL = True
-    DEFAULT_OPTION_SMOOTH_PAUSED_SEEK = True
     DEFAULT_OPTION_PLAY_IN_VLC = False
     DEFAULT_OPTION_PLAY_IN_MPV = False
     # Auto-play settings
@@ -182,7 +181,7 @@ class ConfigManager:
                 self.config = json.loads(f.read())
             if self.config is None:
                 self.config = self.default_config()
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError, json.JSONDecodeError:
             self.config = self.default_config()
             self.save_config()
 
@@ -270,9 +269,13 @@ class ConfigManager:
         if "keyboard_remote_mode" not in self.config:
             self.keyboard_remote_mode = ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE
             need_update = True
-        # add smooth_paused_seek if missing
-        if "smooth_paused_seek" not in self.config:
-            self.smooth_paused_seek = ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK
+        # Remove preferences belonging to the retired Qt/libVLC window.
+        if "smooth_paused_seek" in self.config:
+            del self.config["smooth_paused_seek"]
+            need_update = True
+        window_positions = self.config.get("window_positions", {})
+        if "video_player" in window_positions:
+            del window_positions["video_player"]
             need_update = True
         # add epg_list_window_hours if missing
         if "epg_list_window_hours" not in self.config:
@@ -333,9 +336,6 @@ class ConfigManager:
     keyboard_remote_mode = _config_property(
         "keyboard_remote_mode", DEFAULT_OPTION_KEYBOARD_REMOTE_MODE, coerce=bool
     )
-    smooth_paused_seek = _config_property(
-        "smooth_paused_seek", DEFAULT_OPTION_SMOOTH_PAUSED_SEEK, coerce=bool
-    )
     play_in_vlc = _config_property("play_in_vlc", DEFAULT_OPTION_PLAY_IN_VLC, coerce=bool)
     play_in_mpv = _config_property("play_in_mpv", DEFAULT_OPTION_PLAY_IN_MPV, coerce=bool)
 
@@ -372,7 +372,6 @@ class ConfigManager:
                     "splitter_ratio": 0.75,
                     "splitter_content_info_ratio": 0.33,
                 },
-                "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
             },
             "favorites": [],
             "show_stb_content_info": ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO,
@@ -382,7 +381,6 @@ class ConfigManager:
             "xmltv_channel_map": MultiKeyDict(),
             "max_cache_image_size": ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE,
             "keyboard_remote_mode": ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE,
-            "smooth_paused_seek": ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK,
             "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
             "epg_stb_period_hours": ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
         }

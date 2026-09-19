@@ -1,85 +1,56 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-import os
+import json
 from pathlib import Path
-import tomllib
-from PyInstaller.building.build_main import Analysis, PYZ, EXE, BUNDLE
 
+from PyInstaller.building.datastruct import Tree
 
-def read_version():
-    # SPECPATH is provided by PyInstaller and points to the spec file directory
-    pyproj = Path(SPECPATH) / 'pyproject.toml'
-    with pyproj.open('rb') as f:
-        return tomllib.load(f)['project']['version']
+ROOT = Path(SPECPATH)
+NATIVE_MPV = ROOT / 'native' / 'mpv'
+if not (NATIVE_MPV / 'bundle.json').is_file():
+    raise SystemExit('Prepare bundled MPV first: uv run scripts/prepare_mpv.py')
+if not json.loads((NATIVE_MPV / 'bundle.json').read_text()).get('redistributable'):
+    raise SystemExit('Diagnostic MPV is not a release input; run the default source preparation.')
 
-
-APP_VERSION = read_version()
-
-VLC_PATH = '/usr/lib/x86_64-linux-gnu'  # Default path on Ubuntu
-
-# Find the exact versions of libvlc and libvlccore
-libvlc_version = "libvlc.so"
-libvlccore_version = "libvlccore.so"
-
-# Check if versioned libraries exist; use `ls` to find versions if not directly known
-for file in os.listdir(VLC_PATH):
-    if file.startswith("libvlc.so"):
-        libvlc_version = file
-    if file.startswith("libvlccore.so"):
-        libvlccore_version = file
-
-# Find libxcb-cursor (required by Qt xcb platform plugin on many distros)
-xcb_cursor_binaries = []
-for file in os.listdir(VLC_PATH):
-    if file.startswith("libxcb-cursor.so"):
-        xcb_cursor_binaries.append(
-            (file, os.path.join(VLC_PATH, file), "BINARY")
-        )
+# Qt's xcb plugin needs this at runtime on desktop Linux.
+xcb_cursor_binaries = [
+    (str(path), '.') for path in Path('/usr/lib/x86_64-linux-gnu').glob('libxcb-cursor.so*')
+]
 
 a = Analysis(
-    ['main.py'],
-    pathex=[VLC_PATH],
-    binaries=[
-        (os.path.join(VLC_PATH, 'vlc/plugins/*'), 'plugins'),
-    ],
+    [str(ROOT / 'main.py')],
+    pathex=[str(ROOT)],
+    binaries=xcb_cursor_binaries,
     datas=[
-        ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
-        ('assets', 'assets'),  # Include icons and desktop file
+        (str(ROOT / 'pyproject.toml'), '.'),
+        (str(ROOT / 'assets'), 'assets'),
     ],
-    hiddenimports=[],
+    hiddenimports=['scripts.smoke_mpv'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['vlc', 'mpv'],
     noarchive=False,
-    # If using a custom path for VLC, ensure you include the libvlc libraries
-    module_collection_mode={
-        'vlc': 'py',
-    }
 )
 
+# Append after Analysis so the prepared dependency closure is not reclassified,
+# scanned against runner libraries, or rewritten. Executable DATA retains its
+# execute bit when PyInstaller extracts the onefile archive.
+native_mpv = Tree(str(NATIVE_MPV), prefix='native/mpv', typecode='DATA')
 pyz = PYZ(a.pure)
-
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries + [
-        (libvlc_version, os.path.join(VLC_PATH, libvlc_version), "BINARY"),
-        (libvlccore_version, os.path.join(VLC_PATH, libvlccore_version), "BINARY"),
-    ] + xcb_cursor_binaries,
+    a.binaries,
     a.datas,
+    native_mpv,
     [],
     name='qitv',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
+    upx=False,
     runtime_tmpdir=None,
-    console=True,  # Set to False if you want to suppress the console
+    console=True,
     disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
 )

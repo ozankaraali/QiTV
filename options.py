@@ -271,16 +271,6 @@ class OptionsDialog(QDialog):
         self.keyboard_remote_checkbox.setChecked(self.config_manager.keyboard_remote_mode)
         self.settings_layout.addRow(self.keyboard_remote_checkbox)
 
-        # Smooth seeking while paused: briefly resume to seek, then pause again
-        self.smooth_paused_seek_checkbox = QCheckBox(
-            "Smooth seeking while paused (briefly resume to seek)", self.settings_tab
-        )
-        self.smooth_paused_seek_checkbox.setToolTip(
-            "Reduces timestamp errors during paused seeking by resuming momentarily."
-        )
-        self.smooth_paused_seek_checkbox.setChecked(self.config_manager.smooth_paused_seek)
-        self.settings_layout.addRow(self.smooth_paused_seek_checkbox)
-
         # Auto-play settings section
         self.autoplay_section_label = QLabel("<b>Auto-Play Settings</b>", self.settings_tab)
         self.settings_layout.addRow(self.autoplay_section_label)
@@ -692,7 +682,6 @@ class OptionsDialog(QDialog):
         self.config_manager.prefer_https = self.prefer_https_checkbox.isChecked()
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.keyboard_remote_mode = self.keyboard_remote_checkbox.isChecked()
-        self.config_manager.smooth_paused_seek = self.smooth_paused_seek_checkbox.isChecked()
         self.config_manager.auto_play_episodes = self.auto_play_episodes_checkbox.isChecked()
         self.config_manager.auto_play_movies = self.auto_play_movies_checkbox.isChecked()
 
@@ -993,7 +982,7 @@ class OptionsDialog(QDialog):
                     self.config_manager.xmltv_channel_map = multiKey
                     self.load_xmltv_channel_mapping()
                     self.xmltv_mapping_modified = True
-            except (FileNotFoundError, json.JSONDecodeError):
+            except FileNotFoundError, json.JSONDecodeError:
                 pass
 
     def export_xmltv_mapping(self):

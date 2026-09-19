@@ -8,10 +8,10 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication
 
 from channel_list import ChannelList
 from config_manager import ConfigManager
@@ -87,13 +87,21 @@ class ProviderCacheTests(unittest.TestCase):
         self.assertEqual(manager.get_all_providers_cached_content(), [])
 
 
-class PlayerSignals(QMainWindow):
-    mediaEnded = Signal()
-    positionChanged = Signal(int, int)
+class PlayerSignals(QObject):
+    mediaEnded = Signal(str)
+    positionChanged = Signal(str, int, int)
+    errorOccurred = Signal(str)
+    shutdownFinished = Signal()
     backRequested = Signal()
     forwardRequested = Signal()
     channelNextRequested = Signal()
     channelPrevRequested = Signal()
+
+    def shutdown(self):
+        self.shutdownFinished.emit()
+
+    def is_running(self):
+        return False
 
 
 class CatalogNavigationTests(unittest.TestCase):
@@ -142,6 +150,12 @@ class CatalogNavigationTests(unittest.TestCase):
                 return
             QTest.qWait(10)
         self.fail("Background UI operation did not complete")
+
+    def test_late_position_belongs_to_previous_item_after_selection_changes(self):
+        self.window._current_content_id = "new-item"
+        self.player.positionChanged.emit("previous-item", 25000, 100000)
+        self.assertEqual(self.config.get_playback_position("previous-item"), 25000)
+        self.assertIsNone(self.config.get_playback_position("new-item"))
 
     def test_back_reuses_cached_seasons_without_mutating_names(self):
         window = self.window

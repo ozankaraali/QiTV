@@ -1,16 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-import os
+import json
 from pathlib import Path
 import tomllib
+
+from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.win32.versioninfo import (
-    VSVersionInfo,
     FixedFileInfo,
     StringFileInfo,
-    StringTable,
     StringStruct,
+    StringTable,
     VarFileInfo,
     VarStruct,
+    VSVersionInfo,
 )
 
 
@@ -66,42 +68,44 @@ version_resource = VSVersionInfo(
     ],
 )
 
-VLC_PATH = 'C:\\Program Files\\VideoLAN\\VLC'
-
-block_cipher = None
+ROOT = Path(SPECPATH)
+NATIVE_MPV = ROOT / 'native' / 'mpv'
+if not (NATIVE_MPV / 'bundle.json').is_file():
+    raise SystemExit('Prepare bundled MPV first: uv run scripts/prepare_mpv.py')
+if not json.loads((NATIVE_MPV / 'bundle.json').read_text()).get('redistributable'):
+    raise SystemExit('Diagnostic MPV is not a release input; run the default source preparation.')
 
 a = Analysis(
-    ['main.py'],
-    pathex=[VLC_PATH], #insert your base VLC path here, ex: pathex=["D:\KivySchool\VLC"],
-    binaries=[
-        (os.path.join(VLC_PATH, 'plugins/*'), 'plugins'),
-    ],
+    [str(ROOT / 'main.py')],
+    pathex=[str(ROOT)],
+    binaries=[],
     datas=[
-        ('assets/*', 'assets'),
-        ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
+        (str(ROOT / 'assets'), 'assets'),
+        (str(ROOT / 'pyproject.toml'), '.'),
     ],
-    hiddenimports=[],
+    hiddenimports=['scripts.smoke_mpv'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['vlc', 'mpv'],
     noarchive=False,
 )
+# Keep the prepared standalone closure intact, without dependency analysis or
+# UPX rewriting of the native player and its DLLs.
+native_mpv = Tree(str(NATIVE_MPV), prefix='native/mpv', typecode='DATA')
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries + [
-        ("libvlc.dll", os.path.join(VLC_PATH, 'libvlc.dll'), "BINARY"),
-        ("libvlccore.dll", os.path.join(VLC_PATH, 'libvlccore.dll'), "BINARY"),
-    ],
+    a.binaries,
     a.datas,
+    native_mpv,
     [],
     name='qitv.exe',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -110,6 +114,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/qitv.ico',
+    icon=str(ROOT / 'assets' / 'qitv.ico'),
     version=version_resource,
 )

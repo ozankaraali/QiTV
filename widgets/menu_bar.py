@@ -70,18 +70,24 @@ class AppMenuBar:
 
         # Player selection submenu
         play_menu = menu.addMenu("&Play with")
+        play_menu.setToolTipsVisible(True)
         self._player_group = QActionGroup(self.window)
         self._player_group.setExclusive(True)
 
-        self.player_internal_action = play_menu.addAction("Internal Player")
+        self.player_internal_action = play_menu.addAction("Internal (Bundled MPV)")
+        self.player_internal_action.setToolTip(
+            "QiTV's bundled MPV with its own controls and isolated configuration."
+        )
         self.player_internal_action.setCheckable(True)
         self._player_group.addAction(self.player_internal_action)
 
-        self.player_vlc_action = play_menu.addAction("VLC")
+        self.player_vlc_action = play_menu.addAction("VLC (External)")
+        self.player_vlc_action.setToolTip("Use your installed VLC Media Player.")
         self.player_vlc_action.setCheckable(True)
         self._player_group.addAction(self.player_vlc_action)
 
-        self.player_mpv_action = play_menu.addAction("MPV")
+        self.player_mpv_action = play_menu.addAction("MPV (User Configuration)")
+        self.player_mpv_action.setToolTip("Use your installed MPV and its normal configuration.")
         self.player_mpv_action.setCheckable(True)
         self._player_group.addAction(self.player_mpv_action)
 

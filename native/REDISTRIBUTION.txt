@@ -1,0 +1,58 @@
+QiTV standalone MPV native runtime
+=================================
+
+The QiTV application license does not replace the licenses of the separate MPV
+executable or its native dependencies. MPV is built with GPL code enabled;
+FFmpeg is built with GPL and version3 enabled, and OpenSSL TLS support. The
+combined standalone player is distributed under GPL version 3 or later, with
+its libraries' original copyright notices and license texts retained in this
+licenses directory. libass (ISC), LuaJIT (MIT), libplacebo (LGPL-2.1-or-later),
+OpenSSL (Apache-2.0), and every additional linked dependency retain their own
+applicable terms. Consult dependencies/*/copyright and the SPDX inventories
+for the precise installed versions, licenses, source locations and hashes.
+
+Corresponding source distribution
+---------------------------------
+Every binary release MUST be accompanied, at the same download location and
+without additional charge, by its matching mpv-sources-<target>.tar.gz archive.
+bundle.json identifies that archive and its SHA-256. A link to an upstream
+project home page is not a substitute for distributing this matching archive.
+Keep the source archive available for as long as the matching binary is
+available. Mirror the source archive when mirroring a QiTV binary release.
+
+The archive contains the original pinned MPV, libplacebo and vcpkg source
+archives, all libplacebo generator/submodule sources, the dependency source
+downloads used by vcpkg, the full vcpkg port recipes and patches (inside its
+source archive), the preparation script and manifest, actual dependency SPDX
+inventories, and the Meson configuration/build provenance. These are the
+preferred forms for modifying and rebuilding the separate MPV executable;
+there is no intentionally withheld library patch or proprietary media library.
+
+To rebuild, unpack the source archive and use recipe/scripts/prepare_mpv.py
+with recipe/native/mpv-manifest.json and the platform compiler/build tools
+listed in the script. uv run scripts/prepare_mpv.py is run from recipe/.
+Original pinned inputs may be installed in --cache-dir/archives using their
+SHA-256 as filenames; vcpkg independently verifies its downloads using the
+hashes in its pinned port recipes. The build disables binary caches, uses
+static media libraries, and records all dependency source downloads. Compiler
+and operating-system SDK versions are recorded in the Meson logs. Builds use
+the platform SDK/system runtime; byte-for-byte identity across different
+compiler/SDK versions is not claimed.
+
+The user may replace/rebuild the standalone MPV executable. QiTV's IPC use
+does not require a secret signing key; macOS local builds use ad-hoc signing.
+No DRM, installation-information restriction or custom license restriction is
+imposed on modifying that executable. The GPL warranty disclaimer applies.
+
+Platform system libraries and GPU/audio drivers are supplied by the user's
+operating system, not copied from the build runner. They are not represented
+as included media dependencies. Native dependency metadata is inspected at
+preparation time to reject accidental Homebrew/vcpkg shared-library linkage.
+
+Diagnostic downloads
+--------------------
+The optional --prebuilt Intel macOS download is only for local development
+verification on older macOS devices. It contains an older FFmpeg and lacks a
+complete distributor-provided corresponding-source closure. It is marked
+redistributable=false and MUST NOT be packaged or published as a QiTV release.
+The default preparation command builds current pinned sources instead.

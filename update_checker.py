@@ -14,10 +14,9 @@ from config_manager import ConfigManager, get_app_version
 
 logger = logging.getLogger(__name__)
 
-# Platform-specific asset name patterns
-ASSET_PATTERNS = {
+# Exact release asset names; source archives/checksums are never executables.
+ASSET_NAMES = {
     "Windows": "qitv-windows.exe",
-    "Darwin": "qitv-macos",  # Will match qitv-macos-universal.zip or qitv-macos-intel.zip
     "Linux": "qitv-linux",
 }
 
@@ -172,34 +171,21 @@ def compare_versions(latest_version, current_version):
 
 
 def get_download_url_for_platform(assets: list) -> Tuple[Optional[str], int]:
-    """Returns (download_url, file_size) for the current platform's asset."""
+    """Return the application asset matching this OS and architecture."""
     system = platform.system()
-    pattern = ASSET_PATTERNS.get(system)
-
-    if not pattern:
-        return None, 0
-
+    expected_name: Optional[str]
     if system == "Darwin":
-        machine = platform.machine()
-        # Intel macs get intel build, ARM macs get universal build
-        preferred_suffix = "intel" if machine == "x86_64" else "universal"
-
-        for asset in assets:
-            name = asset.get("name", "")
-            if pattern in name and preferred_suffix in name:
-                return asset.get("browser_download_url"), asset.get("size", 0)
-
-        # Fallback: any macOS build
-        for asset in assets:
-            name = asset.get("name", "")
-            if pattern in name:
-                return asset.get("browser_download_url"), asset.get("size", 0)
+        architecture = {"x86_64": "intel", "arm64": "arm64"}.get(platform.machine())
+        if architecture is None:
+            return None, 0
+        expected_name = f"qitv-macos-{architecture}.zip"
     else:
-        for asset in assets:
-            name = asset.get("name", "")
-            if name == pattern or name.startswith(pattern):
-                return asset.get("browser_download_url"), asset.get("size", 0)
-
+        expected_name = ASSET_NAMES.get(system)
+    if expected_name is None:
+        return None, 0
+    for asset in assets:
+        if asset.get("name") == expected_name:
+            return asset.get("browser_download_url"), asset.get("size", 0)
     return None, 0
 
 
@@ -291,10 +277,7 @@ def _polish_msgbox(msg: QMessageBox):
 
     # Defer button width calculation until after the dialog is laid out,
     # so font metrics are resolved by the platform style engine.
-    original_show = msg.showEvent
-
-    def _on_show(event):
-        original_show(event)
+    def _resize_buttons():
         total_buttons_width = 0
         for btn in msg.buttons():
             fm = btn.fontMetrics()
@@ -307,7 +290,7 @@ def _polish_msgbox(msg: QMessageBox):
         min_dialog_width = max(400, total_buttons_width + 80)
         msg.setMinimumWidth(min_dialog_width)
 
-    msg.showEvent = _on_show
+    QTimer.singleShot(0, msg, _resize_buttons)
 
 
 def show_update_dialog(
@@ -517,8 +500,7 @@ def _perform_windows_update(downloaded_path: str, release_url: str):
         # Launch the downloaded exe with --replace flag
         subprocess.Popen(
             [downloaded_path, "--replace", original_exe],
-            creationflags=subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
 
         # Quit the current application

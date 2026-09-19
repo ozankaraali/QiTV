@@ -18,6 +18,7 @@ Style & Tooling
 - Logging: use `logging.getLogger(__name__)` rather than `print`.
 
 Current Work Plan (Living TODO)
+- In progress: 1.14 bundled standalone MPV replaces the Qt/libVLC player. Keep Internal isolated from user configuration; external VLC/MPV use installed applications. Release only after local Intel playback and native source/frozen smoke checks on all four packaging targets.
 1) Input/UI polish and correctness
    - [x] Separate dblclick fullscreen from single-click play/pause (video_player.py)
    - [x] Remove unused `installEventFilter(self)` on `video_frame` or implement `eventFilter` explicitly

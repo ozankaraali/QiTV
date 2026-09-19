@@ -1,67 +1,67 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-import os
+import json
 from pathlib import Path
 import tomllib
 
+from PyInstaller.building.datastruct import Tree
 
-def read_version():
-    # SPECPATH is provided by PyInstaller and points to the spec file directory
-    pyproj = Path(SPECPATH) / 'pyproject.toml'
-    with pyproj.open('rb') as f:
-        return tomllib.load(f)['project']['version']
-
-
-APP_VERSION = read_version()
-
-VLC_PATH = '/Applications/VLC.app/Contents'  # Adjust this path if necessary
+ROOT = Path(SPECPATH)
+with (ROOT / 'pyproject.toml').open('rb') as file:
+    APP_VERSION = tomllib.load(file)['project']['version']
+NATIVE_MPV = ROOT / 'native' / 'mpv'
+if not (NATIVE_MPV / 'bundle.json').is_file():
+    raise SystemExit('Prepare bundled MPV first: uv run scripts/prepare_mpv.py')
+if not json.loads((NATIVE_MPV / 'bundle.json').read_text()).get('redistributable'):
+    raise SystemExit('Diagnostic MPV is not a release input; run the default source preparation.')
 
 a = Analysis(
-    ['main.py'],
-    pathex=[VLC_PATH],
-    binaries=[
-        (os.path.join(VLC_PATH, 'MacOS/plugins/*'), 'plugins'),
-    ],
+    [str(ROOT / 'main.py')],
+    pathex=[str(ROOT)],
+    binaries=[],
     datas=[
-        ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
+        (str(ROOT / 'pyproject.toml'), '.'),
+        (str(ROOT / 'assets'), 'assets'),
     ],
-    hiddenimports=[],
+    hiddenimports=['scripts.smoke_mpv'],
     hookspath=[],
+    hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['vlc', 'mpv'],
     noarchive=False,
-    #https://github.com/pyinstaller/pyinstaller/issues/7851#issuecomment-1677986648
-    module_collection_mode={
-        'vlc': 'py',
-    }
 )
 
+# Preserve the prepared MPV closure, install names and signatures. BUNDLE places
+# this complete data tree in Resources and cross-links it from sys._MEIPASS.
+# Native executable DATA keeps its execute bit; Analysis must not rewrite it.
+native_mpv = Tree(str(NATIVE_MPV), prefix='native/mpv', typecode='DATA')
 pyz = PYZ(a.pure)
-
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries + [
-        ("libvlc.dylib", os.path.join(VLC_PATH, 'MacOS/lib/libvlc.dylib'), "BINARY"),
-        ("libvlccore.dylib", os.path.join(VLC_PATH, 'MacOS/lib/libvlccore.dylib'), "BINARY")
-        ],
-    #a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='QiTV',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    upx=False,
     console=False,
-    icon='assets/qitv.icns',
+    icon=str(ROOT / 'assets' / 'qitv.icns'),
+)
+collection = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    native_mpv,
+    strip=False,
+    upx=False,
+    name='QiTV',
 )
 app = BUNDLE(
-    exe,
+    collection,
     name='QiTV.app',
-    icon='assets/qitv.icns',
+    icon=str(ROOT / 'assets' / 'qitv.icns'),
     bundle_identifier='com.ozankaraali.QiTV',
     version=APP_VERSION,
     info_plist={
@@ -76,5 +76,5 @@ app = BUNDLE(
         'LSApplicationCategoryType': 'public.app-category.video',
         'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication',
-    }
+    },
 )

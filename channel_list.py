@@ -80,6 +80,7 @@ class ChannelList(
         self._active_content_worker = None
         self._provider_setup_running = False
         self._queued_provider_refresh = None
+        self._closing = False
 
         self.link: Optional[str] = None
         self.current_category: Optional[Dict[str, Any]] = None  # For back navigation
@@ -98,13 +99,6 @@ class ChannelList(
         self._current_category_movies: List[Dict[str, Any]] = []
         self._current_content_id: Optional[str] = None
         self._autoplay_dialog: Optional[QDialog] = None
-
-        # External VLC player instance (for single-instance behavior)
-        self._external_vlc_instance = None
-        self._external_vlc_player = None
-
-        # External MPV player instance (for single-instance behavior)
-        self._external_mpv_player = None
 
         # Create UI components
         self.create_top_bar()
@@ -140,8 +134,7 @@ class ChannelList(
         self.splitter.addWidget(self.content_info_panel)
         self.splitter.setSizes([1, 0])
         self.splitter.setHandleWidth(5)
-        self.splitter.setStyleSheet(
-            """
+        self.splitter.setStyleSheet("""
             QSplitter::handle {
                 background-color: rgba(128, 128, 128, 0.2);
                 border-radius: 2px;
@@ -149,8 +142,7 @@ class ChannelList(
             QSplitter::handle:hover {
                 background-color: rgba(128, 128, 128, 0.4);
             }
-        """
-        )
+        """)
 
         container_layout = QVBoxLayout(self.container_widget)
         container_layout.setContentsMargins(0, 0, 0, 0)
@@ -159,15 +151,13 @@ class ChannelList(
         # Connect player signals for auto-play and position tracking
         self.player.mediaEnded.connect(self.on_media_ended)
         self.player.positionChanged.connect(self.on_position_changed)
+        self.player.errorOccurred.connect(self.on_playback_error)
 
         # Input integration from player: mouse back/forward and remote Up/Down
-        try:
-            self.player.backRequested.connect(self.go_back)
-            self.player.forwardRequested.connect(self.go_forward)
-            self.player.channelNextRequested.connect(self.channel_surf_next)
-            self.player.channelPrevRequested.connect(self.channel_surf_prev)
-        except Exception:
-            pass
+        self.player.backRequested.connect(self.go_back)
+        self.player.forwardRequested.connect(self.go_forward)
+        self.player.channelNextRequested.connect(self.channel_surf_next)
+        self.player.channelPrevRequested.connect(self.channel_surf_prev)
 
         self.splitter.splitterMoved.connect(self.update_splitter_ratio)
 
@@ -196,7 +186,9 @@ class ChannelList(
     def closeEvent(self, event):
         from options import _verification_jobs
 
-        self._closing = True
+        if not self._closing:
+            self._closing = True
+            self.player.shutdown()
         self._queued_provider_refresh = None
         self.cancel_content_loading()
         self.stop_image_loading()
@@ -209,18 +201,18 @@ class ChannelList(
             or self._provider_setup_running
             or getattr(self, "_retired_image_loaders", [])
             or _verification_jobs
+            or self.player.is_running()
         ):
-            # Keep delivering queued completions until every QThread has stopped.
-            # Never destroy a running thread or block the GUI in wait().
+            # Keep the event loop alive until background workers and MPV exit.
+            # Never block the GUI waiting for a thread or process.
             self.setEnabled(False)
-            self.statusBar().showMessage("Closing after background requests finish...")
+            self.statusBar().showMessage("Closing after playback and background requests finish...")
             QTimer.singleShot(100, self.close)
             event.ignore()
             return
         self.refresh_on_air_timer.deleteLater()
 
         self.app.quit()
-        self.player.close()
         self.image_manager.save_index()
         self.epg_manager.save_index()
         self.config_manager.save_window_settings(self, "channel_list")
@@ -520,7 +512,7 @@ class ChannelList(
 
         # Playback shortcuts: mirror on ChannelList with Window scope
         # so they work when this window is active, without colliding
-        # with VideoPlayer's own shortcuts when it has focus.
+        # with MPV's own shortcuts when its window has focus.
 
         # Fullscreen
         act_full = QAction("Fullscreen", self)
@@ -545,7 +537,7 @@ class ChannelList(
         act_play.setShortcut(QKeySequence(Qt.Key_Space))
         act_play.setShortcutContext(Qt.WindowShortcut)
         act_play.triggered.connect(
-            lambda: self.player.toggle_play_pause() if not_in_text_input() else None
+            lambda: self.player.toggle_pause() if not_in_text_input() else None
         )
         self.addAction(act_play)
 
@@ -556,9 +548,7 @@ class ChannelList(
 
         def _pip():
             if not_in_text_input():
-                if self.player.windowState() == Qt.WindowFullScreen:
-                    self.player.setWindowState(Qt.WindowNoState)
-                self.player.toggle_pip_mode()
+                self.player.toggle_pip()
 
         act_pip.triggered.connect(_pip)
         self.addAction(act_pip)
@@ -791,11 +781,8 @@ class ChannelList(
         self.config_manager.play_in_vlc = mode == "vlc"
         self.config_manager.play_in_mpv = mode == "mpv"
         self.save_config()
-        if mode == "internal":
-            pass  # Player will open on next play
-        else:
-            if hasattr(self, "player") and self.player.isVisible():
-                self.player.close()
+        if mode != "internal":
+            self.player.shutdown()
 
     def _on_menu_provider_selected(self, provider_name):
         self.sidebar.select_provider(provider_name)

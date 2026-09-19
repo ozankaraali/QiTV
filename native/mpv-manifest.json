@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "mpv_version": "0.41.0-dev-e76a35ec95",
+  "mpv_commit": "e76a35ec95b27f5cf2d27b043b5e2e0d90e468ae",
+  "vcpkg_commit": "dc1dbc7d46ceb78858f26d21fd22ee4d530e30ea",
+  "libplacebo_version": "7.360.1",
+  "meson_version": "1.12.0",
+  "sources": {
+    "vcpkg.tar.gz": {
+      "url": "https://codeload.github.com/microsoft/vcpkg/tar.gz/dc1dbc7d46ceb78858f26d21fd22ee4d530e30ea",
+      "sha256": "cfaaf3764ca0db56d1463136f095d37b5c9aab1c261dce7243880f6a67834aca",
+      "size": 5388649
+    },
+    "mpv.tar.gz": {
+      "url": "https://codeload.github.com/mpv-player/mpv/tar.gz/e76a35ec95b27f5cf2d27b043b5e2e0d90e468ae",
+      "sha256": "0f9ce05d33051f912ba69da51430d3fb051e8a3aa6d7c52a34f43a9f9f663e89",
+      "size": 7459702
+    },
+    "libplacebo.tar.gz": {
+      "url": "https://codeload.github.com/haasn/libplacebo/tar.gz/refs/tags/v7.360.1",
+      "sha256": "d05fdf90bea2f629eaa2d115e909fd356388ac639e54f77b87a018a6d76224bd",
+      "size": 862269
+    },
+    "Vulkan-Headers.tar.gz": {
+      "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/450bd2232225d6c7728a4108055ac2e37cef6475",
+      "sha256": "26df9841c30806a994e2fdf42f7c87bcb1ced9db9a06033469123939fb3fa075",
+      "size": 2940820
+    },
+    "fast_float.tar.gz": {
+      "url": "https://codeload.github.com/fastfloat/fast_float/tar.gz/97b54ca9e75f5303507699d27c6b4f4efe4641a1",
+      "sha256": "2b132274539286e41f37857cac22aa8441d21bd86d55de825a3342b149f66801",
+      "size": 120200
+    },
+    "glad.tar.gz": {
+      "url": "https://codeload.github.com/Dav1dde/glad/tar.gz/73db193f853e2ee079bf3ca8a64aa2eaf6459043",
+      "sha256": "33dbeae44d8315ece57e14eba4b1b4a02ac5406d1c4f49cd20048c91522a6b9a",
+      "size": 645779
+    },
+    "jinja.tar.gz": {
+      "url": "https://codeload.github.com/pallets/jinja/tar.gz/15206881c006c79667fe5154fe80c01c65410679",
+      "sha256": "b88a20dcc2e34072fcf4159325bc6c34cd4b29a81a8b83d15d2f28ba561da296",
+      "size": 276954
+    },
+    "markupsafe.tar.gz": {
+      "url": "https://codeload.github.com/pallets/markupsafe/tar.gz/297fc8e356e6836a62087949245d09a28e9f1b13",
+      "sha256": "da7c010c9c81a66ac73036558c1fcb6212b50482f43211cd1254035b94f82414",
+      "size": 83817
+    }
+  },
+  "targets": {
+    "darwin-x86_64": {
+      "triplet": "x64-qitv-osx",
+      "host_triplet": "x64-osx",
+      "architecture": "x64",
+      "cmake_system": "Darwin",
+      "minimum_os": "13.0"
+    },
+    "darwin-arm64": {
+      "triplet": "arm64-qitv-osx",
+      "host_triplet": "arm64-osx",
+      "architecture": "arm64",
+      "cmake_system": "Darwin",
+      "minimum_os": "13.0"
+    },
+    "windows-x86_64": {
+      "triplet": "x64-qitv-windows",
+      "host_triplet": "x64-windows",
+      "architecture": "x64",
+      "cmake_system": null,
+      "minimum_os": "10"
+    },
+    "linux-x86_64": {
+      "triplet": "x64-qitv-linux",
+      "host_triplet": "x64-linux",
+      "architecture": "x64",
+      "cmake_system": "Linux",
+      "minimum_os": "glibc 2.35; X11 desktop or XWayland"
+    }
+  },
+  "diagnostic_prebuilt": {
+    "darwin-x86_64": {
+      "url": "https://laboratory.stolendata.net/~djinn/mpv_osx/mpv-0.39.0.tar.gz",
+      "sha256": "35ec81ad86a97b24956a8d0f4fa1ba2690b44ae7741c920e923620bcd7bd402a",
+      "size": 23791174,
+      "executable": "mpv.app/Contents/MacOS/mpv",
+      "minimum_os": "11.0",
+      "version": "0.39.0",
+      "redistributable": false,
+      "reason": "Diagnostic only. Contains old FFmpeg6.1.2 and distributor does not provide complete matching dependency source/build recipes. Release preparation MUST use source builds."
+    }
+  }
+}
