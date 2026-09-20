@@ -34,6 +34,8 @@ The one-time native preparation builds pinned MPV, FFmpeg, libraries, and the uo
 
 The recipe writes `native/mpv/` and a matching `native/mpv-sources-<target>.tar.gz`. PyInstaller packages this private runtime; it never searches the build machine for a replacement MPV installation. See [native redistribution instructions](native/REDISTRIBUTION.txt) for licenses and rebuilding.
 
+Subsequent preparation reuses that runtime/source pair when the native inputs and toolchain still match. The cache identity includes the target, source pins, build recipe, patches, bundled MPV assets, compiler/SDK versions, build flags, and CI runner image. Reuse validates cached file hashes, executable permissions, and the corresponding-source archive checksum. Python application and packaging dependency changes alone do not invalidate it. Build tools remain necessary to identify the toolchain; use `uv run --frozen python scripts/prepare_mpv.py --rebuild` to force compilation.
+
 ### Linux Desktop Integration
 
 After downloading the release binary or cloning the repo, you can install QiTV into your application menu so it persists across reboots:
@@ -129,6 +131,8 @@ uv export --frozen --no-dev --no-emit-project --output-file requirements.txt
 ```
 
 The native playback smoke uses a small synthetic H.264/AAC fixture and MPV's `fast` rendering profile for software-rendered CI environments. Linux smokes force a 60 Hz refresh rate to accommodate Xvfb. It verifies playback, window controls and packaging isolation, not GPU performance or picture quality. These CI rendering overrides are not applied to normal internal playback.
+
+CI caches `native/mpv/` together with its matching source archive under an exact, target-specific key. Caches are saved only after source and frozen playback checks and packaging succeed; cache hits still run those checks. Missing, evicted, or invalid caches trigger a source build rather than using an incompatible runtime. GitHub can evict inactive caches, and cache entries are immutable: delete a damaged entry if it repeatedly fails integrity checks so a successful rebuild can replace it.
 
 ## Acknowledgements
 
