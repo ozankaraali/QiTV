@@ -73,7 +73,7 @@ jobs:
       - name: Verify native video and visible controls
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
-            QT_DEBUG_PLUGINS=1 QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py \
+            QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py \
               --render --fixture tests/fixtures/mpv-smoke.mp4 --report build/mpv-probe/render.json
           else
             uv run --frozen --no-sync python scripts/smoke_mpv.py \

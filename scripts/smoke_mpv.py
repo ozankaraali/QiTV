@@ -34,6 +34,9 @@ class SmokeMpvPlayer(MpvPlayer):
     def _mpv_arguments(self):
         # Exercise native graphics with software-friendly settings on virtual CI GPUs.
         video = ['--profile=fast', '--geometry=640x480+0+0'] if self.render else ['--vo=null']
+        # Xvfb can report NaN refresh rates, which invalidate uosc's rendering timer.
+        if self.render and sys.platform.startswith('linux'):
+            video.append('--display-fps-override=60')
         diagnostics = (
             ['--log-file=' + str(self.log_path), '--msg-level=all=debug'] if self.log_path else []
         )
