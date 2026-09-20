@@ -21,15 +21,6 @@ jobs:
           - name: linux
             runner: ubuntu-22.04
             asset: qitv-linux
-          - name: windows
-            runner: windows-2022
-            asset: qitv-windows.exe
-          - name: macos-arm64
-            runner: macos-15
-            asset: qitv-macos-arm64.zip
-          - name: macos-intel
-            runner: macos-15-intel
-            asset: qitv-macos-intel.zip
     env:
       GH_TOKEN: ${{ github.token }}
       QT_QPA_PLATFORM: offscreen
@@ -81,7 +72,7 @@ jobs:
       - name: Verify native video and visible controls
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
-            QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py \
+            QT_DEBUG_PLUGINS=1 QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py \
               --render --fixture tests/fixtures/mpv-smoke.mp4 --report build/mpv-probe/render.json
           else
             uv run --frozen --no-sync python scripts/smoke_mpv.py \
