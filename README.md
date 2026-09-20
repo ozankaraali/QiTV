@@ -128,7 +128,7 @@ Dependency versions are maintained in `pyproject.toml` and `uv.lock`. Use `uv sy
 uv export --frozen --no-dev --no-emit-project --output-file requirements.txt
 ```
 
-The native playback smoke uses a small synthetic H.264/AAC fixture and MPV's `fast` rendering profile for software-rendered CI environments, with a fixed 60 Hz refresh rate on Xvfb. It verifies playback, window controls and packaging isolation, not GPU performance or picture quality. Normal internal playback retains MPV's default rendering settings.
+The native playback smoke uses a small synthetic H.264/AAC fixture and MPV's `fast` rendering profile for software-rendered CI environments. Linux smokes force a 60 Hz refresh rate to accommodate Xvfb. It verifies playback, window controls and packaging isolation, not GPU performance or picture quality. These CI rendering overrides are not applied to normal internal playback.
 
 ## Acknowledgements
 
