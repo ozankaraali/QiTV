@@ -19,6 +19,7 @@ import os
 from pathlib import Path, PurePosixPath
 import platform
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -41,6 +42,179 @@ def host_target():
 def sha256(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def toolchain_identity(manifest: dict, target_name: str) -> dict:
+    """Fingerprint the compiler/SDK actually selected on this host, not its paths alone."""
+    commands = {
+        "cmake": ["cmake", "--version"],
+        "ninja": ["ninja", "--version"],
+        "nasm": ["nasm", "-v"],
+        "go": ["go", "version"],
+    }
+    if target_name.startswith("windows"):
+        commands.update(
+            msvc=["cl"],
+            clang=["clang", "--version"],
+            linker=["lld-link", "--version"],
+        )
+    else:
+        commands.update(
+            cc=shlex.split(os.environ.get("CC", "cc")) + ["--version"],
+            cxx=shlex.split(os.environ.get("CXX", "c++")) + ["--version"],
+        )
+        if target_name.startswith("darwin"):
+            commands.update(
+                swift=["swift", "--version"],
+                sdk=["xcrun", "--sdk", "macosx", "--show-sdk-build-version"],
+            )
+        else:
+            commands.update(
+                linker=["ld", "--version"],
+                libc=["getconf", "GNU_LIBC_VERSION"],
+                desktop_sdk=[
+                    "pkg-config",
+                    "--modversion",
+                    "x11",
+                    "xext",
+                    "xrandr",
+                    "xcursor",
+                    "xi",
+                    "xfixes",
+                    "xscrnsaver",
+                    "xpresent",
+                    "xkbcommon",
+                    "gl",
+                    "alsa",
+                    "libpulse",
+                ],
+            )
+    environment = os.environ.copy()
+    environment.update(GOTOOLCHAIN=f"go{manifest['go_version']}", GOWORK="off")
+    versions = {}
+    for name, command in commands.items():
+        result = subprocess.run(
+            command,
+            env=environment,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        # Ignore Go's first-use download notice on stderr; cl prints its version there.
+        version = result.stdout.strip() or result.stderr.strip()
+        # cl without a source file prints its version and exits with code 2.
+        if result.returncode not in ((0, 2) if name == "msvc" else (0,)) or not version:
+            raise RuntimeError(f"Could not identify {name}: {result.stdout}{result.stderr}")
+        versions[name] = version
+    return {
+        "platform": platform.platform(),
+        "runner_image": [os.environ.get("ImageOS", ""), os.environ.get("ImageVersion", "")],
+        "tools": versions,
+        "environment": {
+            name: os.environ.get(name, "")
+            for name in (
+                "CC",
+                "CXX",
+                "CPPFLAGS",
+                "CFLAGS",
+                "CXXFLAGS",
+                "LDFLAGS",
+                "CL",
+                "_CL_",
+                "LINK",
+                "SDKROOT",
+                "DEVELOPER_DIR",
+                "WindowsSDKVersion",
+                "VCToolsVersion",
+                "VSCMD_VER",
+                "CMAKE_TOOLCHAIN_FILE",
+                "GOFLAGS",
+                "GOEXPERIMENT",
+                "GOAMD64",
+                "GOARM64",
+            )
+        },
+    }
+
+
+def native_cache_key(root: Path, target_name: str, toolchain: dict) -> str:
+    """Only native recipe/source inputs invalidate reuse; Python UI changes do not."""
+    inputs = {}
+    for relative in (
+        "scripts/prepare_mpv.py",
+        "native/mpv-manifest.json",
+        "native/REDISTRIBUTION.txt",
+        "native/patches",
+        "assets/mpv",
+    ):
+        source = root / relative
+        if source.is_symlink():
+            raise ValueError(f"Symlink in native build inputs: {source}")
+        if not source.exists():
+            raise FileNotFoundError(f"Missing native build input: {source}")
+        paths = sorted(source.rglob("*")) if source.is_dir() else [source]
+        for path in paths:
+            if path.is_symlink():
+                raise ValueError(f"Symlink in native build inputs: {path}")
+            if path.is_file():
+                inputs[path.relative_to(root).as_posix()] = sha256(path)
+    identity = {"target": target_name, "inputs": inputs, "toolchain": toolchain}
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"qitv-mpv-v1-{target_name}-{digest}"
+
+
+def runtime_inventory(directory: Path) -> dict:
+    """Cover every runtime/license file and executable permissions, excluding this manifest."""
+    if directory.is_symlink():
+        raise ValueError("Runtime directory is a symlink")
+    files = {}
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"Symlink in native runtime: {path}")
+        if path.is_dir() or path == directory / "bundle.json":
+            continue
+        if not path.is_file():
+            raise ValueError(f"Non-regular native runtime file: {path}")
+        files[path.relative_to(directory).as_posix()] = {
+            "sha256": sha256(path),
+            "executable": path.stat().st_mode & 0o111 if os.name != "nt" else 0,
+        }
+    return files
+
+
+def cached_runtime_valid(directory: Path, sources: Path, target_name: str, key: str) -> bool:
+    """A partial, stale or corrupted runtime/source pair is a miss, never a build input."""
+    try:
+        if (directory / "bundle.json").is_symlink() or sources.is_symlink():
+            return False
+        metadata = json.loads((directory / "bundle.json").read_text(encoding="utf-8"))
+        suffix = ".exe" if target_name.startswith("windows") else ""
+        executables = [f"bin/mpv{suffix}", f"bin/ziggy{suffix}"]
+        if (
+            metadata["schema"] != 1
+            or metadata["target"] != target_name
+            or metadata["cache_key"] != key
+            or metadata["redistributable"] is not True
+            or metadata["executable"] != executables[0]
+            or metadata["uosc"]["executable"] != executables[1]
+            or metadata["source_archive"] != sources.name
+            or metadata["source_sha256"] != sha256(sources)
+        ):
+            return False
+        inventory = runtime_inventory(directory)
+        return (
+            bool(inventory)
+            and metadata["files"] == inventory
+            and all(name in inventory for name in executables)
+            and (
+                os.name == "nt" or all(os.access(directory / name, os.X_OK) for name in executables)
+            )
+        )
+    except OSError, ValueError, KeyError, TypeError:
+        return False
 
 
 def download(artifact, cache):
@@ -635,6 +809,16 @@ def main():
     )
     parser.add_argument("--target", default=host_target())
     parser.add_argument("--cache-dir", type=Path, default=Path.home() / ".cache" / "qitv" / "mpv")
+    parser.add_argument(
+        "--print-cache-key",
+        action="store_true",
+        help="Print the native input/toolchain cache key without preparing a runtime.",
+    )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Rebuild even if a verified prepared runtime matches.",
+    )
     args = parser.parse_args()
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     if args.target not in manifest["targets"]:
@@ -643,7 +827,12 @@ def main():
         )
     if args.target != host_target():
         parser.error("Native source builds must run on the matching OS/architecture runner.")
+    key = native_cache_key(ROOT, args.target, toolchain_identity(manifest, args.target))
+    if args.print_cache_key:
+        print(key)
+        return
     destination = ROOT / "native" / "mpv"
+    sources = destination.parent / f"mpv-sources-{args.target}.tar.gz"
     destination.parent.mkdir(parents=True, exist_ok=True)
     args.cache_dir = args.cache_dir.expanduser().resolve()
     args.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -657,12 +846,22 @@ def main():
     try:
         with os.fdopen(lock_fd, "w") as stream:
             stream.write(str(os.getpid()))
+        if not args.rebuild and cached_runtime_valid(destination, sources, args.target, key):
+            print(f"Reusing verified native runtime and matching sources: {key}", flush=True)
+            return
+        print(f"Building native runtime (cache missing, invalid or bypassed): {key}", flush=True)
         with tempfile.TemporaryDirectory(prefix=".mpv-", dir=destination.parent) as temporary:
             stage = Path(temporary) / "runtime"
             stage.mkdir()
-            sources = destination.parent / f"mpv-sources-{args.target}.tar.gz"
             metadata = build_runtime(manifest, args.target, args.cache_dir, stage, sources)
-            metadata.update({"schema": 1, "target": args.target})
+            metadata.update(
+                {
+                    "schema": 1,
+                    "target": args.target,
+                    "cache_key": key,
+                    "files": runtime_inventory(stage),
+                }
+            )
             metadata["runtime_bytes"] = sum(
                 p.stat().st_size for p in stage.rglob("*") if p.is_file()
             )
