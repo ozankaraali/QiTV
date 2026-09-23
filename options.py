@@ -30,6 +30,7 @@ import requests
 
 from config_manager import MultiKeyDict
 from provider_manager import StbHandshake
+from services.thread_cleanup import ThreadCleanup
 from update_checker import check_for_updates
 
 # Jobs outlive a closed dialog; a running QThread must never be owned by that dialog.
@@ -787,9 +788,9 @@ class OptionsDialog(QDialog):
         thread.started.connect(worker.run)
         worker.result.connect(self._provider_verified, Qt.QueuedConnection)
         worker.finished.connect(thread.quit, Qt.DirectConnection)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(lambda: _release_verification_job(thread, worker))
-        thread.finished.connect(thread.deleteLater)
+        ThreadCleanup(thread, worker).finished.connect(
+            lambda finished_thread: _release_verification_job(finished_thread, worker)
+        )
         _verification_jobs.append((thread, worker))
         thread.start()
 
@@ -993,7 +994,7 @@ class OptionsDialog(QDialog):
                     self.config_manager.xmltv_channel_map = multiKey
                     self.load_xmltv_channel_mapping()
                     self.xmltv_mapping_modified = True
-            except (FileNotFoundError, json.JSONDecodeError):
+            except FileNotFoundError, json.JSONDecodeError:
                 pass
 
     def export_xmltv_mapping(self):

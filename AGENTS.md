@@ -51,6 +51,7 @@ Current Work Plan (Living TODO)
    - [ ] Plumb important errors to the UI via signals (non-modal first, modal where necessary)
 
 5) Testing and stability
+   - [x] Fix native QThread teardown races without blocking the GUI; retain wrappers through a successful nonblocking join
    - [ ] Add tests for provider cache pruning and image cache accounting
    - [ ] Add tests for XMLTV parsing and MultiKeyDict behavior
    - [ ] Add simple smoke tests for content loader pagination/aggregation
@@ -71,6 +72,8 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- v1.13.7 (unreleased): Fixed an intermittent native PySide/QThread cleanup crash, observed immediately after waking from sleep and reproduced with repeated local M3U loads. Shared `services/thread_cleanup.py` retains thread/worker wrappers through a successful nonblocking native join before notifying the GUI or deleting the thread. Applied to catalog, images, provider setup/verification, playback links, and updates; app closure waits asynchronously for pending cleanup. VLC playback and existing packaging remain unchanged; no MPV migration was merged.
+- Verification: On Intel macOS/Python 3.14.0/PySide6 6.11.2, 3,000 local M3U worker lifecycles, all 13 regressions, controlled-response update/download success/error/cancellation smoke checks, focused seven-module type checks, syntax/undefined-name lint, and the version/lock consistency check passed. New subprocess regressions cover delayed native teardown, GUI responsiveness, and consumer destruction. Broader mypy still reports 22 errors in unchanged export/dialog modules. Frozen bundles and other operating systems have not yet been reverified for this patch.
 - Release v1.13.6: Dependency/security upgrades and the Xtream duplicate-request fix (#51). Verified 11 regressions, 11-module type checks, native macOS single-request playback and VOD resume, asynchronous image loading, and the macOS bundle build.
 - Fix #51: Xtream catalog loading no longer probes media URLs, and the embedded player no longer requests network preparsing before playback. Provider metadata determines stream URLs/formats; native playback, redirects, reconnects, and VOD error/seek handling remain intact. `tests/test_xtream_requests.py` covers API-only live/VOD catalog requests, explicit scheme/port precedence, HLS-only providers, and VOD container metadata.
 - Dependencies: Updated runtime/tooling pins and all transitive dependencies, aligned pre-commit tool versions, and pinned supported CI action releases by commit SHA. Removed unused m3u-parser/asyncio and obsolete tzlocal stubs. Python is constrained to 3.14 by current Qt/theme support; requirements.txt is generated with hashes from uv.lock.

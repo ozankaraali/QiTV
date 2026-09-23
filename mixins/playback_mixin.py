@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 import requests
 from urlobject import URLObject
 
+from services.thread_cleanup import ThreadCleanup
 from widgets.autoplay_dialogs import (
     EpisodeAutoPlayDialog,
     MovieSuggestionDialog,
@@ -128,11 +129,9 @@ class PlaybackMixin:
             worker.error.connect(self._on_link_error, Qt.QueuedConnection)
             worker.finished.connect(thread.quit)
             worker.error.connect(thread.quit)
-            thread.finished.connect(worker.deleteLater)
-            thread.finished.connect(thread.deleteLater)
-            thread.finished.connect(_cleanup)
-            thread.start()
+            ThreadCleanup(thread, worker).finished.connect(_cleanup)
             self._bg_jobs.append((thread, worker))
+            thread.start()
         else:
             cmd = item_data.get("cmd")
             self.link = cmd
@@ -432,7 +431,7 @@ class PlaybackMixin:
 
             self._external_mpv_player.play(url)
             return True
-        except (ImportError, OSError, Exception):
+        except ImportError, OSError, Exception:
             # python-mpv not available or failed, fall back to subprocess
             pass
 

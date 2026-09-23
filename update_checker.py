@@ -5,12 +5,13 @@ import subprocess
 import sys
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
 from packaging.version import parse
 import requests
 
 from config_manager import ConfigManager, get_app_version
+from services.thread_cleanup import ThreadCleanup, has_pending_threads
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class UpdateWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
 
+    @Slot()
     def run(self):
         repo = "ozankaraali/QiTV"
         api_url = f"https://api.github.com/repos/{repo}/releases/latest"
@@ -68,16 +70,31 @@ def check_for_updates(config_manager: Optional[ConfigManager] = None, manual: bo
     worker = UpdateWorker()
     worker.moveToThread(thread)
 
-    def on_started():
-        worker.run()
+    update_result = None
+    update_error = None
 
     def on_finished(result):
+        nonlocal update_result
+        update_result = result
         thread.quit()
+
+    def on_error(msg):
+        nonlocal update_error
+        update_error = msg
+        thread.quit()
+
+    def _cleanup(_thread):
+        _update_jobs.remove((thread, worker))
         app = QApplication.instance()
+        if update_error is not None:
+            logger.warning(f"Error checking for updates: {update_error}")
+            if manual and app:
+                QTimer.singleShot(0, app, lambda: _show_check_error(update_error))
+            return
         if app is None:
             return
-        if result:
-            version = result.get("version", "")
+        if update_result:
+            version = update_result.get("version", "")
             # For automatic checks, skip if user previously chose to skip this version
             if (
                 not manual
@@ -87,30 +104,18 @@ def check_for_updates(config_manager: Optional[ConfigManager] = None, manual: bo
             ):
                 logger.debug("Skipping update dialog for version %s (user skipped)", version)
                 return
-            QTimer.singleShot(0, app, lambda: show_update_dialog(result, config_manager, manual))
+            QTimer.singleShot(
+                0, app, lambda: show_update_dialog(update_result, config_manager, manual)
+            )
         elif manual:
             QTimer.singleShot(0, app, _show_up_to_date)
 
-    def on_error(msg):
-        thread.quit()
-        logger.warning(f"Error checking for updates: {msg}")
-        if manual:
-            app = QApplication.instance()
-            if app:
-                QTimer.singleShot(0, app, lambda: _show_check_error(msg))
-
-    def _cleanup():
-        try:
-            _update_jobs.remove((thread, worker))
-        except ValueError:
-            pass
-
-    thread.started.connect(on_started)
-    worker.finished.connect(on_finished, Qt.QueuedConnection)
-    worker.error.connect(on_error, Qt.QueuedConnection)
-    thread.finished.connect(_cleanup)
-    thread.start()
+    thread.started.connect(worker.run)
+    worker.finished.connect(on_finished, Qt.DirectConnection)
+    worker.error.connect(on_error, Qt.DirectConnection)
+    ThreadCleanup(thread, worker).finished.connect(_cleanup)
     _update_jobs.append((thread, worker))
+    thread.start()
 
 
 def _skip_version(config_manager: Optional[ConfigManager], version: str):
@@ -224,6 +229,7 @@ class UpdateDownloader(QObject):
     def cancel(self):
         self._cancelled = True
 
+    @Slot()
     def run(self):
         try:
             # Extract filename from URL
@@ -421,9 +427,14 @@ def start_download(download_url: str, file_size: int, release_url: str):
     # closures lack thread affinity and may run on the worker thread, which
     # crashes macOS (NSWindow operations must be on the Main Thread).
     app = QApplication.instance()
+    downloaded_path = None
+    download_error = None
+    completed = False
 
     def on_progress(downloaded: int, total: int):
         def _update():
+            if completed or progress.wasCanceled():
+                return
             if total > 0:
                 percent = int(downloaded * 100 / total)
                 progress.setValue(percent)
@@ -437,40 +448,36 @@ def start_download(download_url: str, file_size: int, release_url: str):
             QTimer.singleShot(0, app, _update)
 
     def on_finished(path: str):
-        def _handle():
-            thread.quit()
-            progress.close()
-            perform_update(path, release_url)
-            _cleanup()
-
-        if app:
-            QTimer.singleShot(0, app, _handle)
+        nonlocal downloaded_path
+        downloaded_path = path
+        thread.quit()
 
     def on_error(error_msg: str):
-        def _handle():
-            thread.quit()
-            progress.close()
-            _cleanup()
-            if "cancelled" not in error_msg.lower():
-                _show_download_error(error_msg, release_url)
-
-        if app:
-            QTimer.singleShot(0, app, _handle)
+        nonlocal download_error
+        download_error = error_msg
+        thread.quit()
 
     def on_cancelled():
         downloader.cancel()
 
-    def _cleanup():
-        try:
-            _download_jobs.remove((thread, downloader, progress))
-        except ValueError:
-            pass
+    def _cleanup(_thread):
+        nonlocal completed
+        completed = True
+        progress.canceled.disconnect(on_cancelled)
+        progress.close()
+        _download_jobs.remove((thread, downloader, progress))
+        if app:
+            if downloaded_path is not None:
+                QTimer.singleShot(0, app, lambda: perform_update(downloaded_path, release_url))
+            elif download_error is not None and "cancelled" not in download_error.lower():
+                QTimer.singleShot(0, app, lambda: _show_download_error(download_error, release_url))
 
     thread.started.connect(downloader.run)
-    downloader.progress.connect(on_progress)
-    downloader.finished.connect(on_finished)
-    downloader.error.connect(on_error)
+    downloader.progress.connect(on_progress, Qt.DirectConnection)
+    downloader.finished.connect(on_finished, Qt.DirectConnection)
+    downloader.error.connect(on_error, Qt.DirectConnection)
     progress.canceled.connect(on_cancelled)
+    ThreadCleanup(thread, downloader).finished.connect(_cleanup)
 
     _download_jobs.append((thread, downloader, progress))
     thread.start()
@@ -509,6 +516,11 @@ def _perform_windows_update(downloaded_path: str, release_url: str):
     """Windows: launch new exe with --replace flag, then quit."""
     import webbrowser
 
+    app = QApplication.instance()
+    if app and has_pending_threads():
+        QTimer.singleShot(25, app, lambda: _perform_windows_update(downloaded_path, release_url))
+        return
+
     # Get the path to the original executable (not the temp extraction folder)
     # For PyInstaller, sys.executable points to the original .exe file
     original_exe = sys.executable
@@ -521,10 +533,9 @@ def _perform_windows_update(downloaded_path: str, release_url: str):
             | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
         )
 
-        # Quit the current application
-        app = QApplication.instance()
+        # Run the normal window shutdown paths before exiting.
         if app:
-            app.quit()
+            app.closeAllWindows()
 
     except OSError as e:
         logger.error(f"Failed to launch update: {e}")

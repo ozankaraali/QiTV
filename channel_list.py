@@ -33,6 +33,7 @@ from content_loader import ContentLoader
 from image_loader import ImageLoader
 from mixins import ContentLoadingMixin, DisplayMixin, ExportMixin, PlaybackMixin
 from options import OptionsDialog
+from services.thread_cleanup import ThreadCleanup, has_pending_threads
 from widgets.delegates import HtmlItemDelegate
 from widgets.menu_bar import AppMenuBar
 from widgets.sidebar import Sidebar
@@ -140,8 +141,7 @@ class ChannelList(
         self.splitter.addWidget(self.content_info_panel)
         self.splitter.setSizes([1, 0])
         self.splitter.setHandleWidth(5)
-        self.splitter.setStyleSheet(
-            """
+        self.splitter.setStyleSheet("""
             QSplitter::handle {
                 background-color: rgba(128, 128, 128, 0.2);
                 border-radius: 2px;
@@ -149,8 +149,7 @@ class ChannelList(
             QSplitter::handle:hover {
                 background-color: rgba(128, 128, 128, 0.4);
             }
-        """
-        )
+        """)
 
         container_layout = QVBoxLayout(self.container_widget)
         container_layout.setContentsMargins(0, 0, 0, 0)
@@ -194,8 +193,6 @@ class ChannelList(
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
-        from options import _verification_jobs
-
         self._closing = True
         self._queued_provider_refresh = None
         self.cancel_content_loading()
@@ -208,7 +205,7 @@ class ChannelList(
             self._bg_jobs
             or self._provider_setup_running
             or getattr(self, "_retired_image_loaders", [])
-            or _verification_jobs
+            or has_pending_threads()
         ):
             # Keep delivering queued completions until every QThread has stopped.
             # Never destroy a running thread or block the GUI in wait().
@@ -347,16 +344,14 @@ class ChannelList(
             force_epg_refresh=bool(force_update),
         )
         self.set_provider_thread.progress.connect(self.update_busy_progress)
-        # Ensure the finished handler runs on the GUI thread (no lambda)
-        self.set_provider_thread.finished.connect(
-            self._on_set_provider_thread_finished, Qt.QueuedConnection
+        ThreadCleanup(self.set_provider_thread).finished.connect(
+            self._on_set_provider_thread_finished
         )
         self.set_provider_thread.start()
 
     def set_provider_finished(self, force_update=False):
         self.progress_bar.setRange(0, 100)  # Stop busy indicator
         if hasattr(self, "set_provider_thread"):
-            self.set_provider_thread.deleteLater()
             del self.set_provider_thread
         self._provider_setup_running = False
         if getattr(self, "_closing", False):
