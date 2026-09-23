@@ -182,7 +182,7 @@ class ConfigManager:
                 self.config = json.loads(f.read())
             if self.config is None:
                 self.config = self.default_config()
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError, json.JSONDecodeError:
             self.config = self.default_config()
             self.save_config()
 
@@ -193,6 +193,13 @@ class ConfigManager:
 
     def update_patcher(self):
         need_update = False
+
+        # Other player versions may remove windows that this build still uses.
+        window_positions = self.config.setdefault("window_positions", {})
+        for window_name, settings in self.default_config()["window_positions"].items():
+            if window_name not in window_positions:
+                window_positions[window_name] = settings
+                need_update = True
 
         # add favorites to the loaded config if it doesn't exist
         if "favorites" not in self.config:
