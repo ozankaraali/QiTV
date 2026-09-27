@@ -1,3 +1,10 @@
+import multiprocessing
+
+# PyInstaller must dispatch spawned workers before importing Qt, libmpv or
+# application configuration. Source-mode children import this as __mp_main__.
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+
 import ctypes
 import logging
 import os
@@ -5,20 +12,6 @@ import platform
 import shutil
 import sys
 import time
-
-from PySide6 import QtGui
-from PySide6.QtCore import QLoggingCategory, QTimer, qInstallMessageHandler
-from PySide6.QtWidgets import QApplication
-import qdarktheme
-
-from channel_list import ChannelList
-from config_manager import ConfigManager, get_app_version
-from epg_manager import EpgManager
-from image_manager import ImageManager
-from mpv_player import MpvPlayer
-from provider_manager import ProviderManager
-from sleep_manager import allow_sleep, prevent_sleep
-from update_checker import check_for_updates
 
 
 def handle_replace_flag():
@@ -55,6 +48,20 @@ def handle_replace_flag():
 
 
 if __name__ == "__main__":
+    from PySide6 import QtGui
+    from PySide6.QtCore import QLoggingCategory, QTimer, qInstallMessageHandler
+    from PySide6.QtWidgets import QApplication
+    import qdarktheme
+
+    from channel_list import ChannelList
+    from config_manager import ConfigManager, get_app_version
+    from epg_manager import EpgManager
+    from image_manager import ImageManager
+    from mpv_player import MpvPlayer
+    from provider_manager import ProviderManager
+    from sleep_manager import allow_sleep, prevent_sleep
+    from update_checker import check_for_updates
+
     if "--smoke-mpv" in sys.argv:
         from scripts.smoke_mpv import main as smoke_main
 

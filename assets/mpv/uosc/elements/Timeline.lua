@@ -123,6 +123,13 @@ end
 ---@param fast? boolean
 function Timeline:set_from_cursor(fast)
 	if state.time and state.duration then
+		if state.qitv_timeshift then
+			if self.pressed then
+				self.pressed.qitv_target = state.qitv_timeshift.start + self:get_time_at_x(cursor.x)
+				request_render()
+			end
+			return
+		end
 		mp.commandv('seek', self:get_time_at_x(cursor.x), fast and 'absolute+keyframes' or 'absolute+exact')
 	end
 end
@@ -136,6 +143,7 @@ end
 
 function Timeline:handle_cursor_down()
 	self.pressed = {pause = state.pause, distance = 0, last = {x = cursor.x, y = cursor.y}}
+	if state.qitv_timeshift then self.pressed.pause = state.qitv_timeshift.paused end
 	mp.set_property_native('pause', true)
 	self:set_from_cursor()
 end
@@ -154,7 +162,12 @@ function Timeline:on_options()
 end
 function Timeline:handle_cursor_up()
 	if self.pressed then
-		mp.set_property_native('pause', self.pressed.pause)
+		if self.pressed.qitv_target then
+			mp.commandv('script-message-to', 'qitv', 'buffer-seek',
+				tostring(self.pressed.qitv_target), self.pressed.pause and 'yes' or 'no')
+		else
+			mp.set_property_native('pause', self.pressed.pause)
+		end
 		self.pressed = false
 	end
 end
@@ -199,10 +212,22 @@ function Timeline:render()
 		end)
 		if config.timeline_step ~= 0 then
 			cursor:zone('wheel_down', self, function()
-				mp.commandv('seek', -config.timeline_step, config.timeline_step_flag)
+				if state.qitv_timeshift then
+					mp.commandv('script-message-to', 'qitv', 'buffer-seek',
+						tostring(state.qitv_timeshift.position - config.timeline_step),
+						state.pause and 'yes' or 'no')
+				else
+					mp.commandv('seek', -config.timeline_step, config.timeline_step_flag)
+				end
 			end)
 			cursor:zone('wheel_up', self, function()
-				mp.commandv('seek', config.timeline_step, config.timeline_step_flag)
+				if state.qitv_timeshift then
+					mp.commandv('script-message-to', 'qitv', 'buffer-seek',
+						tostring(state.qitv_timeshift.position + config.timeline_step),
+						state.pause and 'yes' or 'no')
+				else
+					mp.commandv('seek', config.timeline_step, config.timeline_step_flag)
+				end
 			end)
 		end
 	end
@@ -220,6 +245,9 @@ function Timeline:render()
 
 	local spacing = math.max(math.floor((self.size - self.font_size) / 2.5), 4)
 	local progress = state.time / state.duration
+	if self.pressed and self.pressed.qitv_target and state.qitv_timeshift then
+		progress = clamp(0, (self.pressed.qitv_target - state.qitv_timeshift.start) / state.duration, 1)
+	end
 	local is_line = options.timeline_style == 'line'
 
 	-- Foreground & Background bar coordinates
@@ -404,7 +432,7 @@ function Timeline:render()
 	local function draw_timeline_timestamp(x, y, align, timestamp, opts)
 		opts.color, opts.border_color = fgt, fg
 		opts.clip = '\\clip(' .. foreground_coordinates .. ')'
-		local func = options.time_precision > 0 and ass.timestamp or ass.txt
+		local func = not state.qitv_timeshift and options.time_precision > 0 and ass.timestamp or ass.txt
 		func(ass, x, y, align, timestamp, opts)
 		opts.color, opts.border_color = bgt, bg
 		opts.clip = '\\iclip(' .. foreground_coordinates .. ')'
@@ -461,6 +489,10 @@ function Timeline:render()
 			size = self.font_size, offset = timestamp_gap, margin = tooltip_gap, timestamp = options.time_precision > 0,
 		}
 		local hovered_time_human = format_time(hovered_seconds, state.duration)
+		if state.qitv_timeshift then
+			hovered_time_human = format_time(hovered_seconds - state.duration, state.duration) .. ' LIVE'
+			opts.timestamp = false
+		end
 		opts.width_overwrite = timestamp_width(hovered_time_human, opts)
 		tooltip_anchor = ass:tooltip(tooltip_anchor, hovered_time_human, opts)
 

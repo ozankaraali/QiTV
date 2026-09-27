@@ -57,7 +57,12 @@
     "main_lua_matches_upstream": true,
     "nondefault_uosc_options": {}
   },
-  "runtime_source_modifications": [],
+  "runtime_source_modifications": [
+    {
+      "files": ["main.lua", "elements/Timeline.lua"],
+      "description": "QiTV rolling time-shift timeline and native seek routing; modified source ships in these runtime files, originals remain in source_archive."
+    }
+  ],
   "qitv_configuration": [
     "input.conf"
   ],

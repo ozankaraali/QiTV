@@ -11,6 +11,7 @@ from urlobject import URLObject
 
 from content_loader import ContentLoader
 from image_loader import ImageLoader
+from services.thread_cleanup import ThreadCleanup
 from workers import (
     M3ULoaderWorker,
     STBCategoriesWorker,
@@ -80,9 +81,8 @@ class ContentLoadingMixin:
             worker.finished.connect(self._content_worker_result, Qt.QueuedConnection)
             worker.finished.connect(thread.quit)
             worker.error.connect(thread.quit)
-            thread.finished.connect(worker.deleteLater)
         worker.error.connect(self._content_worker_error, Qt.QueuedConnection)
-        thread.finished.connect(self._content_job_finished, Qt.QueuedConnection)
+        ThreadCleanup(thread, worker).finished.connect(self._content_job_finished)
         self._bg_jobs.append((thread, worker))
         thread.start()
 
@@ -110,15 +110,13 @@ class ContentLoadingMixin:
         if self.sender() is getattr(self, "_active_content_worker", None):
             self.update_progress(current, total)
 
-    def _content_job_finished(self):
-        thread = self.sender()
+    def _content_job_finished(self, thread):
         for job in self._bg_jobs:
             if job[0] is thread:
                 self._bg_jobs.remove(job)
                 if job[1] is getattr(self, "_active_content_worker", None):
                     self.cancel_content_loading()
                 break
-        thread.deleteLater()
 
     def _display_loaded_root(self):
         """Refresh an open category in place, or display the refreshed root."""

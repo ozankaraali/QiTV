@@ -116,6 +116,8 @@ class ConfigManager:
     DEFAULT_OPTION_SHOW_INFO_PANEL = True
     DEFAULT_OPTION_PLAY_IN_VLC = False
     DEFAULT_OPTION_PLAY_IN_MPV = False
+    DEFAULT_OPTION_TIMESHIFT_ENABLED = False
+    DEFAULT_OPTION_TIMESHIFT_MAX_MIB = 2048
     # Auto-play settings
     DEFAULT_OPTION_AUTO_PLAY_EPISODES = True
     DEFAULT_OPTION_AUTO_PLAY_MOVIES = True
@@ -192,6 +194,13 @@ class ConfigManager:
 
     def update_patcher(self):
         need_update = False
+
+        # Restore windows still used by this build without resetting saved geometry.
+        window_positions = self.config.setdefault("window_positions", {})
+        for window_name, settings in self.default_config()["window_positions"].items():
+            if window_name not in window_positions:
+                window_positions[window_name] = settings
+                need_update = True
 
         # add favorites to the loaded config if it doesn't exist
         if "favorites" not in self.config:
@@ -286,6 +295,14 @@ class ConfigManager:
             self.epg_stb_period_hours = ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS
             need_update = True
 
+        if "timeshift_minutes" in self.config:
+            del self.config["timeshift_minutes"]
+            need_update = True
+        for key in ("timeshift_enabled", "timeshift_max_mib"):
+            if key not in self.config:
+                self.config[key] = self.default_config()[key]
+                need_update = True
+
         if need_update:
             self.save_config()
 
@@ -338,6 +355,12 @@ class ConfigManager:
     )
     play_in_vlc = _config_property("play_in_vlc", DEFAULT_OPTION_PLAY_IN_VLC, coerce=bool)
     play_in_mpv = _config_property("play_in_mpv", DEFAULT_OPTION_PLAY_IN_MPV, coerce=bool)
+    timeshift_enabled = _config_property(
+        "timeshift_enabled", DEFAULT_OPTION_TIMESHIFT_ENABLED, coerce=lambda value: value is True
+    )
+    timeshift_max_mib = _config_property(
+        "timeshift_max_mib", DEFAULT_OPTION_TIMESHIFT_MAX_MIB, coerce=int, clamp=(256, 16384)
+    )
 
     # Auto-play settings
     auto_play_episodes = _config_property(
@@ -356,6 +379,8 @@ class ConfigManager:
             "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
             "prefer_https": ConfigManager.DEFAULT_OPTION_PREFER_HTTPS,
             "ssl_verify": ConfigManager.DEFAULT_OPTION_SSL_VERIFY,
+            "timeshift_enabled": ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
+            "timeshift_max_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB,
             "data": [
                 {
                     "type": "M3UPLAYLIST",

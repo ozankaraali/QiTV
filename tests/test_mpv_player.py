@@ -194,6 +194,29 @@ class MpvProtocolTests(unittest.TestCase):
         for credential in ("password", "token=secret", "provider.invalid"):
             self.assertNotIn(credential, self.errors[0])
 
+    def test_paused_buffer_seek_waits_for_seekable_gop_not_forward_cache_duration(self):
+        self.loaded("live", 1)
+        item = self.player._active
+        item.is_live = item.buffered = True
+        item.resume = 1000
+        item.paused = True
+        start = len(self.socket.commands)
+        self.observe(
+            "demuxer-cache-state",
+            {"cache-duration": 3, "seekable-ranges": [{"start": 0, "end": 0.96}]},
+        )
+        self.assertEqual(self.socket.commands[start:], [])
+        self.observe(
+            "demuxer-cache-state",
+            {"cache-duration": 3, "seekable-ranges": [{"start": 0, "end": 1.96}]},
+        )
+        self.assertEqual(self.socket.commands[-1]["command"], ["seek", 1.0, "absolute+exact"])
+        self.observe("time-pos", 0.0)
+        self.assertEqual(item.resume, 1000)
+        self.observe("time-pos", 1.0)
+        self.assertEqual(item.resume, 0)
+        self.assertEqual(self.socket.commands[-1]["command"], ["set_property", "pause", True])
+
 
 if __name__ == "__main__":
     unittest.main()

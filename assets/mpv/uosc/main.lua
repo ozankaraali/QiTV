@@ -474,12 +474,22 @@ end
 function update_duration()
 	local duration = state._duration and ((state.rebase_start_time == false and state.start_time)
 		and (state._duration + state.start_time) or state._duration)
+	-- QiTV's rolling disk history is larger than this HLS reader's local clock.
+	if state.qitv_timeshift then
+		duration = state.qitv_timeshift['end'] - state.qitv_timeshift.start
+	end
 	set_state('duration', duration)
 	update_human_times()
 end
 
 function update_human_times()
 	state.speed = state.speed or 1
+	if state.qitv_timeshift then
+		local delay = math.max(0, state.duration - (state.time or 0))
+		state.time_human = delay <= 3 and 'LIVE' or format_time(-delay, state.duration) .. ' LIVE'
+		state.destination_time_human = format_time(state.duration, state.duration) .. ' buffered'
+		return
+	end
 	if state.time then
 		if state.duration then
 			if options.destination_time == 'playtime-remaining' then
@@ -564,6 +574,12 @@ function create_state_setter(name, callback)
 end
 
 function set_state(name, value)
+	if name == 'time' and state.qitv_timeshift then
+		local buffer = state.qitv_timeshift
+		value = clamp(0, buffer.position - buffer.start, buffer['end'] - buffer.start)
+	elseif name == 'uncached_ranges' and state.qitv_timeshift then
+		value = nil
+	end
 	state[name] = value
 	local state_event = state['on_' .. name]
 	if state_event then state_event(value) end
@@ -647,7 +663,7 @@ end)
 mp.observe_property('playback-time', 'number', create_state_setter('time', function()
 	-- Create a file-end event that triggers right before file ends
 	file_end_timer:kill()
-	if state.duration and state.time and not state.pause then
+	if not state.qitv_timeshift and state.duration and state.time and not state.pause then
 		local remaining = (state.duration - state.time) / state.speed
 		if remaining < 5 then
 			local timeout = remaining - 0.02
@@ -1200,3 +1216,15 @@ end
 
 -- Initial commit
 Manager:disable('user', options.disable_elements)
+
+-- QiTV local integration; original upstream sources remain in sources/.
+mp.observe_property('user-data/qitv-timeshift', 'native', function(_, buffer)
+	state.qitv_timeshift = type(buffer) == 'table' and buffer.active
+		and type(buffer.start) == 'number' and type(buffer['end']) == 'number'
+		and buffer['end'] > buffer.start and buffer or nil
+	update_duration()
+	set_state('time', mp.get_property_number('playback-time'))
+	set_state('uncached_ranges', nil)
+	update_human_times()
+	request_render()
+end)

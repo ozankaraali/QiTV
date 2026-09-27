@@ -1,12 +1,14 @@
 [project]
 name = "qitv"
-version = "1.14.0"
+version = "1.14.1"
 description = "A cross-platform STB and IPTV player client"
 # Qt and the theme package currently support Python 3.14, but not 3.15.
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "aiohttp[speedups]>=3.14.3",
+    "av==18.1.0",
     "certifi>=2026.7.22",
+    "m3u8==6.0.0",
     "orjson>=3.12.0",
     "packaging>=26.3",
     "pyqtdarktheme-fork>=2.3.6",

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 import requests
 from urlobject import URLObject
 
+from services.thread_cleanup import ThreadCleanup
 from widgets.autoplay_dialogs import (
     EpisodeAutoPlayDialog,
     MovieSuggestionDialog,
@@ -128,11 +129,9 @@ class PlaybackMixin:
             worker.error.connect(self._on_link_error, Qt.QueuedConnection)
             worker.finished.connect(thread.quit)
             worker.error.connect(thread.quit)
-            thread.finished.connect(worker.deleteLater)
-            thread.finished.connect(thread.deleteLater)
-            thread.finished.connect(_cleanup)
-            thread.start()
+            ThreadCleanup(thread, worker).finished.connect(_cleanup)
             self._bg_jobs.append((thread, worker))
+            thread.start()
         else:
             cmd = item_data.get("cmd")
             self.link = cmd
@@ -335,6 +334,9 @@ class PlaybackMixin:
 
     def _play_content(self, url):
         """Play through bundled MPV or the user's chosen external player."""
+        if self.config_manager.play_in_vlc or self.config_manager.play_in_mpv:
+            # Switching player modes must not leave the old live buffer recording.
+            self.player.stop()
         if self.config_manager.play_in_vlc:
             self._launch_vlc(url)
         elif self.config_manager.play_in_mpv:

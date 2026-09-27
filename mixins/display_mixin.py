@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 import tzlocal
 
 from image_loader import ImageLoader
+from services.thread_cleanup import ThreadCleanup
 from widgets.delegates import ChannelItemDelegate, HtmlItemDelegate
 from workers import CategoryTreeWidgetItem, ChannelTreeWidgetItem, NumberedTreeWidgetItem
 
@@ -768,17 +769,14 @@ class DisplayMixin:
             loader.cancel()
 
     def stop_image_loading(self):
-        """Detach results immediately; retain each thread until its finished signal."""
+        """Detach results immediately; retain each thread through native teardown."""
         self._retire_image_loader(self.image_loader)
         self.stop_poster_loading()
 
     def stop_poster_loading(self):
         self._retire_image_loader(getattr(self, "_poster_loader", None))
 
-    def image_loader_finished(self):
-        loader = self.sender()
-        if loader is None:
-            return
+    def image_loader_finished(self, loader):
         if loader is self.image_loader:
             self.image_loader = None
             self._logo_items = []
@@ -789,7 +787,6 @@ class DisplayMixin:
         else:
             return
         # Image downloads do not own navigation, selection, or content progress UI.
-        loader.deleteLater()
 
     def _start_logo_loading(self, logo_urls, logo_items, refresh_cache=False):
         self._retire_image_loader(self.image_loader)
@@ -805,7 +802,7 @@ class DisplayMixin:
             refresh_cache=refresh_cache,
         )
         self.image_loader.progress_updated.connect(self.update_channel_logos, Qt.QueuedConnection)
-        self.image_loader.finished.connect(self.image_loader_finished, Qt.QueuedConnection)
+        ThreadCleanup(self.image_loader).finished.connect(self.image_loader_finished)
         self.image_loader.start()
 
     def _start_poster_loading(self, poster_url):
@@ -817,7 +814,7 @@ class DisplayMixin:
             verify_ssl=self.config_manager.ssl_verify,
         )
         self._poster_loader.progress_updated.connect(self.update_poster, Qt.QueuedConnection)
-        self._poster_loader.finished.connect(self.image_loader_finished, Qt.QueuedConnection)
+        ThreadCleanup(self._poster_loader).finished.connect(self.image_loader_finished)
         self._poster_loader.start()
 
     def rescan_logos(self):
@@ -837,12 +834,10 @@ class DisplayMixin:
         font_size = 12
         icon_size = font_size + 4
         self.content_list.setIconSize(QSize(icon_size, icon_size))
-        self.content_list.setStyleSheet(
-            f"""
+        self.content_list.setStyleSheet(f"""
         QTreeWidget {{ border: none; font-size: {font_size}px; }}
         QTreeWidget::item {{ padding: 6px 8px; }}
-        """
-        )
+        """)
 
         font = QFont()
         font.setPointSize(font_size)
@@ -878,7 +873,7 @@ class DisplayMixin:
     def populate_channel_programs_content_info(self, item_data):
         try:
             self.program_list.itemSelectionChanged.disconnect()
-        except (TypeError, RuntimeError):
+        except TypeError, RuntimeError:
             pass
         self.program_list.clear()
         self.program_list.itemSelectionChanged.connect(self.update_channel_program)

@@ -15,6 +15,8 @@ from PySide6.QtNetwork import QLocalSocket
 import certifi
 
 from services.mpv_runtime import get_bundled_mpv_path, get_resource_root
+from services.thread_cleanup import ThreadCleanup
+from services.timeshift import TimeshiftRecorder
 
 
 @dataclass
@@ -23,6 +25,12 @@ class _Playback:
     content_id: str
     is_live: bool | None
     resume: int
+    buffered: bool = False
+    buffer_base: float = 0.0
+    paused: bool = False
+    speed: float = 1.0
+    seek_sent: bool = False
+    seek_deadline: float = 0.0
     entry_id: int | None = None
     position: int = 0
     duration: int = 0
@@ -70,14 +78,23 @@ class MpvPlayer(QObject):
         self._quit_stage = 0
         self._settings_checked_at = 0.0
         self._remote_mode = None
+        self._recorder = None
+        self._recorder_stopping = False
+        self._buffer_source = None
+        self._buffer_state = {}
+        self._buffer_started = False
+        self._speed = 1.0
+        self._paused = False
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(100)
         self._tick_timer.timeout.connect(self._tick)
         self._position_timer = QTimer(self)
         self._position_timer.setInterval(1000)
         self._position_timer.timeout.connect(self._flush_position)
+        self._position_timer.timeout.connect(self._buffer_tick)
 
     def play(self, url, *, is_live=None, content_id=None, resume_position=None):
+        self._stop_recording()
         self._pending = _Playback(
             str(url),
             str(content_id or ""),
@@ -96,6 +113,7 @@ class MpvPlayer(QObject):
 
     def stop(self):
         self._pending = None
+        self._stop_recording()
         if self._active:
             self._active.cancelled = True
             self._flush_position()
@@ -104,6 +122,7 @@ class MpvPlayer(QObject):
 
     def shutdown(self):
         self._pending = None
+        self._stop_recording()
         if self._closing:
             return
         if not self.is_running():
@@ -121,6 +140,9 @@ class MpvPlayer(QObject):
             self._begin_quit()
 
     def is_running(self):
+        return self._recorder is not None or self._process_running()
+
+    def _process_running(self):
         return self._process is not None and self._process.state() != QProcess.NotRunning
 
     def toggle_pause(self):
@@ -138,6 +160,157 @@ class MpvPlayer(QObject):
     def _control(self, command):
         if self._ready and not self._closing:
             self._send(command)
+
+    def set_speed(self, speed):
+        speed = float(speed)
+        if math.isfinite(speed) and 0.25 <= speed <= 3:
+            self._speed = speed
+            self._control(["set_property", "speed", speed])
+
+    def start_timeshift(self):
+        """Explicit live intent for M3U entries without trustworthy media metadata."""
+        item = self._active
+        if not self._can_buffer(item) or self._recorder is not None:
+            return
+        self.play(item.url, is_live=True, content_id=item.content_id)
+
+    def _can_buffer(self, item):
+        return bool(
+            item
+            and not item.buffered
+            and item.is_live is not False
+            and item.url.startswith(("http://", "https://", "rtsp://", "udp://", "rtp://"))
+            and getattr(self.config_manager, "timeshift_enabled", False)
+        )
+
+    def seek_relative(self, delta):
+        item = self._active
+        if item and item.buffered:
+            self.seek_buffer(item.buffer_base + item.position / 1000 + float(delta))
+        else:
+            self._control(["seek", float(delta), "relative+exact"])
+
+    def seek_buffer(self, position):
+        if math.isfinite(float(position)):
+            self._queue_buffer_playback(float(position), self._paused)
+
+    def go_live(self):
+        self.set_speed(1.0)
+        self._queue_buffer_playback(None, False)
+
+    def _start_recording(self, item):
+        mib = min(16384, max(256, int(getattr(self.config_manager, "timeshift_max_mib", 2048))))
+        recorder = TimeshiftRecorder(
+            item.url,
+            directory=str(Path(self.config_manager.get_config_dir()) / "timeshift"),
+            max_bytes=mib * 1024 * 1024,
+            verify_ssl=bool(getattr(self.config_manager, "ssl_verify", True)),
+        )
+        self._recorder = recorder
+        self._recorder_stopping = False
+        self._buffer_source = item
+        self._buffer_state = {"max_bytes": mib * 1024 * 1024}
+        self._buffer_started = False
+        self._speed = 1.0
+        recorder.updated.connect(lambda state: self._recording_updated(recorder, state))
+        recorder.errorOccurred.connect(lambda message: self._recording_error(recorder, message))
+        ThreadCleanup(recorder).finished.connect(self._recording_finished)
+        recorder.start()
+        self._buffer_tick()
+
+    def _stop_recording(self):
+        self._buffer_source = None
+        if self._recorder is not None:
+            self._recorder_stopping = True
+            self._recorder.request_stop()
+        self._buffer_state = {}
+        self._buffer_tick()
+
+    def _recording_updated(self, recorder, state):
+        if recorder is not self._recorder or self._recorder_stopping:
+            return
+        self._buffer_state.update(state)
+        if not self._buffer_started and self._active is None and self._pending is None:
+            self._queue_buffer_playback(None, False)
+        self._buffer_tick()
+
+    def _recording_error(self, recorder, message):
+        if recorder is self._recorder and not self._recorder_stopping:
+            self.errorOccurred.emit(message)
+            self.stop()
+
+    def _recording_finished(self, recorder):
+        if recorder is not self._recorder:
+            return
+        self._recorder = None
+        self._recorder_stopping = False
+        self._buffer_source = None
+        self._buffer_state = {}
+        self._buffer_tick()
+        if self._process is None:
+            self._closing = False
+            self.shutdownFinished.emit()
+            if self._pending:
+                self._start()
+        elif not self._closing:
+            self._advance()
+
+    def _queue_buffer_playback(self, target, paused):
+        if not self._recorder or self._recorder_stopping or self._closing:
+            return
+        selection = self._recorder.playback(target)
+        source = self._buffer_source
+        if selection is None or source is None:
+            return
+        url, base, offset = selection
+        self._buffer_started = True
+        self._pending = _Playback(
+            url,
+            source.content_id,
+            True,
+            round(offset * 1000),
+            buffered=True,
+            buffer_base=base,
+            paused=paused,
+            speed=self._speed,
+        )
+        if self._active:
+            self._active.cancelled = True
+        self._advance()
+
+    def _buffer_tick(self):
+        item = self._active
+        active = self._recorder is not None and not self._recorder_stopping
+        state = dict(self._buffer_state) if active else {}
+        position = item.buffer_base + item.position / 1000 if item and item.buffered else 0.0
+        state.update(
+            active=active,
+            can_start=self._can_buffer(item) and not active,
+            position=position,
+            paused=item.paused if item and item.buffered and item.resume else self._paused,
+            status="Buffering…" if active and not (item and item.loaded) else "",
+        )
+        if (
+            active
+            and item
+            and item.buffered
+            and item.loaded
+            and not item.cancelled
+            and not item.resume
+        ):
+            start, end = state.get("start", 0), state.get("end", 0)
+            if position < start - 0.5 and self._pending is None:
+                self._queue_buffer_playback(start, self._paused)
+                state["status"] = "Oldest buffered content expired"
+            elif (
+                self._speed > 1
+                and not self._paused
+                and not state.get("ended", False)
+                and end - position <= 3
+            ):
+                self.set_speed(1.0)
+        if self._ready and not self._closing:
+            self._send(["set_property", "user-data/qitv-timeshift", state])
 
     def _start(self):
         root = get_resource_root()
@@ -211,6 +384,8 @@ class MpvPlayer(QObject):
         controls = (
             "menu,gap,<video,audio>subtitles,<has_many_audio>audio,<has_many_video>video,"
             "<has_many_edition>editions,gap,space,<video,audio>speed,space,shuffle,"
+            "command:history:script-binding qitv/timeshift-menu?Time-shift,"
+            "command:live_tv:script-binding qitv/go-live?Go live,"
             "loop-playlist,loop-file,gap,prev,items,next,gap,fullscreen"
         )
         # uosc's ! prefix keeps downloaded subtitles in managed storage for local files too.
@@ -330,8 +505,23 @@ class MpvPlayer(QObject):
                 "MPV could not stop the previous media. Select the media again to restart it."
             )
             return
+        item = self._active
+        if item and item.buffered and item.resume and item.seek_deadline and not item.cancelled:
+            if now > item.seek_deadline:
+                self._fail("The buffered seek could not be completed. Select the stream again.")
+                return
         if now - self._settings_checked_at >= 2:
             self._settings_checked_at = now
+            if (
+                self._recorder
+                and not self._recorder_stopping
+                and not getattr(self.config_manager, "timeshift_enabled", False)
+            ):
+                source = self._buffer_source
+                if source:
+                    self.play(source.url, is_live=source.is_live, content_id=source.content_id)
+                else:
+                    self.stop()
             remote = bool(getattr(self.config_manager, "keyboard_remote_mode", False))
             if remote != self._remote_mode:
                 self._remote_mode = remote
@@ -388,7 +578,7 @@ class MpvPlayer(QObject):
                 self._settings_checked_at = 0.0
                 self._tick()
                 self._advance()
-            elif len(args) == 2 and args[0] == "qitv" and not self._closing:
+            elif len(args) >= 2 and args[0] == "qitv" and not self._closing:
                 signal = {
                     "back": self.backRequested,
                     "forward": self.forwardRequested,
@@ -397,6 +587,23 @@ class MpvPlayer(QObject):
                 }.get(args[1])
                 if signal:
                     signal.emit()
+                elif args[1] == "buffer-back":
+                    self.seek_relative(-10)
+                elif args[1] == "buffer-forward":
+                    self.seek_relative(10)
+                elif args[1] == "buffer-live":
+                    self.go_live()
+                elif args[1] == "buffer-start":
+                    self.seek_buffer(self._buffer_state.get("start", 0))
+                elif args[1] == "buffer-enable":
+                    self.start_timeshift()
+                elif args[1] == "buffer-seek" and len(args) == 4:
+                    try:
+                        target = float(args[2])
+                    except ValueError:
+                        return
+                    if math.isfinite(target):
+                        self._queue_buffer_playback(target, args[3] == "yes")
             return
         item = self._active
         if item is None:
@@ -407,11 +614,14 @@ class MpvPlayer(QObject):
             if item.cancelled or self._closing:
                 return
             item.loaded = True
-            for name in ("time-pos", "duration"):
+            if item.buffered and item.resume:
+                item.seek_deadline = time.monotonic() + 10
+            for name in ("time-pos", "duration", "speed", "pause", "demuxer-cache-state"):
                 self._observer_id += 1
                 item.observers[self._observer_id] = name
                 self._send(["observe_property", self._observer_id, name])
             self.playing.emit()
+            self._buffer_tick()
         elif event == "property-change":
             name = item.observers.get(message.get("id"))
             if name:
@@ -424,6 +634,8 @@ class MpvPlayer(QObject):
             failed = message.get("reason") == "error" and not item.cancelled and not self._closing
             self._retire(item)
             if failed:
+                if item.buffered:
+                    self._stop_recording()
                 self.errorOccurred.emit(
                     "MPV could not open or decode this media. Check the provider URL, account access and network connection."
                 )
@@ -433,10 +645,50 @@ class MpvPlayer(QObject):
                 self._advance()
 
     def _sample(self, item, name, value):
+        if item.cancelled and name not in ("time-pos", "duration"):
+            return
+        if name == "demuxer-cache-state":
+            if (
+                item.buffered
+                and item.resume
+                and not item.seek_sent
+                and isinstance(value, dict)
+                and value.get("seekable-ranges")
+                and any(
+                    cached.get("end", 0) - cached.get("start", 0) >= item.resume / 1000 + 0.05
+                    for cached in value["seekable-ranges"]
+                )
+            ):
+                # Live HLS has no low-level seek. Its selected first segment
+                # is now cached, so exact sub-GOP seeks do not touch upstream.
+                item.seek_sent = True
+                self._send(["seek", item.resume / 1000, "absolute+exact"])
+            return
+        if name == "pause":
+            self._paused = value is True
+            return
+        if name == "speed":
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
+                self._speed = value
+            return
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             value = min(2147483647, max(0, round(value * 1000)))
             if name == "time-pos":
                 item.position = value
+                if (
+                    item.buffered
+                    and item.resume
+                    and item.seek_sent
+                    and not item.cancelled
+                    and abs(value - item.resume) <= 150
+                ):
+                    item.resume = 0
+                    item.seek_deadline = 0.0
+                    self._send(["set_property", "pause", item.paused])
             elif name == "duration":
                 item.duration = value
 
@@ -473,6 +725,18 @@ class MpvPlayer(QObject):
     def _advance(self):
         if not self._ready or self._closing:
             return
+        # Keep the native VO/window alive across rolling-reader replacements
+        # and initial recording. Reopening a paused Cocoa VO can strand MPV
+        # waiting for its first frame flip, blocking the entire control loop.
+        pending = self._pending
+        hold_window = bool(
+            (self._recorder is not None and not self._recorder_stopping)
+            or (
+                pending
+                and (pending.buffered or (pending.is_live is True and self._can_buffer(pending)))
+            )
+        )
+        self._send(["set_property", "force-window", "yes" if hold_window else "no"])
         item = self._active
         if item:
             if item.cancelled and not item.stopping:
@@ -480,18 +744,29 @@ class MpvPlayer(QObject):
                 item.stop_deadline = time.monotonic() + self._REQUEST_TIMEOUT
                 self._snapshot(lambda: self._stop_item(item))
             return
-        if self._pending is None:
+        if self._pending is None or self._recorder_stopping:
             return
         item, self._pending = self._pending, None
+        if item.is_live is True and self._can_buffer(item):
+            self._start_recording(item)
+            return
         self._active = item
         # Per-file options do not leak from live playback into a later VOD.
         options = {
-            "pause": "no",
+            "pause": "yes" if item.paused else "no",
+            "speed": str(item.speed),
             "cache": "yes",
             "tls-verify": "yes" if getattr(self.config_manager, "ssl_verify", True) else "no",
         }
         if item.is_live is True:
             options.update({"cache-secs": "2", "demuxer-readahead-secs": "2"})
+        if item.buffered:
+            options["demuxer-lavf-o"] = "live_start_index=0"
+            options["keep-open"] = "yes"
+            if item.resume:
+                options["pause"] = "yes"
+                options["cache-secs"] = str(item.resume / 1000 + 2)
+                options["demuxer-readahead-secs"] = options["cache-secs"]
         if item.resume and item.is_live is not True:
             # MPV applies start after demuxer readiness, not a racy early seek.
             options["start"] = str(item.resume / 1000)
@@ -505,6 +780,8 @@ class MpvPlayer(QObject):
             return
         if response.get("error") != "success":
             self._retire(item)
+            if item.buffered:
+                self._stop_recording()
             self.errorOccurred.emit(
                 "MPV rejected this media. Check the provider URL and bundled runtime."
             )
@@ -587,6 +864,7 @@ class MpvPlayer(QObject):
             return
         was_closing = self._closing
         self._closing = True
+        self._stop_recording()
         if not was_closing:
             self._pending = None
         if self._socket:
@@ -611,6 +889,7 @@ class MpvPlayer(QObject):
             self._directory = None
         self._ready = self._closing = False
         self._quit_at = None
-        self.shutdownFinished.emit()
-        if self._pending:
-            self._start()
+        if self._recorder is None:
+            self.shutdownFinished.emit()
+            if self._pending:
+                self._start()

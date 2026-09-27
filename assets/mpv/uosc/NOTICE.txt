@@ -11,8 +11,12 @@ The upstream tag is unsigned. The release ZIP was downloaded directly from
 upstream over HTTPS and its SHA-256 matched GitHub's published asset digest.
 Exact URLs, hashes and file inventory are recorded in PROVENANCE.json.
 
-Every upstream runtime Lua, JSON, font and helper source file is unmodified.
-input.conf is QiTV's supported custom menu configuration, not an upstream patch.
+QiTV modifies main.lua and elements/Timeline.lua to display the rolling disk
+history and send native timeline seeks to QiTV's time-shift controller. The
+original upstream versions remain in the source ZIP; the modified Lua files
+ship as readable source alongside this notice. Other upstream runtime Lua,
+JSON, font and helper source files are unmodified.
+input.conf is QiTV's supported custom menu configuration.
 The menu omits self-update, personal configuration-directory access, destructive
 file deletion, screenshots without a managed output directory, and stream-quality
 selection without a bundled yt-dlp dependency. The uosc updater is not bound to

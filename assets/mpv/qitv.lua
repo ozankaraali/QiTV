@@ -3,10 +3,14 @@ local mp = require 'mp'
 local owner = nil
 local started_at = mp.get_time()
 local pip = nil
+local utils = require 'mp.utils'
+local timeshift = false
+local live_delay = 0
+local buffer_state = {}
 
-local function notify(action)
+local function notify(action, ...)
     if owner then
-        return mp.commandv('script-message-to', owner, 'qitv', action)
+        return mp.commandv('script-message-to', owner, 'qitv', action, ...)
     end
 end
 
@@ -81,5 +85,62 @@ mp.register_script_message('remote', function(enabled)
     if enabled == 'yes' then
         mp.add_key_binding('UP', 'qitv-previous', function() notify('previous') end, {repeatable = true})
         mp.add_key_binding('DOWN', 'qitv-next', function() notify('next') end, {repeatable = true})
+    end
+end)
+
+local function timeshift_menu()
+    local items = {}
+    local title = 'Time-shift'
+    if timeshift then
+        title = string.format('%.0fs behind live · %.1f / %.0f MiB',
+            live_delay, (buffer_state.bytes or 0) / 1048576,
+            (buffer_state.max_bytes or 0) / 1048576)
+        items = {
+            {title = 'Rewind 10 seconds', value = 'script-binding qitv/buffer-back'},
+            {title = 'Forward 10 seconds', value = 'script-binding qitv/buffer-forward'},
+            {title = 'Go live (1x)', value = 'script-binding qitv/go-live'},
+        }
+    elseif buffer_state.can_start then
+        items = {{title = 'Buffer this stream', value = 'script-binding qitv/buffer-start-recording'}}
+    else
+        mp.osd_message('Enable Time-shift in QiTV Settings, then play a live stream')
+        return
+    end
+    for _, speed in ipairs({0.5, 0.75, 1, 1.25, 1.5, 2}) do
+        items[#items + 1] = {title = speed .. 'x speed', value = 'set speed ' .. speed}
+    end
+    mp.commandv('script-message-to', 'uosc', 'open-menu', utils.format_json({
+        type = 'qitv-timeshift', title = title, items = items,
+    }))
+end
+
+mp.add_key_binding(nil, 'timeshift-menu', timeshift_menu)
+mp.add_key_binding(nil, 'buffer-back', function() notify('buffer-back') end)
+mp.add_key_binding(nil, 'buffer-forward', function() notify('buffer-forward') end)
+mp.add_key_binding(nil, 'go-live', function()
+    if timeshift then notify('buffer-live') else timeshift_menu() end
+end)
+mp.add_key_binding(nil, 'buffer-start-recording', function() notify('buffer-enable') end)
+mp.register_script_message('buffer-seek', function(position, paused)
+    if timeshift and tonumber(position) then notify('buffer-seek', position, paused) end
+end)
+
+mp.observe_property('user-data/qitv-timeshift', 'native', function(_, state)
+    buffer_state = state or {}
+    live_delay = math.max(0, (buffer_state['end'] or 0) - (buffer_state.position or 0))
+    local active = buffer_state.active == true
+    if timeshift == active then return end
+    timeshift = active
+    for _, name in ipairs({'qitv-rewind', 'qitv-forward-buffer', 'qitv-live', 'qitv-oldest'}) do
+        mp.remove_key_binding(name)
+    end
+    if active then
+        mp.add_forced_key_binding('LEFT', 'qitv-rewind',
+            function() notify('buffer-back') end, {repeatable = true})
+        mp.add_forced_key_binding('RIGHT', 'qitv-forward-buffer',
+            function() notify('buffer-forward') end, {repeatable = true})
+        mp.add_forced_key_binding('END', 'qitv-live', function() notify('buffer-live') end)
+        mp.add_forced_key_binding('HOME', 'qitv-oldest', function() notify('buffer-start') end)
+        mp.osd_message('Time-shift: Left/Right ±10s · End Live · speed control to catch up', 5)
     end
 end)
