@@ -88,6 +88,14 @@ class SmokeMpvPlayer(MpvPlayer):
             ]
         return arguments
 
+    def _tick(self):
+        if self.debugger_path is not None and not self._ready and not self._closing:
+            # A debugger is not MPV: symbol loading precedes native process startup.
+            # Bound this diagnostic launch by the unchanged whole-smoke deadline;
+            # production and uninstrumented smokes retain the ten-second deadline.
+            self._started_at = time.monotonic()
+        super()._tick()
+
     def _process_started(self, process):
         self.native_pid = process.processId()
         super()._process_started(process)
@@ -745,6 +753,7 @@ def main(argv=None):
                     home / 'QiTV, Türkçe',
                     args.report.resolve().with_suffix('.png') if args.render else None,
                 )
+            smoke.player.log_path = args.report.resolve().with_suffix('.log')
             smoke.player.stderr_path = args.report.resolve().with_suffix('.stderr.log')
             sys.excepthook = lambda kind, value, traceback: smoke.fail(f'{kind.__name__}: {value}')
             QTimer.singleShot(0, smoke.start)
@@ -754,7 +763,9 @@ def main(argv=None):
             result = smoke.report()
             result['native_exits'] = smoke.player.native_exits
             result['mpv_stderr'] = str(smoke.player.stderr_path)
+            result['mpv_log'] = str(smoke.player.log_path)
             if smoke.player.debugger_path is not None:
+                result['diagnostic_only'] = True
                 result['mpv_debugger_log'] = str(smoke.player.debugger_path)
                 debugger_output = smoke.player.debugger_path.read_text(
                     encoding='utf-8', errors='replace'

@@ -43,7 +43,7 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       MACOSX_DEPLOYMENT_TARGET: '13.0'
-      QITV_SMOKE_LLDB: ${{ matrix.name == 'macos-intel' && '1' || '0' }}
+      QITV_SMOKE_LLDB: ${{ startsWith(matrix.name, 'macos-') && '1' || '0' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,8 +70,8 @@ jobs:
       - name: Install macOS native build tools
         if: runner.os == 'macOS'
         run: brew install cmake ninja nasm autoconf autoconf-archive automake libtool pkgconf
-      - name: Enable temporary Intel native debugging
-        if: matrix.name == 'macos-intel'
+      - name: Enable temporary macOS native debugging
+        if: runner.os == 'macOS'
         run: sudo DevToolsSecurity -enable
       - name: Select Windows x64 compiler
         if: runner.os == 'Windows'
@@ -129,11 +129,27 @@ jobs:
       - name: Run application and native integrity regressions
         timeout-minutes: 5
         run: uv run --frozen --no-sync python -m unittest discover -s tests -v
+      - name: Acquire temporary Windows native crash debuggers
+        if: runner.os == 'Windows'
+        timeout-minutes: 12
+        shell: pwsh
+        run: ./scripts/diagnose_mpv_windows.ps1 -Mode Prepare
       - name: Smoke source backend against real bundled MPV
+        if: runner.os != 'Windows'
         timeout-minutes: 2
         run: |
           uv run --frozen --no-sync python scripts/smoke_mpv.py --fixture tests/fixtures/mpv-smoke.mp4 \
             --report build/mpv-smoke/source.json
+      - name: Smoke Windows source with independent native exception observer
+        if: runner.os == 'Windows'
+        timeout-minutes: 2
+        shell: pwsh
+        run: ./scripts/diagnose_mpv_windows.ps1 -Mode Capture
+      - name: Extract Windows native fault stacks offline
+        if: always() && runner.os == 'Windows'
+        timeout-minutes: 3
+        shell: pwsh
+        run: ./scripts/diagnose_mpv_windows.ps1 -Mode Analyze
       - name: Exercise actual native video output
         timeout-minutes: 2
         run: |
@@ -264,6 +280,16 @@ jobs:
             build/mpv-smoke/*.json
             build/mpv-smoke/*.png
             build/mpv-smoke/*.log
+          if-no-files-found: warn
+      - name: Upload temporary Windows native fault diagnostics
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mpv-crashes-windows
+          # Text only. Raw dumps and the matching executable stay in RUNNER_TEMP.
+          path: |
+            build/mpv-smoke/windows-native/*.json
+            build/mpv-smoke/windows-native/*.log
           if-no-files-found: warn
       - name: Upload macOS native crash reports
         if: always() && runner.os == 'macOS'
