@@ -529,6 +529,11 @@ def _launch_windows_update(downloaded_path: str, release_url: str):
     """Launch (or report failure) while the shutdown event loop still exists."""
     import webbrowser
 
+    app = QApplication.instance()
+    if app and has_pending_threads():
+        QTimer.singleShot(25, app, lambda: _perform_windows_update(downloaded_path, release_url))
+        return
+
     # Get the path to the original executable (not the temp extraction folder)
     # For PyInstaller, sys.executable points to the original .exe file
     original_exe = sys.executable
@@ -539,6 +544,7 @@ def _launch_windows_update(downloaded_path: str, release_url: str):
             [downloaded_path, "--replace", original_exe],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
+
 
     except OSError as e:
         logger.error(f"Failed to launch update: {e}")
