@@ -1,0 +1,41 @@
+--- a/video/out/cocoa_cb_common.swift
++++ b/video/out/cocoa_cb_common.swift
+@@ -93,7 +93,11 @@
+             return
+         }
+ 
+-        let (wr, _) = getWindowGeometry(forScreen: targetScreen, videoOut: vo)
++        let geometry = eventsLock.withLock { () -> NSRect? in
++            guard self.vo == vo else { return nil }
++            return getWindowGeometry(forScreen: targetScreen, videoOut: vo).0
++        }
++        guard let wr = geometry else { return }
+         if !(window?.isVisible ?? false) && !(window?.isMiniaturized ?? false) && !NSApp.isHidden {
+             window?.makeKeyAndOrderFront(nil)
+         }
+@@ -239,6 +243,9 @@
+             DispatchQueue.main.sync { self.preinit(vo) }
+             return VO_TRUE
+         case VOCTRL_UNINIT:
++            // The borrowed VO expires when this callback returns. Queued UI
++            // work must finish its protected reads or reject this retired VO.
++            eventsLock.withLock { self.vo = nil }
+             DispatchQueue.main.async { self.uninit() }
+             return VO_TRUE
+         case VOCTRL_RECONFIG:
+--- a/video/out/mac/common.swift
++++ b/video/out/mac/common.swift
+@@ -542,7 +542,12 @@
+                      TypeHelper.toPointer(&option.voPtr.pointee.autofit_smaller),
+                      TypeHelper.toPointer(&option.voPtr.pointee.autofit_larger):
+                     DispatchQueue.main.async {
+-                        let (_, wr, forcePosition) = self.getInitProperties(vo)
++                        let geometry = self.eventsLock.withLock { () -> (NSScreen, NSRect, Bool)? in
++                            guard self.vo == vo else { return nil }
++                            return self.getInitProperties(vo)
++                        }
++                        guard let geometry = geometry else { return }
++                        let (_, wr, forcePosition) = geometry
+                         forcePosition ? self.window?.updateFrame(wr) : self.window?.updateSize(wr.size)
+                     }
+                 default:
