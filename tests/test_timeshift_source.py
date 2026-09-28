@@ -94,7 +94,7 @@ class LocalSource:
                         body(self)
                     else:
                         self.wfile.write(body)
-                except BrokenPipeError, ConnectionResetError, ssl.SSLError:
+                except ConnectionError, ssl.SSLError:
                     pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -198,7 +198,7 @@ class TimeshiftSourceTests(unittest.TestCase):
                                     break
                             if chunked:
                                 request.wfile.write(b"0\r\n\r\n")
-                        except BrokenPipeError, ConnectionResetError:
+                        except ConnectionError:
                             closed.set()
 
                     headers = {

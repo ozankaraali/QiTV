@@ -206,7 +206,8 @@ def _owned_files(directory: Path, *, require_marker: bool = True) -> list[Path] 
         if not require_marker:
             return files
         marker = directory / "owner"
-        if marker.stat().st_size != len(_OWNER):
+        # Text-mode writes use CRLF on Windows; read_text normalizes both endings.
+        if marker.stat().st_size not in (len(_OWNER), len(_OWNER) + 1):
             return None
         if marker.read_text(encoding="ascii") != _OWNER:
             return None

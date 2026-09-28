@@ -29,9 +29,20 @@ from services.mpv_runtime import get_bundled_mpv_path
 class SmokeMpvPlayer(MpvPlayer):
     render = False
     log_path: Path | None = None
+    stderr_path: Path | None = None
     playback_restarted = False
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.native_exits = []
+        self.native_pid = 0
+
     def _mpv_arguments(self):
+        if self.stderr_path:
+            self.stderr_path.parent.mkdir(parents=True, exist_ok=True)
+            # _start has selected the null device but has not started QProcess yet.
+            # Capture native assertions/crash traces only for this synthetic smoke.
+            self._process.setStandardErrorFile(str(self.stderr_path))
         # Exercise native graphics with software-friendly settings on virtual CI GPUs.
         video = ['--profile=fast', '--geometry=640x480+0+0'] if self.render else ['--vo=null']
         # Xvfb can report NaN refresh rates, which invalidate uosc's rendering timer.
@@ -41,6 +52,21 @@ class SmokeMpvPlayer(MpvPlayer):
             ['--log-file=' + str(self.log_path), '--msg-level=all=debug'] if self.log_path else []
         )
         return super()._mpv_arguments() + ['--ao=null', '--hwdec=no'] + video + diagnostics
+
+    def _process_started(self, process):
+        self.native_pid = process.processId()
+        super()._process_started(process)
+
+    def _finished(self, process, code, status):
+        self.native_exits.append(
+            {
+                'pid': self.native_pid,
+                'exit_code': code,
+                'exit_status': status.name,
+                'shutdown_requested': self._closing,
+            }
+        )
+        super()._finished(process, code, status)
 
     def _message(self, message):
         event = message.get('event')
@@ -677,12 +703,20 @@ def main(argv=None):
                     home / 'QiTV, Türkçe',
                     args.report.resolve().with_suffix('.png') if args.render else None,
                 )
+            smoke.player.stderr_path = args.report.resolve().with_suffix('.stderr.log')
             sys.excepthook = lambda kind, value, traceback: smoke.fail(f'{kind.__name__}: {value}')
             QTimer.singleShot(0, smoke.start)
             exit_code = app.exec()
             if not smoke.completed and not smoke.failure:
                 smoke.failure = f'Application exited before completing phase {smoke.phase}'
             result = smoke.report()
+            result['native_exits'] = smoke.player.native_exits
+            result['mpv_stderr'] = str(smoke.player.stderr_path)
+            for native_exit in smoke.player.native_exits:
+                if native_exit['exit_code'] != 0 or native_exit['exit_status'] == 'CrashExit':
+                    result['ok'] = False
+                    result['failure'] = result['failure'] or f'Abnormal MPV exit: {native_exit}'
+                    exit_code = 1
             if not result['processes_reaped']:
                 result['ok'] = False
                 result['failure'] = result['failure'] or 'MPV process survived smoke'

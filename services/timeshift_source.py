@@ -4,6 +4,7 @@ import base64
 from contextlib import ExitStack, contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
+import os
 import secrets
 from socketserver import TCPServer, ThreadingMixIn
 import sys
@@ -355,7 +356,7 @@ def open_source(url: str, *, verify_ssl: bool = True):
 
     with ExitStack() as resources:
         try:
-            scheme = urlsplit(url).scheme.lower()
+            scheme = "" if os.path.splitdrive(url)[0] else urlsplit(url).scheme.lower()
             network = bool(scheme and scheme != "file")
             options = _native_options(verify_ssl, network=network)
             source: str | _ReplayReader = url

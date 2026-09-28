@@ -257,6 +257,21 @@ jobs:
             build/mpv-smoke/*.png
             build/mpv-smoke/*.log
           if-no-files-found: warn
+      - name: Upload macOS native crash reports
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mpv-crashes-${{ matrix.name }}
+          path: |
+            ~/Library/Logs/DiagnosticReports/mpv*.ips
+            ~/Library/Logs/DiagnosticReports/mpv*.crash
+            ~/Library/Logs/DiagnosticReports/QiTV*.ips
+            ~/Library/Logs/DiagnosticReports/QiTV*.crash
+            /Library/Logs/DiagnosticReports/mpv*.ips
+            /Library/Logs/DiagnosticReports/mpv*.crash
+            /Library/Logs/DiagnosticReports/QiTV*.ips
+            /Library/Logs/DiagnosticReports/QiTV*.crash
+          if-no-files-found: warn
       - name: Cache verified native runtime and matching sources
         if: success() && steps.native-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

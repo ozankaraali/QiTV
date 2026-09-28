@@ -528,7 +528,13 @@ time.sleep(60)
                     owner.kill()
                     owner.wait(5)
                     peer.settimeout(3)
-                    self.assertEqual(peer.recv(1), b"", "orphaned recorder retained its socket")
+                    try:
+                        remaining = peer.recv(1)
+                    except ConnectionResetError:
+                        # Windows reports a reset when the terminated child
+                        # closes its socket, rather than an orderly TCP EOF.
+                        remaining = b""
+                    self.assertEqual(remaining, b"", "orphaned recorder retained its socket")
                     closed = True
             finally:
                 if owner.poll() is None:
@@ -622,22 +628,25 @@ time.sleep(60)
         self.assertEqual(list(self.directory.iterdir()), [])
 
     def test_stale_owned_sessions_only_and_active_sibling_lock_survives(self):
-        stale = self.directory / (".qitv-timeshift-" + "a" * 32)
-        stale.mkdir()
-        (stale / "owner").write_text(_OWNER, encoding="ascii")
-        (stale / "segment-0.ts").write_bytes(b"old recording")
-        child = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                "import os,sys; from PySide6.QtCore import QLockFile; "
-                "lock=QLockFile(sys.argv[1]); assert lock.tryLock(0); os._exit(0)",
-                str(stale / "session.lock"),
-            ],
-            capture_output=True,
-            timeout=5,
-        )
-        self.assertEqual(child.returncode, 0, child.stderr.decode())
+        stale_directories = []
+        for character, newline in (("a", "\n"), ("d", "\r\n")):
+            stale = self.directory / (".qitv-timeshift-" + character * 32)
+            stale.mkdir()
+            (stale / "owner").write_text(_OWNER, encoding="ascii", newline=newline)
+            (stale / "segment-0.ts").write_bytes(b"old recording")
+            child = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os,sys; from PySide6.QtCore import QLockFile; "
+                    "lock=QLockFile(sys.argv[1]); assert lock.tryLock(0); os._exit(0)",
+                    str(stale / "session.lock"),
+                ],
+                capture_output=True,
+                timeout=5,
+            )
+            self.assertEqual(child.returncode, 0, child.stderr.decode())
+            stale_directories.append(stale)
         unrelated = self.directory / (".qitv-timeshift-" + "b" * 32)
         unrelated.mkdir()
         (unrelated / "owner").write_text("not owned", encoding="ascii")
@@ -653,7 +662,8 @@ time.sleep(60)
         second = self.engine()
         second._prepare_directory()
         try:
-            self.assertFalse(stale.exists())
+            for stale in stale_directories:
+                self.assertFalse(stale.exists())
             self.assertTrue(active_directory.exists())
             self.assertTrue((active_directory / "session.lock").exists())
             self.assertEqual((unrelated / "owner").read_text(), "not owned")
