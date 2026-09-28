@@ -43,6 +43,7 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       MACOSX_DEPLOYMENT_TARGET: '13.0'
+      QITV_SMOKE_LLDB: ${{ matrix.name == 'macos-intel' && '1' || '0' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -69,6 +70,9 @@ jobs:
       - name: Install macOS native build tools
         if: runner.os == 'macOS'
         run: brew install cmake ninja nasm autoconf autoconf-archive automake libtool pkgconf
+      - name: Enable temporary Intel native debugging
+        if: matrix.name == 'macos-intel'
+        run: sudo DevToolsSecurity -enable
       - name: Select Windows x64 compiler
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
@@ -133,6 +137,10 @@ jobs:
       - name: Exercise actual native video output
         timeout-minutes: 2
         run: |
+          if [[ "$QITV_SMOKE_LLDB" == 1 ]]; then
+            /usr/bin/lldb --no-lldbinit --batch -o run -- \
+              native/mpv/bin/mpv --no-config --load-scripts=no --version
+          fi
           if [[ "$RUNNER_OS" == Linux ]]; then
             QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py --render --fixture tests/fixtures/mpv-smoke.mp4 \
               --report build/mpv-smoke/source-render.json

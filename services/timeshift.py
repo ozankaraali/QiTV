@@ -935,12 +935,14 @@ class TimeshiftRecorder(QThread):
                     deadline = time.monotonic() + _STOP_GRACE
                 if deadline is not None and time.monotonic() >= deadline:
                     break
-                if receiver.poll(0.05):
-                    try:
+                try:
+                    if receiver.poll(0.05):
                         failed = self._receive(receiver.recv()) or failed
-                    except EOFError:
+                    elif not process.is_alive():
                         break
-                elif not process.is_alive():
+                except EOFError, BrokenPipeError:
+                    # Windows can report peer closure from poll's PeekNamedPipe,
+                    # before recv has an opportunity to translate it into EOF.
                     break
         except OSError, EOFError, ValueError, RuntimeError:
             if not self._stop.is_set():

@@ -622,8 +622,47 @@ time.sleep(60)
         )
         unsupported = self.recorder(str(path))
         self.assertTrue(unsupported.wait(7000))
-        self.assertEqual(len(unsupported.errors), 1)
+        self.assertEqual(len(unsupported.errors), 1, unsupported.errors)
         self.assertIsNone(unsupported.playback())
+        path.unlink()
+        self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_closed_recording_pipe_does_not_repeat_reported_source_failure(self):
+        context = multiprocessing.get_context("spawn")
+        native_pipe = context.Pipe
+        closed = threading.Event()
+
+        def windows_eof_pipe(*args, **kwargs):
+            receiver, sender = native_pipe(*args, **kwargs)
+            native_poll, native_recv = receiver.poll, receiver.recv
+            pending = []
+
+            def poll(timeout=0):
+                try:
+                    if not native_poll(timeout):
+                        return False
+                    pending.append(native_recv())
+                except EOFError, BrokenPipeError:
+                    # Windows PeekNamedPipe reports a closed peer from poll,
+                    # before recv can translate it into EOFError.
+                    closed.set()
+                    raise BrokenPipeError("recording pipe closed") from None
+                return True
+
+            receiver.poll = poll
+            receiver.recv = pending.pop
+            return receiver, sender
+
+        path = self.directory / "unsupported.mkv"
+        path.write_bytes(
+            make_transport_stream(seconds=2, audio_codec="pcm_s16le", container="matroska")
+        )
+        with patch.object(context, "Pipe", windows_eof_pipe):
+            recorder = self.recorder(str(path))
+            self.assertTrue(recorder.wait(7000))
+        self.assertTrue(closed.is_set(), "recording pipe never reached its closed-peer boundary")
+        self.assertEqual(len(recorder.errors), 1, recorder.errors)
+        self.assertIsNone(recorder.playback())
         path.unlink()
         self.assertEqual(list(self.directory.iterdir()), [])
 

@@ -30,6 +30,7 @@ class SmokeMpvPlayer(MpvPlayer):
     render = False
     log_path: Path | None = None
     stderr_path: Path | None = None
+    debugger_path: Path | None = None
     playback_restarted = False
 
     def __init__(self, *args, **kwargs):
@@ -51,7 +52,41 @@ class SmokeMpvPlayer(MpvPlayer):
         diagnostics = (
             ['--log-file=' + str(self.log_path), '--msg-level=all=debug'] if self.log_path else []
         )
-        return super()._mpv_arguments() + ['--ao=null', '--hwdec=no'] + video + diagnostics
+        arguments = super()._mpv_arguments() + ['--ao=null', '--hwdec=no'] + video + diagnostics
+        if self.render and os.environ.get('QITV_SMOKE_LLDB') == '1':
+            assert self.log_path is not None
+            self.debugger_path = self.log_path.with_suffix('.lldb.log')
+            executable = self._process.program()
+            self._process.setProgram('/usr/bin/lldb')
+            self._process.setStandardOutputFile(str(self.debugger_path))
+            exit_report = (
+                'script import json, lldb; '
+                'p = lldb.debugger.GetSelectedTarget().GetProcess(); '
+                "print('QITV_DEBUGGEE=' + json.dumps({'pid': p.GetProcessID(), "
+                "'exit_code': p.GetExitStatus(), 'exited': p.GetState() == lldb.eStateExited}))"
+            )
+            return [
+                '--no-lldbinit',
+                '--batch',
+                '-o',
+                'settings set auto-confirm true',
+                '-o',
+                'run',
+                '-o',
+                exit_report,
+                '-k',
+                'thread backtrace all',
+                '-k',
+                'register read',
+                '-k',
+                'process kill',
+                '-k',
+                exit_report,
+                '--',
+                executable,
+                *arguments,
+            ]
+        return arguments
 
     def _process_started(self, process):
         self.native_pid = process.processId()
@@ -63,6 +98,7 @@ class SmokeMpvPlayer(MpvPlayer):
                 'pid': self.native_pid,
                 'exit_code': code,
                 'exit_status': status.name,
+                'launcher': process.program(),
                 'shutdown_requested': self._closing,
             }
         )
@@ -398,7 +434,13 @@ class Smoke:
                     None,
                 )
                 if endpoint:
-                    if Path(process.program()).resolve() != Path(self.result['executable']):
+                    program = Path(process.program()).resolve()
+                    if self.player.debugger_path is not None:
+                        if program != Path('/usr/bin/lldb').resolve():
+                            raise RuntimeError('Native debugger launcher was replaced')
+                        arguments = process.arguments()
+                        program = Path(arguments[arguments.index('--') + 1]).resolve()
+                    if program != Path(self.result['executable']):
                         raise RuntimeError('Backend did not launch the bundled MPV executable')
                     self.probe.connectToServer(endpoint)
                     break
@@ -712,6 +754,18 @@ def main(argv=None):
             result = smoke.report()
             result['native_exits'] = smoke.player.native_exits
             result['mpv_stderr'] = str(smoke.player.stderr_path)
+            if smoke.player.debugger_path is not None:
+                result['mpv_debugger_log'] = str(smoke.player.debugger_path)
+                debugger_output = smoke.player.debugger_path.read_text(
+                    encoding='utf-8', errors='replace'
+                )
+                results = re.findall(r'^QITV_DEBUGGEE=(.+)$', debugger_output, re.MULTILINE)
+                debuggee = json.loads(results[-1]) if results else None
+                result['debuggee_exit'] = debuggee
+                if not debuggee or not debuggee['exited'] or debuggee['exit_code'] != 0:
+                    result['ok'] = False
+                    result['failure'] = result['failure'] or 'Native debuggee did not exit cleanly'
+                    exit_code = 1
             for native_exit in smoke.player.native_exits:
                 if native_exit['exit_code'] != 0 or native_exit['exit_status'] == 'CrashExit':
                     result['ok'] = False
