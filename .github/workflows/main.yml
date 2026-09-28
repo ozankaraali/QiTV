@@ -43,7 +43,6 @@ jobs:
     env:
       QT_QPA_PLATFORM: offscreen
       MACOSX_DEPLOYMENT_TARGET: '13.0'
-      QITV_SMOKE_LLDB: ${{ startsWith(matrix.name, 'macos-') && '1' || '0' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,9 +69,10 @@ jobs:
       - name: Install macOS native build tools
         if: runner.os == 'macOS'
         run: brew install cmake ninja nasm autoconf autoconf-archive automake libtool pkgconf
-      - name: Enable temporary macOS native debugging
+      - name: Prepare temporary macOS native core capture
         if: runner.os == 'macOS'
-        run: sudo DevToolsSecurity -enable
+        timeout-minutes: 3
+        run: uv run --frozen --no-sync python scripts/diagnose_mpv_macos.py prepare
       - name: Select Windows x64 compiler
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
@@ -138,6 +138,7 @@ jobs:
         if: runner.os != 'Windows'
         timeout-minutes: 2
         run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then ulimit -c unlimited; fi
           uv run --frozen --no-sync python scripts/smoke_mpv.py --fixture tests/fixtures/mpv-smoke.mp4 \
             --report build/mpv-smoke/source.json
       - name: Smoke Windows source with independent native exception observer
@@ -153,10 +154,7 @@ jobs:
       - name: Exercise actual native video output
         timeout-minutes: 2
         run: |
-          if [[ "$QITV_SMOKE_LLDB" == 1 ]]; then
-            /usr/bin/lldb --no-lldbinit --batch -o run -- \
-              native/mpv/bin/mpv --no-config --load-scripts=no --version
-          fi
+          if [[ "$RUNNER_OS" == macOS ]]; then ulimit -c unlimited; fi
           if [[ "$RUNNER_OS" == Linux ]]; then
             QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py --render --fixture tests/fixtures/mpv-smoke.mp4 \
               --report build/mpv-smoke/source-render.json
@@ -167,6 +165,7 @@ jobs:
       - name: Exercise spawned time-shift and native controls
         timeout-minutes: 2
         run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then ulimit -c unlimited; fi
           if [[ "$RUNNER_OS" == Linux ]]; then
             QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py \
               --timeshift --render --fixture tests/fixtures/mpv-smoke.mp4 \
@@ -202,6 +201,7 @@ jobs:
         timeout-minutes: 3
         if: runner.os == 'macOS'
         run: |
+          ulimit -c unlimited
           mv native/mpv native/.mpv-source-only
           mv native/pyav native/.pyav-source-only
           trap 'mv "$GITHUB_WORKSPACE/native/.mpv-source-only" "$GITHUB_WORKSPACE/native/mpv"; mv "$GITHUB_WORKSPACE/native/.pyav-source-only" "$GITHUB_WORKSPACE/native/pyav"' EXIT
@@ -271,6 +271,10 @@ jobs:
           path: native/pyav-sources-${{ matrix.target }}.tar.gz
           if-no-files-found: error
           compression-level: 0
+      - name: Extract macOS native fault stacks offline
+        if: always() && runner.os == 'macOS'
+        timeout-minutes: 4
+        run: uv run --frozen --no-sync python scripts/diagnose_mpv_macos.py analyze
       - name: Upload actual source and frozen smoke evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

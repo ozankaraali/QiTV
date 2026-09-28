@@ -87,6 +87,9 @@ if ($Mode -eq 'Capture') {
     $observer.StartInfo.UseShellExecute = $false
     $observer.StartInfo.RedirectStandardOutput = $true
     $observer.StartInfo.RedirectStandardError = $true
+    # ProcDump 12 writes redirected output as UTF-16LE, including its ready message.
+    $observer.StartInfo.StandardOutputEncoding = [System.Text.Encoding]::Unicode
+    $observer.StartInfo.StandardErrorEncoding = [System.Text.Encoding]::Unicode
     foreach ($argument in @('-accepteula', '-mm', '-e', '-r', '-n', '1', '-w', 'mpv.exe', $capture)) {
         $observer.StartInfo.ArgumentList.Add($argument)
     }
