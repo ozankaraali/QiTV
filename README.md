@@ -150,10 +150,10 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, Go 1
 - **Linux:** a C/C++ compiler, CMake, Ninja, NASM, pkg-config, Autotools, and X11/OpenGL/ALSA/PulseAudio development headers. See the Ubuntu package list in the [build workflow](.github/workflows/main.yml).
 - **Windows:** an x64 Visual Studio developer shell, LLVM (`clang`, `clang++`, `lld-link`, `llvm-rc`), CMake, Ninja, NASM, and MSYS2 with `make`, `diffutils`, and `pkgconf`.
 
-For the 1.14 development version described here:
+Clone the repository and prepare its bundled media runtimes:
 
 ```bash
-git clone --branch verify/bundled-mpv https://github.com/ozankaraali/QiTV/
+git clone https://github.com/ozankaraali/QiTV/
 cd QiTV
 uv sync --frozen
 uv run --frozen --no-sync python scripts/prepare_mpv.py
