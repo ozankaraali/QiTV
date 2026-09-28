@@ -5,6 +5,7 @@ published. https://lldb.llvm.org/man/lldb.html documents the --core interface.
 """
 
 import argparse
+import json
 import logging
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import resource
 import signal
 import subprocess
 import sys
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -58,18 +60,26 @@ def prepare(core_directory: Path, evidence: Path) -> None:
     probe = core_directory / "qitv-core-probe"
     subprocess.run(
         ["clang", "-x", "c", "-g", "-o", str(probe), "-"],
-        input="#include <signal.h>\nint main(void) { raise(SIGSEGV); return 1; }\n",
+        input=(
+            "#include <signal.h>\n#include <stdio.h>\n"
+            'int main(void) { fputs("Core probe: raising SIGSEGV\\n", stderr); '
+            "fflush(stderr); raise(SIGSEGV); return 1; }\n"
+        ),
         text=True,
         check=True,
         timeout=30,
     )
     core = None
+    process = None
+    complete = False
+    started = time.monotonic()
     try:
         # Prove kernel capture and offline unwinding before expensive native builds.
         process = subprocess.Popen([str(probe)])
         core = core_directory / f"core.{process.pid}"
         try:
-            code = process.wait(timeout=15)
+            # Core writing is diagnostic I/O, not a playback/shutdown deadline.
+            code = process.wait(timeout=90)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
@@ -79,10 +89,33 @@ def prepare(core_directory: Path, evidence: Path) -> None:
         if not core.is_file():
             raise RuntimeError("macOS did not write the owned probe's core file")
         analyze_core(core, evidence)
+        complete = True
     finally:
-        if core is not None:
+        info = core.stat() if core is not None and core.is_file() else None
+        metadata = {
+            "pid": process.pid if process else None,
+            "exit_code": process.poll() if process else None,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "core_bytes": info.st_size if info else None,
+            "core_disk_bytes": info.st_blocks * 512 if info else None,
+            "offline_analysis_completed": complete,
+        }
+        (evidence / "core-probe.json").write_text(
+            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+        )
+        if process and process.poll() is None:
+            with (evidence / "core-probe-process.log").open("w") as stream:
+                subprocess.run(
+                    ["/bin/ps", "-p", str(process.pid), "-o", "pid=,stat=,wchan=,etime=,time="],
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    timeout=5,
+                    check=False,
+                )
+        # On failure preserve the private probe/core for the always-run analysis.
+        if complete and core is not None:
             core.unlink(missing_ok=True)
-        probe.unlink(missing_ok=True)
+            probe.unlink(missing_ok=True)
 
 
 def main() -> None:

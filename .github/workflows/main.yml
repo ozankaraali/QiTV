@@ -71,7 +71,7 @@ jobs:
         run: brew install cmake ninja nasm autoconf autoconf-archive automake libtool pkgconf
       - name: Prepare temporary macOS native core capture
         if: runner.os == 'macOS'
-        timeout-minutes: 3
+        timeout-minutes: 4
         run: uv run --frozen --no-sync python scripts/diagnose_mpv_macos.py prepare
       - name: Select Windows x64 compiler
         if: runner.os == 'Windows'

@@ -1,0 +1,38 @@
+--- a/audio/out/ao_wasapi.c
++++ b/audio/out/ao_wasapi.c
+@@ -502,8 +502,10 @@
+ static void hotplug_uninit(struct ao *ao)
+ {
+     MP_DBG(ao, "Hotplug uninit\n");
++    struct wasapi_state *state = ao->priv;
+     wasapi_change_uninit(ao);
+-    CoUninitialize();
++    SAFE_DESTROY(state->hotplug_mta_cookie,
++                 CoDecrementMTAUsage(state->hotplug_mta_cookie));
+ }
+ 
+ static int hotplug_init(struct ao *ao)
+@@ -511,8 +513,11 @@
+     MP_DBG(ao, "Hotplug init\n");
+     struct wasapi_state *state = ao->priv;
+     state->log = ao->log;
+-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+-    HRESULT hr = wasapi_change_init(ao, true);
++    // A client property query can initialize hotplug on a thread that exits
++    // before core shutdown. Retain the MTA independently of that thread.
++    HRESULT hr = CoIncrementMTAUsage(&state->hotplug_mta_cookie);
++    EXIT_ON_ERROR(hr);
++    hr = wasapi_change_init(ao, true);
+     EXIT_ON_ERROR(hr);
+ 
+     return 0;
+--- a/audio/out/ao_wasapi.h
++++ b/audio/out/ao_wasapi.h
+@@ -100,6 +100,7 @@
+     struct ao_convert_fmt convert_format;
+ 
+     change_notify change;
++    CO_MTA_USAGE_COOKIE hotplug_mta_cookie;
+ } wasapi_state;
+ 
+ char *mp_PKEY_to_str_buf(char *buf, size_t buf_size, const PROPERTYKEY *pkey);
