@@ -545,7 +545,6 @@ def _launch_windows_update(downloaded_path: str, release_url: str):
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
 
-
     except OSError as e:
         logger.error(f"Failed to launch update: {e}")
         error_dialog = QMessageBox()
