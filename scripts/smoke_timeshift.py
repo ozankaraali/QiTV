@@ -1,6 +1,6 @@
 """Exercise the real spawned recorder and native MPV using synthetic local media."""
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import io
 import math
 import multiprocessing
@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtGui import QImage
+
+from services.timeshift_source import ThreadingLoopbackHTTPServer
 
 
 def _fixtures(fixture, directory):
@@ -128,8 +130,7 @@ class TimeshiftSmoke:
                 except BrokenPipeError, ConnectionResetError, OSError:
                     pass
 
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-        self.server.daemon_threads = True
+        self.server = ThreadingLoopbackHTTPServer(('127.0.0.1', 0), Handler)
         self.server_thread = threading.Thread(
             target=lambda: self.server.serve_forever(poll_interval=0.05),
             daemon=True,

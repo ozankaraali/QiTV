@@ -231,6 +231,42 @@ class TimeshiftTests(unittest.TestCase):
             self.assertEqual(sum(1 for _ in media.decode(video=0)), expected_frames)
         self.stop_recorder(recorder)
 
+    def test_recording_playlist_remains_playable_when_reverse_dns_is_unavailable(self):
+        fixture = Path(__file__).parent / "fixtures" / "mpv-smoke.mp4"
+        with av.open(str(fixture)) as media:
+            expected_frames = sum(1 for _ in media.decode(video=0))
+        messages = []
+        ready = threading.Event()
+        stop = threading.Event()
+
+        def receive(message):
+            messages.append(message)
+            if message[0] == "error" or message[1]["ended"]:
+                ready.set()
+
+        engine = _RecordingEngine(
+            str(fixture),
+            session_directory=self.directory / (".qitv-timeshift-" + secrets.token_hex(16)),
+            max_bytes=2 * 1024 * 1024,
+            stop=stop,
+            send=receive,
+        )
+        worker = threading.Thread(target=engine.run)
+        with patch("socket.getfqdn", side_effect=OSError("Reverse DNS unavailable")):
+            worker.start()
+            try:
+                self.assertTrue(ready.wait(8), "recording did not become playable")
+                self.assertEqual([message for message in messages if message[0] == "error"], [])
+                state = next(message for message in reversed(messages) if message[1]["ended"])
+                url = f"{state[2]}/playlist/{state[4]}.m3u8"
+                with av.open(url, options={"live_start_index": "0"}, timeout=(3, 3)) as media:
+                    self.assertEqual(sum(1 for _ in media.decode(video=0)), expected_frames)
+            finally:
+                stop.set()
+                worker.join(7)
+        self.assertFalse(worker.is_alive(), "recording worker survived shutdown")
+        self.assertEqual(list(self.directory.iterdir()), [])
+
     def test_nonseekable_ingestion_eviction_manifest_tracks_and_seek_clamping(self):
         source = self.source()
         cap = len(self.payload) // 2

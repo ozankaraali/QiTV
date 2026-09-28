@@ -72,6 +72,7 @@ WINDOWS_SYSTEM = {
     "mfuuid.dll",
     "strmiids.dll",
     "avrt.dll",
+    "avicap32.dll",
     "version.dll",
 }
 

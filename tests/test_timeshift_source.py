@@ -142,6 +142,18 @@ class TimeshiftSourceTests(unittest.TestCase):
         self.assertEqual(server.requests[0][1]["User-Agent"], "libmpv")
         self.assertNotIn("Range", server.requests[0][1])
 
+    def test_hls_relay_decodes_when_reverse_dns_is_unavailable(self):
+        server = self.server(
+            {
+                "/channel.m3u8": (200, {}, leaf("video.ts")),
+                "/video.ts": (200, {}, self.video),
+            }
+        )
+        with patch("socket.getfqdn", side_effect=OSError("Reverse DNS unavailable")):
+            with open_source(server.url + "/channel.m3u8") as source:
+                self.assertEqual(sum(1 for _ in source.decode(video=0)), 100)
+        self.assertEqual(server.counts, {"/channel.m3u8": 1, "/video.ts": 1})
+
     def test_gzip_encoded_http_media_and_nested_playlist_are_decoded(self):
         server = self.server(
             {

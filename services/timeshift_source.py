@@ -2,9 +2,10 @@
 
 import base64
 from contextlib import ExitStack, contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import io
 import secrets
+from socketserver import TCPServer, ThreadingMixIn
 import sys
 import threading
 from urllib.parse import urljoin, urlsplit
@@ -20,6 +21,19 @@ _NETWORK_PROTOCOLS = "http,https,tls,tcp,udp,rtp,crypto,httpproxy,rtmp,rtmps,rtm
 
 class SourceError(RuntimeError):
     """A source failure whose explanation is safe to display without redaction."""
+
+
+class LoopbackHTTPServer(HTTPServer):
+    """Internal HTTP listener whose startup never needs reverse DNS."""
+
+    def server_bind(self) -> None:
+        TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = self.server_address[1]
+
+
+class ThreadingLoopbackHTTPServer(ThreadingMixIn, LoopbackHTTPServer):
+    daemon_threads = True
 
 
 def _close_redirect_body(response, **_kwargs):
@@ -183,8 +197,7 @@ class _HLSBridge:
                     except OSError:
                         pass
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._server.daemon_threads = True
+        self._server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self._server.block_on_close = False
         try:
             self._initial: tuple[str, bytes] | None = (url, self._manifest(content, url))

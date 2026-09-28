@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from fractions import Fraction
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 import math
 import multiprocessing
 from multiprocessing.connection import wait as wait_for_connection
@@ -24,7 +24,7 @@ import time
 
 from PySide6.QtCore import QLockFile, QThread, Signal
 
-from services.timeshift_source import SourceError, open_source
+from services.timeshift_source import LoopbackHTTPServer, SourceError, open_source
 
 _SESSION_PREFIX = ".qitv-timeshift-"
 _SESSION_PATTERN = re.compile(r"\.qitv-timeshift-[0-9a-f]{32}")
@@ -286,7 +286,7 @@ class _BoundedWriter:
         self.file.close()
 
 
-class _PlaylistServer(HTTPServer):
+class _PlaylistServer(LoopbackHTTPServer):
     allow_reuse_address = False
 
     def __init__(self, recorder: _RecordingEngine) -> None:
