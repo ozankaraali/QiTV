@@ -60,7 +60,7 @@
   "runtime_source_modifications": [
     {
       "files": ["main.lua", "elements/Timeline.lua"],
-      "description": "QiTV rolling time-shift timeline and native seek routing; modified source ships in these runtime files, originals remain in source_archive."
+      "description": "QiTV rolling time-shift timeline and native seek routing, preserving user pause intent during reader replacement; modified source ships in these runtime files, originals remain in source_archive."
     }
   ],
   "qitv_configuration": [

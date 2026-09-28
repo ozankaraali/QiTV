@@ -637,6 +637,11 @@ def main(argv=None):
         action='store_true',
         help='Exercise the real video window and save a PNG beside the report',
     )
+    parser.add_argument(
+        '--timeshift',
+        action='store_true',
+        help='Exercise spawned recording, native rewind/Go-live and recorder shutdown',
+    )
     args = parser.parse_args(argv)
     result: dict[str, Any] = {'ok': False}
     exit_code = 1
@@ -655,12 +660,23 @@ def main(argv=None):
             os.environ['MPV_HOME'] = directory
             app = QApplication.instance() or QApplication(['qitv-mpv-smoke'])
             app.setQuitOnLastWindowClosed(False)
-            smoke = Smoke(
-                app,
-                args.fixture.resolve(strict=True),
-                home / 'QiTV, Türkçe',
-                args.report.resolve().with_suffix('.png') if args.render else None,
-            )
+            if args.timeshift:
+                from scripts.smoke_timeshift import TimeshiftSmoke
+
+                smoke = TimeshiftSmoke(
+                    app,
+                    args.fixture.resolve(strict=True),
+                    home / 'QiTV, Türkçe',
+                    args.report.resolve().with_suffix('.png') if args.render else None,
+                    player_type=SmokeMpvPlayer,
+                )
+            else:
+                smoke = Smoke(
+                    app,
+                    args.fixture.resolve(strict=True),
+                    home / 'QiTV, Türkçe',
+                    args.report.resolve().with_suffix('.png') if args.render else None,
+                )
             sys.excepthook = lambda kind, value, traceback: smoke.fail(f'{kind.__name__}: {value}')
             QTimer.singleShot(0, smoke.start)
             exit_code = app.exec()

@@ -53,3 +53,32 @@ Platform system libraries and GPU/audio drivers are supplied by the user's
 operating system, not copied from the build runner. They are not represented
 as included media dependencies. Native dependency metadata is inspected at
 preparation time to reject accidental Homebrew/vcpkg shared-library linkage.
+
+Private time-shift runtime
+--------------------------
+Time-shift uses a separate, source-built PyAV wheel and LGPL-only FFmpeg shared
+libraries. These are not the GPL-enabled libraries in the standalone MPV
+executable. The private build excludes GPL and nonfree codecs, disables
+incidental system-library detection, and does not redistribute PyPI's FFmpeg
+wheel closure. PyAV retains its BSD-3-Clause license. FFmpeg and any included
+TLS libraries retain the license texts and copyright notices under
+native/pyav/licenses; native/pyav/bundle.json records the actual versions,
+configuration, native files, and matching source archive hashes.
+
+Each release must also publish pyav-sources-<target>.tar.gz next to its binary
+and MPV source archive. This contains the pinned PyAV/FFmpeg source inputs,
+any bundled TLS source, the private build recipe, and original licenses.
+Keep and mirror it for as long as the matching binary remains available.
+Use the same release tag's QiTV source archive for the application code,
+dependency lock, and PyInstaller specifications. Both source distributions
+are available from https://github.com/ozankaraali/QiTV/releases.
+
+Users may modify and rebuild these libraries and relink/repackage QiTV with
+their modified versions: prepare the private wheel with
+scripts/prepare_pyav.py, keep that environment with uv's --no-sync option,
+then run the matching platform's PyInstaller specification. The shared
+libraries remain separate native files, not statically linked into Python.
+The application's MIT license is unchanged; it does not restrict modifying
+or reverse engineering the combined work to debug LGPL-library changes.
+No secret signing key or authorization service is required. The LGPL
+disclaimers of warranty and liability apply to the covered libraries.

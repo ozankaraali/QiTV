@@ -2,11 +2,17 @@
 
 import json
 from pathlib import Path
+import sys
 import tomllib
 
 from PyInstaller.building.datastruct import Tree
 
 ROOT = Path(SPECPATH)
+sys.path.insert(0, str(ROOT))
+from scripts.prepare_pyav import validate_installed
+
+NATIVE_PYAV = ROOT / 'native' / 'pyav'
+validate_installed(NATIVE_PYAV)
 with (ROOT / 'pyproject.toml').open('rb') as file:
     APP_VERSION = tomllib.load(file)['project']['version']
 NATIVE_MPV = ROOT / 'native' / 'mpv'
@@ -22,6 +28,8 @@ a = Analysis(
     datas=[
         (str(ROOT / 'pyproject.toml'), '.'),
         (str(ROOT / 'assets'), 'assets'),
+        (str(NATIVE_PYAV / 'bundle.json'), 'native/pyav'),
+        (str(NATIVE_PYAV / 'licenses'), 'native/pyav/licenses'),
     ],
     hiddenimports=['scripts.smoke_mpv'],
     hookspath=[],

@@ -47,6 +47,7 @@ class PlaybackMixin:
     provider_manager: "ProviderManager"
     config_manager: "ConfigManager"
     player: "MpvPlayer"
+    _closing: bool
     content_type: str
     link: Optional[str]
     current_category: Optional[Dict[str, Any]]
@@ -64,6 +65,8 @@ class PlaybackMixin:
     _pending_link_ctx: Optional[Dict[str, Any]]
 
     def play_item(self, item_data, is_episode=False, item_type=None):
+        if self._closing:
+            return
         # Track current playing item for auto-play
         self._current_playing_item = item_data
         self._current_playing_type = item_type
@@ -175,6 +178,8 @@ class PlaybackMixin:
 
     def _play_content_with_resume_check(self, url: str, item_data: Dict[str, Any]):
         """Play content, checking for resume position first."""
+        if self._closing:
+            return
         # Check for saved position
         content_id = self._current_content_id
         if not content_id:
@@ -212,6 +217,8 @@ class PlaybackMixin:
 
     def _play_content_with_position(self, url: str, resume_position: int):
         """Play content with resume position."""
+        if self._closing:
+            return
         if self.config_manager.play_in_vlc:
             self._launch_vlc(url)
         elif self.config_manager.play_in_mpv:
@@ -334,6 +341,8 @@ class PlaybackMixin:
 
     def _play_content(self, url):
         """Play through bundled MPV or the user's chosen external player."""
+        if self._closing:
+            return
         if self.config_manager.play_in_vlc or self.config_manager.play_in_mpv:
             # Switching player modes must not leave the old live buffer recording.
             self.player.stop()
@@ -555,6 +564,8 @@ class PlaybackMixin:
 
     def on_media_ended(self, content_id: str):
         """Handle media ended signal - trigger auto-play if enabled."""
+        if self._closing:
+            return
         # Don't auto-play if using external player
         if self.config_manager.play_in_vlc or self.config_manager.play_in_mpv:
             return

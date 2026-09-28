@@ -32,11 +32,14 @@ class _Playback:
     seek_sent: bool = False
     seek_deadline: float = 0.0
     entry_id: int | None = None
+    load_pending: bool = False
+    deferred_events: list = field(default_factory=list)
     position: int = 0
     duration: int = 0
     loaded: bool = False
     cancelled: bool = False
     stopping: bool = False
+    stop_sent: bool = False
     stop_deadline: float = 0.0
     observers: dict = field(default_factory=dict)
 
@@ -71,6 +74,7 @@ class MpvPlayer(QObject):
         self._active = None
         self._pending = None
         self._ready = False
+        self._waiting_for_idle = False
         self._closing = False
         self._failed = False
         self._started_at = 0.0
@@ -146,7 +150,12 @@ class MpvPlayer(QObject):
         return self._process is not None and self._process.state() != QProcess.NotRunning
 
     def toggle_pause(self):
-        self._control(["cycle", "pause"])
+        item = self._pending or self._active
+        if item and item.buffered and (item is self._pending or item.resume):
+            item.paused = not self._pause_intent()
+            self._buffer_tick()
+        else:
+            self._control(["cycle", "pause"])
 
     def toggle_mute(self):
         self._control(["cycle", "mute"])
@@ -192,7 +201,13 @@ class MpvPlayer(QObject):
 
     def seek_buffer(self, position):
         if math.isfinite(float(position)):
-            self._queue_buffer_playback(float(position), self._paused)
+            self._queue_buffer_playback(float(position), self._pause_intent())
+
+    def _pause_intent(self):
+        item = self._pending or self._active
+        if item and item.buffered and (item is self._pending or item.resume):
+            return item.paused
+        return self._paused
 
     def go_live(self):
         self.set_speed(1.0)
@@ -287,7 +302,7 @@ class MpvPlayer(QObject):
             active=active,
             can_start=self._can_buffer(item) and not active,
             position=position,
-            paused=item.paused if item and item.buffered and item.resume else self._paused,
+            paused=self._pause_intent(),
             status="Buffering…" if active and not (item and item.loaded) else "",
         )
         if (
@@ -575,6 +590,7 @@ class MpvPlayer(QObject):
             if args == ["qitv", "ready"] and not self._closing:
                 self._ready = True
                 self._position_timer.start()
+                self._send(["observe_property", 0, "idle-active"])
                 self._settings_checked_at = 0.0
                 self._tick()
                 self._advance()
@@ -602,15 +618,43 @@ class MpvPlayer(QObject):
                         target = float(args[2])
                     except ValueError:
                         return
+                    item = self._pending or self._active
+                    paused = (
+                        self._pause_intent()
+                        if item and item.buffered and (item is self._pending or item.resume)
+                        else args[3] == "yes"
+                    )
                     if math.isfinite(target):
-                        self._queue_buffer_playback(target, args[3] == "yes")
+                        self._queue_buffer_playback(target, paused)
+                elif args[1] == "stopped" and len(args) == 3:
+                    item = self._active
+                    if item and item.stopping and args[2] == str(item.entry_id):
+                        self._send(
+                            ["get_property", "idle-active"],
+                            lambda reply: self._stopped_idle(item, reply),
+                        )
+            return
+        if event == "property-change" and message.get("id") == 0:
+            self._idle_changed(message.get("data"))
             return
         item = self._active
-        if item is None:
+        if (
+            item
+            and item.load_pending
+            and event in ("start-file", "file-loaded", "end-file", "property-change")
+        ):
+            # Command replies and lifecycle events may arrive in either order.
+            # Match starts to loadfile's actual playlist ID, never the next event.
+            item.deferred_events.append(message)
             return
         if event == "start-file":
-            item.entry_id = message.get("playlist_entry_id")
-        elif event == "file-loaded":
+            self._waiting_for_idle = False
+            if not item or item.entry_id != message.get("playlist_entry_id"):
+                self._adopt_native_file(message.get("playlist_entry_id"))
+            return
+        if item is None:
+            return
+        if event == "file-loaded":
             if item.cancelled or self._closing:
                 return
             item.loaded = True
@@ -628,10 +672,13 @@ class MpvPlayer(QObject):
                 self._sample(item, name, message.get("data"))
         elif event == "end-file" and message.get("playlist_entry_id") == item.entry_id:
             if message.get("reason") == "redirect" and not item.cancelled:
-                item.entry_id = None
+                item.entry_id = message.get("playlist_insert_id")
                 return
             natural = message.get("reason") == "eof" and not item.cancelled and not self._closing
             failed = message.get("reason") == "error" and not item.cancelled and not self._closing
+            self._waiting_for_idle = True
+            if not item.cancelled:
+                self._stop_recording()
             self._retire(item)
             if failed:
                 if item.buffered:
@@ -642,7 +689,39 @@ class MpvPlayer(QObject):
             if natural and item.is_live is not True and item.content_id:
                 self.mediaEnded.emit(item.content_id)
             if not self._closing:
-                self._advance()
+                self._send(
+                    ["get_property", "idle-active"],
+                    lambda reply: self._idle_changed(reply.get("data")),
+                )
+
+    def _adopt_native_file(self, entry_id):
+        if self._closing:
+            return
+        # Native uosc navigation owns the new entry. Old reader intents,
+        # recorder updates and late stop/snapshot replies must not replace it.
+        self._pending = None
+        self._stop_recording()
+        if self._active:
+            self._retire(self._active)
+        item = _Playback("", "", None, 0, entry_id=entry_id)
+        self._active = item
+        self._advance()
+
+        def received(reply):
+            if self._active is not item:
+                return
+            for entry in reply.get("data") or []:
+                if entry.get("id") == item.entry_id:
+                    item.url = entry.get("filename", "")
+                    break
+            self._buffer_tick()
+
+        self._send(["get_property", "playlist"], received)
+
+    def _idle_changed(self, idle):
+        if idle is True and self._active is None and not self._closing:
+            self._waiting_for_idle = False
+            self._advance()
 
     def _sample(self, item, name, value):
         if item.cancelled and name not in ("time-pos", "duration"):
@@ -688,6 +767,7 @@ class MpvPlayer(QObject):
                 ):
                     item.resume = 0
                     item.seek_deadline = 0.0
+                    self._paused = item.paused
                     self._send(["set_property", "pause", item.paused])
             elif name == "duration":
                 item.duration = value
@@ -725,18 +805,18 @@ class MpvPlayer(QObject):
     def _advance(self):
         if not self._ready or self._closing:
             return
-        # Keep the native VO/window alive across rolling-reader replacements
-        # and initial recording. Reopening a paused Cocoa VO can strand MPV
-        # waiting for its first frame flip, blocking the entire control loop.
-        pending = self._pending
+        # Keep a control window for audio too, and never recreate a paused
+        # Cocoa VO between readers: its first frame flip can deadlock MPV.
+        # end-file is not idle (native playlist navigation can follow it).
         hold_window = bool(
-            (self._recorder is not None and not self._recorder_stopping)
-            or (
-                pending
-                and (pending.buffered or (pending.is_live is True and self._can_buffer(pending)))
-            )
+            self._active
+            or self._pending
+            or (self._recorder is not None and not self._recorder_stopping)
         )
-        self._send(["set_property", "force-window", "yes" if hold_window else "no"])
+        if hold_window:
+            self._send(["set_property", "force-window", "yes"])
+        elif not self._waiting_for_idle:
+            self._send(["set_property", "force-window", "no"])
         item = self._active
         if item:
             if item.cancelled and not item.stopping:
@@ -744,13 +824,15 @@ class MpvPlayer(QObject):
                 item.stop_deadline = time.monotonic() + self._REQUEST_TIMEOUT
                 self._snapshot(lambda: self._stop_item(item))
             return
-        if self._pending is None or self._recorder_stopping:
+        if self._pending is None or self._recorder_stopping or self._waiting_for_idle:
             return
         item, self._pending = self._pending, None
         if item.is_live is True and self._can_buffer(item):
             self._start_recording(item)
             return
         self._active = item
+        item.load_pending = True
+        self._paused = item.paused
         # Per-file options do not leak from live playback into a later VOD.
         options = {
             "pause": "yes" if item.paused else "no",
@@ -776,32 +858,42 @@ class MpvPlayer(QObject):
         )
 
     def _loaded_command(self, item, response):
-        if self._active is not item or item.cancelled or self._closing:
+        if self._active is not item:
             return
-        if response.get("error") != "success":
+        item.load_pending = False
+        if response.get("error") == "success":
+            item.entry_id = response["data"]["playlist_entry_id"]
+        else:
             self._retire(item)
-            if item.buffered:
+            if item.buffered and not item.cancelled:
                 self._stop_recording()
-            self.errorOccurred.emit(
-                "MPV rejected this media. Check the provider URL and bundled runtime."
+            if not item.cancelled and not self._closing:
+                self.errorOccurred.emit(
+                    "MPV rejected this media. Check the provider URL and bundled runtime."
+                )
+            self._waiting_for_idle = True
+            self._send(
+                ["get_property", "idle-active"],
+                lambda reply: self._idle_changed(reply.get("data")),
             )
-            self._advance()
+        events, item.deferred_events = item.deferred_events, []
+        for event in events:
+            self._message(event)
+        if self._active is item and item.stopping:
+            self._stop_item(item)
 
     def _stop_item(self, item):
-        if self._active is not item or self._closing:
+        if self._active is not item or self._closing or item.load_pending or item.stop_sent:
             return
-        # loadfile/stop return before unloading. An idle query covers cancellation
-        # before start-file; otherwise end-file is the serialization boundary.
-        self._send(
-            ["stop"],
-            lambda reply: self._send(
-                ["get_property", "idle-active"], lambda response: self._stopped_idle(item, response)
-            ),
-        )
+        item.stop_sent = True
+        # Check the selected entry atomically inside MPV. A native Open File
+        # between our snapshot and stop must not be killed by the stale stop.
+        self._send(["script-message-to", "qitv", "stop", str(item.entry_id)])
 
     def _stopped_idle(self, item, response):
         if self._active is item and response.get("data") is True:
             self._retire(item)
+            self._waiting_for_idle = False
             self._advance()
 
     def _retire(self, item):

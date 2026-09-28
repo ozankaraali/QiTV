@@ -496,13 +496,38 @@ def perform_update(downloaded_path: str, release_url: str):
 
 
 def _perform_windows_update(downloaded_path: str, release_url: str):
-    """Windows: launch new exe with --replace flag, then quit."""
-    import webbrowser
+    """Stop playback and workers before launching the Windows replacement."""
+    from channel_list import ChannelList
 
     app = QApplication.instance()
-    if app and has_pending_threads():
-        QTimer.singleShot(25, app, lambda: _perform_windows_update(downloaded_path, release_url))
-        return
+    if app:
+        for window in app.topLevelWidgets():
+            if isinstance(window, ChannelList):
+                # closeEvent initiates recorder/process shutdown and keeps the
+                # event loop alive until every native worker has joined. Launch
+                # synchronously at that barrier, before ChannelList calls quit;
+                # a queued timer could otherwise be abandoned on event-loop exit.
+                window.shutdownFinished.connect(
+                    lambda: _launch_windows_update(downloaded_path, release_url),
+                    Qt.SingleShotConnection,
+                )
+                window.close()
+                return
+        if has_pending_threads():
+            QTimer.singleShot(
+                25, app, lambda: _perform_windows_update(downloaded_path, release_url)
+            )
+            return
+
+    _launch_windows_update(downloaded_path, release_url)
+    if app:
+        app.closeAllWindows()
+        app.quit()
+
+
+def _launch_windows_update(downloaded_path: str, release_url: str):
+    """Launch (or report failure) while the shutdown event loop still exists."""
+    import webbrowser
 
     # Get the path to the original executable (not the temp extraction folder)
     # For PyInstaller, sys.executable points to the original .exe file
@@ -514,10 +539,6 @@ def _perform_windows_update(downloaded_path: str, release_url: str):
             [downloaded_path, "--replace", original_exe],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
-
-        # Run the normal window shutdown paths before exiting.
-        if app:
-            app.closeAllWindows()
 
     except OSError as e:
         logger.error(f"Failed to launch update: {e}")

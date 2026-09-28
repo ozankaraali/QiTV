@@ -7,7 +7,7 @@ from datetime import datetime
 import logging
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -50,6 +50,8 @@ class ChannelList(
     DisplayMixin,
     QMainWindow,
 ):
+    shutdownFinished = Signal()
+
     def __init__(self, app, player, config_manager, provider_manager, image_manager, epg_manager):
         super().__init__()
         self.app = app
@@ -82,6 +84,7 @@ class ChannelList(
         self._provider_setup_running = False
         self._queued_provider_refresh = None
         self._closing = False
+        self._shutdown_complete = False
 
         self.link: Optional[str] = None
         self.current_category: Optional[Dict[str, Any]] = None  # For back navigation
@@ -185,6 +188,9 @@ class ChannelList(
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
+        if self._shutdown_complete:
+            event.accept()
+            return
         if not self._closing:
             self._closing = True
             self.player.shutdown()
@@ -211,11 +217,15 @@ class ChannelList(
             return
         self.refresh_on_air_timer.deleteLater()
 
-        self.app.quit()
         self.image_manager.save_index()
         self.epg_manager.save_index()
         self.config_manager.save_window_settings(self, "channel_list")
+        self._shutdown_complete = True
         event.accept()
+        # Shutdown consumers (notably the Windows installer) must run before
+        # quit stops timer delivery, and only after native teardown is complete.
+        self.shutdownFinished.emit()
+        self.app.quit()
 
     # ------------------------------------------------------------------
     # EPG refresh

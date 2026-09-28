@@ -34,6 +34,9 @@ MANIFEST
 /native/mpv/
 /native/.mpv-*/
 /native/mpv-sources-*.tar.gz
+/native/pyav/
+/native/.pyav-*/
+/native/pyav-sources-*.tar.gz
 
 # Installer logs
 pip-log.txt

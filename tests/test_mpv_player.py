@@ -42,6 +42,17 @@ class ConnectedPlayer(MpvPlayer):
         return True
 
 
+class BufferedRecorder:
+    def __init__(self):
+        self.stopped = False
+
+    def playback(self, target):
+        return "http://127.0.0.1/reader.m3u8", 100.0, (target or 110.0) - 100.0
+
+    def request_stop(self):
+        self.stopped = True
+
+
 class MpvProtocolTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -86,7 +97,7 @@ class MpvProtocolTests(unittest.TestCase):
         self.player.play(
             "https://provider.invalid/" + content_id, content_id=content_id, is_live=False
         )
-        self.reply(["loadfile"])
+        self.reply(["loadfile"], {"playlist_entry_id": entry_id})
         self.feed({"event": "start-file", "playlist_entry_id": entry_id}, {"event": "file-loaded"})
         self.observe("duration", 100)
         self.observe("time-pos", 12)
@@ -97,6 +108,33 @@ class MpvProtocolTests(unittest.TestCase):
         )
         self.feed({"event": "property-change", "name": name, "id": observer, "data": value})
 
+    def buffered(self, paused=False):
+        self.loaded("live", 1)
+        item = self.player._active
+        item.is_live = item.buffered = True
+        item.buffer_base = 100.0
+        item.paused = paused
+        self.observe("pause", paused)
+        recorder = BufferedRecorder()
+        self.player._recorder = recorder
+        self.player._buffer_source = item
+        self.player._buffer_state = {"start": 100.0, "end": 130.0}
+        self.player._buffer_started = True
+        return recorder
+
+    def stopped_reply(self, entry_id):
+        self.reply(["script-message-to", "qitv", "stop", str(entry_id)])
+        self.feed({"event": "client-message", "args": ["qitv", "stopped", str(entry_id)]})
+
+    def finish_replacement(self, old_entry, new_entry):
+        self.reply(["get_property", "duration"], 100)
+        self.reply(["get_property", "time-pos"], 12)
+        self.stopped_reply(old_entry)
+        self.feed({"event": "end-file", "playlist_entry_id": old_entry, "reason": "stop"})
+        self.feed({"event": "property-change", "id": 0, "data": True})
+        self.reply(["loadfile"], {"playlist_entry_id": new_entry})
+        self.feed({"event": "start-file", "playlist_entry_id": new_entry}, {"event": "file-loaded"})
+
     def test_rapid_replacement_flushes_old_identity_and_loads_only_latest_intent(self):
         self.loaded("A", 10)
         old_observers = dict(self.player._active.observers)
@@ -104,9 +142,10 @@ class MpvProtocolTests(unittest.TestCase):
         self.player.play("https://provider.invalid/C", content_id="C")
         self.reply(["get_property", "duration"], 100)
         self.reply(["get_property", "time-pos"], 13.25)
-        self.reply(["stop"])
+        self.stopped_reply(10)
         # Natural EOF arriving while stop is in flight must not auto-play A's next item.
         self.feed({"event": "end-file", "playlist_entry_id": 10, "reason": "eof"})
+        self.feed({"event": "property-change", "id": 0, "data": True})
         self.reply(["get_property", "idle-active"], True)
         loads = [
             request["command"][1]
@@ -116,9 +155,9 @@ class MpvProtocolTests(unittest.TestCase):
         self.assertEqual(loads, ["https://provider.invalid/A", "https://provider.invalid/C"])
         self.assertEqual(self.ends, [])
         final_index = self.timeline.index(("position", ("A", 13250, 100000)))
-        stop_index = self.timeline.index(("command", ["stop"]))
+        stop_index = self.timeline.index(("command", ["script-message-to", "qitv", "stop", "10"]))
         self.assertLess(final_index, stop_index)
-        self.reply(["loadfile"])
+        self.reply(["loadfile"], {"playlist_entry_id": 12})
         self.feed({"event": "start-file", "playlist_entry_id": 12}, {"event": "file-loaded"})
         self.observe("duration", 80)
         self.observe("time-pos", 2)
@@ -134,8 +173,8 @@ class MpvProtocolTests(unittest.TestCase):
     def test_cancel_before_start_file_does_not_wait_for_an_end_event(self):
         self.player.play("https://provider.invalid/A", content_id="A")
         self.player.play("https://provider.invalid/B", content_id="B")
-        self.reply(["loadfile"])
-        self.reply(["stop"])
+        self.reply(["loadfile"], {"playlist_entry_id": 1})
+        self.stopped_reply(1)
         self.reply(["get_property", "idle-active"], True)
         loads = [
             request["command"][1]
@@ -216,6 +255,178 @@ class MpvProtocolTests(unittest.TestCase):
         self.observe("time-pos", 1.0)
         self.assertEqual(item.resume, 0)
         self.assertEqual(self.socket.commands[-1]["command"], ["set_property", "pause", True])
+
+    def test_repeated_buffer_seek_preserves_playing_and_paused_intent(self):
+        self.buffered()
+        self.player.seek_buffer(111)
+        self.finish_replacement(1, 2)
+        self.observe("pause", True)  # Reader initialization, not user intent.
+        self.player.seek_buffer(112)
+        self.assertFalse(self.player._pending.paused)
+        self.finish_replacement(2, 3)
+        self.observe("pause", True)
+        self.feed({"event": "client-message", "args": ["qitv", "buffer-seek", "113", "yes"]})
+        self.assertFalse(self.player._pending.paused)
+        self.finish_replacement(3, 4)
+        self.observe("pause", True)
+        self.player.toggle_pause()  # User now requests pause during initialization.
+        self.player.seek_buffer(114)
+        self.assertTrue(self.player._pending.paused)
+        self.finish_replacement(4, 5)
+        self.observe("pause", True)
+        self.observe("demuxer-cache-state", {"seekable-ranges": [{"start": 0, "end": 20}]})
+        self.observe("time-pos", 14)
+        self.assertEqual(self.socket.commands[-1]["command"], ["set_property", "pause", True])
+        self.player.seek_buffer(115)
+        self.assertTrue(self.player._pending.paused)
+
+    def test_finished_buffer_seek_does_not_expose_stale_implementation_pause(self):
+        self.buffered()
+        self.player.seek_buffer(111)
+        self.finish_replacement(1, 2)
+        self.observe("pause", True)
+        self.observe("demuxer-cache-state", {"seekable-ranges": [{"start": 0, "end": 20}]})
+        self.observe("time-pos", 11)
+        self.assertEqual(self.socket.commands[-1]["command"], ["set_property", "pause", False])
+        # A new key event can beat MPV's acknowledgement of pause=no.
+        self.player.seek_buffer(112)
+        self.assertFalse(self.player._pending.paused)
+
+    def test_native_open_detaches_recorder_and_disables_old_buffer_controls(self):
+        recorder = self.buffered()
+        self.feed({"event": "end-file", "playlist_entry_id": 1, "reason": "stop"})
+        self.assertTrue(recorder.stopped)
+        self.feed({"event": "start-file", "playlist_entry_id": 50}, {"event": "file-loaded"})
+        self.reply(["get_property", "playlist"], [{"id": 50, "filename": "/music/native.flac"}])
+        self.assertEqual(self.player._active.url, "/music/native.flac")
+        self.assertFalse(self.player._active.buffered)
+        self.assertEqual(self.player._active.content_id, "")
+        self.observe("duration", 80)
+        self.observe("time-pos", 5)
+        start = len(self.socket.commands)
+        self.player.go_live()
+        self.feed({"event": "client-message", "args": ["qitv", "buffer-seek", "112", "no"]})
+        self.player._recording_updated(recorder, {"start": 100.0, "end": 500.0})
+        self.player._recording_finished(recorder)
+        self.assertIsNone(self.player._buffer_source)
+        self.assertIsNone(self.player._pending)
+        self.assertEqual(self.player._active.entry_id, 50)
+        self.assertFalse(any(c["command"][0] == "loadfile" for c in self.socket.commands[start:]))
+        published = [
+            c["command"][2]
+            for c in self.socket.commands
+            if c["command"][:2] == ["set_property", "user-data/qitv-timeshift"]
+        ]
+        self.assertFalse(published[-1]["active"])
+        self.feed({"event": "end-file", "playlist_entry_id": 50, "reason": "eof"})
+        self.assertEqual(self.ends, [])
+        self.assertEqual(self.positions, [])  # Neither native file nor live stream is VOD resume.
+
+    def test_native_start_overtakes_buffer_snapshot_and_old_end(self):
+        recorder = self.buffered()
+        old_observers = dict(self.player._active.observers)
+        self.player.seek_buffer(111)
+        self.feed({"event": "start-file", "playlist_entry_id": 50}, {"event": "file-loaded"})
+        self.reply(["get_property", "playlist"], [{"id": 50, "filename": "/video/native.mkv"}])
+        start = len(self.socket.commands)
+        self.reply(["get_property", "time-pos"], 12)
+        self.reply(["get_property", "duration"], 100)
+        self.feed({"event": "end-file", "playlist_entry_id": 1, "reason": "stop"})
+        for observer, name in old_observers.items():
+            self.feed({"event": "property-change", "id": observer, "name": name, "data": 99})
+        self.assertTrue(recorder.stopped)
+        self.assertIsNone(self.player._pending)
+        self.assertEqual(self.player._active.url, "/video/native.mkv")
+        self.assertEqual(self.player._active.position, 0)
+        self.assertFalse(
+            any(
+                c["command"][0] == "loadfile"
+                or c["command"][:3] == ["script-message-to", "qitv", "stop"]
+                for c in self.socket.commands[start:]
+            )
+        )
+
+    def test_native_choice_after_stop_request_wins_over_pending_reader(self):
+        self.buffered()
+        self.player.seek_buffer(111)
+        self.reply(["get_property", "time-pos"], 12)
+        self.reply(["get_property", "duration"], 100)
+        self.stopped_reply(1)
+        self.feed({"event": "end-file", "playlist_entry_id": 1, "reason": "stop"})
+        self.reply(["get_property", "idle-active"], False)
+        self.assertIsNone(self.player._active)
+        self.assertIsNotNone(self.player._pending)
+        self.feed({"event": "start-file", "playlist_entry_id": 50}, {"event": "file-loaded"})
+        self.reply(["get_property", "idle-active"], True)  # Stale end-file query.
+        self.assertEqual(self.player._active.entry_id, 50)
+        self.assertIsNone(self.player._pending)
+        loads = [c["command"][1] for c in self.socket.commands if c["command"][0] == "loadfile"]
+        self.assertEqual(loads, ["https://provider.invalid/live"])
+
+    def test_start_before_load_reply_uses_returned_entry_identity(self):
+        self.player.play("/music/owned.flac", content_id="owned", is_live=False)
+        self.feed({"event": "start-file", "playlist_entry_id": 7}, {"event": "file-loaded"})
+        self.assertFalse(self.player._active.loaded)
+        self.reply(["loadfile"], {"playlist_entry_id": 7})
+        self.assertTrue(self.player._active.loaded)
+        self.assertEqual(self.player._active.content_id, "owned")
+        self.feed({"event": "end-file", "playlist_entry_id": 7, "reason": "eof"})
+        self.assertEqual(self.ends, ["owned"])
+
+    def test_native_start_before_load_reply_is_not_misattributed_to_owned_media(self):
+        self.player.play("/music/owned.flac", content_id="owned", is_live=False)
+        self.feed({"event": "start-file", "playlist_entry_id": 8}, {"event": "file-loaded"})
+        self.reply(["loadfile"], {"playlist_entry_id": 7})
+        self.reply(["get_property", "playlist"], [{"id": 8, "filename": "/music/native.flac"}])
+        self.assertEqual(self.player._active.url, "/music/native.flac")
+        self.assertEqual(self.player._active.content_id, "")
+        self.feed({"event": "end-file", "playlist_entry_id": 7, "reason": "eof"})
+        self.assertEqual(self.player._active.entry_id, 8)
+        self.assertEqual(self.ends, [])
+
+    def test_playlist_redirect_retains_owned_identity_for_first_resolved_file(self):
+        self.player.play("/music/list.m3u", content_id="playlist", is_live=False)
+        self.reply(["loadfile"], {"playlist_entry_id": 7})
+        self.feed(
+            {"event": "start-file", "playlist_entry_id": 7},
+            {
+                "event": "end-file",
+                "playlist_entry_id": 7,
+                "reason": "redirect",
+                "playlist_insert_id": 8,
+                "playlist_insert_num_entries": 2,
+            },
+            {"event": "start-file", "playlist_entry_id": 8},
+            {"event": "file-loaded"},
+        )
+        self.assertEqual(self.player._active.content_id, "playlist")
+        self.feed({"event": "end-file", "playlist_entry_id": 8, "reason": "eof"})
+        self.assertEqual(self.ends, ["playlist"])
+        self.feed({"event": "start-file", "playlist_entry_id": 9}, {"event": "file-loaded"})
+        self.assertEqual(self.player._active.content_id, "")
+
+    def test_audio_control_window_survives_replacement_until_actual_idle(self):
+        self.player.play("/music/audio.flac", is_live=False)
+        self.reply(["loadfile"], {"playlist_entry_id": 1})
+        self.feed({"event": "start-file", "playlist_entry_id": 1}, {"event": "file-loaded"})
+        start = self.timeline.index(("command", ["set_property", "force-window", "yes"]))
+        load = next(i for i, row in enumerate(self.timeline) if row[1][0] == "loadfile")
+        self.assertLess(start, load)
+        self.player.play("/music/second.flac", is_live=False)
+        self.finish_replacement(1, 2)
+        self.assertFalse(
+            any(
+                c["command"] == ["set_property", "force-window", "no"] for c in self.socket.commands
+            )
+        )
+        self.feed({"event": "end-file", "playlist_entry_id": 2, "reason": "eof"})
+        self.assertNotEqual(
+            self.socket.commands[-1]["command"], ["set_property", "force-window", "no"]
+        )
+        self.feed({"event": "property-change", "id": 0, "data": True})
+        self.assertEqual(
+            self.socket.commands[-1]["command"], ["set_property", "force-window", "no"]
+        )
 
 
 if __name__ == "__main__":

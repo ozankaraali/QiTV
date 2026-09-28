@@ -22,6 +22,14 @@ class SourceError(RuntimeError):
     """A source failure whose explanation is safe to display without redaction."""
 
 
+def _close_redirect_body(response, **_kwargs):
+    # Requests consumes redirect bodies even with stream=True (and while preparing
+    # Response.next with redirects disabled). Close before its redirect resolver
+    # runs; headers remain available for cookies, authentication, and Location.
+    if response.is_redirect:
+        response.close()
+
+
 class _HTTPReader(io.RawIOBase):
     """Nonseekable, short-reading transport; never reopen the HTTP response."""
 
@@ -342,6 +350,7 @@ def open_source(url: str, *, verify_ssl: bool = True):
             bridge = None
             if scheme in ("http", "https"):
                 session = resources.enter_context(requests.Session())
+                session.hooks["response"].append(_close_redirect_body)
                 response = resources.enter_context(
                     session.get(
                         url,

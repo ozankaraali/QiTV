@@ -585,7 +585,11 @@ class _RecordingEngine:
                     "max_interleave_delta": "1000000",
                 },
             )
-            mapping = {stream.index: output.add_stream_from_template(stream) for stream in streams}
+            # Remux decoder parameters verbatim; no encoder is needed for a copy.
+            mapping = {
+                stream.index: output.add_stream_from_template(stream, opaque=True)
+                for stream in streams
+            }
             for stream in streams:
                 mapping[stream.index].metadata.update(stream.metadata)
             return segment, writer, output, mapping

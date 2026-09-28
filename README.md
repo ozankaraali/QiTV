@@ -15,6 +15,10 @@ QiTV is a free, open-source IPTV player for Windows, macOS, and Linux. Watch liv
 - **Opt-in live time-shift:** rewind non-seekable live TV using bounded temporary disk history; catch up with MPV's playback-speed control.
 - **M3U export and portable mode:** use your playlists in other players or keep QiTV's settings alongside the app.
 
+![QiTV channel browser with a local demo playlist](docs/screenshots/library.png)
+
+*Screenshots use fictional channels and original generated video.*
+
 ## Installation
 
 Download QiTV from the official [Releases page](https://github.com/ozankaraali/QiTV/releases). Avoid untrusted third-party distributions.
@@ -102,6 +106,8 @@ Enable **Settings → Time-shift** and choose how much disk space to use (defaul
 
 Works with **Internal/Bundled MPV**. The oldest history is replaced when the cache fills. Stop, changing channels, or closing QiTV clears the cache; this is not permanent recording.
 
+![Bundled MPV player with buffered rewind and live controls](docs/screenshots/timeshift.png)
+
 ### Program guide and content details
 
 In **Settings → EPG**, choose **STB** for a guide supplied by an STB or Xtream provider, or choose **Local File** or **URL** for an XMLTV guide. XMLTV mappings let you match guide entries to channels.
@@ -142,7 +148,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, Go 1
 
 - **macOS:** Xcode 15 or newer command-line tools, plus `brew install cmake ninja nasm autoconf autoconf-archive automake libtool pkgconf`.
 - **Linux:** a C/C++ compiler, CMake, Ninja, NASM, pkg-config, Autotools, and X11/OpenGL/ALSA/PulseAudio development headers. See the Ubuntu package list in the [build workflow](.github/workflows/main.yml).
-- **Windows:** an x64 Visual Studio developer shell, LLVM (`clang`, `clang++`, `lld-link`, `llvm-rc`), CMake, Ninja, and NASM on PATH.
+- **Windows:** an x64 Visual Studio developer shell, LLVM (`clang`, `clang++`, `lld-link`, `llvm-rc`), CMake, Ninja, NASM, and MSYS2 with `make`, `diffutils`, and `pkgconf`.
 
 For the 1.14 development version described here:
 
@@ -150,11 +156,12 @@ For the 1.14 development version described here:
 git clone --branch verify/bundled-mpv https://github.com/ozankaraali/QiTV/
 cd QiTV
 uv sync --frozen
-uv run --frozen python scripts/prepare_mpv.py
-uv run --frozen python main.py
+uv run --frozen --no-sync python scripts/prepare_mpv.py
+uv run --frozen --no-sync python scripts/prepare_pyav.py
+uv run --frozen --no-sync python main.py
 ```
 
-uv creates `.venv` and selects Python 3.14. The preparation step builds the bundled player and reuses it on later runs when possible.
+uv creates `.venv` and selects Python 3.14. Preparation builds the private media runtimes and reuses verified builds on later runs. Keep `--no-sync` to retain the private PyAV build.
 
 For packaging, licenses, and rebuilding the native player, see the [redistribution instructions](native/REDISTRIBUTION.txt).
 
@@ -183,4 +190,4 @@ QiTV's application code is licensed under [MIT](LICENSE). Bundled third-party co
 - **[MPV](https://mpv.io/) and FFmpeg:** the combined bundled player is distributed under GPLv3-or-later. Builds that bundle it include matching `mpv-sources-<target>.tar.gz` downloads; see the [redistribution instructions](native/REDISTRIBUTION.txt).
 - **[uosc](https://github.com/tomasklaen/uosc) and its Ziggy helper:** LGPLv2.1, with additional dependency and font notices in the [uosc notice](assets/mpv/uosc/NOTICE.txt).
 - **PySide6 / Qt:** see [Qt licensing](https://www.qt.io/licensing/).
-- **[PyAV](https://github.com/PyAV-Org/PyAV):** BSD-3-Clause; its bundled FFmpeg libraries retain their own licenses. Binary distributors must also supply the matching wheel/library notices and corresponding FFmpeg sources; the separate MPV source archive does not cover these libraries.
+- **[PyAV](https://github.com/PyAV-Org/PyAV):** BSD-3-Clause, with a private LGPLv3-or-later FFmpeg build. Releases include matching `pyav-sources-<target>.tar.gz` downloads and bundled notices.

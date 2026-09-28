@@ -215,7 +215,7 @@ function Timeline:render()
 				if state.qitv_timeshift then
 					mp.commandv('script-message-to', 'qitv', 'buffer-seek',
 						tostring(state.qitv_timeshift.position - config.timeline_step),
-						state.pause and 'yes' or 'no')
+						state.qitv_timeshift.paused and 'yes' or 'no')
 				else
 					mp.commandv('seek', -config.timeline_step, config.timeline_step_flag)
 				end
@@ -224,7 +224,7 @@ function Timeline:render()
 				if state.qitv_timeshift then
 					mp.commandv('script-message-to', 'qitv', 'buffer-seek',
 						tostring(state.qitv_timeshift.position + config.timeline_step),
-						state.pause and 'yes' or 'no')
+						state.qitv_timeshift.paused and 'yes' or 'no')
 				else
 					mp.commandv('seek', config.timeline_step, config.timeline_step_flag)
 				end

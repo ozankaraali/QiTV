@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "sources": {
+    "ffmpeg": {
+      "version": "8.1.2",
+      "url": "https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz",
+      "sha256": "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c",
+      "size": 11710924,
+      "filename": "ffmpeg-8.1.2.tar.xz",
+      "license": "COPYING.LGPLv3"
+    },
+    "av": {
+      "version": "18.1.0",
+      "url": "https://files.pythonhosted.org/packages/8d/f4/f22114d30d3435e38c6af2b4870f37b864403dca6ae7af747a289ce0a18e/av-18.1.0.tar.gz",
+      "sha256": "47bfc286e1bc9de7ab4681fc2b575cd2460a66919d31ffe1bd5aa54fae531a28",
+      "size": 4451061,
+      "filename": "av-18.1.0.tar.gz",
+      "license": "LICENSE.txt"
+    },
+    "delvewheel": {
+      "version": "1.13.1",
+      "url": "https://files.pythonhosted.org/packages/36/8d/ad1ecad995732a6c53086ce3bf20479d37a970acc80b7bdb4ab1eb156f2e/delvewheel-1.13.1.tar.gz",
+      "sha256": "ae445f35f411c367f5b350431ac5f1435af8128bff31ccf34035a409704da8c6",
+      "size": 64796,
+      "filename": "delvewheel-1.13.1.tar.gz",
+      "license": "LICENSE"
+    },
+    "openssl": {
+      "version": "3.6.4",
+      "url": "https://github.com/openssl/openssl/archive/refs/tags/openssl-3.6.4.tar.gz",
+      "sha256": "c6b94124bb76ac5f8aa80de121e0f922a93d3bbf1be478bd50ebc36a30dc1db1",
+      "size": 55195950,
+      "filename": "openssl-3.6.4.tar.gz",
+      "license": "LICENSE.txt"
+    }
+  },
+  "python_tools": {
+    "common": ["setuptools==84.0.0", "cython==3.3.0", "wheel==0.48.0", "packaging==26.3"],
+    "darwin": ["delocate==0.13.0", "macholib==1.16.4", "altgraph==0.17.5", "typing_extensions==4.16.0"],
+    "linux": ["auditwheel==6.8.2", "pyelftools==0.33", "patchelf==0.19.1.0"],
+    "windows": ["delvewheel==1.13.1", "pefile==2024.8.26"]
+  },
+  "ffmpeg_options": [
+    "--disable-autodetect", "--disable-gpl", "--disable-nonfree", "--enable-version3",
+    "--disable-static", "--enable-shared", "--disable-programs", "--disable-doc",
+    "--disable-debug", "--enable-pic", "--enable-network",
+    "--enable-avcodec", "--enable-avformat", "--enable-avdevice", "--enable-avfilter",
+    "--enable-swscale", "--enable-swresample"
+  ],
+  "targets": {
+    "darwin-x86_64": {"minimum_os": "13.0", "tls": "securetransport"},
+    "darwin-arm64": {"minimum_os": "13.0", "tls": "securetransport"},
+    "linux-x86_64": {"minimum_os": "glibc 2.35", "tls": "openssl", "wheel_platform": "manylinux_2_35_x86_64"},
+    "windows-x86_64": {"minimum_os": "Windows 10", "tls": "schannel"}
+  }
+}

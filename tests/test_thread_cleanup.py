@@ -67,10 +67,19 @@ class ThreadCleanupTests(unittest.TestCase):
         """Exercise the real content lifecycle, including loss of its QObject owner."""
         self.run_scenario("content-loading")
 
+    def test_delayed_link_and_resume_cannot_restart_a_closing_window(self):
+        self.run_scenario("closing-playback")
+
+    def test_windows_update_stops_recording_and_waits_for_native_shutdown(self):
+        self.run_scenario("windows-update")
+
+    def test_windows_update_launch_failure_is_reported_before_quitting(self):
+        self.run_scenario("windows-update-error")
+
 
 def run_child(scenario, playlist):
     # Keep QApplication, production imports, and crash-prone threads out of the
-    # unittest runner. No ChannelList, playback backend, or user config is needed.
+    # unittest runner. Every scenario uses only isolated configuration/fixtures.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from PySide6.QtCore import QEventLoop, QObject, Qt, QThread, QTimer, Slot
     from PySide6.QtWidgets import QApplication
@@ -250,6 +259,220 @@ def run_child(scenario, playlist):
             gate.assert_pending(thread_ref, worker_ref)
         finally:
             gate.finish(destroyed)
+    elif scenario in ("closing-playback", "windows-update", "windows-update-error"):
+        from unittest.mock import patch
+
+        from PySide6.QtCore import QProcess, Signal
+        from PySide6.QtWidgets import QMainWindow, QMessageBox
+
+        from channel_list import ChannelList
+        from mpv_player import MpvPlayer
+        import update_checker
+
+        class Player(MpvPlayer):
+            """Use a harmless stdin-driven child at the native MPV boundary."""
+
+            def __init__(self):
+                super().__init__(SimpleNamespace())
+                self.starts = []
+                self.quit_requested = False
+
+            def _start(self):
+                self.starts.append(self._pending.url)
+                self._pending = None
+                process = QProcess(self)
+                self._process = process
+                process.finished.connect(lambda code, status: self._finished(process, code, status))
+                process.start(sys.executable, ["-c", "import sys; sys.stdin.read()"])
+
+            def _begin_quit(self):
+                # The test releases stdin separately, just as MPV can take time
+                # to honor the IPC quit request while a recorder is stopping.
+                self.quit_requested = True
+
+        class Window(ChannelList):
+            def __init__(self, player):
+                # Omit catalog/UI construction; retain real playback and closure.
+                QMainWindow.__init__(self)
+                self.app = app
+                self.player = player
+                self._closing = False
+                self._shutdown_complete = False
+                self._bg_jobs = []
+                self._provider_setup_running = False
+                self._current_content_id = None
+                self._pending_link_ctx = None
+                self.content_type = "itv"
+                self.provider_manager = SimpleNamespace(current_provider={"type": "STB"})
+                self.config_manager = SimpleNamespace(
+                    play_in_vlc=False,
+                    play_in_mpv=False,
+                    save_window_settings=lambda *_: None,
+                )
+                self.image_manager = SimpleNamespace(save_index=lambda: None)
+                self.epg_manager = SimpleNamespace(save_index=lambda: None)
+                self.content_refresh_timer = QTimer(self)
+                self.refresh_on_air_timer = QTimer(self)
+
+            def cancel_content_loading(self):
+                pass
+
+            def stop_image_loading(self):
+                pass
+
+            def unlock_ui_after_loading(self):
+                pass
+
+        player = Player()
+        window = Window(player)
+        shutdowns = []
+        window.shutdownFinished.connect(lambda: shutdowns.append(True))
+        window.show()
+        app.setQuitOnLastWindowClosed(True)
+        timed_out = []
+        watchdog = QTimer()
+        watchdog.setSingleShot(True)
+        watchdog.timeout.connect(lambda: (timed_out.append(True), app.quit()))
+        watchdog.start(10000)
+        quits = []
+        app.aboutToQuit.connect(lambda: quits.append(True))
+
+        if scenario == "closing-playback":
+
+            class LinkWorker(QObject):
+                finished = Signal(dict)
+
+                @Slot()
+                def run(self):
+                    release_link.wait(5)
+                    self.finished.emit({"link": "https://example.invalid/late"})
+
+            # Ordinary stop/replay remains allowed before application closure.
+            window._play_content("https://example.invalid/first")
+            wait_until(lambda: player._process.state() == QProcess.Running, "child did not start")
+            player.stop()
+            window._play_content_with_position("https://example.invalid/replay", 12000)
+            case.assertEqual(player._pending.url, "https://example.invalid/replay")
+            player.stop()
+            player._process.closeWriteChannel()
+            wait_until(lambda: not player.is_running(), "initial child did not exit")
+            starts = list(player.starts)
+
+            release_link = threading.Event()
+            thread = QThread()
+            worker = LinkWorker()
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.finished.connect(window._on_link_created, Qt.QueuedConnection)
+            worker.finished.connect(thread.quit)
+            window._bg_jobs.append((thread, worker))
+            ThreadCleanup(thread, worker).finished.connect(lambda _: window._bg_jobs.clear())
+            thread.start()
+
+            def close_during_link():
+                window.close()
+                case.assertTrue(window._closing)
+                case.assertTrue(window.isVisible(), "window did not wait for the link worker")
+                # Already queued resume/autoplay callbacks must not launch or
+                # schedule another provider worker either.
+                window._play_content_with_position("https://example.invalid/resume", 12000)
+                window._play_content_with_resume_check("https://example.invalid/dialog", {})
+                window.play_item({"cmd": "https://example.invalid/autoplay"})
+                release_link.set()
+
+            QTimer.singleShot(0, close_during_link)
+            try:
+                app.exec()
+            finally:
+                release_link.set()
+            case.assertFalse(timed_out, "late playback prevented application shutdown")
+            case.assertEqual(player.starts, starts, "closing launched a fresh player")
+            case.assertIsNone(player._pending)
+            case.assertFalse(window.isVisible())
+        else:
+
+            class Recorder(QThread):
+                def __init__(self):
+                    super().__init__()
+                    self.stop_requested = threading.Event()
+
+                def run(self):
+                    self.stop_requested.wait(5)
+
+                def request_stop(self):
+                    self.stop_requested.set()
+
+            gate = TeardownGate()
+            recorder = Recorder()
+            recorder.finished.connect(gate.block, Qt.DirectConnection)
+            destroyed = threading.Event()
+            recorder.destroyed.connect(lambda *_: destroyed.set())
+            player._recorder = recorder
+            ThreadCleanup(recorder).finished.connect(player._recording_finished)
+            recorder.start()
+            # Set up the independent native process without stopping recording.
+            player._pending = SimpleNamespace(url="https://example.invalid/live")
+            player._start()
+            wait_until(lambda: player._process.state() == QProcess.Running, "child did not start")
+            launches = []
+            warnings = []
+            quit_snapshots = []
+            app.aboutToQuit.connect(lambda: quit_snapshots.append((list(launches), list(warnings))))
+
+            def dismiss_failure():
+                for widget in app.topLevelWidgets():
+                    if isinstance(widget, QMessageBox):
+                        warnings.append(widget.text())
+                        widget.accept()
+
+            def launch(command, **kwargs):
+                case.assertFalse(has_pending_threads(), "installer raced native thread teardown")
+                case.assertFalse(player.is_running(), "installer raced the old player process")
+                launches.append(command)
+                if scenario == "windows-update-error":
+                    QTimer.singleShot(0, dismiss_failure)
+                    raise OSError("fixture launch failure")
+
+            def install():
+                update_checker._perform_windows_update(
+                    "downloaded.exe", "https://example.invalid/release"
+                )
+                case.assertTrue(recorder.stop_requested.is_set(), "update never stopped recording")
+                case.assertTrue(player.quit_requested)
+                gate.assert_pending(weakref.ref(recorder), weakref.ref(recorder))
+                case.assertEqual(launches, [])
+                gate.finish(destroyed)
+                case.assertTrue(player.is_running())
+                case.assertEqual(launches, [], "installer did not wait for the native child")
+                player._process.closeWriteChannel()
+
+            with (
+                patch.object(update_checker.subprocess, "Popen", side_effect=launch),
+                patch.object(update_checker.subprocess, "DETACHED_PROCESS", 8, create=True),
+                patch.object(
+                    update_checker.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True
+                ),
+            ):
+                QTimer.singleShot(0, install)
+                try:
+                    app.exec()
+                finally:
+                    gate.release.set()
+                    recorder.stop_requested.set()
+            case.assertFalse(timed_out, "update deadlocked during shutdown")
+            expected = [["downloaded.exe", "--replace", sys.executable]]
+            case.assertEqual(launches, expected)
+            expected_warnings = (
+                ["Failed to launch the update."] if scenario.endswith("-error") else []
+            )
+            case.assertEqual(quit_snapshots, [(expected, expected_warnings)])
+        watchdog.stop()
+        case.assertEqual(quits, [True])
+        from PySide6.QtGui import QCloseEvent
+
+        window.closeEvent(QCloseEvent())
+        case.assertEqual(shutdowns, [True], "repeated close emitted shutdown completion again")
+        case.assertFalse(has_pending_threads())
     else:
         raise ValueError(f"Unknown scenario: {scenario}")
 

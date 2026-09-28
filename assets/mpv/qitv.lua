@@ -18,6 +18,15 @@ mp.register_script_message('hello', function(client)
     owner = client
     notify('ready')
 end)
+
+mp.register_script_message('stop', function(entry_id)
+    -- A native playlist/Open File choice can overtake QiTV's IPC snapshot.
+    -- Stop only the entry QiTV cancelled, not the newer selected media.
+    local index = mp.get_property_number('playlist-current-pos')
+    local current = index and mp.get_property_number('playlist/' .. index .. '/id')
+    if current == tonumber(entry_id) then mp.commandv('stop') end
+    notify('stopped', entry_id)
+end)
 -- Test whether the IPC owner still exists, not whether its UI thread is busy.
 -- MPV reports failure when script-message-to targets a disconnected client.
 mp.add_periodic_timer(2, function()

@@ -214,6 +214,23 @@ class TimeshiftTests(unittest.TestCase):
         self.assertTrue(recorder.wait(7000))
         self.assertEqual(list(self.directory.iterdir()), [])
 
+    def test_h264_aac_remux_preserves_frames_without_requiring_an_encoder(self):
+        fixture = Path(__file__).parent / "fixtures" / "mpv-smoke.mp4"
+        with av.open(str(fixture)) as media:
+            expected_frames = sum(1 for _ in media.decode(video=0))
+        recorder = self.recorder(str(fixture))
+        self.wait_for(
+            lambda: recorder._snapshot()["ended"] or recorder.errors,
+            "H.264 recording did not finish",
+        )
+        self.assertEqual(recorder.errors, [])
+        url, _, _ = recorder.playback(-100)
+        with av.open(url, options={"live_start_index": "0"}, timeout=(3, 3)) as media:
+            self.assertEqual(media.streams.video[0].codec_context.name, "h264")
+            self.assertEqual(media.streams.audio[0].codec_context.name, "aac")
+            self.assertEqual(sum(1 for _ in media.decode(video=0)), expected_frames)
+        self.stop_recorder(recorder)
+
     def test_nonseekable_ingestion_eviction_manifest_tracks_and_seek_clamping(self):
         source = self.source()
         cap = len(self.payload) // 2

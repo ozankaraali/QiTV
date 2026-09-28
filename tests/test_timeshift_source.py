@@ -83,13 +83,17 @@ class LocalSource:
                     route = route(self, owner.counts[self.path])
                 status, headers, body = route
                 self.send_response(status)
-                self.send_header("Content-Length", str(len(body)))
+                if not callable(body):
+                    self.send_header("Content-Length", str(len(body)))
                 self.send_header("Connection", "close")
                 for name, value in headers.items():
                     self.send_header(name, value)
                 self.end_headers()
                 try:
-                    self.wfile.write(body)
+                    if callable(body):
+                        body(self)
+                    else:
+                        self.wfile.write(body)
                 except BrokenPipeError, ConnectionResetError, ssl.SSLError:
                     pass
 
@@ -156,6 +160,115 @@ class TimeshiftSourceTests(unittest.TestCase):
                     self.assertEqual(sum(1 for _ in source.decode(video=0)), 100)
         self.assertEqual(server.counts["/video.ts"], 2)
         self.assertEqual(server.counts["/leaf.m3u8"], 1)
+
+    def test_streaming_redirect_bodies_do_not_delay_media(self):
+        for nested in (False, True):
+            with self.subTest(nested=nested):
+                release = threading.Event()
+                finished = threading.Event()
+                disconnected = []
+                result = []
+
+                def redirect(location, *, chunked):
+                    closed = threading.Event()
+                    disconnected.append(closed)
+
+                    def body(request):
+                        block = b"x" * 8192
+                        if chunked:
+                            block = b"2000\r\n" + block + b"\r\n"
+                        try:
+                            # No natural EOF: a reader that drains redirects can
+                            # never reach the target until the test releases it.
+                            while not release.is_set():
+                                request.wfile.write(block)
+                                if release.wait(0.01):
+                                    break
+                            if chunked:
+                                request.wfile.write(b"0\r\n\r\n")
+                        except BrokenPipeError, ConnectionResetError:
+                            closed.set()
+
+                    headers = {
+                        "Location": location,
+                        "Set-Cookie": "access=allowed; Path=/",
+                    }
+                    if chunked:
+                        headers["Transfer-Encoding"] = "chunked"
+                    else:
+                        headers["Content-Length"] = str(1 << 40)
+                    return 302, headers, body
+
+                routes = {"/media/video.ts": (200, {}, self.video)}
+                if nested:
+                    routes.update(
+                        {
+                            "/start": (
+                                200,
+                                {},
+                                b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nredirect.m3u8\n",
+                            ),
+                            "/redirect.m3u8": redirect("/media/leaf.m3u8", chunked=True),
+                            "/media/leaf.m3u8": (200, {}, leaf("redirect.ts")),
+                            "/media/redirect.ts": redirect("/media/video.ts", chunked=False),
+                        }
+                    )
+                else:
+                    routes["/start"] = redirect("/media/video.ts", chunked=True)
+                server = self.server(routes)
+
+                def decode():
+                    try:
+                        with open_source(server.url + "/start") as source:
+                            result.append(sum(1 for _ in source.decode(video=0)))
+                    except Exception as error:
+                        result.append(error)
+                    finally:
+                        finished.set()
+
+                worker = threading.Thread(target=decode, daemon=True)
+                worker.start()
+                try:
+                    self.assertTrue(
+                        finished.wait(5),
+                        "media remained blocked on a streaming redirect body",
+                    )
+                    self.assertEqual(result, [100])
+                    for closed in disconnected:
+                        self.assertTrue(closed.wait(2), "redirect body connection was not closed")
+                    targets = [
+                        headers
+                        for path, headers in server.requests
+                        if path in ("/media/leaf.m3u8", "/media/video.ts")
+                    ]
+                    for headers in targets:
+                        self.assertIn("access=allowed", headers.get("Cookie", ""))
+                finally:
+                    release.set()
+                    worker.join(5)
+                    server.close()
+                    self.servers.remove(server)
+                self.assertFalse(worker.is_alive(), "source worker survived cleanup")
+
+    def test_redirect_chain_strips_cross_origin_authorization_and_keeps_cookies(self):
+        destination = self.server(
+            {
+                "/entry": (
+                    302,
+                    {"Location": "/video.ts", "Set-Cookie": "access=allowed; Path=/"},
+                    b"",
+                ),
+                "/video.ts": (200, {}, self.video),
+            }
+        )
+        origin = self.server({"/start": (302, {"Location": destination.url + "/entry"}, b"")})
+        url = origin.url.replace("http://", "http://user:password@") + "/start"
+        with open_source(url) as source:
+            self.assertEqual(sum(1 for _ in source.decode(video=0)), 100)
+        self.assertIn("Authorization", origin.requests[0][1])
+        for _path, headers in destination.requests:
+            self.assertNotIn("Authorization", headers)
+        self.assertIn("access=allowed", destination.requests[-1][1].get("Cookie", ""))
 
     def test_redirected_leaf_keeps_fragmented_init_and_byte_ranges(self):
         movie = transport_stream(
