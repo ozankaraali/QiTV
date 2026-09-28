@@ -479,7 +479,16 @@ def build_environment(prefix, target):
     elif target.startswith("windows"):
         environment.update(MSYS2_ARG_CONV_EXCL="*", MSYS_NO_PATHCONV="1")
         msys_bin = str(Path(posix_tool("bash", target)).parent)
-        environment["PATH"] = environment["PATH"] + os.pathsep + msys_bin
+        compiler = shutil.which("cl.exe", path=environment["PATH"])
+        if compiler is None:
+            raise RuntimeError("MSVC x64 developer environment is required")
+        # Keep MSVC's link.exe ahead of MSYS's Unix link, but select all shell
+        # utilities from this MSYS installation before Git/Strawberry tools.
+        # Mixing MSYS runtimes loses backslashes in configure's sed expressions
+        # and the MSVC dependency-generation awk program.
+        environment["PATH"] = os.pathsep.join(
+            (str(Path(compiler).parent), msys_bin, environment["PATH"])
+        )
         environment["SHELL"] = posix_tool("bash", target).replace("\\", "/")
         environment["INCLUDE"] = (
             str(prefix / "include") + os.pathsep + environment.get("INCLUDE", "")

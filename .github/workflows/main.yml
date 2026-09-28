@@ -124,7 +124,41 @@ jobs:
         run: uv run --frozen --no-sync python scripts/prepare_pyav.py --target '${{ matrix.target }}'
       - name: Run application and native integrity regressions
         timeout-minutes: 5
-        run: uv run --frozen --no-sync python -m unittest discover -s tests -v
+        run: |
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            # Temporary startup evidence for the macOS recorder regression failure.
+            diagnostic="$RUNNER_TEMP/qitv-startup-diagnostic"
+            mkdir -p "$diagnostic"
+            cat > "$diagnostic/sitecustomize.py" <<'PY'
+          import atexit
+          import faulthandler
+          import os
+          from pathlib import Path
+          import sys
+          import time
+
+          directory = Path(os.environ["QITV_STARTUP_DIAGNOSTICS"])
+          directory.mkdir(parents=True, exist_ok=True)
+          trace = (directory / f"python-{os.getpid()}.log").open("w", buffering=1)
+          trace.write(
+              f"pid={os.getpid()} ppid={os.getppid()} monotonic={time.monotonic()}\n"
+              f"executable={sys.executable}\nversion={sys.version}\n"
+              f"multiprocessing_child={'--multiprocessing-fork' in sys.argv}\n"
+          )
+          faulthandler.dump_traceback_later(4, repeat=True, file=trace)
+
+          def close_trace():
+              faulthandler.cancel_dump_traceback_later()
+              trace.close()
+
+          atexit.register(close_trace)
+          PY
+            QITV_STARTUP_DIAGNOSTICS="$GITHUB_WORKSPACE/build/mpv-smoke" \
+              PYTHONPATH="$diagnostic${PYTHONPATH:+:$PYTHONPATH}" \
+              uv run --frozen --no-sync python -m unittest discover -s tests -v
+          else
+            uv run --frozen --no-sync python -m unittest discover -s tests -v
+          fi
       - name: Smoke source backend against real bundled MPV
         timeout-minutes: 2
         run: |
