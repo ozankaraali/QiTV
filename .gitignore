@@ -164,3 +164,8 @@ cython_debug/
 config.json
 
 .DS_Store
+
+# Local design/test tooling
+.superpowers/
+.playwright-mcp/
+.claude/worktrees/
