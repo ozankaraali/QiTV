@@ -12,11 +12,29 @@ import zipfile
 import orjson as json
 import requests
 import tzlocal
-from urlobject import URLObject
 
 from content_loader import ContentLoader
 from multikeydict import MultiKeyDict
-from services.provider_api import base_from_url, stb_endpoint, xtream_xmltv_url
+from services.provider_api import (
+    base_from_url,
+    https_fallback_candidates,
+    stb_endpoint,
+    xtream_xmltv_url,
+)
+
+logger = logging.getLogger(__name__)
+
+# Timestamp format of the "date"/"last_access" fields in the EPG cache index.
+_INDEX_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _cache_key(source: str) -> str:
+    """Name an EPG source's cache entry (index key and pickle file stem)."""
+    return hashlib.md5(source.encode()).hexdigest()
+
+
+def _xtream_cache_key(provider_url: str, username: str) -> str:
+    return _cache_key(f"{provider_url}:{username}")
 
 
 def xml_to_dict(element):
@@ -68,8 +86,39 @@ class EpgManager:
         return d
 
     def _index_file(self):
-        cache_dir = self._cache_dir()
-        return os.path.join(cache_dir, "index.json")
+        return os.path.join(self._cache_dir(), "index.json")
+
+    def _pickle_path(self, cache_key):
+        return os.path.join(self._cache_dir(), f"{cache_key}.pkl")
+
+    def _is_expired(self, epg_info):
+        epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
+        age = datetime.now() - epg_date
+        return age.total_seconds() > self.config_manager.epg_expiration
+
+    def _load_cached_epg(self, cache_key):
+        """Load a previously indexed EPG from disk; return False if it is missing."""
+        epg_file = self._pickle_path(cache_key)
+        if not os.path.exists(epg_file):
+            return False
+        with open(epg_file, "rb") as f:
+            self.epg = pickle.load(f)
+        self.index[cache_key]["last_access"] = datetime.now().strftime(_INDEX_TIME_FORMAT)
+        return True
+
+    def _cache_epg(self, cache_key, source_date=None):
+        """Persist the current EPG and record when its source was last updated."""
+        with open(self._pickle_path(cache_key), "wb") as f:
+            pickle.dump(self.epg, f)
+        now = datetime.now()
+        self.index[cache_key] = {
+            "date": (source_date or now).strftime(_INDEX_TIME_FORMAT),
+            "last_access": now.strftime(_INDEX_TIME_FORMAT),
+        }
+
+    def _mark_epg_unavailable(self, cache_key):
+        self.index[cache_key] = None
+        self.epg = MultiKeyDict()
 
     def _load_index(self):
         index_file = self._index_file()
@@ -173,94 +222,57 @@ class EpgManager:
         with open(index_file, "w", encoding="utf-8") as f:
             f.write(json.dumps(self.index, option=json.OPT_INDENT_2).decode("utf-8"))
 
-    def refresh_epg(self):
-        epg_source = self.config_manager.epg_source
-
-        if epg_source == "STB":
-            provider_type = self.provider_manager.current_provider.get("type", "").upper()
-            if provider_type == "STB":
-                return self._refresh_epg_stb(
-                    self.provider_manager.current_provider["url"],
-                    self.provider_manager.headers,
-                )
-            elif provider_type == "XTREAM":
-                return self._refresh_epg_xtream(
-                    self.provider_manager.current_provider["url"],
-                    self.provider_manager.current_provider.get("username", ""),
-                    self.provider_manager.current_provider.get("password", ""),
-                )
-        elif epg_source == "Local File":
-            return self._refresh_epg_file(self.config_manager.epg_file)
-        elif epg_source == "URL":
-            return self._refresh_epg_url(self.config_manager.epg_url)
-        return False
+    # The _refresh_epg_* helpers refetch a cached source once it is out of date and
+    # return True when they did so.
 
     def _refresh_epg_stb(self, provider_url, headers):
-        provider_hash = hashlib.md5(provider_url.encode()).hexdigest()
-        if provider_hash in self.index:
-            epg_info = self.index[provider_hash]
-            if epg_info:
-                current_time = datetime.now()
-                # Check expiration time
-                epg_date = datetime.strptime(epg_info["date"], "%Y-%m-%d %H:%M:%S")
-                if (current_time - epg_date).total_seconds() > self.config_manager.epg_expiration:
-                    self._fetch_epg_from_stb(provider_url, headers)
-                    return True
+        epg_info = self.index.get(_cache_key(provider_url))
+        if epg_info and self._is_expired(epg_info):
+            self._fetch_epg_from_stb(provider_url, headers)
+            return True
         return False
 
     def _refresh_epg_xtream(self, provider_url, username, password):
-        provider_hash = hashlib.md5(f"{provider_url}:{username}".encode()).hexdigest()
-        if provider_hash in self.index:
-            epg_info = self.index[provider_hash]
-            if epg_info:
-                current_time = datetime.now()
-                # Check expiration time
-                epg_date = datetime.strptime(epg_info["date"], "%Y-%m-%d %H:%M:%S")
-                if (current_time - epg_date).total_seconds() > self.config_manager.epg_expiration:
-                    self._fetch_epg_from_xtream(provider_url, username, password)
-                    return True
+        epg_info = self.index.get(_xtream_cache_key(provider_url, username))
+        if epg_info and self._is_expired(epg_info):
+            self._fetch_epg_from_xtream(provider_url, username, password)
+            return True
         return False
 
     def _refresh_epg_file(self, xmltv_file):
-        xmltv_filehash = hashlib.md5(xmltv_file.encode()).hexdigest()
-        if xmltv_filehash in self.index:
-            epg_info = self.index[xmltv_filehash]
-            if epg_info:
-                # Check modified time
-                epg_date = datetime.strptime(epg_info["date"], "%Y-%m-%d %H:%M:%S")
-                if (
-                    datetime.fromtimestamp(os.path.getmtime(xmltv_file)) - epg_date
-                ).total_seconds() > 2:
-                    self._fetch_epg_from_file(xmltv_filehash, xmltv_file)
-                    return True
+        xmltv_filehash = _cache_key(xmltv_file)
+        epg_info = self.index.get(xmltv_filehash)
+        if epg_info:
+            # Check modified time
+            epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
+            if (
+                datetime.fromtimestamp(os.path.getmtime(xmltv_file)) - epg_date
+            ).total_seconds() > 2:
+                self._fetch_epg_from_file(xmltv_filehash, xmltv_file)
+                return True
         return False
 
     def _refresh_epg_url(self, url):
-        url_hash = hashlib.md5(url.encode()).hexdigest()
-        if url_hash in self.index:
-            epg_info = self.index[url_hash]
-            if epg_info:
-                # Check expiration time first, if expired check header for last-modified
-                last_access = datetime.strptime(epg_info["last_access"], "%Y-%m-%d %H:%M:%S")
-                current_time = datetime.now()
-                if (
-                    current_time - last_access
-                ).total_seconds() > self.config_manager.epg_expiration:
-                    epg_date = datetime.strptime(epg_info["date"], "%Y-%m-%d %H:%M:%S")
-                    # Request the URL with "If-Modified-Since" header
-                    headers = {"If-Modified-Since": epg_date.strftime("%a, %d %b %Y %H:%M:%S GMT")}
-                    r = requests.get(
-                        url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify
-                    )
-                    if r.status_code == 304:
-                        # EPG is still fresh
-                        self.index[url_hash]["last_access"] = current_time.strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
-                        return False
-                    # EPG is not fresh, fetch it
-                    self._fetch_epg_from_url(url)
-                    return True
+        url_hash = _cache_key(url)
+        epg_info = self.index.get(url_hash)
+        if epg_info:
+            # Check expiration time first, if expired check header for last-modified
+            last_access = datetime.strptime(epg_info["last_access"], _INDEX_TIME_FORMAT)
+            current_time = datetime.now()
+            if (current_time - last_access).total_seconds() > self.config_manager.epg_expiration:
+                epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
+                # Request the URL with "If-Modified-Since" header
+                headers = {"If-Modified-Since": epg_date.strftime("%a, %d %b %Y %H:%M:%S GMT")}
+                r = requests.get(
+                    url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify
+                )
+                if r.status_code == 304:
+                    # EPG is still fresh
+                    epg_info["last_access"] = current_time.strftime(_INDEX_TIME_FORMAT)
+                    return False
+                # EPG is not fresh, fetch it
+                self._fetch_epg_from_url(url)
+                return True
         return False
 
     def set_current_epg(self):
@@ -288,132 +300,65 @@ class EpgManager:
         elif epg_source == "URL":
             self._set_epg_from_url(self.config_manager.epg_url)
 
+    # Each _set_epg_from_* loader follows the same steps (set_current_epg has already
+    # reset self.epg to an empty MultiKeyDict): a source indexed as None has no EPG; an
+    # outdated one is refetched; otherwise its cached pickle is used. Sources that were
+    # never indexed, or whose pickle is gone, are fetched.
+
     def _set_epg_from_stb(self, provider_url, headers):
-        provider_hash = hashlib.md5(provider_url.encode()).hexdigest()
+        provider_hash = _cache_key(provider_url)
         if provider_hash in self.index:
-            epg_info = self.index[provider_hash]
-            if epg_info is None:
-                # STB EPG not available, keep MultiKeyDict
+            if self.index[provider_hash] is None:
                 return
-            refreshed = self._refresh_epg_stb(provider_url, headers)
-            if refreshed:
+            if self._refresh_epg_stb(provider_url, headers):
                 return
-
-            # EPG was fresh enough
-            cache_dir = self._cache_dir()
-            epg_file = os.path.join(cache_dir, f"{provider_hash}.pkl")
-            if os.path.exists(epg_file):
-                with open(epg_file, "rb") as f:
-                    self.epg = pickle.load(f)
-                    current_time = datetime.now()
-                    self.index[provider_hash]["last_access"] = datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                    return
-
-        # no EPG or not fresh enough, fetch it
+            if self._load_cached_epg(provider_hash):
+                return
         self._fetch_epg_from_stb(provider_url, headers)
 
     def _set_epg_from_xtream(self, provider_url, username, password):
-        provider_hash = hashlib.md5(f"{provider_url}:{username}".encode()).hexdigest()
+        provider_hash = _xtream_cache_key(provider_url, username)
         if provider_hash in self.index:
-            epg_info = self.index[provider_hash]
-            if epg_info is None:
-                # Xtream uses XMLTV format, which requires MultiKeyDict
-                if not isinstance(self.epg, MultiKeyDict):
-                    self.epg = MultiKeyDict()
+            if self.index[provider_hash] is None:
                 return
-            refreshed = self._refresh_epg_xtream(provider_url, username, password)
-            if refreshed:
+            if self._refresh_epg_xtream(provider_url, username, password):
                 return
-
-            # EPG was fresh enough
-            cache_dir = self._cache_dir()
-            epg_file = os.path.join(cache_dir, f"{provider_hash}.pkl")
-            if os.path.exists(epg_file):
-                with open(epg_file, "rb") as f:
-                    self.epg = pickle.load(f)
-                    self.index[provider_hash]["last_access"] = datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                    return
-
-        # no EPG or not fresh enough, fetch it
+            if self._load_cached_epg(provider_hash):
+                return
         self._fetch_epg_from_xtream(provider_url, username, password)
 
     def _set_epg_from_file(self, xmltv_file):
-        xmltv_filehash = hashlib.md5(xmltv_file.encode()).hexdigest()
+        xmltv_filehash = _cache_key(xmltv_file)
         if xmltv_filehash in self.index:
-            epg_info = self.index[xmltv_filehash]
-            if epg_info is None:
-                # XMLTV files require MultiKeyDict
-                if not isinstance(self.epg, MultiKeyDict):
-                    self.epg = MultiKeyDict()
+            if self.index[xmltv_filehash] is None:
                 return
-            refreshed = self._refresh_epg_file(xmltv_file)
-            if refreshed:
+            if self._refresh_epg_file(xmltv_file):
                 return
-
-            # EPG is fresh enough
-            cache_dir = self._cache_dir()
-            programs_pickle = os.path.join(cache_dir, f"{xmltv_filehash}.pkl")
-            if os.path.exists(programs_pickle):
-                with open(programs_pickle, "rb") as f:
-                    self.epg = pickle.load(f)
-                    self.index[xmltv_filehash]["last_access"] = datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                    return
-
-        # no EPG or not fresh enough, fetch it
+            if self._load_cached_epg(xmltv_filehash):
+                return
         self._fetch_epg_from_file(xmltv_filehash, xmltv_file)
 
     def _set_epg_from_url(self, url):
-        url_hash = hashlib.md5(url.encode()).hexdigest()
+        url_hash = _cache_key(url)
         if url_hash in self.index:
-            epg_info = self.index[url_hash]
-            if epg_info is None:
-                # XMLTV URLs require MultiKeyDict
-                if not isinstance(self.epg, MultiKeyDict):
-                    self.epg = MultiKeyDict()
+            if self.index[url_hash] is None:
                 return
-            refreshed = self._refresh_epg_url(url)
-            if refreshed:
+            if self._refresh_epg_url(url):
                 return
-
-            # EPG is fresh enough
-            cache_dir = self._cache_dir()
-            programs_pickle = os.path.join(cache_dir, f"{url_hash}.pkl")
-            if os.path.exists(programs_pickle):
-                with open(programs_pickle, "rb") as f:
-                    self.epg = pickle.load(f)
-                    self.index[url_hash]["last_access"] = datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                    return
-
-        # no EPG or not fresh enough, fetch it
+            if self._load_cached_epg(url_hash):
+                return
         self._fetch_epg_from_url(url)
 
     def _fetch_epg_from_file(self, xmltv_filehash, xmltv_file):
         self.epg = self._index_programs(xmltv_file)
         if self.epg:
-            cache_dir = self._cache_dir()
-            programs_pickle = os.path.join(cache_dir, f"{xmltv_filehash}.pkl")
-            with open(programs_pickle, "wb") as f:
-                pickle.dump(self.epg, f)
-            self.index[xmltv_filehash] = {
-                "date": datetime.fromtimestamp(os.path.getmtime(xmltv_file)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-                "last_access": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
+            self._cache_epg(xmltv_filehash, datetime.fromtimestamp(os.path.getmtime(xmltv_file)))
         else:
-            self.index[xmltv_filehash] = None
+            self._mark_epg_unavailable(xmltv_filehash)
         self.save_index()
 
     def _fetch_epg_from_stb(self, provider_url, headers):
-        provider_hash = hashlib.md5(provider_url.encode()).hexdigest()
+        provider_hash = _cache_key(provider_url)
         base = base_from_url(provider_url)
         prefer_https = self.provider_manager.current_provider.get(
             "prefer_https", self.config_manager.prefer_https
@@ -421,21 +366,13 @@ class EpgManager:
         verify_ssl = self.provider_manager.current_provider.get(
             "ssl_verify", self.config_manager.ssl_verify
         )
-        candidates = [base]
-        # Honor per-provider HTTPS preference with graceful fallback
-        try:
-            if prefer_https and base.startswith("http://"):
-                candidates = ["https://" + base[len("http://") :], base]
-        except Exception:
-            candidates = [base]
+        # The setting is already coerced to an int and clamped by ConfigManager.
+        period = self.config_manager.epg_stb_period_hours
 
-        content_loader = None
-        for b in candidates:
+        items = []
+        # Honor per-provider HTTPS preference with graceful fallback
+        for b in https_fallback_candidates(base, prefer_https):
             url = stb_endpoint(b)
-            try:
-                period = int(self.config_manager.epg_stb_period_hours)
-            except Exception:
-                period = 5
             logger.debug("STB EPG endpoint: %s?action=get_epg_info&period=%s", url, period)
             content_loader = ContentLoader(
                 url=url,
@@ -446,28 +383,19 @@ class EpgManager:
                 verify_ssl=verify_ssl,
             )
             content_loader.run()
-            if getattr(content_loader, "items", None):
+            items = content_loader.items
+            if items:
                 break
-        items = getattr(content_loader, "items", []) if content_loader else []
         if items:
             self.epg = items[0]
-            cache_dir = self._cache_dir()
-            epg_file = os.path.join(cache_dir, f"{provider_hash}.pkl")
-            with open(epg_file, "wb") as f:
-                pickle.dump(self.epg, f)
-            current_time = datetime.now()
-            self.index[provider_hash] = {
-                "date": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-                "last_access": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-            }
+            self._cache_epg(provider_hash)
         else:
-            self.index[provider_hash] = None
-            self.epg = MultiKeyDict()
+            self._mark_epg_unavailable(provider_hash)
         self.save_index()
 
     def _fetch_epg_from_xtream(self, provider_url, username, password):
         """Fetch EPG from Xtream provider using XMLTV endpoint."""
-        provider_hash = hashlib.md5(f"{provider_url}:{username}".encode()).hexdigest()
+        provider_hash = _xtream_cache_key(provider_url, username)
         xmltv_url = xtream_xmltv_url(provider_url, username, password)
         logger.debug("Xtream XMLTV URL: %s", xmltv_url)
         prefer_https = self.provider_manager.current_provider.get(
@@ -476,14 +404,11 @@ class EpgManager:
         verify_ssl = self.provider_manager.current_provider.get(
             "ssl_verify", self.config_manager.ssl_verify
         )
-        urls = [xmltv_url]
-        if prefer_https and xmltv_url.startswith("http://"):
-            urls = ["https://" + xmltv_url[len("http://") :], xmltv_url]
 
         try:
             # Fetch the XMLTV data from Xtream endpoint, trying HTTPS first if preferred
             r = None
-            for _url in urls:
+            for _url in https_fallback_candidates(xmltv_url, prefer_https):
                 try:
                     r = requests.get(_url, stream=True, timeout=30, verify=verify_ssl)
                     if r.status_code == 200 and r.content:
@@ -491,12 +416,15 @@ class EpgManager:
                         break
                 except requests.RequestException:
                     r = None
-                    continue
             if r is None:
                 raise RuntimeError("Failed to fetch Xtream XMLTV EPG")
-            if r.status_code == 200:
-                cache_dir = self._cache_dir()
-                xmltv_file_path = os.path.join(cache_dir, f"{provider_hash}_xtream.xml")
+            if r.status_code != 200:
+                logger.warning(
+                    f"Failed to fetch Xtream EPG, status code: {r.status_code} for URL: {xmltv_url}"
+                )
+                self._mark_epg_unavailable(provider_hash)
+            else:
+                xmltv_file_path = os.path.join(self._cache_dir(), f"{provider_hash}_xtream.xml")
 
                 # Handle compressed responses
                 content_type = r.headers.get("Content-Type", "")
@@ -513,37 +441,15 @@ class EpgManager:
                         f.write(r.content)
 
                 # Parse and index the XMLTV file
-                if os.path.exists(xmltv_file_path):
-                    self.epg = self._index_programs(xmltv_file_path)
-                    os.remove(xmltv_file_path)
-
-                    if self.epg:
-                        # Cache the parsed EPG
-                        epg_file = os.path.join(cache_dir, f"{provider_hash}.pkl")
-                        with open(epg_file, "wb") as f:
-                            pickle.dump(self.epg, f)
-
-                        current_time = datetime.now()
-                        self.index[provider_hash] = {
-                            "date": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-                            "last_access": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        }
-                    else:
-                        self.index[provider_hash] = None
-                        self.epg = MultiKeyDict()
+                self.epg = self._index_programs(xmltv_file_path)
+                os.remove(xmltv_file_path)
+                if self.epg:
+                    self._cache_epg(provider_hash)
                 else:
-                    self.index[provider_hash] = None
-                    self.epg = MultiKeyDict()
-            else:
-                logger.warning(
-                    f"Failed to fetch Xtream EPG, status code: {r.status_code} for URL: {xmltv_url}"
-                )
-                self.index[provider_hash] = None
-                self.epg = MultiKeyDict()
+                    self._mark_epg_unavailable(provider_hash)
         except Exception as e:
             logger.error(f"Error fetching Xtream EPG: {e}")
-            self.index[provider_hash] = None
-            self.epg = MultiKeyDict()
+            self._mark_epg_unavailable(provider_hash)
 
         self.save_index()
 
@@ -551,10 +457,8 @@ class EpgManager:
         r = requests.get(url, stream=True, timeout=10, verify=self.config_manager.ssl_verify)
         if r.status_code == 200:
             content_type = r.headers.get("Content-Type", "")
-            xmltv_file_path = None
-            cache_dir = self._cache_dir()
-            url_hash = hashlib.md5(url.encode()).hexdigest()
-            xmltv_file_path = os.path.join(cache_dir, f"{url_hash}.xml")
+            url_hash = _cache_key(url)
+            xmltv_file_path = os.path.join(self._cache_dir(), f"{url_hash}.xml")
 
             if content_type == "application/zip":
                 with zipfile.ZipFile(io.BytesIO(r.raw.read())) as z:
@@ -577,24 +481,16 @@ class EpgManager:
                 self.epg = self._index_programs(xmltv_file_path)
                 os.remove(xmltv_file_path)
                 if self.epg:
-                    programs_pickle = os.path.join(cache_dir, f"{url_hash}.pkl")
-                    with open(programs_pickle, "wb") as f:
-                        pickle.dump(self.epg, f)
-                    current_time = datetime.now()
                     last_modified = datetime.strptime(
                         r.headers.get(
                             "Last-Modified",
-                            current_time.strftime("%a, %d %b %Y %H:%M:%S %Z"),
+                            datetime.now().strftime("%a, %d %b %Y %H:%M:%S %Z"),
                         ),
                         "%a, %d %b %Y %H:%M:%S %Z",
                     )
-                    self.index[url_hash] = {
-                        "date": last_modified.strftime("%Y-%m-%d %H:%M:%S"),
-                        "last_access": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    }
+                    self._cache_epg(url_hash, last_modified)
                 else:
-                    self.index[url_hash] = None
-                    self.epg = MultiKeyDict()
+                    self._mark_epg_unavailable(url_hash)
         self.save_index()
 
     def force_refresh_current_epg(self):
@@ -620,8 +516,7 @@ class EpgManager:
                 )
         elif epg_source == "Local File":
             xmltv_file = self.config_manager.epg_file
-            xmltv_filehash = hashlib.md5(xmltv_file.encode()).hexdigest()
-            self._fetch_epg_from_file(xmltv_filehash, xmltv_file)
+            self._fetch_epg_from_file(_cache_key(xmltv_file), xmltv_file)
         elif epg_source == "URL":
             self._fetch_epg_from_url(self.config_manager.epg_url)
 
@@ -647,11 +542,7 @@ class EpgManager:
         if start_time is None:
             start_time = datetime.now()
         # Apply end-of-window limit based on config (0 = unlimited)
-        window_hours = 0
-        try:
-            window_hours = int(self.config_manager.epg_list_window_hours)
-        except Exception:
-            window_hours = 0
+        window_hours = self.config_manager.epg_list_window_hours
         end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
         filtered = []
         for program in programs:
@@ -715,11 +606,7 @@ class EpgManager:
         need_check_tz = ref_timezone1 != ref_timezone
 
         # If unlimited requested and no windowing (window_hours <= 0), return all entries sorted
-        window_hours = 0
-        try:
-            window_hours = int(self.config_manager.epg_list_window_hours)
-        except Exception:
-            window_hours = 0
+        window_hours = self.config_manager.epg_list_window_hours
         if (not max_programs or max_programs <= 0) and window_hours <= 0:
             programs = list(self.epg[chosen_key])
             programs.sort(key=lambda program: program["@start"])
@@ -750,22 +637,3 @@ class EpgManager:
         if not max_programs or max_programs <= 0:
             return programs
         return programs[:max_programs]
-
-    def _filter_and_sort_programs(self, programs, start_time, max_programs):
-        filtered_programs = []
-        for program in programs:
-            if (
-                datetime.strptime(program["time"], "%Y-%m-%d %H:%M:%S") >= start_time
-                or datetime.strptime(program["time_to"], "%Y-%m-%d %H:%M:%S") > start_time
-            ):
-                filtered_programs.append(program)
-                if max_programs and max_programs > 0 and len(filtered_programs) >= max_programs:
-                    break
-
-        filtered_programs.sort(
-            key=lambda program: datetime.strptime(program["time"], "%Y-%m-%d %H:%M:%S")
-        )
-        return filtered_programs[:max_programs]
-
-
-logger = logging.getLogger(__name__)

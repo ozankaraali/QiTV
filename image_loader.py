@@ -53,14 +53,11 @@ class ImageLoader(QThread):
         return None
 
     async def decode_base64_image(self, image_rank, image_str):
-        try:
-            # Cache decoded image on disk in worker thread
-            cache_path = await self.image_manager.cache_image_from_base64(image_str, self.iconified)
-            if cache_path:
-                return {"rank": image_rank, "cache_path": cache_path, "iconified": self.iconified}
-        except Exception as e:
-            logger.warning(f"Error decoding base64 image : {e}")
-            raise
+        # Cache decoded image on disk in worker thread; the manager logs decode/write
+        # failures and returns None for them.
+        cache_path = await self.image_manager.cache_image_from_base64(image_str, self.iconified)
+        if cache_path:
+            return {"rank": image_rank, "cache_path": cache_path, "iconified": self.iconified}
         return None
 
     async def load_images(self):

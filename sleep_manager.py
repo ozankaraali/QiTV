@@ -1,7 +1,10 @@
 import ctypes
+import logging
 import platform
 
 from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
+
+logger = logging.getLogger(__name__)
 
 mac_assertion_id = None
 linux_cookie = None
@@ -99,29 +102,27 @@ def allow_sleep_macos():
         mac_assertion_id = None
 
 
+def _screensaver_interface():
+    service_name = "org.freedesktop.ScreenSaver"
+    return QDBusInterface(
+        service_name, "/org/freedesktop/ScreenSaver", service_name, QDBusConnection.sessionBus()
+    )
+
+
 def prevent_sleep_linux():
     global linux_cookie
-    interface = "org.freedesktop.ScreenSaver"
-    object_path = "/org/freedesktop/ScreenSaver"
-    service_name = "org.freedesktop.ScreenSaver"
-    connection = QDBusConnection.sessionBus()
-    screensaver_interface = QDBusInterface(service_name, object_path, interface, connection)
+    screensaver_interface = _screensaver_interface()
     if screensaver_interface.isValid():
         reply = screensaver_interface.call("Inhibit", "QiTV", "Playing video")
         try:
             if reply.type() == QDBusMessage.ReplyMessage:
                 linux_cookie = reply.arguments()[0]
-        except:
-            pass
+        except Exception as e:
+            logger.debug("Unexpected screensaver Inhibit reply: %s", e)
 
 
 def allow_sleep_linux():
-    global linux_cookie
     if linux_cookie:
-        interface = "org.freedesktop.ScreenSaver"
-        object_path = "/org/freedesktop/ScreenSaver"
-        service_name = "org.freedesktop.ScreenSaver"
-        connection = QDBusConnection.sessionBus()
-        screensaver_interface = QDBusInterface(service_name, object_path, interface, connection)
+        screensaver_interface = _screensaver_interface()
         if screensaver_interface.isValid():
             screensaver_interface.call("UnInhibit", linux_cookie)

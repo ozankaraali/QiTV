@@ -1,12 +1,20 @@
 import logging
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 from typing import List, Optional, Tuple
+import webbrowser
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import QApplication, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QGridLayout,
+    QMessageBox,
+    QProgressDialog,
+)
 from packaging.version import parse
 import requests
 
@@ -162,8 +170,6 @@ def _show_check_error(error_msg: str):
 
 def extract_version_from_tag(tag):
     # Handle common tag formats like 'v1.2.3', 'release-1.2.3', or '1.2.3'
-    import re
-
     match = re.search(r"(\d+\.\d+\.\d+)", tag)
     if match:
         return match.group(0)
@@ -284,8 +290,6 @@ def _polish_msgbox(msg: QMessageBox):
     Button sizing is deferred to the first show event so that font metrics
     are fully resolved by the platform style.
     """
-    from PySide6.QtWidgets import QGridLayout
-
     layout = msg.layout()
     if layout:
         layout.setHorizontalSpacing(10)
@@ -313,7 +317,7 @@ def _polish_msgbox(msg: QMessageBox):
         min_dialog_width = max(400, total_buttons_width + 80)
         msg.setMinimumWidth(min_dialog_width)
 
-    msg.showEvent = _on_show
+    msg.showEvent = _on_show  # type: ignore[method-assign]
 
 
 def show_update_dialog(
@@ -339,11 +343,9 @@ def show_update_dialog(
         config_manager: Persists skip-version and reminder preferences.
         manual: True when the user triggered the check explicitly.
     """
-    from PySide6.QtWidgets import QCheckBox
-
     version = update_info["version"]
     release_url = update_info["url"]
-    download_url = update_info.get("download_url")
+    download_url = update_info.get("download_url") or ""
     file_size = update_info.get("file_size", 0)
 
     # Check if we're running as a frozen executable
@@ -360,51 +362,35 @@ def show_update_dialog(
         mute_checkbox = QCheckBox("Do not remind me about updates")
         msg.setCheckBox(mute_checkbox)
 
+    download_btn = None
     if download_url and is_frozen:
         msg.setInformativeText("Would you like to download and install the update?")
         download_btn = msg.addButton("Download && Install", QMessageBox.AcceptRole)
         browser_btn = msg.addButton("Open Release Page", QMessageBox.ActionRole)
-        skip_btn = msg.addButton("Skip This Version", QMessageBox.RejectRole)
-
-        _polish_msgbox(msg)
-        msg.exec_()
-        clicked = msg.clickedButton()
-
-        if clicked == download_btn:
-            # Clear any previous skip for this version so it doesn't block
-            # future checks after the download is complete / cancelled.
-            if config_manager:
-                config_manager.skipped_update_version = ""
-                config_manager.save_config()
-            start_download(download_url, file_size, release_url)
-        elif clicked == browser_btn:
-            import webbrowser
-
-            webbrowser.open(release_url)
-        elif clicked == skip_btn:
-            if mute_checkbox and mute_checkbox.isChecked():
-                _disable_update_reminders(config_manager)
-            else:
-                _skip_version(config_manager, version)
     else:
         # Fallback: running from source or no download URL available
         msg.setInformativeText("Would you like to open the release page?")
-        open_btn = msg.addButton("Open Release Page", QMessageBox.AcceptRole)
-        skip_btn = msg.addButton("Skip This Version", QMessageBox.RejectRole)
+        browser_btn = msg.addButton("Open Release Page", QMessageBox.AcceptRole)
+    skip_btn = msg.addButton("Skip This Version", QMessageBox.RejectRole)
 
-        _polish_msgbox(msg)
-        msg.exec_()
-        clicked = msg.clickedButton()
+    _polish_msgbox(msg)
+    msg.exec_()
+    clicked = msg.clickedButton()
 
-        if clicked == open_btn:
-            import webbrowser
-
-            webbrowser.open(release_url)
-        elif clicked == skip_btn:
-            if mute_checkbox and mute_checkbox.isChecked():
-                _disable_update_reminders(config_manager)
-            else:
-                _skip_version(config_manager, version)
+    if download_btn is not None and clicked == download_btn:
+        # Clear any previous skip for this version so it doesn't block
+        # future checks after the download is complete / cancelled.
+        if config_manager:
+            config_manager.skipped_update_version = ""
+            config_manager.save_config()
+        start_download(download_url, file_size, release_url)
+    elif clicked == browser_btn:
+        webbrowser.open(release_url)
+    elif clicked == skip_btn:
+        if mute_checkbox and mute_checkbox.isChecked():
+            _disable_update_reminders(config_manager)
+        else:
+            _skip_version(config_manager, version)
 
 
 # Keep reference to download jobs to avoid GC
@@ -486,8 +472,6 @@ def start_download(download_url: str, file_size: int, release_url: str):
 
 def _show_download_error(error_msg: str, release_url: str):
     """Show download error with option to open release page."""
-    import webbrowser
-
     error_dialog = QMessageBox()
     error_dialog.setIcon(QMessageBox.Warning)
     error_dialog.setWindowTitle("Download Failed")
@@ -514,8 +498,6 @@ def perform_update(downloaded_path: str, release_url: str):
 
 def _perform_windows_update(downloaded_path: str, release_url: str):
     """Windows: launch new exe with --replace flag, then quit."""
-    import webbrowser
-
     app = QApplication.instance()
     if app and has_pending_threads():
         QTimer.singleShot(25, app, lambda: _perform_windows_update(downloaded_path, release_url))
@@ -529,8 +511,7 @@ def _perform_windows_update(downloaded_path: str, release_url: str):
         # Launch the downloaded exe with --replace flag
         subprocess.Popen(
             [downloaded_path, "--replace", original_exe],
-            creationflags=subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
 
         # Run the normal window shutdown paths before exiting.

@@ -2,7 +2,6 @@
 
 import logging
 import re
-import time
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -13,12 +12,24 @@ from urlobject import URLObject
 from services.m3u import parse_m3u
 from services.provider_api import (
     base_from_url,
+    https_fallback_candidates,
+    stb_create_link_url,
+    stb_portal_base,
     stb_request_url,
     xtream_choose_resolved_base,
     xtream_player_api_url,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_xtream_base(server_info: dict, base_url: str, prefer_https: bool) -> str:
+    """Pick the panel-advertised base, falling back to the user's URL when there is none."""
+    resolved_base = xtream_choose_resolved_base(server_info, base_url, prefer_https=prefer_https)
+    if resolved_base:
+        return resolved_base
+    url_obj = URLObject(base_url)
+    return f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip("/")
 
 
 # --- Roman numeral helpers (conservative matching) ---
@@ -80,13 +91,8 @@ class M3ULoaderWorker(QObject):
                 with open(self.url, encoding="utf-8") as file:
                     self.finished.emit(parse_m3u(file.read(), categorize=True))
                 return
-            candidate_urls = []
-            if self.prefer_https and self.url.startswith("http://"):
-                candidate_urls.append("https://" + self.url[len("http://") :])
-            candidate_urls.append(self.url)
-
             last_exc = None
-            for u in candidate_urls:
+            for u in https_fallback_candidates(self.url, self.prefer_https):
                 try:
                     response = requests.get(u, timeout=10, verify=self.verify_ssl)
                     response.raise_for_status()
@@ -94,7 +100,6 @@ class M3ULoaderWorker(QObject):
                     return
                 except requests.RequestException as e:
                     last_exc = e
-                    continue
             # If we got here, all attempts failed
             raise last_exc or Exception("Failed to load M3U")
         except (requests.RequestException, OSError, ValueError) as e:
@@ -128,22 +133,11 @@ class XtreamAuthWorker(QObject):
             resp.raise_for_status()
             body = resp.json()
             server_info = body.get("server_info", {}) if isinstance(body, dict) else {}
-            allowed: List[str] = []
             user_info = body.get("user_info", {}) if isinstance(body, dict) else {}
-            try:
+            allowed: List[str] = []
+            if isinstance(user_info, dict):
                 allowed = user_info.get("allowed_output_formats", []) or []
-            except Exception:
-                allowed = []
-
-            resolved_base = xtream_choose_resolved_base(
-                server_info, self.base_url, prefer_https=self.prefer_https
-            )
-            if not resolved_base:
-                # Fall back to given base
-                url_obj = URLObject(self.base_url)
-                resolved_base = f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip(
-                    "/"
-                )
+            resolved_base = _resolve_xtream_base(server_info, self.base_url, self.prefer_https)
 
             self.finished.emit(
                 {
@@ -154,6 +148,14 @@ class XtreamAuthWorker(QObject):
             )
         except Exception as e:
             self.error.emit(str(e))
+
+
+# Player API actions (categories, streams) and stream URL prefix per content type.
+_XTREAM_CATALOG_ACTIONS = {
+    "itv": ("get_live_categories", "get_live_streams", "live"),
+    "vod": ("get_vod_categories", "get_vod_streams", "movie"),
+    "series": ("get_series_categories", "get_series", "series"),
+}
 
 
 class XtreamLoaderWorker(QObject):
@@ -193,15 +195,7 @@ class XtreamLoaderWorker(QObject):
             server_info = auth_body.get("server_info", {}) if isinstance(auth_body, dict) else {}
             user_info = auth_body.get("user_info", {}) if isinstance(auth_body, dict) else {}
             allowed_formats = user_info.get("allowed_output_formats", []) or []
-
-            resolved_base = xtream_choose_resolved_base(
-                server_info, self.base_url, prefer_https=self.prefer_https
-            )
-            if not resolved_base:
-                url_obj = URLObject(self.base_url)
-                resolved_base = f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip(
-                    "/"
-                )
+            resolved_base = _resolve_xtream_base(server_info, self.base_url, self.prefer_https)
 
             # Select from provider metadata only. Opening a media URL here consumes
             # a playback connection before the user has selected anything.
@@ -213,20 +207,10 @@ class XtreamLoaderWorker(QObject):
                 stream_ext = allowed_formats[0]
 
             # Step 2: Determine API actions based on content type
-            if self.content_type == "itv":
-                cat_action = "get_live_categories"
-                streams_action = "get_live_streams"
-                url_prefix = "live"
-            elif self.content_type == "vod":
-                cat_action = "get_vod_categories"
-                streams_action = "get_vod_streams"
-                url_prefix = "movie"
-            elif self.content_type == "series":
-                cat_action = "get_series_categories"
-                streams_action = "get_series"
-                url_prefix = "series"
-            else:
+            actions = _XTREAM_CATALOG_ACTIONS.get(self.content_type)
+            if actions is None:
                 raise ValueError(f"Unknown content type: {self.content_type}")
+            cat_action, streams_action, url_prefix = actions
 
             # Step 3: Fetch categories
             cat_url = xtream_player_api_url(
@@ -315,9 +299,7 @@ class XtreamLoaderWorker(QObject):
                     items.append(item)
 
                     # Build sorted_channels mapping
-                    if cid not in sorted_channels:
-                        sorted_channels[cid] = []
-                    sorted_channels[cid].append(len(items) - 1)
+                    sorted_channels.setdefault(cid, []).append(len(items) - 1)
 
                 except Exception as e:
                     logger.warning(f"Failed to process stream: {e}")
@@ -386,14 +368,8 @@ class XtreamSeriesInfoWorker(QObject):
                 server_info = (
                     auth_body.get("server_info", {}) if isinstance(auth_body, dict) else {}
                 )
-                self.resolved_base = xtream_choose_resolved_base(
-                    server_info, self.base_url, prefer_https=self.prefer_https
-                )
-
-            if not self.resolved_base:
-                url_obj = URLObject(self.base_url)
-                self.resolved_base = (
-                    f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip("/")
+                self.resolved_base = _resolve_xtream_base(
+                    server_info, self.base_url, self.prefer_https
                 )
 
             # Fetch series info
@@ -458,22 +434,17 @@ class XtreamSeriesInfoWorker(QObject):
                     }
                     seasons.append(season_item)
 
-            # Explicitly convert to plain Python types
-            result = {
-                "seasons": list(seasons),  # Ensure it's a plain list
-                "series_info": dict(series_info) if series_info else {},
-                "resolved_base": str(self.resolved_base) if self.resolved_base else "",
-            }
-
-            # Emit result to UI
-            self.finished.emit(result)
+            self.finished.emit(
+                {
+                    "seasons": seasons,
+                    "series_info": dict(series_info) if series_info else {},
+                    "resolved_base": self.resolved_base,
+                }
+            )
 
         except Exception as e:
             logger.error(f"Worker error: {e}")
-            try:
-                self.error.emit(str(e))
-            except Exception as emit_err:
-                logger.error(f"Error emitting error: {emit_err}")
+            self.error.emit(str(e))
 
 
 class STBCategoriesWorker(QObject):
@@ -508,8 +479,8 @@ class STBCategoriesWorker(QObject):
             resp.raise_for_status()
             categories = resp.json()["js"]
 
-            # Only fetch all channels for itv type
-            all_channels = []
+            result = {"categories": categories, "contents": {}}
+            # Live channels come as one list; VOD/series are fetched per category later.
             if self.content_type == "itv":
                 fetchurl = stb_request_url(base, "itv", "get_all_channels")
                 resp = requests.get(
@@ -517,9 +488,6 @@ class STBCategoriesWorker(QObject):
                 )
                 resp.raise_for_status()
                 all_channels = resp.json()["js"]["data"]
-
-            result = {"categories": categories, "contents": {}}
-            if self.content_type == "itv":
                 sorted_channels: Dict[str, List[int]] = {}
                 for index, channel in enumerate(all_channels):
                     category_id = str(channel.get("tv_genre_id"))
@@ -560,23 +528,13 @@ class LinkCreatorWorker(QObject):
 
     def run(self):
         try:
-            from urllib.parse import quote as url_quote
-
-            url = URLObject(self.base_url)
-            scheme = url.scheme
-            if self.prefer_https and scheme == "http":
-                scheme = "https"
-            base = f"{scheme}://{url.netloc}"
-            if self.is_episode:
-                fetchurl = (
-                    f"{base}/server/load.php?type={'vod' if self.content_type == 'series' else self.content_type}&action=create_link"
-                    f"&cmd={url_quote(self.cmd)}&series={self.series_param}&JsHttpRequest=1-xml"
-                )
-            else:
-                fetchurl = (
-                    f"{base}/server/load.php?type={self.content_type}&action=create_link"
-                    f"&cmd={url_quote(self.cmd)}&JsHttpRequest=1-xml"
-                )
+            fetchurl = stb_create_link_url(
+                stb_portal_base(self.base_url, self.prefer_https),
+                self.content_type,
+                self.cmd,
+                is_episode=self.is_episode,
+                series=self.series_param,
+            )
             response = requests.get(
                 fetchurl, headers=self.headers, timeout=10, verify=self.verify_ssl
             )
@@ -658,11 +616,7 @@ class SetProviderThread(QThread):
             self.provider_manager.set_current_provider(self.progress)
             if self.force_epg_refresh:
                 self.provider_manager.clear_current_provider_cache()
-            if self.force_epg_refresh:
-                try:
-                    self.progress.emit("Refreshing EPG…")
-                except Exception:
-                    pass
+                self.progress.emit("Refreshing EPG…")
                 self.epg_manager.force_refresh_current_epg()
             else:
                 self.epg_manager.set_current_epg()

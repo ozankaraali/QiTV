@@ -72,7 +72,7 @@ class ProviderManager(QObject):
             try:
                 with open(cache_path, "rb") as f:
                     cache = json.loads(f.read())
-            except (OSError, json.JSONDecodeError):
+            except OSError, json.JSONDecodeError:
                 return {}
         if not isinstance(cache, dict):
             return {}
@@ -123,7 +123,7 @@ class ProviderManager(QObject):
                 self.providers = json.loads(f.read())
             if self.providers is None:
                 self.providers = self.default_providers()
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError, json.JSONDecodeError:
             self.providers = self.default_providers()
             self.save_providers()
 
@@ -137,9 +137,8 @@ class ProviderManager(QObject):
             }
         ]
 
-    def invalidate_provider_cache(self, provider_name) -> None:
-        """Invalidate queued writes as well as the on-disk cache for this name."""
-        cache_path = self._provider_cache_name(provider_name)
+    def _invalidate_cache_path(self, cache_path) -> None:
+        """Supersede queued writes for this cache file, then delete it."""
         with self._cache_lock:
             self._cache_generations[cache_path] = self._cache_generations.get(cache_path, 0) + 1
             self._pending_cache_snapshots.pop(cache_path, None)
@@ -147,6 +146,10 @@ class ProviderManager(QObject):
                 os.remove(cache_path)
             except FileNotFoundError:
                 pass
+
+    def invalidate_provider_cache(self, provider_name) -> None:
+        """Invalidate queued writes as well as the on-disk cache for this name."""
+        self._invalidate_cache_path(self._provider_cache_name(provider_name))
         if self.current_provider.get("name") == provider_name:
             self.current_provider_content = {}
 
@@ -203,35 +206,21 @@ class ProviderManager(QObject):
             f.write(serialized.decode("utf-8"))
 
         # Delete stale cache files not matching any known provider name hash
-        expected_files = set()
-        for p in self.providers:
-            try:
-                name = p.get("name") if isinstance(p, dict) else None
-                if name:
-                    expected_files.add(f"{hashlib.sha256(name.encode('utf-8')).hexdigest()}.json")
-            except Exception:
-                # ignore malformed entries
-                pass
+        # (malformed provider entries without a string name are ignored).
+        expected_files = {
+            os.path.basename(self._provider_cache_name(p["name"]))
+            for p in self.providers
+            if isinstance(p, dict) and isinstance(p.get("name"), str) and p["name"]
+        }
 
         with self._cache_lock:
             queued_files = {os.path.basename(path) for path in self._cache_generations}
         for entry in set(os.listdir(self.provider_dir)) | queued_files:
-            if entry == "index.json":
-                continue
             # Only consider json cache files for pruning
-            if not entry.endswith(".json"):
+            if entry == "index.json" or not entry.endswith(".json"):
                 continue
             if entry not in expected_files:
-                cache_path = os.path.join(self.provider_dir, entry)
-                with self._cache_lock:
-                    self._cache_generations[cache_path] = (
-                        self._cache_generations.get(cache_path, 0) + 1
-                    )
-                    self._pending_cache_snapshots.pop(cache_path, None)
-                    try:
-                        os.remove(cache_path)
-                    except FileNotFoundError:
-                        pass
+                self._invalidate_cache_path(os.path.join(self.provider_dir, entry))
 
     @staticmethod
     def _snapshot_cache(value):
@@ -266,7 +255,7 @@ class ProviderManager(QObject):
                 if self._cache_generations.get(cache_path, 0) == generation:
                     os.replace(temporary_path, cache_path)
                     temporary_path = None
-        except (OSError, TypeError):
+        except OSError, TypeError:
             logger.exception("Failed to save provider cache")
         finally:
             with self._cache_lock:

@@ -15,7 +15,6 @@ class ContentLoader(QThread):
     content_loaded = Signal(dict)
     progress_updated = Signal(int, int)
     error = Signal(str)
-    counter_page_not_fetched = 0
 
     def __init__(
         self,
@@ -80,8 +79,8 @@ class ContentLoader(QThread):
                         )
                         curl_cmd = f"curl -sS -m {timeout} {hdrs} \"{full_url}\""
                         logger.info(f"EPG curl: {curl_cmd}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Could not format EPG curl command: %s", e)
                 async with session.get(
                     self.url, headers=self.headers, params=params, timeout=timeout
                 ) as response:
@@ -186,10 +185,9 @@ class ContentLoader(QThread):
             page_items, total_items, max_page_items = await self.fetch_page(
                 session, page, self.max_retries, self.timeout
             )
-            # if page_items is list, extend items
+            # Paginated lists are concatenated; EPG actions return a single dict.
             if isinstance(page_items, list):
                 self.items.extend(page_items)
-            # if page_items is dict, extend items
             elif isinstance(page_items, dict):
                 self.items.append(page_items)
 

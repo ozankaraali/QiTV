@@ -3,14 +3,14 @@
 import logging
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog, QTreeWidget
 import requests
-from urlobject import URLObject
 
 from services.export import save_m3u_content, save_stb_content
+from services.provider_api import stb_endpoint, stb_portal_base
 
 if TYPE_CHECKING:
     from config_manager import ConfigManager
@@ -47,9 +47,7 @@ class ExportMixin:
 
     def fetch_and_export_all_live_channels(self, file_path):
         selected_provider = self.provider_manager.current_provider
-        url = selected_provider.get("url", "")
-        url = URLObject(url)
-        base_url = f"{url.scheme}://{url.netloc}"
+        base_url = stb_portal_base(selected_provider.get("url", ""))
         mac = selected_provider.get("mac", "")
 
         try:
@@ -207,9 +205,7 @@ class ExportMixin:
     def fetch_and_export_all_series(self, file_path):
         """Fetch all series, seasons, and episodes, then export to M3U."""
         selected_provider = self.provider_manager.current_provider
-        url = selected_provider.get("url", "")
-        url = URLObject(url)
-        base_url = f"{url.scheme}://{url.netloc}"
+        base_url = stb_portal_base(selected_provider.get("url", ""))
         mac = selected_provider.get("mac", "")
 
         # Get the current content (series in categories)
@@ -315,55 +311,34 @@ class ExportMixin:
 
     def fetch_seasons_sync(self, series_item):
         """Synchronously fetch seasons for a series."""
-        selected_provider = self.provider_manager.current_provider
-        headers = self.provider_manager.headers
-        url = selected_provider.get("url", "")
-        url = URLObject(url)
-        scheme = url.scheme
-        if self.config_manager.prefer_https and scheme == "http":
-            scheme = "https"
-        base_url = f"{scheme}://{url.netloc}/server/load.php"
-
-        params = {
-            "type": "series",
-            "action": "get_ordered_list",
-            "category_id": series_item.get("category_id"),
-            "movie_id": series_item.get("id"),
-            "season_id": 0,
-            "sortby": "name",
-            "JsHttpRequest": "1-xml",
-        }
-
-        try:
-            verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
-            response = requests.get(
-                base_url, headers=headers, params=params, timeout=10, verify=verify_ssl
-            )
-            if response.status_code == 200:
-                return response.json().get("js", {})
-        except Exception as e:
-            logger.warning(f"Error fetching seasons for {series_item.get('name')}: {e}")
-
-        return None
+        return self._fetch_series_list_sync(
+            series_item, 0, "name", f"seasons for {series_item.get('name')}"
+        )
 
     def fetch_episodes_sync(self, series_item, season_item):
         """Synchronously fetch episodes for a season."""
+        return self._fetch_series_list_sync(
+            series_item,
+            season_item.get("id"),
+            "added",
+            f"episodes for {series_item.get('name')} - {season_item.get('name')}",
+        )
+
+    def _fetch_series_list_sync(self, series_item, season_id, sortby, description):
+        """Fetch one STB series listing (season_id 0 lists the seasons); None on failure."""
         selected_provider = self.provider_manager.current_provider
         headers = self.provider_manager.headers
-        url = selected_provider.get("url", "")
-        url = URLObject(url)
-        scheme = url.scheme
-        if self.config_manager.prefer_https and scheme == "http":
-            scheme = "https"
-        base_url = f"{scheme}://{url.netloc}/server/load.php"
+        base_url = stb_endpoint(
+            stb_portal_base(selected_provider.get("url", ""), self.config_manager.prefer_https)
+        )
 
         params = {
             "type": "series",
             "action": "get_ordered_list",
             "category_id": series_item.get("category_id"),
             "movie_id": series_item.get("id"),
-            "season_id": season_item.get("id"),
-            "sortby": "added",
+            "season_id": season_id,
+            "sortby": sortby,
             "JsHttpRequest": "1-xml",
         }
 
@@ -375,8 +350,6 @@ class ExportMixin:
             if response.status_code == 200:
                 return response.json().get("js", {})
         except Exception as e:
-            logger.warning(
-                f"Error fetching episodes for {series_item.get('name')} - {season_item.get('name')}: {e}"
-            )
+            logger.warning(f"Error fetching {description}: {e}")
 
         return None

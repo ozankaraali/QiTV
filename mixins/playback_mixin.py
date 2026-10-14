@@ -7,11 +7,11 @@ import platform
 import shutil
 import subprocess
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
-from urllib.parse import quote as url_quote
 
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 import requests
-from urlobject import URLObject
 
+from services.provider_api import stb_create_link_url, stb_portal_base
 from services.thread_cleanup import ThreadCleanup
 from widgets.autoplay_dialogs import (
     EpisodeAutoPlayDialog,
@@ -30,6 +30,7 @@ from widgets.autoplay_dialogs import (
     ResumeCountdownDialog,
     SeriesCompleteDialog,
 )
+from workers import LinkCreatorWorker
 
 if TYPE_CHECKING:
     from config_manager import ConfigManager
@@ -86,8 +87,6 @@ class PlaybackMixin:
         )
 
         if self.provider_manager.current_provider["type"] == "STB":
-            from workers import LinkCreatorWorker
-
             # Create link in a worker thread, then play
             selected_provider = self.provider_manager.current_provider
             headers = self.provider_manager.headers
@@ -217,14 +216,9 @@ class PlaybackMixin:
         elif self.config_manager.play_in_mpv:
             self._launch_mpv(url)
         else:
-            provider_type = self.provider_manager.current_provider.get("type", "").upper()
-            if provider_type in ("STB", "XTREAM"):
-                is_live = self.content_type == "itv"
-            else:
-                is_live = None
             self.player.play_video(
                 url,
-                is_live=is_live,
+                is_live=self._is_live_hint(),
                 content_id=self._current_content_id,
                 resume_position=resume_position,
             )
@@ -292,28 +286,17 @@ class PlaybackMixin:
             self.play_item(item_data, is_episode=is_episode, item_type=item_type)
 
     def create_link(self, item, is_episode=False):
+        """Resolve an STB item's playable link synchronously (also stored in self.link)."""
         try:
             selected_provider = self.provider_manager.current_provider
             headers = self.provider_manager.headers
-            url = selected_provider.get("url", "")
-            url = URLObject(url)
-            scheme = url.scheme
-            if self.config_manager.prefer_https and scheme == "http":
-                scheme = "https"
-            url = f"{scheme}://{url.netloc}"
-            cmd = item.get("cmd")
-            if is_episode:
-                # For episodes, we need to pass 'series' parameter
-                series_param = item.get("series")  # This should be the episode number
-                fetchurl = (
-                    f"{url}/server/load.php?type={'vod' if self.content_type == 'series' else self.content_type}&action=create_link"
-                    f"&cmd={url_quote(cmd)}&series={series_param}&JsHttpRequest=1-xml"
-                )
-            else:
-                fetchurl = (
-                    f"{url}/server/load.php?type={self.content_type}&action=create_link"
-                    f"&cmd={url_quote(cmd)}&JsHttpRequest=1-xml"
-                )
+            fetchurl = stb_create_link_url(
+                stb_portal_base(selected_provider.get("url", ""), self.config_manager.prefer_https),
+                self.content_type,
+                item.get("cmd"),
+                is_episode=is_episode,
+                series=item.get("series") if is_episode else None,
+            )
             verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
             response = requests.get(fetchurl, headers=headers, timeout=5, verify=verify_ssl)
             if response.status_code != 200 or not response.content:
@@ -330,6 +313,17 @@ class PlaybackMixin:
             logger.warning(f"Error creating link: {e}")
             return None
 
+    def _is_live_hint(self) -> Optional[bool]:
+        """Tell the built-in player whether the current content is live, if known.
+
+        STB/XTREAM APIs explicitly separate live (itv) from VOD content. M3U playlists
+        (M3UPLAYLIST, M3USTREAM, ...) don't, so VLC detects it via seekability (None).
+        """
+        provider_type = self.provider_manager.current_provider.get("type", "").upper()
+        if provider_type in ("STB", "XTREAM"):
+            return self.content_type == "itv"
+        return None
+
     def _play_content(self, url):
         """Play content in VLC, MPV, or built-in player based on checkbox state."""
         if self.config_manager.play_in_vlc:
@@ -337,17 +331,9 @@ class PlaybackMixin:
         elif self.config_manager.play_in_mpv:
             self._launch_mpv(url)
         else:
-            # Use built-in player
-            # Determine is_live hint based on provider type
-            # STB/XTREAM APIs explicitly separate live (itv) from VOD content
-            # M3U playlists don't distinguish, so let VLC auto-detect
-            provider_type = self.provider_manager.current_provider.get("type", "").upper()
-            if provider_type in ("STB", "XTREAM"):
-                is_live = self.content_type == "itv"
-            else:
-                # M3UPLAYLIST, M3USTREAM, etc. - let VLC detect via seekability
-                is_live = None
-            self.player.play_video(url, is_live=is_live, content_id=self._current_content_id)
+            self.player.play_video(
+                url, is_live=self._is_live_hint(), content_id=self._current_content_id
+            )
 
     def _launch_vlc(self, url):
         """Launch VLC with platform-specific handling."""
@@ -431,9 +417,9 @@ class PlaybackMixin:
 
             self._external_mpv_player.play(url)
             return True
-        except ImportError, OSError, Exception:
+        except Exception as e:
             # python-mpv not available or failed, fall back to subprocess
-            pass
+            logger.debug("python-mpv unavailable (%s); launching mpv executable", e)
 
         # Subprocess fallback with platform-specific paths
         mpv_cmd = None
@@ -461,13 +447,13 @@ class PlaybackMixin:
                 try:
                     import winreg
 
-                    for hkey in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:  # type: ignore[attr-defined]
+                    for hkey in [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]:
                         try:
-                            with winreg.OpenKey(  # type: ignore[attr-defined]
+                            with winreg.OpenKey(
                                 hkey,
                                 r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\mpv.exe",
                             ) as key:
-                                reg_path = winreg.QueryValue(key, None)  # type: ignore[attr-defined]
+                                reg_path = winreg.QueryValue(key, None)
                                 if reg_path and os.path.exists(reg_path):
                                     mpv_cmd = reg_path
                                     break
@@ -542,51 +528,7 @@ class PlaybackMixin:
             QMessageBox.warning(self, "MPV Launch Failed", f"Failed to launch MPV: {str(e)}")
             return False
 
-    def open_in_vlc(self):
-        # Invoke user's VLC player to open the current stream
-        if self.link:
-            logger.warning(f"Opening VLC for link: {self.link}")
-            try:
-                if platform.system() == "Windows":
-                    vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
-                    if not vlc_path:
-                        program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
-                        vlc_path = os.path.join(program_files, "VideoLAN", "VLC", "vlc.exe")
-                    # Use VLC's directory as cwd to avoid DLL conflicts with bundled libvlc
-                    vlc_dir = os.path.dirname(vlc_path)
-                    subprocess.Popen([vlc_path, self.link], cwd=vlc_dir)
-                elif platform.system() == "Darwin":  # macOS
-                    vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
-                    if not vlc_path:
-                        common_paths = [
-                            "/Applications/VLC.app/Contents/MacOS/VLC",
-                            "~/Applications/VLC.app/Contents/MacOS/VLC",
-                        ]
-                        for path in common_paths:
-                            expanded_path = os.path.expanduser(path)
-                            if os.path.exists(expanded_path):
-                                vlc_path = expanded_path
-                                break
-                    if not vlc_path:
-                        raise FileNotFoundError("VLC not found")
-                    vlc_dir = os.path.dirname(vlc_path)
-                    subprocess.Popen([vlc_path, self.link], cwd=vlc_dir)
-                else:  # Assuming Linux or other Unix-like OS
-                    vlc_path = shutil.which("vlc")  # Try to find VLC in PATH
-                    if not vlc_path:
-                        raise FileNotFoundError("VLC not found")
-                    vlc_dir = os.path.dirname(vlc_path)
-                    subprocess.Popen([vlc_path, self.link], cwd=vlc_dir)
-                # when VLC opens, stop running video on self.player
-                self.player.stop_video()
-            except FileNotFoundError as fnf_error:
-                logger.warning("VLC not found: %s", fnf_error)
-            except Exception as e:
-                logger.warning(f"Error opening VLC: {e}")
-
     def open_file(self):
-        from PySide6.QtWidgets import QFileDialog
-
         file_path, _ = QFileDialog.getOpenFileName(self)
         if file_path:
             self._play_content(file_path)
@@ -713,7 +655,7 @@ class PlaybackMixin:
         provider_type = self.provider_manager.current_provider.get("type", "").upper()
 
         if provider_type == "XTREAM":
-            episode_item = self._build_xtream_episode_item(first_ep, next_season)
+            episode_item = self._build_xtream_episode_item(first_ep)
         else:
             # STB episodes
             episode_item = self._build_stb_episode_item(first_ep, next_season)
@@ -725,7 +667,7 @@ class PlaybackMixin:
 
         return episode_item
 
-    def _build_xtream_episode_item(self, episode_data: dict, season_data: dict) -> Dict[str, Any]:
+    def _build_xtream_episode_item(self, episode_data: dict) -> Dict[str, Any]:
         """Build an episode item dict for Xtream provider."""
         provider = self.provider_manager.current_provider
         resolved_base = self.provider_manager.current_provider_content.get("series", {}).get(
@@ -770,7 +712,7 @@ class PlaybackMixin:
         episode_list = []
         for ep in episodes:
             if provider_type == "XTREAM":
-                episode_list.append(self._build_xtream_episode_item(ep, season_data))
+                episode_list.append(self._build_xtream_episode_item(ep))
             else:
                 # STB uses simple episode numbers
                 if isinstance(ep, int):
@@ -946,14 +888,13 @@ class PlaybackMixin:
                 self.config_manager.selected_provider_name = provider_name
                 self.config_manager.save_config()
                 QTimer.singleShot(0, lambda: self.set_provider())
-                return
             else:
                 QMessageBox.warning(
                     self,
                     "Provider Not Found",
                     f"Provider '{provider_name}' is no longer available.",
                 )
-                return
+            return
 
         # Play the item
         is_episode = item_type == "episode"

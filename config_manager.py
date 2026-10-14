@@ -1,3 +1,5 @@
+from datetime import datetime
+from importlib import metadata as importlib_metadata
 import logging
 import os
 from pathlib import Path
@@ -9,11 +11,6 @@ import tomllib
 import orjson as json
 
 from multikeydict import MultiKeyDict
-
-try:
-    from importlib import metadata as importlib_metadata
-except Exception:  # pragma: no cover
-    import importlib_metadata  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +89,7 @@ def get_app_version() -> str:
             logger.debug(f"Unable to read version from {p}: {e}")
 
     # 4) Fallback
-    if _APP_VERSION is None:
-        _APP_VERSION = "0.0.0"
+    _APP_VERSION = "0.0.0"
     return _APP_VERSION
 
 
@@ -201,94 +197,32 @@ class ConfigManager:
                 window_positions[window_name] = settings
                 need_update = True
 
-        # add favorites to the loaded config if it doesn't exist
-        if "favorites" not in self.config:
-            self.favorites = []
-            need_update = True
-
-        # add last_watched to the loaded config if it doesn't exist
-        if "last_watched" not in self.config:
-            self.last_watched = None
-            need_update = True
-
-        # add check_updates to the loaded config if it doesn't exist
-        if "check_updates" not in self.config:
-            self.check_updates = ConfigManager.DEFAULT_OPTION_CHECKUPDATE
-            need_update = True
-
-        # add show_stb_content_info to the loaded config if it doesn't exist
-        if "show_stb_content_info" not in self.config:
-            self.show_stb_content_info = ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO
-            need_update = True
-
-        if "show_info_panel" not in self.config:
-            self.show_info_panel = ConfigManager.DEFAULT_OPTION_SHOW_INFO_PANEL
-            need_update = True
-
-        # add channel logo to the loaded config if it doesn't exist
-        if "channel_logos" not in self.config:
-            self.channel_logos = ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO
-            need_update = True
-
-        # add max_cache_image_size to the loaded config if it doesn't exist
-        if "max_cache_image_size" not in self.config:
-            self.max_cache_image_size = ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE
-            need_update = True
-
-        # add epg_source to the loaded config if it doesn't exist
-        if "epg_source" not in self.config:
-            self.epg_source = ConfigManager.DEFAULT_OPTION_EPG_SOURCE
-            need_update = True
-
-        # add epg_url to the loaded config if it doesn't exist
-        if "epg_url" not in self.config:
-            self.epg_url = ConfigManager.DEFAULT_OPTION_EPG_URL
-            need_update = True
-
-        # add epg_file to the loaded config if it doesn't exist
-        if "epg_file" not in self.config:
-            self.epg_file = ConfigManager.DEFAULT_OPTION_EPG_FILE
-            need_update = True
-
-        # add epg_expiration_value to the loaded config if it doesn't exist
-        if "epg_expiration_value" not in self.config:
-            self.epg_expiration_value = ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE
-            need_update = True
-
-        # add epg_expiration_unit to the loaded config if it doesn't exist
-        if "epg_expiration_unit" not in self.config:
-            self.epg_expiration_unit = ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_UNIT
-            need_update = True
-
-        # add xmltv_channel_map to the loaded config if it doesn't exist
-        if "xmltv_channel_map" not in self.config:
-            self.config["xmltv_channel_map"] = MultiKeyDict()
-            need_update = True
-
-        # add network security options if missing
-        if "prefer_https" not in self.config:
-            self.prefer_https = ConfigManager.DEFAULT_OPTION_PREFER_HTTPS
-            need_update = True
-        if "ssl_verify" not in self.config:
-            self.ssl_verify = ConfigManager.DEFAULT_OPTION_SSL_VERIFY
-            need_update = True
-
-        # add keyboard_remote_mode if missing
-        if "keyboard_remote_mode" not in self.config:
-            self.keyboard_remote_mode = ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE
-            need_update = True
-        # add smooth_paused_seek if missing
-        if "smooth_paused_seek" not in self.config:
-            self.smooth_paused_seek = ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK
-            need_update = True
-        # add epg_list_window_hours if missing
-        if "epg_list_window_hours" not in self.config:
-            self.epg_list_window_hours = ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS
-            need_update = True
-        # add epg_stb_period_hours if missing
-        if "epg_stb_period_hours" not in self.config:
-            self.epg_stb_period_hours = ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS
-            need_update = True
+        # Add settings introduced after the loaded config was written.
+        missing_defaults: dict[str, object] = {
+            "favorites": [],
+            "last_watched": None,
+            "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
+            "show_stb_content_info": ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO,
+            "show_info_panel": ConfigManager.DEFAULT_OPTION_SHOW_INFO_PANEL,
+            "channel_logos": ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO,
+            "max_cache_image_size": ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE,
+            "epg_source": ConfigManager.DEFAULT_OPTION_EPG_SOURCE,
+            "epg_url": ConfigManager.DEFAULT_OPTION_EPG_URL,
+            "epg_file": ConfigManager.DEFAULT_OPTION_EPG_FILE,
+            "epg_expiration_value": ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE,
+            "epg_expiration_unit": ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_UNIT,
+            "xmltv_channel_map": MultiKeyDict(),
+            "prefer_https": ConfigManager.DEFAULT_OPTION_PREFER_HTTPS,
+            "ssl_verify": ConfigManager.DEFAULT_OPTION_SSL_VERIFY,
+            "keyboard_remote_mode": ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE,
+            "smooth_paused_seek": ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK,
+            "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
+            "epg_stb_period_hours": ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
+        }
+        for key, value in missing_defaults.items():
+            if key not in self.config:
+                self.config[key] = value
+                need_update = True
 
         if need_update:
             self.save_config()
@@ -467,8 +401,6 @@ class ConfigManager:
             link: The playback URL
             provider_name: Current provider name
         """
-        from datetime import datetime
-
         content_id = self._generate_content_id(item_data, provider_name)
 
         history_entry = {
@@ -502,8 +434,6 @@ class ConfigManager:
             position_ms: Current position in milliseconds
             duration_ms: Total duration in milliseconds
         """
-        from datetime import datetime
-
         positions = self.playback_positions or {}
         positions[content_id] = {
             "position": position_ms,

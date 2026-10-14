@@ -2,15 +2,14 @@
 
 import logging
 import re
-import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import QMessageBox, QProgressBar, QPushButton, QTreeWidget, QWidget
-from urlobject import URLObject
 
 from content_loader import ContentLoader
 from image_loader import ImageLoader
+from services.provider_api import stb_endpoint, stb_portal_base
 from services.thread_cleanup import ThreadCleanup
 from workers import (
     M3ULoaderWorker,
@@ -27,6 +26,9 @@ if TYPE_CHECKING:
     from widgets.top_bar import TopBar
 
 logger = logging.getLogger(__name__)
+
+# display_content() list kind for the items of a category, per content type.
+_CATEGORY_ITEM_KIND = {"itv": "channel", "series": "serie", "vod": "movie"}
 
 
 class ContentLoadingMixin:
@@ -229,23 +231,10 @@ class ContentLoadingMixin:
         )
         self._start_content_worker(worker, self._on_catalog_loaded)
 
-    @staticmethod
-    def get_categories_params(_type):
-        params = {
-            "type": _type,
-            "action": "get_genres" if _type == "itv" else "get_categories",
-            "JsHttpRequest": str(int(time.time() * 1000)) + "-xml",
-        }
-        return "&".join(f"{k}={v}" for k, v in params.items())
-
-    @staticmethod
-    def get_allchannels_params():
-        params = {
-            "type": "itv",
-            "action": "get_all_channels",
-            "JsHttpRequest": str(int(time.time() * 1000)) + "-xml",
-        }
-        return "&".join(f"{k}={v}" for k, v in params.items())
+    def _display_category_items(self, items, select_first=True):
+        kind = _CATEGORY_ITEM_KIND.get(self.content_type)
+        if kind is not None:
+            self.display_content(items, content=kind, select_first=select_first)
 
     def load_content_in_category(self, category, select_first=True):
         self.cancel_content_loading()
@@ -256,8 +245,6 @@ class ContentLoadingMixin:
             self.content_type, {}
         )
         category_id = str(category.get("id", "*"))
-        selected_provider = self.provider_manager.current_provider
-        config_type = selected_provider.get("type", "")
 
         # For XTREAM and STB providers with sorted_channels structure
         if "sorted_channels" in content_data:
@@ -269,29 +256,12 @@ class ContentLoadingMixin:
                 indices = sorted_map.get(category_id, []) if isinstance(sorted_map, dict) else []
                 # Guard missing/invalid state
                 items = [contents[i] for i in indices] if isinstance(contents, list) else []
-
-            # Display with appropriate content type
-            if self.content_type == "itv":
-                self.display_content(items, content="channel", select_first=select_first)
-            elif self.content_type == "series":
-                self.display_content(items, content="serie", select_first=select_first)
-            elif self.content_type == "vod":
-                self.display_content(items, content="movie", select_first=select_first)
-        else:
-            # For STB providers with per-category fetching
-            # Check if we have cached content for this category
-            if category_id in content_data.get("contents", {}):
-                items = content_data["contents"][category_id]
-                if self.content_type == "itv":
-                    self.display_content(items, content="channel", select_first=select_first)
-                elif self.content_type == "series":
-                    self.display_content(items, content="serie", select_first=select_first)
-                elif self.content_type == "vod":
-                    self.display_content(items, content="movie", select_first=select_first)
-            else:
-                # Fetch content for the category (STB only)
-                if config_type == "STB":
-                    self.fetch_content_in_category(category_id, select_first=select_first)
+            self._display_category_items(items, select_first)
+        # For STB providers with per-category fetching: use the cached category if present
+        elif category_id in content_data.get("contents", {}):
+            self._display_category_items(content_data["contents"][category_id], select_first)
+        elif self.provider_manager.current_provider.get("type", "") == "STB":
+            self.fetch_content_in_category(category_id, select_first=select_first)
 
     def fetch_content_in_category(self, category_id, select_first=True):
         # Ask confirmation if the user wants to load all content
@@ -308,15 +278,8 @@ class ContentLoadingMixin:
 
         selected_provider = self.provider_manager.current_provider
         headers = self.provider_manager.headers
-        url = selected_provider.get("url", "")
-        url = URLObject(url)
-        scheme = url.scheme
-        if (
-            selected_provider.get("prefer_https", self.config_manager.prefer_https)
-            and scheme == "http"
-        ):
-            scheme = "https"
-        url = f"{scheme}://{url.netloc}/server/load.php"
+        prefer_https = selected_provider.get("prefer_https", self.config_manager.prefer_https)
+        url = stb_endpoint(stb_portal_base(selected_provider.get("url", ""), prefer_https))
 
         verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
         loader = ContentLoader(
@@ -348,15 +311,8 @@ class ContentLoadingMixin:
         elif config_type == "STB":
             # Use STB API
             headers = self.provider_manager.headers
-            url = selected_provider.get("url", "")
-            url = URLObject(url)
-            scheme = url.scheme
-            if (
-                selected_provider.get("prefer_https", self.config_manager.prefer_https)
-                and scheme == "http"
-            ):
-                scheme = "https"
-            url = f"{scheme}://{url.netloc}/server/load.php"
+            prefer_https = selected_provider.get("prefer_https", self.config_manager.prefer_https)
+            url = stb_endpoint(stb_portal_base(selected_provider.get("url", ""), prefer_https))
 
             verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
             loader = ContentLoader(
@@ -487,9 +443,7 @@ class ContentLoadingMixin:
                 return
 
             headers = self.provider_manager.headers
-            url = selected_provider.get("url", "")
-            url = URLObject(url)
-            url = f"{url.scheme}://{url.netloc}/server/load.php"
+            url = stb_endpoint(stb_portal_base(selected_provider.get("url", "")))
 
             verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
             loader = ContentLoader(
@@ -538,10 +492,8 @@ class ContentLoadingMixin:
             self._pending_link_ctx = None
 
     def _on_link_error(self, msg: str):
-        try:
-            logger.warning(f"Error creating link: {msg}")
-        finally:
-            self.unlock_ui_after_loading()
+        logger.warning(f"Error creating link: {msg}")
+        self.unlock_ui_after_loading()
 
     # --- UI state for loading ---
 
@@ -570,13 +522,7 @@ class ContentLoadingMixin:
         contents = content_data.setdefault("contents", {})
         contents[category_id] = items
         self.save_provider()
-
-        if self.content_type == "series":
-            self.display_content(items, content="serie", select_first=select_first)
-        elif self.content_type == "vod":
-            self.display_content(items, content="movie", select_first=select_first)
-        elif self.content_type == "itv":
-            self.display_content(items, content="channel", select_first=select_first)
+        self._display_category_items(items, select_first)
 
     def update_seasons_list(self, data, select_first=True):
         if not self.current_series:
@@ -672,10 +618,7 @@ class ContentLoadingMixin:
         if total:
             progress_percentage = int((current / total) * 100)
             self.progress_bar.setValue(progress_percentage)
-            if progress_percentage == 100:
-                self.progress_bar.setVisible(False)
-            else:
-                self.progress_bar.setVisible(True)
+            self.progress_bar.setVisible(progress_percentage != 100)
 
     def update_busy_progress(self, msg):
         self.cancel_button.setText(msg)

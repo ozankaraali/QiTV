@@ -49,8 +49,8 @@ def parse_m3u(data: str, categorize: bool = False):
             item["user_agent"] = user_agent
 
         elif line.startswith("http"):
-            urlobject = urlparse(line)
-            item["cmd"] = urlobject.geturl()
+            # Round-trip through urlparse: it drops stray tabs/CR/LF (e.g. CRLF playlists).
+            item["cmd"] = urlparse(line).geturl()
             items.append(item)
 
     # Return flat list if not categorizing
@@ -69,36 +69,23 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
         - contents: List of all items with tv_genre_id field added
         - sorted_channels: Dict mapping category_id -> list of item indices
     """
-    categories_map: Dict[str, str] = {}
     sorted_channels: Dict[str, List[int]] = {}
-    contents: List[Dict] = []
 
-    # Group items by category
+    # Group items by category. The group title is also the category id: it is stable
+    # across refreshes/processes and cannot collide.
     for idx, item in enumerate(items):
-        group = item.get("group") or "Uncategorized"
-        category_id = group  # Stable across refreshes/processes; no hash collisions.
-
-        # Add to categories map
-        if category_id not in categories_map:
-            categories_map[category_id] = group
-
+        category_id = item.get("group") or "Uncategorized"
         # Add tv_genre_id for compatibility with STB/Xtream structure
         item["tv_genre_id"] = category_id
         item["number"] = str(idx + 1)
-        contents.append(item)
-
-        # Add to sorted_channels mapping
-        if category_id not in sorted_channels:
-            sorted_channels[category_id] = []
-        sorted_channels[category_id].append(idx)
+        sorted_channels.setdefault(category_id, []).append(idx)
 
     # Build categories list
     categories = [{"id": "*", "title": "All"}]
-    for cat_id, cat_name in sorted(categories_map.items(), key=lambda x: x[1]):
-        categories.append({"id": cat_id, "title": cat_name})
+    categories.extend({"id": group, "title": group} for group in sorted(sorted_channels))
 
     return {
         "categories": categories,
-        "contents": contents,
+        "contents": items,
         "sorted_channels": sorted_channels,
     }
