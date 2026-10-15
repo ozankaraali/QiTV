@@ -11,7 +11,7 @@ from mixins.content_loading_mixin import ContentLoadingMixin
 from mixins.export_mixin import ExportMixin
 from mixins.playback_mixin import PlaybackMixin
 from services.export import save_stb_content
-from services.provider_api import provider_prefers_https
+from services.provider_api import provider_prefers_https, stb_portal_base
 
 
 class _Response:
@@ -136,6 +136,23 @@ class ProviderCacheIdentityTests(unittest.TestCase):
             self._identity({**base, "prefer_https": None}, True),
             self._identity({**base, "prefer_https": False}, True),
         )
+
+
+class ExportLinkSchemeTests(unittest.TestCase):
+    def test_exported_links_keep_provider_scheme_despite_prefer_https(self):
+        host = _host(ExportMixin, {"url": "http://portal.test/c/", "mac": "m"}, True)
+        base = host._export_link_base(host.provider_manager.current_provider)
+        self.assertEqual(base, "http://portal.test")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "out.m3u"
+            items = [{"name": "One", "cmd": "ffmpeg http://localhost/ch/123_"}]
+            save_stb_content(base, items, "m", str(path))
+            text = path.read_text(encoding="utf-8")
+        self.assertIn("http://portal.test/play/live.php", text)
+        self.assertNotIn("https://", text)
+
+    def test_fetch_base_still_honours_prefer_https(self):
+        self.assertEqual(stb_portal_base("http://portal.test/c/", True), "https://portal.test")
 
 
 if __name__ == "__main__":

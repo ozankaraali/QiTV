@@ -28,6 +28,15 @@ class ExportMixin:
     content_list: QTreeWidget
     content_type: str
 
+    @staticmethod
+    def _export_link_base(provider) -> str:
+        """Base for links written into exported files: the provider's own scheme.
+
+        External players have no HTTP fallback, so unlike fetch URLs this is never upgraded
+        to HTTPS by the Prefer HTTPS setting.
+        """
+        return stb_portal_base(provider.get("url", ""))
+
     def export_all_live_channels(self):
         provider = self.provider_manager.current_provider
         if provider.get("type") != "STB":
@@ -47,10 +56,7 @@ class ExportMixin:
 
     def fetch_and_export_all_live_channels(self, file_path):
         selected_provider = self.provider_manager.current_provider
-        base_url = stb_portal_base(
-            selected_provider.get("url", ""),
-            provider_prefers_https(selected_provider, self.config_manager.prefer_https),
-        )
+        base_url = self._export_link_base(selected_provider)
         mac = selected_provider.get("mac", "")
 
         try:
@@ -127,10 +133,7 @@ class ExportMixin:
             provider = self.provider_manager.current_provider
             config_type = provider.get("type", "")
             if config_type == "STB":
-                base_url = stb_portal_base(
-                    provider.get("url", ""),
-                    provider_prefers_https(provider, self.config_manager.prefer_https),
-                )
+                base_url = self._export_link_base(provider)
                 mac = provider.get("mac", "")
                 save_stb_content(base_url, items, mac, file_path)
             else:
@@ -149,10 +152,7 @@ class ExportMixin:
                 self.content_type, {}
             )
 
-            base_url = stb_portal_base(
-                provider.get("url", ""),
-                provider_prefers_https(provider, self.config_manager.prefer_https),
-            )
+            base_url = self._export_link_base(provider)
             config_type = provider.get("type", "")
             mac = provider.get("mac", "")
 
@@ -214,10 +214,7 @@ class ExportMixin:
     def fetch_and_export_all_series(self, file_path):
         """Fetch all series, seasons, and episodes, then export to M3U."""
         selected_provider = self.provider_manager.current_provider
-        base_url = stb_portal_base(
-            selected_provider.get("url", ""),
-            provider_prefers_https(selected_provider, self.config_manager.prefer_https),
-        )
+        base_url = self._export_link_base(selected_provider)
         mac = selected_provider.get("mac", "")
 
         # Get the current content (series in categories)
