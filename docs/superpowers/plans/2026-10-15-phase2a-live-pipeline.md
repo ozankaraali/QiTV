@@ -380,11 +380,10 @@ Everything is tested headless.
 - **Route:** `GET /<token>/<session>/stream/<seq>.ts`.
   - The token is compared with `secrets.compare_digest`. A bad token, an unknown session, or a seq evicted (older than the oldest) or not yet opened returns 404 with no body.
   - On success: status 200, `Content-Type: video/mp2t`, `Cache-Control: no-store`, `Connection: close`, no Content-Length. The body is streamed across segments `seq`, `seq+1`, …:
-    - lease segment `n`;
     - for `n == seq`, send from offset 0 (with its PAT/PMT header); for later segments, send from `header_len`, so the byte stream stays the original;
-    - read 64 KiB chunks through `ring.read`, writing outside any lock;
+    - for each 64 KiB chunk: `lease(n)` (None means the segment was evicted, so end the response), `ring.read`, `release`, and only then write the chunk to the socket. **A lease is never held across socket I/O**: a paused VLC blocks the write indefinitely, and a held lease would pin a charged segment until `append` hits the cap;
     - when caught up with an open segment, `ring.wait_for(segment, offset, 0.5)` and loop;
-    - release, then move to `n+1` once `n` is complete;
+    - move to `n+1` once `n` is complete and fully sent;
     - if `n+1` is gone (evicted under a slow reader), end the response;
     - if the session ended and the last segment is fully sent, end the response.
   - Stop and session removal wake waiters and end responses.
