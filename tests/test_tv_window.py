@@ -758,6 +758,34 @@ class FitToAreaTests(unittest.TestCase):
 
 
 class FullscreenExitTests(WindowCase):
+    def test_a_change_asked_while_the_last_one_animates_waits_for_it(self):
+        # AppKit drops a fullscreen change made while the previous one still animates: on
+        # CI's macOS 15 a leave right after the entry left the window in fullscreen (macOS 13
+        # too, within ~0.6 s). The second request waits for the platform to report the first.
+        self.show()
+        window, asked = self.window, []
+        set_state = window.setWindowState
+
+        def spy(state):
+            asked.append(bool(state & Qt.WindowState.WindowFullScreen))
+            set_state(state)
+
+        with (
+            mock.patch.object(window, "setWindowState", side_effect=spy),
+            mock.patch.object(type(window), "_animates_fullscreen", return_value=True),
+        ):
+            window.toggle_fullscreen()
+            window.toggle_fullscreen()  # at once: the entry has not been reported yet
+            self.assertEqual(asked, [True])
+            self.assertTrue(
+                wait_until(lambda: asked == [True, False] and not window.isFullScreen(), 5000),
+                f"{asked}",
+            )
+            window.toggle_fullscreen()
+            window.leave_fullscreen()  # Esc right after F: the entry is undone once reported
+            self.assertTrue(wait_until(lambda: asked[-1] is False and len(asked) == 4, 5000))
+            self.assertTrue(wait_until(lambda: not window.isFullScreen(), 5000))
+
     def test_leaving_fullscreen_returns_inside_the_screen(self):
         # A display smaller than the window from before fullscreen (macOS put it off screen).
         self.show()

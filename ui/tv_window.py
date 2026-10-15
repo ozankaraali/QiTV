@@ -59,6 +59,7 @@ WATCH_SAVE_DELAY_MS = 2000  # a play is saved once the zapping settles (and on c
 MINI_WIDTH_FRACTION = 0.25
 MINI_MARGIN = 10
 FULLSCREEN_EXIT_MS = 1500  # the longest wait for the platform to finish leaving fullscreen
+FULLSCREEN_SETTLE_MS = 5000  # the longest wait for macOS to report a fullscreen change
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
 _SHORTCUT_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier
@@ -145,6 +146,19 @@ class _FullscreenExitWatch(QObject):
         return False
 
 
+class _PlatformStateWatch(QObject):
+    """Calls back on each window state change the platform reports (spontaneous)."""
+
+    def __init__(self, window: QMainWindow, callback: Callable[[], None]) -> None:
+        super().__init__(window)
+        self._callback = callback
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.WindowStateChange and event.spontaneous():
+            self._callback()
+        return False
+
+
 class _Geometry:
     """What ConfigManager.save_window_settings reads: a geometry to store."""
 
@@ -194,6 +208,13 @@ class TVWindow(QMainWindow):
         self._fullscreen_restore: Optional[QRect] = None
         self._pre_fullscreen: Optional[QRect] = None
         self._exit_watch = _FullscreenExitWatch(self, self._fit_to_screen)
+        # macOS animates a fullscreen change, and AppKit drops one asked for meanwhile: the
+        # state asked for until the platform reports it, and a later request, applied then.
+        self._fs_target: Optional[bool] = None
+        self._fs_queued: Optional[bool] = None
+        self._fs_watch = _PlatformStateWatch(self, self._fullscreen_settled)
+        self._fs_settle = QTimer(self, singleShot=True, interval=FULLSCREEN_SETTLE_MS)
+        self._fs_settle.timeout.connect(self._fullscreen_settled)
         self._fit_fallback = QTimer(self, singleShot=True, interval=FULLSCREEN_EXIT_MS)
         self._fit_fallback.timeout.connect(self._fit_to_screen)
         self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
@@ -403,16 +424,60 @@ class TVWindow(QMainWindow):
             return
         if self._mini_restore is not None:
             self._leave_mini()
-        if self.isFullScreen():
-            self._fullscreen_restore = self.normalGeometry()
-        else:
-            self._pre_fullscreen = None  # remembered afresh as fullscreen begins
-        self.setWindowState(self.windowState() ^ Qt.WindowState.WindowFullScreen)
+        self._request_fullscreen(not self._fullscreen_heading())
+
+    @staticmethod
+    def _animates_fullscreen() -> bool:
+        """macOS animates fullscreen changes, and AppKit drops one made during another."""
+        return QGuiApplication.platformName() == "cocoa"
 
     def leave_fullscreen(self) -> None:
-        if self.isFullScreen() and not self._closing:
+        if not self._closing and self._fullscreen_heading():
+            self._request_fullscreen(False)
+
+    def _fullscreen_heading(self) -> bool:
+        """The fullscreen state the window is on its way to, reported or not."""
+        for wanted in (self._fs_queued, self._fs_target):
+            if wanted is not None:
+                return wanted
+        return self.isFullScreen()
+
+    def _request_fullscreen(self, on: bool) -> None:
+        """Enter or leave fullscreen; on macOS only once the previous change was reported.
+
+        AppKit drops a change made while another still animates: a leave asked right after
+        the entry (CI's macOS 15 VM) left the window in fullscreen for good.
+        """
+        if self._fs_target is not None:
+            self._fs_queued = on  # applied when the platform reports the change under way
+            return
+        if on == self.isFullScreen():
+            return
+        if on:
+            self._pre_fullscreen = None  # remembered afresh as fullscreen begins
+        else:
             self._fullscreen_restore = self.normalGeometry()
-            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowFullScreen)
+        handle = self.windowHandle()
+        if self._animates_fullscreen() and handle is not None:
+            handle.installEventFilter(self._fs_watch)
+            self._fs_target = on
+            self._fs_settle.start()
+        state = self.windowState()
+        fullscreen = Qt.WindowState.WindowFullScreen
+        self.setWindowState(state | fullscreen if on else state & ~fullscreen)
+
+    def _fullscreen_settled(self) -> None:
+        """The platform reported a state (or never did): apply a request made meanwhile."""
+        if self._fs_target is None:
+            return
+        self._fs_settle.stop()
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.removeEventFilter(self._fs_watch)
+        self._fs_target = None
+        queued, self._fs_queued = self._fs_queued, None
+        if queued is not None and not self._closing:
+            QTimer.singleShot(0, self, lambda: self._request_fullscreen(queued))
 
     def toggle_mini_player(self) -> None:
         """Frameless and on top, a quarter of the screen wide in the bottom-right corner."""
