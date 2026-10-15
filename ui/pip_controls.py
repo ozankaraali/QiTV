@@ -2,7 +2,8 @@
 
 P (or the transport's Second channel) opens the channel tuned before the current one small,
 or closes the small picture; the drawer's context menu and Ctrl/⌘+P open the drawer's
-channel. Its link is asked for on LinkLanes' side lane, one at a time: a choice made while
+channel. S (or a click on the small picture) swaps; one that has to wait for the large
+picture's channel to open says "Switching…". Its link is asked for on LinkLanes' side lane, one at a time: a choice made while
 one is on its way waits, replacing an older one that waits, and a link that lands after the
 PiP was closed, or after the large picture took its channel, opens nothing. SessionManager
 opens it in the slot that is not large, with a main tune's start arguments; its refusals
@@ -26,9 +27,11 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
+from services.catalog import ALL_GROUP_ID
 from services.live.stay_live import TARGETS
 from services.sessions import PURPOSE, SessionManager, Slot, limit_message
 from services.zapping import ZapContext
+from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
 from ui.overlays.pip_label import CONNECTING, LIVE
@@ -70,7 +73,10 @@ class PipControls(QObject):
         lanes: LinkLanes,
         budget,
         live_start: Callable[[Target, str], LiveStart],
-        previous: Callable[[], tuple[Optional[dict], Optional[ZapContext]]],
+        nav,
+        drawer,
+        zap,
+        all_live: Callable[[], list[dict]],
         large_channel: Callable[[], Optional[dict]],
         vod: Callable[[], bool],
         closed: Callable[[], bool],
@@ -81,10 +87,11 @@ class PipControls(QObject):
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
 
-        `budget` is the ConnectionBudget; `live_start(target, url)` a main tune's LiveStart; `previous()` the channel tuned
-        before the large picture's, with its zap group; `large_channel()` what the large
-        picture plays; `vod()` whether a movie or an episode is current; `swap()` the
-        shell's swap; `mixer()` opens the mixer on the PiP's row.
+        `budget` is the ConnectionBudget; `live_start(target, url)` a main tune's LiveStart;
+        `nav`, `drawer` and `zap` the shell's (P on the drawer's channel, the previous
+        channel); `all_live()` every live channel; `large_channel()` what the large picture
+        plays; `vod()` whether a movie or an episode is current; `swap()` the shell's swap
+        (False when it has to wait); `mixer()` opens the mixer on the PiP's row.
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -96,7 +103,10 @@ class PipControls(QObject):
         self._lanes = lanes
         self._budget = budget
         self._live_start = live_start
-        self._previous = previous
+        self._nav = nav
+        self._drawer = drawer
+        self._zap = zap
+        self._all_live = all_live
         self._large_channel = large_channel
         self._vod = vod
         self._closed = closed
@@ -120,7 +130,7 @@ class PipControls(QObject):
         self._transport.pipRequested.connect(self.toggle_previous)
         self._transport.set_pip_state(True, False)
         if self._frame is not None:
-            self._frame.swapRequested.connect(self._swap)
+            self._frame.swapRequested.connect(self.user_swap)
         label = self._label
         if label is not None:
             label.closeRequested.connect(self.close)
@@ -158,6 +168,54 @@ class PipControls(QObject):
         self._views[old] = SlotView(target, context, url)
         return self.view(new)
 
+    # ---- keys, clicks and the menu ------------------------------------------------------------
+
+    def pip_key(self) -> None:
+        """P: the drawer's highlighted channel small (Ctrl/⌘+P there), else the previous
+        channel, or close the small picture."""
+        drawer = self._drawer
+        node = drawer.highlighted() if drawer.isVisible() else None
+        if node is not None and is_channel(self._nav, node):
+            self.open_node(node)
+            drawer.close_drawer()
+        else:
+            self.toggle_previous()
+
+    def swap_key(self) -> None:
+        """S: swap, or say how to open picture in picture."""
+        if not self.sessions.pip_open():
+            self._toast(OPEN_PIP_FIRST)
+        else:
+            self.user_swap()
+
+    def user_swap(self) -> bool:
+        """S or a click on the PiP: a swap that has to wait says so."""
+        swapped = self._swap()
+        if not swapped and self.sessions.pip_open():
+            self._toast(SWITCHING, "info", SWITCHING_MS)
+        return swapped
+
+    def open_node(self, node) -> None:
+        """A drawer row's channel small, with its group for ↑/↓ once it is swapped in."""
+        nav = self._nav
+        group = next((n for n in reversed(nav.path) if n.layer == "group"), None)
+        nodes = nav.children(group) if group is not None else []
+        channels = [n.payload for n in nodes if isinstance(n.payload, dict)] or [node.payload]
+        key = group.key if group is not None else ALL_GROUP_ID
+        self.open_channel(node.payload, ZapContext(key, channels, fallback=self._all_live()))
+
+    def _previous_channel(self) -> tuple[Optional[dict], Optional[ZapContext]]:
+        """The channel tuned before the large picture's, with the zap group to walk."""
+        zap = self._zap
+        channel = zap.previous_channel()
+        if channel is None:
+            return None, None
+        context = zap.context
+        if context.index_of(channel) < 0:
+            channels = self._all_live()
+            context = ZapContext(ALL_GROUP_ID, channels, fallback=channels)
+        return channel, ZapContext(context.group_key, context.channels, fallback=context.fallback)
+
     # ---- opening and closing ------------------------------------------------------------------
 
     def toggle_previous(self) -> None:
@@ -170,7 +228,7 @@ class PipControls(QObject):
         if self._vod():
             self._toast(PIP_LIVE_ONLY)
             return
-        previous, context = self._previous()
+        previous, context = self._previous_channel()
         if previous is None:
             self._toast(NO_PREVIOUS)
             return

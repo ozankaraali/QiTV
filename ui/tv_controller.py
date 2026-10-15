@@ -79,7 +79,7 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import BannerInfo, ZapBanner
-from ui.pip_controls import OPEN_PIP_FIRST, SWITCHING, SWITCHING_MS, PipControls
+from ui.pip_controls import PipControls
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
 
@@ -279,12 +279,15 @@ class TVController(QObject):
                 lanes=self._lanes,
                 budget=self.budget,
                 live_start=self._live_controls.live_start,
-                previous=self._previous_channel,
+                nav=nav,
+                drawer=overlays.drawer,
+                zap=zap,
+                all_live=self._all_live,
                 large_channel=lambda: self._channel,
                 vod=self.vod_current,
                 closed=lambda: self._closed,
                 toast=self._toast,
-                swap=self._user_swap,
+                swap=self.swap,
                 mixer=self._mixer.open_small,
                 parent=self,
             )
@@ -583,9 +586,11 @@ class TVController(QObject):
         elif action is Action.MINI_PLAYER:
             self.window_actions.toggle_mini_player()
         elif action is Action.PIP:
-            self._pip_key()
+            if self._pip is not None:
+                self._pip.pip_key()
         elif action is Action.SWAP:
-            self._swap_key()
+            if self._pip is not None:
+                self._pip.swap_key()
         elif action is Action.MUTE:
             self._mixer.mute()
         elif action in (Action.VOL_UP, Action.VOL_DOWN):
@@ -998,59 +1003,11 @@ class TVController(QObject):
         self._lanes.drop_tune()  # superseded: it would replace the picture swapped in
         return sessions.swap()
 
-    def _swap_key(self) -> None:
-        sessions = self.sessions
-        if sessions is None:
-            return
-        if not sessions.pip_open():
-            self._toast(OPEN_PIP_FIRST)
-            return
-        self._user_swap()
-
-    def _user_swap(self) -> bool:
-        """S or a click on the PiP: a swap that has to wait says so."""
-        swapped = self.swap()
-        if not swapped and self.sessions is not None and self.sessions.pip_open():
-            self._toast(SWITCHING, "info", SWITCHING_MS)
-        return swapped
-
     def open_pip(self, channel: dict, *, group_key: str, channels: list[dict]) -> None:
         """Open `channel` small (the drawer's menu or Ctrl/⌘+P), or show it in the PiP."""
         if self._pip is not None and not self._closed:
             context = ZapContext(group_key, channels, fallback=self._all_live())
             self._pip.open_channel(channel, context)
-
-    def _pip_key(self) -> None:
-        """P: the drawer's highlighted channel small (Ctrl/⌘+P there), else the previous one,
-        or close the small picture."""
-        pip, drawer = self._pip, self.overlays.drawer
-        if pip is None:
-            return
-        node = drawer.highlighted() if drawer.isVisible() else None
-        if node is not None and is_channel(self.nav, node):
-            self._open_pip_node(node)
-            drawer.close_drawer()
-        else:
-            pip.toggle_previous()
-
-    def _open_pip_node(self, node: NavNode) -> None:
-        """A drawer row's channel small, with its group for ↑/↓ once it is swapped in."""
-        group = next((n for n in reversed(self.nav.path) if n.layer == "group"), None)
-        nodes = self.nav.children(group) if group is not None else []
-        channels = [n.payload for n in nodes if isinstance(n.payload, dict)] or [node.payload]
-        key = group.key if group is not None else ALL_GROUP_ID
-        self.open_pip(node.payload, group_key=key, channels=channels)
-
-    def _previous_channel(self) -> tuple[Optional[dict], Optional[ZapContext]]:
-        """The channel tuned before the large picture's, with the zap group to walk."""
-        channel = self.zap.previous_channel()
-        if channel is None:
-            return None, None
-        context = self.zap.context
-        if context.index_of(channel) < 0:
-            channels = self._all_live()
-            context = ZapContext(ALL_GROUP_ID, channels, fallback=channels)
-        return channel, ZapContext(context.group_key, context.channels, fallback=context.fallback)
 
     def _pip_takes(self, channel: dict, group_key: str, channels: list[dict]) -> bool:
         """A tune of the large picture onto the PiP's channel (Review Focus 3): never a second
@@ -1076,6 +1033,10 @@ class TVController(QObject):
     def _close_pip(self) -> None:
         if self._pip is not None:
             self._pip.close()
+
+    def _open_pip_node(self, node: NavNode) -> None:
+        if self._pip is not None:
+            self._pip.open_node(node)
 
     def _on_large_changed(self, name: str) -> None:
         """A swap: the large picture's player, stream and state are the other slot's now."""
