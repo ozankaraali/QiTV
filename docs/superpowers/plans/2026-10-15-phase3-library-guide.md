@@ -525,7 +525,7 @@ Earlier plans give the consumed interfaces: Phase 1A (`services/*`), Phase 1B (`
   def set_message(self, text: str | None)       # "Loading…", an error, or "Nothing here"
   def current_index(self) -> int                # -1 when empty
   def set_current_index(self, i: int, *, reveal: bool = True)
-  def move(self, dx: int, dy: int)              # dx = ±1 column, dy = ±1 row
+  def move_by(self, dx: int, dy: int)              # dx = ±1 column, dy = ±1 row
   def page(self, delta: int); def home(self); def end(self)
   def jump_to_letter(self, letter: str)
   def item(self, i: int) -> dict | None
@@ -565,9 +565,9 @@ Earlier plans give the consumed interfaces: Phase 1A (`services/*`), Phase 1B (`
   - letters in the index at 0.6, others at 0.2;
   - clicking a letter calls `jump_to_letter`.
 - **Movement:**
-  - `move(-1, 0)` in column 0 emits `leftEdge`; `move(0, -1)` in the first row emits `upEdge`;
-  - `move(+1, 0)` at the last column or the last item does nothing;
-  - `move(0, ±1)` keeps the column, clamped to the last item of a shorter row;
+  - `move_by(-1, 0)` in column 0 emits `leftEdge`; `move_by(0, -1)` in the first row emits `upEdge`;
+  - `move_by(+1, 0)` at the last column or the last item does nothing;
+  - `move_by(0, ±1)` keeps the column, clamped to the last item of a shorter row;
   - in search mode, rows flow across section boundaries;
   - `page(±1)` moves by the number of fully visible rows; `home`/`end` go to the first or last item.
   - Each change emits `focusChanged` and, with `reveal`, scrolls so that the current row and its strip are fully visible.
@@ -586,7 +586,7 @@ Earlier plans give the consumed interfaces: Phase 1A (`services/*`), Phase 1B (`
   5. Hover dwell: after 300 ms over another poster it becomes current; after 100 ms it does not.
   6. `jump_to_letter("m")` with an index makes the mapped item current.
   7. With 20,000 items, `set_sections` plus a paint (`grab()`) takes under 150 ms, and `request` is called with at most `(visible rows + 1) × columns` URLs.
-  8. Sections: two titled sections; `move(0, 1)` from the last row of the first section goes to the second section.
+  8. Sections: two titled sections; `move_by(0, 1)` from the last row of the first section goes to the second section.
   9. `set_message("Loading…")` paints without items (`grab()` non-null).
   10. A sort chip click emits `sortRequested("az")`.
 - [ ] **Steps 2–5:** run RED, implement, run GREEN, run the suite, lint/type. Render `scratchpad/library/grid.png` (1280×720 library-sized, 30 fake titles, two with posters, one focused with resume) and view it against mockup 05. Commit (`feat: add the poster grid with inline details`).
@@ -607,7 +607,7 @@ Earlier plans give the consumed interfaces: Phase 1A (`services/*`), Phase 1B (`
   def set_genres(self, genres: list[Genre])           # pinned first, as the model returns them
   def set_current(self, genre_id: str | None)
   def current_id(self) -> str | None
-  def move(self, delta: int); def page(self, delta: int)
+  def move_by(self, delta: int); def page(self, delta: int)
   def type_text(self, text: str); def backspace(self) -> None
   def escape(self) -> bool          # True when it cleared a non-empty filter
   filter_text: str                  # property; the controller passes it to LibraryModel.genres()
@@ -623,7 +623,7 @@ Earlier plans give the consumed interfaces: Phase 1A (`services/*`), Phase 1B (`
   def set_source_name(self, name: str)
   def set_tabs(self, tabs: list[str])                 # Movies/Series hidden for M3U providers
   def set_focused(self, focused: bool)
-  def move(self, delta: int)        # focus between the tabs and pills
+  def move_by(self, delta: int)        # focus between the tabs and pills
   def activate(self) -> None
   ```
 
@@ -646,11 +646,11 @@ Earlier plans give the consumed interfaces: Phase 1A (`services/*`), Phase 1B (`
 
 - [ ] **Step 1: Write failing tests:**
   1. GenreList shows pinned genres under "PINNED" and the rest under "GENRES · N" (checks through a `rows()` accessor that returns the painted labels in order).
-  2. `move(3)` quickly emits `genreSelected` once, after the debounce, with the final id.
+  2. `move_by(3)` quickly emits `genreSelected` once, after the debounce, with the final id.
   3. `type_text("doc")` then `escape()` returns True and clears; a second `escape()` returns False.
   4. Activating flushes the pending preview: `genreSelected` comes before `genreActivated`.
   5. TopNav `set_tabs(["live"])` hides Movies/Series. Clicking the Movies tab emits `tabRequested("movies")`; clicking the source pill emits `sourceRequested` with a point under the pill.
-  6. TopNav keyboard: `move(1)` twice then `activate()` from Live TV emits `tabRequested("series")`.
+  6. TopNav keyboard: `move_by(1)` twice then `activate()` from Live TV emits `tabRequested("series")`.
   7. `grab()` non-null for both, at 1280 and 800 px widths.
 - [ ] **Steps 2–5:** run RED, implement, run GREEN, run the suite, lint/type. Render `scratchpad/library/genres.png` and view it. Commit (`feat: add the genre column and library navigation`).
 
@@ -677,7 +677,7 @@ class SeriesView(QWidget):
     def set_progress_provider(self, fn: Callable[[dict], float | None])
     def current_season(self) -> dict | None
     def current_episode(self) -> dict | None
-    def move(self, dx: int, dy: int); def activate(self); def escape(self) -> bool
+    def move_by(self, dx: int, dy: int); def activate(self); def escape(self) -> bool
 ```
 
 **Layout:**
@@ -699,15 +699,15 @@ class SeriesView(QWidget):
 
 **Keys:**
 - Focus starts on the episodes list when episodes exist, otherwise on the seasons row.
-- In the seasons row: `move(±1, 0)` changes the season and emits `seasonSelected` after 250 ms idle; `move(0, 1)` goes to the episodes.
-- In the episodes: `move(0, -1)` from the first episode goes to the seasons row.
+- In the seasons row: `move_by(±1, 0)` changes the season and emits `seasonSelected` after 250 ms idle; `move_by(0, 1)` goes to the episodes.
+- In the episodes: `move_by(0, -1)` from the first episode goes to the seasons row.
 - `activate()` on an episode emits `episodeActivated(season, episode)`.
 - `escape()` emits `backRequested` and returns True.
 
 - [ ] **Step 1: Write failing tests:**
-  1. `set_seasons([…3])` then `move(1, 0)` twice quickly emits `seasonSelected` once, with the third season.
+  1. `set_seasons([…3])` then `move_by(1, 0)` twice quickly emits `seasonSelected` once, with the third season.
   2. `set_episodes(season, [...])` then `activate()` emits `episodeActivated(season, first episode)`.
-  3. From the first episode, `move(0, -1)` focuses the seasons row (asserted through a `focus_zone` property).
+  3. From the first episode, `move_by(0, -1)` focuses the seasons row (asserted through a `focus_zone` property).
   4. The error state's `activate()` emits `retryRequested`.
   5. Progress ≥ 0.9 paints the check mark (through a `row_badges(i)` accessor that returns `"✓"`).
   6. 2,000 episodes paint in under 100 ms.
@@ -730,7 +730,7 @@ class Guide(Overlay):
                  now: Callable[[], datetime], parent=None)
     def open_guide(self, channels: list[dict], current: int)
     def close_guide(self)
-    def move(self, delta: int)            # channel rows
+    def move_by(self, delta: int)            # channel rows
     def page(self, delta: int)
     def shift(self, delta: int)           # ±1 = ±30 minutes, clamped to [now slot, now + 24 h]
     def activate(self)                    # Enter: tuneRequested(current channel)
@@ -756,7 +756,7 @@ class Guide(Overlay):
 - **Data:** `programmes(channel, window_start, 12)` for each visible row, cached per (channel key, window_start). The cache is cleared on `open_guide` and on `shift`.
 
 - [ ] **Step 1: Write failing tests:**
-  1. `open_guide` sets the current row, and `move(1)` changes `current_channel`.
+  1. `open_guide` sets the current row, and `move_by(1)` changes `current_channel`.
   2. `activate()` emits `tuneRequested` with the current channel.
   3. `shift(-1)` at the start does nothing. `shift(1)` moves `window_start` by 30 minutes, and `shift` never exceeds now + 24 h.
   4. With 1,000 channels, a `grab()` queries `programmes` only for the visible rows (≤ 20 calls at 720 px).
@@ -829,7 +829,7 @@ class Guide(Overlay):
 
 **Behaviour:**
 - **Focus zones:** `nav`, `genres`, `grid`, `series`, `search`. Keys go to the focused zone:
-  - **grid:** arrows call `move`; `leftEdge` focuses genres (browse mode); `upEdge` focuses nav; Enter activates; Ctrl+D toggles the favourite of the current item; Home/End/PgUp/PgDn work.
+  - **grid:** arrows call `move_by`; `leftEdge` focuses genres (browse mode); `upEdge` focuses nav; Enter activates; Ctrl+D toggles the favourite of the current item; Home/End/PgUp/PgDn work.
   - **genres:** ↑/↓ move; → or Enter focuses the grid; text filters; Backspace deletes; Esc clears the filter, else goes to nav.
   - **nav:** ←/→ move; Enter activates; ↓ returns to the previous zone.
   - **series:** keys go to `SeriesView`; `backRequested` returns to the grid with the series still current.
@@ -887,7 +887,7 @@ class Guide(Overlay):
 **Behaviour:**
 - **Guide:**
   - `GUIDE` (`G`), during live, opens `guide.open_guide(zap.context.channels, current index)`;
-  - while the guide is open, keys route to it: ↑/↓ `move`, PgUp/PgDn `page`, ←/→ `shift`, Enter `activate`, Esc `escape`, and `G` closes;
+  - while the guide is open, keys route to it: ↑/↓ `move_by`, PgUp/PgDn `page`, ←/→ `shift`, Enter `activate`, Esc `escape`, and `G` closes;
   - `tuneRequested(channel)` calls `tune(channel, group_key=zap.context.group_key, channels=zap.context.channels)` and closes the guide;
   - `Overlays` gains `guide` and `next_card` fields; the window builds them. The context menu is a `QMenu` created on demand.
 - **Autoplay** (Review Focus 3):
