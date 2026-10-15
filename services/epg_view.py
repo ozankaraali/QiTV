@@ -7,10 +7,9 @@ from datetime import datetime
 import logging
 from typing import Any, Iterable, Optional
 
-logger = logging.getLogger(__name__)
+from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_naive
 
-_XMLTV_FORMATS = ("%Y%m%d%H%M%S %z", "%Y%m%d%H%M%S")
-_STB_FORMAT = "%Y-%m-%d %H:%M:%S"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -49,9 +48,10 @@ def _aware(moment: datetime) -> datetime:
 
 
 def _parse_xmltv_time(value: Any) -> Optional[datetime]:
-    for fmt in _XMLTV_FORMATS:
+    text = str(value).strip()
+    for parse in (parse_xmltv, parse_xmltv_naive):
         try:
-            return _aware(datetime.strptime(str(value).strip(), fmt))
+            return _aware(parse(text))
         except ValueError:
             continue
     return None
@@ -59,7 +59,7 @@ def _parse_xmltv_time(value: Any) -> Optional[datetime]:
 
 def _parse_stb_time(value: Any) -> Optional[datetime]:
     try:
-        return _aware(datetime.strptime(str(value).strip(), _STB_FORMAT))
+        return _aware(parse_stb(str(value).strip()))
     except ValueError:
         return None
 

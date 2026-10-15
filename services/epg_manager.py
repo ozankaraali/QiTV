@@ -14,6 +14,7 @@ import requests
 import tzlocal
 
 from services.content_loader import ContentLoader
+from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_as
 from services.multikeydict import MultiKeyDict
 from services.provider_api import (
     base_from_url,
@@ -49,8 +50,8 @@ def normalize_programme_stop(start: str, stop: str) -> str:
     """
     for fmt in _XMLTV_FORMATS:
         try:
-            start_dt = datetime.strptime(start, fmt)
-            stop_dt = datetime.strptime(stop, fmt)
+            start_dt = parse_xmltv_as(start, fmt)
+            stop_dt = parse_xmltv_as(stop, fmt)
         except ValueError:
             continue
         if stop_dt < start_dt:
@@ -612,10 +613,7 @@ class EpgManager:
         programs = epg.get(channel_id, [])
         # If unlimited requested and no windowing, return all entries sorted
         if (not max_programs or max_programs <= 0) and start_time is None:
-            return sorted(
-                programs,
-                key=lambda program: datetime.strptime(program["time"], "%Y-%m-%d %H:%M:%S"),
-            )
+            return sorted(programs, key=lambda program: parse_stb(program["time"]))
         if start_time is None:
             start_time = datetime.now()
         # Apply end-of-window limit based on config (0 = unlimited)
@@ -623,14 +621,14 @@ class EpgManager:
         end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
         filtered = []
         for program in programs:
-            p_start = datetime.strptime(program["time"], "%Y-%m-%d %H:%M:%S")
-            p_stop = datetime.strptime(program["time_to"], "%Y-%m-%d %H:%M:%S")
+            p_start = parse_stb(program["time"])
+            p_stop = parse_stb(program["time_to"])
             if p_start >= start_time or p_stop > start_time:
                 if end_time is None or p_start < end_time:
                     filtered.append(program)
                     if max_programs and max_programs > 0 and len(filtered) >= max_programs:
                         break
-        filtered.sort(key=lambda program: datetime.strptime(program["time"], "%Y-%m-%d %H:%M:%S"))
+        filtered.sort(key=lambda program: parse_stb(program["time"]))
         return filtered
 
     def _get_programs_for_channel_from_xmltv(self, channel_info, start_time, max_programs):
@@ -675,11 +673,11 @@ class EpgManager:
 
         # search the timezone used by programs by looking at the first/last program
         ref_time_str = epg[chosen_key][0]["@start"]
-        ref_time = datetime.strptime(ref_time_str, "%Y%m%d%H%M%S %z")
+        ref_time = parse_xmltv(ref_time_str)
         ref_timezone = ref_time.tzinfo
 
         ref_time_str1 = epg[chosen_key][-1]["@start"]
-        ref_time1 = datetime.strptime(ref_time_str1, "%Y%m%d%H%M%S %z")
+        ref_time1 = parse_xmltv(ref_time_str1)
         ref_timezone1 = ref_time1.tzinfo
         need_check_tz = ref_timezone1 != ref_timezone
 
@@ -698,12 +696,12 @@ class EpgManager:
         end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
         for entry in epg[chosen_key]:
             if need_check_tz:
-                tz = datetime.strptime(entry["@start"], "%Y%m%d%H%M%S %z").tzinfo
+                tz = parse_xmltv(entry["@start"]).tzinfo
                 start_time_str = start_time.astimezone(tz).strftime("%Y%m%d%H%M%S %z")
             if entry["@start"] >= start_time_str or entry["@stop"] > start_time_str:
                 if end_time is not None:
                     # Compare with end_time in the entry's timezone
-                    entry_start_dt = datetime.strptime(entry["@start"], "%Y%m%d%H%M%S %z")
+                    entry_start_dt = parse_xmltv(entry["@start"])
                     if entry_start_dt >= end_time.astimezone(entry_start_dt.tzinfo):
                         continue
                 programs.append(entry)
