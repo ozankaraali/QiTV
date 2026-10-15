@@ -33,6 +33,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 import logging
 import os
+import re
 import socket
 import ssl
 import sys
@@ -81,6 +82,15 @@ _STALE_TARGETS = 3
 _RECENT_SEGMENTS = 10
 _SEGMENT_FAILURES = 3
 _SKIPPABLE_STATUS = (404, 410)
+# Answers that mean the provider's stream limit is reached (spec 6.9), never retried; any other
+# 4xx counts when its body says so (the first _LIMIT_BODY_BYTES of it are read).
+_LIMIT_STATUS = (403, 429, 458, 509)
+_LIMIT_BODY_BYTES = 4096
+_LIMIT_WORDS = re.compile(
+    rb"connections?[\s_-]*limit|limit[\s_-]*of[\s_-]*connections|max(?:imum)?[\s_-]*connections"
+    rb"|too[\s_-]*many[\s_-]*connections",
+    re.IGNORECASE,
+)
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _IDENTITY = {"Accept-Encoding": "identity"}
 _WINDOWS = sys.platform == "win32"
@@ -105,6 +115,8 @@ _ENCRYPTION = "The HLS channel uses an unsupported encryption method."
 _UNDECRYPTABLE = "The HLS channel could not be decrypted."
 _NOT_TS = "The HLS channel's segments are not MPEG-TS."
 _FROZEN = "The channel's HLS playlist stopped advancing."
+# Shown in place of an "http" failure's message when the provider refused for its limit.
+STREAM_LIMIT = "The provider refused the stream: its connection limit is reached."
 
 _DEFAULT_MESSAGES = {
     "unsupported": _OPEN_FAILED,
@@ -205,6 +217,23 @@ def _identity(url: str) -> str:
 
 def _status(error: requests.exceptions.HTTPError) -> int | None:
     return error.response.status_code if error.response is not None else None
+
+
+def _refused_for_limit(response: Any) -> bool:
+    """Whether an error answer says the provider's connection limit is reached.
+
+    A 4xx body is read (bounded) only to look for those words: it never reaches a log.
+    """
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status in _LIMIT_STATUS:
+        return True
+    if not 400 <= status < 500:
+        return False
+    try:
+        body = response.raw.read1(_LIMIT_BODY_BYTES, decode_content=True) or b""
+    except Exception:
+        return False
+    return bool(_LIMIT_WORDS.search(body))
 
 
 def _sized(response: Any) -> bool:
@@ -587,6 +616,12 @@ class _Http:
             raise _Closed()
         try:
             response.raise_for_status()
+        except requests.exceptions.HTTPError as error:
+            limited = _refused_for_limit(response)
+            self.release(response)
+            if limited:
+                raise SourceError("http", STREAM_LIMIT, _status(error)) from None
+            raise
         except BaseException:
             self.release(response)
             raise

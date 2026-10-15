@@ -29,7 +29,13 @@ import ts_fixtures
 from urllib3.exceptions import InsecureRequestWarning
 
 from services.live import source as source_module
-from services.live.source import Discontinuity, SourceError, _scheme, open_source
+from services.live.source import (
+    STREAM_LIMIT,
+    Discontinuity,
+    SourceError,
+    _scheme,
+    open_source,
+)
 
 KEY = bytes(range(16))
 FAST_RETRIES = (0.01,) * 6
@@ -1148,6 +1154,32 @@ high.m3u8
                     self.assertEqual(raised.exception.status, 429)
         self.assertEqual(server.counts["/full.ts"], 1)
         self.assertEqual(server.counts["/b.ts"], 1)
+
+    def test_a_refusal_for_the_connection_limit_says_so_and_is_never_retried(self):
+        def answer(status, body=b""):
+            return lambda _request, _count: (status, {}, body)
+
+        cases = {
+            "/403.ts": (answer(403), True),
+            "/429.ts": (answer(429), True),
+            "/458.ts": (answer(458), True),
+            "/509.ts": (answer(509), True),
+            "/400.ts": (answer(400, b"<h1>Max connections reached for this line</h1>"), True),
+            "/401.ts": (answer(401, b"Your connection limit is exceeded"), True),
+            "/404.ts": (answer(404, b"Not found"), False),
+            "/500.ts": (answer(500, b"max connections"), False),  # only a 4xx body is read
+        }
+        server = self.server({path: route for path, (route, _limited) in cases.items()})
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            for path, (_route, limited) in cases.items():
+                with self.subTest(path=path):
+                    with self.assertRaises(SourceError) as raised:
+                        media(server.url + path)
+                    error = raised.exception
+                    self.assertEqual((error.kind, error.status), ("http", int(path[1:4])))
+                    self.assertEqual(str(error) == STREAM_LIMIT, limited)
+                    self.assertNotIn("127.0.0.1", str(error))
+        self.assertEqual(server.counts["/509.ts"], 1)  # a limit is never retried
 
     # ---- live HLS --------------------------------------------------------------------------
 
