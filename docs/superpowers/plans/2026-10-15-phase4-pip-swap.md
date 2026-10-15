@@ -98,8 +98,8 @@
 - **Initial state:** `main` is large and PiP is closed.
 - **`open_pip`:**
   - when PiP is already open, it re-tunes the PiP slot: stop its live session, release its ticket on `released`, then request again;
-  - otherwise it requests `budget.request(provider_name, budget.limit_for(provider, xtream_max), purpose="pip")`;
-  - when that would exceed the limit *with the main slot holding the only slot*, it emits `denied(limit)` and cancels the queued request. A PiP must never wait in the queue for the main stream to end;
+  - otherwise it calls `budget.request(provider_name, budget.limit_for(provider, xtream_max), purpose="pip", queue=False)`. The result `DENIED` means no slot is free (the main slot holds the only one): emit `denied(limit)` and open nothing — a PiP never waits in the queue;
+  - `granted` is always delivered later (the budget defers it), so wait for `granted` for the returned ticket before starting;
   - on `granted` for its ticket: `pip.live.start(**start_kwargs)` and `pip.playback.set_muted(True)`, then emit `pipStateChanged(True)`.
 - **`close_pip`:**
   - when the PiP slot is large, swap back first, so the main slot becomes large;
