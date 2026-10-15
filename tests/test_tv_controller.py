@@ -3095,6 +3095,17 @@ class LibraryTests(AutoplayCase):
         self.assertTrue(self.transport.named("dismiss") and self.banner.named("dismiss"))
         self.assertFalse(self.controller.vod_current())
 
+    def test_stop_for_library_gives_a_direct_plays_slot_back_once_vlc_let_go(self):
+        self.config.selected_provider_name = "Home"
+        self.play(0)  # a direct channel holds the main slot too (a PiP must see it taken)
+        budget = self.controller.budget
+        self.assertEqual(budget.holders("Home"), ["main"])
+        self.session.holding = True  # libVLC ends the provider's stream on its worker
+        self.controller.stop_for_library()
+        self.assertEqual(budget.holders("Home"), ["main"])  # still open upstream
+        self.session.let_go()
+        self.assertEqual(budget.holders("Home"), [])
+
     def test_stop_for_library_closes_the_next_card(self):
         films = [movie(1), movie(2)]
         self.controller.play_vod(films[0], "movie", play_context(genre_items=films))
