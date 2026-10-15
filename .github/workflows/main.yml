@@ -214,6 +214,7 @@ jobs:
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
+          QITV_GUI_TESTS: '1'  # tests that show real windows (a GUI session)
       - name: Smoke test
         if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
         run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline
@@ -285,6 +286,7 @@ jobs:
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
+          QITV_GUI_TESTS: '1'  # tests that show real windows (a GUI session)
       - name: Smoke test
         if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
         run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline

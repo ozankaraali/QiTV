@@ -1,4 +1,5 @@
 import ctypes
+import ctypes.util
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,25 @@ from ui.overlays.toast import Toast
 PARENT_VIEW, CHILD_VIEW = 101, 202
 PARENT_WINDOW, CHILD_WINDOW = 1001, 2002
 NORMAL_LEVEL = 0
+# Tests that show and activate real windows run only when asked (CI's macOS jobs do): they
+# take the focus from whoever uses the Mac, and the suite runs often on shared machines.
+GUI_TESTS_ENV = "QITV_GUI_TESTS"
+
+
+def gui_session() -> bool:
+    """Whether this process has a macOS window server session (none over SSH alone)."""
+    try:
+        cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics") or "")
+        cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreFoundation") or "")
+    except OSError:
+        return False
+    cg.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+    session = cg.CGSessionCopyCurrentDictionary()
+    if not session:
+        return False
+    cf.CFRelease(session)
+    return True
 
 
 class FakeObjC:
@@ -114,6 +134,10 @@ class HostShowTests(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == "darwin", "macOS animates a restore out of the Dock")
+@unittest.skipUnless(
+    os.environ.get(GUI_TESTS_ENV) == "1",
+    f"shows and activates a real window for about 5 s: set {GUI_TESTS_ENV}=1 to run it",
+)
 class DockRestoreTests(unittest.TestCase):
     """A real minimize and restore on the cocoa platform (tests/dock_fixtures.py).
 
@@ -124,6 +148,8 @@ class DockRestoreTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        if not gui_session():
+            raise unittest.SkipTest("no macOS GUI session (window server) to show a window in")
         child = Path(__file__).resolve().with_name("dock_fixtures.py")
         env = {**os.environ, "QT_QPA_PLATFORM": "cocoa"}
         run = subprocess.run(
