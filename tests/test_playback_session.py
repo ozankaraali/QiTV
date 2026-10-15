@@ -39,8 +39,9 @@ SLOW_STOP_S = 2.0
 
 def wait_for(predicate, timeout_ms=8000):
     # Short steps (timer_fixtures): one long QTest.qWait holds the GIL, and the workers that
-    # stop libVLC barely run during it.
-    return wait_until(predicate, timeout_ms)
+    # stop libVLC barely run during it. At least timer_fixtures' 10 s: a deadline in real time
+    # (the old loop counted its steps, so a stalled runner got longer).
+    return wait_until(predicate, max(timeout_ms, 10_000))
 
 
 def release_and_wait(test, session):
@@ -266,7 +267,7 @@ class PlaybackSessionTests(unittest.TestCase):
         # libVLC is stopped on a worker. Wait in short steps: one long QTest.qWait holds the
         # GIL throughout, so neither that worker nor the slow server's thread could run.
         self.assertTrue(wait_for(lambda: session._job is None, 6000))
-        wait_for(lambda: False, 2500)  # the slow answer has arrived by now
+        elapse(2500)  # the slow answer has arrived by now
         self.assertIsNone(session._player.get_media())
         self.assertNotIn(
             session._player.get_state(), (vlc.State.Opening, vlc.State.Playing, vlc.State.Buffering)

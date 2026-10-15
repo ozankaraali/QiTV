@@ -1438,14 +1438,14 @@ class TuningBannerTests(ControllerTestCase):
         self.assertTrue(self.banner.isVisible())
         self.assertEqual(self.banner.info.name, "One")
         self.ready()
-        self.assertTrue(wait_until(lambda: not self.banner.isVisible(), 2000))
+        self.assertTrue(wait_until(lambda: not self.banner.isVisible()))
 
     def test_the_banner_stays_until_the_link_fails(self):
         self.tune(0)
         elapse(800)  # well past the banner's own time and its fade
         self.assertTrue(self.banner.isVisible())
         self.catalog.linkFailed.emit(1, "Portal down")
-        self.assertTrue(wait_until(lambda: not self.banner.isVisible(), 2000))
+        self.assertTrue(wait_until(lambda: not self.banner.isVisible()))
 
     def test_a_dismissed_banner_is_not_brought_back(self):
         self.tune(0)
@@ -2173,7 +2173,7 @@ class ReleaseOrderTests(PipelineCase):
         self.session.holding = True
         with self.assertLogs("ui.live_tuner", "WARNING"):
             self.play_movie()
-            self.assertTrue(wait_until(lambda: len(self.played_urls()) == 2, 1000))
+            self.assertTrue(wait_until(lambda: len(self.played_urls()) == 2))
 
     def test_a_movie_after_a_movie_waits_for_the_first_to_end(self):
         self.play_movie()

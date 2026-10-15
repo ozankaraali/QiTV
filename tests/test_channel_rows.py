@@ -308,12 +308,12 @@ class ColumnTests(unittest.TestCase):
         elapse(600)
         self.assertTrue(col.isVisible())  # the pointer rests on it, about to click a row
         QTest.mouseMove(host.windowHandle(), QPoint(1000, 300))  # off the column
-        self.assertTrue(wait_until(lambda: not col.isVisible(), 1000))
+        self.assertTrue(wait_until(lambda: not col.isVisible()))
 
     def test_a_pointer_resting_where_the_column_opens_does_not_hold_it(self):
         host, col = self.hosted_column(idle_ms=200)
         QTest.mouseMove(host.windowHandle(), QPoint(200, 300))  # one event, no movement
-        self.assertTrue(wait_until(lambda: not col.isVisible(), 1000))
+        self.assertTrue(wait_until(lambda: not col.isVisible()))
 
     def test_row_click(self):
         host, col = self.make()

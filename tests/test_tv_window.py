@@ -607,7 +607,7 @@ class TVWindowTests(WindowCase):
         self.press_and_hold()
         self.assertFalse(drawer.isVisible())  # not while the button is still down
         QTest.mouseRelease(self.window.surface, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
-        self.assertTrue(wait_until(drawer.isVisible, 2000))
+        self.assertTrue(wait_until(drawer.isVisible))
 
     def test_the_first_click_after_the_mini_player_is_not_swallowed(self):
         self.show()
@@ -714,7 +714,7 @@ class TVWindowTests(WindowCase):
         waiting = [True]
         with mock.patch("ui.tv_window.has_pending_threads", side_effect=lambda: waiting[0]):
             self.assertFalse(self.window.close())
-            self.assertTrue(wait_until(lambda: (CLOSING_TEXT, "info") in self.toasts, 3000))
+            self.assertTrue(wait_until(lambda: (CLOSING_TEXT, "info") in self.toasts))
             for _ in range(3):  # stays up while the wait lasts
                 elapse(400)
                 self.assertTrue(toast.isVisible())
@@ -733,9 +733,7 @@ class TVWindowTests(WindowCase):
             mock.patch("ui.tv_window.CLOSING_NOTICE_MS", 200),
         ):
             self.assertFalse(self.window.close())
-            self.assertTrue(
-                wait_until(lambda: self.toasts.count((CLOSING_TEXT, "info")) >= 3, 5000)
-            )
+            self.assertTrue(wait_until(lambda: self.toasts.count((CLOSING_TEXT, "info")) >= 3))
             waiting[0] = False
             self.assertTrue(wait_until(lambda: not self.window.isVisible()))
         self.assertNotIn(True, shown_over)
@@ -778,7 +776,7 @@ class TVWindowTests(WindowCase):
             self.assertLogs("ui.tv_window", "WARNING") as logs,
         ):
             self.assertFalse(self.window.close())
-            self.assertTrue(wait_until(lambda: not self.window.isVisible(), 3000))
+            self.assertTrue(wait_until(lambda: not self.window.isVisible()))
         self.assertIn("EpgLoadWorker", "\n".join(logs.output))
         at_exit.register.assert_called_once_with(_exit_now)  # leaves without destroying it
 
@@ -984,13 +982,13 @@ class FullscreenExitTests(WindowCase):
             window.toggle_fullscreen()  # at once: the entry has not been reported yet
             self.assertEqual(asked, [True])
             self.assertTrue(
-                wait_until(lambda: asked == [True, False] and not window.isFullScreen(), 5000),
+                wait_until(lambda: asked == [True, False] and not window.isFullScreen()),
                 f"{asked}",
             )
             window.toggle_fullscreen()
             window.leave_fullscreen()  # Esc right after F: the entry is undone once reported
-            self.assertTrue(wait_until(lambda: asked[-1] is False and len(asked) == 4, 5000))
-            self.assertTrue(wait_until(lambda: not window.isFullScreen(), 5000))
+            self.assertTrue(wait_until(lambda: asked[-1] is False and len(asked) == 4))
+            self.assertTrue(wait_until(lambda: not window.isFullScreen()))
 
     def test_leaving_fullscreen_returns_inside_the_screen(self):
         # A display smaller than the window from before fullscreen (macOS put it off screen).
@@ -1022,9 +1020,7 @@ class FullscreenExitTests(WindowCase):
         self.assertTrue(wait_until(window.isFullScreen))
         window.setWindowState(window.windowState() & ~Qt.WindowState.WindowFullScreen)
         window.setGeometry(area.x(), area.y(), area.width() // 3, area.height() // 3)
-        self.assertTrue(
-            wait_until(lambda: window.geometry() == before, 4000), f"{window.geometry()}"
-        )
+        self.assertTrue(wait_until(lambda: window.geometry() == before), f"{window.geometry()}")
 
     def test_a_window_that_fits_comes_back_unchanged(self):
         self.show()
@@ -1176,7 +1172,7 @@ class LivePipelineWindowTests(WindowCase):
         hooks = [stop() for stop, _undo in update_checker._before_update]
         self.assertIn(window.stop_live, hooks)  # a later update stops it again
         # The channel plays again, time-shifted, on the new helper.
-        self.assertTrue(wait_until(lambda: modes[-1:] == ["pipeline"] and len(modes) == 2, 5000))
+        self.assertTrue(wait_until(lambda: modes[-1:] == ["pipeline"] and len(modes) == 2))
         self.assertEqual(window.zap.context.current()["name"], "Channel 1")
 
     def test_pip_plays_two_channels_at_once_and_a_swap_restarts_neither(self):
@@ -1217,14 +1213,12 @@ class LivePipelineWindowTests(WindowCase):
         transport = window.overlays.transport
         window.controller.mouse_moved()  # the transport shows: the PiP rises above it
         self.assertTrue(transport.isVisible())
-        self.assertTrue(
-            wait_until(lambda: frame.small_rect().bottom() < transport.controls_top(), 2000)
-        )
+        self.assertTrue(wait_until(lambda: frame.small_rect().bottom() < transport.controls_top()))
         raised = frame.small_rect()
         self.assertEqual(label.geometry(), raised)
         self.assertFalse(window.host.mask().contains(raised.center()))  # clicks reach it
         transport.dismiss()
-        self.assertTrue(wait_until(lambda: frame.small_rect() == small, 2000))
+        self.assertTrue(wait_until(lambda: frame.small_rect() == small))
         mixer = window.mixer
         QTest.keyClick(self.window, Qt.Key.Key_Minus)  # the mixer: a row per picture
         self.assertTrue(mixer.isVisible())
@@ -1235,7 +1229,7 @@ class LivePipelineWindowTests(WindowCase):
         self.assertEqual(mixer.selected(), 1)
         QTest.keyClick(self.window, Qt.Key.Key_Escape)
         self.assertFalse(mixer.isVisible())
-        self.assertTrue(wait_until(lambda: frame.small_rect() == small, 2000))
+        self.assertTrue(wait_until(lambda: frame.small_rect() == small))
         counts = (plays["main"].call_count, plays["pip"].call_count)
 
         QTest.keyClick(self.window, Qt.Key.Key_S)
@@ -1380,7 +1374,7 @@ class LibraryWindowTests(TwoProviderCase):
         default = Path.home() / "Downloads" / f"{PROVIDER_NAME}-cached.m3u"
         self.assertEqual(ask.call_args[0][1:], ("Export", str(default), "M3U files (*.m3u)"))
         done = ("Exported 2 items to channels.m3u", "info")
-        self.assertTrue(wait_until(lambda: done in self.toasts, 5000), self.toasts)
+        self.assertTrue(wait_until(lambda: done in self.toasts), self.toasts)
         text = target.read_text(encoding="utf-8")
         self.assertEqual(text.count("#EXTINF"), 2)
         self.assertIn(channel_urls()[0], text)

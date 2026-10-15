@@ -387,7 +387,7 @@ class LostDragAndRepaintTests(unittest.TestCase):
         host.hide()
         host.show()
         transport.poke()
-        self.assertTrue(wait_until(lambda: not transport.isVisible(), 1000))
+        self.assertTrue(wait_until(lambda: not transport.isVisible()))
         self.assertEqual(seeks.count(), 0)
         QTest.mouseRelease(transport, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))
 
@@ -404,7 +404,7 @@ class LostDragAndRepaintTests(unittest.TestCase):
             Qt.KeyboardModifier.NoModifier,
         )
         QApplication.sendEvent(transport, moved)
-        self.assertTrue(wait_until(lambda: not transport.isVisible(), 1000))
+        self.assertTrue(wait_until(lambda: not transport.isVisible()))
         self.assertEqual(seeks.count(), 0)
         QTest.mouseRelease(transport, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))
 
@@ -426,7 +426,7 @@ class LostDragAndRepaintTests(unittest.TestCase):
         transport.dismiss()
         counter = _PaintCounter(transport)
         transport.poke()
-        self.assertTrue(wait_until(lambda: counter.paints > 0, 1000))
+        self.assertTrue(wait_until(lambda: counter.paints > 0))
 
 
 class MiniPlayerLayoutTests(unittest.TestCase):
