@@ -10,6 +10,7 @@ import gzip
 import logging
 import ntpath
 from pathlib import Path
+import re
 import shutil
 import socket
 import ssl
@@ -37,6 +38,19 @@ FAST_RETRIES = (0.01,) * 6
 
 def encrypt(data, iv, key=KEY):
     return AES.new(key, AES.MODE_CBC, iv=iv).encrypt(pad(data, 16))
+
+
+class TokenRoutes(dict):
+    """Routes that ignore a rotating ``/tok<N>`` path prefix and the query string."""
+
+    def get(self, path, default=None):
+        return super().get(re.sub(r"^/tok\d+", "", path.split("?")[0]), default)
+
+
+def requested_segments(server):
+    """Segment names in request order, without rotating tokens or queries."""
+    paths = (path.split("?")[0] for path, _headers in server.requests)
+    return [re.sub(r"^/tok\d+", "", path)[1:] for path in paths if path.endswith(".ts")]
 
 
 def hls(sequence, names, *, target=1, ended=False, extra=""):
@@ -1068,24 +1082,121 @@ high.m3u8
                 self.assertEqual(requested, fetched)
 
     def test_a_stale_playlist_copy_is_waited_out(self):
-        copies = [
-            hls(10, ["a.ts", "b.ts", "c.ts"]),
-            hls(9, ["z.ts", "a.ts", "b.ts"]),  # an older CDN copy: lags behind, overlaps
-            hls(11, ["b.ts", "c.ts", "d.ts"], ended=True),
-        ]
+        # The second copy lags behind and overlaps: an older copy from a lagging CDN node.
+        shapes = [(10, "abc", False), (9, "zab", False), (11, "bcd", True)]
+        cases = (
+            ("static names", False, (None, None, None)),
+            ("rotating tokens", True, (None, None, None)),
+            ("lower discontinuity sequence", False, (5, 4, 5)),
+        )
+        for case, tokens, discontinuities in cases:
+            with self.subTest(case):
+
+                def playlist(_request, count, tokens=tokens, discontinuities=discontinuities):
+                    sequence, letters, ended = shapes[min(count, 3) - 1]
+                    names = [f"{letter}.ts" for letter in letters]
+                    if tokens:
+                        names = [f"tok{count}/{name}?token={count}" for name in names]
+                    discontinuity = discontinuities[min(count, 3) - 1]
+                    extra = ""
+                    if discontinuity is not None:
+                        extra = f"#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity}\n"
+                    return 200, {}, hls(sequence, names, ended=ended, extra=extra)
+
+                routes = TokenRoutes({f"/{name}.ts": (200, {}, self.video) for name in "abcz"})
+                routes["/d.ts"] = (200, {}, self.next_video)
+                routes["/live.m3u8"] = playlist
+                server = self.server(routes)
+                parts = media(server.url + "/live.m3u8", live_delay=100.0)
+                self.assertEqual(parts, [self.video * 3 + self.next_video])
+                self.assertEqual(requested_segments(server), ["a.ts", "b.ts", "c.ts", "d.ts"])
+                self.assertEqual(server.counts["/live.m3u8"], 3)
+
+    def test_an_empty_playlist_copy_is_waited_out(self):
+        window = [f"w{number}.ts" for number in range(10)]
 
         def playlist(_request, count):
-            return 200, {}, copies[min(count, 3) - 1]
+            if count == 1:
+                return 200, {}, hls(100, window)
+            if count == 2:
+                return 200, {}, hls(100, [])
+            return 200, {}, hls(101, window[1:] + ["w10.ts"], ended=True)
 
-        routes = {f"/{name}.ts": (200, {}, self.video) for name in "abcz"}
-        routes["/d.ts"] = (200, {}, self.next_video)
+        routes = {f"/{name}": (200, {}, self.video) for name in window}
+        routes["/w10.ts"] = (200, {}, self.next_video)
         routes["/live.m3u8"] = playlist
         server = self.server(routes)
-        parts = media(server.url + "/live.m3u8", live_delay=100.0)
-        self.assertEqual(parts, [self.video * 3 + self.next_video])
-        requested = [path[1:] for path, _headers in server.requests if path.endswith(".ts")]
-        self.assertEqual(requested, ["a.ts", "b.ts", "c.ts", "d.ts"])
-        self.assertEqual(server.counts["/live.m3u8"], 3)
+        parts = media(server.url + "/live.m3u8", live_delay=1.0)
+        self.assertEqual(parts, [self.video + self.next_video])
+        self.assertEqual(requested_segments(server), ["w9.ts", "w10.ts"])
+
+    def test_a_lagging_copy_that_persists_counts_as_a_restart(self):
+        def playlist(_request, count):
+            if count == 1:
+                return 200, {}, hls(10, ["a.ts", "b.ts", "c.ts"])
+            # The sequence went back but the names overlap: stale, until it persists.
+            return 200, {}, hls(0, ["b.ts", "c.ts", "d.ts"], ended=count >= 5)
+
+        server = self.server(
+            {
+                "/live.m3u8": playlist,
+                "/c.ts": (200, {}, self.video),
+                "/d.ts": (200, {}, self.next_video),
+            }
+        )
+        with patch.object(source_module, "_STALE_TARGETS", 1):  # one target duration
+            parts = media(server.url + "/live.m3u8", live_delay=1.0)
+        self.assertEqual(parts, [self.video, Discontinuity(), self.next_video])
+        self.assertEqual(requested_segments(server), ["c.ts", "d.ts"])
+
+    def test_falling_behind_the_window_resumes_at_the_live_start(self):
+        def playlist(_request, count):
+            if count == 1:
+                return 200, {}, hls(10, ["s10.ts"])
+            if count == 2:
+                return 200, {}, hls(13, ["s13.ts", "s14.ts", "s15.ts", "s16.ts"])
+            return 200, {}, hls(14, ["s14.ts", "s15.ts", "s16.ts", "s17.ts"], ended=True)
+
+        server = self.server(
+            {
+                "/live.m3u8": playlist,
+                "/s10.ts": (200, {}, self.video),
+                "/s16.ts": (200, {}, self.next_video),
+                "/s17.ts": (200, {}, self.video),
+            }
+        )
+        parts = media(server.url + "/live.m3u8", live_delay=1.0)
+        self.assertEqual(parts, [self.video, Discontinuity(), self.next_video + self.video])
+        self.assertEqual(requested_segments(server), ["s10.ts", "s16.ts", "s17.ts"])
+
+    def test_a_stalled_segment_is_skipped_while_the_playlist_advances(self):
+        release = threading.Event()
+        head = self.video[: 188 * 100]
+
+        def stalled(request):
+            request.wfile.write(head)
+            request.wfile.flush()
+            release.wait(10)
+
+        def playlist(_request, count):
+            return 200, {}, hls(count, [f"s{count}.ts"], ended=count >= 4)
+
+        server = self.server(
+            {
+                "/live.m3u8": playlist,
+                "/s1.ts": (200, {}, self.video),
+                "/s2.ts": (200, {"Content-Length": str(len(self.video))}, stalled),
+                "/s3.ts": (200, {}, self.next_video),
+                "/s4.ts": (200, {}, self.video),
+            }
+        )
+        # As in production, a segment read may time out exactly as late as the frozen timer.
+        try:
+            with patch.multiple(source_module, _TIMEOUT=1.0, _FROZEN_TIMEOUT=1.0):
+                parts = media(server.url + "/live.m3u8", live_delay=1.0)
+        finally:
+            release.set()
+        self.assertEqual(parts, [self.video + head, Discontinuity(), self.next_video + self.video])
 
     def test_a_frozen_live_playlist_times_out(self):
         server = self.server(
@@ -1132,6 +1243,48 @@ high.m3u8
         self.assertEqual(server.counts["/gone.ts"], 1)
         self.assertEqual(server.counts["/expired.ts"], 1)
         self.assertEqual(server.counts["/hole.ts"], 0)
+
+    def test_a_missing_key_or_a_segment_that_exhausts_its_retries_is_skipped(self):
+        zero = "IV=0x" + "0" * 32
+        text = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\na.ts\n"
+            f'#EXT-X-KEY:METHOD=AES-128,URI="gone.key",{zero}\n#EXTINF:4,\nlocked.ts\n'
+            "#EXT-X-KEY:METHOD=NONE\n#EXTINF:4,\nb.ts\n#EXTINF:4,\nbusy.ts\n"
+            "#EXTINF:4,\nc.ts\n#EXT-X-ENDLIST\n"
+        )
+        server = self.server(
+            {
+                "/channel.m3u8": (200, {}, text.encode()),
+                "/a.ts": (200, {}, self.video),
+                "/locked.ts": (200, {}, encrypt(self.video, bytes(16))),
+                "/b.ts": (200, {}, self.next_video),
+                "/busy.ts": (503, {}, b""),
+                "/c.ts": (200, {}, self.video),
+            }
+        )  # gone.key is not routed: 404
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            parts = media(server.url + "/channel.m3u8")
+        mark = Discontinuity()
+        self.assertEqual(parts, [self.video, mark, self.next_video, mark, self.video])
+        self.assertEqual(server.counts["/gone.key"], 1)
+        self.assertEqual(server.counts["/locked.ts"], 0)
+        self.assertEqual(server.counts["/busy.ts"], 7)
+
+    def test_adjacent_segment_failures_give_one_marker(self):
+        text = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\na.ts\n#EXTINF:4,\ngone.ts\n"
+            "#EXTINF:4,\npage.ts\n#EXTINF:4,\nb.ts\n#EXT-X-ENDLIST\n"
+        )
+        server = self.server(
+            {
+                "/channel.m3u8": (200, {}, text.encode()),
+                "/a.ts": (200, {}, self.video),
+                "/page.ts": (200, {}, b"<html>busy</html>" * 20),
+                "/b.ts": (200, {}, self.next_video),
+            }
+        )
+        parts = media(server.url + "/channel.m3u8")
+        self.assertEqual(parts, [self.video, Discontinuity(), self.next_video])
 
     def test_bad_segments_after_the_first_delivery_are_skipped(self):
         zero = "IV=0x" + "0" * 32
@@ -1230,7 +1383,12 @@ high.m3u8
 
     def test_only_the_user_agent_reaches_other_origins_and_referer_stays_with_the_entry(self):
         cdn = self.server({"/segment/a.ts": (200, {}, self.video)})
-        hop = self.server({"/live.m3u8": (200, {}, leaf(cdn.url + "/segment/a.ts"))})
+
+        def live(_request, count):
+            names = [cdn.url + "/segment/a.ts"] + (["b.ts"] if count > 1 else [])
+            return 200, {}, hls(0, names, ended=count > 1)
+
+        hop = self.server({"/live.m3u8": live, "/b.ts": (200, {}, self.next_video)})
         entry = self.server({"/play": (302, {"Location": hop.url + "/live.m3u8"}, b"")})
         headers = {
             "User-Agent": "Provider/3.0",
@@ -1243,7 +1401,8 @@ high.m3u8
             "Connection": "close",
             "Content-Length": "5",
         }
-        self.assertEqual(media(entry.url + "/play", headers=headers), [self.video])
+        parts = media(entry.url + "/play", headers=headers)
+        self.assertEqual(parts, [self.video + self.next_video])
         for server in (entry, hop, cdn):
             for _path, received in server.requests:
                 self.assertEqual(received["User-Agent"], "Provider/3.0")
@@ -1251,9 +1410,13 @@ high.m3u8
                     self.assertNotIn(name, received)
                 self.assertTrue(received["Host"].startswith("127.0.0.1:"))
                 self.assertNotEqual(received.get("Connection"), "close")
-        # The entry request and its redirect hops carry the Referer; other origins do not.
+        # The entry, its redirect hop and the final media playlist's origin (here the hop:
+        # reloads and segments) carry the Referer; other origins do not.
         self.assertEqual(entry.requests[0][1].get("Referer"), "http://portal.invalid/")
-        self.assertEqual(hop.requests[0][1].get("Referer"), "http://portal.invalid/")
+        hop_paths = [path for path, _received in hop.requests]
+        self.assertEqual(hop_paths, ["/live.m3u8", "/live.m3u8", "/b.ts"])
+        for _path, received in hop.requests:
+            self.assertEqual(received.get("Referer"), "http://portal.invalid/")
         self.assertNotIn("Referer", cdn.requests[0][1])
 
     def test_keep_alive_connections_are_reused_for_reloads_and_segments(self):

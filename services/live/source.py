@@ -146,6 +146,10 @@ class _NotPlaylist(Exception):
     """A playlist URL answered with something else: unsupported at open, retried on reload."""
 
 
+class _Exhausted(Exception):
+    """A request kept failing through the whole reconnect schedule."""
+
+
 class _BadSegment(Exception):
     """One segment's content is unusable (not TS, undecryptable, a bad key or IV)."""
 
@@ -164,6 +168,11 @@ def _origin(url: str) -> tuple[str, str, int | None]:
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
     return scheme, (parts.hostname or "").lower(), parts.port or _DEFAULT_PORTS.get(scheme)
+
+
+def _identity(url: str) -> str:
+    """A segment's name without rotating tokens: the last path component, no query."""
+    return urlsplit(url).path.rsplit("/", 1)[-1]
 
 
 def _status(error: requests.exceptions.HTTPError) -> int | None:
@@ -307,6 +316,8 @@ def _translate(error: BaseException) -> SourceError:
         return SourceError("timeout")
     if isinstance(error, _ReadError):
         return SourceError("network", _RECEIVE_FAILED)
+    if isinstance(error, _Exhausted):
+        return SourceError("network", _RECEIVE_FAILED)
     if isinstance(error, _NotPlaylist):
         return SourceError("unsupported", _INVALID_PLAYLIST)
     if isinstance(error, _BadSegment):
@@ -352,7 +363,7 @@ class _Http:
         provided = {name.lower(): value for name, value in headers.items() if value}
         self.user_agent = provided.get("user-agent") or DEFAULT_USER_AGENT
         self._referer = provided.get("referer")
-        self._entry = _origin(url)
+        self._entries = {_origin(url)}
         self.session = requests.Session()
         adapter = _InterruptibleAdapter(self._interrupter)
         self.session.mount("http://", adapter)
@@ -375,7 +386,7 @@ class _Http:
             raise _Closed()
         self._owner = threading.get_ident()
         sent = dict(headers or {})
-        if self._referer and _origin(url) == self._entry:
+        if self._referer and _origin(url) in self._entries:
             sent["Referer"] = self._referer  # requests keeps it across this request's hops
         try:
             response = self.session.get(
@@ -402,6 +413,10 @@ class _Http:
             self.release(response)
             raise
         return response
+
+    def add_entry(self, url: str) -> None:
+        """Send the Referer to ``url``'s origin too (the media playlist found at open)."""
+        self._entries.add(_origin(url))
 
     def release(self, response: Any) -> None:
         with self._lock:
@@ -466,7 +481,7 @@ class _Http:
                     len(_RECONNECT_DELAYS),
                     type(error).__name__,
                 )
-        raise SourceError("network", _RECEIVE_FAILED)
+        raise _Exhausted()
 
     def fetch(self, attempt: Callable[[], _T]) -> _T:
         """``attempt`` now, retried with the reconnect delays after a transient failure."""
@@ -790,6 +805,23 @@ class _Decryptor:
         raise _BadSegment(_UNDECRYPTABLE)
 
 
+def _skippable(error: Exception) -> tuple[SourceError, bool] | None:
+    """How a segment's key or request failure is skipped (failure, is-content), if it can be.
+
+    A missing segment or key (404/410), a request that used up its reconnect schedule and
+    damaged content are skippable; anything else ends the session.
+    """
+    if isinstance(error, _BadSegment):
+        return SourceError("unsupported", error.message), True
+    if isinstance(error, _Exhausted):
+        return SourceError("network", _RECEIVE_FAILED), False
+    if isinstance(error, requests.exceptions.HTTPError):
+        status = _status(error)
+        if status in _SKIPPABLE_STATUS:
+            return SourceError("http", status=status), False
+    return None
+
+
 def _require_ts(data: bytes) -> None:
     if data[0] != 0x47 or (len(data) > _PACKET and data[_PACKET] != 0x47):
         raise _BadSegment(_NOT_TS)
@@ -818,10 +850,12 @@ def _checked_ts(blocks: Iterator[bytes]) -> Iterator[bytes]:
 class HlsSource:
     """HLS of MPEG-TS segments: live reloads, AES-128 and discontinuity markers.
 
-    Live failures are survived where a player would survive them: a missing (404/410),
-    gap-tagged or damaged segment is skipped with a marker (three failures in a row end the
-    session), a stale playlist copy is waited out and a media-sequence restart resumes at
-    the new live start. A playlist without a new segment for 60 s times out.
+    Live failures are survived where a player would survive them:
+    - a missing (404/410), gap-tagged, damaged or persistently failing segment (or key) is
+      skipped with a marker; three failures in a row end the session;
+    - a stale playlist copy is waited out; a media-sequence restart, or falling behind the
+      window, resumes at the live start;
+    - reloads that bring no new segment for 60 s (download time excluded) time out.
     """
 
     def __init__(self, http: _Http, playlist: Any, url: str, live_delay: float) -> None:
@@ -868,11 +902,18 @@ class HlsSource:
 
     def _restarted(self, playlist: Any, base: str, stalled: float) -> bool:
         """For a playlist whose newest segment is older than the last one fetched: whether
-        the stream restarted (True) or a lagging server sent a stale copy (False)."""
-        if playlist.discontinuity_sequence != self._discontinuity_sequence:
-            return True
-        names = {_resolve(base, segment.uri) for segment in playlist.segments}
+        the stream restarted (True) or a lagging server sent a stale copy (False).
+
+        Segments are compared by name without rotating tokens (path prefix, query). An
+        empty copy, or one with a lower discontinuity sequence, is stale; ``stalled`` is the
+        time since the last reload that brought new segments finished downloading them.
+        """
+        if not playlist.segments:
+            return False
+        names = {_identity(_resolve(base, segment.uri)) for segment in playlist.segments}
         if names.isdisjoint(self._recent):
+            return True
+        if (playlist.discontinuity_sequence or 0) > (self._discontinuity_sequence or 0):
             return True
         return stalled >= _STALE_TARGETS * float(playlist.target_duration or 1)
 
@@ -887,9 +928,10 @@ class HlsSource:
             if next_sequence is None:
                 next_sequence = first + self._start(playlist)
             elif first > next_sequence:
-                log.info("The HLS playlist skipped %d segments.", first - next_sequence)
+                # Fell behind the window: rejoin at the live start, not the oldest segment.
+                log.info("The HLS playlist moved past %d segments.", first - next_sequence)
                 self._mark()
-                next_sequence = first
+                next_sequence = first + self._start(playlist)
             elif newest < next_sequence - 1:
                 stale = not self._restarted(playlist, url, loaded - progress)
                 if not stale:
@@ -898,8 +940,10 @@ class HlsSource:
                     next_sequence = first + self._start(playlist)
             if not stale:
                 self._discontinuity_sequence = playlist.discontinuity_sequence
-            if newest >= next_sequence:
-                progress = loaded
+            fresh = newest >= next_sequence
+            # Frozen time runs between reloads only, never while segments download.
+            if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
+                raise SourceError("timeout", _FROZEN)
             for index, segment in enumerate(playlist.segments):
                 sequence = first + index
                 if sequence < next_sequence:
@@ -912,10 +956,10 @@ class HlsSource:
                     self._mark()
                     continue
                 yield from self._segment(segment, sequence, url)
+            if fresh:
+                progress = time.monotonic()
             if playlist.is_endlist:
                 return
-            if time.monotonic() - progress >= _FROZEN_TIMEOUT:
-                raise SourceError("timeout", _FROZEN)
             interval = max(1.0, float(playlist.target_duration or 0) / 2)
             if http.wait(interval - (time.monotonic() - loaded)):
                 raise _Closed()
@@ -926,29 +970,25 @@ class HlsSource:
 
     def _segment(self, segment: Any, sequence: int, base: str) -> Iterator[bytes | Discontinuity]:
         uri = _resolve(base, segment.uri)
-        self._recent.append(uri)
+        self._recent.append(_identity(uri))
+        skipped: tuple[SourceError, bool] | None = None
         try:
             decryptor = self._decryptor(segment.key, sequence, base)
-        except _BadSegment as error:
-            self._skip(SourceError("unsupported", error.message), content=True)
-            return
-        status: int | None = None
-        try:
             response = self._http.fetch(lambda: self._http.get(uri, headers=_IDENTITY))
-        except requests.exceptions.HTTPError as error:
-            status = _status(error)
-            if status not in _SKIPPABLE_STATUS:
+        except Exception as error:
+            skipped = _skippable(error)
+            if skipped is None:
                 raise
-        if status is not None:
-            self._skip(SourceError("http", status=status))
+        if skipped is not None:
+            self._skip(*skipped)
             return
         failure: SourceError | None = None
         content = False
         try:
-            if self._pending:
-                self._pending = False
-                yield Discontinuity()
             for block in _checked_ts(self._blocks(response, decryptor)):
+                if self._pending:  # only ever right before bytes that really arrive
+                    self._pending = False
+                    yield Discontinuity()
                 self._started = True
                 yield block
         except _ReadError as error:
@@ -961,9 +1001,9 @@ class HlsSource:
             self._failures = 0
             self._delivered = True
         else:
-            self._skip(failure, content=content)
+            self._skip(failure, content)
 
-    def _skip(self, failure: SourceError, *, content: bool = False) -> None:
+    def _skip(self, failure: SourceError, content: bool = False) -> None:
         """Skip a segment with a marker, or end the session: on bad content before any
         segment arrived whole (it is unsupported), and on a third failure in a row."""
         self._failures += 1
@@ -1022,6 +1062,7 @@ def _open_http(http: _Http, url: str, live_delay: float) -> Source:
         raise
     http.release(response)
     playlist, base = _media_playlist(http, content, final)
+    http.add_entry(base)  # reloads and same-origin segments keep the provider's Referer
     return HlsSource(http, playlist, base, live_delay)
 
 
@@ -1038,8 +1079,10 @@ def open_source(
 
     Provider ``headers``: only ``User-Agent`` (default ``VLC/3.0.20``) and ``Referer`` are
     used. The User-Agent goes with every request. The Referer goes only with requests to
-    the entry URL's origin (scheme, host and port) and those requests' redirect hops.
-    Every other provider header (Host, Range, Connection, Content-Length, Cookie,
+    an entry origin (scheme, host and port) and those requests' redirect hops; the entry
+    origins are the URL's own and, for HLS, that of the media playlist reached at open
+    (so reloads and same-origin segments keep it after a cross-origin redirect). Every
+    other provider header (Host, Range, Connection, Content-Length, Cookie,
     Authorization, ...) is dropped.
 
     A live HLS session starts at the first segment from which the playlist's remaining
