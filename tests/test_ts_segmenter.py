@@ -947,6 +947,20 @@ class SegmenterTests(unittest.TestCase):
         # The PTS stayed continuous: the segment before the marker keeps its exact end.
         self.assertEqual(closes(events)[1].next_first_pts, 900000 + 3 * CLOCK)
 
+    def test_a_reconnect_mid_packet_never_forwards_a_spliced_packet(self):
+        # The old connection broke 77 bytes into packet 300 (video): those bytes must not be
+        # joined with the new connection's first bytes into one forwarded packet.
+        old = fx.make_stream(3)
+        new = fx.make_stream(3, pts_start=900000 + 30 * CLOCK)
+        cut = PACKET * 300 + 77
+        self.assertEqual(pid_of(old[PACKET * 300 :]), fx.VIDEO_PID)
+        seg = Segmenter(clock=lambda: 0.0)
+        events = seg.feed(old[:cut])
+        seg.discontinuity()
+        events += seg.feed(new) + seg.finish()
+        first = pusi_offset(old, fx.VIDEO_PID, 900000)
+        self.assertEqual(payload(events), old[first : PACKET * 300] + new)
+
     def test_no_program_tables_within_3_mib_is_unsupported(self):
         null = bytes([0x47, 0x1F, 0xFF, 0x10]) + b"\xff" * 184
         seg = Segmenter(clock=lambda: 0.0)

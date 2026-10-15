@@ -196,9 +196,16 @@ class Segmenter:
         return self._wall
 
     def discontinuity(self) -> None:
-        """Mark the next cut as a discontinuity (the source restarted its timestamps)."""
+        """Mark the next cut as a discontinuity (the source restarted its timestamps).
+
+        The input starts afresh: a partial packet the old input left is dropped, and the next
+        packet start must be proven again, so no packet joins the two inputs.
+        """
         self._latch()
         self._media_ref = None  # measure the new content's age from its first PTS
+        self._pos += len(self._buf)
+        self._buf = b""
+        self._searching = True
 
     def feed(self, chunk: bytes) -> list[Event]:
         """Consume input bytes; raises `Unsupported` for input that cannot be segmented."""
