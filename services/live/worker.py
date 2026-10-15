@@ -16,10 +16,15 @@ Commands (parent to helper):
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
 additions)`; `("ready", sid)` once the first segment is open (its state comes first);
 `("error", sid, kind, message)`; `("ended", sid)`; `("closed", sid)`. Error messages are
-fixed strings. `kind` is a `SourceError` kind ("unsupported", "network", "tls", "timeout",
-"http"; "unsupported" also for input the segmenter or the RAM ring cannot take), "internal",
-or "disk": the disk ring failed and the session goes on in RAM, the only non-final error.
-After a final error or the end of the input the buffer stays playable until "close".
+fixed strings. `kind`, one meaning each:
+- a `SourceError` kind ("unsupported", "network", "tls", "timeout", "http"; "unsupported"
+  also for input the segmenter or the RAM ring cannot take): the input ended for good;
+- "crashed": this session failed unexpectedly while the helper stays up (also the reply to
+  a malformed or duplicate "open", and, with sid None, to a malformed command);
+- "disk": the disk ring failed and the session goes on in RAM, the only non-final error.
+The helper never sends "internal": that is the parent's report of the helper's death. When
+the command loop itself fails, the sessions are cancelled without a message and the helper
+exits. After a final error or the end of the input the buffer stays playable until "close".
 
 Messages leave through one queue and one writer thread, the only caller of `conn.send`:
 the pipe buffers a few KiB, and a parent that stops reading for a while must never block
@@ -236,7 +241,7 @@ class _Session:
             except BaseException as error:
                 _LOG.warning("A live session failed unexpectedly (%s).", type(error).__name__)
                 with contextlib.suppress(_Cancelled):
-                    self._fail("internal", _INTERNAL)
+                    self._fail("crashed", _INTERNAL)
             finally:
                 self._close_source()
             # Keep serving the buffer until the parent closes the session.
@@ -501,7 +506,7 @@ class _Helper:
             if name in ("open", "close"):
                 if len(command) != (7 if name == "open" else 2) or not isinstance(command[1], str):
                     # A plain reply: a malformed session id is never echoed back.
-                    self.send(("error", None, "internal", _INTERNAL))
+                    self.send(("error", None, "crashed", _INTERNAL))
                 elif name == "open":
                     self._open(*command[1:])
                 else:
@@ -524,7 +529,7 @@ class _Helper:
         live_delay: float,
     ) -> None:
         if not _SESSION_ID.fullmatch(sid) or sid in self._sessions:
-            self.send(("error", sid, "internal", _INTERNAL))
+            self.send(("error", sid, "crashed", _INTERNAL))
             return
         session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay)
         self._sessions[sid] = session
@@ -538,12 +543,13 @@ class _Helper:
         self.send(("closed", sid))
 
     def fail_all(self) -> None:
-        """The command loop failed: report it for every open session before exiting."""
-        sessions = list(self._sessions.values())
-        for session in sessions:
-            session.cancel()  # nothing of a session follows its "internal" error
-        for session in sessions:
-            self.send(("error", session.sid, "internal", _INTERNAL))
+        """The command loop failed: cancel every session, silently, before exiting.
+
+        The helper is going down: its parent reports that ("down", then "internal" for each
+        session still reading), and a failure sent from here would arrive before "down".
+        """
+        for session in self._sessions.values():
+            session.cancel()
 
     def shutdown(self) -> None:
         sessions = list(self._sessions.values())

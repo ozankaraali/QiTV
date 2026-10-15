@@ -12,25 +12,33 @@ argv, the receive loop that treats `EOFError` or `BrokenPipeError` from either `
 `recv()` as the helper's exit, the failed flag that keeps a failure the helper reported from
 being reported again, and the join -> terminate -> kill escalation with 0.5 s graces.
 
-Helper death (spec: restart once, then fall back): every session it held whose input was
-still running gets one `sessionFailed(sid, "internal", ...)` (none when that session had
-already ended or reported a final error), its spans are dropped, every buffer directory
-handed out is removed, and the helper is restarted. A helper that sends no `hello` within
-30 s counts as dead too, and so does one that cannot be started at all. On the new helper's
-`hello`, the sessions the GUI has not closed are reopened with the same arguments: a fresh
-directory if the old one could not be removed, RAM if the disk already failed. Then
-`available(True)` follows. `is_available()` is False in between, without a signal. A second
-death emits `available(False)` for the rest of the run, and every later open fails at once.
+Helper death (spec: restart once, then fall back): `is_available()` turns False (no
+signal), then every session it held whose input was still running gets one
+`sessionFailed(sid, "internal", ...)` (none when that session had already ended or reported
+a final error), its spans are dropped, every buffer directory handed out is removed, and the
+helper is restarted. A helper that sends no `hello` within 30 s counts as dead too, and so
+does one that cannot be started at all. On the new helper's `hello`, the sessions the GUI has
+not closed are reopened with the same arguments: a fresh directory if the old one could not
+be removed, RAM if the disk already failed. Then `available(True)` follows. A second death
+emits `available(False)` for the rest of the run, and every later open fails at once.
 
-A session whose input is over (it ended, or its source failed for good) is not reopened, so
-a restart never opens a second provider connection behind the GUI's back. It stays known
+A session whose input is over (it ended, or it failed for good) is not reopened, so a
+restart never opens a second provider connection behind the GUI's back. It stays known
 until `close_session`; its buffer is gone after a death, but it hears nothing about it.
 
-Contract per sid: after `sessionEnded`, or after a final `sessionFailed` (any kind except
-"disk" and "internal"), only `sessionClosed` follows. "internal" always means a reopen
-follows on `available(True)`, unless `available(False)` comes instead.
-`sessionFailed(sid, "disk", ...)` is the one other non-final failure: the session goes on
-in RAM.
+`sessionFailed(sid, kind, message)` carries a fixed message; each kind has one meaning:
+- "disk": a notice, the only non-final kind. The disk buffer failed; the session goes on in
+  RAM, and so does a reopen.
+- "unsupported", "network", "tls", "timeout", "http": the input ended for good (the stream
+  cannot be time-shifted, or the source gave up). Final; the buffer stays playable.
+- "crashed": the helper failed this session unexpectedly while staying up. Final.
+- "internal": only from the engine, only for a helper death, and only after it went down
+  (`is_available()` is already False). The session is reopened under the same sid once
+  `available(True)` follows; otherwise `available(False)` follows.
+- "unavailable": time-shift is off for this run, after `available(False)` was emitted: an
+  open after that, or a session that had not reached a helper yet. Final.
+After `sessionEnded` or a final failure, only `sessionClosed` follows; `sessionClosed` always
+answers `close_session`.
 
 Known limits:
 - Commands are sent with a blocking write, one small command at a time between reads. Only
@@ -77,6 +85,7 @@ _SHUTDOWN_WAIT_MS = 1800  # the escalation takes at most 1.5 s
 _SESSION_PREFIX = ".qitv-timeshift-"
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNAVAILABLE = "The live buffer is not available."
+# "internal" and "unavailable" are the engine's own kinds (see the module docstring).
 
 _Command = tuple[Any, ...]
 
@@ -243,9 +252,8 @@ class _Supervisor(QThread):
                 ram = {"kind": "ram", "max_bytes": _RAM_BYTES}
                 record.command = (*record.command[:5], ram, *record.command[6:])
             else:
-                record.failed = True
-                if message[2] != "internal":
-                    record.over = True  # the source gave up: a reopen would just retry it
+                # Final, "crashed" included: a reopen would only retry what failed.
+                record.failed = record.over = True
         elif name == "ended":
             record.over = True
         elif name not in ("state", "ready"):
@@ -341,12 +349,12 @@ class _Supervisor(QThread):
 
     def _give_up(self) -> None:
         self._dead = True
+        self._relay(("unavailable",))  # first: "unavailable" failures follow available(False)
         for sid, record in self._records.items():
             # Nothing was reported yet (it never reached a helper), and its input is not over.
             if not record.failed and not record.over:
-                self._relay(("error", sid, "internal", _UNAVAILABLE))
+                self._relay(("error", sid, "unavailable", _UNAVAILABLE))
         self._records.clear()
-        self._relay(("unavailable",))
 
     def _serve_without_helper(self) -> None:
         try:
@@ -356,7 +364,8 @@ class _Supervisor(QThread):
         if command is None:
             return
         if command[0] == "open":
-            self._relay(("error", command[1], "internal", _UNAVAILABLE))
+            # Time-shift is off: available(False) was emitted already, and no reopen follows.
+            self._relay(("error", command[1], "unavailable", _UNAVAILABLE))
         else:
             self._relay(("closed", command[1]))
 
@@ -422,10 +431,12 @@ class LiveEngine(QObject):
     """Live sessions in the helper process, driven from the GUI thread.
 
     Signals are delivered on the GUI thread. `sessionFailed(sid, kind, message)` carries a
-    fixed message; kind "disk" is a notice (the session continues in RAM) and
-    "internal" (a helper death) is followed by a reopen on `available(True)`, or by
-    `available(False)`; every other kind ends the session's input. After that or
-    `sessionEnded`, only `sessionClosed` follows. `sessionClosed` answers `close_session`.
+    fixed message, and each kind has one meaning (module docstring): "disk" is a notice (the
+    session continues in RAM); "internal" is a helper death, after `is_available()` turned
+    False, and is followed by a reopen on `available(True)` or by `available(False)`; every
+    other kind ("unsupported", "network", "tls", "timeout", "http", "crashed",
+    "unavailable") is final. After a final failure or `sessionEnded`, only `sessionClosed`
+    follows. `sessionClosed` answers `close_session`.
     """
 
     available = Signal(bool)

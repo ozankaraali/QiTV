@@ -38,6 +38,7 @@ from services.thread_cleanup import has_pending_threads
 REPO = Path(__file__).resolve().parents[1]
 SECRET_PATH = "/user/secret/live.ts"
 INTERNAL = "The live buffer stopped unexpectedly."
+UNAVAILABLE = "The live buffer is not available."
 STATE_KEYS = {"oldest", "newest", "open", "start", "end", "live_edge", "bytes", "ended", "burst_s"}
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
@@ -154,6 +155,22 @@ def silent_helper(conn, root):
     time.sleep(60)
 
 
+def crashing_session_helper(conn, root):
+    """The real helper, except that a session whose URL ends in "/crash" fails unexpectedly
+    (its helper stays up)."""
+    from services.live import worker
+
+    ingest = worker._Session._ingest
+
+    def crash(session):
+        if session._url.endswith("/crash"):
+            raise RuntimeError("an unexpected session failure")
+        ingest(session)
+
+    worker._Session._ingest = crash
+    worker.helper_main(conn, root)
+
+
 def stubborn_helper(conn, root):
     """A helper that holds a real disk buffer and ignores "shutdown" and SIGTERM."""
     from services.live.ring import DiskRing
@@ -177,8 +194,10 @@ class Signals:
     """Every engine signal in emission order, when it came, and from which thread."""
 
     def __init__(self, engine):
+        self.engine = engine
         self.events = []
         self.times = []
+        self.up = []  # engine.is_available() as each signal arrived
         self.off_thread = []
         # Direct connections record the emitting thread, which must be the GUI thread.
         direct = Qt.ConnectionType.DirectConnection
@@ -198,6 +217,7 @@ class Signals:
             self.off_thread.append(event)
         self.events.append(event)
         self.times.append(time.monotonic())
+        self.up.append(self.engine.is_available())
 
     def wait_for(self, predicate, timeout=20.0, start=0):
         """The index of the first matching event at or after `start`."""
@@ -375,7 +395,8 @@ class LiveEngineTests(unittest.TestCase):
         engine.close_session(sid)
         signals.wait_for(lambda event: event == ("closed", sid), start=unavailable)
         late = self.open(engine, source.url + SECRET_PATH)
-        signals.wait_for(lambda event: event[:3] == ("failed", late, "internal"))
+        # Final: no reopen follows; available(False) already came.
+        signals.wait_for(lambda event: event == ("failed", late, "unavailable", UNAVAILABLE))
         self.assertEqual(len(signals.of("failed", sid)), 2, "one failure per helper death")
         self.assertEqual(signals.off_thread, [])
 
@@ -437,6 +458,34 @@ class LiveEngineTests(unittest.TestCase):
         self.assertTrue(closed.is_set(), "the helper pipe never reached its closed-peer boundary")
         self.assertEqual(signals.of("failed", sid), [("failed", sid, "internal", INTERNAL)])
         self.assertEqual(signals.of("failed", other), [("failed", other, "internal", INTERNAL)])
+        # The command loop's crash is a helper death: "down" (not available) comes first.
+        for index, event in enumerate(signals.events):
+            if event[0] == "failed":
+                self.assertFalse(signals.up[index], f"{event} arrived while still available")
+
+    def test_a_session_crash_is_final_and_never_reopened(self):
+        self.enterContext(patch.object(engine_module, "helper_main", crashing_session_helper))
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        source = self.source()
+        live = self.open(engine, source.url + SECRET_PATH)
+        crashed = self.open(engine, source.url + "/user/secret/crash")
+        failed = signals.wait_for(lambda event: event[:2] == ("failed", crashed))
+        self.assertEqual(signals.events[failed], ("failed", crashed, "crashed", INTERNAL))
+        self.assertTrue(signals.up[failed], "the helper stayed up")
+        signals.wait_for(lambda event: event == ("ready", live))
+        mark = len(signals.events)
+        with self.assertLogs("services.live.engine", "WARNING"):
+            kill(helpers()[0])
+            restarted = signals.wait_for(lambda event: event == ("available", True), start=mark)
+        signals.wait_for(lambda event: event == ("ready", live), start=restarted)
+        QTest.qWait(500)  # time for an unwanted reopen to crash again
+        # A reopen would crash once more: the session heard of its failure once, and of the
+        # helper's death not at all.
+        self.assertEqual(signals.of("failed", crashed), [("failed", crashed, "crashed", INTERNAL)])
+        self.assertEqual(signals.of("failed", live), [("failed", live, "internal", INTERNAL)])
+        engine.close_session(crashed)
+        signals.wait_for(lambda event: event == ("closed", crashed), start=mark)
 
     def test_shutdown_is_bounded_and_leaves_no_helper_or_buffer(self):
         engine, signals = self.engine()
@@ -582,7 +631,7 @@ class LiveEngineTests(unittest.TestCase):
         self.assertFalse(engine.is_available())
         source_url = "http://127.0.0.1:9" + SECRET_PATH
         sid = self.open(engine, source_url)
-        signals.wait_for(lambda event: event[:3] == ("failed", sid, "internal"))
+        signals.wait_for(lambda event: event == ("failed", sid, "unavailable", UNAVAILABLE))
         engine.close_session(sid)
         signals.wait_for(lambda event: event == ("closed", sid))
         self.assertEqual(helpers(), [])
@@ -595,7 +644,12 @@ class LiveEngineTests(unittest.TestCase):
             self.assertLogs("services.live.engine", "WARNING") as logs,
         ):
             engine, signals = self.engine()
-            signals.wait_for(lambda event: event == ("available", False), timeout=30)
+            # It never reaches a helper: when time-shift goes off, it fails for good.
+            early = self.open(engine, "http://127.0.0.1:9" + SECRET_PATH)
+            off = signals.wait_for(lambda event: event == ("available", False), timeout=30)
+        failed = signals.wait_for(lambda event: event[:2] == ("failed", early))
+        self.assertLess(off, failed, "available(False) comes first")
+        self.assertEqual(signals.events[failed], ("failed", early, "unavailable", UNAVAILABLE))
         late = [line for line in logs.output if "did not start in time" in line]
         self.assertEqual(len(late), 2, "one start and one restart")
         self.assertEqual(helpers(), [])

@@ -445,7 +445,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(errors[0][2], "network")
         self.assertEqual(helper.of(sid, "ready"), [])
 
-    def test_an_unexpected_session_failure_reports_one_internal_error(self):
+    def test_an_unexpected_session_failure_reports_one_crashed_error(self):
         hung_up = threading.Event()
         source = self.source(
             {
@@ -464,7 +464,8 @@ class LiveWorkerTests(unittest.TestCase):
         helper.wait_for(lambda message: message == ("ended", working))
         for sid in (broken, "not/a-session"):
             errors = helper.of(sid, "error")
-            self.assertEqual(errors, [("error", sid, "internal", errors[0][3])])
+            # "crashed": final, with the helper up ("internal" is the parent's, for its death).
+            self.assertEqual(errors, [("error", sid, "crashed", errors[0][3])])
             self.assertNotIn("max_bytes", errors[0][3])
         helper.close(broken)
         helper.wait_for(lambda message: message == ("closed", broken))
@@ -753,7 +754,7 @@ class OutboxTests(unittest.TestCase):
         loop.start()
         self.assertTrue(parent.poll(10))
         self.assertEqual(parent.recv()[0], "hello")
-        failure = ("error", None, "internal", "The live buffer stopped unexpectedly.")
+        failure = ("error", None, "crashed", "The live buffer stopped unexpectedly.")
         for command in (
             ("close", ["not", "a", "sid"]),  # an unhashable sid is never echoed
             ("close",),
