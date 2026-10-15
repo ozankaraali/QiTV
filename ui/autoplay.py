@@ -115,6 +115,10 @@ class Autoplay(QObject):
     def waiting(self) -> bool:
         return self._awaiting is not None
 
+    def hint(self) -> Optional[str]:
+        """The lasting hint autoplay wants shown now: its wait for a season, else None."""
+        return LOADING_NEXT_SEASON_TEXT if self._awaiting is not None else None
+
     def play_now(self) -> bool:
         """Enter while the card shows: play it now."""
         if not self.card_open():

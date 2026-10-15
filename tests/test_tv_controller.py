@@ -2521,6 +2521,10 @@ class AutoplayCase(ControllerTestCase):
     def setUp(self):
         super().setUp()
         self.controller.start()
+        self.catalog.providerReady.emit("Home")
+        self.catalog.sectionReady.emit("live")  # the setup's "Loading Home…" ends
+        self.drawer.visible = False  # it opened on the idle player
+        self.assertIsNone(self.toast.hint)
         self.catalog.season_map["s9"] = [SEASON_1, SEASON_2]
 
     def play_episode(self, season, number, **values):
@@ -2565,9 +2569,10 @@ class EpisodeAutoplayTests(AutoplayCase):
     def test_enter_plays_now_and_escape_cancels_while_the_card_shows(self):
         self.play_episode(SEASON_1, 1)
         self.end()
+        opened = len(self.drawer.named("open_drawer"))  # once in setUp, on the idle player
         self.controller.handle(Action.OK)
         self.assertEqual(self.link_items(), ["e11", "e12"])
-        self.assertEqual(self.drawer.named("open_drawer"), [])  # Enter did not open it
+        self.assertEqual(len(self.drawer.named("open_drawer")), opened)  # Enter did not open it
         self.ready("http://vod/e12.mkv")
         self.end()  # the last episode of a season whose next is unloaded
         self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
@@ -2840,6 +2845,40 @@ class ContextMenuTests(ControllerTestCase):
         self.assertEqual(self.session.stops, stops)
         self.assertEqual(self.toast.messages()[-1], ("MPV Media Player is not installed.", "error"))
 
+    def test_an_overtaken_tune_gives_the_channel_back_to_what_plays(self):
+        self.play(0)  # One plays
+        self.tune(1)  # Two: its link is on its way
+        self.choose(self.menu_for(self.channels[2]), "Play in VLC")  # Three overtakes it
+        self.catalog.linkFailed.emit(3, "portal said no")
+        self.catalog.linkReady.emit(2, "http://stream/2")  # dropped: One goes on
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+        self.controller.handle(Action.INFO)
+        self.assertEqual(self.banner.info.name, "One")
+        self.controller.handle(Action.FAVORITE)
+        self.assertEqual(self.config.favorites, ["One"])
+        self.clock.now += 5
+        self.controller.handle(Action.CH_NEXT)  # from One, not from the dropped Two
+        self.assertEqual(self.requested()[-1], "Two")
+
+    def test_after_an_external_play_the_channel_is_the_played_one(self):
+        self.play(0)
+        self.tune(1)
+        self.choose(self.menu_for(self.channels[2]), "Play in VLC")
+        self.catalog.linkReady.emit(2, "http://stream/2")  # the overtaken tune: dropped
+        self.catalog.linkReady.emit(3, "http://stream/3")
+        self.assertEqual(self.external.calls, [("vlc", "http://stream/3")])
+        self.controller.handle(Action.INFO)
+        self.assertEqual(self.banner.info.name, "Three")
+
+    def test_a_superseded_side_play_never_asks_for_its_link(self):
+        self.play(0)
+        self.choose(self.menu_for(self.channels[1]), "Copy stream link")  # link 2
+        self.choose(self.menu_for(self.channels[2]), "Play in VLC")  # waits behind it
+        self.tune(3)  # a newer choice: Four (link 3)
+        self.catalog.linkReady.emit(2, "http://stream/2")
+        self.assertEqual(self.requested(), ["One", "Two", "Four"])
+        self.assertEqual(self.external.calls, [])
+
     def test_a_failed_external_player_toasts(self):
         self.external.result = (False, "MPV is not installed\nsearched: /usr/bin")
         self.choose(self.menu_for(self.channels[1]), "Play in MPV")
@@ -2899,6 +2938,19 @@ class CardRoutingTests(AutoplayCase):
         self.assertEqual(len(self.catalog.links), self.links)
 
 
+class ErrorStateRoutingTests(AutoplayCase):
+    def test_a_failed_episode_keeps_the_zap_keys(self):
+        self.catalog.episode_map[("s9", "1")] = [episode(SEASON_1, 1)]
+        self.play(1)
+        self.play_episode(SEASON_1, 1)
+        self.session.stateChanged.emit("error")
+        links = len(self.catalog.links)
+        self.controller.handle(Action.CH_NEXT)
+        self.controller.wheel(1, NO_MODS)
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.session.level, 40)
+
+
 class SeasonWaitTests(AutoplayCase):
     def setUp(self):
         super().setUp()
@@ -2922,6 +2974,28 @@ class SeasonWaitTests(AutoplayCase):
         self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
         self.catalog.episodesReady.emit("s9", "2")
         self.assertEqual(self.next_card.named("show_next"), [])
+
+    def test_a_provider_setups_hint_comes_first_and_the_wait_shows_after_it(self):
+        self.controller.select_provider("Home")
+        self.assertEqual(self.toast.hint, "Loading Home…")
+        self.play_episode(SEASON_1, 2)
+        self.end()  # the wait starts while the setup still loads
+        self.assertEqual(self.toast.hint, "Loading Home…")
+        self.catalog.providerReady.emit("Home")
+        self.catalog.sectionReady.emit("live")  # the setup ends; the wait goes on
+        self.assertEqual(self.toast.hint, "Loading next season…")
+        self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
+        self.catalog.episodesReady.emit("s9", "2")
+        self.assertIsNone(self.toast.hint)
+        self.assertEqual(len(self.next_card.named("show_next")), 1)
+
+    def test_a_wait_ending_during_a_setup_leaves_its_hint(self):
+        self.controller.select_provider("Backup")
+        self.play_episode(SEASON_1, 2)
+        self.end()
+        self.catalog.episodesFailed.emit("s9", "2", "boom")
+        self.assertEqual(self.toast.hint, "Loading Backup…")
+        self.assertEqual(self.toast.messages()[-1], ("Couldn't load the next season", "error"))
 
     def test_a_failed_wait_clears_the_hint(self):
         self.play_episode(SEASON_1, 2)

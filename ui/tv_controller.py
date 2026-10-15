@@ -81,6 +81,7 @@ TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
 FAVORITES_SAVE_FAILED_TEXT = "Couldn't save your favorites; they will be lost when QiTV closes"
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 _ACTIVE_STATES = frozenset({"opening", "buffering", "playing", "paused"})
+_ON_DEMAND_STOPS = frozenset({"ended", "error"})  # a movie or episode still current after them
 _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
@@ -172,7 +173,7 @@ class TVController(QObject):
             is_current=self._still_current,
             external_mode=lambda: self._external_launcher() is not None,
             notify=self._notify,
-            set_hint=overlays.toast.set_hint,
+            set_hint=self._wait_hint,
             show_transport=overlays.transport.poke,
             parent=self,
         )
@@ -214,6 +215,7 @@ class TVController(QObject):
         catalog.sectionFailed.connect(self._on_section_failed)
         self._lanes.tuneReady.connect(self._on_tune_ready)
         self._lanes.tuneFailed.connect(self._on_tune_failed)
+        self._lanes.tuneDropped.connect(self._on_tune_dropped)
         self._lanes.sideFailed.connect(self._on_side_failed)
         catalog.epgReady.connect(self._on_epg_ready)
         self.nav.notice.connect(self._on_notice)
@@ -610,6 +612,15 @@ class TVController(QObject):
             return  # the failed target was superseded: no error for it
         self._restore_channel()
         self._error(f"{target.title}: {message}")
+
+    def _on_tune_dropped(self, _target: Target) -> None:
+        """A tune overtaken by an external play: the channel still playing stays the channel."""
+        if self._closed:
+            return
+        self._restore_channel()  # INFO, the guide and Ctrl+D follow what plays
+        playing = self._playing_live()
+        if playing is not None:
+            self.zap.tuned(playing.item)  # ↑/↓ move on from it, not from the dropped one
 
     def _on_side_failed(self, target: Target, message: str) -> None:
         """A context menu's link failed (or what used it did)."""
@@ -1394,7 +1405,13 @@ class TVController(QObject):
         self._cancel_external()
         self._autoplay.drop()
         self._lanes.drop_tune()  # e.g. an STB retry still on its way would open in-app
-        self._tuner.open(self._guarded(target, lambda: self._launch(target, url, launcher)))
+
+        def launch() -> None:
+            self._launch(target, url, launcher)
+            if self._current is target:
+                self._restore_channel()  # INFO, the guide and Ctrl+D follow what it plays
+
+        self._tuner.open(self._guarded(target, launch))
 
     # ---- state helpers ------------------------------------------------------------------------
 
@@ -1410,7 +1427,9 @@ class TVController(QObject):
         current = self._current
         if current is None or current.live:
             return False
-        return self._has_media() or self._state == "ended" or self._autoplay.card_open()
+        if self._has_media() or self._state in _ON_DEMAND_STOPS:
+            return True
+        return self._autoplay.card_open()
 
     def _toast(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
         self.overlays.toast.show_message(text, kind, ms)
@@ -1454,4 +1473,9 @@ class TVController(QObject):
     def _end_loading(self) -> None:
         if self._loading:
             self._loading = False
-            self.overlays.toast.set_hint(None)
+            self.overlays.toast.set_hint(self._autoplay.hint())  # a wait that went on shows
+
+    def _wait_hint(self, text: Optional[str]) -> None:
+        """Autoplay's "Loading next season…": a provider setup's hint comes first."""
+        if not self._loading:
+            self.overlays.toast.set_hint(text)

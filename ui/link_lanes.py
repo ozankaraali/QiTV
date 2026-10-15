@@ -10,8 +10,8 @@ request id it answers.
 A choice generation orders what the user chose. `supersede()` starts a new one: the shell
 calls it for a tune or a movie, and a side request that will play (an external player) makes
 its own and drops the queued tune. A side play whose generation is no longer the newest when
-its link lands is dropped, and so is a tune in flight that it overtook; a copied link is
-never superseded.
+its link lands is dropped (one still waiting in line is never even asked for), and so is a
+tune in flight that it overtook (`tuneDropped`); a copied link is never superseded.
 """
 
 from __future__ import annotations
@@ -70,6 +70,7 @@ class _SideJob:
 class LinkLanes(QObject):
     tuneReady = Signal(object, str)  # Target, link
     tuneFailed = Signal(object, str)  # Target, message
+    tuneDropped = Signal(object)  # Target: overtaken by a side play, its result is dropped
     sideFailed = Signal(object, str)  # Target, message (scrub before showing)
 
     def __init__(self, catalog, parent: Optional[QObject] = None) -> None:
@@ -141,14 +142,28 @@ class LinkLanes(QObject):
         self._next_side()
 
     def _next_side(self) -> None:
-        if self._closed or self._side is not None or not self._side_queue:
+        if self._closed or self._side is not None:
             return
-        job = self._side_queue.popleft()
+        job = self._next_current_job()
+        if job is None:
+            return
         section = job.target.section
         request_id = self.catalog.request_link(
             job.target.item, section=section, is_episode=section == "series"
         )
         self._side = (request_id, job)
+
+    def _next_current_job(self) -> Optional[_SideJob]:
+        """The next side job worth a request: superseded plays are dropped unasked."""
+        while self._side_queue:
+            job = self._side_queue.popleft()
+            if not self._superseded(job):
+                return job
+            logger.debug("Not asking for the link of %s: a newer choice plays", job.target.title)
+        return None
+
+    def _superseded(self, job: _SideJob) -> bool:
+        return job.generation is not None and job.generation != self._generation
 
     # ---- both ---------------------------------------------------------------------------------
 
@@ -180,6 +195,7 @@ class LinkLanes(QObject):
         if generation != self._generation and self.queued is None:
             # Overtaken by a side play (a newer tune would be queued): it must not open.
             logger.debug("Dropping the link for %s: a newer choice plays", target.title)
+            self.tuneDropped.emit(target)
             return None
         return target
 
@@ -204,7 +220,7 @@ class LinkLanes(QObject):
 
     def _finish_side(self, job: _SideJob, url: str) -> None:
         try:
-            if job.generation is not None and job.generation != self._generation:
+            if self._superseded(job):
                 logger.debug("Dropping the link for %s: a newer choice plays", job.target.title)
                 return
             job.then(url)

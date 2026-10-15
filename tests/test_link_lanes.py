@@ -90,6 +90,24 @@ class LinkLanesTests(unittest.TestCase):
         self.catalog.linkReady.emit(1, "u1")
         self.assertEqual(self.ready, [])  # neither One nor the older Two opens
 
+    def test_a_superseded_side_play_waiting_in_line_is_never_requested(self):
+        got = []
+        self.lanes.request_side(target("Two"), got.append, play=False)
+        self.lanes.request_side(target("Three"), got.append, play=True)
+        self.lanes.request_side(target("Four"), got.append, play=False)
+        self.lanes.supersede()  # e.g. a zap
+        self.catalog.linkReady.emit(1, "u2")
+        self.assertEqual(self.names(), ["Two", "Four"])
+
+    def test_an_overtaken_tune_is_reported_as_dropped(self):
+        dropped = []
+        self.lanes.tuneDropped.connect(lambda t: dropped.append(t.title))
+        self.lanes.request(target("One"))
+        self.lanes.request_side(target("Two"), lambda url: None, play=True)
+        self.catalog.linkFailed.emit(2, "no")
+        self.catalog.linkReady.emit(1, "u1")
+        self.assertEqual((dropped, self.ready), (["One"], []))
+
     def test_a_side_follow_up_that_raises_is_reported_and_the_queue_goes_on(self):
         def broken(url):
             raise RuntimeError("bad")
