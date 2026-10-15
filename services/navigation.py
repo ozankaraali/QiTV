@@ -348,7 +348,7 @@ class NavModel(QObject):
         self._settled(("episodes", series_id, season_id))
 
     def _fail(self, key: tuple, message: str) -> None:
-        logger.info("Load failed for %s: %s", key, message)
+        logger.info("Load failed for %s", key)  # the message is for the user, not the log
         if key[0] == "section":
             self._ready_sections.discard(key[1])
         self._pending.discard(key)

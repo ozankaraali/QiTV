@@ -9,7 +9,7 @@ from PySide6.QtCore import QCoreApplication, QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from services.catalog import ALL_GROUP_ID, CatalogService, Group
+from services.catalog import ALL_GROUP_ID, UNEXPECTED_ANSWER_MESSAGE, CatalogService, Group
 from services.jobs import ImmediateRunner, JobRunner
 
 
@@ -152,7 +152,7 @@ class CatalogServiceTests(unittest.TestCase):
         factory.results["provider_setup"] = {"fail": "handshake refused"}
         failed = collect(service.providerFailed)
         service.select_provider()
-        self.assertEqual(failed, [("X", "handshake refused")])
+        self.assertEqual(failed, [("X", UNEXPECTED_ANSWER_MESSAGE)])  # raw texts never leave
 
     def test_xtream_section_groups_and_items(self):
         provider = {"name": "X", "type": "XTREAM", "url": "h:1", "username": "u", "password": "p"}
@@ -313,7 +313,7 @@ class CatalogServiceTests(unittest.TestCase):
         factory.results["provider_setup"] = {"fail": "nope"}
         failed = collect(service.providerFailed)
         service.select_provider("Other")
-        self.assertEqual(failed, [("Other", "nope")])
+        self.assertEqual(failed, [("Other", UNEXPECTED_ANSWER_MESSAGE)])
 
     def test_group_result_after_switch_is_dropped(self):
         runner = ManualRunner()

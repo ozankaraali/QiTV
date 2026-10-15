@@ -6,7 +6,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
-from services.catalog import format_xtream_episodes, normalize_seasons
+from services.catalog import (
+    UNEXPECTED_ANSWER_MESSAGE,
+    format_xtream_episodes,
+    normalize_seasons,
+)
 from tests.test_catalog_service import ManualRunner, collect, make_service
 
 
@@ -178,7 +182,7 @@ class SeriesTests(unittest.TestCase):
         series = {"id": 1, "name": "Show"}
         service.request_seasons(series)
         runner.complete(0)
-        self.assertEqual(failed, [("1", "boom")])
+        self.assertEqual(failed, [("1", UNEXPECTED_ANSWER_MESSAGE)])
         service.request_seasons(series)  # error released the pending slot
         self.assertEqual(len(factory.calls), 2)
         factory.results["provider_setup"] = {"result": {"name": "X"}}
@@ -192,7 +196,7 @@ class SeriesTests(unittest.TestCase):
         factory.results["stb_list"] = {"fail": "nope"}
         failed = collect(service.episodesFailed)
         service.request_episodes({"id": 9, "name": "Show"}, {"id": "9:1"})
-        self.assertEqual(failed, [("9", "9:1", "nope")])
+        self.assertEqual(failed, [("9", "9:1", UNEXPECTED_ANSWER_MESSAGE)])
 
     def test_stale_episodes_after_switch_are_dropped(self):
         service, _, factory, _ = make_service({"name": "S", "type": "STB", "url": "http://p/c/"})

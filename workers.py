@@ -22,6 +22,8 @@ from services.provider_api import (
 
 logger = logging.getLogger(__name__)
 
+NO_PORTAL_DATA_MESSAGE = "The portal returned no data"
+
 
 def _resolve_xtream_base(server_info: dict, base_url: str, prefer_https: bool) -> str:
     """Pick the panel-advertised base, falling back to the user's URL when there is none."""
@@ -653,7 +655,9 @@ class ProviderSetupWorker(QObject):
                 self.provider_manager.clear_current_provider_cache()
             self.finished.emit({"name": self.provider_manager.current_provider.get("name", "")})
         except Exception as e:
-            logger.warning("Provider setup failed: %s", e)
+            # The text can carry portal URLs and credentials: log only the type at warning.
+            logger.warning("Provider setup failed (%s)", type(e).__name__)
+            logger.debug("Provider setup failure", exc_info=True)
             self.error.emit(str(e))
 
 
@@ -674,7 +678,8 @@ class EpgLoadWorker(QObject):
                 self.epg_manager.set_current_epg()
             self.finished.emit({})
         except Exception as e:
-            logger.warning("EPG load failed: %s", e)
+            logger.warning("EPG load failed (%s)", type(e).__name__)
+            logger.debug("EPG load failure", exc_info=True)
             self.error.emit(str(e))
 
 
@@ -704,4 +709,4 @@ class StbListWorker(QObject):
         if results:
             self.finished.emit(results[-1])
         else:
-            self.error.emit(errors[-1] if errors else "The portal returned no data")
+            self.error.emit(errors[-1] if errors else NO_PORTAL_DATA_MESSAGE)

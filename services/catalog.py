@@ -16,9 +16,9 @@ from typing import Any, Callable, Optional, cast
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.epg_view import Programme, programmes_for_channel
-from services.jobs import JobRunner
+from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
-from workers import find_roman_token
+from workers import NO_PORTAL_DATA_MESSAGE, find_roman_token
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,78 @@ ALL_GROUP_ID = "*"
 NO_SERIES_MESSAGE = "This provider has no series"
 PROVIDER_LOADING_MESSAGE = "The provider is still loading"
 GROUP_UNAVAILABLE_MESSAGE = "This group isn't available"
+NO_STREAM_MESSAGE = "This item has no stream address"
+EMPTY_LINK_MESSAGE = "The portal returned an empty link"
 # Catalog network jobs (sections, groups, seasons, episodes) running at once per service:
 # portals rate-limit, and some ban a MAC that opens many connections.
 MAX_CATALOG_JOBS = 2
+
+# --- failure messages shown to the user ---------------------------------------------------
+# Worker errors are exception texts that can carry URLs, query strings and credentials
+# (Xtream puts the username and password in every URL). Only these fixed strings, and the
+# service's own messages, ever leave the service.
+UNREACHABLE_MESSAGE = "Couldn't reach the provider"
+LOGIN_REFUSED_MESSAGE = "The provider refused the login"
+TOO_SLOW_MESSAGE = "The provider took too long to answer"
+UNEXPECTED_ANSWER_MESSAGE = "The provider sent an unexpected answer"
+_SAFE_MESSAGES = frozenset(
+    {
+        PROVIDER_LOADING_MESSAGE,
+        GROUP_UNAVAILABLE_MESSAGE,
+        NO_SERIES_MESSAGE,
+        NO_STREAM_MESSAGE,
+        EMPTY_LINK_MESSAGE,
+        NO_PORTAL_DATA_MESSAGE,
+        FAILED_MESSAGE,
+        NO_RESULT_MESSAGE,
+        UNREACHABLE_MESSAGE,
+        LOGIN_REFUSED_MESSAGE,
+        TOO_SLOW_MESSAGE,
+        UNEXPECTED_ANSWER_MESSAGE,
+    }
+)
+_SAFE_PREFIXES = ("Unknown section: ", "Unsupported provider: ")
+_TOO_SLOW = re.compile(r"timed? ?out|timeout", re.IGNORECASE)
+_LOGIN_REFUSED = re.compile(
+    r"\b(?:401|403)\s+(?:client\s+)?error\b|unauthori[sz]ed|forbidden"
+    r"|status(?:\s*code)?\W+(?:401|403)\b|:\s*(?:401|403)\s*$",
+    re.IGNORECASE,
+)
+_UNREACHABLE = re.compile(
+    r"max retries exceeded|failed to establish|connection (?:refused|reset|aborted|error)"
+    r"|connectionerror|failed to resolve|name or service not known|nodename nor servname"
+    r"|getaddrinfo|name resolution|cannot connect to host|network is unreachable"
+    r"|no route to host|remote ?end closed|remotedisconnected|server ?disconnected"
+    r"|ssl|certificate|no such file|errno",
+    re.IGNORECASE,
+)
+_EXCEPTION_TYPE = re.compile(r"\b([A-Z]\w*(?:Error|Exception|Timeout))\b")
+
+
+def friendly_error(message: object) -> str:
+    """Map a worker's error text to a fixed message without URLs or credentials.
+
+    The service's own messages pass through. Everything else is classified, and the
+    exception type it names (never the text) is logged at INFO.
+    """
+    text = "" if message is None else str(message)
+    if text in _SAFE_MESSAGES or text.startswith(_SAFE_PREFIXES):
+        return text
+    if not text.strip() or _TOO_SLOW.search(text):
+        friendly = TOO_SLOW_MESSAGE  # an empty text is almost always a timeout
+    elif _LOGIN_REFUSED.search(text):
+        friendly = LOGIN_REFUSED_MESSAGE
+    elif _UNREACHABLE.search(text):
+        friendly = UNREACHABLE_MESSAGE
+    else:
+        friendly = UNEXPECTED_ANSWER_MESSAGE
+    found = _EXCEPTION_TYPE.search(text)
+    logger.info(
+        "Provider request failed: %s (%s)",
+        friendly,
+        found.group(1) if found else "no exception type named",
+    )
+    return friendly
 
 
 def normalize_seasons(series_name: str, items: list[dict]) -> list[dict]:
@@ -351,7 +420,7 @@ class CatalogService(QObject):
     def _on_provider_error(self, job: _Job, message: str) -> None:
         if self._next_state_job() or job.generation != self._generation:
             return
-        self.providerFailed.emit(job.data[0] or self.current_provider_name(), message)
+        self._fail(self.providerFailed, job.data[0] or self.current_provider_name(), message)
         self._pump_catalog()
 
     # --- EPG --------------------------------------------------------------------------
@@ -387,7 +456,7 @@ class CatalogService(QObject):
     def _on_epg_error(self, job: _Job, message: str) -> None:
         if self._next_state_job() or not self._current(job):
             return
-        logger.info("EPG unavailable: %s", message)
+        logger.info("EPG unavailable: %s", friendly_error(message))
 
     def epg_ready(self) -> bool:
         return self._epg_ready
@@ -417,7 +486,7 @@ class CatalogService(QObject):
 
     def request_section(self, section: str, *, force: bool = False) -> None:
         if self._setup_active():
-            self._emit_later(self.sectionFailed, section, PROVIDER_LOADING_MESSAGE)
+            self._fail_later(self.sectionFailed, section, PROVIDER_LOADING_MESSAGE)
             return
         ct = SECTION_CONTENT_TYPES[section]
         content = self.provider_manager.current_provider_content.get(ct)
@@ -442,7 +511,7 @@ class CatalogService(QObject):
             self._emit_later(self.sectionReady, section)
             return
         if ptype not in ("M3UPLAYLIST", "XTREAM", "STB"):
-            self._emit_later(self.sectionFailed, section, f"Unsupported provider: {ptype}")
+            self._fail_later(self.sectionFailed, section, f"Unsupported provider: {ptype}")
             return
         self._request_catalog(("section", section), "section", section, self._section_worker)
 
@@ -472,7 +541,7 @@ class CatalogService(QObject):
         self.sectionReady.emit(section)
 
     def _on_section_error(self, job: _Job, message: str) -> None:
-        self.sectionFailed.emit(job.data, message)
+        self._fail(self.sectionFailed, job.data, message)
 
     def _store_section(self, ct: str, payload) -> None:
         self.provider_manager.current_provider_content[ct] = payload
@@ -538,14 +607,14 @@ class CatalogService(QObject):
 
     def request_group(self, section: str, group_id: str) -> None:
         if self._setup_active():
-            self._emit_later(self.groupFailed, section, group_id, PROVIDER_LOADING_MESSAGE)
+            self._fail_later(self.groupFailed, section, group_id, PROVIDER_LOADING_MESSAGE)
             return
         if self.items(section, group_id) is not None:
             self._emit_later(self.groupReady, section, group_id)
             return
         if self.provider_type() != "STB":
             # Only STB portals load groups on demand; elsewhere the section holds them all.
-            self._emit_later(self.groupFailed, section, group_id, GROUP_UNAVAILABLE_MESSAGE)
+            self._fail_later(self.groupFailed, section, group_id, GROUP_UNAVAILABLE_MESSAGE)
             return
         self._request_catalog(
             ("group", section, group_id), "group", (section, group_id), self._group_worker
@@ -572,7 +641,7 @@ class CatalogService(QObject):
         content = self.provider_manager.current_provider_content.get(SECTION_CONTENT_TYPES[section])
         if not isinstance(content, dict):
             logger.warning("Dropping %s group %s: section content is not loaded", section, group_id)
-            self.groupFailed.emit(section, group_id, GROUP_UNAVAILABLE_MESSAGE)
+            self._fail(self.groupFailed, section, group_id, GROUP_UNAVAILABLE_MESSAGE)
             return
         content.setdefault("contents", {})[group_id] = list(payload.get("items") or [])
         self.provider_manager.save_provider()
@@ -580,7 +649,7 @@ class CatalogService(QObject):
 
     def _on_group_error(self, job: _Job, message: str) -> None:
         section, group_id = job.data
-        self.groupFailed.emit(section, group_id, message)
+        self._fail(self.groupFailed, section, group_id, message)
 
     # --- series -----------------------------------------------------------------------
     def _series_cache(self) -> dict:
@@ -598,13 +667,13 @@ class CatalogService(QObject):
     def request_seasons(self, series: dict) -> None:
         series_id = str(series.get("id"))
         if self._setup_active():
-            self._emit_later(self.seasonsFailed, series_id, PROVIDER_LOADING_MESSAGE)
+            self._fail_later(self.seasonsFailed, series_id, PROVIDER_LOADING_MESSAGE)
             return
         if self.seasons(series) is not None:
             self._emit_later(self.seasonsReady, series_id)
             return
         if self.provider_type() not in ("XTREAM", "STB"):
-            self._emit_later(self.seasonsFailed, series_id, NO_SERIES_MESSAGE)
+            self._fail_later(self.seasonsFailed, series_id, NO_SERIES_MESSAGE)
             return
         self._request_catalog(("seasons", series_id), "seasons", series, self._seasons_worker)
 
@@ -646,7 +715,7 @@ class CatalogService(QObject):
         self.seasonsReady.emit(str(series.get("id")))
 
     def _on_seasons_error(self, job: _Job, message: str) -> None:
-        self.seasonsFailed.emit(str(job.data.get("id")), message)
+        self._fail(self.seasonsFailed, str(job.data.get("id")), message)
 
     def episodes(self, series: dict, season: dict) -> Optional[list[dict]]:
         if self.provider_type() == "XTREAM":
@@ -669,13 +738,13 @@ class CatalogService(QObject):
     def request_episodes(self, series: dict, season: dict) -> None:
         series_id, season_id = str(series.get("id")), str(season.get("id"))
         if self._setup_active():
-            self._emit_later(self.episodesFailed, series_id, season_id, PROVIDER_LOADING_MESSAGE)
+            self._fail_later(self.episodesFailed, series_id, season_id, PROVIDER_LOADING_MESSAGE)
             return
         if self.episodes(series, season) is not None:
             self._emit_later(self.episodesReady, series_id, season_id)
             return
         if self.provider_type() != "STB":
-            self._emit_later(self.episodesFailed, series_id, season_id, NO_SERIES_MESSAGE)
+            self._fail_later(self.episodesFailed, series_id, season_id, NO_SERIES_MESSAGE)
             return
         self._request_catalog(
             ("episodes", series_id, season_id), "episodes", (series, season), self._episodes_worker
@@ -727,24 +796,24 @@ class CatalogService(QObject):
 
     def _on_episodes_error(self, job: _Job, message: str) -> None:
         series, season = job.data
-        self.episodesFailed.emit(str(series.get("id")), str(season.get("id")), message)
+        self._fail(self.episodesFailed, str(series.get("id")), str(season.get("id")), message)
 
     # --- links ------------------------------------------------------------------------
     def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
         """Resolve a playable URL. STB portals mint a fresh link; others play `cmd` directly."""
         request_id = next(self._link_ids)
         if self._setup_active():
-            self._emit_later(self.linkFailed, request_id, PROVIDER_LOADING_MESSAGE)
+            self._fail_later(self.linkFailed, request_id, PROVIDER_LOADING_MESSAGE)
             return request_id
         if section not in SECTION_CONTENT_TYPES:
-            self._emit_later(self.linkFailed, request_id, f"Unknown section: {section}")
+            self._fail_later(self.linkFailed, request_id, f"Unknown section: {section}")
             return request_id
         if self.provider_type() != "STB":
             url = str(item.get("cmd") or "").strip()
             if url:
                 self._emit_later(self.linkReady, request_id, url)
             else:
-                self._emit_later(self.linkFailed, request_id, "This item has no stream address")
+                self._fail_later(self.linkFailed, request_id, NO_STREAM_MESSAGE)
             return request_id
         provider = self.current_provider()
         worker = self.factory.link(
@@ -767,11 +836,11 @@ class CatalogService(QObject):
         if url:
             self.linkReady.emit(job.data, url)
         else:
-            self.linkFailed.emit(job.data, "The portal returned an empty link")
+            self._fail(self.linkFailed, job.data, EMPTY_LINK_MESSAGE)
 
     def _on_link_error(self, job: _Job, message: str) -> None:
         if self._current(job):
-            self.linkFailed.emit(job.data, message)
+            self._fail(self.linkFailed, job.data, message)
 
     # --- catalog job queue ------------------------------------------------------------
     def _request_catalog(
@@ -837,6 +906,15 @@ class CatalogService(QObject):
     def _current(self, job: _Job) -> bool:
         """True while the job belongs to the current provider generation and provider."""
         return job.generation == self._generation and job.provider == self.current_provider_name()
+
+    def _fail(self, signal, *args) -> None:
+        """Emit a *Failed signal; its last argument, the message, is made user-safe."""
+        *head, message = args
+        signal.emit(*head, friendly_error(message))
+
+    def _fail_later(self, signal, *args) -> None:
+        *head, message = args
+        self._emit_later(signal, *head, friendly_error(message))
 
     def _emit_later(self, signal, *args) -> None:
         generation = self._generation

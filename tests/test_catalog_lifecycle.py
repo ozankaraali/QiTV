@@ -14,7 +14,12 @@ import orjson
 
 from config_manager import ConfigManager
 from provider_manager import ProviderManager
-from services.catalog import MAX_CATALOG_JOBS, PROVIDER_LOADING_MESSAGE, CatalogService
+from services.catalog import (
+    MAX_CATALOG_JOBS,
+    PROVIDER_LOADING_MESSAGE,
+    UNEXPECTED_ANSWER_MESSAGE,
+    CatalogService,
+)
 from services.navigation import NavModel
 from tests.test_catalog_service import (
     XTREAM_PAYLOAD,
@@ -276,7 +281,7 @@ class CatalogQueueTests(unittest.TestCase):
         for group in "123":
             service.request_group("movies", group)
         runner.complete(0)
-        self.assertEqual(failed, [("movies", "1", "boom")])
+        self.assertEqual(failed, [("movies", "1", UNEXPECTED_ANSWER_MESSAGE)])
         self.assertEqual(len(runner.jobs), 3)
 
     def test_links_and_epg_do_not_wait_for_catalog_jobs(self):
