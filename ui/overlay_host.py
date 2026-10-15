@@ -43,10 +43,13 @@ class OverlayHost(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # It never takes the focus: its buttons' tooltips show anyway.
+        self.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips)
         self.setMouseTracking(True)
         self._window = window
         self._surface = surface
         self._overlays: list[QWidget] = []
+        self._hole = QRect()  # the PiP (see set_hole)
         self._attached_id = 0
         # macOS: from a minimize until the platform reports the window restored, the window
         # counts as in the Dock here, whatever Qt's state says (see _update_visibility).
@@ -97,6 +100,17 @@ class OverlayHost(QWidget):
     def visible_overlays(self) -> list[QWidget]:
         return [w for w in self._overlays if isValid(w) and w.isVisibleTo(self)]
 
+    def set_hole(self, rect: QRect) -> None:
+        """Where the picture-in-picture surface is (host coordinates; empty: nowhere).
+
+        Clicks there reach the small picture below, except where an overlay claims them:
+        an overlay's `hole_claims()` (a transport's buttons), else its whole mask (a panel, the
+        PiP label's pill); an overlay transparent for the mouse (the banner) claims nothing.
+        """
+        if rect != self._hole:
+            self._hole = QRect(rect)
+            self._update_mask()
+
     def sync_geometry(self) -> None:
         rect = QRect(self._surface.mapToGlobal(QPoint(0, 0)), self._surface.size())
         if rect != self.geometry():
@@ -104,7 +118,7 @@ class OverlayHost(QWidget):
         self._update_mask()
 
     def _update_mask(self) -> None:
-        region = QRegion()
+        region, claims = QRegion(), QRegion()
         for widget in self.visible_overlays():
             part = (
                 widget.mask_region()
@@ -112,6 +126,14 @@ class OverlayHost(QWidget):
                 else QRegion(widget.geometry())
             )
             region = region.united(part)
+            if self._hole.isEmpty():
+                continue
+            if hasattr(widget, "hole_claims"):
+                claims = claims.united(widget.hole_claims())
+            elif not widget.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents):
+                claims = claims.united(part)
+        if not self._hole.isEmpty():
+            region = region.subtracted(QRegion(self._hole).subtracted(claims))
         if region.isEmpty():
             self.clearMask()
         else:

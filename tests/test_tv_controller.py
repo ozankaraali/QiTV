@@ -19,10 +19,12 @@ from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.navigation import FAVORITES_GROUP, NavModel, NavNode
+from services.sessions import PIP_FAILED, SessionManager, Slot
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
 from ui.keymap import Action
+from ui.live_tuner import LiveTuner
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
@@ -32,6 +34,7 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
+from ui.pip_controls import ALREADY_LARGE, NO_PREVIOUS, OPEN_PIP_FIRST, PIP_LIVE_ONLY
 from ui.tv_controller import Overlays, TVController, scrub
 
 NOW = datetime(2026, 10, 15, 20, 30, tzinfo=timezone.utc)
@@ -172,6 +175,9 @@ class FakeSession(QObject):
         self.muted = not self.muted
         return self.muted
 
+    def set_muted(self, muted):
+        self.muted = bool(muted)
+
     def audio_tracks(self):
         return list(self.audio)
 
@@ -302,9 +308,14 @@ class FakeTransport(FakeOverlay):
     programmeStartRequested = Signal()
     seekToRequested = Signal(float)
     nextRequested = Signal()
+    pipRequested = Signal()
+    miniPlayerRequested = Signal()
 
     def set_next_available(self, available):
         self.record("set_next_available", available)
+
+    def set_pip_state(self, available, open_):
+        self.record("set_pip_state", available, open_)
 
     def show_vod(self, title, subtitle):
         self.record("show_vod", title, subtitle)
@@ -1942,7 +1953,16 @@ class PipelineTuneTests(PipelineCase):
         self.ready("udp://239.0.0.1:1234")
         self.assertEqual(self.session.plays[-1][0], "udp://239.0.0.1:1234")
         self.assertEqual(len(self.starts()), 1)
-        self.assertEqual(self.budget.holders("Home"), [])
+        self.assertEqual(self.budget.holders("Home"), ["main"])  # the direct play's own
+
+    def test_a_direct_play_books_its_slot_under_the_catalogs_provider(self):
+        # During a provider setup the selected provider is already the next one, while the
+        # catalog (and every pipeline tune) still uses the old: one name for both.
+        self.config.selected_provider_name = "Backup"
+        self.tune(1)
+        self.ready("udp://239.0.0.1:1234")
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual(self.budget.holders("Backup"), [])
 
     def test_a_movie_stops_the_live_channel_and_gives_its_slot_back(self):
         self.start_pipeline(0)
@@ -1951,7 +1971,7 @@ class PipelineTuneTests(PipelineCase):
         self.assertIn(("stop",), self.live.calls)
         self.live.released.emit()
         self.assertEqual(self.played_urls()[-1], "http://vod/heat.mkv")
-        self.assertEqual(self.budget.holders("Home"), [])
+        self.assertEqual(self.budget.holders("Home"), ["main"])  # the movie's, not the channel's
         self.controller.handle(Action.SEEK_BACK)  # the movie's keys reach the player again
         self.assertEqual(self.live.named("seek_relative"), [])
 
@@ -1996,10 +2016,11 @@ class ReleaseOrderTests(PipelineCase):
         self.play_movie()
         self.session.holding = True  # VLC still holds the movie's connection
         self.play(0)
-        QTest.qWait(30)  # the slot is granted…
-        self.assertEqual(self.starts(), [])  # …but VLC has not let go of the movie
+        QTest.qWait(30)
+        self.assertEqual(self.starts(), [])  # VLC has not let go of the movie…
+        self.assertEqual(self.budget.holders("Home"), ["main"])  # …which keeps its slot
         self.session.let_go()
-        self.assertEqual(len(self.starts()), 1)
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 1))
 
     def test_direct_channel_to_pipeline(self):
         self.tune(0)
@@ -2009,6 +2030,7 @@ class ReleaseOrderTests(PipelineCase):
         QTest.qWait(30)
         self.assertEqual(self.starts(), [])
         self.session.let_go()
+        self.assertTrue(wait_until(lambda: self.starts()))
         self.assertEqual(self.starts()[0][0], "http://stream/2")
 
     def test_pipeline_to_external_player(self):
@@ -3253,3 +3275,566 @@ class LibraryTests(AutoplayCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- picture in picture (Phase 4 Task 3) -----------------------------------------------------
+
+GROUP_B = [
+    {"id": i, "name": name, "number": str(i), "cmd": f"ffrt http://tv/{i}"}
+    for i, name in ((5, "Five"), (6, "Six"))
+]
+SHIFTED = {
+    "start": 0.0,
+    "end": 300.0,
+    "position": 100.0,
+    "live_edge": 300.0,
+    "lag": 200.0,
+    "mode": "shifted",
+    "rate": 1.0,
+    "paused": False,
+    "target": 2.5,
+}
+
+
+class FakeFrame(QObject):
+    swapRequested = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+        self.shown = False
+        self.large = "main"
+
+    def show_pip(self):
+        self.calls.append(("show_pip",))
+        self.shown = True
+
+    def hide_pip(self):
+        self.calls.append(("hide_pip",))
+        self.shown, self.large = False, "main"
+
+    def set_large(self, name):
+        self.calls.append(("set_large", name))
+        self.large = name
+
+
+class FakePipLabel(FakeOverlay):
+    closeRequested = Signal()
+    mixerRequested = Signal()
+    info = None
+    audible = False
+
+    def set_info(self, name, state):
+        self.record("set_info", name, state)
+        self.info = (name, state)
+
+    def set_audible(self, audible):
+        self.audible = audible
+
+    def show(self):
+        self.visible = True
+
+    def hide(self):
+        self.visible = False
+
+
+class FakeMixer(FakeOverlay):
+    levelRequested = Signal(int, int)
+    muteRequested = Signal(int)
+    rowSelected = Signal(int)
+    closed = Signal()
+    rows = ()
+    selected = 0
+
+    def show_rows(self, rows, selected):
+        self.record("show_rows", rows, selected)
+        self.rows, self.selected = list(rows), selected
+        self.visible = True
+
+    def dismiss(self):
+        if self.visible:
+            self.visible = False
+            self.closed.emit()
+
+    def shown(self):
+        """(title, channel, level, muted) per row, and the selected row."""
+        return [(r.title, r.channel, r.level, r.muted) for r in self.rows], self.selected
+
+
+class PipCase(ControllerTestCase):
+    """Two players (fake sessions and live sessions, each with its real LiveTuner), the real
+    SessionManager and budget, a fake PiP frame and label."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.ssl_verify = True
+        self.config.timeshift_enabled = False
+        self.config.timeshift_max_mib = 2048
+        self.config.selected_provider_name = "Home"
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
+        self.catalog.live["20"] = list(GROUP_B)
+        self.budget = ConnectionBudget()
+        self.live = FakeLiveSession(self.session)
+        self.pip_session = FakeSession()
+        self.pip_live = FakeLiveSession(self.pip_session)
+        self.main_slot = Slot(
+            "main",
+            self.session,
+            self.live,
+            tuner=LiveTuner(self.session, self.config, self.live, self.budget),
+        )
+        self.pip_slot = Slot(
+            "pip",
+            self.pip_session,
+            self.pip_live,
+            tuner=LiveTuner(
+                self.pip_session, self.config, self.pip_live, self.budget, purpose="pip"
+            ),
+        )
+        self.sessions = SessionManager(self.main_slot, self.pip_slot, self.budget)
+        self.frame = FakeFrame()
+        self.label = FakePipLabel()
+        self.controller = self.make_controller(
+            self.column, sessions=self.sessions, pip_frame=self.frame
+        )
+        for live in (self.live, self.pip_live):
+            self.addCleanup(live.released.emit)  # no capped release wait outlives the test
+        self.controller.start()
+
+    mixer = None  # MixerTests: a FakeMixer
+
+    def overlays(self, column):
+        overlays = super().overlays(column)
+        overlays.pip_label = getattr(self, "label", None)
+        overlays.mixer = self.mixer
+        return overlays
+
+    def start_large(self, index):
+        """Tune a channel on the large picture and play it from its pipeline."""
+        live = self.controller.live
+        count, running = len(live.named("start")), live.running
+        self.play(index)
+        if running:
+            self.assertEqual(live.calls[-1], ("stop",))
+            live.released.emit()
+        self.assertTrue(wait_until(lambda: len(live.named("start")) == count + 1))
+        live.play_pipeline()
+
+    def open_small(self, channel, group_key="10", channels=CHANNELS):
+        """Open `channel` small from the drawer's menu and play it from its pipeline."""
+        self.controller.open_pip(channel, group_key=group_key, channels=channels)
+        small = self.sessions.other()
+        count = len(small.live.named("start"))
+        self.ready(f"http://stream/{channel['id']}")
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == count + 1))
+        self.assertTrue(self.sessions.pip_open())
+        small.live.play_pipeline()
+        return small
+
+    def counts(self):
+        """What each player and live session was asked to do so far."""
+        return (
+            len(self.session.plays),
+            self.session.stops,
+            len(self.live.calls),
+            len(self.pip_session.plays),
+            self.pip_session.stops,
+            len(self.pip_live.calls),
+        )
+
+
+class PipTests(PipCase):
+    def test_p_opens_the_previous_channel_small_once_its_link_comes(self):
+        self.start_large(0)
+        self.start_large(1)  # One is the previous channel now
+        self.controller.handle(Action.PIP)
+        self.assertEqual(self.requested()[-1], "One")
+        self.assertEqual(self.pip_live.calls, [])
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: self.pip_live.named("start")))
+        url, kwargs = self.pip_live.named("start")[0]
+        self.assertEqual(url, "http://stream/1")
+        self.assertEqual(  # a main tune's start arguments
+            kwargs,
+            {
+                "headers": {"User-Agent": DEFAULT_USER_AGENT},
+                "verify_ssl": True,
+                "latency": "low",
+                "user_agent": DEFAULT_USER_AGENT,
+                "disk": False,
+                "max_bytes": 128 * MIB,
+            },
+        )
+        self.assertTrue(self.sessions.pip_open())
+        self.assertTrue(self.pip_session.muted)
+        self.assertFalse(self.session.muted)
+        self.assertEqual(self.frame.calls, [("show_pip",)])
+        self.assertTrue(self.label.visible)
+        self.assertEqual(self.label.info, ("One", "Connecting…"))
+        self.assertEqual(self.transport.named("set_pip_state")[-1], (True, True))
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+        self.assertEqual(len(self.live.named("start")), 2)  # the large picture plays on
+
+    def test_p_again_closes_pip(self):
+        self.start_large(0)
+        self.start_large(1)
+        self.controller.handle(Action.PIP)
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(self.sessions.pip_open))
+        large = self.counts()[:3]
+        self.controller.handle(Action.PIP)
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.pip_live.calls[-1], ("stop",))
+        self.assertEqual(self.frame.calls[-2:], [("hide_pip",), ("set_large", "main")])
+        self.assertFalse(self.label.visible)
+        self.assertEqual(self.transport.named("set_pip_state")[-1], (True, False))
+        self.pip_live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual(self.counts()[:3], large)
+
+    def test_p_while_its_link_is_on_the_way_cancels_it(self):
+        self.start_large(0)
+        self.start_large(1)
+        self.controller.handle(Action.PIP)
+        self.controller.handle(Action.PIP)  # changed one's mind
+        self.ready("http://stream/1")
+        QTest.qWait(20)
+        self.assertEqual(self.pip_live.calls, [])
+        self.assertFalse(self.sessions.pip_open())
+
+    def test_p_without_a_previous_channel_says_so(self):
+        self.start_large(0)
+        self.controller.handle(Action.PIP)
+        self.assertEqual(self.toast.messages()[-1], (NO_PREVIOUS, "info"))
+        self.assertEqual(self.requested(), ["One"])
+
+    def test_s_swaps_the_banner_the_zap_group_and_the_transport_follow_the_pip(self):
+        self.start_large(0)
+        self.open_small(GROUP_B[0], "20", GROUP_B)
+        self.pip_live.timelineChanged.emit(SHIFTED)
+        self.assertEqual(self.label.info, ("Five", "−03:20"))
+        before = self.counts()
+        self.controller.handle(Action.SWAP)
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.assertEqual(self.frame.calls[-1], ("set_large", "pip"))
+        self.assertEqual(self.banner.info.name, "Five")
+        self.assertEqual(self.zap.context.group_key, "20")
+        self.assertEqual(self.zap.context.current(), GROUP_B[0])
+        self.assertEqual(self.transport.named("show_timeshift")[-1], ("Five", ""))
+        self.assertEqual(self.transport.named("update_timeline")[-1][0], SHIFTED)
+        self.assertEqual(self.label.info, ("One", "Connecting…"))  # One is small now
+        self.assertEqual(self.counts(), before)  # nothing played, stopped or started again
+        self.assertTrue(self.session.muted)  # audio follows the large picture
+        self.assertFalse(self.pip_session.muted)
+        self.assertIs(self.controller.session, self.pip_session)
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+
+    def test_a_zap_after_a_swap_tunes_the_large_slot_and_leaves_the_small_one_alone(self):
+        self.start_large(0)
+        self.open_small(GROUP_B[0], "20", GROUP_B)
+        self.controller.handle(Action.SWAP)
+        main = self.counts()[:3]
+        self.controller.handle(Action.CH_NEXT)
+        self.assertEqual(self.requested()[-1], "Six")
+        self.ready("http://stream/6")
+        self.assertEqual(self.pip_live.calls[-1], ("stop",))
+        self.pip_live.released.emit()
+        self.assertTrue(
+            wait_until(lambda: self.pip_live.named("start")[-1][0] == "http://stream/6")
+        )
+        self.assertEqual(self.counts()[:3], main)  # the small picture got no calls
+        self.assertEqual(self.zap.context.current(), GROUP_B[1])
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+        self.assertEqual(self.label.info[0], "One")
+
+    def test_zapping_the_large_slot_onto_the_pips_channel_swaps_instead(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        links, before = len(self.catalog.links), self.counts()
+        self.controller.handle(Action.CH_NEXT)  # One -> Two, which the PiP shows
+        self.assertEqual(len(self.catalog.links), links)  # no second stream of it
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.assertEqual(self.zap.context.current(), CHANNELS[1])
+        self.assertEqual(self.counts(), before)
+        self.controller.handle(Action.PREVIOUS)  # back to One: the small picture again
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertEqual(len(self.catalog.links), links)
+
+    def test_s_without_pip_says_how_to_open_it(self):
+        self.start_large(0)
+        self.controller.handle(Action.SWAP)
+        self.assertEqual(self.toast.messages()[-1], (OPEN_PIP_FIRST, "info"))
+
+    def test_a_click_on_the_small_picture_swaps(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.frame.swapRequested.emit()
+        self.assertIs(self.sessions.large(), self.pip_slot)
+
+    def test_denied_toasts_the_providers_limit(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB"}  # one stream
+        self.start_large(0)
+        self.start_large(1)
+        self.controller.handle(Action.PIP)
+        self.ready("http://stream/1")
+        QTest.qWait(20)
+        self.assertIn(("Your provider allows 1 stream at a time", "error"), self.toast.messages())
+        self.assertEqual(self.pip_live.calls, [])
+        self.assertEqual(self.frame.calls, [])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_p_during_a_movie_toasts_and_opens_nothing(self):
+        self.start_large(0)
+        self.start_large(1)
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+        self.live.released.emit()
+        links = len(self.catalog.links)
+        self.controller.handle(Action.PIP)
+        self.assertEqual(self.toast.messages()[-1], (PIP_LIVE_ONLY, "info"))
+        self.assertEqual(len(self.catalog.links), links)
+
+    def test_a_movie_closes_the_small_picture_first(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.pip_live.calls[-1], ("stop",))
+
+    def test_the_library_stops_both_pictures(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.stop_for_library()
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.pip_live.calls[-1], ("stop",))
+        self.assertEqual(self.live.calls[-1], ("stop",))
+
+    def test_shutdown_closes_the_small_picture_then_stops_the_large(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        order = []
+        self.live.stop = lambda: order.append("large")
+        self.pip_live.stop = lambda: order.append("small")
+        self.controller.shutdown()
+        self.assertEqual(order, ["small", "large"])
+
+    def test_closing_while_swapped_keeps_the_picture_that_is_large(self):
+        self.start_large(0)
+        self.open_small(GROUP_B[0], "20", GROUP_B)
+        self.controller.handle(Action.SWAP)
+        large = self.counts()[3:]
+        self.label.closeRequested.emit()  # the × on the small picture: One
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        self.assertEqual(self.counts()[3:], large)  # Five plays on, large
+        self.assertIs(self.controller.session, self.pip_session)
+        self.assertEqual(self.frame.calls[-2:], [("hide_pip",), ("set_large", "pip")])
+        self.live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), ["main"])  # Five's, as the large one
+        self.controller.handle(Action.CH_NEXT)  # zapping goes on in Five's group
+        self.assertEqual(self.requested()[-1], "Six")
+
+    def test_the_label_names_the_small_pictures_state(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.assertEqual(self.label.info, ("Two", "Connecting…"))
+        self.pip_live.timelineChanged.emit(dict(SHIFTED, lag=3.4, target=2.5))
+        self.assertEqual(self.label.info, ("Two", "LIVE"))  # within a second of its target
+        self.pip_live.timelineChanged.emit(dict(SHIFTED, lag=3.6, target=2.5))
+        self.assertEqual(self.label.info, ("Two", "−00:03"))
+        self.live.timelineChanged.emit(SHIFTED)  # the large picture's: not the label's
+        self.assertEqual(self.label.info, ("Two", "−00:03"))
+
+    def test_a_pip_failure_closes_it_and_says_why(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.failed.emit("http://user:secret@tv/2: 404")
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.toast.messages()[-1], (PIP_FAILED, "error"))
+
+    def test_the_drawers_menu_opens_a_channel_small(self):
+        self.start_large(0)
+        self.nav.reset_to("live", "10")
+        node = self.nav.children(self.nav.path[-1])[2]
+        shown = []
+        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append(menu)):
+            self.drawer.contextRequested.emit(node, QPoint(40, 50))
+        menu = shown[0]
+        self.addCleanup(menu.deleteLater)
+        action = next(a for a in menu.actions() if a.text() == "Open in picture-in-picture")
+        action.trigger()
+        self.assertEqual(self.requested()[-1], "Three")
+        self.ready("http://stream/3")
+        self.assertTrue(wait_until(self.sessions.pip_open))
+        self.controller.handle(Action.SWAP)
+        self.assertEqual(self.zap.context.current(), CHANNELS[2])
+        self.controller.handle(Action.CH_NEXT)  # ↓ walks the drawer group from Three
+        self.assertEqual(self.requested()[-1], "Four")
+
+    def test_ctrl_p_in_the_drawer_opens_the_highlighted_channel_small(self):
+        self.start_large(0)
+        self.nav.reset_to("live", "10")
+        self.drawer.visible = True
+        self.drawer.highlight = self.nav.children(self.nav.path[-1])[2]
+        self.controller.handle(Action.PIP)
+        self.assertEqual(self.requested()[-1], "Three")
+        self.assertEqual(self.drawer.named("close_drawer"), [()])
+
+    def test_the_large_pictures_channel_is_not_opened_again_small(self):
+        self.start_large(0)
+        self.controller.open_pip(CHANNELS[0], group_key="10", channels=CHANNELS)
+        self.assertEqual(self.toast.messages()[-1], (ALREADY_LARGE, "info"))
+        self.assertEqual(self.requested(), ["One"])
+
+    def test_zapping_onto_the_channel_on_its_way_to_the_pip_opens_it_large_only(self):
+        self.start_large(0)
+        self.controller.open_pip(CHANNELS[1], group_key="10", channels=CHANNELS)
+        self.controller.handle(Action.CH_NEXT)  # Two, whose PiP link is on its way
+        self.ready("http://stream/2")  # the PiP's link: it opens nothing now
+        QTest.qWait(20)
+        self.assertEqual(self.pip_live.calls, [])
+        self.assertEqual(self.requested()[-1], "Two")
+        self.ready("http://stream/2")  # the large picture's own
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.live.named("start")[-1][0] == "http://stream/2"))
+        self.assertFalse(self.sessions.pip_open())
+
+    def test_another_provider_closes_the_small_picture(self):
+        self.catalog.providerReady.emit("Home")
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.catalog.providerReady.emit("Home")  # the same provider again: it stays open
+        self.assertTrue(self.sessions.pip_open())
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.pip_live.calls[-1], ("stop",))
+
+    def test_a_swap_waits_for_nothing_while_the_large_pictures_stream_opens(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.play(2)  # Three: waits for One's release
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        self.controller.handle(Action.SWAP)
+        self.assertIs(self.sessions.large(), self.main_slot)  # nothing swapped
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.live.named("start")[-1][0] == "http://stream/3"))
+        self.controller.handle(Action.SWAP)
+        self.assertIs(self.sessions.large(), self.pip_slot)
+
+
+class MixerTests(PipCase):
+    """The volume keys on the mixer: a row per picture (Phase 4 Task 3b)."""
+
+    def setUp(self):
+        self.mixer = FakeMixer()
+        super().setUp()
+        self.config.pip_volume = 30
+
+    def test_the_pips_level_comes_from_the_config_at_startup(self):
+        self.assertEqual(self.sessions.level("pip"), 30)
+        self.config.pip_volume = 45
+        controller = self.make_controller(self.column, sessions=self.sessions)
+        controller.start()
+        self.assertEqual(self.sessions.level("pip"), 45)
+
+    def test_a_volume_key_without_pip_shows_one_row(self):
+        self.start_large(0)
+        self.controller.handle(Action.VOL_DOWN)
+        self.assertEqual(self.mixer.shown(), ([("Main", "One", 95, False)], 0))
+        self.assertEqual(self.sessions.level("main"), 95)
+        self.assertEqual(self.session.level, 95)
+        self.assertEqual(self.toast.messages(), [])  # the mixer says it
+
+    def test_with_pip_it_shows_two_rows_and_the_keys_act_on_the_selected_one(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.VOL_DOWN)  # the large picture's row first
+        self.assertEqual(
+            self.mixer.shown(), ([("Main", "One", 95, False), ("PiP", "Two", 30, True)], 0)
+        )
+        self.controller.handle(Action.SEEK_FWD)  # → the PiP's row (not a seek)
+        self.assertEqual(self.mixer.selected, 1)
+        self.assertEqual(self.live.named("seek_relative"), [])
+        self.controller.handle(Action.CH_PREV)  # ↑: louder, and audible now
+        self.assertEqual(self.mixer.shown()[0][1], ("PiP", "Two", 35, False))
+        self.assertFalse(self.pip_session.muted)
+        self.assertEqual(self.pip_session.level, 35)
+        self.assertTrue(self.label.audible)
+        self.controller.handle(Action.CH_NEXT)  # ↓ (not a zap)
+        self.controller.handle(Action.CH_NEXT)
+        self.assertEqual(self.sessions.level("pip"), 25)
+        self.assertEqual(self.requested(), ["One", "Two"])
+        self.controller.handle(Action.TAB)  # back to Main
+        self.assertEqual(self.mixer.selected, 0)
+        self.controller.handle(Action.MUTE)  # M mutes the selected row
+        self.assertTrue(self.sessions.muted("main"))
+        self.assertFalse(self.sessions.muted("pip"))
+        self.controller.handle(Action.ESCAPE)  # hides it first
+        self.assertFalse(self.mixer.visible)
+        self.assertEqual(self.window.calls, [])
+
+    def test_m_mutes_the_large_picture_and_shows_the_mixer(self):
+        self.start_large(0)
+        self.controller.handle(Action.MUTE)
+        self.assertTrue(self.sessions.muted("main"))
+        self.assertTrue(self.session.muted)
+        self.assertEqual(self.mixer.shown(), ([("Main", "One", 100, True)], 0))
+        self.mixer.dismiss()
+        self.controller.handle(Action.MUTE)
+        self.assertFalse(self.sessions.muted("main"))
+
+    def test_a_swap_moves_each_level_with_its_stream(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.VOL_DOWN)
+        self.mixer.levelRequested.emit(0, 80)
+        self.mixer.levelRequested.emit(1, 20)
+        self.assertEqual(
+            self.mixer.shown(), ([("Main", "One", 80, False), ("PiP", "Two", 20, False)], 1)
+        )
+        self.controller.handle(Action.SWAP)
+        self.assertEqual(
+            self.mixer.shown()[0], [("Main", "Two", 20, False), ("PiP", "One", 80, False)]
+        )
+        self.assertEqual((self.session.level, self.pip_session.level), (80, 20))
+
+    def test_raising_the_pip_row_from_zero_unmutes_the_small_picture(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.label.mixerRequested.emit()  # the PiP label's speaker: the PiP's row
+        self.assertEqual(self.mixer.selected, 1)
+        self.mixer.levelRequested.emit(1, 0)
+        self.assertTrue(self.sessions.muted("pip"))
+        self.controller.handle(Action.CH_PREV)
+        self.assertEqual(self.sessions.level("pip"), 5)
+        self.assertFalse(self.sessions.muted("pip"))
+        self.assertFalse(self.pip_session.muted)
+
+    def test_a_click_on_a_speaker_toggles_that_rows_mute(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.VOL_UP)
+        self.mixer.muteRequested.emit(1)
+        self.assertFalse(self.sessions.muted("pip"))
+        self.mixer.muteRequested.emit(1)
+        self.assertTrue(self.sessions.muted("pip"))
+        self.mixer.muteRequested.emit(0)
+        self.assertTrue(self.sessions.muted("main"))
+
+    def test_the_pips_level_is_remembered_once_the_mixer_hides(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.label.mixerRequested.emit()
+        self.controller.handle(Action.CH_PREV)
+        self.assertEqual(self.config.saves, 0)
+        self.mixer.dismiss()  # 3 s after the last change
+        self.assertEqual((self.config.pip_volume, self.config.saves), (35, 1))
+        self.mixer.dismiss()
+        self.assertEqual(self.config.saves, 1)
+
+    def test_the_wheel_during_a_movie_shows_the_mixer(self):
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+        self.controller.wheel(1, NO_MODS)
+        self.assertEqual(self.mixer.shown(), ([("Main", "Heat", 95, False)], 0))

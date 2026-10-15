@@ -45,6 +45,9 @@ class Action(str, Enum):
     FAVORITE = "favorite"
     LIBRARY = "library"
     OPEN_FILE = "open_file"
+    PIP = "pip"  # picture in picture: open (the previous or highlighted channel) or close
+    SWAP = "swap"  # the large and the small picture trade places
+    TAB = "tab"  # the mixer's other row
 
 
 CONTEXTS = ("player", "drawer", "library", "guide")
@@ -80,6 +83,7 @@ _PLAYER_KEYS = {
     _K.Key_Left.value: Action.SEEK_BACK,
     _K.Key_Right.value: Action.SEEK_FWD,
     _K.Key_Escape.value: Action.ESCAPE,
+    _K.Key_Tab.value: Action.TAB,
 }
 # Character keys: only plain or with Shift (Ctrl/Alt/Meta combinations are not ours).
 _PLAYER_CHARS = {
@@ -92,6 +96,8 @@ _PLAYER_CHARS = {
     _K.Key_Plus.value: Action.VOL_UP,
     _K.Key_Equal.value: Action.VOL_UP,  # the unshifted "+" key on US layouts
     _K.Key_Minus.value: Action.VOL_DOWN,
+    _K.Key_P.value: Action.PIP,
+    _K.Key_S.value: Action.SWAP,
 }
 # Remote channel keys (drawer closed, like the arrows they stand in for).
 _CHANNEL_KEYS = {
@@ -105,6 +111,9 @@ _MEDIA_KEYS = {
     _K.Key_MediaPause.value: Action.PLAY_PAUSE,
     _K.Key_MediaNext.value: Action.MEDIA_NEXT,
     _K.Key_MediaPrevious.value: Action.MEDIA_PREV,
+    _K.Key_VolumeUp.value: Action.VOL_UP,
+    _K.Key_VolumeDown.value: Action.VOL_DOWN,
+    _K.Key_VolumeMute.value: Action.MUTE,
 }
 # Shortcuts that work in every context: Ctrl/⌘+F is the quick search (the owner's ruling),
 # and fullscreen is F11 or ⌃⌘F (Ctrl+Meta+F) anywhere, plain F on the player and in the guide.
@@ -172,6 +181,9 @@ def resolve(
         return Action.FULLSCREEN, ""
     if held == _CTRL and key in _CTRL_KEYS:
         return _CTRL_KEYS[key], ""
+    if held == _CTRL and key == _K.Key_P.value and context in ("player", "drawer"):
+        # The drawer types P into its filter: Ctrl/⌘+P opens the highlighted channel small.
+        return Action.PIP, ""
     if context == "library":
         if key in _LIBRARY_KEYS:
             return _LIBRARY_KEYS[key], ""
@@ -239,11 +251,14 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("L", "Go live"),
         ("G", "Guide"),
         ("I", "Channel info"),
-        ("+, -", "Volume up / down"),
+        ("+, -", "Volume up / down (the mixer)"),
         ("M", "Mute"),
+        ("Tab", "The mixer's other row (while it shows)"),
         ("F, F11, Ctrl+Meta+F", "Fullscreen"),
         ("Ctrl+F", "Search"),
         ("Ctrl+D", "Add or remove a favorite channel"),
+        ("P, Ctrl+P", "Picture-in-picture with the previous channel, or close it"),
+        ("S", "Swap the large and the small picture"),
         ("Alt+P", "Mini player"),
         ("Esc", "Close what is open, leave fullscreen; after a movie, back to the Library"),
     ],
@@ -255,6 +270,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("A…Z", "Type to filter"),
         ("Backspace", "Delete a letter of the filter"),
         ("Ctrl+D", "Add or remove a favorite channel"),
+        ("Ctrl+P", "Open the channel in picture-in-picture"),
         ("Ctrl+F", "Search"),
         ("F11, Ctrl+Meta+F", "Fullscreen"),
         ("Esc", "Clear the filter, then close"),

@@ -7,7 +7,9 @@ unavailable, once per channel and run) and its failures. An STB channel that fai
 fresh link once per tune (its play token may have expired) before the error shows; a
 refusal for the provider's connection limit is never retried and says so.
 
-TVController owns the target and the LiveTuner and hands this unit what it needs.
+TVController owns the target and the LiveTuner and hands this unit what it needs. With
+picture in picture it is the large picture's: a swap hands it the other player's tuner, live
+session and player (`use_slot`).
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import logging
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, SignalInstance
 
 from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE, LiveSession
@@ -86,6 +88,7 @@ class LiveControls(QObject):
         self._ticks: list[tuple[float, str]] = []
         self._unavailable_noticed: set[tuple[str, str]] = set()  # (provider, channel) this run
         self._held_notice: Optional[tuple[str, str]] = None  # shown once the channel plays
+        self._wired = False
 
     def wire(self) -> None:
         transport = self._transport
@@ -94,13 +97,35 @@ class LiveControls(QObject):
         transport.goLiveRequested.connect(self.go_live)
         transport.programmeStartRequested.connect(self._programme_start)
         transport.seekToRequested.connect(self._seek_to)
-        self._tuner.startFailed.connect(self._on_live_start_failed)
-        if self.live is not None:
-            live = self.live
-            live.modeChanged.connect(self._on_live_mode)
-            live.timelineChanged.connect(self._on_live_timeline)
-            live.notice.connect(self._on_live_notice)
-            live.failed.connect(self._on_live_failed)
+        self._wired = True
+        self._connect(True)
+
+    def _connect(self, connect: bool) -> None:
+        pairs: list[tuple[SignalInstance, Callable[..., None]]] = [
+            (self._tuner.startFailed, self._on_live_start_failed)
+        ]
+        live = self.live
+        if live is not None:
+            pairs += [
+                (live.modeChanged, self._on_live_mode),
+                (live.timelineChanged, self._on_live_timeline),
+                (live.notice, self._on_live_notice),
+                (live.failed, self._on_live_failed),
+            ]
+        for signal, slot in pairs:
+            if connect:
+                signal.connect(slot)
+            else:
+                signal.disconnect(slot)
+
+    def use_slot(self, tuner: LiveTuner, live: Optional[LiveSession], session) -> None:
+        """The large picture is another player's now (a PiP swap): act on its stream."""
+        if self._wired:
+            self._connect(False)
+        self._tuner, self.live, self.session = tuner, live, session
+        if self._wired:
+            self._connect(True)
+        self.new_target()
 
     # ---- tuning -------------------------------------------------------------------------------
 
@@ -140,11 +165,15 @@ class LiveControls(QObject):
             self._restore_channel()
             self._toast(self.limit_text(limit), "error", ERROR_MS)
             return False
+        self._tuner.tune(self.live_start(target, url), name, limit)
+        return True
+
+    def live_start(self, target: Target, url: str) -> LiveStart:
+        """How the pipeline asks for `target`'s link: its agent and the provider's TLS check."""
         provider = self.catalog.current_provider()
         user_agent = target.item.get("user_agent") or DEFAULT_USER_AGENT
         verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
-        self._tuner.tune(LiveStart(url, user_agent, verify_ssl), name, limit)
-        return True
+        return LiveStart(url, user_agent, verify_ssl)
 
     def pipeline_live(self) -> bool:
         """The current channel plays from the time-shift buffer."""

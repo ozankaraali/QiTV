@@ -1119,6 +1119,73 @@ class LivePipelineWindowTests(WindowCase):
         self.assertTrue(wait_until(lambda: modes[-1:] == ["pipeline"] and len(modes) == 2, 5000))
         self.assertEqual(window.zap.context.current()["name"], "Channel 1")
 
+    def test_pip_plays_two_channels_at_once_and_a_swap_restarts_neither(self):
+        """Phase 4: the fixture's two local channels in both pictures, then a swap."""
+        window = self.window
+        main, pip = window.session, window.pip_session
+        live, pip_live = window.live_session, window.pip_live
+        plays = {}
+        for name, session in (("main", main), ("pip", pip)):
+            patcher = mock.patch.object(session, "play", wraps=session.play)
+            plays[name] = patcher.start()
+            self.addCleanup(patcher.stop)
+
+        def playing(session, live_session):
+            return lambda: (live_session.is_pipeline() and session.state() is PlaybackState.PLAYING)
+
+        self.open_first_channel()
+        self.assertTrue(wait_until(playing(main, live)))
+        QTest.keyClick(self.window, Qt.Key.Key_Down)  # Channel 2: Channel 1 is the previous
+        self.assertTrue(wait_until(lambda: window.zap.context.current()["name"] == "Channel 2"))
+        self.assertTrue(wait_until(lambda: plays["main"].call_count == 2))
+        self.assertTrue(wait_until(playing(main, live)))
+        QTest.keyClick(self.window, Qt.Key.Key_P)  # Channel 1, small
+        sessions = window.sessions
+        self.assertTrue(wait_until(sessions.pip_open))
+        self.assertTrue(wait_until(playing(pip, pip_live)))
+        self.assertTrue(playing(main, live)())
+        self.assertEqual(sorted(window.budget.holders(PROVIDER_NAME)), ["main", "pip"])
+        frame, label = window.pip_frame, window.pip_label
+        page = window.player_page.rect()
+        small = frame.small_rect()
+        self.assertEqual(small, window.pip_surface.geometry())
+        self.assertEqual(window.surface.geometry(), page)
+        self.assertEqual(small.width(), round(page.width() * 0.25))
+        self.assertEqual(label.geometry(), small)  # host coordinates: the host covers the page
+        self.assertTrue(label.isVisible())
+        self.assertEqual(label.info()[0], "Channel 1")
+        mixer = window.mixer
+        QTest.keyClick(self.window, Qt.Key.Key_Minus)  # the mixer: a row per picture
+        self.assertTrue(mixer.isVisible())
+        self.assertEqual([row.title for row in mixer.rows()], ["Main", "PiP"])
+        self.assertEqual(mixer.rows()[1].channel, "Channel 1")
+        self.assertFalse(mixer.geometry().intersects(small))
+        QTest.keyClick(self.window, Qt.Key.Key_Tab)  # the PiP's row
+        self.assertEqual(mixer.selected(), 1)
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertFalse(mixer.isVisible())
+        counts = (plays["main"].call_count, plays["pip"].call_count)
+
+        QTest.keyClick(self.window, Qt.Key.Key_S)
+        self.assertIs(sessions.large().playback, pip)
+        QTest.qWait(300)
+        self.assertTrue(playing(main, live)())
+        self.assertTrue(playing(pip, pip_live)())
+        self.assertEqual((plays["main"].call_count, plays["pip"].call_count), counts)
+        self.assertEqual(window.pip_surface.geometry(), page)
+        self.assertEqual(window.surface.geometry(), frame.small_rect())
+        self.assertEqual(label.info()[0], "Channel 2")
+        self.assertEqual(window.overlays.banner.info.name, "Channel 1")
+        self.assertEqual(sorted(window.budget.holders(PROVIDER_NAME)), ["main", "pip"])
+
+        QTest.keyClick(self.window, Qt.Key.Key_P)  # closes the small picture: Channel 2
+        self.assertFalse(sessions.pip_open())
+        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == ["main"]))
+        self.assertTrue(playing(pip, pip_live)())  # Channel 1 plays on, large
+        self.assertEqual(window.pip_surface.geometry(), page)
+        self.assertFalse(window.surface.isVisible())
+        self.assertFalse(label.isVisible())
+
 
 # ---- the Library, menus, exports (Phase 3 Task 12) -------------------------------------------
 

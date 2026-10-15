@@ -1,7 +1,10 @@
 """The single TV window: the player and Library pages, the overlays and the menus (spec §5, §8).
 
-Two pages share the window (a QStackedWidget): the player (the native video surface, with the
-overlay host glued over it) and the Library (Movies and Series, spec §5.4). The moves between
+Two pages share the window (a QStackedWidget): the player (the native video surfaces, with the
+overlay host glued over them) and the Library (Movies and Series, spec §5.4). The player has
+two surfaces, each with its own player, live session and tuner (spec §7, Phase 4): the PiP
+frame (ui/pip.py) fills the page with the large one and puts the other in a corner while
+picture in picture is open; the SessionManager says which is large. The moves between
 them are ui/tv_pages.py's, the menu bar ui/tv_menus.py's; this window lays them out, owns the
 services, routes the keys, and handles fullscreen, the mini player and closing.
 
@@ -44,7 +47,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QStackedWidget,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -56,6 +58,7 @@ from services.live.engine import LiveEngine
 from services.live.live_session import LiveSession
 from services.navigation import NavModel
 from services.playback import NullSession, PlaybackSession, Session, create_instance
+from services.sessions import SessionManager, Slot
 from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update
 from services.watch_state import WatchState
@@ -63,16 +66,20 @@ from services.zapping import ZapController
 from ui.export_flow import ExportFlow
 from ui.keymap import Action, resolve
 from ui.library.library_screen import LibraryScreen
+from ui.live_tuner import LiveTuner
 from ui.logos import LogoCache, PosterCache
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
+from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
+from ui.overlays.pip_label import PipLabel
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
+from ui.pip import PipFrame
 from ui.settings_dialog import OptionsDialog
 from ui.tv_controller import Overlays, TVController
 from ui.tv_menus import TVMenus
@@ -250,6 +257,7 @@ class TVWindow(QMainWindow):
         self._fs_settle.timeout.connect(self._fullscreen_settled)
         self._fit_fallback = QTimer(self, singleShot=True, interval=FULLSCREEN_EXIT_MS)
         self._fit_fallback.timeout.connect(self._fit_to_screen)
+        self._bound_pip: Optional[int] = None  # the PiP surface's native window, once bound
         self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
         self._dragged = False  # the last press on the video moved the mini player
         self._pressed = False  # the left button is down on the video
@@ -257,19 +265,18 @@ class TVWindow(QMainWindow):
 
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        # The player page is the video container: the main surface fills it (Phase 4's
-        # picture in picture puts its second surface in it as well). The page paints the
-        # black behind the video; the surfaces paint nothing (see ui/video_surface.py).
+        # The player page is the video container: the large surface fills it, and picture in
+        # picture puts the other one in a corner (the PiP frame lays them out). The page paints
+        # the black behind the video; the surfaces paint nothing (see ui/video_surface.py).
         self.player_page = QWidget()
         black = self.player_page.palette()
         black.setColor(QPalette.ColorRole.Window, QColor("#000000"))
         self.player_page.setPalette(black)
         self.player_page.setAutoFillBackground(True)
         self.surface = VideoSurface(self.player_page)
-        video_layout = QVBoxLayout(self.player_page)
-        video_layout.setContentsMargins(0, 0, 0, 0)
-        video_layout.addWidget(self.surface)
-        self.surface.installEventFilter(self)
+        self.pip_surface = VideoSurface(self.player_page)
+        for surface in (self.surface, self.pip_surface):
+            surface.installEventFilter(self)  # before the PiP frame's: it sees them first
         self.logos = LogoCache(image_manager, config_manager, self)
         self.posters = PosterCache(image_manager, config_manager, self)
         self.library_page = LibraryScreen(self.posters, self.logos)
@@ -278,7 +285,8 @@ class TVWindow(QMainWindow):
         self.pages.addWidget(self.player_page)
         self.pages.addWidget(self.library_page)
         self.setCentralWidget(self.pages)
-        self.host = OverlayHost(self, self.surface)  # shown only while the surface is
+        # Glued to the page, not a surface: either surface may be the large one.
+        self.host = OverlayHost(self, self.player_page)  # shown only while the page is
 
         self.catalog = CatalogService(config_manager, provider_manager, epg_manager, parent=self)
         self.nav = NavModel(self.catalog, config_manager, self)
@@ -287,19 +295,50 @@ class TVWindow(QMainWindow):
         self._owns_instance = vlc_instance is None and self._instance is not None
         self.session: Session
         # The time-shift pipeline (spec §6): only with libVLC, since nothing plays without it.
+        # Picture in picture needs it too: a second player and live session (spec §7).
         self.engine: Optional[LiveEngine] = None
         self.live_session: Optional[LiveSession] = None
+        self.pip_session: Optional[PlaybackSession] = None
+        self.pip_live: Optional[LiveSession] = None
+        self.sessions: Optional[SessionManager] = None
+        self.budget = ConnectionBudget(self)
         if self._instance is None:
             logger.warning("libVLC is unavailable: channels cannot play")
             self.session = NullSession(self)
         else:
             self.session = PlaybackSession(self._instance, self)
+            self.pip_session = PlaybackSession(self._instance, self)
             root = os.path.join(config_manager.get_config_dir(), TIMESHIFT_DIR)
             self.engine = LiveEngine(root, self)
-            # Connected before the engine starts, so it hears a helper that never comes up.
+            # Connected before the engine starts, so they hear a helper that never comes up.
             self.live_session = LiveSession(self.engine, self.session)
+            self.pip_live = LiveSession(self.engine, self.pip_session)
             self.engine.start()
-        self.budget = ConnectionBudget(self)
+            self.sessions = SessionManager(
+                Slot(
+                    "main",
+                    self.session,
+                    self.live_session,
+                    tuner=LiveTuner(
+                        self.session, config_manager, self.live_session, self.budget, self
+                    ),
+                ),
+                Slot(
+                    "pip",
+                    self.pip_session,
+                    self.pip_live,
+                    tuner=LiveTuner(
+                        self.pip_session,
+                        config_manager,
+                        self.pip_live,
+                        self.budget,
+                        self,
+                        purpose="pip",
+                    ),
+                ),
+                self.budget,
+                parent=self,
+            )
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
 
         # The drawer and column ask the controller for "now" titles, and the controller
@@ -313,6 +352,8 @@ class TVWindow(QMainWindow):
             return catalog.programmes(channel, start, limit=limit)
 
         host = self.host
+        self.pip_label = PipLabel(host)
+        self.mixer = Mixer(host)
         self.overlays = Overlays(
             banner=ZapBanner(host),
             column=ChannelColumn(self.logos, now_provider, parent=host),
@@ -322,18 +363,38 @@ class TVWindow(QMainWindow):
             guide=Guide(self.logos, guide_programmes, _local_now, parent=host),
             next_card=NextCard(host),
             welcome=WelcomeCard(host),
+            pip_label=self.pip_label,
+            mixer=self.mixer,
         )
+        # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
+        # bottom corner's PiP: its pill, speaker and × stay within reach; elsewhere on the PiP
+        # the transport keeps only its own buttons and bar, and other clicks reach the small
+        # picture (OverlayHost.set_hole). The mixer shows over both (it sits above the
+        # transport's controls and beside the PiP). The drawer and the guide cover them all.
         for overlay in (
             self.overlays.banner,
             self.overlays.column,
-            self.overlays.drawer,
             self.overlays.transport,
+            self.pip_label,
+            self.mixer,
+            self.overlays.drawer,
             self.overlays.guide,
             self.overlays.next_card,
             self.overlays.welcome,
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
+        # After the window's surface filters: the frame takes the small surface's left button
+        # before the window (its mini-player drag) and the surface (the drawer) see it.
+        self.pip_frame = PipFrame(self.player_page, self.surface, self.pip_surface, config_manager)
+        # The host covers the page exactly: page coordinates are the host's.
+        self.pip_frame.smallRectChanged.connect(self.pip_label.follow)
+        self.pip_frame.smallRectChanged.connect(self.mixer.avoid)
+        # Clicks on the small picture reach it through the overlays (but their buttons).
+        self.pip_frame.smallRectChanged.connect(self.host.set_hole)
+        self.pip_label.pillPressed.connect(self.pip_frame.pill_press)
+        self.pip_label.pillMoved.connect(self.pip_frame.pill_move)
+        self.pip_label.pillReleased.connect(self.pip_frame.pill_release)
         controller = TVController(
             config=config_manager,
             catalog=self.catalog,
@@ -346,6 +407,8 @@ class TVWindow(QMainWindow):
             logos=self.logos,
             live=self.live_session,
             budget=self.budget,
+            sessions=self.sessions,
+            pip_frame=self.pip_frame,
             parent=self,
         )
         self.controller = controller
@@ -369,7 +432,7 @@ class TVWindow(QMainWindow):
         # A Windows self-update waits for background threads: the engine's must stop first,
         # and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
-        for source in (self.surface, self.host):
+        for source in (self.surface, self.pip_surface, self.host):
             source.clicked.connect(self._on_video_clicked)
             source.doubleClicked.connect(controller.video_double_clicked)
             source.mouseMoved.connect(controller.mouse_moved)
@@ -413,6 +476,15 @@ class TVWindow(QMainWindow):
         ):
             event.accept()  # deliver it as a key press: keyPressEvent handles it once
             return True
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and isinstance(event, QKeyEvent)
+            and event.key() == Qt.Key.Key_Tab
+            and not self._closing
+            and self._resolve(event) is not None
+        ):
+            self.keyPressEvent(event)  # Tab moves the focus otherwise: the mixer's rows
+            return True
         return super().event(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -448,7 +520,7 @@ class TVWindow(QMainWindow):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if (
-            watched is self.surface
+            watched in (self.surface, self.pip_surface)
             and event.type() in _MOUSE_EVENTS
             and isinstance(event, QMouseEvent)
         ):
@@ -763,9 +835,10 @@ class TVWindow(QMainWindow):
             self.setGeometry(fitted)
 
     def _bind_video(self) -> None:
-        """Hand libVLC the surface's native window; again only if its id changed.
+        """Hand libVLC each surface's native window; again only if its id changed.
 
-        On macOS a window flag change (the mini player) keeps the same view.
+        Each player draws into its own surface for good: a PiP swap moves the surfaces, never
+        the players. On macOS a window flag change (the mini player) keeps the same views.
         """
         if not _native_video_handles():
             if self._bound_handle is None:
@@ -779,6 +852,11 @@ class TVWindow(QMainWindow):
         if handle != self._bound_handle:
             self._bound_handle = handle
             self.session.set_window(handle)
+        if self.pip_session is not None:
+            handle = self.pip_surface.native_handle()
+            if handle != self._bound_pip:
+                self._bound_pip = handle
+                self.pip_session.set_window(handle)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Close in steps, each after the event loop ran again (`close_retry`).
@@ -857,12 +935,12 @@ class TVWindow(QMainWindow):
         most the engine's _SHUTDOWN_WAIT_MS (1.8 s; about 0.1 s normally). Safe to call again.
         """
         try:
-            self.controller.stop_live()  # live_session.stop(), keeping the budget in step
+            self.controller.stop_live()  # both live sessions stop, keeping the budget in step
         finally:
             if self.engine is not None:
                 self.engine.shutdown()
-                if self.live_session is not None:
-                    self.live_session.engine_shut_down()  # it signals nothing from now on
+                for live in self._lives():
+                    live.engine_shut_down()  # it signals nothing from now on
 
     def restart_live(self) -> None:
         """A self-update stopped the time-shift helper and could not launch: start a new one.
@@ -873,12 +951,16 @@ class TVWindow(QMainWindow):
         if self._closing or self.engine is None or self.live_session is None:
             return
         old, self.engine = self.engine, LiveEngine(str(self.engine.root_dir), self)
-        self.live_session.use_engine(self.engine)  # connected before it starts
+        for live in self._lives():
+            live.use_engine(self.engine)  # connected before it starts
         self.engine.start()
         old.deleteLater()
         call_before_update(self.stop_live, self.restart_live)  # each hook runs once
         logger.info("The update did not launch; time-shift is back on.")
         self.controller.resume_stopped()  # what played before plays again
+
+    def _lives(self) -> list[LiveSession]:
+        return [live for live in (self.live_session, self.pip_live) if live is not None]
 
     def _shut_down(self) -> None:
         self.epg_refresh.stop()
@@ -888,6 +970,7 @@ class TVWindow(QMainWindow):
             ("stop the live pipeline", self.stop_live),
             ("stop the catalog", self.catalog.shutdown),
             ("stop the controller", self.controller.shutdown),
+            ("stop following the surfaces", self.pip_frame.close),
             ("stop loading logos", self.logos.shutdown),
             ("stop loading posters", self.posters.shutdown),
             ("save the window geometry", self._save_geometry),
@@ -906,6 +989,8 @@ class TVWindow(QMainWindow):
 
     def _release_video(self) -> None:
         self.session.release()
+        if self.pip_session is not None:
+            self.pip_session.release()
         if self._owns_instance and self._instance is not None:
             instance, self._instance = self._instance, None
             instance.release()

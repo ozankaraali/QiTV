@@ -109,7 +109,23 @@ class ClosedKeymapTests(unittest.TestCase):
 
     def test_alt_p_mini_player(self):
         self.assertEqual(closed(K.Key_P, "π", ALT), (Action.MINI_PLAYER, ""))
-        self.assertIsNone(closed(K.Key_P, "p"))
+        self.assertEqual(closed(K.Key_P, "p"), (Action.PIP, ""))  # plain P: Phase 4's PiP
+
+    def test_p_picture_in_picture_and_s_swap(self):
+        self.assertEqual(closed(K.Key_P, "p"), (Action.PIP, ""))
+        self.assertEqual(closed(K.Key_P, "P", SHIFT), (Action.PIP, ""))
+        self.assertEqual(closed(K.Key_S, "s"), (Action.SWAP, ""))
+        self.assertEqual(closed(K.Key_P, "p", CTRL), (Action.PIP, ""))
+        self.assertIsNone(closed(K.Key_S, "s", CTRL))
+
+    def test_tab_switches_the_mixers_rows(self):
+        self.assertEqual(closed(K.Key_Tab, "\t"), (Action.TAB, ""))
+
+    def test_media_volume_keys(self):
+        self.assertEqual(closed(K.Key_VolumeUp), (Action.VOL_UP, ""))
+        self.assertEqual(closed(K.Key_VolumeDown), (Action.VOL_DOWN, ""))
+        self.assertEqual(closed(K.Key_VolumeMute), (Action.MUTE, ""))
+        self.assertEqual(opened(K.Key_VolumeUp), (Action.VOL_UP, ""))  # they never type
 
     def test_unmapped_key(self):
         self.assertIsNone(closed(K.Key_Q, "q"))
@@ -180,6 +196,13 @@ class OpenKeymapTests(unittest.TestCase):
             self.assertIsNone(
                 resolve(K.Key_E.value, CTRL | ALT, "e", drawer_open=True, platform=platform)
             )
+
+    def test_p_types_and_ctrl_p_opens_the_highlighted_channel_in_the_pip(self):
+        # The drawer types to filter ("Premier…"): Ctrl/⌘+P is its PiP key, as Ctrl+D its
+        # favorite one.
+        self.assertEqual(opened(K.Key_P, "p"), (Action.NAV_TEXT, "p"))
+        self.assertEqual(opened(K.Key_S, "s"), (Action.NAV_TEXT, "s"))
+        self.assertEqual(opened(K.Key_P, "p", CTRL), (Action.PIP, ""))
 
     def test_media_keys_work_with_the_drawer_open(self):
         self.assertEqual(opened(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))
@@ -314,6 +337,10 @@ class ContextTests(unittest.TestCase):
     def test_unknown_context(self):
         with self.assertRaises(ValueError):
             resolve(K.Key_Up.value, NONE, "", context="menu")
+
+    def test_ctrl_p_is_only_the_players_and_the_drawers(self):
+        for context in ("guide", "library"):
+            self.assertIsNone(resolve(K.Key_P.value, CTRL, "p", context=context), context)
 
     def test_new_actions_exist(self):
         for name in ("SEARCH", "FAVORITE", "NAV_HOME", "NAV_END", "LIBRARY", "GUIDE", "OPEN_FILE"):

@@ -5,6 +5,10 @@ the bar over the buffered range, or, while the session's stay-live mode is LIVE,
 latency indicator (it reads "catching up" while stay-live nudges the rate, and "Reconnecting…"
 while the source has stalled). The bar and the Go live chip show only when the viewer left live
 (shifted, or a chosen speed); a drag keeps the bar.
+
+Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P) and, on
+live TV while the window offers picture in picture, the second channel (P). Hovering those
+three names their keys.
 """
 
 from dataclasses import dataclass
@@ -17,6 +21,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetricsF,
+    QHelpEvent,
     QHideEvent,
     QLinearGradient,
     QMouseEvent,
@@ -25,7 +30,7 @@ from PySide6.QtGui import (
     QPen,
     QRegion,
 )
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QToolTip, QWidget
 
 from services.live.stay_live import TARGETS, Mode
 from ui.overlays.base import Overlay
@@ -46,6 +51,13 @@ TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
 TICK_LABEL_MAX_U = 25.0
 MINUS = "−"
+TOOLTIPS = {
+    "pip": "Second channel (P)",
+    "mini": "Mini player (Alt+P)",
+    "fullscreen": "Fullscreen (F)",
+}
+_ICONS = {"mini": "mini_player", "pip": "pip"}  # button name -> painting icon, if they differ
+_LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
 
 
 def _speed_label(rate: float) -> str:
@@ -114,6 +126,8 @@ class Transport(Overlay):
     goLiveRequested = Signal()
     programmeStartRequested = Signal()
     seekToRequested = Signal(float)
+    pipRequested = Signal()  # the second channel: open picture in picture, or close it
+    miniPlayerRequested = Signal()
 
     def __init__(
         self,
@@ -134,7 +148,10 @@ class Transport(Overlay):
         self._paused = False
         self._speed = 1.0
         self._next_available = False
+        self._pip_available = False  # the window can open a second channel
+        self._pip_open = False
         self._timeline: _Timeline | None = None
+        self._claimed: tuple[object, ...] = ()  # what hole_claims() covered last
         self._ticks: list[tuple[float, str]] = []
         self._edge = True
         self._edge_lag: float | None = None
@@ -188,6 +205,7 @@ class Transport(Overlay):
         self._speed = 1.0 if live else tl.rate  # stay-live's nudges are not a chosen speed
         self._paused = tl.paused
         self.update()
+        self._controls_changed()
 
     def show_live_edge(self, lag_s: float, catching_up: bool) -> None:
         """Show the live-edge indicator instead of the bar; never changes visibility."""
@@ -197,6 +215,7 @@ class Transport(Overlay):
         self._catching_up = catching_up
         self._stalled = False
         self.update()
+        self._controls_changed()
 
     def update_position(self, position_ms: int, length_ms: int) -> None:
         self._position = max(0, position_ms)
@@ -214,6 +233,42 @@ class Transport(Overlay):
     def set_next_available(self, available: bool) -> None:
         self._next_available = available
         self.update()
+        self._controls_changed()
+
+    def set_pip_state(self, available: bool, open_: bool) -> None:
+        """The second channel's button: shown on live TV when `available`; lit while open."""
+        if (available, open_) != (self._pip_available, self._pip_open):
+            self._pip_available, self._pip_open = available, open_
+            self.update()
+            self._controls_changed()
+
+    def hole_claims(self) -> QRegion:
+        """Over the PiP, the clicks this keeps (host coordinates): its buttons and its bar."""
+        region = QRegion()
+        for name, rect in self._layout().items():
+            if name in _LABELS:
+                continue
+            if name == "seek":
+                rect = rect.adjusted(0, -rect.height(), 0, rect.height())  # its hit area
+            region = region.united(QRegion(rect.toAlignedRect()))
+        return region.translated(self.geometry().topLeft())
+
+    def _controls_changed(self) -> None:
+        """The host masks the PiP anew when this shows other controls (a mode, the bar)."""
+        claimed = (self.size(), tuple(sorted(n for n in self._layout() if n not in _LABELS)))
+        if claimed == self._claimed:
+            return
+        self._claimed = claimed
+        host = self.parentWidget()
+        if not self.isHidden() and host is not None and hasattr(host, "overlay_changed"):
+            host.overlay_changed()
+
+    def tooltip_at(self, pos: QPointF) -> str:
+        """What hovering `pos` says: a button's name and key, or nothing."""
+        for name, rect in self._layout().items():
+            if name in TOOLTIPS and rect.contains(pos):
+                return TOOLTIPS[name]
+        return ""
 
     def poke(self) -> None:
         """Show (fade later); already shown, only restart the fade: no repaint, no mask."""
@@ -328,6 +383,7 @@ class Transport(Overlay):
         # Even while hidden: the next show then needs no layout pass.
         if obj is self.parentWidget() and event.type() == QEvent.Type.Resize:
             self._fit()
+            self._controls_changed()
         return False
 
     @staticmethod
@@ -370,7 +426,7 @@ class Transport(Overlay):
         if not bar:
             put("play", big, un.px(1.5))
             x = float(right)
-            for name in ("fullscreen", "subtitles", "audio"):
+            for name in self._right_buttons("subtitles", "audio"):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
                 x -= un.px(1.8)
@@ -406,7 +462,7 @@ class Transport(Overlay):
             chip_w = un.px(3.6)
             rects["speed"] = QRectF(x, cy - un.px(1.1), chip_w, un.px(2.2))
             x = float(right)
-            for name in ("fullscreen", "audio", "subtitles"):
+            for name in self._right_buttons("audio", "subtitles"):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
                 x -= un.px(1.8)
@@ -415,6 +471,11 @@ class Transport(Overlay):
                 width = 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance("Go live")
                 rects["golive"] = QRectF(x - width, cy - un.px(1.1), width, un.px(2.2))
         return rects
+
+    def _right_buttons(self, *rest: str) -> tuple[str, ...]:
+        """The icon buttons from the right edge inwards."""
+        pip = ("pip",) if self._pip_available and self._live else ()
+        return ("fullscreen", "mini", *pip, *rest)
 
     def seek_rect(self) -> QRectF:
         return self._layout()["seek"]
@@ -476,8 +537,12 @@ class Transport(Overlay):
             self._paint_timeshift(p, un, rects, text)
         else:
             self._paint_vod(p, un, rects, text)
-        for name in ("subtitles", "audio", "fullscreen"):
-            draw_icon(p, name, rects[name], text)
+        for name in ("subtitles", "audio", "pip", "mini", "fullscreen"):
+            if name in rects:
+                lit = name == "pip" and self._pip_open
+                draw_icon(
+                    p, _ICONS.get(name, name), rects[name], qcolor(PALETTE.accent) if lit else text
+                )
         p.end()
 
     def _paint_scrims(self, p: QPainter) -> None:
@@ -718,6 +783,17 @@ class Transport(Overlay):
             self._drag = self._frac_at(event.position().x())
             self.update()
 
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            text = self.tooltip_at(QPointF(event.pos()))
+            if text:
+                QToolTip.showText(event.globalPos(), text, self)
+            else:
+                QToolTip.hideText()
+                event.ignore()
+            return True
+        return super().event(event)
+
     def hideEvent(self, event: QHideEvent) -> None:
         # Hidden mid-drag (the host hides with a minimized window): no release will come.
         self._end_drag()
@@ -730,6 +806,7 @@ class Transport(Overlay):
         self._drag = None
         self.update()
         self._idle.start()
+        self._controls_changed()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton and self._drag is not None:
@@ -740,6 +817,7 @@ class Transport(Overlay):
             self._drag = None
             self.update()
             self._idle.start()
+            self._controls_changed()  # the bar may go with the drag
             if timeshift:
                 self.seekToRequested.emit(target_t)
             else:
@@ -774,6 +852,10 @@ class Transport(Overlay):
                 self.audioRequested.emit()
             elif name == "subtitles":
                 self.subtitleRequested.emit()
+            elif name == "pip":
+                self.pipRequested.emit()
+            elif name == "mini":
+                self.miniPlayerRequested.emit()
             return
 
     def _nearest_speed(self) -> int:
@@ -791,6 +873,7 @@ class Transport(Overlay):
             self._position = self._length = 0
         self.update()  # already shown, the new mode needs a repaint
         self.poke()
+        self._controls_changed()
 
     def _clear_timeline(self) -> None:
         self._timeline = None

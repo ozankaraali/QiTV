@@ -340,6 +340,16 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
         elif name == "plus":  # Add provider
             fill(_rrect(0.16, 0.43, 0.68, 0.14, 0.05))
             fill(_rrect(0.43, 0.16, 0.14, 0.68, 0.05))
+        elif name == "pip":  # a second channel: a screen with a picture inset
+            line(_rrect(0.08, 0.2, 0.84, 0.6, 0.08))
+            fill(_rrect(0.5, 0.48, 0.32, 0.24, 0.04))
+        elif name == "mini_player":  # the window small in a corner: a frame, an arrow to it
+            line(_rrect(0.08, 0.2, 0.84, 0.6, 0.08))
+            fill(_rrect(0.56, 0.52, 0.28, 0.2, 0.04))
+            arrow = QPainterPath(QPointF(0.22, 0.32))
+            arrow.lineTo(0.46, 0.56)
+            line(arrow)
+            fill(_poly([(0.5, 0.6), (0.34, 0.58), (0.48, 0.44)]))
         elif name == "live_dot":
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))

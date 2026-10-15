@@ -77,6 +77,124 @@ class TransportCase(unittest.TestCase):
         self.click(t, t.button_rect("fwd10").center().toPoint())
         self.assertEqual([spy.at(0)[0], spy.at(1)[0]], [-10_000, 10_000])
 
+    def test_mini_player_and_second_channel_buttons_sit_left_of_fullscreen(self):
+        # Owner (Phase 4): clickable controls for both pictures-in-picture.
+        t = self.make()
+        t.show_live("One", "")
+        self.assertNotIn("pip", t._layout())  # no PiP until the window says it can
+        t.set_pip_state(True, False)
+        mini, pip, full = (t.button_rect(n) for n in ("mini", "pip", "fullscreen"))
+        self.assertLess(mini.right(), full.left())
+        self.assertLess(pip.right(), mini.left())
+        self.assertLess(t.button_rect("subtitles").right(), pip.left())
+        for name, signal in (("mini", t.miniPlayerRequested), ("pip", t.pipRequested)):
+            spy = QSignalSpy(signal)
+            self.click(t, t.button_rect(name).center().toPoint())
+            self.assertEqual(spy.count(), 1, name)
+        t.show_timeshift("One", "")
+        t.update_timeline(
+            {
+                "start": 0.0,
+                "end": 60.0,
+                "position": 30.0,
+                "live_edge": 60.0,
+                "lag": 30.0,
+                "mode": "shifted",
+                "rate": 1.0,
+                "paused": False,
+            },
+            [],
+        )
+        self.assertIn("seek", t._layout())
+        self.assertLess(t.button_rect("pip").right(), t.button_rect("mini").left())
+
+    def test_the_second_channel_is_live_tv_only(self):
+        t = self.make()
+        t.set_pip_state(True, False)
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        self.assertNotIn("pip", t._layout())  # hidden during a movie
+        self.assertIn("mini", t._layout())  # the mini player still works
+
+    def test_the_new_buttons_name_their_keys(self):
+        t = self.make()
+        t.show_live("One", "")
+        t.set_pip_state(True, True)
+        for name, text in (
+            ("pip", "Second channel (P)"),
+            ("mini", "Mini player (Alt+P)"),
+            ("fullscreen", "Fullscreen (F)"),
+        ):
+            self.assertEqual(t.tooltip_at(t.button_rect(name).center()), text)
+        self.assertEqual(t.tooltip_at(QPointF(640, 300)), "")
+
+    def test_over_the_pip_only_its_controls_keep_the_clicks(self):
+        t = self.make()
+        t.show_live("One", "")
+        t.set_pip_state(True, False)
+        claims = t.hole_claims()
+        for name in ("play", "fullscreen", "mini", "pip", "audio", "subtitles"):
+            self.assertTrue(claims.contains(t.button_rect(name).center().toPoint()), name)
+        self.assertFalse(claims.contains(QPoint(640, 300)))  # the scrim
+        self.assertFalse(claims.contains(t.button_rect("live").center().toPoint()))  # a label
+
+    def test_the_host_hears_when_its_controls_change(self):
+        class Host(QWidget):
+            changes = 0
+
+            def overlay_changed(self):
+                self.changes += 1
+
+        host = Host()
+        host.resize(1280, 720)
+        t = Transport(host)
+        t.show_live("One", "")
+        before = host.changes
+        t.update_timeline(
+            {
+                "start": 0.0,
+                "end": 60.0,
+                "position": 30.0,
+                "live_edge": 60.0,
+                "lag": 30.0,
+                "mode": "shifted",
+                "rate": 1.0,
+                "paused": False,
+            },
+            [],
+        )  # still the plain live row: nothing changed
+        self.assertEqual(host.changes, before)
+        t.show_timeshift("One", "")
+        t.update_timeline(
+            {
+                "start": 0.0,
+                "end": 60.0,
+                "position": 30.0,
+                "live_edge": 60.0,
+                "lag": 30.0,
+                "mode": "shifted",
+                "rate": 1.0,
+                "paused": False,
+            },
+            [],
+        )  # the bar and Go live appear
+        self.assertGreater(host.changes, before)
+        changes = host.changes
+        t.update_timeline(
+            {
+                "start": 0.0,
+                "end": 61.0,
+                "position": 31.0,
+                "live_edge": 61.0,
+                "lag": 30.0,
+                "mode": "shifted",
+                "rate": 1.0,
+                "paused": False,
+            },
+            [],
+        )  # a tick: the same controls
+        self.assertEqual(host.changes, changes)
+
     def test_next_button_only_when_available(self):
         t = self.make()
         t.show_vod("A", "b")

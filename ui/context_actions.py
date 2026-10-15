@@ -1,6 +1,8 @@
 """The drawer's context menu: a right-click on a channel, title or episode.
 
 - "Add to favorites" / "Remove from favorites" (channels only);
+- "Open in picture-in-picture" (channels, when the shell offers picture in picture): the
+  channel plays small beside the one playing (Ctrl/⌘+P on the highlighted row does the same);
 - "Play in VLC" / "Play in MPV": the shell plays the link externally once the in-app stream is
   released. A player that is not installed is said at once, and nothing stops;
 - "Copy stream link": the link goes to the clipboard.
@@ -26,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 Launcher = Callable[[str], tuple[bool, str]]
 LINK_COPIED_TEXT = "Link copied"
+OPEN_PIP_TEXT = "Open in picture-in-picture"
 
 
 def is_channel(nav: NavModel, node: Optional[NavNode]) -> bool:
@@ -67,10 +70,15 @@ class ContextActions(QObject):
         toggle_favorite: Callable[[dict], None],
         play_external: Callable[[Target, str, Launcher], None],
         notify: Callable[[str, str], None],
+        open_pip: Optional[Callable[[NavNode], None]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
-        """`external` is services.external_players or a stand-in; `notify(text, kind)` toasts."""
+        """`external` is services.external_players or a stand-in; `notify(text, kind)` toasts.
+
+        `open_pip(node)` opens a channel row in picture in picture (None: no such entry).
+        """
         super().__init__(parent)
+        self._open_pip = open_pip
         self.nav = nav
         self.config = config
         self.lanes = lanes
@@ -99,6 +107,9 @@ class ContextActions(QObject):
             kept = favorites.is_favorite(self.config, item)
             text = "Remove from favorites" if kept else "Add to favorites"
             menu.addAction(text).triggered.connect(lambda _=False: self._toggle_favorite(item))
+            open_pip = self._open_pip
+            if open_pip is not None:
+                menu.addAction(OPEN_PIP_TEXT).triggered.connect(lambda _=False: open_pip(node))
         if playable:
             if channel:
                 menu.addSeparator()

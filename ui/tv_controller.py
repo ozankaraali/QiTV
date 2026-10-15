@@ -22,6 +22,14 @@ The guide (ui/guide_controller.py) takes the keys while it is open. The drawer's
 the in-app stream first, as an external pick does. Only this controller holds the LiveTuner
 and the session: the others call back play_vod, tune or the external play.
 
+Picture in picture (spec §7, Phase 4) is PipControls' (ui/pip_controls.py) over the window's
+SessionManager: each player has its own LiveTuner, and `session`, `live` and the tuner here
+are always the large picture's, so zapping, the banner, the transport, seek and Go live act
+on it. A swap re-points them (`_use_slot`) and trades what each picture showed (its target
+and zap group); nothing is stopped or restarted. A zap onto the channel the small picture
+shows swaps instead of opening it twice. Movies, episodes, files and the Library close the
+small picture first: it is for live TV.
+
 Provider setups (the loading and welcome hints, the last channel, the drawer on an idle player)
 are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4, R5) stops
 what plays (`stop_for_library`); back to live TV (`resume_live`) tunes the last channel. The
@@ -33,10 +41,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import partial
 import logging
 from pathlib import Path
 import re
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
 from PySide6.QtGui import QPixmap
@@ -50,6 +59,7 @@ from services.live.live_session import UNAVAILABLE, LiveSession
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
 from services.next_episode import play_context
 from services.redact import safe_traceback
+from services.sessions import SessionManager, Slot
 from services.vlc_profile import classify
 from services.zapping import ZapContext
 from ui.autoplay import FINISHED_TEXT, Autoplay
@@ -59,6 +69,7 @@ from ui.keymap import Action, as_int
 from ui.link_lanes import LinkLanes, Target
 from ui.live_controls import LiveControls
 from ui.live_tuner import LiveTuner
+from ui.mixer_controls import MixerControls
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
@@ -68,6 +79,7 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import BannerInfo, ZapBanner
+from ui.pip_controls import OPEN_PIP_FIRST, PipControls
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
 
@@ -106,6 +118,8 @@ class Overlays:
     guide: Guide
     next_card: NextCard
     welcome: WelcomeCard
+    pip_label: Any = None  # the PipLabel (Phase 4), with picture in picture only
+    mixer: Any = None  # the volume mixer (Phase 4)
 
 
 class TVController(QObject):
@@ -125,8 +139,12 @@ class TVController(QObject):
         logos=None,
         live: Optional[LiveSession] = None,
         budget: Optional[ConnectionBudget] = None,
+        sessions: Optional[SessionManager] = None,
+        pip_frame=None,
         parent: Optional[QObject] = None,
     ):
+        """With `sessions` (picture in picture), its large slot's player, live session and
+        tuner stand for `session`, `live` and `budget`."""
         super().__init__(parent)
         self.config = config
         self.catalog = catalog
@@ -141,9 +159,19 @@ class TVController(QObject):
         self._logos = logos
         # Opens every stream; `live` (the time-shift pipeline) None plays every live channel
         # directly (no libVLC, tests).
-        self._tuner = LiveTuner(session, config, live, budget, self)
+        self.sessions = sessions
+        self._tuner: LiveTuner
+        if sessions is not None:
+            large = sessions.large()
+            tuner = large.tuner
+            if not isinstance(tuner, LiveTuner):
+                raise TypeError("Each picture-in-picture slot needs a LiveTuner")
+            self._tuner, self.session, live = tuner, large.playback, large.live
+        else:
+            self._tuner = LiveTuner(session, config, live, budget, self)
         self.live = live
         self.budget = self._tuner.budget
+        self._states: dict[str, str] = {}  # each player's last state (a swap shows another)
         self._resume: Optional[Target] = None  # what stop_live() stopped, for resume_stopped()
         self._external_pending: Optional[tuple[Target, str]] = None
         self._external_settle = QTimer(self, singleShot=True)
@@ -224,8 +252,41 @@ class TVController(QObject):
             toggle_favorite=self._toggle_favorite,
             play_external=self._play_external,
             notify=self._notify,
+            open_pip=self._open_pip_node if sessions is not None else None,
             parent=self,
         )
+        # The volume keys, mute and the wheel, on the mixer (one row per picture).
+        self._mixer = MixerControls(
+            mixer=overlays.mixer,
+            sessions=sessions,
+            session=lambda: self.session,
+            config=config,
+            toast=self._toast,
+            names=self._picture_names,
+            audio_changed=self._refresh_pip_label,
+            parent=self,
+        )
+        self._pip: Optional[PipControls] = None
+        if sessions is not None:
+            self._pip = PipControls(
+                sessions=sessions,
+                frame=pip_frame,
+                label=overlays.pip_label,
+                transport=overlays.transport,
+                catalog=catalog,
+                config=config,
+                lanes=self._lanes,
+                live_start=self._live_controls.live_start,
+                previous=self._previous_channel,
+                large_channel=lambda: self._channel,
+                vod=self.vod_current,
+                closed=lambda: self._closed,
+                toast=self._toast,
+                swap=self.swap,
+                mixer=self._mixer.open_small,
+                parent=self,
+            )
+            self._pip.changed.connect(self._mixer.refresh)
         self._column_wheel = PointerInput(self)
         # While a live link resolves, the banner is shown again before it fades (Minor 11).
         self._tuning = QTimer(self, interval=TUNING_KEEP_MS)
@@ -261,22 +322,27 @@ class TVController(QObject):
         zap.highlightChanged.connect(self._on_highlight)
         zap.digitsChanged.connect(self._on_digits)
         zap.numberNotFound.connect(self._on_number_not_found)
-        session.stateChanged.connect(self._on_state)
-        session.positionChanged.connect(self._on_position)
-        session.errorOccurred.connect(self._on_error)
-        session.ended.connect(self._on_ended)
+        self._connect_session(session, True)
+        for name, player in self._players():
+            player.stateChanged.connect(partial(self._states.__setitem__, name))
+        if self.sessions is not None:
+            self.sessions.largeChanged.connect(self._on_large_changed)
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
         drawer.contextRequested.connect(self._on_context)
         self._guide.tuneRequested.connect(self._on_guide_tune)
         transport.nextRequested.connect(self._on_next_requested)
-        transport.playPauseRequested.connect(self._tuner.toggle_pause)
-        transport.seekRequested.connect(session.seek)
+        transport.playPauseRequested.connect(self._toggle_pause)
+        transport.seekRequested.connect(self._seek_ms)
         transport.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
+        transport.miniPlayerRequested.connect(self.window_actions.toggle_mini_player)
         transport.audioRequested.connect(self._cycle_audio)
         transport.subtitleRequested.connect(self._cycle_subtitles)
         self._live_controls.wire()
+        self._mixer.wire()
+        if self._pip is not None:
+            self._pip.wire()
         if self._logos is not None:
             self._logos.logoReady.connect(self._on_logo_ready)
         # The column's list would scroll on its own; wheel over it zaps instead.
@@ -301,6 +367,11 @@ class TVController(QObject):
         except Exception as e:
             self._log_failure("save the watch state", e)
         try:
+            self._mixer.save()  # a PiP level changed while the mixer still shows
+        except Exception as e:
+            self._log_failure("save the picture-in-picture volume", e)
+        try:
+            self._close_pip()  # the small picture first, then the large one
             self._tuner.shutdown()
         except Exception as e:
             self._log_failure("stop playback", e)
@@ -311,6 +382,7 @@ class TVController(QObject):
     def stop_live(self) -> None:
         """Stop what plays (window close, self-update): its slot goes back once released."""
         self._resume = self._current if self._has_media() else None
+        self._close_pip()
         self._live_controls.stop_tune()
 
     def resume_stopped(self) -> None:
@@ -351,6 +423,7 @@ class TVController(QObject):
             self.watch.flush()  # a movie's last position
         except Exception as e:
             self._log_failure("save the watch state", e)
+        self._close_pip()  # both pictures stop
         self._live_controls.stop_tune()
         self._current, self._cid = None, None
 
@@ -376,6 +449,7 @@ class TVController(QObject):
         url = Path(path).absolute().as_uri()
         title = Path(path).name
         target = Target({"name": title, "cmd": url}, "movies", title)
+        self._close_pip()  # picture in picture is for live TV
         self._cancel_external()
         self._lanes.supersede()
         self._lanes.drop_tune()  # a channel or movie still on its way never opens over it
@@ -384,9 +458,11 @@ class TVController(QObject):
         self._live_controls.new_target()
         self._current, self._cid = target, None
 
+        session = self.session  # the large picture's, whatever swaps before it opens
+
         def open_file() -> None:
-            self.session.play(url, kind=classify(url, False), start_ms=0)
-            self._reset_speed()
+            session.play(url, kind=classify(url, False), start_ms=0)
+            self._reset_speed(session)
 
         self._tuner.open(self._guarded(target, open_file), local=True)  # no provider slot
         self.overlays.banner.dismiss()
@@ -398,7 +474,8 @@ class TVController(QObject):
 
         The time-shift settings (disk, size) apply from the next tune.
         """
-        self._tuner.set_latency(self.config.live_latency)
+        for tuner in self._tuners():
+            tuner.set_latency(self.config.live_latency)
 
     def _repaint(self) -> None:
         """Repaint what depends on settings or EPG: column rows and the open drawer."""
@@ -419,6 +496,7 @@ class TVController(QObject):
         overlays = self.overlays
         return bool(
             self._guide.is_open()
+            or self._mixer.visible()
             or overlays.drawer.isVisible()
             or self._autoplay.card_open()
             or self._autoplay.waiting()
@@ -447,6 +525,8 @@ class TVController(QObject):
         if self._guide.is_open() and self._guide.handle(action, payload):
             return
         drawer = self.overlays.drawer
+        if not drawer.isVisible() and self._mixer.handle(action):
+            return  # the mixer shows: the arrows, M, Tab and Esc are its own
         if action in (Action.CH_NEXT, Action.CH_PREV):
             delta = 1 if action is Action.CH_NEXT else -1
             if self._on_demand():
@@ -499,9 +579,12 @@ class TVController(QObject):
             self.window_actions.toggle_fullscreen()
         elif action is Action.MINI_PLAYER:
             self.window_actions.toggle_mini_player()
+        elif action is Action.PIP:
+            self._pip_key()
+        elif action is Action.SWAP:
+            self._swap_key()
         elif action is Action.MUTE:
-            muted = self.session.toggle_mute()
-            self._toast("Muted" if muted else f"Volume {self.session.volume()}%")
+            self._mixer.mute()
         elif action in (Action.VOL_UP, Action.VOL_DOWN):
             self._change_volume(VOLUME_STEP if action is Action.VOL_UP else -VOLUME_STEP)
         elif action is Action.ESCAPE:
@@ -595,6 +678,8 @@ class TVController(QObject):
             self.zap.set_context(ZapContext(group_key, channels, fallback=self._all_live()))
         playing = self._playing_live()
         stay = playing is not None and ZapContext.same(channel, playing.item)
+        if not stay and self._pip_takes(channel, group_key, channels):
+            return
         if not from_zap and not stay:
             self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
         self.overlays.column.close()
@@ -639,6 +724,7 @@ class TVController(QObject):
         context = play_context(context)
         episode = kind == "episode"
         series = context["series"]
+        self._close_pip()  # picture in picture is for live TV
         self._lanes.supersede()  # a newer choice than an external play waiting for its link
         self._request(
             Target(
@@ -753,6 +839,8 @@ class TVController(QObject):
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item
         launcher = self._external_launcher()
+        # Direct plays book the slot under the catalog's provider, as pipeline tunes do.
+        provider_name = self.catalog.current_provider_name()
         self._audio_id = self._subtitle_id = None
         self._live_controls.new_target()  # the old channel's ticks and held notice
         if launcher is not None:
@@ -773,30 +861,33 @@ class TVController(QObject):
                 self.overlays.transport.set_speed(1.0)  # LiveSession starts every tune at 1x
             else:
                 self._current, self._cid = target, None
+                session = self.session  # the large picture's, whatever swaps before it opens
 
                 def play_direct() -> None:
-                    self.session.play(
+                    session.play(
                         url,
                         kind=kind,
                         latency=self.config.live_latency,
                         user_agent=item.get("user_agent"),
                     )
-                    self._reset_speed()
+                    self._reset_speed(session)
 
-                self._tuner.open(self._guarded(target, play_direct), direct=True)
+                self._tuner.open(
+                    self._guarded(target, play_direct), direct=True, provider=provider_name
+                )
             if self.overlays.transport.isVisible():
                 self._live_controls.show_live_transport(target)
         else:
-            provider = self.catalog.current_provider_name()
-            cid = self.watch.content_id(provider, item, item_type=target.item_type)
+            cid = self.watch.content_id(provider_name, item, item_type=target.item_type)
             start = 0 if target.start_over else self.watch.resume_position(cid)
             self._current, self._cid = target, cid
+            session = self.session
 
             def open_vod() -> None:
-                self.session.play(url, kind=classify(url, False), start_ms=start)
-                self._reset_speed()
+                session.play(url, kind=classify(url, False), start_ms=start)
+                self._reset_speed(session)
 
-            self._tuner.open(self._guarded(target, open_vod), direct=True)
+            self._tuner.open(self._guarded(target, open_vod), direct=True, provider=provider_name)
             if start:
                 self._toast(f"Resumed at {fmt_duration(start)}")
             self.overlays.banner.dismiss()  # the transport takes the bottom of the video
@@ -842,6 +933,10 @@ class TVController(QObject):
 
     def _delivered(self, target: Target, url: str) -> None:
         """The target is playing (or opening): confirm the zap and record it in the history."""
+        if self.sessions is not None:  # what the large picture shows (a zap onto it stays)
+            large = self.sessions.large()
+            large.channel = target.item if target.live else None
+            large.group_key = target.group_key if target.live else None
         if target.live:
             self.zap.tuned(target.item)
         try:
@@ -866,9 +961,10 @@ class TVController(QObject):
         self._external_settle.stop()
         self._external_pending = None
 
-    def _reset_speed(self) -> None:
-        self.session.set_rate(1.0)
-        self.overlays.transport.set_speed(1.0)
+    def _reset_speed(self, session=None) -> None:
+        (session or self.session).set_rate(1.0)
+        if session is None or session is self.session:
+            self.overlays.transport.set_speed(1.0)
 
     def _external_launcher(self) -> Optional[Callable[[str], tuple[bool, str]]]:
         launcher: Optional[Callable[[str], tuple[bool, str]]] = None
@@ -878,6 +974,178 @@ class TVController(QObject):
             launcher = self.external.launch_mpv
         return launcher
 
+    # ---- picture in picture -------------------------------------------------------------------
+
+    def swap(self) -> bool:
+        """The large and the small picture trade places (S, a click on the PiP, a zap onto its
+        channel): nothing restarts. A choice still on its way for the large picture is
+        dropped; while its next stream waits for its slot, nothing swaps (False)."""
+        sessions = self.sessions
+        if self._closed or sessions is None or not sessions.pip_open():
+            return False
+        if self._tuner.settling():
+            logger.debug("Not swapping: the large picture's stream is opening")
+            return False
+        self._cancel_external()
+        self._lanes.drop_tune()  # superseded: it would replace the picture swapped in
+        return sessions.swap()
+
+    def _swap_key(self) -> None:
+        sessions = self.sessions
+        if sessions is None:
+            return
+        if not sessions.pip_open():
+            self._toast(OPEN_PIP_FIRST)
+            return
+        self.swap()
+
+    def open_pip(self, channel: dict, *, group_key: str, channels: list[dict]) -> None:
+        """Open `channel` small (the drawer's menu or Ctrl/⌘+P), or show it in the PiP."""
+        if self._pip is not None and not self._closed:
+            context = ZapContext(group_key, channels, fallback=self._all_live())
+            self._pip.open_channel(channel, context)
+
+    def _pip_key(self) -> None:
+        """P: the drawer's highlighted channel small (Ctrl/⌘+P there), else the previous one,
+        or close the small picture."""
+        pip, drawer = self._pip, self.overlays.drawer
+        if pip is None:
+            return
+        node = drawer.highlighted() if drawer.isVisible() else None
+        if node is not None and is_channel(self.nav, node):
+            self._open_pip_node(node)
+            drawer.close_drawer()
+        else:
+            pip.toggle_previous()
+
+    def _open_pip_node(self, node: NavNode) -> None:
+        """A drawer row's channel small, with its group for ↑/↓ once it is swapped in."""
+        group = next((n for n in reversed(self.nav.path) if n.layer == "group"), None)
+        nodes = self.nav.children(group) if group is not None else []
+        channels = [n.payload for n in nodes if isinstance(n.payload, dict)] or [node.payload]
+        key = group.key if group is not None else ALL_GROUP_ID
+        self.open_pip(node.payload, group_key=key, channels=channels)
+
+    def _previous_channel(self) -> tuple[Optional[dict], Optional[ZapContext]]:
+        """The channel tuned before the large picture's, with the zap group to walk."""
+        channel = self.zap.previous_channel()
+        if channel is None:
+            return None, None
+        context = self.zap.context
+        if context.index_of(channel) < 0:
+            channels = self._all_live()
+            context = ZapContext(ALL_GROUP_ID, channels, fallback=channels)
+        return channel, ZapContext(context.group_key, context.channels, fallback=context.fallback)
+
+    def _pip_takes(self, channel: dict, group_key: str, channels: list[dict]) -> bool:
+        """A tune of the large picture onto the PiP's channel (Review Focus 3): never a second
+        stream of it. Shown small, the pictures swap; on its way there, it opens large."""
+        pip = self._pip
+        if pip is None:
+            return False
+        if pip.claims(channel):
+            pip.close()  # the large picture takes it instead
+            return False
+        small = pip.small_showing(channel)
+        if small is None:
+            return False
+        if self._tuner.settling():
+            self._tuner.stop()  # the zap still waiting is abandoned: nothing to keep small
+        pip.view(small.name).context = ZapContext(group_key, channels, fallback=self._all_live())
+        self.overlays.column.close()
+        if self.swap():
+            return True
+        pip.close()  # it cannot swap now: the PiP closes and the channel opens large
+        return False
+
+    def _close_pip(self) -> None:
+        if self._pip is not None:
+            self._pip.close()
+
+    def _on_large_changed(self, name: str) -> None:
+        """A swap: the large picture's player, stream and state are the other slot's now."""
+        sessions, pip = self.sessions, self._pip
+        if sessions is None or pip is None or self._closed:
+            return
+        new, old = sessions.large(), sessions.other()
+        view = pip.take_large(old.name, new.name, self._current, self.zap.context)
+        shown = self._current if self._current is not None and self._current.live else None
+        old.channel = shown.item if shown is not None else None  # what the small one shows
+        old.group_key = shown.group_key if shown is not None else None
+        self._use_slot(new)
+        self._current, self._cid = view.target, None
+        self._restore_channel()
+        self._state = self._states.get(new.name, "idle")
+        self._audio_id = self._subtitle_id = None
+        self._tuning.stop()
+        if self._digits:
+            self.zap.cancel_digits()
+        context = view.context
+        if context is not None and context is not self.zap.context:
+            self.zap.set_context(context)
+        channel = self._channel
+        transport = self.overlays.transport
+        transport.set_paused(self._state == "paused")
+        if channel is not None:
+            self.zap.tuned(channel)
+            current = self._current
+            if current is not None:
+                # The transport takes the large picture's last timeline at once; the banner
+                # then announces the channel (they share the bottom of the video).
+                self._live_controls.show_live_transport(current)
+            self._show_banner(channel)
+        pip.after_swap()
+        if self._tuner_of(old).idle():
+            pip.close()  # the old large picture was between two channels: nothing to show
+
+    def _use_slot(self, slot: Slot) -> None:
+        """Act on `slot`'s player, live session and tuner (it is large now)."""
+        tuner = slot.tuner
+        if not isinstance(tuner, LiveTuner):
+            raise TypeError("Each picture-in-picture slot needs a LiveTuner")
+        if self._wired:
+            self._connect_session(self.session, False)
+        self.session, self.live, self._tuner = slot.playback, slot.live, tuner
+        if self._wired:
+            self._connect_session(slot.playback, True)
+        self._live_controls.use_slot(tuner, slot.live, slot.playback)
+
+    def _connect_session(self, session, connect: bool) -> None:
+        for signal, slot in (
+            (session.stateChanged, self._on_state),
+            (session.positionChanged, self._on_position),
+            (session.errorOccurred, self._on_error),
+            (session.ended, self._on_ended),
+        ):
+            if connect:
+                signal.connect(slot)
+            else:
+                signal.disconnect(slot)
+
+    def _players(self) -> list[tuple[str, Any]]:
+        sessions = self.sessions
+        if sessions is None:
+            return [("main", self.session)]
+        return [(slot.name, slot.playback) for slot in (sessions.large(), sessions.other())]
+
+    def _tuners(self) -> list[LiveTuner]:
+        sessions = self.sessions
+        if sessions is None:
+            return [self._tuner]
+        return [self._tuner_of(slot) for slot in (sessions.large(), sessions.other())]
+
+    @staticmethod
+    def _tuner_of(slot: Slot) -> LiveTuner:
+        tuner = slot.tuner
+        assert isinstance(tuner, LiveTuner)
+        return tuner
+
+    def _toggle_pause(self) -> None:
+        self._tuner.toggle_pause()
+
+    def _seek_ms(self, ms: int) -> None:
+        self.session.seek(ms)
+
     # ---- catalog events -----------------------------------------------------------------------
 
     def _settle_links(self, provider_changed: bool) -> Optional[Target]:
@@ -885,7 +1153,8 @@ class TVController(QObject):
 
         A setup makes the catalog drop link results requested before it, so a request still
         in flight may never settle. A changed provider's channels are the old one's: nothing
-        is asked again, and the zapping, the Next card and the guide start over.
+        is asked again, the zapping, the Next card and the guide start over, and the small
+        picture closes.
         """
         pending = self._lanes.pending()
         if self._is_stay(pending):
@@ -897,6 +1166,7 @@ class TVController(QObject):
             pending = None
             self._autoplay.drop()
             self._guide.close()  # its channels are the old provider's
+            self._close_pip()  # the small picture's channel and stream are too
         return pending
 
     def _live_section_loaded(self) -> None:
@@ -1192,9 +1462,19 @@ class TVController(QObject):
             self.overlays.transport.poke()
 
     def _change_volume(self, delta: int) -> None:
-        volume = max(0, min(100, self.session.volume() + delta))
-        self.session.set_volume(volume)
-        self._toast(f"Volume {volume}%")
+        self._mixer.change(delta)
+
+    def _picture_names(self) -> tuple[str, str]:
+        """The large and the small picture's channel (or movie) names, for the mixer."""
+        current, pip, sessions = self._current, self._pip, self.sessions
+        large = current.title if current is not None else ""
+        small = sessions.small() if sessions is not None else None
+        target = pip.view(small.name).target if pip is not None and small is not None else None
+        return large, target.title if target is not None else ""
+
+    def _refresh_pip_label(self) -> None:
+        if self._pip is not None:
+            self._pip.refresh_label()
 
     # ---- favorites and context actions --------------------------------------------------------
 

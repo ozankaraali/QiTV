@@ -6,7 +6,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QRegion, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 from shiboken6 import isValid
@@ -65,6 +65,30 @@ class OverlayHostTests(HostCase):
         self.panel.show()
         QTest.qWait(20)
         self.assertEqual(self.host.mask().boundingRect(), QRect(0, 0, 200, 100))
+
+    def test_clicks_on_the_pip_reach_it_unless_an_overlay_claims_them(self):
+        # Phase 4: a PiP under the host's overlays takes the clicks no overlay claims there.
+        class Buttons(Overlay):  # a bar with one button inside the hole
+            def hole_claims(self):
+                return QRegion(QRect(500, 300, 30, 30))
+
+        through = Overlay()
+        through.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # the banner
+        bar = Buttons()
+        for overlay, rect in ((through, QRect(0, 250, 800, 200)), (bar, QRect(0, 280, 800, 170))):
+            self.host.add_overlay(overlay)
+            overlay.setGeometry(rect)
+            overlay.show()
+        self.panel.setGeometry(360, 240, 100, 100)  # a panel over the PiP keeps its area
+        self.panel.show()
+        self.host.set_hole(QRect(400, 260, 200, 112))
+        mask = self.host.mask()
+        self.assertFalse(mask.contains(QPoint(560, 350)))  # the PiP's own
+        self.assertTrue(mask.contains(QPoint(510, 310)))  # the bar's button over it
+        self.assertTrue(mask.contains(QPoint(420, 300)))  # the panel over it
+        self.assertTrue(mask.contains(QPoint(100, 300)))  # beside it: the overlays'
+        self.host.set_hole(QRect())
+        self.assertTrue(self.host.mask().contains(QPoint(560, 350)))
 
     def test_hidden_with_window(self):
         self.panel.show()
