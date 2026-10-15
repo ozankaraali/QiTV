@@ -143,7 +143,8 @@
 - **Behaviour:**
   - **Start:**
     - if `engine.is_available()`: open a session (`live_delay` = Low 3 s / Normal 6 s / Stable 12 s from `latency`) and wait for `sessionReady` for that sid. On ready, play `stream_url(sid, oldest_seq)` with `LIVE_PIPELINE` and set `_base = span(oldest).start` (0.0 when the first segment is still open).
-    - Otherwise, and on `sessionFailed` or a timeout before ready: close the session if one is open, play `url` directly with `PlayKind.LIVE` and `latency`, emit `notice("Time-shift isn't available for this channel")` and `modeChanged("direct")`.
+    - A `sessionFailed` with kind `"disk"` is **not** final (the helper switched that session to RAM, possibly before ready): emit `notice("Disk time-shift isn't available; using memory")` and keep waiting.
+    - Otherwise, and on any other `sessionFailed` or a timeout before ready: close the session if one is open, play `url` directly with `PlayKind.LIVE` and `latency`, emit `notice("Time-shift isn't available for this channel")` and `modeChanged("direct")`.
   - **Tick** (`tick_ms`):
     - compute the position as in spec §6.3 (a wall-clock × rate fallback when `get_time()` deltas disagree by more than 1 s);
     - `lag = live_edge − position`;
