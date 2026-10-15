@@ -1,15 +1,33 @@
 from datetime import datetime, timedelta, timezone
+import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
+from PySide6.QtGui import QFont, QWheelEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
+from shiboken6 import isValid
 
 from services.epg_view import Programme
-from ui.overlays.guide import Guide, box_span, wrap_lines
+from ui.overlay_host import OverlayHost
+from ui.overlays.guide import (
+    HEADER_U,
+    REPAINT_MS,
+    ROW_U,
+    TOP_U,
+    Guide,
+    box_span,
+    footer_programme,
+    programme_spans,
+    wrap_lines,
+)
+from ui.video_surface import VideoSurface
 
 NOW = datetime(2026, 10, 15, 19, 42, tzinfo=timezone.utc)
 HALF_HOUR = timedelta(minutes=30)
@@ -30,10 +48,34 @@ class Lookups:
         self.result = result
 
     def __call__(self, channel, start, limit):
-        self.calls.append((channel["id"], start, limit))
+        self.calls.append((channel.get("id"), start, limit))
         if self.result is not None:
             return self.result(channel, start)
         return [Programme("Show", start - HALF_HOUR, start + HALF_HOUR, "About the show.")]
+
+
+def wheel(widget, dy, dx=0, modifiers=Qt.KeyboardModifier.NoModifier):
+    event = QWheelEvent(
+        QPointF(5, 5),
+        QPointF(5, 5),
+        QPoint(0, 0),
+        QPoint(dx, dy),
+        Qt.MouseButton.NoButton,
+        modifiers,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    QApplication.sendEvent(widget, event)
+
+
+def close_window(window):
+    if isValid(window):
+        window.close()
+        window.deleteLater()
+
+
+def prog(title, start, minutes):
+    return Programme(title, start, start + timedelta(minutes=minutes))
 
 
 class FakeLogos(QObject):
@@ -181,6 +223,63 @@ class GuideTests(unittest.TestCase):
         with self.assertLogs("ui.overlays.guide", "ERROR"):
             self.assertFalse(self.guide.grab().isNull())
 
+    def test_failed_lookups_are_retried_and_logged_once(self):
+        def result(channel, start):
+            if channel["id"] == "1":
+                raise RuntimeError("EPG reloading")
+            return []
+
+        lookups = Lookups(result)
+        self.guide = Guide(None, lookups, lambda: NOW, self.host)
+        self.guide.open_guide(channels(3), 0)
+        with self.assertLogs("ui.overlays.guide", "DEBUG") as logs:
+            self.guide.grab()
+            self.guide.grab()
+        self.assertEqual([key for key, _, _ in lookups.calls].count("1"), 2)
+        self.assertEqual([key for key, _, _ in lookups.calls].count("0"), 1)
+        self.assertEqual([r.levelname for r in logs.records].count("ERROR"), 1)
+
+    def test_invalidate_looks_the_visible_rows_up_again(self):
+        self.guide.open_guide(channels(1000), 500)
+        self.guide.grab()
+        first = len(self.lookups.calls)
+        self.guide.invalidate()
+        self.guide.grab()
+        self.assertEqual(len(self.lookups.calls), 2 * first)
+
+    def test_channels_without_a_key_are_cached_per_row(self):
+        def result(channel, start):
+            return [prog("News " + channel["number"], start, 30)]
+
+        lookups = Lookups(result)
+        self.guide = Guide(None, lookups, lambda: NOW, self.host)
+        self.guide.open_guide([{"number": "1"}, {"number": "2"}], 0)
+        self.guide.grab()
+        self.guide.grab()
+        self.assertEqual(len(lookups.calls), 2)
+
+    def test_a_naive_clock_is_treated_as_local_time(self):
+        naive = datetime(2026, 10, 15, 19, 42)
+        self.guide = Guide(None, self.lookups, lambda: naive, self.host)
+        self.guide.open_guide(channels(3), 0)
+        start = self.guide.window_start()
+        self.assertIsNotNone(start.tzinfo)
+        self.assertEqual(start.astimezone().replace(tzinfo=None), datetime(2026, 10, 15, 19, 30))
+        self.assertFalse(self.guide.grab().isNull())
+        self.guide.shift(1)
+        self.assertEqual(self.guide.window_start(), start + HALF_HOUR)
+        self.assertFalse(self.guide.grab().isNull())
+
+    def test_repaint_timer_runs_only_while_open_and_keeps_the_window(self):
+        self.guide.open_guide(channels(3), 0)
+        start = self.guide.window_start()
+        self.assertTrue(self.guide._repaint.isActive())
+        self.assertEqual(self.guide._repaint.interval(), REPAINT_MS)
+        self.guide._repaint.timeout.emit()
+        self.assertEqual(self.guide.window_start(), start)
+        self.guide.close_guide()
+        self.assertFalse(self.guide._repaint.isActive())
+
     def test_escape_closes_and_emits_closed(self):
         self.guide.open_guide(channels(3), 0)
         self.assertTrue(self.guide.escape())
@@ -193,6 +292,176 @@ class GuideTests(unittest.TestCase):
         self.guide.open_guide(channels(3), 0)
         self.host.resize(960, 540)
         self.assertEqual(self.guide.geometry(), self.host.rect())
+
+
+class GuideMouseTests(unittest.TestCase):
+    """The guide consumes the mouse: nothing reaches the overlay host (drawer, zapping)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.window = QMainWindow()
+        self.surface = VideoSurface()
+        self.window.setCentralWidget(self.surface)
+        self.window.setGeometry(100, 100, 800, 450)
+        self.window.show()
+        QTest.qWait(20)
+        self.host = OverlayHost(self.window, self.surface)
+        self.addCleanup(close_window, self.window)
+        self.guide = Guide(None, Lookups(), lambda: NOW, self.host)
+        self.host.add_overlay(self.guide)
+        self.chans = channels(30)
+        self.guide.open_guide(self.chans, 0)
+        QTest.qWait(20)
+        self.host_events: list[object] = []
+        self.host.clicked.connect(lambda: self.host_events.append("clicked"))
+        self.host.doubleClicked.connect(lambda: self.host_events.append("doubleClicked"))
+        self.host.wheelSteps.connect(lambda n, m: self.host_events.append(("wheel", n)))
+        self.tuned: list[dict] = []
+        self.guide.tuneRequested.connect(self.tuned.append)
+
+    def row_point(self, row):
+        u = self.guide.width() / 100
+        y = (TOP_U + HEADER_U + ROW_U * (row + 0.5)) * u
+        return QPoint(self.guide.width() // 2, round(y))
+
+    def wait_past_double_click(self):
+        QTest.qWait(QApplication.doubleClickInterval() + 100)
+
+    def test_the_guide_fills_the_host(self):
+        self.assertTrue(self.guide.isVisible())
+        self.assertEqual(self.guide.geometry(), self.host.rect())
+
+    def test_click_selects_the_row_under_the_pointer(self):
+        left = Qt.MouseButton.LeftButton
+        QTest.mouseClick(self.guide, left, Qt.KeyboardModifier.NoModifier, self.row_point(3))
+        self.assertIs(self.guide.current_channel(), self.chans[3])
+        QTest.mouseClick(self.guide, left, Qt.KeyboardModifier.NoModifier, QPoint(10, 2))
+        self.assertIs(self.guide.current_channel(), self.chans[3])  # the header: no row
+        self.wait_past_double_click()
+        self.assertEqual(self.host_events, [])
+        self.assertEqual(self.tuned, [])
+
+    def test_double_click_tunes_the_row(self):
+        QTest.mouseDClick(
+            self.guide, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, self.row_point(5)
+        )
+        self.assertEqual(self.tuned, [self.chans[5]])
+        self.wait_past_double_click()
+        self.assertEqual(self.host_events, [])
+
+    def test_wheel_moves_rows_and_shift_or_sideways_moves_time(self):
+        start = self.guide.window_start()
+        wheel(self.guide, -120)
+        self.assertIs(self.guide.current_channel(), self.chans[1])
+        wheel(self.guide, 120)
+        self.assertIs(self.guide.current_channel(), self.chans[0])
+        wheel(self.guide, -120, modifiers=Qt.KeyboardModifier.ShiftModifier)
+        self.assertEqual(self.guide.window_start(), start + HALF_HOUR)
+        wheel(self.guide, 0, dx=-120)
+        self.assertEqual(self.guide.window_start(), start + 2 * HALF_HOUR)
+        self.assertIs(self.guide.current_channel(), self.chans[0])
+        self.assertEqual(self.host_events, [])
+
+
+class ProgrammeSpansTests(unittest.TestCase):
+    def setUp(self):
+        self.start = datetime(2026, 10, 15, 19, 30, tzinfo=timezone.utc)
+
+    def spans(self, programmes, min_width=10.0):
+        result = programme_spans(programmes, self.start, 0.0, 500.0, min_width)
+        return [(s.programme.title, s.x, s.width) for s in result]
+
+    def test_adjacent_programmes_sit_side_by_side(self):
+        a, b = prog("A", self.start, 30), prog("B", self.start + HALF_HOUR, 30)
+        self.assertEqual(self.spans([b, a]), [("A", 0.0, 100.0), ("B", 100.0, 100.0)])
+
+    def test_an_overlap_ends_where_the_next_programme_starts(self):
+        a, b = prog("A", self.start, 60), prog("B", self.start + HALF_HOUR, 60)
+        result = programme_spans([a, b], self.start, 0.0, 500.0, 10.0)
+        self.assertEqual(self.spans([a, b]), [("A", 0.0, 100.0), ("B", 100.0, 200.0)])
+        self.assertEqual(result[0].stop, self.start + HALF_HOUR)
+
+    def test_equal_starts_draw_one_box(self):
+        a, b = prog("A", self.start, 30), prog("B", self.start, 60)
+        self.assertEqual(self.spans([a, b]), [("B", 0.0, 200.0)])
+
+    def test_slivers_narrower_than_the_minimum_are_dropped(self):
+        sliver = prog("Sliver", self.start - timedelta(minutes=29), 30)  # 1 min in the window
+        rest = prog("Rest", self.start + timedelta(minutes=1), 29)
+        self.assertEqual([t for t, _, _ in self.spans([sliver, rest])], ["Rest"])
+
+
+class FooterProgrammeTests(unittest.TestCase):
+    def test_on_now_wins(self):
+        on_now = prog("On now", NOW - timedelta(minutes=12), 30)
+        later = prog("Later", on_now.stop, 30)
+        self.assertIs(footer_programme([on_now, later], NOW), on_now)
+
+    def test_first_upcoming_when_nothing_is_on_now(self):
+        ended = prog("Ended", NOW - timedelta(minutes=42), 30)
+        upcoming = prog("Upcoming", NOW + timedelta(minutes=18), 60)
+        later = prog("Later", upcoming.stop, 60)
+        self.assertIs(footer_programme([ended, upcoming, later], NOW), upcoming)
+        self.assertIsNone(footer_programme([ended], NOW))
+        self.assertIsNone(footer_programme([], NOW))
+
+
+_LOCAL_TIME_SCRIPT = """
+import json
+from datetime import datetime, timedelta, timezone
+from services.epg_view import Programme
+from ui.overlays.guide import day_label, fmt_span, slot_start
+now = datetime(2026, 10, 15, 19, 42, tzinfo=timezone.utc)
+slot = slot_start(now)
+print(json.dumps({
+    "slot_utc": slot.astimezone(timezone.utc).strftime("%H:%M"),
+    "span": fmt_span(Programme("Show", slot, slot + timedelta(hours=1))),
+    "days": [day_label(slot + timedelta(hours=h), now) for h in (0, 12, 13, 24)],
+}))
+"""
+
+
+@unittest.skipIf(sys.platform == "win32", "POSIX TZ strings")
+class LocalTimeTests(unittest.TestCase):
+    """Slots, times and day labels follow the local zone, not UTC (run in a child process)."""
+
+    def run_in_zone(self, tz):
+        env = dict(os.environ, TZ=tz, QT_QPA_PLATFORM="offscreen")
+        done = subprocess.run(
+            [sys.executable, "-c", _LOCAL_TIME_SCRIPT],
+            cwd=Path(__file__).resolve().parents[1],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_quarter_hour_zone_ahead_of_utc(self):
+        # UTC+5:45: 19:42 UTC is 01:27 on the 16th, so the slot is 01:00 local (19:15 UTC).
+        self.assertEqual(
+            self.run_in_zone("NPT-05:45"),
+            {
+                "slot_utc": "19:15",
+                "span": "01:00 – 02:00",
+                "days": ["Today", "Today", "Today", "Tomorrow"],
+            },
+        )
+
+    def test_zone_behind_utc(self):
+        # UTC-8: 19:42 UTC is 11:42 on the 15th; 12 h later is 23:30 local, still today.
+        self.assertEqual(
+            self.run_in_zone("PST8"),
+            {
+                "slot_utc": "19:30",
+                "span": "11:30 – 12:30",
+                "days": ["Today", "Today", "Tomorrow", "Tomorrow"],
+            },
+        )
 
 
 class WrapLinesTests(unittest.TestCase):

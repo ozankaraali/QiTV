@@ -9,16 +9,19 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 import math
+from typing import NamedTuple
 
-from PySide6.QtCore import QEvent, QObject, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QFont,
     QFontMetrics,
+    QMouseEvent,
     QPainter,
     QPainterPath,
     QPaintEvent,
     QPen,
     QTextLayout,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import QWidget
 
@@ -26,6 +29,7 @@ from services.epg_view import Programme
 from services.navigation import item_key
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_logo, elided, fill_round, fmt_clock
+from ui.pointer import PointerInput
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -35,14 +39,22 @@ SLOTS = 5
 WINDOW = SLOTS * SLOT  # 2.5 h on screen (R4)
 MAX_AHEAD = timedelta(hours=24)
 LOOKUP_LIMIT = 12
+REPAINT_MS = 30_000  # keeps the now-line and the on-now boxes current while open
 TOP_U = 1.0
 HEADER_U = 4.0
 ROW_U = 5.0
 FOOTER_U = 5.0
 CHANNEL_U = 22.0
 SIDE_U = 1.6
+MIN_BOX_U = 1.5  # narrower boxes (slivers at the window's edges) are not drawn
 TIME_DETAIL_U = 8.0  # boxes at least this wide show their time under the title
 NO_INFO_TEXT = "No programme information"
+
+# (channel key, row when the channel has no key, window start)
+_Key = tuple[str, int | None, datetime]
+# A box to label after the now-line is drawn: its rect, programme (None: no information)
+# and whether it is on now.
+_Box = tuple[QRectF, Programme | None, bool]
 
 
 def slot_start(moment: datetime) -> datetime:
@@ -69,8 +81,48 @@ def box_span(
     )
 
 
+class Span(NamedTuple):
+    programme: Programme
+    stop: datetime  # the programme's stop, cut back to the next programme's start
+    x: float
+    width: float
+
+
+def programme_spans(
+    programmes: list[Programme],
+    window_start: datetime,
+    left: float,
+    width: float,
+    min_width: float,
+) -> list[Span]:
+    """A row's boxes: overlaps end where the next programme starts; slivers are dropped."""
+    ordered = sorted(programmes, key=lambda p: p.start)
+    spans = []
+    for i, programme in enumerate(ordered):
+        stop = programme.stop
+        if i + 1 < len(ordered):
+            stop = min(stop, max(programme.start, ordered[i + 1].start))
+        span = box_span(programme.start, stop, window_start, left, width)
+        if span is not None and span[1] >= min_width:
+            spans.append(Span(programme, stop, *span))
+    return spans
+
+
 def fmt_span(programme: Programme) -> str:
     return f"{fmt_clock(programme.start.astimezone())} – {fmt_clock(programme.stop.astimezone())}"
+
+
+def day_label(window_start: datetime, now: datetime) -> str:
+    """The window's local day: "Today", "Tomorrow" or its weekday."""
+    start = window_start.astimezone()
+    days = (start.date() - now.astimezone().date()).days
+    return {0: "Today", 1: "Tomorrow"}.get(days, start.strftime("%A"))
+
+
+def footer_programme(programmes: list[Programme], now: datetime) -> Programme | None:
+    """The programme on now, else the first one still to come."""
+    on_now = next((p for p in programmes if p.is_on(now)), None)
+    return on_now or next((p for p in programmes if p.start >= now), None)
 
 
 def wrap_lines(text: str, font: QFont, width: float, max_lines: int) -> list[str]:
@@ -133,8 +185,16 @@ class Guide(Overlay):
         self._current = -1
         self._top = 0
         self._window_start = slot_start(now())
-        self._cache: dict[tuple[str, datetime], list[Programme]] = {}
+        self._cache: dict[_Key, list[Programme]] = {}
+        self._failed: set[_Key] = set()  # lookups that raised: logged once, retried
         self._requested: set[str] = set()
+        self._repaint = QTimer(self)
+        self._repaint.setInterval(REPAINT_MS)
+        self._repaint.timeout.connect(self.update)
+        self._row_wheel = PointerInput(self)
+        self._row_wheel.wheelSteps.connect(self._on_row_wheel)
+        self._time_wheel = PointerInput(self)
+        self._time_wheel.wheelSteps.connect(self._on_time_wheel)
         if logos is not None:
             logos.logoReady.connect(self._on_logo_ready)
         if parent is not None:
@@ -147,29 +207,32 @@ class Guide(Overlay):
         self._channels = list(channels)
         self._current = min(max(current, 0), len(self._channels) - 1)
         self._window_start = slot_start(self._now())
-        self._cache.clear()
+        self._forget_lookups()
         self._requested.clear()  # a reopened guide retries logos that failed
         self._relayout()
         full = self._layout().full_rows()
         self._top = self._clamped_top(self._current - full // 2, full)
+        self._repaint.start()
         self.show()
         self.raise_()
         self.update()
 
     def close_guide(self) -> None:
+        self._repaint.stop()
         was_open = not self.isHidden()
         self.hide()
         if was_open:
             self.closed.emit()
 
+    def invalidate(self) -> None:
+        """Look the visible rows up again, e.g. after the EPG was refreshed."""
+        self._forget_lookups()
+        self.update()
+
     def move_by(self, delta: int) -> None:
         if not self._channels:
             return
-        row = min(max(self._current + delta, 0), len(self._channels) - 1)
-        if row != self._current:
-            self._current = row
-            self._ensure_visible()
-            self.update()
+        self._set_current(min(max(self._current + delta, 0), len(self._channels) - 1))
 
     def page(self, delta: int) -> None:
         self.move_by(delta * max(1, self._layout().full_rows() - 1))
@@ -180,7 +243,7 @@ class Guide(Overlay):
         target = min(max(self._window_start + delta * SLOT, earliest), earliest + MAX_AHEAD)
         if target != self._window_start:
             self._window_start = target
-            self._cache.clear()
+            self._forget_lookups()
             self.update()
 
     def activate(self) -> None:
@@ -202,6 +265,12 @@ class Guide(Overlay):
 
     # ---- state ------------------------------------------------------------------------------
 
+    def _set_current(self, row: int) -> None:
+        if row != self._current:
+            self._current = row
+            self._ensure_visible()
+            self.update()
+
     def _clamped_top(self, top: int, full: int) -> int:
         return min(max(top, 0), max(0, len(self._channels) - full))
 
@@ -217,26 +286,32 @@ class Guide(Overlay):
     def _visible_rows(self, layout: _Layout) -> range:
         return range(self._top, min(len(self._channels), self._top + layout.painted_rows()))
 
-    def _programmes_for(self, row: int) -> list[Programme]:
-        """The row's programmes for the current window; looked up once per channel and window."""
-        channel = self._channels[row]
-        key = (item_key(channel), self._window_start)
-        cached = self._cache.get(key)
-        if cached is None:
-            try:
-                cached = list(self._programmes(channel, self._window_start, LOOKUP_LIMIT))
-            except Exception:
-                logger.exception("Guide lookup failed for %s", channel.get("name"))
-                cached = []
-            self._cache[key] = cached
-        return cached
+    def _forget_lookups(self) -> None:
+        self._cache.clear()
+        self._failed.clear()
 
-    def _footer_programme(self, now: datetime) -> Programme | None:
-        if self.current_channel() is None:
-            return None
-        programmes = self._programmes_for(self._current)
-        on_now = next((p for p in programmes if p.is_on(now)), None)
-        return on_now or next((p for p in programmes if p.start >= now), None)
+    def _programmes_for(self, row: int) -> list[Programme]:
+        """The row's programmes for the current window; looked up once per channel and window.
+
+        A lookup that raises is not cached, so the next paint tries again.
+        """
+        channel = self._channels[row]
+        ident = item_key(channel)
+        key: _Key = (ident, None if ident else row, self._window_start)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            result = list(self._programmes(channel, self._window_start, LOOKUP_LIMIT))
+        except Exception:
+            if key in self._failed:
+                logger.debug("Guide lookup failed again for %s", channel.get("name"))
+            else:
+                self._failed.add(key)
+                logger.exception("Guide lookup failed for %s", channel.get("name"))
+            return []
+        self._cache[key] = result
+        return result
 
     def _on_logo_ready(self, url: str) -> None:
         if self.isHidden():
@@ -256,6 +331,48 @@ class Guide(Overlay):
                 urls.append(url)
         if urls:
             self._logos.request(urls)
+
+    # ---- mouse: consumed here, so it never reaches the video underneath -----------------
+
+    def _row_at(self, y: float) -> int | None:
+        layout = self._layout()
+        if not layout.rows.top() <= y < layout.rows.bottom():
+            return None
+        row = self._top + int((y - layout.rows.top()) // layout.row_h)
+        return row if row < len(self._channels) else None
+
+    def _select_at(self, event: QMouseEvent) -> bool:
+        row = self._row_at(event.position().y())
+        if row is None:
+            return False
+        self._set_current(row)
+        return True
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._select_at(event)
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._select_at(event):
+            self.activate()
+        event.accept()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        delta = event.angleDelta()
+        if abs(delta.x()) > abs(delta.y()):
+            self._time_wheel.wheel(delta.x(), event.modifiers())
+        elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self._time_wheel.wheel(delta.y(), event.modifiers())
+        else:
+            self._row_wheel.wheel(delta.y(), event.modifiers())
+        event.accept()
+
+    def _on_row_wheel(self, steps: int, _modifiers) -> None:
+        self.move_by(steps)
+
+    def _on_time_wheel(self, steps: int, _modifiers) -> None:
+        self.shift(steps)
 
     # ---- layout -----------------------------------------------------------------------------
 
@@ -299,10 +416,15 @@ class Guide(Overlay):
         p.save()
         p.setClipRect(layout.rows)
         y = layout.rows.top()
+        boxes: list[_Box] = []
         for row in rows:
-            self._paint_row(p, layout, row, QRectF(0, y, layout.rows.width(), layout.row_h), now)
+            rect = QRectF(0, y, layout.rows.width(), layout.row_h)
+            boxes += self._paint_row(p, layout, row, rect, now)
             y += layout.row_h
+        # The line runs over the boxes but under their text, so titles stay readable.
         self._paint_now_line(p, layout, now, min(y, layout.rows.bottom()))
+        for box, programme, on_now in boxes:
+            self._paint_box_text(p, layout.units, box, programme, on_now)
         p.restore()
         self._paint_footer(p, layout, now)
         p.end()
@@ -313,11 +435,6 @@ class Guide(Overlay):
             return None
         return layout.times.left() + offset * layout.times.width() / WINDOW.total_seconds()
 
-    def _day_label(self, now: datetime) -> str:
-        start = self._window_start.astimezone()
-        days = (start.date() - now.astimezone().date()).days
-        return {0: "Today", 1: "Tomorrow"}.get(days, start.strftime("%A"))
-
     def _paint_header(self, p: QPainter, layout: _Layout, now: datetime) -> None:
         units, header, times = layout.units, layout.header, layout.times
         u = units.u
@@ -325,9 +442,8 @@ class Guide(Overlay):
         p.setFont(units.font(1.1, QFont.Weight.DemiBold))
         p.setPen(qcolor(PALETTE.text, 0.85))
         day = QRectF(SIDE_U * u, label_top, times.left() - 2 * SIDE_U * u, label_h)
-        p.drawText(
-            day, Qt.AlignLeft | Qt.AlignVCenter, elided(p, self._day_label(now), day.width())
-        )
+        label = day_label(self._window_start, now)
+        p.drawText(day, Qt.AlignLeft | Qt.AlignVCenter, elided(p, label, day.width()))
         slot_w = times.width() / SLOTS
         p.setFont(units.font(1.0))
         for i in range(SLOTS):
@@ -337,11 +453,10 @@ class Guide(Overlay):
                 qcolor(PALETTE.text, 0.18),
             )
             p.setPen(qcolor(PALETTE.text, 0.6))
-            label = fmt_clock((self._window_start + i * SLOT).astimezone())
             p.drawText(
                 QRectF(x + 0.6 * u, label_top, slot_w - 0.8 * u, label_h),
                 Qt.AlignLeft | Qt.AlignVCenter,
-                label,
+                fmt_clock((self._window_start + i * SLOT).astimezone()),
             )
         now_x = self._now_x(layout, now)
         if now_x is not None:
@@ -357,10 +472,10 @@ class Guide(Overlay):
 
     def _paint_row(
         self, p: QPainter, layout: _Layout, row: int, rect: QRectF, now: datetime
-    ) -> None:
+    ) -> list[_Box]:
+        """Paint a row's backgrounds; return its boxes for labelling after the now-line."""
         units, times = layout.units, layout.times
         u = units.u
-        channel = self._channels[row]
         p.fillRect(
             QRectF(rect.left(), rect.bottom() - 1, rect.width(), 1), qcolor(PALETTE.text, 0.06)
         )
@@ -372,31 +487,26 @@ class Guide(Overlay):
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), 1.0 * u, 1.0 * u)
             p.restore()
-        self._paint_channel(p, layout, channel, QRectF(0, rect.top(), times.left(), rect.height()))
-        drawn = False
-        for programme in self._programmes_for(row):
-            span = box_span(
-                programme.start, programme.stop, self._window_start, times.left(), times.width()
-            )
-            if span is None:
-                continue
-            box = QRectF(span[0], rect.top(), span[1], rect.height()).adjusted(
-                0.2 * u, 0.2 * u, -0.2 * u, -0.2 * u
-            )
-            if box.width() >= 1:
-                self._paint_box(p, units, programme, box, programme.is_on(now))
-                drawn = True
-        if not drawn:
+        self._paint_channel(
+            p, layout, self._channels[row], QRectF(0, rect.top(), times.left(), rect.height())
+        )
+        programmes = self._programmes_for(row)
+        start, stop = self._window_start, self._window_start + WINDOW
+        if not any(prog.stop > start and prog.start < stop for prog in programmes):
             box = QRectF(times.left(), rect.top(), times.width(), rect.height()).adjusted(
                 0.2 * u, 0.2 * u, -0.2 * u, -0.2 * u
             )
             fill_round(p, box, qcolor(PALETTE.text, 0.03), 0.6 * u)
-            p.setFont(units.font(1.0))
-            p.setPen(qcolor(PALETTE.text, 0.45))
-            inner = box.adjusted(0.9 * u, 0, -0.9 * u, 0)
-            p.drawText(
-                inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, NO_INFO_TEXT, inner.width())
+            return [(box, None, False)]
+        boxes: list[_Box] = []
+        for span in programme_spans(programmes, start, times.left(), times.width(), MIN_BOX_U * u):
+            box = QRectF(span.x, rect.top(), span.width, rect.height()).adjusted(
+                0.2 * u, 0.2 * u, -0.2 * u, -0.2 * u
             )
+            on_now = span.programme.start <= now < span.stop
+            self._paint_box_fill(p, units, box, on_now)
+            boxes.append((box, span.programme, on_now))
+        return boxes
 
     def _paint_channel(self, p: QPainter, layout: _Layout, channel: dict, rect: QRectF) -> None:
         units = layout.units
@@ -430,13 +540,10 @@ class Guide(Overlay):
             elided(p, name, width),
         )
 
-    def _paint_box(
-        self, p: QPainter, units: Units, programme: Programme, box: QRectF, on_now: bool
-    ) -> None:
+    def _paint_box_fill(self, p: QPainter, units: Units, box: QRectF, on_now: bool) -> None:
         u = units.u
         radius = 0.6 * u
         fill_round(p, box, qcolor(PALETTE.text, 0.1 if on_now else 0.06), radius)
-        left = box.left()
         if on_now:
             p.save()
             path = QPainterPath()
@@ -444,7 +551,20 @@ class Guide(Overlay):
             p.setClipPath(path, Qt.IntersectClip)
             p.fillRect(QRectF(box.left(), box.top(), 0.2 * u, box.height()), qcolor(PALETTE.accent))
             p.restore()
-            left += 0.2 * u
+
+    def _paint_box_text(
+        self, p: QPainter, units: Units, box: QRectF, programme: Programme | None, on_now: bool
+    ) -> None:
+        u = units.u
+        if programme is None:
+            p.setFont(units.font(1.0))
+            p.setPen(qcolor(PALETTE.text, 0.45))
+            inner = box.adjusted(0.9 * u, 0, -0.9 * u, 0)
+            p.drawText(
+                inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, NO_INFO_TEXT, inner.width())
+            )
+            return
+        left = box.left() + (0.2 * u if on_now else 0.0)
         inner = QRectF(left + 0.7 * u, box.top(), box.right() - left - 1.4 * u, box.height())
         if inner.width() < 1.0 * u:
             return
@@ -487,17 +607,18 @@ class Guide(Overlay):
         p.fillRect(
             QRectF(footer.left(), footer.top(), footer.width(), 1), qcolor(PALETTE.text, 0.08)
         )
-        programme = self._footer_programme(now)
+        if self.current_channel() is None:
+            return
+        programme = footer_programme(self._programmes_for(self._current), now)
         left, width = SIDE_U * u, footer.width() - 2 * SIDE_U * u
         if programme is None:
-            if self.current_channel() is not None:
-                p.setFont(units.font(1.0))
-                p.setPen(qcolor(PALETTE.text, 0.45))
-                p.drawText(
-                    QRectF(left, footer.top(), width, footer.height()),
-                    Qt.AlignLeft | Qt.AlignVCenter,
-                    NO_INFO_TEXT,
-                )
+            p.setFont(units.font(1.0))
+            p.setPen(qcolor(PALETTE.text, 0.45))
+            p.drawText(
+                QRectF(left, footer.top(), width, footer.height()),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                NO_INFO_TEXT,
+            )
             return
         title_font = units.font(1.2, QFont.Weight.Bold)
         body_font = units.font(1.0)  # the time range and the description
