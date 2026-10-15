@@ -1,7 +1,11 @@
-"""Native child widget libVLC draws into; reports mouse input to the shell."""
+"""Native child widget libVLC draws into; reports mouse input to the shell.
+
+It paints nothing itself: its parent paints the black behind the video (the TV window's player
+page). macOS never repaints under an opaque native view, so an opaque surface would keep
+showing whatever the window drew there last (the Library page) until libVLC draws.
+"""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QWidget
 
 from ui.pointer import PointerInput
@@ -19,12 +23,7 @@ class VideoSurface(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMouseTracking(True)
-        self.setAutoFillBackground(True)
-        palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor("#000000"))
-        self.setPalette(palette)
         self._pointer = PointerInput(self)
         self._pointer.clicked.connect(self.clicked)
         self._pointer.doubleClicked.connect(self.doubleClicked)

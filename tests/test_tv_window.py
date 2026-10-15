@@ -217,6 +217,23 @@ class TVWindowTests(WindowCase):
         self.assertIs(window.surface.parentWidget(), window.player_page)
         self.assertEqual(window.surface.geometry(), window.player_page.rect())
 
+    def test_the_player_page_paints_the_black_behind_the_video(self):
+        # macOS never repaints under an opaque native view: after the Library page, its last
+        # pixels stayed where the video goes (seen on screen with QScreen.grabWindow). The
+        # surface lets Qt paint the page's black under it instead.
+        window, surface = self.window, self.window.surface
+        self.assertTrue(window.player_page.autoFillBackground())
+        self.assertEqual(window.player_page.palette().window().color().name(), "#000000")
+        self.assertFalse(surface.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent))
+        self.assertFalse(surface.autoFillBackground())
+        self.assertTrue(surface.testAttribute(Qt.WidgetAttribute.WA_NativeWindow))
+        self.show()
+        window.open_library("movies")
+        window.back_to_tv()
+        QTest.qWait(50)
+        middle = surface.mapTo(window, surface.rect().center())
+        self.assertEqual(window.grab().toImage().pixelColor(middle).name(), "#000000")
+
     def test_hosts_the_options_dialog(self):
         for name in HOST_METHODS + HOST_ATTRIBUTES:
             self.assertTrue(hasattr(self.window, name), name)
@@ -1159,7 +1176,8 @@ class LibraryWindowTests(TwoProviderCase):
         self.assertIs(window.pages.currentWidget(), window.library_page)
         self.wait_idle()
         self.assertFalse(window.host.isVisible())
-        self.assertEqual(window.budget.holders(PROVIDER_NAME), [])
+        # The stream's slot goes back once the release gate has let go of it.
+        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == []))
         self.assertTrue(window.library_toast.isVisible())  # messages show on the Library
         for text in ("Guide", "Channel List", "Play/Pause", "Mute", "Previous Channel"):
             self.assertFalse(actions[text].isEnabled(), text)  # the player's keys

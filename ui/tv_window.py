@@ -37,11 +37,13 @@ from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QCloseEvent,
+    QColor,
     QDesktopServices,
     QGuiApplication,
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
+    QPalette,
     QWindowStateChangeEvent,
 )
 from PySide6.QtWidgets import (
@@ -302,8 +304,13 @@ class TVWindow(QMainWindow):
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # The player page is the video container: the main surface fills it (Phase 4's
-        # picture in picture puts its second surface in it as well).
+        # picture in picture puts its second surface in it as well). The page paints the
+        # black behind the video; the surfaces paint nothing (see ui/video_surface.py).
         self.player_page = QWidget()
+        black = self.player_page.palette()
+        black.setColor(QPalette.ColorRole.Window, QColor("#000000"))
+        self.player_page.setPalette(black)
+        self.player_page.setAutoFillBackground(True)
         self.surface = VideoSurface(self.player_page)
         video_layout = QVBoxLayout(self.player_page)
         video_layout.setContentsMargins(0, 0, 0, 0)
