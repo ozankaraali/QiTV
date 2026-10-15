@@ -100,6 +100,11 @@ def _merge(older: tuple[Any, ...], newer: tuple[Any, ...]) -> tuple[Any, ...]:
     return ("state", sid, snapshot, first, list(kept.values()))
 
 
+def _sid_of(message: tuple[Any, ...]) -> str | None:
+    """The session a message is about; None for "hello" and for a malformed id."""
+    return message[1] if len(message) > 1 and isinstance(message[1], str) else None
+
+
 class _Outbox:
     """The pipe's only writer: messages queue in FIFO order and never block their sender.
 
@@ -127,7 +132,7 @@ class _Outbox:
             # "closed", so nothing the session queues can follow its "closed".
             if self._closing or self._broken or (session is not None and session.cancelled):
                 return
-            sid = message[1] if len(message) > 1 and isinstance(message[1], str) else None
+            sid = _sid_of(message)
             if message[0] == "state" and sid is not None:
                 entry = self._states.get(sid)
                 if entry is not None:
@@ -157,8 +162,12 @@ class _Outbox:
                     return
                 entry = self._queue.popleft()
                 message = entry[0]
-                if self._states.get(message[1]) is entry:
-                    del self._states[message[1]]  # a later state queues anew
+                try:
+                    sid = _sid_of(message)
+                    if sid is not None and self._states.get(sid) is entry:
+                        del self._states[sid]  # a later state queues anew
+                except Exception as error:  # one bad message must never stop the writer
+                    _LOG.debug("A live helper message was malformed (%s).", type(error).__name__)
             try:
                 self._conn.send(message)
             except OSError:
@@ -488,10 +497,14 @@ class _Helper:
         """Run one command; False ends the command loop."""
         name = command[0] if isinstance(command, tuple) and command else None
         try:
-            if name == "open" and len(command) == 7:
-                self._open(*command[1:])
-            elif name == "close" and len(command) == 2:
-                self._close(command[1])
+            if name in ("open", "close"):
+                if len(command) != (7 if name == "open" else 2) or not isinstance(command[1], str):
+                    # A plain reply: a malformed session id is never echoed back.
+                    self.send(("error", None, "internal", _INTERNAL))
+                elif name == "open":
+                    self._open(*command[1:])
+                else:
+                    self._close(command[1])
             elif name == "shutdown":
                 return False
             else:
@@ -502,22 +515,22 @@ class _Helper:
 
     def _open(
         self,
-        sid: Any,
+        sid: str,
         url: str,
         headers: dict[str, str],
         verify_ssl: bool,
         ring: dict[str, Any],
         live_delay: float,
     ) -> None:
-        if not isinstance(sid, str) or not _SESSION_ID.fullmatch(sid) or sid in self._sessions:
+        if not _SESSION_ID.fullmatch(sid) or sid in self._sessions:
             self.send(("error", sid, "internal", _INTERNAL))
             return
         session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay)
         self._sessions[sid] = session
         session.thread.start()
 
-    def _close(self, sid: Any) -> None:
-        session = self._sessions.pop(sid, None) if isinstance(sid, str) else None
+    def _close(self, sid: str) -> None:
+        session = self._sessions.pop(sid, None)
         if session is not None:
             session.cancel()
             self.server.remove_session(sid)  # ends that session's loopback responses

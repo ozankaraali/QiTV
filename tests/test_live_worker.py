@@ -36,7 +36,9 @@ STATE_KEYS = {"oldest", "newest", "open", "start", "end", "live_edge", "bytes", 
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
 # helper's command loop never sees EOF: only the owner-death watchdog can end the helper.
-# The holder waits on the pipe, so it exits by itself once the helper is gone.
+# The holder waits on the pipe, so it exits by itself once the helper is gone. It only
+# isolates the watchdog while the helper sends nothing after hello: any message would end
+# the holder's wait, close its copy and let the command loop see EOF instead.
 OWNER = """
 import multiprocessing, sys, time
 from multiprocessing.connection import wait
@@ -714,6 +716,50 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(
             rebuild(m for m in connection.sent if m[:2] == ("state", "a")), rebuild(everything)
         )
+
+    def test_malformed_commands_get_a_plain_reply_and_never_stop_the_writer(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
+        self.addCleanup(temporary.cleanup)
+        parent, child = multiprocessing.Pipe(duplex=True)
+        helper = worker._Helper(child, temporary.name)
+        loop = threading.Thread(target=helper.run, daemon=True)
+        loop.start()
+        self.assertTrue(parent.poll(10))
+        self.assertEqual(parent.recv()[0], "hello")
+        failure = ("error", None, "internal", "The live buffer stopped unexpectedly.")
+        for command in (
+            ("close", ["not", "a", "sid"]),  # an unhashable sid is never echoed
+            ("close",),
+            ("open", {"x": 1}, "http://127.0.0.1:9" + SECRET_PATH, {}, True, RAM, 6.0),
+            ("open", "short"),
+        ):
+            with self.subTest(command=command[:2]):
+                parent.send(command)
+                self.assertTrue(parent.poll(2), "no reply to a malformed command")
+                self.assertEqual(parent.recv(), failure)
+        parent.send(("close", "ok"))
+        self.assertTrue(parent.poll(2), "the writer stopped after a malformed command")
+        self.assertEqual(parent.recv(), ("closed", "ok"))
+        parent.send(("shutdown",))
+        loop.join(5)
+        self.assertFalse(loop.is_alive())
+        helper.shutdown()
+        parent.close()
+        child.close()
+
+    def test_one_bad_message_never_stops_the_writer(self):
+        parent, child = multiprocessing.Pipe(duplex=True)
+        self.addCleanup(parent.close)
+        self.addCleanup(child.close)
+        outbox = worker._Outbox(child)
+        outbox.put(("closed", ["unhashable"]))  # no session to track: sent as it is
+        outbox.put(("error", "a", "internal", lambda: None))  # cannot be pickled: dropped
+        outbox.put(("closed", "a"))
+        received = []
+        while len(received) < 2 and parent.poll(2):
+            received.append(parent.recv())
+        self.assertEqual(received, [("closed", ["unhashable"]), ("closed", "a")])
+        outbox.close(2)
 
     def test_the_final_flush_is_bounded_when_the_parent_never_reads(self):
         connection = GatedConnection()
