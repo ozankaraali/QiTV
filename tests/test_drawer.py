@@ -18,8 +18,10 @@ from ui.overlays.channel_rows import NumberRole
 from ui.overlays.drawer import (
     EMPTY_TEXT,
     LOADING_TEXT,
+    PAD_SIDE_U,
     PREVIEW_DEBOUNCE_MS,
     PROVIDER_ERROR_TEXT,
+    REFRESH_ACTION,
     Drawer,
     IconRole,
 )
@@ -301,36 +303,37 @@ class DrawerTests(unittest.TestCase):
         self.record_hand_offs()
         return self.drawer._columns["left"]
 
-    # ---- the Settings gear beside the provider's name ----------------------------------------
+    # ---- the header row's buttons: refresh, then Settings, at its right end ------------------
 
     def click(self, point):
         QTest.mouseClick(self.drawer, Qt.LeftButton, Qt.NoModifier, point.toPoint())
 
-    def test_a_gear_right_after_the_provider_name_opens_settings(self):
+    def test_the_header_row_ends_with_refresh_then_settings(self):
         self.drawer.open_drawer("1")
         self.record_hand_offs()
-        gear, crumb = self.drawer.settings_gear_rect(), self.drawer.breadcrumb_text_rect()
-        left = self.drawer._columns["left"].rect
+        d = self.drawer
+        gear, refresh, crumb = d.settings_gear_rect(), d.refresh_rect(), d.breadcrumb_text_rect()
+        left, side = d._columns["left"].rect, d._units.px(PAD_SIDE_U)
         self.assertFalse(crumb.isEmpty())  # the provider's name is on the row
-        self.assertAlmostEqual(gear.center().y(), crumb.center().y(), delta=1)  # on its row
-        self.assertGreaterEqual(gear.left(), crumb.right())  # after the name, not over it
-        self.assertLess(gear.left() - crumb.right(), self.drawer._units.px(2.0))  # beside it
-        self.assertLessEqual(gear.right(), left.right())
+        self.assertAlmostEqual(gear.right(), left.right() + 1 - side, delta=1)  # right-aligned
+        self.assertLess(refresh.right(), gear.left())  # refresh just left of the gear
+        for icon in (gear, refresh):
+            self.assertAlmostEqual(icon.center().y(), crumb.center().y(), delta=1)  # its row
+        self.assertLessEqual(crumb.right(), refresh.left())  # the name never runs under them
         self.click(gear.center())
-        self.assertEqual(self.actions, [SETTINGS_ROW])
+        self.click(refresh.center())
+        self.assertEqual(self.actions, [SETTINGS_ROW, REFRESH_ACTION])
 
-    def test_the_gear_is_there_on_the_sources_layer_too(self):
+    def test_the_buttons_are_there_on_the_sources_layer_too(self):
         self.open_on_the_sources()
-        gear = self.drawer.settings_gear_rect()
-        self.assertTrue(self.drawer._columns["left"].rect.contains(gear.toRect()))
-        self.click(gear.center())
+        for rect in (self.drawer.settings_gear_rect(), self.drawer.refresh_rect()):
+            self.assertTrue(self.drawer._columns["left"].rect.contains(rect.toRect()))
+        self.click(self.drawer.settings_gear_rect().center())
         self.assertEqual(self.actions, [SETTINGS_ROW])
 
-    def test_a_click_beside_the_gear_opens_nothing(self):
+    def test_a_click_on_the_name_opens_nothing(self):
         self.drawer.open_drawer("1")
         self.record_hand_offs()
-        gear = self.drawer.settings_gear_rect()
-        self.click(gear.center() + QPointF(gear.width() * 2, 0))
         self.click(self.drawer.breadcrumb_text_rect().center())
         self.assertEqual(self.actions, [])
 

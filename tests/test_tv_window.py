@@ -402,6 +402,7 @@ class TVWindowTests(WindowCase):
                 ("Movies", "Ctrl+2"),
                 ("Series", "Ctrl+3"),
                 ("Search", "Ctrl+F"),
+                ("Refresh Channels and Guide", "Ctrl+R"),
                 ("Guide", "G"),
                 ("Channel List", "Return"),
                 ("Fullscreen", "F"),
@@ -430,6 +431,7 @@ class TVWindowTests(WindowCase):
             "Movies",
             "Series",
             "Search",
+            "Refresh Channels and Guide",
             "Mini Player",
         }
         for text, action in actions.items():
@@ -1585,6 +1587,25 @@ class DrawerSettingsTests(WindowCase):
             dialog.return_value.start_new_provider.assert_called_once_with()
         self.assertEqual(dialog.call_count, 2)
         self.assertTrue(drawer.isVisible())
+
+    def test_the_drawers_refresh_button_reloads_the_channels_and_the_guide(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        with (
+            mock.patch.object(self.window, "set_provider") as set_provider,
+            mock.patch.object(self.window, "reload_epg") as reload_epg,
+        ):
+            point = drawer.refresh_rect().center().toPoint()
+            QTest.mouseClick(
+                drawer, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point
+            )
+            set_provider.assert_called_once_with(force_update=True)
+            reload_epg.assert_called_once_with()
+            self.assertEqual(self.toasts[-1], ("Refreshing channels and guide…", "info"))
+            refresh = self.menu_actions()["Refresh Channels and Guide"]
+            self.assertEqual(refresh.shortcut(), QKeySequence("Ctrl+R"))
+            refresh.trigger()
+            self.assertEqual(set_provider.call_count, 2)
 
     def test_add_provider_opens_the_providers_tab_on_a_new_entry(self):
         dialog = OptionsDialog(self.window)

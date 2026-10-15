@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLay
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
 from services.navigation import ADD_PROVIDER_ROW, SETTINGS_ROW
+from ui.overlays.drawer import REFRESH_ACTION
 from ui.brand import logo_pixmap
 from ui.keymap import Action
 from ui.shortcuts_dialog import ShortcutsDialog
@@ -112,6 +113,7 @@ class TVMenus(QObject):
         add(view, "Movies", "Ctrl+2", lambda: screens.open_library("movies"))
         add(view, "Series", "Ctrl+3", lambda: screens.open_library("series"))
         add(view, "Search", "Ctrl+F", screens.open_search)
+        add(view, "Refresh Channels and Guide", "Ctrl+R", self.refresh_content)
         player = self._player_actions  # the player's keys: off while the Library shows
         player.append(add(view, "Guide", "G", self._handler(Action.GUIDE)))
         player.append(add(view, "Channel List", "Return", self._handler(Action.OPEN_DRAWER)))
@@ -220,8 +222,16 @@ class TVMenus(QObject):
         QDesktopServices.openUrl(QUrl(ISSUES_URL))
 
     def on_drawer_action(self, row: str) -> None:
-        """The drawer's Settings and Add provider rows."""
+        """The drawer's Settings and Add provider rows, and its header's refresh button."""
         if row == SETTINGS_ROW:
             self._window.options_dialog()
         elif row == ADD_PROVIDER_ROW:
             self._window.add_provider()
+        elif row == REFRESH_ACTION:
+            self.refresh_content()
+
+    def refresh_content(self) -> None:
+        """Load the provider's channels and guide again (the drawer's ↻, Ctrl/⌘+R)."""
+        self._window.set_provider(force_update=True)
+        self._window.reload_epg()
+        self._window.screens.notify("Refreshing channels and guide…")

@@ -56,7 +56,7 @@ On a first start QiTV opens with a [publicly available playlist](https://github.
    - **STB:** the portal address and your MAC address (serial number and device ID only if your provider asks for them).
 4. Press **Verify Provider** to check the details, then **Save**. QiTV loads the channels, and the Library loads the provider's movies and series.
 
-If you have no provider at all, QiTV shows a welcome card whose **Add provider** button does the same. Settings is one click away too: the **⚙** right after your provider's name at the top of the channel list, or the menu bar (<kbd>Ctrl/⌘+,</kbd>). To switch between providers, pick one in the channel list's sources column or in the **Providers** menu.
+If you have no provider at all, QiTV shows a welcome card whose **Add provider** button does the same. Settings is one click away too: the **⚙** at the right end of the channel list's top row (beside it, **↻** loads your provider's channels and guide again, also <kbd>Ctrl/⌘+R</kbd>), or the menu bar (<kbd>Ctrl/⌘+,</kbd>). To switch between providers, pick one in the channel list's sources column or in the **Providers** menu.
 
 QiTV keeps each provider's lists for six hours and refreshes them in the background, so they open at once. If your provider allows only one or two streams at a time, QiTV never opens more: set **Max simultaneous streams** in the provider's settings when QiTV cannot read the limit from the provider.
 
@@ -150,6 +150,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Ctrl/⌘+3</kbd> | Series |
 | <kbd>Ctrl/⌘+O</kbd> | Open a file |
 | <kbd>Ctrl/⌘+,</kbd> | Settings |
+| <kbd>Ctrl/⌘+R</kbd> | Refresh channels and guide |
 | <kbd>Ctrl/⌘+Q</kbd> | Quit |
 <!-- keys:end -->
 

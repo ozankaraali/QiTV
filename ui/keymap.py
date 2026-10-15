@@ -301,6 +301,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+3", "Series"),
         ("Ctrl+O", "Open a file"),
         ("Ctrl+,", "Settings"),
+        ("Ctrl+R", "Refresh channels and guide"),
         ("Ctrl+Q", "Quit"),
     ],
 }

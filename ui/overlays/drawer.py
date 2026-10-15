@@ -23,12 +23,15 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QColor,
     QFont,
     QFontMetrics,
     QKeySequence,
     QLinearGradient,
     QMouseEvent,
     QPainter,
+    QPainterPath,
+    QPen,
     QWheelEvent,
 )
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QToolTip
@@ -66,8 +69,9 @@ PAD_TOP_U = 2.4
 PAD_SIDE_U = 1.6
 CRUMB_H_U = 2.2
 FILTER_H_U = 3.4
-GEAR_U = 1.9  # the Settings gear right after the breadcrumb (the provider's name)
+GEAR_U = 1.9  # the header row's buttons (refresh, Settings) at its right end, this wide
 GEAR_GAP_U = 0.7
+REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channels and guide
 CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
 LOADING_TEXT = "Loading…"
@@ -80,6 +84,28 @@ CountRole = Qt.UserRole + 11
 IconRole = Qt.UserRole + 12
 _PINNED_ICONS = {FAVORITES_GROUP: "star", RECENT_GROUP: "recent"}
 _ACTION_ICONS = {SETTINGS_ROW: "gear", ADD_PROVIDER_ROW: "plus"}
+
+
+def _draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
+    """A circular arrow, drawn like painting.draw_icon's glyphs (a unit box, round caps)."""
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.translate(rect.x(), rect.y())
+    p.scale(rect.width(), rect.height())
+    pen = QPen(color, 0.1)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawArc(QRectF(0.16, 0.16, 0.68, 0.68), 70 * 16, 290 * 16)  # open at the top right
+    head = QPainterPath()
+    head.moveTo(0.52, 0.03)
+    head.lineTo(0.74, 0.17)
+    head.lineTo(0.5, 0.3)
+    head.closeSubpath()
+    p.setPen(Qt.NoPen)
+    p.setBrush(color)
+    p.drawPath(head)
+    p.restore()
 
 
 def _leaves_drawer(node: NavNode) -> bool:
@@ -258,8 +284,8 @@ class Drawer(Overlay):
         self._preview_timer.setInterval(PREVIEW_DEBOUNCE_MS)
         self._preview_timer.timeout.connect(self._flush_preview)
         self._laid_out_for: tuple[int, int] | None = None  # the host size _relayout last fitted
-        self._gear_hover = False
-        # Hover over the gear (a move elsewhere goes on to the host, as without tracking).
+        self._hover: str | None = None  # the header button under the pointer
+        # Hover over the header buttons (a move elsewhere goes on to the host, as without it).
         self.setMouseTracking(True)
         nav.changed.connect(self._on_nav_changed)
         if parent is not None:
@@ -567,8 +593,9 @@ class Drawer(Overlay):
             event.ignore()  # Back/Forward go on to the host: the shell's layer up/down
             return
         event.accept()
-        if event.button() == Qt.LeftButton and self.settings_gear_rect().contains(event.position()):
-            self.actionRequested.emit(SETTINGS_ROW)
+        button = self._header_button_at(event.position())
+        if event.button() == Qt.LeftButton and button is not None:
+            self.actionRequested.emit(button)
             return
         in_fade = event.position().x() > self._columns["right"].rect.right()
         if event.button() == Qt.LeftButton and in_fade:
@@ -584,29 +611,39 @@ class Drawer(Overlay):
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        over = self.settings_gear_rect().contains(event.position())
-        if over != self._gear_hover:
-            self._gear_hover = over
+        over = self._header_button_at(event.position())
+        if over != self._hover:
+            self._hover = over
             self.setCursor(Qt.PointingHandCursor if over else Qt.ArrowCursor)
-            self.update(self.settings_gear_rect().toAlignedRect().adjusted(-2, -2, 2, 2))
+            self.update()
         event.ignore()  # the host still hears the pointer move (the transport, the cursor)
 
     def leaveEvent(self, event: QEvent) -> None:
-        if self._gear_hover:
-            self._gear_hover = False
+        if self._hover is not None:
+            self._hover = None
             self.unsetCursor()
             self.update()
         super().leaveEvent(event)
 
     def event(self, event: QEvent) -> bool:
         if event.type() == QEvent.ToolTip:
-            if self.settings_gear_rect().contains(QPointF(event.pos())):
+            button = self._header_button_at(QPointF(event.pos()))
+            if button == SETTINGS_ROW:
                 keys = QKeySequence("Ctrl+,").toString(QKeySequence.NativeText)
                 QToolTip.showText(event.globalPos(), f"Settings ({keys})", self)
+            elif button == REFRESH_ACTION:
+                QToolTip.showText(event.globalPos(), "Refresh channels and guide", self)
             else:
                 QToolTip.hideText()
             return True
         return super().event(event)
+
+    def _header_button_at(self, point: QPointF) -> str | None:
+        if self.settings_gear_rect().contains(point):
+            return SETTINGS_ROW
+        if self.refresh_rect().contains(point):
+            return REFRESH_ACTION
+        return None
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         event.accept()  # a list at its end, the header or the fade: never a zap behind
@@ -667,10 +704,10 @@ class Drawer(Overlay):
         for col in (left, right):
             self._paint_column(p, col, units)
 
-    def _crumb_layout(self) -> tuple[QRectF, str, str, QRectF]:
+    def _crumb_layout(self) -> tuple[QRectF, str, str, QRectF, QRectF]:
         """The breadcrumb row of the left column: (the text's rect, its dimmed head, its last
-        part, the Settings gear's rect). The gear sits right after the text (the provider's
-        name, or the deepest layer above the columns); at the top layer, at the row's start."""
+        part, the refresh button's rect, the Settings gear's rect). The two buttons sit at the
+        row's right end, the gear last; the text elides before it reaches them."""
         units = self._units
         col = self._columns["left"]
         side = units.px(PAD_SIDE_U)
@@ -680,8 +717,8 @@ class Drawer(Overlay):
             col.rect.width() - 2 * side,
             units.px(CRUMB_H_U),
         )
-        gear, gap = units.px(GEAR_U), units.px(GEAR_GAP_U)
-        room = max(0.0, row.width() - gear - gap)  # the text never runs under the gear
+        size, gap = units.px(GEAR_U), units.px(GEAR_GAP_U)
+        room = max(0.0, row.width() - 2 * size - 2 * gap)  # never under the buttons
         fm = QFontMetrics(units.font(CRUMB_FONT_U))
         parts = [n.title for n in self._nav.path[:-1]]
         head = last = ""
@@ -691,18 +728,24 @@ class Drawer(Overlay):
             head = fm.elidedText(head, Qt.ElideLeft, max(0, int(room - fm.horizontalAdvance(last))))
         width = fm.horizontalAdvance(head) + fm.horizontalAdvance(last)
         text = QRectF(row.x(), row.y(), width, row.height())
-        x = text.right() + gap if parts else row.x()
-        return text, head, last, QRectF(x, row.center().y() - gear / 2, gear, gear)
+        top = row.center().y() - size / 2
+        gear = QRectF(row.right() - size, top, size, size)
+        refresh = QRectF(gear.left() - gap - size, top, size, size)
+        return text, head, last, refresh, gear
 
     def breadcrumb_text_rect(self) -> QRectF:
         return self._crumb_layout()[0]
 
-    def settings_gear_rect(self) -> QRectF:
-        """The Settings gear beside the provider's name (drawer coordinates)."""
+    def refresh_rect(self) -> QRectF:
+        """The refresh button (the provider's channels and guide), left of the gear."""
         return self._crumb_layout()[3]
 
+    def settings_gear_rect(self) -> QRectF:
+        """The Settings gear at the right end of the header row (drawer coordinates)."""
+        return self._crumb_layout()[4]
+
     def _paint_breadcrumb(self, p: QPainter, col: _Column) -> None:
-        text, head, last, gear = self._crumb_layout()
+        text, head, last, refresh, gear = self._crumb_layout()
         if head or last:
             p.setFont(self._units.font(CRUMB_FONT_U))
             fm = p.fontMetrics()
@@ -714,8 +757,12 @@ class Drawer(Overlay):
                 Qt.AlignLeft | Qt.AlignVCenter,
                 last,
             )
-        tone = qcolor(PALETTE.accent) if self._gear_hover else qcolor(PALETTE.text, 0.55)
-        draw_icon(p, "gear", gear, tone)
+        for key, rect in ((REFRESH_ACTION, refresh), (SETTINGS_ROW, gear)):
+            tone = qcolor(PALETTE.accent) if self._hover == key else qcolor(PALETTE.text, 0.55)
+            if key == SETTINGS_ROW:
+                draw_icon(p, "gear", rect, tone)
+            else:
+                _draw_refresh(p, rect, tone)
 
     def _paint_column(self, p: QPainter, col: _Column, units: Units) -> None:
         u = units.u
