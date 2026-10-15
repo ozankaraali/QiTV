@@ -8,7 +8,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QWidget
@@ -318,13 +318,19 @@ class FakeTransport(FakeOverlay):
         self.record("show_vod", title, subtitle)
         self.visible = True
 
-    def show_live(self, title, subtitle):
+    def show_live(self, title, subtitle, logo=None):
         self.record("show_live", title, subtitle)
         self.visible = True
 
-    def show_timeshift(self, title, subtitle):
+    def show_timeshift(self, title, subtitle, logo=None):
         self.record("show_timeshift", title, subtitle)
         self.visible = True
+
+    def badge_rect(self):
+        return QRectF()
+
+    def set_logo(self, logo):
+        self.record("set_logo", logo)
 
     def update_timeline(self, state, ticks):
         self.record("update_timeline", state, ticks)
