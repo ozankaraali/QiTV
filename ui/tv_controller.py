@@ -1360,12 +1360,18 @@ class TVController(QObject):
         return pixmap
 
     def _on_logo_ready(self, url: str) -> None:
-        """Refresh a visible banner when its channel's logo arrives."""
-        banner, channel = self.overlays.banner, self._channel
-        if self._closed or channel is None or channel.get("logo") != url:
+        """Refresh the banner and the transport's badge when a logo they show arrives."""
+        if self._closed:
             return
-        if not self.overlays.transport.badge_rect().isEmpty():
-            self.overlays.transport.set_logo(self._logo(channel))
+        # The transport shows what plays (`_current`), the banner the channel last asked for
+        # (`_channel`): during a zap they differ, and a logo must sit beside its own name.
+        shown = self._current
+        if shown is not None and shown.live and shown.item.get("logo") == url:
+            if not self.overlays.transport.badge_rect().isEmpty():
+                self.overlays.transport.set_logo(self._logo(shown.item))
+        banner, channel = self.overlays.banner, self._channel
+        if channel is None or channel.get("logo") != url:
+            return
         if banner.isVisible() and banner.info is not None and banner.info.logo is None:
             banner.show_info(self.banner_info(channel))
 

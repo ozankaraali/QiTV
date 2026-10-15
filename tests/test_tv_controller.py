@@ -294,6 +294,9 @@ class FakeDrawer(FakeOverlay):
 
 
 class FakeTransport(FakeOverlay):
+    badge = False  # a live channel shows: badge_rect() is not empty
+    logo = None  # the logo the last show_live/show_timeshift was given
+
     playPauseRequested = Signal()
     seekRequested = Signal(int)
     seekRelativeRequested = Signal(int)
@@ -320,14 +323,17 @@ class FakeTransport(FakeOverlay):
 
     def show_live(self, title, subtitle, logo=None):
         self.record("show_live", title, subtitle)
+        self.logo = logo
         self.visible = True
 
     def show_timeshift(self, title, subtitle, logo=None):
         self.record("show_timeshift", title, subtitle)
+        self.logo = logo
         self.visible = True
 
     def badge_rect(self):
-        return QRectF()
+        # The live badge is only there while a live channel shows (the test says when).
+        return QRectF(0, 0, 40, 24) if self.badge else QRectF()
 
     def set_logo(self, logo):
         self.record("set_logo", logo)
@@ -1793,7 +1799,9 @@ class FixRound2Tests(ControllerTestCase):
 
 
 class LogoTests(ControllerTestCase):
-    def test_banner_refreshes_when_its_logo_arrives(self):
+    ONE, TWO = "http://logo/1.png", "http://logo/2.png"
+
+    def with_logos(self):
         logos = FakeLogos()
         self.controller = TVController(
             config=self.config,
@@ -1810,15 +1818,58 @@ class LogoTests(ControllerTestCase):
         )
         self.addCleanup(self.controller.shutdown)
         self.controller.start()
-        channel = dict(CHANNELS[0], logo="http://logo/1.png")
-        self.controller.tune(channel, group_key="10", channels=[channel])
+        self.channels = [
+            dict(CHANNELS[0], logo=self.ONE),
+            dict(CHANNELS[1], logo=self.TWO),
+        ]
+        return logos
+
+    def tune_logo(self, index):
+        self.controller.tune(self.channels[index], group_key="10", channels=self.channels)
+
+    def test_banner_refreshes_when_its_logo_arrives(self):
+        logos = self.with_logos()
+        self.tune_logo(0)
         self.assertIsNone(self.banner.info.logo)
-        self.assertEqual(logos.requested, ["http://logo/1.png"])
+        self.assertEqual(logos.requested, [self.ONE])
         logos.logoReady.emit("http://logo/other.png")
         self.assertEqual(len(self.banner.named("show_info")), 1)
-        logos.pixmaps["http://logo/1.png"] = QPixmap(4, 4)
-        logos.logoReady.emit("http://logo/1.png")
+        logos.pixmaps[self.ONE] = QPixmap(4, 4)
+        logos.logoReady.emit(self.ONE)
         self.assertIsNotNone(self.banner.info.logo)
+
+    def test_a_logo_that_arrives_for_the_shown_channel_reaches_the_transport(self):
+        logos = self.with_logos()
+        self.tune_logo(0)
+        self.ready("http://stream/1")
+        self.transport.badge = True
+        pixmap = logos.pixmaps[self.ONE] = QPixmap(4, 4)
+        logos.logoReady.emit(self.ONE)
+        self.assertEqual(self.transport.named("set_logo"), [(pixmap,)])
+
+    def test_a_logo_for_a_channel_not_shown_yet_does_not_replace_the_shown_one(self):
+        # Review M3: during a zap the controller's channel is the requested one, but the
+        # transport still names the playing one: its logo must not sit beside that name.
+        logos = self.with_logos()
+        self.tune_logo(0)
+        self.ready("http://stream/1")
+        self.transport.badge = True
+        self.tune_logo(1)  # Two is requested; its link has not arrived
+        logos.pixmaps[self.TWO] = QPixmap(4, 4)
+        logos.logoReady.emit(self.TWO)
+        self.assertEqual(self.transport.named("set_logo"), [])
+        self.ready("http://stream/2")  # once it plays, its logo is the shown one's
+        logos.logoReady.emit(self.TWO)
+        self.assertEqual(self.transport.named("set_logo"), [(logos.pixmaps[self.TWO],)])
+
+    def test_the_logo_live_controls_passes_reaches_the_transport(self):
+        logos = self.with_logos()
+        pixmap = logos.pixmaps[self.ONE] = QPixmap(4, 4)
+        self.tune_logo(0)
+        self.ready("http://stream/1")
+        self.controller.mouse_moved()
+        self.assertEqual(self.transport.named("show_live"), [("One", "")])
+        self.assertIs(self.transport.logo, pixmap)
 
 
 class ShutdownTests(ControllerTestCase):
