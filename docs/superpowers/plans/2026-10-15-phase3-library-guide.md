@@ -855,7 +855,7 @@ class Guide(Overlay):
   - `genreSelected` calls `model.select_genre`; `sortRequested` calls `model.set_sort`.
 - **Search** (Review Focus 1 and 4):
   - each query change restarts a 250 ms debounce;
-  - then a `SearchWorker` runs through `jobs` with a generation number. The first search loads the caches; later searches pass the cached snapshot, which is dropped on `providerReady` and on `refresh()`;
+  - then a `SearchWorker` runs through `jobs` with a generation number. The first search loads the caches and builds the folded index (`SearchWorker` emits `(caches, index, hits)`, from the Task 3 review); later searches pass both `caches` and `index` back, so titles are folded once per snapshot. Both are dropped on `providerReady` and on `refresh()`;
   - results with an older generation are ignored;
   - the grid shows sections `"{provider} · Live TV (n)"`, `"… · Movies (n)"` and `"… · Series (n)"`. Live channels are drawn with their logo centred on a dark tile (a poster provider shim).
   - **Activating a hit:**
