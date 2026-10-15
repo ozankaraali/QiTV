@@ -463,6 +463,34 @@ class LiveEngineTests(unittest.TestCase):
             if event[0] == "failed":
                 self.assertFalse(signals.up[index], f"{event} arrived while still available")
 
+    def test_a_dead_helper_that_cannot_be_stopped_turns_time_shift_off(self):
+        # A helper stuck in I/O (a network drive) may outlive a kill with its upstream
+        # connections open: restarting and reopening would add a second one per session.
+        reap = engine_module._Supervisor._reap
+
+        def unstoppable(supervisor, process, conn, grace):
+            reap(supervisor, process, conn, grace)  # it does stop here, but reports it did not
+            return False
+
+        self.enterContext(patch.object(engine_module._Supervisor, "_reap", unstoppable))
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        source = self.source()
+        sid = self.open(engine, source.url + SECRET_PATH)
+        signals.wait_for(lambda event: event == ("ready", sid))
+        mark = len(signals.events)
+        with self.assertLogs("services.live.engine", "WARNING") as logs:
+            kill(helpers()[0])
+            off = signals.wait_for(lambda event: event == ("available", False), start=mark)
+        self.assertIn("time-shift is off for this run", logs.output[-1])
+        self.assertEqual(signals.of("failed", start=mark), [("failed", sid, "internal", INTERNAL)])
+        QTest.qWait(500)
+        self.assertEqual(helpers(), [], "a helper was started again")
+        self.assertEqual(signals.of("available", start=off + 1), [])
+        self.assertEqual(source.counts[SECRET_PATH], 1, "the session was reopened")
+        engine.close_session(sid)
+        signals.wait_for(lambda event: event == ("closed", sid), start=off)
+
     def test_a_session_crash_is_final_and_never_reopened(self):
         self.enterContext(patch.object(engine_module, "helper_main", crashing_session_helper))
         engine, signals = self.engine()

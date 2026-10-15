@@ -19,8 +19,9 @@ a final error), its spans are dropped, every buffer directory handed out is remo
 helper is restarted. A helper that sends no `hello` within 30 s counts as dead too, and so
 does one that cannot be started at all. On the new helper's `hello`, the sessions the GUI has
 not closed are reopened with the same arguments: a fresh directory if the old one could not
-be removed, RAM if the disk already failed. Then `available(True)` follows. A second death
-emits `available(False)` for the rest of the run, and every later open fails at once.
+be removed, RAM if the disk already failed. Then `available(True)` follows. A second death,
+or a dead helper that cannot be stopped (it may still hold its upstream connections), emits
+`available(False)` for the rest of the run, and every later open fails at once.
 
 A session whose input is over (it ended, or it failed for good) is not reopened, so a
 restart never opens a second provider connection behind the GUI's back. It stays known
@@ -315,8 +316,12 @@ class _Supervisor(QThread):
         assert process is not None and conn is not None
         self._process = self._conn = None
         self._report_lost()
-        if self._reap(process, conn, _STOP_GRACE):
-            self._clean_dirs()
+        if not self._reap(process, conn, _STOP_GRACE):
+            # It may still hold its upstream connections: a reopen would add a second one.
+            _LOG.warning("The dead live helper is still running; time-shift is off for this run.")
+            self._give_up()
+            return
+        self._clean_dirs()
         if self._count_death():
             self._start_helper()
 
