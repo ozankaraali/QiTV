@@ -1,0 +1,149 @@
+import os
+import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QCoreApplication
+from PySide6.QtTest import QTest
+
+from services import thread_cleanup
+from services.jobs import ImmediateRunner, JobRunner
+from services.search import SearchWorker, search_caches
+
+APP = QCoreApplication.instance() or QCoreApplication([])
+
+
+def titles(hits, section=None):
+    return [h.title for h in hits if section is None or h.section == section]
+
+
+class SearchCachesTests(unittest.TestCase):
+    def test_multi_term_matching(self):
+        caches = [
+            ("P", {"vod": [{"id": "1", "name": "Salt Roads (2024)"}, {"id": "2", "name": "Salt"}]})
+        ]
+        self.assertEqual(titles(search_caches(caches, "salt road")), ["Salt Roads (2024)"])
+        self.assertEqual(titles(search_caches(caches, "road salt")), ["Salt Roads (2024)"])
+
+    def test_accent_and_turkish_folding(self):
+        caches = [("P", {"itv": {"contents": [{"id": "1", "name": "İstanbul Haber"}]}})]
+        hits = search_caches(caches, "istanbul")
+        self.assertEqual(titles(hits), ["İstanbul Haber"])
+        self.assertEqual(hits[0].section, "live")
+        self.assertEqual(hits[0].provider, "P")
+
+    def test_prefix_hits_come_first(self):
+        caches = [
+            (
+                "P",
+                {
+                    "vod": [
+                        {"id": "1", "name": "The Night Road"},
+                        {"id": "2", "name": "Road Night"},
+                        {"id": "3", "name": "Night Road"},
+                    ]
+                },
+            )
+        ]
+        self.assertEqual(
+            titles(search_caches(caches, "night")), ["Night Road", "The Night Road", "Road Night"]
+        )
+
+    def test_dedupes_across_stb_groups(self):
+        item = {"id": "7", "name": "Dup Movie"}
+        caches = [("P", {"vod": {"contents": {"g1": [item], "g2": [dict(item)]}}})]
+        self.assertEqual(titles(search_caches(caches, "dup")), ["Dup Movie"])
+
+    def test_cache_shapes(self):
+        caches = [
+            (
+                "P",
+                {
+                    "itv": [{"id": "1", "name": "Alpha live"}],
+                    "vod": {"contents": [{"id": "2", "name": "Alpha film"}]},
+                    "series": {"contents": {"a": [{"id": "3", "name": "Alpha show"}], "b": "x"}},
+                },
+            )
+        ]
+        hits = search_caches(caches, "alpha")
+        self.assertEqual(
+            [(h.section, h.title) for h in hits],
+            [("live", "Alpha live"), ("movies", "Alpha film"), ("series", "Alpha show")],
+        )
+
+    def test_categories_are_never_items(self):
+        caches = [
+            (
+                "P",
+                {
+                    "itv": {
+                        "categories": [{"id": "9", "title": "Alpha category"}],
+                        "contents": [{"id": "1", "name": "Alpha one"}],
+                    }
+                },
+            )
+        ]
+        self.assertEqual(titles(search_caches(caches, "alpha")), ["Alpha one"])
+
+    def test_per_section_limit(self):
+        items = [{"id": str(i), "name": f"Movie {i}"} for i in range(10)]
+        hits = search_caches([("P", {"vod": items})], "movie", limit_per_section=3)
+        self.assertEqual(len(hits), 3)
+
+    def test_short_query_gives_nothing(self):
+        caches = [("P", {"vod": [{"id": "1", "name": "A film"}]})]
+        self.assertEqual(search_caches(caches, "a"), [])
+        self.assertEqual(search_caches(caches, "  "), [])
+
+
+class FakeProviders:
+    def __init__(self, caches):
+        self.caches = caches
+        self.calls = 0
+
+    def get_all_providers_cached_content(self):
+        self.calls += 1
+        return self.caches
+
+
+class SearchWorkerTests(unittest.TestCase):
+    def setUp(self):
+        self.caches = [("P", {"vod": [{"id": "1", "name": "Salt Roads"}]})]
+
+    def test_loads_caches_and_searches(self):
+        manager = FakeProviders(self.caches)
+        results = []
+        ImmediateRunner().run_worker(
+            SearchWorker(manager, "salt"), lambda ctx, payload: results.append(payload)
+        )
+        caches, hits = results[0]
+        self.assertEqual(caches, self.caches)
+        self.assertEqual(titles(hits), ["Salt Roads"])
+        self.assertEqual(manager.calls, 1)
+
+    def test_given_caches_skip_the_loader(self):
+        manager = FakeProviders([])
+        results = []
+        ImmediateRunner().run_worker(
+            SearchWorker(manager, "salt", self.caches), lambda ctx, payload: results.append(payload)
+        )
+        self.assertEqual(titles(results[0][1]), ["Salt Roads"])
+        self.assertEqual(manager.calls, 0)
+
+    def test_real_runner_leaves_no_pending_thread(self):
+        runner = JobRunner()
+        results = []
+        runner.run_worker(
+            SearchWorker(FakeProviders(self.caches), "salt"),
+            lambda ctx, payload: results.append(payload),
+        )
+        for _ in range(300):
+            if results and not thread_cleanup.has_pending_threads():
+                break
+            QTest.qWait(10)
+        self.assertEqual(titles(results[0][1]), ["Salt Roads"])
+        self.assertFalse(thread_cleanup.has_pending_threads())
+
+
+if __name__ == "__main__":
+    unittest.main()
