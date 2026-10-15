@@ -14,10 +14,12 @@ from PySide6.QtWidgets import QApplication
 
 from services.playback import (
     NO_VLC_MESSAGE,
+    VLC_LOG_ENV,
     NullSession,
     PlaybackSession,
     PlaybackState,
     create_instance,
+    default_args,
     vlc,
 )
 from services.thread_cleanup import has_pending_threads
@@ -680,6 +682,23 @@ class MainThreadJoinTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: not has_pending_threads(), 4000))
         self.assertIn(("stop",), player.calls)
         self.assertFalse(player.deadlocked)
+
+
+class DefaultArgsTests(unittest.TestCase):
+    def test_quiet_unless_a_log_file_is_named(self):
+        with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}):
+            self.assertEqual(default_args(), ["--no-video-title-show", "--quiet"])
+
+    def test_a_named_log_file_gets_the_verbose_log(self):
+        with (
+            mock.patch.dict(os.environ, {VLC_LOG_ENV: "/tmp/smoke/libvlc.log"}),
+            self.assertLogs("services.playback", "WARNING"),
+        ):
+            args = default_args()
+        self.assertIn("--logfile=/tmp/smoke/libvlc.log", args)
+        self.assertIn("--file-logging", args)
+        self.assertIn("--verbose=2", args)
+        self.assertNotIn("--quiet", args)
 
 
 def _public(cls) -> set[str]:

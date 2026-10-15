@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from enum import Enum
 import logging
+import os
 import platform
 from typing import Any, Optional, Protocol
 
@@ -37,6 +38,9 @@ _RESUME_GIVE_UP_MS = 3000
 _RESUME_END_MARGIN_MS = 1000
 _STALL_BUDGET_RESET_MS = 30000  # healthy playback after a stall refills the retry budget
 NO_VLC_MESSAGE = "Video needs VLC: install it from videolan.org and restart QiTV"
+# A file for libVLC's verbose log (the smoke test sets it). For debugging only: libVLC logs
+# every stream URL, and provider URLs can carry credentials.
+VLC_LOG_ENV = "QITV_VLC_LOG"
 
 
 class PlaybackState(str, Enum):
@@ -49,11 +53,20 @@ class PlaybackState(str, Enum):
     ERROR = "error"
 
 
+def default_args() -> list[str]:
+    """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one."""
+    log = os.environ.get(VLC_LOG_ENV)
+    if not log:
+        return ["--no-video-title-show", "--quiet"]
+    logger.warning("libVLC logs verbosely to %s (%s); it records stream URLs", log, VLC_LOG_ENV)
+    return ["--no-video-title-show", "--verbose=2", "--file-logging", f"--logfile={log}"]
+
+
 def create_instance(extra_args: Optional[list[str]] = None):
     if vlc is None:
         return None
     try:
-        return vlc.Instance(extra_args or ["--no-video-title-show", "--quiet"])
+        return vlc.Instance(extra_args or default_args())
     except Exception as e:
         logger.warning("Could not create a libVLC instance: %s", e)
         return None
