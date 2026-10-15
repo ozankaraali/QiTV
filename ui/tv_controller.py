@@ -1181,6 +1181,11 @@ class TVController(QObject):
             return  # zap timers may fire while the window is torn down
         column = self.overlays.column
         if open_:
+            # The column stands alone over the video (mockup 01-shapes A): the banner, and a
+            # number being typed, give way; the rest tune announces the channel again.
+            if self._digits:
+                self.zap.cancel_digits()
+            self.overlays.banner.dismiss()
             context = self.zap.context
             column.open(
                 self._group_title(context.group_key), context.channels, context.current_index
@@ -1199,6 +1204,7 @@ class TVController(QObject):
         if not self._closed:
             if text:
                 self.overlays.transport.dismiss()
+                self.zap.close_column()  # a number takes over: the banner shows it alone
             self.overlays.banner.show_digits(text)
 
     def _on_number_not_found(self, number: str) -> None:
@@ -1415,6 +1421,8 @@ class TVController(QObject):
         if self._on_demand():
             self._show_transport()
             return
+        if self.overlays.column.isVisible():
+            return  # the column names the channels; the banner would lie under it
         channel = self._channel or self.zap.context.current()
         if channel is not None:
             self._show_banner(channel)

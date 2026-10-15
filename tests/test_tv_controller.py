@@ -962,6 +962,43 @@ class KeyTests(ControllerTestCase):
         self.ready("http://stream/2")
         self.assertEqual(self.requested(), ["One", "Two", "Three"])
 
+    def test_the_column_opens_alone_and_the_rest_tune_announces_its_channel(self):
+        # H19: the banner stayed under the column, showing the previous channel.
+        self.play(0)
+        self.controller.handle(Action.CH_NEXT)  # Two: the banner announces it
+        self.assertTrue(self.banner.visible)
+        self.controller.handle(Action.CH_NEXT)  # a burst: the column opens on Three
+        self.assertTrue(self.column.visible)
+        self.assertFalse(self.banner.visible)
+        self.ready("http://stream/2")  # Two's link arrives while the column is open
+        self.assertFalse(self.banner.visible)
+        self.controller.handle(Action.INFO)  # I: the column already names the channel
+        self.assertFalse(self.banner.visible)
+        self.assertTrue(wait_until(lambda: not self.column.visible))  # the zap rest
+        self.assertTrue(self.banner.visible)
+        self.assertEqual(self.banner.info.name, "Three")
+
+    def test_the_column_takes_over_from_a_number_being_typed(self):
+        self.play(0)
+        self.controller.handle(Action.CH_NEXT)
+        self.controller.handle(Action.DIGIT, "4")
+        self.assertEqual(self.banner.named("show_digits")[-1], ("4",))
+        self.controller.handle(Action.CH_NEXT)  # a burst: the column opens
+        self.assertTrue(self.column.visible)
+        self.assertEqual(self.banner.named("show_digits")[-1], ("",))  # the number is dropped
+        self.assertFalse(self.banner.visible)
+
+    def test_a_digit_closes_the_column_for_the_number(self):
+        self.play(0)
+        self.controller.handle(Action.CH_NEXT)
+        self.controller.handle(Action.CH_NEXT)  # column open on Three
+        self.controller.handle(Action.DIGIT, "4")
+        self.assertFalse(self.column.visible)  # the banner shows the number alone
+        self.assertEqual(self.banner.named("show_digits")[-1], ("4",))
+        self.ready("http://stream/2")
+        self.assertTrue(wait_until(lambda: self.requested()[-1] == "Four"))
+        self.assertNotIn("Three", self.requested())  # the column's rest tune was dropped
+
     def test_digits(self):
         self.play(0)
         self.controller.handle(Action.DIGIT, "4")
