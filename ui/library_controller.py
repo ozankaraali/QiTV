@@ -39,6 +39,12 @@ from ui.library.search_session import DEBOUNCE_MS, SECTION_LABELS, SearchSession
 
 logger = logging.getLogger(__name__)
 
+
+def _titles(count: int) -> str:
+    """The grid header's count: "1 title", "1,200 titles"."""
+    return f"{count:,} title" if count == 1 else f"{count:,} titles"
+
+
 SEARCH_DEBOUNCE_MS = DEBOUNCE_MS
 LOADING_TEXT = "Loading…"
 EMPTY_TEXT = "Nothing here"
@@ -502,7 +508,7 @@ class LibraryController(QObject):
         sorts: list[tuple[str, str]] = []
         if model.genre_id not in PINNED_TITLES:
             sorts = [(s.value, SORT_LABELS[s]) for s in model.available_sorts()]
-        count = "" if items is None else f"{len(items):,} titles"
+        count = "" if items is None else _titles(len(items))
         grid.set_header(self._genre_title(), count, sorts, model.sort.value)
         if not items:
             grid.set_sections([])

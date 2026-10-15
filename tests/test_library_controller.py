@@ -297,6 +297,17 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(grid._count_text, "3 titles")
         self.assertEqual([value for value, _label in grid._sorts], ["az", "year", "rating"])
 
+    def test_a_genre_of_one_title_says_title(self):
+        # The header read "1 titles" (H17).
+        self.catalog.item_map[("movies", "d")] = [SALT]
+        self.catalog.item_map[("movies", "c")] = [movie(100 + i, f"M{i}") for i in range(1200)]
+        ctl = self.open_movies()
+        self.assertEqual(self.screen.grid._count_text, "1 title")
+        ctl.handle(Action.NAV_LEFT)  # genres
+        ctl.handle(Action.NAV_DOWN)
+        ctl.handle(Action.NAV_ACTIVATE)  # Comedy
+        self.assertEqual(self.screen.grid._count_text, "1,200 titles")
+
     def test_genre_choice_and_sort_reach_the_model(self):
         ctl = self.open_movies()
         ctl.handle(Action.NAV_LEFT)  # genres
