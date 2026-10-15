@@ -1,8 +1,8 @@
 """Layered navigation for the drawer: Source → Section → Group → Item → Season → Episode.
 
-The sources column ends with two action rows, Settings and Add provider: rows to choose, not
-providers or layers to open (the drawer hands them to the shell, as it does the Library's
-sections).
+The sources column ends with three action rows, Settings, Add provider and Open file: rows to
+choose, not providers or layers to open (the drawer hands them to the shell, as it does the
+Library's sections).
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ SECTION_TITLES = {"live": "Live TV", "movies": "Movies", "series": "Series"}
 LIBRARY_SECTIONS = frozenset({"movies", "series"})  # chosen in the drawer, shown by the Library
 SETTINGS_ROW = "settings"
 ADD_PROVIDER_ROW = "add_provider"
+OPEN_FILE_ROW = "open_file"  # File → Open File… without the menu bar (fullscreen hides it)
 FAVORITES_GROUP = "@favorites"
 RECENT_GROUP = "@recent"
 _RECENT_LIMIT = 20
@@ -44,9 +45,10 @@ class NavNode:
         return isinstance(other, NavNode) and (self.layer, self.key) == (other.layer, other.key)
 
 
-ACTION_ROWS = (  # the drawer paints their icons (a gear, a plus)
+ACTION_ROWS = (  # the drawer paints their icons (a gear, a plus, a file)
     NavNode("action", SETTINGS_ROW, "Settings"),
     NavNode("action", ADD_PROVIDER_ROW, "Add provider"),
+    NavNode("action", OPEN_FILE_ROW, "Open file"),
 )
 
 

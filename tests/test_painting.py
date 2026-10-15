@@ -49,6 +49,7 @@ ICONS = [
     "external",
     "swap",
     "guide",
+    "file",
 ]
 
 

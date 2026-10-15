@@ -380,6 +380,19 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             ):
                 for x0, x1 in spans:
                     fill(_rrect(x0, y, x1 - x0, 0.14, 0.04))
+        elif name == "file":  # Open file: a page with a folded corner and a play mark
+            page = QPainterPath(QPointF(0.22, 0.1))
+            page.lineTo(0.58, 0.1)
+            page.lineTo(0.78, 0.3)
+            page.lineTo(0.78, 0.9)
+            page.lineTo(0.22, 0.9)
+            page.closeSubpath()
+            line(page)
+            fold = QPainterPath(QPointF(0.58, 0.1))
+            fold.lineTo(0.58, 0.3)
+            fold.lineTo(0.78, 0.3)
+            line(fold)
+            fill(_poly([(0.42, 0.46), (0.62, 0.6), (0.42, 0.74)]))
         elif name == "live_dot":
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))

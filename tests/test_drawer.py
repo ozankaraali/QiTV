@@ -11,8 +11,9 @@ from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
-from services.navigation import ADD_PROVIDER_ROW, SETTINGS_ROW, NavModel
+from services.navigation import ADD_PROVIDER_ROW, OPEN_FILE_ROW, SETTINGS_ROW, NavModel
 from tests.test_navigation import FakeCatalog
+from ui.keymap import key_hint
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_rows import NumberRole
 from ui.overlays.drawer import (
@@ -22,6 +23,7 @@ from ui.overlays.drawer import (
     PREVIEW_DEBOUNCE_MS,
     PROVIDER_ERROR_TEXT,
     REFRESH_ACTION,
+    SEARCH_ACTION,
     Drawer,
     IconRole,
 )
@@ -324,9 +326,67 @@ class DrawerTests(unittest.TestCase):
         self.click(refresh.center())
         self.assertEqual(self.actions, [SETTINGS_ROW, REFRESH_ACTION])
 
+    def test_the_header_has_search_left_of_refresh(self):
+        # The owner's mouse-only rule (2.0.1): Ctrl/⌘+F has a button in the channel list.
+        self.drawer.open_drawer("1")
+        self.record_hand_offs()
+        d = self.drawer
+        search, refresh, crumb = d.search_rect(), d.refresh_rect(), d.breadcrumb_text_rect()
+        self.assertLess(search.right(), refresh.left())
+        self.assertAlmostEqual(search.center().y(), crumb.center().y(), delta=1)  # its row
+        self.assertLessEqual(crumb.right(), search.left())  # the names never run under it
+        self.click(search.center())
+        self.assertEqual(self.actions, [SEARCH_ACTION])
+        self.assertEqual(self.library, [])
+        self.assertTrue(self.drawer.isVisible())  # the shell opens the search
+
+    def test_the_header_buttons_take_clicks_over_28_px(self):
+        self.drawer.open_drawer("1")
+        self.record_hand_offs()
+        d = self.drawer
+        for name, rect in (
+            (SEARCH_ACTION, d.search_rect()),
+            (REFRESH_ACTION, d.refresh_rect()),
+            (SETTINGS_ROW, d.settings_gear_rect()),
+        ):
+            with self.subTest(name=name):
+                hit = d.header_hit_rect(rect)
+                self.assertGreaterEqual(min(hit.width(), hit.height()), 28)
+                self.assertTrue(hit.contains(rect))
+                self.actions.clear()
+                self.click(QPointF(hit.left() + 1, hit.center().y()))  # its hit area's edge
+                self.assertEqual(self.actions, [name])
+
+    def test_in_a_small_window_the_hit_areas_never_reach_their_neighbours(self):
+        self.host.resize(640, 360)
+        self.drawer.open_drawer("1")
+        d = self.drawer
+        hits = [d.header_hit_rect(r) for r in (d.search_rect(), d.refresh_rect())]
+        self.assertLessEqual(hits[0].right(), hits[1].left())
+        self.assertLessEqual(
+            d.header_hit_rect(d.back_rect()).right(), d.breadcrumb_text_rect().left()
+        )
+        self.assertLessEqual(d.breadcrumb_text_rect().right(), hits[0].left())
+
+    def test_the_header_buttons_name_their_keys(self):
+        self.drawer.open_drawer("1")
+        d = self.drawer
+        self.assertEqual(d.tooltip_at(d.search_rect().center()), key_hint("Search", "Ctrl+F"))
+        self.assertEqual(
+            d.tooltip_at(d.settings_gear_rect().center()), key_hint("Settings", "Ctrl+,")
+        )
+        self.assertEqual(
+            d.tooltip_at(d.refresh_rect().center()),
+            key_hint("Refresh channels and guide", "Ctrl+R"),
+        )
+
     def test_the_buttons_are_there_on_the_sources_layer_too(self):
         self.open_on_the_sources()
-        for rect in (self.drawer.settings_gear_rect(), self.drawer.refresh_rect()):
+        for rect in (
+            self.drawer.settings_gear_rect(),
+            self.drawer.refresh_rect(),
+            self.drawer.search_rect(),
+        ):
             self.assertTrue(self.drawer._columns["left"].rect.contains(rect.toRect()))
         self.click(self.drawer.settings_gear_rect().center())
         self.assertEqual(self.actions, [SETTINGS_ROW])
@@ -378,6 +438,8 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.nav.path[-1].key, "10")  # its channels stay on the right
 
     def test_a_click_on_a_name_further_up_shows_that_layer(self):
+        # Wide enough for three whole names beside ⌕ ↻ ⚙ (at 1280 the head elides).
+        self.host.resize(1600, 900)
         self.catalog.movies = {"5": [{"id": "s1", "name": "Show"}]}
         self.nav.reset_to("series", "5")
         self.nav.open(self.nav.children(self.nav.path[-1])[0])  # Home › Series › Films › Show
@@ -394,9 +456,9 @@ class DrawerTests(unittest.TestCase):
         self.nav.reset_to("live", "10")
         self.drawer.open_drawer("1")
         d = self.drawer
-        back, refresh, text = d.back_rect(), d.refresh_rect(), d.breadcrumb_text_rect()
+        back, search, text = d.back_rect(), d.search_rect(), d.breadcrumb_text_rect()
         self.assertLessEqual(back.right(), text.left())
-        self.assertLessEqual(text.right(), refresh.left())
+        self.assertLessEqual(text.right(), search.left())
         parts = d.breadcrumb_parts()
         self.assertEqual([i for i, _t, _r in parts], [None, 1])  # the head is elided
         self.assertTrue(parts[0][1].startswith("…"), parts[0][1])
@@ -412,14 +474,28 @@ class DrawerTests(unittest.TestCase):
         self.click(self.drawer.breadcrumb_text_rect().center())
         self.assertEqual(self.actions, [])
 
-    def test_the_sources_column_ends_with_settings_and_add_provider(self):
+    def test_the_sources_column_ends_with_settings_add_provider_and_open_file(self):
         column = self.open_on_the_sources()
         rows = [column.model.index(r) for r in range(column.model.rowCount())]
         self.assertEqual(
             [(r.data(), r.data(IconRole)) for r in rows],
-            [("Home", None), ("Backup", None), ("Settings", "gear"), ("Add provider", "plus")],
+            [
+                ("Home", None),
+                ("Backup", None),
+                ("Settings", "gear"),
+                ("Add provider", "plus"),
+                ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (owner, 2.0.1)
+            ],
         )
         self.assertEqual(self.drawer.highlighted().key, "Home")
+
+    def test_a_click_on_open_file_asks_for_it(self):
+        column = self.open_on_the_sources()
+        path = self.nav.path
+        self.drawer._on_row_clicked("left", 4)
+        self.assertEqual(self.actions, [OPEN_FILE_ROW])
+        self.assertEqual(column.current.key, OPEN_FILE_ROW)
+        self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
 
     def test_arrows_and_enter_reach_settings_and_add_provider(self):
         self.open_on_the_sources()
@@ -700,6 +776,7 @@ class HostedDrawerInputTests(unittest.TestCase):
         drawer = self.drawer
         names = [rect for _i, _t, rect in drawer.breadcrumb_parts()]
         for rect in (
+            drawer.search_rect(),
             drawer.refresh_rect(),
             drawer.settings_gear_rect(),
             drawer.back_rect(),

@@ -1642,6 +1642,34 @@ class DrawerSettingsTests(WindowCase):
         self.assertEqual(dialog.call_count, 2)
         self.assertTrue(drawer.isVisible())
 
+    def test_the_drawers_search_button_opens_the_search(self):
+        # The owner's mouse-only rule (2.0.1): Ctrl/⌘+F has a button in the channel list.
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.mouseClick(
+            drawer,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            drawer.search_rect().center().toPoint(),
+        )
+        self.assertTrue(self.window.screens.library_shown())
+        self.assertEqual(self.window.library_controller.mode, "search")
+        self.assertFalse(drawer.isVisible())
+
+    def test_the_drawers_open_file_row_opens_a_file(self):
+        # Ctrl/⌘+O without the menu bar (hidden in fullscreen on Windows and Linux).
+        self.show()
+        drawer = self.wait_for_drawer()
+        with mock.patch("ui.tv_pages.QFileDialog.getOpenFileName", return_value=("", "")) as dialog:
+            for key in (Qt.Key.Key_Left, Qt.Key.Key_Left):
+                QTest.keyClick(self.window, key)  # the sources column
+            for _ in range(3):
+                QTest.keyClick(self.window, Qt.Key.Key_Down)  # ⚙, ＋, then Open file
+            self.assertEqual(drawer.highlighted().title, "Open file")
+            QTest.keyClick(self.window, Qt.Key.Key_Return)
+        dialog.assert_called_once()
+        self.assertIs(dialog.call_args[0][0], self.window)
+
     def test_the_drawers_refresh_button_reloads_the_channels_and_the_guide(self):
         self.show()
         drawer = self.wait_for_drawer()

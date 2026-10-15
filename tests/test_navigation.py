@@ -11,6 +11,7 @@ from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
+    OPEN_FILE_ROW,
     RECENT_GROUP,
     SETTINGS_ROW,
     NavModel,
@@ -137,6 +138,7 @@ class NavModelTests(unittest.TestCase):
                 ("source", "Backup", "Backup"),
                 ("action", SETTINGS_ROW, "Settings"),  # icons are painted, not glyphs
                 ("action", ADD_PROVIDER_ROW, "Add provider"),
+                ("action", OPEN_FILE_ROW, "Open file"),
             ],
         )
         self.assertFalse(any(self.nav.is_playable(n) or self.nav.needs_setup(n) for n in rows[2:]))
