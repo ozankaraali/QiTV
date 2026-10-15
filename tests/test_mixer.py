@@ -78,10 +78,12 @@ class MixerTests(MixerCase):
     def test_it_hides_three_seconds_after_the_last_change(self):
         # Timer order, not wall-clock waits (CI): each step runs as its probe fires, before
         # any timer due later; the change at 100 ms restarts the 200 ms wait (due at 300+).
+        # The first show is a step too: shown before the probes start, a runner stalled for
+        # 100 ms between the two found the mixer's wait due before the change at 100 ms.
         _host, mixer = self.make(idle_ms=200)
         closed = QSignalSpy(mixer.closed)
-        mixer.show_rows([MAIN], 0)
-        _, shown = timeline((100, lambda: mixer.show_rows([MAIN], 0)), (250, mixer.isVisible))
+        show = lambda: mixer.show_rows([MAIN], 0)  # noqa: E731
+        _, _, shown = timeline((0, show), (100, show), (250, mixer.isVisible))
         self.assertTrue(shown)
         self.assertEqual(closed.count(), 0)
         elapse(250)  # past the restarted wait however late it started

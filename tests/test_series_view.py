@@ -274,7 +274,9 @@ class SeriesViewTests(unittest.TestCase):
         start = time.thread_time()  # CPU time: the work, not a loaded runner's waits
         view.set_episodes(ss[0], episodes(2000))
         view.grab()
-        self.assertLess(time.thread_time() - start, 0.1)
+        # About 0.03 s on a developer Mac; CI's Intel macOS runners took 0.17 s. A per-row
+        # widget or relayout for 2,000 episodes costs seconds, far past this.
+        self.assertLess(time.thread_time() - start, 0.5)
 
 
 if __name__ == "__main__":
