@@ -971,7 +971,8 @@ class CatalogService(QObject):
 
     def _finish_catalog_job(self, job: _Job) -> bool:
         """Free the job's slot; True when its result still belongs to the current provider."""
-        self._catalog_inflight.pop(job.key, None)
+        if job.key is not None:
+            self._catalog_inflight.pop(job.key, None)
         return self._current(job)
 
     def _on_catalog_loaded(self, job: _Job, payload) -> None:
