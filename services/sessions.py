@@ -349,12 +349,13 @@ class SessionManager(QObject):
         return self._levels[slot_name]
 
     def set_level(self, slot_name: str, value: int) -> None:
-        """That stream's volume (0–100); above 0 on the small slot, it unmutes it too."""
+        """That stream's volume (0–100); raised on the small slot, it unmutes it too."""
         slot = self._slot(slot_name)
         level = max(0, min(100, int(value)))
+        raised = level > self._levels[slot.name]
         self._levels[slot.name] = level
         slot.playback.set_volume(level)
-        if level > 0 and slot is self.small():
+        if raised and slot is self.small():  # only raising it makes the PiP audible
             self._set_mute(slot, False)
 
     def _set_mute(self, slot: Slot, muted: bool) -> None:

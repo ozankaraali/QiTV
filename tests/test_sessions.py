@@ -425,6 +425,16 @@ class LevelTests(_Fixture):
             self.calls("pip", "player")[-2:], [("set_volume", 45), ("set_muted", False)]
         )
 
+    def test_lowering_a_muted_small_slot_keeps_it_muted(self):
+        # Review M3: only raising the PiP's level makes it audible ("raised above 0").
+        self.open_granted(B)
+        self.manager.set_level("pip", 25)
+        self.assertTrue(self.manager.muted("pip"))
+        self.manager.set_level("pip", 25)  # the same level: still muted
+        self.assertTrue(self.manager.muted("pip"))
+        self.manager.set_level("pip", 30)
+        self.assertFalse(self.manager.muted("pip"))
+
     def test_a_level_for_the_large_slot_keeps_the_users_mute(self):
         self.open_granted(B)
         self.manager.set_muted("main", True)
