@@ -13,6 +13,7 @@ from PySide6.QtGui import QFont, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 from shiboken6 import isValid
+from timer_fixtures import elapse
 
 from services.epg_view import Programme
 from ui.overlay_host import OverlayHost
@@ -303,7 +304,7 @@ class GuideTests(unittest.TestCase):
 
         self.guide._paint_row, self.guide._paint_footer = row_spy, footer_spy
         try:
-            QTest.qWait(10)
+            elapse(10)
             QApplication.processEvents()
         finally:
             del self.guide._paint_row, self.guide._paint_footer
@@ -360,14 +361,14 @@ class GuideMouseTests(unittest.TestCase):
         self.window.setCentralWidget(self.surface)
         self.window.setGeometry(100, 100, 800, 450)
         self.window.show()
-        QTest.qWait(20)
+        elapse(20)
         self.host = OverlayHost(self.window, self.surface)
         self.addCleanup(close_window, self.window)
         self.guide = Guide(None, Lookups(), lambda: NOW, self.host)
         self.host.add_overlay(self.guide)
         self.chans = channels(30)
         self.guide.open_guide(self.chans, 0)
-        QTest.qWait(20)
+        elapse(20)
         self.host_events: list[object] = []
         self.host.clicked.connect(lambda: self.host_events.append("clicked"))
         self.host.doubleClicked.connect(lambda: self.host_events.append("doubleClicked"))
@@ -381,7 +382,7 @@ class GuideMouseTests(unittest.TestCase):
         return QPoint(self.guide.width() // 2, round(y))
 
     def wait_past_double_click(self):
-        QTest.qWait(QApplication.doubleClickInterval() + 100)
+        elapse(QApplication.doubleClickInterval() + 100)
 
     def test_the_guide_fills_the_host(self):
         self.assertTrue(self.guide.isVisible())

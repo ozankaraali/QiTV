@@ -25,6 +25,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import elapse, wait_until
 
 import main as qitv_main
 from services import update_checker
@@ -70,14 +71,6 @@ INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--quiet"])
 HOST_METHODS = ("save_config", "set_provider", "reload_epg")
 HOST_ATTRIBUTES = ("config_manager", "provider_manager", "epg_manager", "image_manager")
 _OFFSCREEN_NOISE = "This plugin does not support"
-
-
-def wait_until(predicate, timeout_ms=10000):
-    waited = 0
-    while not predicate() and waited < timeout_ms:
-        QTest.qWait(20)
-        waited += 20
-    return predicate()
 
 
 class WindowCase(unittest.TestCase):
@@ -231,7 +224,7 @@ class TVWindowTests(WindowCase):
             self.show()
             self.assertTrue(wait_until(lambda: load.call_count == 2))
             self.window.player_page.repaint()
-            QTest.qWait(20)
+            elapse(20)
         self.assertEqual(load.call_args_list, [mock.call("a"), mock.call("b")])
 
     def test_the_player_page_paints_the_black_behind_the_video(self):
@@ -247,7 +240,7 @@ class TVWindowTests(WindowCase):
         self.show()
         window.screens.open_library("movies")
         window.screens.back_to_tv()
-        QTest.qWait(50)
+        elapse(50)
         middle = surface.mapTo(window, surface.rect().center())
         self.assertEqual(window.grab().toImage().pixelColor(middle).name(), "#000000")
 
@@ -585,13 +578,13 @@ class TVWindowTests(WindowCase):
         QTest.mouseMove(surface, QPoint(10, 20))
         QTest.mouseRelease(surface, Qt.MouseButton.LeftButton, pos=QPoint(10, 20))
         self.assertEqual(self.window.pos(), start + QPoint(-30, -20))
-        QTest.qWait(QApplication.doubleClickInterval() + 100)
+        elapse(QApplication.doubleClickInterval() + 100)
         self.assertFalse(drawer.isVisible())  # the drag is not a click on the video
 
     def press_and_hold(self):
         """Press on the video and hold past the double-click interval (the click is due)."""
         QTest.mousePress(self.window.surface, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
-        QTest.qWait(QApplication.doubleClickInterval() + 100)
+        elapse(QApplication.doubleClickInterval() + 100)
 
     def test_mini_player_drag_after_a_long_hold_is_not_a_click(self):
         self.show()
@@ -603,7 +596,7 @@ class TVWindowTests(WindowCase):
         QTest.mouseMove(self.window.surface, QPoint(10, 20))
         QTest.mouseRelease(self.window.surface, Qt.MouseButton.LeftButton, pos=QPoint(10, 20))
         self.assertEqual(self.window.pos(), start + QPoint(-30, -20))
-        QTest.qWait(100)
+        elapse(100)
         self.assertFalse(drawer.isVisible())
 
     def test_mini_player_long_press_without_a_drag_is_a_click(self):
@@ -723,7 +716,7 @@ class TVWindowTests(WindowCase):
             self.assertFalse(self.window.close())
             self.assertTrue(wait_until(lambda: (CLOSING_TEXT, "info") in self.toasts, 3000))
             for _ in range(3):  # stays up while the wait lasts
-                QTest.qWait(400)
+                elapse(400)
                 self.assertTrue(toast.isVisible())
                 self.assertEqual(self.toasts[-1], (CLOSING_TEXT, "info"))
             self.assertEqual(self.toasts.count((CLOSING_TEXT, "info")), 1)  # not laid out again
@@ -767,9 +760,10 @@ class TVWindowTests(WindowCase):
             ]
             self.assertEqual(retries, [self.window.close_retry])
             started = time.monotonic()
-            QTest.qWait(500)
+            elapse(500)
+            waited_ms = (time.monotonic() - started) * 1000  # more on a stalled runner
             in_window = [c for c in checks if c >= started]
-            self.assertLessEqual(len(in_window), 500 // CLOSE_RETRY_MS + 2)  # one chain
+            self.assertLessEqual(len(in_window), waited_ms // CLOSE_RETRY_MS + 2)  # one chain
             waiting[0] = False
             self.assertTrue(wait_until(lambda: not self.window.isVisible()))
 
@@ -811,7 +805,7 @@ class TVWindowTests(WindowCase):
             QTest.keyClick(self.window, Qt.Key.Key_Return)
             self.window.toggle_fullscreen()
             self.window.toggle_mini_player()
-            QTest.qWait(50)
+            elapse(50)
             dialog.assert_not_called()
             self.assertFalse(self.window.isFullScreen())
             self.assert_not_mini()
@@ -1042,7 +1036,7 @@ class FullscreenExitTests(WindowCase):
         self.assertTrue(wait_until(window.isFullScreen))
         window.leave_fullscreen()
         self.assertTrue(wait_until(lambda: not window.isFullScreen()))
-        QTest.qWait(100)
+        elapse(100)
         self.assertEqual(window.geometry(), before)
 
 
@@ -1246,7 +1240,7 @@ class LivePipelineWindowTests(WindowCase):
 
         QTest.keyClick(self.window, Qt.Key.Key_S)
         self.assertIs(sessions.large().playback, pip)
-        QTest.qWait(300)
+        elapse(300)
         self.assertTrue(playing(main, live)())
         self.assertTrue(playing(pip, pip_live)())
         self.assertEqual((plays["main"].call_count, plays["pip"].call_count), counts)
@@ -1492,7 +1486,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.wait_ready(XTREAM)
         self.assertTrue(wait_until(lambda: len(plays) == 1, LIBRARY_WAIT_MS))
         self.assertTrue(plays[0].endswith("/102.mp4"), plays)
-        QTest.qWait(300)
+        elapse(300)
         self.assertEqual(len(plays), 1)  # nothing plays twice, no channel after it
         self.assertIs(window.pages.currentWidget(), window.player_page)
         self.assertTrue(window.controller.vod_current())
@@ -1533,7 +1527,7 @@ class LibraryReturnTests(WindowCase):
         QTest.keyClick(self.window, Qt.Key.Key_Escape)
         self.assertTrue(self.window.screens.library_shown())
         self.window.catalog.linkReady.emit(ids[0], self.MOVIE["cmd"])
-        QTest.qWait(20)
+        elapse(20)
         self.assertEqual(plays, [])  # the link came too late: dropped, never opened
 
     def test_esc_after_the_link_failed_returns(self):

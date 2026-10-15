@@ -9,6 +9,7 @@ from PySide6.QtCore import QModelIndex, QObject, QPoint, QPointF, QRect, Qt, Sig
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem, QWidget
+from timer_fixtures import elapse, timeline, wait_until
 
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
@@ -154,9 +155,10 @@ class ModelTests(unittest.TestCase):
     def test_set_channels_speed(self):
         model = ChannelRowsModel(FakeLogos(), now_provider)
         data = items(5000)
-        start = time.perf_counter()
+        # The GUI thread's CPU time: a loaded runner's wait for a core is not the model's.
+        start = time.thread_time()
         model.set_channels(data)
-        self.assertLess(time.perf_counter() - start, 0.1)
+        self.assertLess(time.thread_time() - start, 0.1)
         self.assertEqual(model.rowCount(), 5000)
 
 
@@ -237,8 +239,7 @@ class ColumnTests(unittest.TestCase):
         self.assertFalse(col.grab().isNull())
         closed = []
         col.closed.connect(lambda: closed.append(1))
-        QTest.qWait(300)
-        self.assertFalse(col.isVisible())
+        self.assertTrue(wait_until(lambda: not col.isVisible()))  # idle, then the fade
         self.assertEqual(closed, [1])
 
     def test_opening_again_lays_the_list_out_only_after_a_resize(self):
@@ -260,10 +261,14 @@ class ColumnTests(unittest.TestCase):
         host, col = self.make(idle_ms=200)
         host.show()
         col.open("Docs", items(8), 0)
-        for i in range(4):
-            QTest.qWait(80)
-            col.highlight(i)
-        self.assertTrue(col.isVisible())
+        # Every 80 ms a step restarts the 200 ms idle: at 320 ms it is still open.
+        *_, shown = timeline(
+            (80, lambda: col.highlight(1)),
+            (160, lambda: col.highlight(2)),
+            (240, lambda: col.highlight(3)),
+            (320, col.isVisible),
+        )
+        self.assertTrue(shown)
 
     def test_the_fade_lets_the_banner_behind_show_through(self):
         host, col = self.make()
@@ -300,7 +305,7 @@ class ColumnTests(unittest.TestCase):
         host, col = self.hosted_column(idle_ms=200)
         for x in (240, 250, 260):  # onto the column's rows, moving
             QTest.mouseMove(host.windowHandle(), QPoint(x, x + 100))
-        QTest.qWait(600)
+        elapse(600)
         self.assertTrue(col.isVisible())  # the pointer rests on it, about to click a row
         QTest.mouseMove(host.windowHandle(), QPoint(1000, 300))  # off the column
         self.assertTrue(wait_until(lambda: not col.isVisible(), 1000))
@@ -349,7 +354,7 @@ class HostedColumnInputTests(unittest.TestCase):
         for point in (QPoint(200, 30), QPoint(8, 400), QPoint(480, 400)):
             QTest.mouseClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
         QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=QPoint(200, 30))
-        QTest.qWait(QApplication.doubleClickInterval() + 80)
+        elapse(QApplication.doubleClickInterval() + 80)
         self.assertEqual(self.events, [])
         self.assertTrue(self.column.isVisible())
 
@@ -359,14 +364,6 @@ class HostedColumnInputTests(unittest.TestCase):
         for point in (QPoint(200, 30), view.geometry().center()):
             QTest.wheelEvent(self.host.windowHandle(), QPointF(point), QPoint(0, -120))
         self.assertEqual(self.events, [])
-
-
-def wait_until(predicate, timeout_ms=2000):
-    waited = 0
-    while not predicate() and waited < timeout_ms:
-        QTest.qWait(10)
-        waited += 10
-    return predicate()
 
 
 if __name__ == "__main__":

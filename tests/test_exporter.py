@@ -98,8 +98,9 @@ class FakePortal:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.url = f"http://127.0.0.1:{self.server.server_port}/c/"
+        # A daemon: a run interrupted before close() must still exit.
         self.thread = threading.Thread(
-            target=self.server.serve_forever, kwargs={"poll_interval": 0.02}
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
         )
         self.thread.start()
 
@@ -303,6 +304,12 @@ class ExporterTests(unittest.TestCase):
         self.assertEqual(
             write_items({"type": "STB", "url": "http://p.test/c/"}, items, self.path), 1
         )
+
+    def test_the_fake_portal_never_keeps_the_test_process_alive(self):
+        # A run interrupted before close() must still exit (as tests/http_fixtures.LocalSource).
+        portal = FakePortal()
+        self.addCleanup(portal.close)
+        self.assertTrue(portal.thread.daemon)
 
     def test_malformed_portal_data_is_skipped(self):
         portal = FakePortal(malformed=True)

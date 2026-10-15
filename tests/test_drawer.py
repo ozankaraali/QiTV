@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, Qt, qInstallMessageHandler
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import elapse
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import ADD_PROVIDER_ROW, SETTINGS_ROW, NavModel
@@ -78,7 +79,7 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.focus_side, "left")
         before = self.nav.path[-1]
         self.drawer.move_by(-1)
-        QTest.qWait(320)
+        elapse(320)
         self.assertNotEqual(self.nav.path[-1], before)
 
     def test_left_twice_goes_up(self):
@@ -262,7 +263,7 @@ class DrawerTests(unittest.TestCase):
             self.drawer.move_by(1)
         self.assertEqual(self.opened, [])
         self.assertEqual(self.drawer.highlighted().title, "Group 5")
-        QTest.qWait(320)
+        elapse(320)
         self.assertEqual([n.title for n in self.opened], ["Group 5"])
 
     def test_right_flushes_pending_preview(self):
@@ -281,7 +282,7 @@ class DrawerTests(unittest.TestCase):
         self.drawer.open_drawer()
         self.drawer.left()
         self.drawer.move_by(1)
-        QTest.qWait(320)
+        elapse(320)
         self.assertEqual(self.catalog.selected, [])
         self.assertEqual(self.drawer.highlighted().title, "Backup")
         self.drawer.right()
@@ -315,7 +316,7 @@ class DrawerTests(unittest.TestCase):
         self.drawer.move_by(1)
         self.drawer.move_by(1)
         self.assertEqual(self.drawer.highlighted().key, SETTINGS_ROW)
-        QTest.qWait(PREVIEW_WAIT_MS)  # highlighting an action row starts nothing
+        elapse(PREVIEW_WAIT_MS)  # highlighting an action row starts nothing
         self.assertEqual((self.actions, self.nav.path, self.catalog.selected), ([], path, []))
         self.drawer.activate()  # Enter (OK on a remote)
         self.drawer.move_by(1)
@@ -352,7 +353,7 @@ class DrawerTests(unittest.TestCase):
         self.drawer.left()
         self.assertEqual(self.drawer.highlighted().title, "Live TV")
         self.drawer.move_by(1)
-        QTest.qWait(PREVIEW_WAIT_MS)
+        elapse(PREVIEW_WAIT_MS)
         self.assertEqual(self.nav.path[-1].key, "live")  # Movies was not opened in the drawer
         self.assertNotIn(("section", "movies"), self.catalog.requests)
         self.drawer.right()
@@ -463,7 +464,7 @@ class DrawerTests(unittest.TestCase):
         self.drawer.left()
         self.drawer.move_by(1)
         self.nav.reset_to("live")
-        QTest.qWait(320)
+        elapse(320)
         self.assertEqual(self.opened, [])
 
 
@@ -521,7 +522,7 @@ class HostedDrawerInputTests(unittest.TestCase):
 
     def click(self, point):
         QTest.mouseClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
-        QTest.qWait(QApplication.doubleClickInterval() + 80)  # a click is reported late
+        elapse(QApplication.doubleClickInterval() + 80)  # a click is reported late
 
     def test_wheel_at_the_end_of_a_list_does_not_reach_the_host(self):
         view = self.drawer._columns["right"].view
@@ -543,7 +544,7 @@ class HostedDrawerInputTests(unittest.TestCase):
 
     def test_a_double_click_on_the_drawer_does_not_toggle_fullscreen(self):
         QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=QPoint(500, 30))
-        QTest.qWait(QApplication.doubleClickInterval() + 80)
+        elapse(QApplication.doubleClickInterval() + 80)
         self.assertNotIn("doubleClicked", self.events)
         self.assertTrue(self.drawer.isVisible())
 

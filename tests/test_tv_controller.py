@@ -10,8 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap, QWheelEvent
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QWidget
+from timer_fixtures import elapse, wait_until
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.connection_budget import ConnectionBudget
@@ -41,15 +41,6 @@ CHANNELS = [
     for i, name in ((1, "One"), (2, "Two"), (3, "Three"), (4, "Four"))
 ]
 NO_MODS = Qt.KeyboardModifier.NoModifier
-
-
-def wait_until(predicate, timeout_ms=2000):
-    """Poll the event loop: a slow first paint can outlast a fixed wait."""
-    waited = 0
-    while not predicate() and waited < timeout_ms:
-        QTest.qWait(5)
-        waited += 5
-    return predicate()
 
 
 class Clock:
@@ -1443,7 +1434,7 @@ class TuningBannerTests(ControllerTestCase):
 
     def test_the_banner_stays_until_the_link_resolves_then_fades(self):
         self.tune(0)
-        QTest.qWait(800)  # well past the banner's own time and its fade
+        elapse(800)  # well past the banner's own time and its fade
         self.assertTrue(self.banner.isVisible())
         self.assertEqual(self.banner.info.name, "One")
         self.ready()
@@ -1451,7 +1442,7 @@ class TuningBannerTests(ControllerTestCase):
 
     def test_the_banner_stays_until_the_link_fails(self):
         self.tune(0)
-        QTest.qWait(800)  # well past the banner's own time and its fade
+        elapse(800)  # well past the banner's own time and its fade
         self.assertTrue(self.banner.isVisible())
         self.catalog.linkFailed.emit(1, "Portal down")
         self.assertTrue(wait_until(lambda: not self.banner.isVisible(), 2000))
@@ -1459,7 +1450,7 @@ class TuningBannerTests(ControllerTestCase):
     def test_a_dismissed_banner_is_not_brought_back(self):
         self.tune(0)
         self.controller.handle(Action.ESCAPE)
-        QTest.qWait(200)
+        elapse(200)
         self.assertFalse(self.banner.isVisible())
 
 
@@ -1648,7 +1639,7 @@ class ReviewFixTests(ControllerTestCase):
         self.controller.handle(Action.ESCAPE)
         self.assertEqual(self.banner.named("show_digits")[-1], ("",))
         self.assertEqual(self.banner.calls[-1], ("dismiss",))
-        QTest.qWait(80)  # past the digit commit
+        elapse(80)  # past the digit commit
         self.assertEqual(self.requested(), ["One"])
         self.assertEqual(self.window.calls, [])
 
@@ -1659,7 +1650,7 @@ class ReviewFixTests(ControllerTestCase):
         self.controller.handle(Action.ESCAPE)
         self.assertFalse(self.column.visible)
         self.ready("http://stream/2")
-        QTest.qWait(80)  # past the zap rest
+        elapse(80)  # past the zap rest
         self.assertEqual(self.requested(), ["One", "Two"])
 
     def test_enter_with_the_column_open_tunes_the_highlight(self):
@@ -1670,7 +1661,7 @@ class ReviewFixTests(ControllerTestCase):
         self.assertFalse(self.column.visible)
         self.assertEqual(self.drawer.named("open_drawer"), [])
         self.ready("http://stream/2")  # Two settles; the queued Three is requested
-        QTest.qWait(80)
+        elapse(80)
         self.assertEqual(self.requested(), ["One", "Two", "Three"])
 
     def test_media_keys(self):
@@ -1717,7 +1708,7 @@ class ReviewFixTests(ControllerTestCase):
         self.catalog.providerFailed.emit("Home", UNREACHABLE_MESSAGE)
         self.catalog.epgReady.emit()
         self.zap.digit("9")  # zap timers may still fire while the window is torn down
-        QTest.qWait(80)  # past the digit commit: "No channel 9" must not be toasted
+        elapse(80)  # past the digit commit: "No channel 9" must not be toasted
         self.assertEqual(self.catalog.requests, [])
         self.assertEqual(self.toast.calls, [])
         self.assertEqual(self.banner.calls, [])
@@ -1769,7 +1760,7 @@ class FixRound2Tests(ControllerTestCase):
         self.assertFalse(self.column.visible)
         self.assertEqual(self.drawer.named("open_drawer"), [("2",)])
         self.ready("http://stream/2")
-        QTest.qWait(80)  # the column's highlight is not tuned
+        elapse(80)  # the column's highlight is not tuned
         self.assertEqual(self.requested(), ["One", "Two"])
 
     def test_channel_list_with_the_column_open_opens_the_drawer(self):
@@ -1778,7 +1769,7 @@ class FixRound2Tests(ControllerTestCase):
         self.assertFalse(self.column.visible)
         self.assertTrue(self.drawer.visible)
         self.ready("http://stream/2")
-        QTest.qWait(80)
+        elapse(80)
         self.assertEqual(self.requested(), ["One", "Two"])
 
     def test_ok_opens_the_drawer_without_the_column(self):
@@ -1803,7 +1794,7 @@ class FixRound2Tests(ControllerTestCase):
         self.controller.handle(Action.CH_PREV)  # burst: column on One
         self.controller.handle(Action.CH_NEXT)  # column on Two, which is playing
         self.controller.handle(Action.OK)
-        QTest.qWait(60)
+        elapse(60)
         self.assertEqual(self.requested(), ["One", "Two"])
         self.assertFalse(self.column.visible)
         self.assertEqual(self.banner.info.name, "Two")
@@ -2024,7 +2015,7 @@ class PipelineTuneTests(PipelineCase):
         self.start_pipeline(0)
         self.play(1)
         self.assertEqual(self.live.calls[-1], ("stop",))
-        QTest.qWait(30)
+        elapse(30)
         self.assertEqual(len(self.starts()), 1)  # the old upstream still holds the slot
         self.assertEqual(self.budget.holders("Home"), ["main"])
         self.live.released.emit()
@@ -2036,7 +2027,7 @@ class PipelineTuneTests(PipelineCase):
         self.catalog.ptype = "M3UPLAYLIST"
         self.start_pipeline(0)
         self.play(1)
-        QTest.qWait(30)  # its slot is granted at once…
+        elapse(30)  # its slot is granted at once…
         self.assertEqual(len(self.starts()), 1)  # …but the old stream is not closed yet
         self.live.released.emit()
         self.assertEqual(self.starts()[1][0], "http://stream/2")
@@ -2048,14 +2039,14 @@ class PipelineTuneTests(PipelineCase):
         self.play(2)  # Two never started: its queued slot is dropped
         self.live.released.emit()
         self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
-        QTest.qWait(30)
+        elapse(30)
         self.assertEqual([url for url, _ in self.starts()], ["http://stream/1", "http://stream/3"])
         self.assertEqual(self.budget.holders("Home"), ["main"])
 
     def test_a_budget_denial_toasts_and_opens_nothing(self):
         self.budget.request("Home", 1, purpose="pip")  # Phase 4: the PiP holds the only slot
         self.play(0)
-        QTest.qWait(30)
+        elapse(30)
         self.assertEqual(
             self.toast.messages(), [("Your provider allows 1 stream at a time", "error")]
         )
@@ -2114,7 +2105,7 @@ class PipelineTuneTests(PipelineCase):
         self.tune(0)  # still waiting for its slot or the pipeline
         self.assertTrue(wait_until(lambda: self.starts()))
         self.tune(0)
-        QTest.qWait(30)
+        elapse(30)
         self.assertEqual(len(self.starts()), 1)
         self.assertEqual(self.requested(), ["One"])
 
@@ -2138,7 +2129,7 @@ class ReleaseOrderTests(PipelineCase):
         self.play_movie()
         self.session.holding = True  # VLC still holds the movie's connection
         self.play(0)
-        QTest.qWait(30)
+        elapse(30)
         self.assertEqual(self.starts(), [])  # VLC has not let go of the movie…
         self.assertEqual(self.budget.holders("Home"), ["main"])  # …which keeps its slot
         self.session.let_go()
@@ -2149,7 +2140,7 @@ class ReleaseOrderTests(PipelineCase):
         self.ready("udp://239.0.0.1:1234")
         self.session.holding = True
         self.play(1)
-        QTest.qWait(30)
+        elapse(30)
         self.assertEqual(self.starts(), [])
         self.session.let_go()
         self.assertTrue(wait_until(lambda: self.starts()))
@@ -2206,7 +2197,7 @@ class SlotWaitTests(PipelineCase):
         self.controller.handle(Action.PLAY_PAUSE)
         self.controller.handle(Action.GO_LIVE)
         self.assertTrue(wait_until(lambda: self.starts()))
-        QTest.qWait(10)
+        elapse(10)
         self.assertEqual(self.live.calls[1:], [])
 
     def test_a_start_that_raises_gives_its_slot_back_and_says_so(self):
@@ -2587,7 +2578,7 @@ class ExternalZapTests(ControllerTestCase):
         self.controller.handle(Action.CH_NEXT)  # Three, before Two settled
         self.ready("http://stream/3")
         self.assertTrue(wait_until(lambda: len(self.external.calls) == 2))
-        QTest.qWait(120)
+        elapse(120)
         self.assertEqual(
             self.external.calls, [("vlc", "http://stream/1"), ("vlc", "http://stream/3")]
         )
@@ -2600,7 +2591,7 @@ class ExternalZapTests(ControllerTestCase):
         self.controller.handle(Action.CH_NEXT)
         self.ready("http://stream/2")
         self.play(3)  # a drawer pick of Four
-        QTest.qWait(120)
+        elapse(120)
         self.assertEqual(
             self.external.calls, [("vlc", "http://stream/1"), ("vlc", "http://stream/4")]
         )
@@ -3081,7 +3072,7 @@ class CardRoutingTests(AutoplayCase):
         self.controller.handle(Action.GUIDE)
         self.assertEqual(self.banner.named("show_digits"), [])
         self.assertEqual(self.guide.named("open_guide"), [])
-        QTest.qWait(60)  # the zap's digit timer would have tuned by now
+        elapse(60)  # the zap's digit timer would have tuned by now
         self.assertEqual(len(self.catalog.links), self.links)
         self.assertTrue(self.next_card.visible)
 

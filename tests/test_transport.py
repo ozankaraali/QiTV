@@ -7,6 +7,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QMouseEvent, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import elapse, timeline, wait_until
 
 from ui.overlays.painting import Units, badge_color
 from ui.overlays.transport import Transport
@@ -250,7 +251,7 @@ class TransportCase(unittest.TestCase):
     def test_idle_hide_and_poke(self):
         t = self.make(idle_ms=60)
         t.show_vod("A", "b")
-        QTest.qWait(300)
+        elapse(300)
         self.assertFalse(t.isVisible())
         t.poke()
         self.assertTrue(t.isVisible())
@@ -282,21 +283,35 @@ class TransportCase(unittest.TestCase):
         r = t.seek_rect()
         y = int(r.center().y())
         QTest.mousePress(t, Qt.LeftButton, Qt.NoModifier, QPoint(int(r.x() + 5), y))
-        QTest.qWait(250)
+        elapse(250)
         self.assertTrue(t.isVisible())
         QTest.mouseRelease(t, Qt.LeftButton, Qt.NoModifier, QPoint(int(r.center().x()), y))
         self.assertEqual(spy.count(), 1)
         self.assertTrue(t.isVisible())
-        QTest.qWait(250)
+        elapse(250)
         self.assertFalse(t.isVisible())
 
     def test_mouse_move_keeps_alive(self):
         t = self.make(idle_ms=200)
         t.show_vod("A", "b")
-        for i in range(6):
-            QTest.qWait(60)
-            QTest.mouseMove(t, QPoint(300 + i * 7, 300))
-        self.assertTrue(t.isVisible())
+
+        # A move every 60 ms restarts the 200 ms idle: at 360 ms it is still shown. The moves
+        # are sent, not queued (QTest.mouseMove), so each lands before a later-due timer.
+        def move(i):
+            point = QPointF(300 + i * 7, 300)
+            event = QMouseEvent(
+                QEvent.Type.MouseMove,
+                point,
+                QPointF(t.mapToGlobal(point.toPoint())),
+                Qt.NoButton,
+                Qt.NoButton,
+                Qt.NoModifier,
+            )
+            QApplication.sendEvent(t, event)
+
+        moves = [(60 * i, lambda i=i: move(i)) for i in range(1, 6)]
+        *_, shown = timeline(*moves, (360, t.isVisible))
+        self.assertTrue(shown)
 
     def test_play_click_scales(self):
         for w, h in ((800, 450), (1920, 1080)):
@@ -395,13 +410,13 @@ class LostDragAndRepaintTests(unittest.TestCase):
 
     def test_mouse_moves_over_a_visible_transport_neither_repaint_nor_reshow_it(self):
         host, transport = self.make(idle_ms=3000)
-        QTest.qWait(50)
+        elapse(50)
         counter = _PaintCounter(transport)
         changes = host.changes
         for i in range(5):
             QTest.mouseMove(transport, QPoint(300 + i * 7, 300))
             transport.poke()  # what the controller does for moves over the video
-        QTest.qWait(50)
+        elapse(50)
         self.assertEqual(counter.paints, 0)
         self.assertEqual(host.changes, changes)  # no mask recomputation per move
         self.assertTrue(transport.isVisible())
@@ -412,14 +427,6 @@ class LostDragAndRepaintTests(unittest.TestCase):
         counter = _PaintCounter(transport)
         transport.poke()
         self.assertTrue(wait_until(lambda: counter.paints > 0, 1000))
-
-
-def wait_until(predicate, timeout_ms=2000):
-    waited = 0
-    while not predicate() and waited < timeout_ms:
-        QTest.qWait(10)
-        waited += 10
-    return predicate()
 
 
 class MiniPlayerLayoutTests(unittest.TestCase):

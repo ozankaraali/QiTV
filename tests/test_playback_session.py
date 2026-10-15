@@ -10,7 +10,6 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse, wait_until
 
@@ -26,7 +25,6 @@ from services.playback import (
     default_args,
     vlc,
 )
-from services.thread_cleanup import has_pending_threads
 from services.vlc_profile import PlayKind
 
 FIXTURE = Path(__file__).parent / "fixtures" / "smoke.mp4"
@@ -40,11 +38,9 @@ SLOW_STOP_S = 2.0
 
 
 def wait_for(predicate, timeout_ms=8000):
-    waited = 0
-    while not predicate() and waited < timeout_ms:
-        QTest.qWait(50)
-        waited += 50
-    return predicate()
+    # Short steps (timer_fixtures): one long QTest.qWait holds the GIL, and the workers that
+    # stop libVLC barely run during it.
+    return wait_until(predicate, timeout_ms)
 
 
 def release_and_wait(test, session):
@@ -114,7 +110,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.session.seek(100)
         self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
         self.session._tick()
-        QTest.qWait(200)
+        elapse(200)
 
     def test_seekable_false_when_media_is_replaced(self):
         flags = []
@@ -174,7 +170,7 @@ class PlaybackSessionTests(unittest.TestCase):
         ):
             session._watch_stall(PlaybackState.PLAYING)
             self.assertEqual(session._stalls, 2)  # not healthy for long enough yet
-            QTest.qWait(150)
+            elapse(150)
             session._watch_stall(PlaybackState.PLAYING)
         self.assertEqual((session._stalls, session._restarted), (0, False))
 
@@ -195,7 +191,7 @@ class PlaybackSessionTests(unittest.TestCase):
             self.assertEqual(set_track.call_args_list, [mock.call(-1)])
             session.stop()
             session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
-            QTest.qWait(800)
+            elapse(800)
             self.assertEqual(set_track.call_args_list, [mock.call(-1)])
 
     def test_audio_restore_after_release_is_harmless(self):
@@ -225,7 +221,7 @@ class PlaybackSessionTests(unittest.TestCase):
         other = (FIXTURE.parent / "other.mp4").as_uri()
         session.play(other, kind=PlayKind.VOD_FILE)
         with mock.patch.object(session, "_start_media") as start:
-            QTest.qWait(600)
+            elapse(600)
         start.assert_not_called()
         self.assertEqual(session.url, other)
 
@@ -924,7 +920,9 @@ class MainThreadJoinTests(unittest.TestCase):
         session.play(B, kind=PlayKind.LIVE)
         self.assertTrue(wait_for(lambda: ("set_media", B) in player.calls, 4000))
         session.stop()
-        self.assertTrue(wait_for(lambda: not has_pending_threads(), 4000))
+        # This session's jobs only (a thread another test left running must not count), with
+        # the time a slow first libVLC use can take (see STOP_HANG_MS).
+        self.assertTrue(wait_for(lambda: session._runner.pending() == 0, STOP_HANG_MS))
         self.assertIn(("stop",), player.calls)
         self.assertFalse(player.deadlocked)
 

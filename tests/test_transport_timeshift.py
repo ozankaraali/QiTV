@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import elapse
 
 from ui.overlays.transport import Transport, fmt_behind
 from ui.theme import PALETTE
@@ -114,7 +115,7 @@ class TimeShiftCase(unittest.TestCase):
         QTest.mousePress(t, Qt.LeftButton, Qt.NoModifier, QPoint(round(r.right() - 2), y))
         QTest.mouseMove(t, QPoint(round(r.center().x()), y))
         self.assertEqual(t.texts()[1], "−29:00 behind live")
-        QTest.qWait(250)
+        elapse(250)
         self.assertTrue(t.isVisible())
         t.update_timeline(at_edge(), PROGRAMME)  # caught up mid-drag: the bar stays until release
         self.assertIn("seek", t._layout())
@@ -122,7 +123,7 @@ class TimeShiftCase(unittest.TestCase):
         self.assertEqual(spy.count(), 1)
         self.assertAlmostEqual(spy.at(0)[0], 1740.0, delta=6.0)
         self.assertTrue(t.isVisible())
-        QTest.qWait(250)
+        elapse(250)
         self.assertFalse(t.isVisible())
 
     def test_drag_anchors_on_the_bar_while_the_buffer_slides(self):

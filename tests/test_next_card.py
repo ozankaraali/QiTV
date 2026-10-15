@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import elapse, wait_until
 
 from ui.overlay_host import OverlayHost
 from ui.overlays.next_card import NextCard
@@ -29,20 +30,14 @@ class NextCardCase(unittest.TestCase):
         self.addCleanup(host.close)
         return host, card
 
-    def wait_for(self, predicate, ms=3000):
-        waited = 0
-        while not predicate() and waited < ms:
-            QTest.qWait(30)
-            waited += 30
-
     def test_countdown_emits_play_now_once(self):
         _, card = self.make()
         spy = QSignalSpy(card.playNow)
         card.show_next("Ep 2", "S1 E2", seconds=1)
         self.assertTrue(card.isVisible())
         self.assertEqual(card.remaining(), 1)
-        self.wait_for(lambda: spy.count() > 0)
-        QTest.qWait(300)
+        wait_until(lambda: spy.count() > 0)
+        elapse(300)
         self.assertEqual(spy.count(), 1)
         self.assertFalse(card.isVisible())
 
@@ -55,7 +50,7 @@ class NextCardCase(unittest.TestCase):
         self.assertTrue(card.escape())
         self.assertEqual(cancelled.count(), 1)
         self.assertFalse(card.isVisible())
-        QTest.qWait(1300)
+        elapse(1300)
         self.assertEqual(play.count(), 0)
 
     def test_activate_plays_once_and_stops(self):
@@ -63,7 +58,7 @@ class NextCardCase(unittest.TestCase):
         play = QSignalSpy(card.playNow)
         card.show_next("Ep 2", "S1 E2", seconds=1)
         card.activate()
-        QTest.qWait(1300)
+        elapse(1300)
         self.assertEqual(play.count(), 1)
         self.assertFalse(card.isVisible())
 
@@ -85,7 +80,7 @@ class NextCardCase(unittest.TestCase):
     def click_host(self, host, pos):
         # Through the host's window, so Qt hit-tests to the child under the point.
         QTest.mouseClick(host.windowHandle(), Qt.LeftButton, Qt.NoModifier, pos)
-        QTest.qWait(QApplication.doubleClickInterval() + 150)
+        elapse(QApplication.doubleClickInterval() + 150)
 
     def test_clicks_on_card_do_not_reach_host(self):
         host, card = self.make()
@@ -114,11 +109,11 @@ class NextCardCase(unittest.TestCase):
         card.show_next("Ep 2", "S1 E2", seconds=1)
         card.parentWidget().hide()
         self.assertFalse(card._timer.isActive())
-        QTest.qWait(1300)
+        elapse(1300)
         self.assertEqual(play.count(), 0)
         card.parentWidget().show()
         self.assertTrue(card._timer.isActive())
-        self.wait_for(lambda: play.count() > 0)
+        wait_until(lambda: play.count() > 0)
         self.assertEqual(play.count(), 1)
 
 
