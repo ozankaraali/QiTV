@@ -37,7 +37,7 @@ instead of using others' distributions, which may have malware.**
 
 ## Keys
 
-All keys are in the [README](../README.md#keys) and in the app under Help → Keyboard Shortcuts.
+All keys are in the [README](https://github.com/ozankaraali/QiTV/blob/main/README.md#keys) and in the app under Help → Keyboard Shortcuts.
 <kbd>Ctrl/⌘</kbd> means Ctrl on Windows and Linux and ⌘ (Command) on a Mac.
 
 | Keys | What they do |
@@ -98,7 +98,7 @@ filter.
 
 QiTV is MIT-licensed. The downloads contain VLC (libVLC, LGPL-2.1-or-later; some plugins
 GPL-2.0-or-later), Qt and PySide6 (LGPLv3) and Python libraries under their own licenses: see
-[THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md), which ships inside every download with the
+[THIRD-PARTY-NOTICES.md](https://github.com/ozankaraali/QiTV/blob/main/THIRD-PARTY-NOTICES.md), which ships inside every download with the
 license texts. QiTV 1.14.x bundled MPV (GPLv3); 2.0 does not.
 
 *The screenshots in the README show made-up demo content (`scripts/make_demo_content.py`).*
