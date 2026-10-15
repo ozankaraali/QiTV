@@ -27,6 +27,7 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Run tests
+        id: tests
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
@@ -57,10 +58,14 @@ jobs:
           name: smoke-linux
           path: smoke-out/
       - name: Package App with PyInstaller for Linux
+        id: package
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: uv run pyinstaller qitv-linux.spec
       - name: Rename binary
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: mv dist/qitv dist/qitv-linux
       - name: Smoke test the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
         # the bundle. The fixtures come from the checkout; the app has none.
         run: |
@@ -122,6 +127,7 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Run tests
+        id: tests
         # Qt's offscreen plugin on Windows reads fonts only from QT_QPA_FONTDIR (the PySide6
         # wheel ships none), so without it every glyph is a box as wide as the pixel size.
         run: |
@@ -143,10 +149,14 @@ jobs:
           name: smoke-windows
           path: smoke-out/
       - name: Package App with PyInstaller for Windows
+        id: package
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: uv run pyinstaller qitv-windows.spec
       - name: Rename binary
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: ren dist\qitv.exe qitv-windows.exe
       - name: Smoke test the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # A windowed app: the shell would not wait for it, and it has no console (its logs
         # are in smoke-frozen). Its exit code is the smoke test's.
         shell: pwsh
@@ -200,6 +210,7 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Run tests
+        id: tests
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
@@ -214,10 +225,14 @@ jobs:
           name: smoke-macos-arm
           path: smoke-out/
       - name: Package App with PyInstaller for macOS
+        id: package
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: codesign --force --deep --sign - dist/qitv.app
       - name: Smoke test the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
         # the bundle. The fixtures come from the checkout; the app has none.
         run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
@@ -266,6 +281,7 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Run tests
+        id: tests
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
@@ -280,10 +296,14 @@ jobs:
           name: smoke-macos-intel
           path: smoke-out/
       - name: Package App with PyInstaller for macOS (Intel)
+        id: package
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: codesign --force --deep --sign - dist/qitv.app
       - name: Smoke test the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
         # the bundle. The fixtures come from the checkout; the app has none.
         run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
