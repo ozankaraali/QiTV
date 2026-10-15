@@ -182,6 +182,10 @@ class NavModel(QObject):
             return
         self._errors.pop(key, None)
         self._pending.discard(key)
+        if key[0] == "section":
+            self._ready_sections.discard(key[1])
+            self._pending.add(key)
+            self.catalog.request_section(key[1])
         self.changed.emit()
 
     def _all_live_items(self) -> list[dict]:
@@ -345,6 +349,8 @@ class NavModel(QObject):
 
     def _fail(self, key: tuple, message: str) -> None:
         logger.info("Load failed for %s: %s", key, message)
+        if key[0] == "section":
+            self._ready_sections.discard(key[1])
         self._pending.discard(key)
         self._errors[key] = message or "Load failed"
         self.changed.emit()

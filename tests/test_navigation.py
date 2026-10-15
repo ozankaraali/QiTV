@@ -316,6 +316,20 @@ class NavModelTests(unittest.TestCase):
         self.catalog.seasonsReady.emit("s1")
         self.assertIsNone(self.nav.load_error(series))
 
+    def test_retry_section_requests_it_again(self):
+        self.catalog.loaded = False
+        self.nav.reset_to("live")
+        section = self.nav.path[-1]
+        self.catalog.sectionFailed.emit("live", "down")
+        count = self.catalog.requests.count(("section", "live"))
+        self.nav.retry(section)
+        self.assertEqual(self.catalog.requests.count(("section", "live")), count + 1)
+        self.assertNotIn("10", [n.key for n in self.nav.children(section)])
+        self.assertEqual(self.catalog.requests.count(("section", "live")), count + 1)
+        self.catalog.loaded = True
+        self.catalog.sectionReady.emit("live")
+        self.assertIn("10", [n.key for n in self.nav.children(section)])
+
 
 if __name__ == "__main__":
     unittest.main()
