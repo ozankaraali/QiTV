@@ -44,9 +44,9 @@ class NavNode:
         return isinstance(other, NavNode) and (self.layer, self.key) == (other.layer, other.key)
 
 
-ACTION_ROWS = (
-    NavNode("action", SETTINGS_ROW, "⚙ Settings"),
-    NavNode("action", ADD_PROVIDER_ROW, "＋ Add provider"),
+ACTION_ROWS = (  # the drawer paints their icons (a gear, a plus)
+    NavNode("action", SETTINGS_ROW, "Settings"),
+    NavNode("action", ADD_PROVIDER_ROW, "Add provider"),
 )
 
 

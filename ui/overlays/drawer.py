@@ -15,9 +15,11 @@ from PySide6.QtGui import QFont, QLinearGradient, QMouseEvent, QPainter, QWheelE
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate
 
 from services.navigation import (
+    ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
     LIBRARY_SECTIONS,
     RECENT_GROUP,
+    SETTINGS_ROW,
     NavModel,
     NavNode,
 )
@@ -55,6 +57,7 @@ NodeRole = Qt.UserRole + 10
 CountRole = Qt.UserRole + 11
 IconRole = Qt.UserRole + 12
 _PINNED_ICONS = {FAVORITES_GROUP: "star", RECENT_GROUP: "recent"}
+_ACTION_ICONS = {SETTINGS_ROW: "gear", ADD_PROVIDER_ROW: "plus"}
 
 
 def _leaves_drawer(node: NavNode) -> bool:
@@ -109,7 +112,8 @@ class _NodeModel(ChannelRowsModel):
             if role == CountRole:
                 return node.count
             if role == IconRole:
-                return _PINNED_ICONS.get(node.key) if node.layer == "group" else None
+                icons = {"group": _PINNED_ICONS, "action": _ACTION_ICONS}.get(node.layer, {})
+                return icons.get(node.key)
         return super().data(index, role)
 
 

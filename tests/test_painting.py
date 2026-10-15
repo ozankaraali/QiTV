@@ -43,6 +43,8 @@ ICONS = [
     "clock",
     "sparkle",
     "live_dot",
+    "gear",
+    "plus",
 ]
 
 

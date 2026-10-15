@@ -135,8 +135,8 @@ class NavModelTests(unittest.TestCase):
             [
                 ("source", "Home", "Home"),
                 ("source", "Backup", "Backup"),
-                ("action", SETTINGS_ROW, "⚙ Settings"),
-                ("action", ADD_PROVIDER_ROW, "＋ Add provider"),
+                ("action", SETTINGS_ROW, "Settings"),  # icons are painted, not glyphs
+                ("action", ADD_PROVIDER_ROW, "Add provider"),
             ],
         )
         self.assertFalse(any(self.nav.is_playable(n) or self.nav.needs_setup(n) for n in rows[2:]))

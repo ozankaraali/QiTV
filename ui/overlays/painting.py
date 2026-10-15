@@ -5,7 +5,16 @@ import hashlib
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QTransform,
+)
 
 from ui.theme import PALETTE, qcolor
 
@@ -317,6 +326,20 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
                 rad = 0.46 if i % 2 == 0 else 0.13
                 pts.append((0.5 + rad * math.cos(ang), 0.5 + rad * math.sin(ang)))
             fill(_poly(pts))
+        elif name == "gear":  # Settings: a cog with eight teeth around a hole
+            cog = QPainterPath()
+            cog.addEllipse(QRectF(0.18, 0.18, 0.64, 0.64))
+            for i in range(8):
+                tooth = QPainterPath()
+                tooth.addRoundedRect(QRectF(0.43, 0.04, 0.14, 0.2), 0.03, 0.03)
+                spin = QTransform().translate(0.5, 0.5).rotate(i * 45).translate(-0.5, -0.5)
+                cog = cog.united(spin.map(tooth))
+            hole = QPainterPath()
+            hole.addEllipse(QRectF(0.36, 0.36, 0.28, 0.28))
+            fill(cog.subtracted(hole))
+        elif name == "plus":  # Add provider
+            fill(_rrect(0.16, 0.43, 0.68, 0.14, 0.05))
+            fill(_rrect(0.43, 0.16, 0.14, 0.68, 0.05))
         elif name == "live_dot":
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))

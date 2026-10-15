@@ -19,6 +19,7 @@ from ui.overlays.drawer import (
     PREVIEW_DEBOUNCE_MS,
     PROVIDER_ERROR_TEXT,
     Drawer,
+    IconRole,
 )
 
 PREVIEW_WAIT_MS = PREVIEW_DEBOUNCE_MS + 120
@@ -252,8 +253,11 @@ class DrawerTests(unittest.TestCase):
 
     def test_the_sources_column_ends_with_settings_and_add_provider(self):
         column = self.open_on_the_sources()
-        titles = [column.model.index(r).data() for r in range(column.model.rowCount())]
-        self.assertEqual(titles, ["Home", "Backup", "⚙ Settings", "＋ Add provider"])
+        rows = [column.model.index(r) for r in range(column.model.rowCount())]
+        self.assertEqual(
+            [(r.data(), r.data(IconRole)) for r in rows],
+            [("Home", None), ("Backup", None), ("Settings", "gear"), ("Add provider", "plus")],
+        )
         self.assertEqual(self.drawer.highlighted().key, "Home")
 
     def test_arrows_and_enter_reach_settings_and_add_provider(self):

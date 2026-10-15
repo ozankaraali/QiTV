@@ -1359,13 +1359,13 @@ class DrawerSettingsTests(WindowCase):
         with mock.patch("ui.tv_window.OptionsDialog") as dialog:
             for key in (Qt.Key.Key_Left, Qt.Key.Key_Left, Qt.Key.Key_Down):
                 QTest.keyClick(self.window, key)  # the sources column, then ⚙ Settings
-            self.assertEqual(drawer.highlighted().title, "⚙ Settings")
+            self.assertEqual(drawer.highlighted().title, "Settings")
             QTest.keyClick(self.window, Qt.Key.Key_Return)
             dialog.assert_called_once_with(self.window)
             dialog.return_value.exec.assert_called_once_with()
             dialog.return_value.start_new_provider.assert_not_called()
             QTest.keyClick(self.window, Qt.Key.Key_Down)
-            self.assertEqual(drawer.highlighted().title, "＋ Add provider")
+            self.assertEqual(drawer.highlighted().title, "Add provider")
             QTest.keyClick(self.window, Qt.Key.Key_Return)
             dialog.return_value.start_new_provider.assert_called_once_with()
         self.assertEqual(dialog.call_count, 2)
