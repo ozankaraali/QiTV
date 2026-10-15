@@ -28,6 +28,10 @@ class TsFixtureTests(unittest.TestCase):
         self.assertEqual(ts.crc32_mpeg(section[:-4]), int.from_bytes(section[-4:], "big"))
         self.assertEqual(ts.crc32_mpeg(section), 0)
 
+    def test_crc_matches_the_mpeg2_check_value(self):
+        # CRC-32/MPEG-2's published check value, so the fixture CRC is not only self-consistent.
+        self.assertEqual(ts.crc32_mpeg(b"123456789"), 0x0376E6E7)
+
     def test_rai_exactly_at_keyframes(self):
         rai = 0
         for p in packets(ts.make_stream(3)):

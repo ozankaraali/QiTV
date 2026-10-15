@@ -20,6 +20,7 @@ from services.live.ts import (
     Opened,
     Segmenter,
     Unsupported,
+    _crc32,
     _h264_intra,
     pts_delta,
 )
@@ -329,6 +330,11 @@ class PtsDeltaTests(unittest.TestCase):
         self.assertEqual(pts_delta(2**33 - 1, 0), 1)
         self.assertEqual(pts_delta(0, 2**33 - 1), -1)
         self.assertEqual(pts_delta(2**33 - 90000, 90000), 180000)
+
+
+class CrcTests(unittest.TestCase):
+    def test_the_section_crc_matches_the_mpeg2_check_value(self):
+        self.assertEqual(_crc32(b"123456789"), 0x0376E6E7)
 
 
 class SegmenterTests(unittest.TestCase):
