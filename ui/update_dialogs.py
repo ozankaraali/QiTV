@@ -176,7 +176,7 @@ def show_update_dialog(
         # future checks after the download is complete / cancelled.
         if config_manager:
             config_manager.skipped_update_version = ""
-            config_manager.save_config()
+            update_checker.save_settings(config_manager)  # a locked file does not stop it
         start_download(download_url, file_size, release_url)
     elif clicked == browser_btn:
         webbrowser.open(release_url)

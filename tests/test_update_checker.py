@@ -122,6 +122,53 @@ class WindowsUpdateTests(unittest.TestCase):
         self.assertEqual(self.calls, ["stop_live"])
 
 
+class LockedConfigTests(unittest.TestCase):
+    """M9: a locked config.json (Windows antivirus, an indexer) must not stop the update flow."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.config = mock.MagicMock()
+        self.config.save_config.side_effect = PermissionError(
+            13, "Permission denied", "/home/someone/.config/qitv/config.json"
+        )
+
+    def test_download_and_install_starts_with_the_config_locked(self):
+        msg, download = mock.MagicMock(), mock.MagicMock()
+        msg.addButton.side_effect = [download, mock.MagicMock(), mock.MagicMock()]
+        msg.clickedButton.return_value = download
+        info = {
+            "version": "9.9.9",
+            "url": "https://release.invalid/qitv",
+            "download_url": "https://release.invalid/qitv.zip",
+            "file_size": 1,
+        }
+        with (
+            mock.patch.object(update_dialogs, "QMessageBox", return_value=msg),
+            mock.patch.object(update_dialogs, "_polish_msgbox"),
+            mock.patch.object(update_dialogs, "start_download") as start_download,
+            mock.patch.object(sys, "frozen", True, create=True),
+            self.assertLogs("services.update_checker", "WARNING") as logs,
+        ):
+            update_dialogs.show_update_dialog(info, self.config, manual=True)
+        start_download.assert_called_once_with(
+            "https://release.invalid/qitv.zip", 1, "https://release.invalid/qitv"
+        )
+        self.assertEqual(self.config.skipped_update_version, "")
+        self.assertIn("[Errno 13] Permission denied", logs.output[0])
+        self.assertNotIn("someone", logs.output[0])  # no file names (safe_message)
+
+    def test_skip_and_stop_reminders_go_on_with_the_config_locked(self):
+        with self.assertLogs("services.update_checker", "WARNING") as logs:
+            update_checker.skip_version(self.config, "9.9.9")
+            update_checker.disable_update_reminders(self.config)
+        self.assertEqual(self.config.skipped_update_version, "9.9.9")
+        self.assertIs(self.config.check_updates, False)
+        self.assertEqual(len([line for line in logs.output if "Permission denied" in line]), 2)
+
+
 class LayoutTests(unittest.TestCase):
     """Review M9 (ruling): services/ holds the update logic; its dialogs are ui/'s."""
 

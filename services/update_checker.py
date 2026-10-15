@@ -21,6 +21,7 @@ from packaging.version import parse
 
 from services.config_manager import ConfigManager, get_app_version
 from services.lazy_import import lazy_module
+from services.redact import safe_message
 from services.thread_cleanup import ThreadCleanup, has_pending_threads
 
 logger = logging.getLogger(__name__)
@@ -192,13 +193,22 @@ def check_for_updates(
     thread.start()
 
 
+def save_settings(config_manager: ConfigManager) -> None:
+    """Save the update preferences; a locked or read-only config.json is logged, not raised
+    (as TVWindow.save_config does): the update flow goes on, the setting applies until quit."""
+    try:
+        config_manager.save_config()
+    except Exception as e:
+        logger.warning("Couldn't save the settings: %s", safe_message(e))
+
+
 def skip_version(config_manager: Optional[ConfigManager], version: str):
     """Record a version to skip in future automatic checks."""
     if config_manager is None:
         logger.warning("Cannot skip version: no config_manager provided")
         return
     config_manager.skipped_update_version = version
-    config_manager.save_config()
+    save_settings(config_manager)
     logger.info("Skipping future prompts for version %s", version)
 
 
@@ -211,7 +221,7 @@ def disable_update_reminders(config_manager: Optional[ConfigManager]):
         logger.warning("Cannot disable update reminders: no config_manager provided")
         return
     config_manager.check_updates = False
-    config_manager.save_config()
+    save_settings(config_manager)
     logger.info("Automatic update reminders disabled")
 
 
