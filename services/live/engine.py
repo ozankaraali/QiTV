@@ -18,9 +18,9 @@ already ended or reported a final error), its spans are dropped, every buffer di
 handed out is removed, and the helper is restarted. A helper that sends no `hello` within
 30 s counts as dead too, and so does one that cannot be started at all. On the new helper's
 `hello`, the sessions the GUI has not closed are reopened with the same arguments: a fresh
-directory if the old one could not be removed, RAM if the disk already failed. Then `available(True)` follows. `is_available()` is
-False in between, without a signal. A second death emits `available(False)` for the rest of
-the run, and every later open fails at once.
+directory if the old one could not be removed, RAM if the disk already failed. Then
+`available(True)` follows. `is_available()` is False in between, without a signal. A second
+death emits `available(False)` for the rest of the run, and every later open fails at once.
 
 A session whose input is over (it ended, or its source failed for good) is not reopened, so
 a restart never opens a second provider connection behind the GUI's back. It stays known
