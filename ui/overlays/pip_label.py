@@ -4,13 +4,27 @@ It covers the small surface (follow()), but only its pill and buttons take the m
 host's mask: a click anywhere else on the small video reaches the surface below. The pill
 stands for that video: its press, moves and release go to the PiP frame (pillPressed …), which
 swaps on a click and moves the PiP on a drag, as it does for the surface itself.
+
+The state is what the pill is for, so it is never cut: the channel name gives way first, down
+to nothing, then the state's font shrinks. Only "Connecting…" may still be cut once its font
+shrank a little (a mini player's 90 px PiP); LIVE and the time behind live always show whole.
 """
 
 from dataclasses import dataclass
+import re
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QPen, QRegion
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import (
+    QFont,
+    QFontMetrics,
+    QHelpEvent,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QRegion,
+)
+from PySide6.QtWidgets import QToolTip, QWidget
 
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, draw_icon, fill_round
@@ -19,8 +33,16 @@ from ui.theme import PALETTE, qcolor
 
 LIVE = "LIVE"
 CONNECTING = "Connecting…"
+TOOLTIPS = {
+    "pill": "Swap (S) · drag to move",
+    "mixer": "Volume",
+    "close": "Close picture-in-picture (P)",
+}
 _SHIFTED_PREFIXES = ("−", "-")  # "−MM:SS" behind live
+_BEHIND = re.compile(r"^[−-]\d+(:\d\d){1,2}$")  # "−MM:SS" or "−H:MM:SS"
 _FALLBACK_HOST_WIDTH = 1280
+_SHRINK = 0.8  # the smallest state font a cut state gets, of its normal size
+_SMALLEST_STATE_PX = 6  # LIVE and the time behind live shrink down to this, never cut
 
 
 @dataclass(frozen=True)
@@ -99,6 +121,10 @@ class PipLabel(Overlay):
     def pill_rect(self) -> QRectF:
         return self._layout().pill
 
+    def state_pixel_size(self) -> int:
+        """The state's font size as painted (smaller than normal when it had to shrink)."""
+        return self._layout().state_font.pixelSize()
+
     def button_rect(self, name: str) -> QRectF:
         """The "close" or "mixer" (speaker) button, in label coordinates."""
         layout = self._layout()
@@ -106,6 +132,14 @@ class PipLabel(Overlay):
 
     def mask_region(self) -> QRegion:
         return self._region().translated(self.geometry().topLeft())
+
+    def tooltip_at(self, pos: QPointF) -> str:
+        """What hovering `pos` says (label coordinates): the part and its key, or nothing."""
+        layout = self._layout()
+        for name, rect in (("close", layout.close), ("mixer", layout.mixer), ("pill", layout.pill)):
+            if rect.contains(pos):
+                return TOOLTIPS[name]
+        return ""
 
     # ---- layout -------------------------------------------------------------------------
 
@@ -122,16 +156,25 @@ class PipLabel(Overlay):
         height = max(names.height(), states.height()) + 2 * un.px(0.35)
         close = QRectF(self.width() - inset - height, inset, height, height)
         mixer = close.translated(-(height + un.px(0.4)), 0)
-        dot, dot_gap = max(6, round(states.height() * 0.42)), un.px(0.4)
+        dot_gap = un.px(0.4)
         room = max(0.0, mixer.left() - un.px(0.6) - inset)  # the pill ends before the speaker
+        # The name gives way first, then the state's font shrinks (the module docstring).
+        state_room = room - 2 * pad
+        whole = self._state == LIVE or bool(_BEHIND.match(self._state))
+        normal = state_font.pixelSize()
+        smallest = _SMALLEST_STATE_PX if whole else max(_SMALLEST_STATE_PX, round(normal * _SHRINK))
+        while self._state_width(state_font, dot_gap) > state_room and (
+            state_font.pixelSize() > smallest
+        ):
+            state_font.setPixelSize(state_font.pixelSize() - 1)
+        states = QFontMetrics(state_font)
+        dot = max(6, round(states.height() * 0.42))
+        state = self._state
+        if not whole and states.horizontalAdvance(state) > state_room:
+            state = states.elidedText(state, Qt.TextElideMode.ElideRight, max(0, int(state_room)))
+        state_w = self._state_width(state_font, dot_gap, state)
         elide = Qt.TextElideMode.ElideRight
-        if self._state == LIVE:
-            state = LIVE
-            state_w = dot + dot_gap + states.horizontalAdvance(LIVE)
-        else:
-            state = states.elidedText(self._state, elide, max(0, int(room - 2 * pad)))
-            state_w = states.horizontalAdvance(state)
-        # The name gives way first; it may shrink to "…" or, with no room for that, to nothing.
+        # The name may shrink to "…" or, with no room for that, to nothing.
         name_room = int(room - 2 * pad - gap - state_w)
         name = names.elidedText(self._name, elide, name_room) if name_room > 0 else ""
         width = 2 * pad + state_w + (gap + names.horizontalAdvance(name) if name else 0)
@@ -139,6 +182,14 @@ class PipLabel(Overlay):
         return _Layout(
             pill, close, mixer, name, state, name_font, state_font, pad, gap, dot, dot_gap
         )
+
+    def _state_width(self, font: QFont, dot_gap: float, text: str | None = None) -> float:
+        metrics = QFontMetrics(font)
+        if self._state == LIVE:
+            return (
+                max(6, round(metrics.height() * 0.42)) + dot_gap + metrics.horizontalAdvance(LIVE)
+            )
+        return metrics.horizontalAdvance(self._state if text is None else text)
 
     def _region(self) -> QRegion:
         """The pill and buttons, in label coordinates (empty with nothing to cover)."""
@@ -287,6 +338,17 @@ class PipLabel(Overlay):
             # A press like any other: the frame knows whether it ends a swapping click.
             self._pill_held = True
             self.pillPressed.emit(event.globalPosition().toPoint())
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            text = self.tooltip_at(QPointF(event.pos()))
+            if text:
+                QToolTip.showText(event.globalPos(), text, self)
+            else:
+                QToolTip.hideText()
+                event.ignore()
+            return True
+        return super().event(event)
 
     def hideEvent(self, event) -> None:
         self._pill_held = False

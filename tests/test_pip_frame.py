@@ -463,11 +463,25 @@ class PipLabelTests(LabelCase):
             self.assertLessEqual(pill.right(), mixer.left(), state)
             name, shown = label.shown_text()
             self.assertTrue(name == "" or name.endswith("…"), name)  # never the whole name
-            if state == "LIVE":
-                self.assertEqual(shown, state)
-            else:  # fonts differ per platform: whole, or a prefix elided with "…"
+            if state == "Connecting…":  # 90 px wide: whole, or cut once the font shrank
                 elided = shown.endswith("…") and state.startswith(shown[:-1])
                 self.assertTrue(shown == state or elided, shown)
+            else:  # the name goes, then the font shrinks: the state is always whole
+                self.assertEqual(shown, state)
+
+    def test_the_state_is_never_cut_the_name_goes_first_then_the_font_shrinks(self):
+        host = QWidget()
+        host.resize(360, 203)
+        label = PipLabel(host)
+        label.follow(corner_rect(QSize(360, 203), "br"))
+        label.set_info("Nature One HD", "LIVE")
+        normal = label.state_pixel_size()
+        label.set_info("Nature One HD", "−12:34:56")  # wider than the pill's room
+        self.assertEqual(label.shown_text(), ("", "−12:34:56"))
+        self.assertLess(label.state_pixel_size(), normal)
+        self.assertLessEqual(label.pill_rect().right(), label.button_rect("mixer").left())
+        label.set_info("Nature One HD", "−03:20")
+        self.assertEqual(label.shown_text()[1], "−03:20")
 
     def test_a_narrow_pip_elides_the_name_before_the_buttons(self):
         host = QWidget()
@@ -479,6 +493,15 @@ class PipLabelTests(LabelCase):
         self.assertTrue(name.endswith("…") and len(name) > 1, name)
         self.assertEqual(shown, "LIVE")
         self.assertLessEqual(label.pill_rect().right(), label.button_rect("mixer").left())
+
+    def test_its_parts_name_their_keys(self):
+        _, label = self.make()
+        self.assertEqual(label.tooltip_at(label.pill_rect().center()), "Swap (S) · drag to move")
+        self.assertEqual(
+            label.tooltip_at(label.button_rect("close").center()), "Close picture-in-picture (P)"
+        )
+        self.assertEqual(label.tooltip_at(label.button_rect("mixer").center()), "Volume")
+        self.assertEqual(label.tooltip_at(QPointF(label.rect().center())), "")
 
     def test_audible_state(self):
         _, label = self.make()
