@@ -19,13 +19,24 @@ jobs:
           python-version: '3.14'
           enable-cache: true
       - name: Install VLC and xcb dependencies
-        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0
+        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0 xvfb
       - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Run tests
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
+      - name: Smoke test
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" uv run python scripts/smoke_tv.py --out smoke-out
+        timeout-minutes: 5
+        env:
+          QT_QPA_PLATFORM: xcb
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-linux
+          path: smoke-out/
       - name: Package App with PyInstaller for Linux
         run: uv run pyinstaller qitv-linux.spec
       - name: Rename binary
@@ -67,6 +78,15 @@ jobs:
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
+      - name: Smoke test
+        run: uv run python scripts/smoke_tv.py --out smoke-out
+        timeout-minutes: 5
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-windows
+          path: smoke-out/
       - name: Package App with PyInstaller for Windows
         run: uv run pyinstaller qitv-windows.spec
       - name: Rename binary
@@ -107,6 +127,15 @@ jobs:
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
+      - name: Smoke test
+        run: uv run python scripts/smoke_tv.py --out smoke-out
+        timeout-minutes: 5
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-macos-arm
+          path: smoke-out/
       - name: Package App with PyInstaller for macOS
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
@@ -149,6 +178,15 @@ jobs:
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
+      - name: Smoke test
+        run: uv run python scripts/smoke_tv.py --out smoke-out
+        timeout-minutes: 5
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-macos-intel
+          path: smoke-out/
       - name: Package App with PyInstaller for macOS (Intel)
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
