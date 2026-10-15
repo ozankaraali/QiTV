@@ -22,7 +22,7 @@ class ExternalPlayersTest(unittest.TestCase):
         ):
             result = external_players.launch_vlc("http://x/s")
         self.assertEqual(result, (True, ""))
-        popen.assert_called_once_with(["open", "-a", "/Applications/VLC.app", "http://x/s"])
+        popen.assert_called_once_with(["open", "-a", "/Applications/VLC.app", "--", "http://x/s"])
 
     def test_vlc_linux_launches_found_binary(self):
         with (
@@ -32,7 +32,7 @@ class ExternalPlayersTest(unittest.TestCase):
         ):
             result = external_players.launch_vlc("http://x/s")
         self.assertEqual(result, (True, ""))
-        popen.assert_called_once_with(["/usr/bin/vlc", "--started-from-file", "http://x/s"])
+        popen.assert_called_once_with(["/usr/bin/vlc", "--started-from-file", "--", "http://x/s"])
 
     def test_vlc_linux_missing(self):
         with (
@@ -77,7 +77,23 @@ class ExternalPlayersTest(unittest.TestCase):
         ):
             result = external_players.launch_mpv("http://x/s")
         self.assertEqual(result, (True, ""))
-        popen.assert_called_once_with(["/usr/bin/mpv", "http://x/s"])
+        popen.assert_called_once_with(["/usr/bin/mpv", "--", "http://x/s"])
+
+    def test_url_that_looks_like_an_option_is_not_one(self):
+        # Finding m8: an untrusted URL beginning with "-" became a player option.
+        url = "--script=/tmp/evil.lua"
+        with (
+            mock.patch.dict(sys.modules, {"mpv": None}),
+            mock.patch("platform.system", return_value="Linux"),
+            mock.patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
+            mock.patch("subprocess.Popen") as popen,
+        ):
+            external_players.launch_mpv(url)
+            external_players.launch_vlc(url)
+        self.assertEqual(popen.call_count, 2)
+        for call in popen.call_args_list:
+            argv = call.args[0]
+            self.assertEqual(argv[-2:], ["--", url])
 
     def test_mpv_python_player_reused(self):
         fake = mock.MagicMock()

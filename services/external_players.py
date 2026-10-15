@@ -26,7 +26,8 @@ def launch_vlc(url: str) -> Tuple[bool, str]:
         for path in vlc_paths:
             if os.path.exists(path):
                 try:
-                    subprocess.Popen(["open", "-a", path, url])
+                    # "--": a URL that starts with "-" must not be read as an option.
+                    subprocess.Popen(["open", "-a", path, "--", url])
                     return True, ""
                 except Exception as e:
                     return False, f"Failed to launch VLC: {str(e)}"
@@ -68,7 +69,7 @@ def launch_vlc(url: str) -> Tuple[bool, str]:
 
     try:
         # --started-from-file sends URL to existing VLC instance (replaces current)
-        subprocess.Popen([vlc_cmd, "--started-from-file", url])
+        subprocess.Popen([vlc_cmd, "--started-from-file", "--", url])
         return True, ""
     except Exception as e:
         return False, f"Failed to launch VLC: {str(e)}"
@@ -193,7 +194,7 @@ def launch_mpv(url: str) -> Tuple[bool, str]:
         )
 
     try:
-        subprocess.Popen([mpv_cmd, url])
+        subprocess.Popen([mpv_cmd, "--", url])
         return True, ""
     except Exception as e:
         return False, f"Failed to launch MPV: {str(e)}"
