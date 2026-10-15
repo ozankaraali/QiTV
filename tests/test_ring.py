@@ -17,6 +17,7 @@ from services.live.ring import (
     RingError,
     Segment,
     cleanup_session_dir,
+    remove_stale_sessions,
 )
 
 
@@ -574,6 +575,33 @@ class DiskRingTests(unittest.TestCase):
         ring.close()
         self.assertFalse(directory.exists())
         self.assertEqual(ring.charged, 0)
+
+    def test_remove_stale_sessions_sweeps_under_the_manager_lock(self):
+        # Run once at startup, so a crashed run's buffers go even if no disk session starts.
+        from PySide6.QtCore import QLockFile
+
+        def stale(character):
+            directory = self.directory / session_name(character)
+            directory.mkdir()
+            (directory / "owner").write_text(_OWNER, encoding="ascii")
+            (directory / "segment-0.ts").write_bytes(b"left over")
+            return directory
+
+        active = self.ring()
+        first = stale("a")
+        remove_stale_sessions(self.directory)
+        self.assertFalse(first.exists())
+        self.assertTrue(active._directory.exists(), "a live session was swept")
+        second = stale("b")
+        manager = QLockFile(str(self.directory / ".qitv-timeshift-manager.lock"))
+        manager.setStaleLockTime(0)
+        self.assertTrue(manager.tryLock(0))
+        try:
+            remove_stale_sessions(self.directory)  # busy: a disk session start sweeps instead
+        finally:
+            manager.unlock()
+        self.assertTrue(second.exists())
+        remove_stale_sessions(self.directory / "missing")  # no buffer root yet: nothing to do
 
     def test_cleanup_session_dir_reclaims_dead_owner(self):
         name = session_name()

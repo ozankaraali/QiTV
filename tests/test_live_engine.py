@@ -463,6 +463,17 @@ class LiveEngineTests(unittest.TestCase):
             if event[0] == "failed":
                 self.assertFalse(signals.up[index], f"{event} arrived while still available")
 
+    def test_the_first_start_removes_buffers_a_crashed_run_left(self):
+        # Up to 16 GiB could stay behind after a crash, forever if disk time-shift is then
+        # turned off: the engine sweeps once before its first helper.
+        stale = self.root / (".qitv-timeshift-" + "a" * 32)
+        stale.mkdir(parents=True)
+        (stale / "owner").write_text("QiTV temporary time-shift v1\n", encoding="ascii")
+        (stale / "segment-0.ts").write_bytes(b"left over")
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        self.assertFalse(stale.exists())
+
     def test_a_dead_helper_that_cannot_be_stopped_turns_time_shift_off(self):
         # A helper stuck in I/O (a network drive) may outlive a kill with its upstream
         # connections open: restarting and reopening would add a second one per session.

@@ -12,6 +12,9 @@ argv, the receive loop that treats `EOFError` or `BrokenPipeError` from either `
 `recv()` as the helper's exit, the failed flag that keeps a failure the helper reported from
 being reported again, and the join -> terminate -> kill escalation with 0.5 s graces.
 
+Before its first helper, the supervisor removes the buffer directories that a crashed run
+left in the root (live sessions of another instance keep their locks and stay).
+
 Helper death (spec: restart once, then fall back): `is_available()` turns False (no
 signal), then every session it held whose input was still running gets one
 `sessionFailed(sid, "internal", ...)` (none when that session had already ended or reported
@@ -69,7 +72,7 @@ from typing import Any
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QThread, Signal, Slot
 
-from services.live.ring import cleanup_session_dir
+from services.live.ring import cleanup_session_dir, remove_stale_sessions
 from services.live.timeline import Span
 from services.live.worker import helper_main
 from services.thread_cleanup import ThreadCleanup
@@ -146,6 +149,7 @@ class _Supervisor(QThread):
                 try:
                     if not started:
                         started = True
+                        self._sweep()
                         self._start_helper()
                     elif self._process is None:
                         self._serve_without_helper()
@@ -279,6 +283,13 @@ class _Supervisor(QThread):
             pass
 
     # ---- helper lifetime --------------------------------------------------------------
+    def _sweep(self) -> None:
+        """Once, before the first helper: remove the buffers a crashed run left behind."""
+        try:
+            remove_stale_sessions(self._root)
+        except OSError as error:
+            _LOG.warning("Old temporary buffers could not be removed (%s).", type(error).__name__)
+
     def _start_helper(self) -> None:
         """Spawn a helper; a failed start counts as a death."""
         while not self._stop.is_set() and not self._spawn():

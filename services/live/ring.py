@@ -457,6 +457,26 @@ def _remove_stale_sessions(root: Path) -> None:
             directory.rmdir()
 
 
+def remove_stale_sessions(root: Path) -> None:
+    """Remove the buffers that dead owners left in `root` (a crash or a power loss).
+
+    Runs under the manager lock; skipped when `root` does not exist yet or another process
+    holds the lock (a disk session start sweeps then). Live sessions keep their locks and
+    are never touched. Raises OSError.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return
+    manager = QLockFile(str(root / _MANAGER_LOCK))
+    manager.setStaleLockTime(0)
+    if not manager.tryLock(0):
+        return
+    try:
+        _remove_stale_sessions(root)
+    finally:
+        manager.unlock()
+
+
 class DiskRing(Ring):
     def __init__(
         self,
