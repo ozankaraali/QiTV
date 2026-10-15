@@ -25,7 +25,7 @@ from ui.tv_window import TVWindow
 from ui.update_dialogs import check_for_updates
 """
 # Loaded when a background job first needs them, not before the window shows.
-NETWORK_MODULES = ["requests", "aiohttp", "urllib3", "Cryptodome", "m3u8", "tzlocal", "urlobject"]
+NETWORK_MODULES = ["requests", "aiohttp", "urllib3", "Cryptodome", "m3u8", "urlobject"]
 
 
 class LazyModuleTests(unittest.TestCase):

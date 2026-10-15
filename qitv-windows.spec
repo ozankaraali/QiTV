@@ -89,7 +89,6 @@ a = Analysis(
         'aiohttp',
         'asyncio',
         'requests',
-        'tzlocal',
         'urlobject',
     ],
     hookspath=[],

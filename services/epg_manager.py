@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 import orjson as json
+import tzlocal  # the GUI thread's guide lookups use it: loaded with the window
 
 from services.content_loader import ContentLoader
 from services.epg_store import read_guide, write_guide
@@ -27,7 +28,6 @@ from services.redact import redact_url, safe_exc
 
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
-tzlocal = lazy_module("tzlocal")
 
 # Timestamp format of the "date"/"last_access" fields in the EPG cache index.
 _INDEX_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
