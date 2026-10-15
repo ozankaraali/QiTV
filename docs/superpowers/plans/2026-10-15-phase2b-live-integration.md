@@ -160,6 +160,8 @@
     - playback `ended` or `errorOccurred` in pipeline mode while the session is not ended: reopen at `max(position, oldest)`. If the position was older than the oldest, emit `notice("Rewound past the buffer")`.
     - `sessionFailed(kind="internal")` after ready: wait for `available(True)` and the engine's reopen, then `go_live()`.
     - `available(False)`: switch to direct and keep it for this run.
+    - `sessionFailed(kind="disk")` **after** ready (the helper swapped in a RAM ring and dropped the history): notice "Disk time-shift isn't available; using memory", then `go_live()`.
+    - `sessionFailed` with kind `network`, `timeout` or `http` **after** ready (the source gave up; the session is ended): play the original URL directly with the LIVE profile and the notice "Lost the time-shift buffer; playing live". If that direct play also fails, the usual error toast applies.
   - **`stop()`:** stop playback, close the session, and emit `released()` on `sessionClosed`, or immediately in direct mode after `playback.stop()`.
 - [ ] **Tests**, with fakes: a `FakeEngine` (QObject with the signals; spans driven by the test) and a `FakePlayback` (records calls, with a controllable `time_ms` and `state`). Cases:
   1. Ready gives pipeline playback of `stream_url(oldest)`.
