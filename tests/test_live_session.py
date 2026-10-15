@@ -1749,6 +1749,30 @@ class HelperDeathTests(LiveSessionCase):
                 self.assertEqual(self.timelines[-1]["mode"], "live")
                 self.assertFalse(self.timelines[-1]["paused"])
 
+    def test_a_helper_death_while_time_shifted_says_the_buffer_is_lost(self):
+        for how in ("seeked back", "paused"):
+            with self.subTest(how=how):
+                self.live = self.make()
+                sid = self.ready(segments(0, 10), live_edge=20.0)
+                self.playback.set_state(PlaybackState.PLAYING)
+                if how == "paused":
+                    self.live.toggle_pause()
+                else:
+                    self.live.seek_to(4.0)
+                self.die(sid)
+                self.assertEqual(self.notices, [LOST])  # the reopen will play live
+                self.engine.up = True
+                self.engine.available.emit(True)
+                self.engine.buffer(sid, segments(0, 5), live_edge=10.0)
+                self.engine.sessionReady.emit(sid)
+                self.assertEqual(self.notices, [LOST])
+
+    def test_a_helper_death_at_the_live_edge_says_nothing(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.die(sid)
+        self.assertEqual(self.notices, [])
+
     def test_a_pause_during_recovery_is_kept_after_the_reopen(self):
         sid = self.ready(segments(0, 3), live_edge=6.0)
         self.playback.set_state(PlaybackState.PLAYING)

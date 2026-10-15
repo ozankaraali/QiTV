@@ -59,7 +59,9 @@ Interruptions while playing from the pipeline:
   seek, Go live or resume meanwhile waits for that state too. Fall back when it does not
   come within `ready_timeout_ms` or `burst_s` + 2 s, whichever is longer.
 - `sessionFailed("internal")` means a helper death: wait for the engine's reopen of the
-  session, then go live; after `_RECOVERY_MS` without it, fall back. (Before ready, the
+  session, then go live (a viewer who was time-shifted or paused hears "Lost the time-shift
+  buffer; playing live" at once; a pause is kept); after `_RECOVERY_MS` without it, fall
+  back. (Before ready, the
   ready timeout bounds the same wait.)
 - Any other kind is final (the source gave up, the helper's session "crashed", or a kind
   this code does not know): at the live edge, fall back with "Lost the time-shift buffer;
@@ -615,7 +617,10 @@ class LiveSession(QObject):
             # reports available(False). Waiting is bounded by the ready timeout before
             # ready, and by the recovery cap after (also when the restarted helper dies).
             if self._phase is _Phase.PIPELINE:
+                shifted = self._paused or self._stay.mode is not Mode.LIVE
                 self._recover()
+                if shifted:  # the time-shifted position went with the helper's buffer
+                    self.notice.emit(LOST)
             return
         # Every other kind is final: the session's input is over.
         if self._phase is _Phase.WAITING:
