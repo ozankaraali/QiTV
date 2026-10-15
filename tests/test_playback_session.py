@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import sys
 import threading
 import time
 import unittest
@@ -11,8 +12,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import elapse, wait_until
 
 from services.playback import (
+    _AUDIO_RESTORE_MS,
     NO_VLC_MESSAGE,
     VLC_LOG_ENV,
     NullSession,
@@ -27,6 +30,12 @@ from services.vlc_profile import PlayKind
 
 FIXTURE = Path(__file__).parent / "fixtures" / "smoke.mp4"
 INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--no-video-title-show", "--quiet"])
+# A stop job not joined by then is hung: the TV window gives up on a worker after as long
+# (CLOSE_THREAD_WAIT_MS). It is no speed budget. The first stops in a process can take
+# seconds while libVLC loads its plugins (CI run 38696639927, Windows: about 6 s, where it
+# usually takes under half a second); those are reported on stderr, not failed.
+STOP_HANG_MS = 30_000
+SLOW_STOP_S = 2.0
 
 
 def wait_for(predicate, timeout_ms=8000):
@@ -38,9 +47,18 @@ def wait_for(predicate, timeout_ms=8000):
 
 
 def release_and_wait(test, session):
-    """Release, then let the worker that stops libVLC finish before the next test."""
+    """Release, then wait until the session's worker that stops libVLC has been joined.
+
+    Only this session's jobs count (its runner forgets a job once its thread is joined), so
+    a thread that another test left running cannot fail this one.
+    """
     session.release()
-    test.assertTrue(wait_for(lambda: not has_pending_threads(), 5000), "a libVLC job outlived it")
+    started = time.monotonic()
+    joined = wait_until(lambda: session._runner.pending() == 0, STOP_HANG_MS)
+    took = time.monotonic() - started
+    test.assertTrue(joined, f"libVLC's stop job hung: still running after {took:.1f} s")
+    if took > SLOW_STOP_S:
+        print(f"\n{test.id()}: waited {took:.1f} s for libVLC's stop job", file=sys.stderr)
 
 
 @unittest.skipIf(INSTANCE is None, "libVLC is not available")
@@ -189,7 +207,9 @@ class PlaybackSessionTests(unittest.TestCase):
             for _ in range(3):
                 session._watch_stall(PlaybackState.PLAYING)
         session.release()
-        QTest.qWait(800)
+        with mock.patch.object(session._player, "audio_set_track") as set_track:
+            elapse(_AUDIO_RESTORE_MS + 100)  # the cancelled restore would have come due
+        set_track.assert_not_called()
 
     def test_stall_restart_is_cancelled_by_a_user_zap(self):
         session = self._stalling_session()
