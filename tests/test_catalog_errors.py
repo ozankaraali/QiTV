@@ -68,6 +68,24 @@ class FriendlyErrorTests(unittest.TestCase):
             with self.subTest(text=text[:60]):
                 self.assertEqual(friendly_error(text), expected)
 
+    def test_an_address_requests_cannot_use_is_unreachable(self):
+        # What requests raises for a mistyped provider address (InvalidURL, MissingSchema,
+        # InvalidSchema) is no unexpected answer: nothing was ever asked.
+        for url in (
+            "http://",
+            "portal.example/c/",
+            "http://[portal.example",
+            "http://portal example/c/",
+            "ftp://portal.example/c/",
+            "http:///player_api.php?username=alice&password=s3cret",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(requests.RequestException) as caught:
+                    requests.Request("GET", url).prepare()
+                    requests.Session().get_adapter(url)
+                self.assertEqual(friendly_error(str(caught.exception)), UNREACHABLE_MESSAGE)
+                self.assertEqual(friendly_error(caught.exception), UNREACHABLE_MESSAGE)
+
     def test_own_messages_pass_through(self):
         for text in (
             PROVIDER_LOADING_MESSAGE,

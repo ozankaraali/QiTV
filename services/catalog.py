@@ -73,7 +73,9 @@ _UNREACHABLE = re.compile(
     r"|connectionerror|failed to resolve|name or service not known|nodename nor servname"
     r"|getaddrinfo|name resolution|cannot connect to host|network is unreachable"
     r"|no route to host|remote ?end closed|remotedisconnected|server ?disconnected"
-    r"|ssl|certificate|no such file|errno",
+    r"|ssl|certificate|no such file|errno"
+    # requests' InvalidURL, MissingSchema and InvalidSchema: an address it cannot use.
+    r"|invalid url|no (?:scheme|host) supplied|no connection adapters|^failed to parse:",
     re.IGNORECASE,
 )
 
