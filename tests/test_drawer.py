@@ -597,6 +597,27 @@ class HostedDrawerInputTests(unittest.TestCase):
         QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.BackButton, pos=over_rows)
         self.assertEqual(len(backs), 2)  # two presses, not a double-click on a row
 
+    def move(self, point):
+        QTest.mouseMove(self.host.windowHandle(), point)
+
+    def test_pointer_moves_over_the_drawer_still_reach_the_host(self):
+        # Review Minor 5: the drawer tracks the pointer for its header buttons and passes the
+        # moves on, so the host still hears them (the cursor, the player's controls).
+        moved = []
+        self.host.mouseMoved.connect(lambda: moved.append(True))
+        refresh = self.drawer.mapTo(self.host, self.drawer.refresh_rect().center().toPoint())
+        for count, point in enumerate((QPoint(330, 400), QPoint(100, 30), refresh), start=1):
+            self.move(point)  # the padding, the header's name, then a header button
+            self.assertEqual(len(moved), count, point)
+
+    def test_hovering_a_header_button_shows_the_pointing_hand(self):
+        drawer = self.drawer
+        for rect in (drawer.refresh_rect(), drawer.settings_gear_rect()):
+            self.move(QPoint(330, 400))
+            self.assertEqual(drawer.cursor().shape(), Qt.CursorShape.ArrowCursor)
+            self.move(drawer.mapTo(self.host, rect.center().toPoint()))
+            self.assertEqual(drawer.cursor().shape(), Qt.CursorShape.PointingHandCursor)
+
     def right_click(self, view, row):
         rect = view.visualRect(view.model().index(row, 0))
         point = view.viewport().mapTo(self.host, rect.center())
