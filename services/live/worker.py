@@ -91,6 +91,70 @@ _DISK_FAILED = "The temporary playback buffer could not be created."
 
 _Addition = tuple[int, float, float, bool]  # seq, start, end, discontinuity
 
+# BurstMeter (see its docstring):
+_BURST_GAP_S = 1.0  # this long without a byte ends a burst
+_BURST_PACE = 2.0  # a burst brings its media at least this many times faster than it plays
+_BURST_SPREAD = 1.5  # two bursts in a row are alike when neither is larger by more than this
+_BURST_RUN = 3  # the estimate is the largest of this many latest bursts
+_STEADY_BURSTS = 3.0  # this many estimates' worth of seconds without a gap: steady again
+
+
+class BurstMeter:
+    """How a source delivers its media: steadily (`burst_s` 0.0), or in bursts.
+
+    Some providers' raw MPEG-TS restreams send ~10 s of media at once every ~10 s, as HLS
+    sends a segment at a time. `add()` takes each chunk's arrival time and the media position
+    after it (the live edge, in seconds; it starts at 0.0). A burst ends where `_BURST_GAP_S`
+    passes without a byte; it counts only when it brought its media at least `_BURST_PACE`
+    times faster than real time, so the stretch before a hiccup on a steady stream (about as
+    long to deliver as to play) is no burst, and clears the run of bursts.
+
+    `burst_s` stays 0.0 until two bursts in a row are alike (within `_BURST_SPREAD`): a single
+    hiccup never makes a steady source bursty, and a provider's large initial backlog does not
+    become the estimate. From then on it is the largest of the last `_BURST_RUN` alike bursts:
+    a burst larger than the estimate would starve the player before the next one lands (and
+    count as a stall), one smaller costs nothing. A burst unlike the one before starts a new
+    run and leaves the estimate as it was until two are alike again. Once `_STEADY_BURSTS`
+    estimates' worth of seconds pass without a gap, the source is steady again (0.0).
+
+    Pure logic: no clock of its own.
+    """
+
+    def __init__(self) -> None:
+        self._estimate = 0.0
+        self._run: deque[float] = deque(maxlen=_BURST_RUN)
+        self._last_wall: float | None = None  # the latest arrival
+        self._start_wall = 0.0  # the current burst's first arrival
+        self._start_media = 0.0  # the media position before it
+        self._media = 0.0  # the media position after the latest arrival
+
+    @property
+    def burst_s(self) -> float:
+        return self._estimate
+
+    def add(self, wall: float, media: float) -> None:
+        last = self._last_wall
+        if last is None or wall - last >= _BURST_GAP_S:
+            if last is not None:
+                self._ended(self._media - self._start_media, last - self._start_wall)
+            self._start_wall, self._start_media = wall, self._media
+        self._last_wall, self._media = wall, media
+        if self._estimate and wall - self._start_wall >= _STEADY_BURSTS * self._estimate:
+            self._estimate = 0.0  # no gap for a while: steady after all
+            self._run.clear()
+
+    def _ended(self, size: float, took: float) -> None:
+        """A burst of `size` media seconds ended; its bytes arrived over `took` seconds."""
+        if size <= 0 or took * _BURST_PACE > size:
+            self._run.clear()  # about as long to deliver as to play: no burst
+            return
+        run = self._run
+        if run and max(size, run[-1]) > _BURST_SPREAD * min(size, run[-1]):
+            run.clear()  # unlike the one before: a new run starts
+        run.append(size)
+        if len(run) >= 2:
+            self._estimate = max(run)
+
 
 class _Cancelled(Exception):
     """The session was closed: unwind without sending anything or writing to a ring."""
@@ -233,6 +297,7 @@ class _Session:
         self._ended = False
         self._segmenter = Segmenter()
         self._timeline = Timeline()
+        self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
         self._pending: list[_Addition] = []
         self._last_notify = 0.0
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
@@ -300,6 +365,7 @@ class _Session:
                 else:
                     received += len(item)
                     self._apply(segmenter.feed(item))
+                    self._measure()
             self._check()
             self._apply(segmenter.finish())
         except SourceError as error:
@@ -435,6 +501,18 @@ class _Session:
             self._notify(force=True)
         self._send(("error", self.sid, kind, message))
 
+    def _live_edge(self) -> float:
+        # On the segment's own PTS axis and the stall-free clock: no stall or jump inflates it.
+        return self._timeline.live_edge(self._segmenter.progress_pts, self._segmenter.wall)
+
+    def _measure(self) -> None:
+        """Feed the burst meter; a new estimate is reported at once (it moves the parent's
+        target and stall bound)."""
+        before = self._bursts.burst_s
+        self._bursts.add(time.monotonic(), self._live_edge())
+        if self._bursts.burst_s != before:
+            self._notify(force=True)
+
     def _notify(self, force: bool = False) -> None:
         if self.cancelled:
             return
@@ -442,7 +520,7 @@ class _Session:
         if not force and now - self._last_notify < _NOTIFY_INTERVAL:
             return
         self._last_notify = now
-        ring, timeline = self._ring, self._timeline
+        ring, timeline, source = self._ring, self._timeline, self._source
         if ring is None:
             return
         oldest = ring.oldest_seq
@@ -457,12 +535,12 @@ class _Session:
             "open": ring.open_seq,
             "start": timeline.start,
             "end": timeline.end,
-            # On the segment's own PTS axis and the stall-free clock: no stall or jump inflates it.
-            "live_edge": timeline.live_edge(self._segmenter.progress_pts, self._segmenter.wall),
+            "live_edge": self._live_edge(),
             "bytes": ring.bytes,
             "ended": self._ended,
-            # HLS: the target duration, which a reload may change; 0.0 for raw TS.
-            "burst_s": self._source.burst_s if self._source is not None else 0.0,
+            # HLS: the target duration, which a reload may change; raw TS: what the meter
+            # measured (0.0 for a steady source). The larger, should both apply.
+            "burst_s": max(source.burst_s if source is not None else 0.0, self._bursts.burst_s),
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the

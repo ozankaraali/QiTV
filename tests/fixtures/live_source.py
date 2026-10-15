@@ -13,6 +13,9 @@ content, made once with ffmpeg as a developer tool:
         -c:v libx264 -profile:v baseline -g 25 -keyint_min 25 -sc_threshold 0 -b:v 400k \
         -c:a aac -b:a 64k -f mpegts tests/fixtures/live.ts
 
+With `burst_s`, the channel arrives in bursts, as some providers' restreams send it: every
+`burst_s` seconds, everything due before the next burst at once.
+
 `connections` counts the requests; `events` records when each connection opened (+1) and
 closed (-1), and `peak` is the most open at once. A client going away is seen at once (the
 server watches its socket between chunks), so the counts follow the client's own closes.
@@ -27,6 +30,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 import itertools
+import math
 from pathlib import Path
 import select
 import statistics
@@ -199,10 +203,12 @@ def opens_in(events: list[tuple[float, int]], start: float, end: float) -> int:
 
 
 class LiveSource:
-    """Serves `LoopedStream(path)` at `url` to every client until `close()`."""
+    """Serves `LoopedStream(path)` at `url` to every client until `close()`; in bursts of
+    `burst_s` seconds when that is set."""
 
-    def __init__(self, path: Path = LIVE_TS) -> None:
+    def __init__(self, path: Path = LIVE_TS, *, burst_s: float = 0.0) -> None:
         self.stream = LoopedStream(Path(path).read_bytes())
+        self.burst_s = burst_s
         self.connections = 0
         self.events: list[tuple[float, int]] = []  # (time.monotonic(), +1 open / -1 close)
         self._stop = threading.Event()
@@ -233,6 +239,8 @@ class LiveSource:
                 self.end_headers()
                 started = time.monotonic()
                 for due, chunk in owner.stream.chunks():
+                    if owner.burst_s > 0:  # sent with the burst it falls in
+                        due = math.floor(due / owner.burst_s) * owner.burst_s
                     if not self._wait(started + due):
                         return
                     try:

@@ -204,7 +204,9 @@ class Feed:
     """A live source and a VLC around a test's fakes, modelled on the review's simulator.
 
     Media arrives `burst` seconds at a time every `burst` seconds (raw TS when 0: a quarter
-    second at a time), each arrival optionally jittered, cut into `gop` second segments
+    second at a time), reported as `burst_s` from arrival `measured_after` on (the helper
+    measures a raw TS source's bursts; HLS reports its own at once), each arrival optionally
+    jittered, cut into `gop` second segments
     whose newest stays open until the next arrival, as in the real segmenter. VLC plays at
     the last rate set while it has data; at the edge it reports `starved` (BUFFERING; real
     libVLC 3 keeps reporting PLAYING with its clock standing still). While `stalled` the
@@ -226,8 +228,10 @@ class Feed:
         seed=1,
         first=None,
         starved=PlaybackState.BUFFERING,
+        measured_after=0,
     ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
+        self.measured_after, self.arrivals = measured_after, 0
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
         self.jitter, self.rng = jitter, random.Random(seed)
         self.nominal = case.clock.now + (self.chunk if first is None else first)
@@ -242,9 +246,8 @@ class Feed:
     def push(self):
         closed = math.ceil(self.edge / self.gop - 1e-9) - 1  # the newest segment is open
         spans = segments(0, closed, length=self.gop)
-        self.case.engine.buffer(
-            self.sid, spans, live_edge=self.edge, open_seq=closed, burst=self.burst
-        )
+        burst = self.burst if self.arrivals >= self.measured_after else 0.0
+        self.case.engine.buffer(self.sid, spans, live_edge=self.edge, open_seq=closed, burst=burst)
 
     def ready(self):
         self.case.engine.sessionReady.emit(self.sid)
@@ -270,6 +273,7 @@ class Feed:
                 while now >= self.next_arrival - 1e-9:
                     if not self.stalled:
                         self.edge += self.chunk
+                        self.arrivals += 1
                     self.nominal += self.chunk
                     self.next_arrival = self.nominal + self.rng.uniform(-self.jitter, self.jitter)
                 if not self.stalled:
@@ -1111,6 +1115,51 @@ class StayLiveTests(LiveSessionCase):
             self.step(0.25, media=0)
         # Paused, the mean lag grows with the wall clock, the transport's "behind live" too.
         self.assertAlmostEqual(self.timelines[-1]["lag"], before + 12.0, delta=0.3)
+
+    def test_raw_ts_bursts_once_measured_are_handled_as_hls_bursts(self):
+        """The owner's channel (2.0.1, L1): raw TS, 10 s at once every 10 s, measured by the
+        helper from the second burst on. From then on: no stall shown between bursts, the
+        burst is the target, no catch-up into the next gap, and Go live keeps a burst's room."""
+        sid = self.start()
+        feed = Feed(self, sid, burst=10.0, edge=12.0, measured_after=2).ready()
+        feed.run(10.5)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])  # not measured yet
+        feed.run(10.0)  # the second burst landed: measured
+        timelines, rates = len(self.timelines), len(self.playback.rates)
+        feed.run(60.0)
+        after = self.timelines[timelines:]
+        self.assertTrue(all(state["target"] == 10.0 for state in after))
+        self.assertFalse(any(state["stalled"] for state in after))
+        self.assertTrue(all(rate <= 1.0 for rate in self.playback.rates[rates:]))
+        self.assertEqual(len(self.playback.plays), 1)  # nothing reopened
+        self.assertEqual(feed.starved_s, 0.0)
+        arrivals = len(feed.before)
+        self.live.go_live()
+        feed.sync()
+        feed.run(60.0)
+        self.assertEqual(len(self.playback.plays), 2)
+        # The mean lag lands at the target: about half a burst of room before every landing
+        # (less the open time Go live allows for: this VLC opens at once).
+        self.assertGreater(min(feed.before[arrivals + 1 :]), 10.0 / 2 - 0.25 - 0.5)
+        self.assertFalse(any(state["stalled"] for state in self.timelines[timelines:]))
+        self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_source_bursty_again_after_steady_eases_afresh(self):
+        """A raw TS source's measured bursts may stop and come back (2.0.1, L1)."""
+        sid = self.ready(segments(0, 3), live_edge=6.0, burst=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.engine.buffer(sid, segments(0, 6), live_edge=12.0, burst=6.0)
+        self.step(0.25)  # the landing's step is eased in: a correction builds up
+        self.engine.buffer(sid, segments(0, 6), live_edge=12.0, burst=0.0)  # steady now
+        for _ in range(8):
+            self.step(0.25)
+        self.assertEqual(len(self.playback.plays), 1)  # no reopen, which would start afresh
+        self.engine.buffer(sid, segments(0, 9), live_edge=18.0, burst=6.0)  # bursty again
+        self.step(0.25)
+        position = self.timelines[-1]["position"]
+        # The mean over a burst, with no correction left over from the earlier bursts.
+        self.assertAlmostEqual(self.timelines[-1]["lag"], 18.0 - position + 0.25 - 3.0)
 
     def test_no_rate_change_while_buffering(self):
         self.ready(segments(0, 2), live_edge=4.0)

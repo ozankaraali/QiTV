@@ -1,0 +1,265 @@
+"""Raw MPEG-TS that arrives in bursts (2.0.1, L1).
+
+Some providers' restreams send ~10 s of media at once every ~10 s. The helper measures that
+(`BurstMeter`) and reports it as the session's `burst_s`, so LiveSession handles it as it
+handles HLS segments: the target, the mean lag, the stall bound and Go live.
+"""
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import multiprocessing
+from pathlib import Path
+import tempfile
+import time
+import unittest
+
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+
+from services.live import worker
+from services.live.engine import LiveEngine
+from services.live.live_session import LiveSession
+from services.live.stay_live import TARGETS
+from services.playback import PlaybackState
+from services.thread_cleanup import has_pending_threads
+from services.vlc_profile import PlayKind
+from tests.fixtures.live_source import LiveSource
+
+app = QApplication.instance() or QApplication([])
+
+
+def steady(start, seconds, *, media=0.0, step=0.1):
+    """Arrivals every `step` seconds from `start`, each bringing `step` seconds of media."""
+    return [(start + i * step, media + (i + 1) * step) for i in range(round(seconds / step))]
+
+
+def bursts(start, size, every, count, *, media=0.0, spread=0.2, chunks=5):
+    """`count` bursts of `size` media seconds, one every `every` seconds from `start`, each
+    arriving in `chunks` chunks over `spread` seconds."""
+    series = []
+    for k in range(count):
+        for c in range(chunks):
+            wall = start + k * every + spread * c / (chunks - 1)
+            series.append((wall, media + k * size + size * (c + 1) / chunks))
+    return series
+
+
+def measured(series):
+    """`burst_s` after each arrival of `series` ((wall, media) pairs) on a fresh meter."""
+    meter = worker.BurstMeter()
+    readings = []
+    for wall, media in series:
+        meter.add(wall, media)
+        readings.append(meter.burst_s)
+    return readings
+
+
+class BurstMeterTests(unittest.TestCase):
+    def test_a_continuous_source_is_steady(self):
+        self.assertEqual(set(measured(steady(0.0, 120.0))), {0.0})
+
+    def test_ten_second_bursts_every_ten_seconds(self):
+        series = bursts(0.0, 10.0, 10.0, 6)
+        readings = measured(series)
+        # Reported once two bursts are complete: the third one's first chunk shows the gap.
+        third = 2 * 5
+        self.assertEqual(set(readings[:third]), {0.0})
+        self.assertEqual(set(readings[third:]), {10.0})
+
+    def test_two_second_bursts_every_two_seconds(self):
+        readings = measured(bursts(0.0, 2.0, 2.0, 10))
+        self.assertEqual(set(readings[: 2 * 5]), {0.0})
+        self.assertEqual(set(readings[2 * 5 :]), {2.0})
+
+    def test_the_estimate_is_the_largest_of_the_last_three_bursts(self):
+        # The provider's first burst carries a little backlog: 12 s, then 10 s each.
+        series = bursts(0.0, 12.0, 10.0, 1, chunks=5)
+        series += bursts(10.0, 10.0, 10.0, 5, media=12.0)
+        readings = measured(series)
+        self.assertEqual(readings[2 * 5], 12.0)  # 12 and 10: consistent, the larger
+        self.assertEqual(readings[4 * 5], 10.0)  # 10, 10, 10: the backlog has left the run
+
+    def test_a_large_initial_backlog_is_not_the_estimate(self):
+        series = bursts(0.0, 30.0, 10.0, 1, chunks=5)
+        series += bursts(10.0, 10.0, 10.0, 5, media=30.0)
+        readings = measured(series)
+        self.assertEqual(set(readings[: 3 * 5]), {0.0})  # 30 then 10: not two alike yet
+        self.assertEqual(set(readings[3 * 5 :]), {10.0})
+
+    def test_one_hiccup_does_not_make_a_continuous_source_bursty(self):
+        # 30 s steady, 3 s without a byte, then the backlog at once and steady again.
+        series = steady(0.0, 30.0)
+        series += [(33.0, 33.0)]
+        series += steady(33.1, 60.0, media=33.0)
+        self.assertEqual(set(measured(series)), {0.0})
+
+    def test_two_hiccups_do_not_make_a_continuous_source_bursty(self):
+        series = steady(0.0, 30.0)
+        series += steady(33.0, 30.0, media=33.0)
+        series += steady(66.0, 30.0, media=66.0)
+        self.assertEqual(set(measured(series)), {0.0})
+
+    def test_a_bursty_source_that_turns_continuous_is_steady_again(self):
+        bursty = bursts(0.0, 4.0, 4.0, 5)
+        readings = measured(bursty + steady(20.0, 30.0, media=20.0))
+        self.assertEqual(readings[len(bursty) - 1], 4.0)
+        continuous = readings[len(bursty) :]  # one arrival every 0.1 s from 20.0
+        # Steady again once nothing paused for three bursts' worth of seconds (12 s).
+        self.assertEqual(continuous[115], 4.0)
+        self.assertEqual(set(continuous[121:]), {0.0})
+
+
+class ModelPlayback(QObject):
+    """VLC playing the loopback stream in real time: at the rate set while the buffer holds
+    media past the position; at the live edge its clock stands still and, like libVLC 3, it
+    keeps reporting Playing. Opening takes `open_s`."""
+
+    stateChanged = Signal(str)
+    positionChanged = Signal(int, int)
+    errorOccurred = Signal(str)
+    ended = Signal()
+    inputEnded = Signal()
+
+    STEP_MS = 50
+
+    def __init__(self, open_s=0.3):
+        super().__init__()
+        self.live = None
+        self.plays = []
+        self.current = PlaybackState.IDLE
+        self.rate = 1.0
+        self.ms = 0.0
+        self.starved_s = 0.0
+        self._open_s = open_s
+        self._opened = 0.0
+        self._last = time.monotonic()
+        self._timer = QTimer(self, interval=self.STEP_MS)
+        self._timer.timeout.connect(self._step)
+        self._timer.start()
+
+    def _set(self, state):
+        if state is not self.current:
+            self.current = state
+            self.stateChanged.emit(state.value)
+
+    def _step(self):
+        now = time.monotonic()
+        dt, self._last = now - self._last, now
+        if self.current is PlaybackState.OPENING and now - self._opened >= self._open_s:
+            self._set(PlaybackState.PLAYING)
+            return
+        if self.current is not PlaybackState.PLAYING or self.live is None:
+            return
+        _, edge = self.live.buffered_range()
+        ahead = max(0.0, edge - self.live.position())
+        advance = min(self.rate * dt, ahead)
+        if advance < self.rate * dt - 1e-6:
+            self.starved_s += dt
+        self.ms += advance * 1000.0
+
+    def play(self, url, *, kind, latency="normal", user_agent=None, start_ms=None):
+        self.plays.append((url, kind))
+        self.ms, self._opened = 0.0, time.monotonic()
+        self._set(PlaybackState.OPENING)
+
+    def stop(self):
+        self._set(PlaybackState.IDLE)
+
+    def state(self):
+        return self.current
+
+    def time_ms(self):
+        return round(self.ms)
+
+    def holds_input(self):
+        return False
+
+    def set_paused(self, paused):
+        if paused and self.current is PlaybackState.PLAYING:
+            self._set(PlaybackState.PAUSED)
+        elif not paused and self.current is PlaybackState.PAUSED:
+            self._set(PlaybackState.PLAYING)
+
+    def toggle_pause(self):
+        pass
+
+    def set_rate(self, rate):
+        self.rate = rate
+
+
+def wait_until(predicate, timeout):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            return False
+        QTest.qWait(20)
+    return True
+
+
+class BurstyRawTsTests(unittest.TestCase):
+    """End to end in real time: the fixture channel in 3 s bursts, the helper, LiveSession."""
+
+    BURST = 3.0
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-live-bursts-test-")
+        self.addCleanup(temporary.cleanup)
+        self.source = LiveSource(burst_s=self.BURST)
+        self.addCleanup(self.source.close)
+        self.engine = LiveEngine(str(Path(temporary.name) / "timeshift"))
+        self.addCleanup(self.retire)
+        self.engine.start()
+        self.assertTrue(wait_until(self.engine.is_available, 60), "the helper never came up")
+        self.playback = ModelPlayback()
+        self.live = LiveSession(self.engine, self.playback, tick_ms=250)
+        self.playback.live = self.live
+        self.timelines, self.notices, self.failures = [], [], []
+        self.live.timelineChanged.connect(self.timelines.append)
+        self.live.notice.connect(self.notices.append)
+        self.live.failed.connect(self.failures.append)
+
+    def retire(self):
+        released = []
+        self.live.released.connect(lambda: released.append(True))
+        self.live.stop()
+        wait_until(lambda: released, 5)
+        self.engine.shutdown()
+        self.assertTrue(wait_until(lambda: not has_pending_threads(), 5))
+        self.assertEqual(multiprocessing.active_children(), [])
+
+    def test_measured_bursts_raise_the_target_without_stalls_or_catch_up(self):
+        latency = "low"  # a 1 s target: the 3 s bursts raise it
+        self.live.start(
+            self.source.url,
+            headers={},
+            verify_ssl=True,
+            latency=latency,
+            user_agent=None,
+            disk=False,
+            max_bytes=64 * 1024 * 1024,
+        )
+        known = wait_until(lambda: any(t["target"] > TARGETS[latency] for t in self.timelines), 25)
+        self.assertTrue(known, "the bursts were never measured")
+        self.assertEqual(self.live.mode, "pipeline")
+        self.assertEqual(self.playback.plays[0][1], PlayKind.LIVE_PIPELINE)
+        first = next(i for i, t in enumerate(self.timelines) if t["target"] > TARGETS[latency])
+        QTest.qWait(round(2.5 * self.BURST * 1000))  # more bursts land meanwhile
+        after = self.timelines[first:]
+        self.assertGreater(len(after), 20)
+        for state in after:
+            # Shown as the source's own pace, never as "Reconnecting…" between bursts.
+            self.assertFalse(state["stalled"], state)
+            self.assertAlmostEqual(state["target"], self.BURST, delta=0.3)
+            # No catch-up into the next gap: the buffer is a burst, not a lag to remove.
+            self.assertLessEqual(state["rate"], 1.0, state)
+            self.assertEqual(state["mode"], "live")
+        self.assertEqual(self.live.mode, "pipeline")
+        self.assertEqual(len(self.playback.plays), 1)  # no reopen
+        self.assertEqual((self.notices, self.failures), ([], []))
+
+
+if __name__ == "__main__":
+    unittest.main()
