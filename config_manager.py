@@ -145,6 +145,10 @@ class ConfigManager:
         self.load_config()
 
     def _get_config_path(self):
+        override = os.environ.get("QITV_CONFIG_DIR")
+        if override:
+            os.makedirs(override, exist_ok=True)
+            return os.path.join(override, "config.json")
         # Check for portable mode (portable.txt file in program directory)
         # Get the directory where the script/executable is located
         if getattr(sys, "frozen", False):
