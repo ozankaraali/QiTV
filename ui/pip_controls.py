@@ -50,6 +50,7 @@ class SlotView:
 
     target: Optional[Target] = None
     context: Optional[ZapContext] = None
+    url: str = ""  # its link: the watch history records it when it becomes large
 
 
 class PipControls(QObject):
@@ -146,9 +147,11 @@ class PipControls(QObject):
     def view(self, name: str) -> SlotView:
         return self._views.setdefault(name, SlotView())
 
-    def take_large(self, old: str, new: str, target: Optional[Target], context) -> SlotView:
-        """A swap: keep the old large slot's target and zap group; the new large one's view."""
-        self._views[old] = SlotView(target, context)
+    def take_large(
+        self, old: str, new: str, target: Optional[Target], context, url: str
+    ) -> SlotView:
+        """A swap: keep the old large slot's target, zap group and link; the new large one's."""
+        self._views[old] = SlotView(target, context, url)
         return self.view(new)
 
     # ---- opening and closing ------------------------------------------------------------------
@@ -245,7 +248,7 @@ class PipControls(QObject):
     def _open(self, target: Target, context: ZapContext, url: str) -> None:
         sessions = self.sessions
         slot = sessions.other()
-        self._views[slot.name] = SlotView(target, context)
+        self._views[slot.name] = SlotView(target, context, url)
         self._timelines.pop(slot.name, None)
         kwargs = start_kwargs(self._live_start(target, url), self.config)
         sessions.open_pip(

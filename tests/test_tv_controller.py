@@ -3529,6 +3529,20 @@ class PipTests(PipCase):
         self.assertIs(self.controller.session, self.pip_session)
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
 
+    def test_a_swap_records_the_channel_now_watched(self):
+        # Review I4: Recent and "start with the last channel" follow the large picture.
+        self.start_large(0)
+        self.open_small(GROUP_B[0], "20", GROUP_B)
+        plays = len(self.watch.plays)
+        self.controller.handle(Action.SWAP)
+        self.assertEqual(
+            self.watch.plays[plays:], [("Home", GROUP_B[0], "channel", "http://stream/5", "20")]
+        )
+        self.controller.handle(Action.SWAP)
+        self.assertEqual(
+            self.watch.plays[-1], ("Home", CHANNELS[0], "channel", "http://stream/1", "10")
+        )
+
     def test_a_zap_after_a_swap_tunes_the_large_slot_and_leaves_the_small_one_alone(self):
         self.start_large(0)
         self.open_small(GROUP_B[0], "20", GROUP_B)

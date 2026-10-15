@@ -225,6 +225,7 @@ class TVController(QObject):
             parent=self,
         )
         self._current: Optional[Target] = None  # handed to the player
+        self._current_url = ""  # its link (a swap records the picture made large)
         self._cid: Optional[str] = None  # resume key of the VOD being played
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
         self._digits = ""  # number entry under way
@@ -933,12 +934,16 @@ class TVController(QObject):
 
     def _delivered(self, target: Target, url: str) -> None:
         """The target is playing (or opening): confirm the zap and record it in the history."""
+        self._current_url = url
         if self.sessions is not None:  # what the large picture shows (a zap onto it stays)
             large = self.sessions.large()
             large.channel = target.item if target.live else None
             large.group_key = target.group_key if target.live else None
         if target.live:
             self.zap.tuned(target.item)
+        self._record_watched(target, url)
+
+    def _record_watched(self, target: Target, url: str) -> None:
         try:
             self.watch.record_play(
                 self.catalog.current_provider_name(),
@@ -1068,12 +1073,14 @@ class TVController(QObject):
         if sessions is None or pip is None or self._closed:
             return
         new, old = sessions.large(), sessions.other()
-        view = pip.take_large(old.name, new.name, self._current, self.zap.context)
+        view = pip.take_large(
+            old.name, new.name, self._current, self.zap.context, self._current_url
+        )
         shown = self._current if self._current is not None and self._current.live else None
         old.channel = shown.item if shown is not None else None  # what the small one shows
         old.group_key = shown.group_key if shown is not None else None
         self._use_slot(new)
-        self._current, self._cid = view.target, None
+        self._current, self._cid, self._current_url = view.target, None, view.url
         self._restore_channel()
         self._state = self._states.get(new.name, "idle")
         self._audio_id = self._subtitle_id = None
@@ -1090,6 +1097,7 @@ class TVController(QObject):
             self.zap.tuned(channel)
             current = self._current
             if current is not None:
+                self._record_watched(current, view.url)  # Recent, the next start's channel
                 # The transport takes the large picture's last timeline at once; the banner
                 # then announces the channel (they share the bottom of the video).
                 self._live_controls.show_live_transport(current)
