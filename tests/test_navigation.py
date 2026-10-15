@@ -201,6 +201,19 @@ class NavModelTests(unittest.TestCase):
         self.assertNotEqual(x1, x2)
         self.assertEqual([x1.title, x2.title], ["Pilot", "Second"])
 
+    def test_public_key_helpers(self):
+        from services import navigation
+        from services.navigation import _item_node, episode_key, item_key
+
+        self.assertEqual(item_key({"id": 7, "cmd": "c", "name": "N"}), "7")
+        self.assertEqual(item_key({"cmd": "c", "name": "N"}), "c")
+        self.assertEqual(item_key({"name": "N"}), "N")
+        self.assertIs(navigation._item_key, item_key)
+        episode = {"id": "s1", "season_id": "s1:2", "season": "2", "series": 3}
+        self.assertEqual(episode_key(episode), "s1:s1:2:3")
+        self.assertEqual(_item_node(episode, "episode").key, episode_key(episode))
+        self.assertEqual(episode_key({"id": 11, "episode_num": "4"}), "11::4")
+
     def test_loading_series_requests_once(self):
         series = self._series_nav()
         for _ in range(3):

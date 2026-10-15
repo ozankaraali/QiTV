@@ -31,23 +31,34 @@ class NavNode:
         return isinstance(other, NavNode) and (self.layer, self.key) == (other.layer, other.key)
 
 
-def _item_key(item: dict) -> str:
+def item_key(item: dict) -> str:
+    """The drawer key of a channel, title, series or season: its id, else cmd, else name."""
     return str(item.get("id", item.get("cmd", item.get("name", ""))))
 
 
+_item_key = item_key  # the earlier private name
+
+
+def episode_key(item: dict) -> str:
+    """The drawer key of an episode: id, season and episode number.
+
+    STB episodes copy the series dict, so their id and name belong to the series.
+    """
+    return ":".join(
+        str(v)
+        for v in (
+            item.get("id", ""),
+            item.get("season_id") or item.get("season") or "",
+            item.get("series") or item.get("episode_num") or item.get("number") or "",
+        )
+    )
+
+
 def _item_node(item: dict, layer: str = "item") -> NavNode:
-    key = _item_key(item)
+    key = item_key(item)
     title = item.get("name") or item.get("title")
     if layer == "episode":
-        # STB episodes copy the series dict, so id/name belong to the series
-        key = ":".join(
-            str(v)
-            for v in (
-                item.get("id", ""),
-                item.get("season_id") or item.get("season") or "",
-                item.get("series") or item.get("episode_num") or item.get("number") or "",
-            )
-        )
+        key = episode_key(item)
         title = item.get("ename") or title
     return NavNode(layer, key, str(title or "Untitled"), item)
 
@@ -118,7 +129,7 @@ class NavModel(QObject):
         if parent.layer == "item" and self.section_of(parent) == "series":
             seasons = self.catalog.seasons(parent.payload)
             if seasons is None:
-                sid = _item_key(parent.payload)
+                sid = item_key(parent.payload)
                 return self._load(
                     ("seasons", sid), lambda: self.catalog.request_seasons(parent.payload)
                 )
@@ -129,7 +140,7 @@ class NavModel(QObject):
                 return []
             episodes = self.catalog.episodes(series.payload, parent.payload)
             if episodes is None:
-                key = ("episodes", _item_key(series.payload), _item_key(parent.payload))
+                key = ("episodes", item_key(series.payload), item_key(parent.payload))
                 return self._load(
                     key, lambda: self.catalog.request_episodes(series.payload, parent.payload)
                 )
@@ -195,7 +206,7 @@ class NavModel(QObject):
         seen, result = set(), []
         for group in self.catalog.groups("live"):
             for item in self.catalog.items("live", group.id) or []:
-                key = _item_key(item)
+                key = item_key(item)
                 if key not in seen:
                     seen.add(key)
                     result.append(item)
@@ -235,7 +246,7 @@ class NavModel(QObject):
             if entry.get("provider_name") != provider or entry.get("item_type") != "channel":
                 continue
             item = entry.get("item_data") or {}
-            key = _item_key(item)
+            key = item_key(item)
             if key not in seen:
                 seen.add(key)
                 result.append(item)
