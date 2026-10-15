@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QMessageBox, QProgressBar, QPushButton, QTreeWidge
 
 from content_loader import ContentLoader
 from image_loader import ImageLoader
-from services.provider_api import stb_endpoint, stb_portal_base
+from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
 from services.thread_cleanup import ThreadCleanup
 from workers import (
     M3ULoaderWorker,
@@ -189,7 +189,7 @@ class ContentLoadingMixin:
         worker = M3ULoaderWorker(
             url,
             verify_ssl=provider.get("ssl_verify", self.config_manager.ssl_verify),
-            prefer_https=provider.get("prefer_https", self.config_manager.prefer_https),
+            prefer_https=provider_prefers_https(provider, self.config_manager.prefer_https),
         )
         self._start_content_worker(worker, self._on_catalog_loaded)
 
@@ -204,7 +204,7 @@ class ContentLoadingMixin:
     def load_xtream_content(self, base_url: str, username: str, password: str, content_type: str):
         """Load Xtream content (Live/VOD/Series) using Player API v2 with categories."""
         provider = self.provider_manager.current_provider
-        prefer_https = provider.get("prefer_https", self.config_manager.prefer_https)
+        prefer_https = provider_prefers_https(provider, self.config_manager.prefer_https)
         verify_ssl = provider.get("ssl_verify", self.config_manager.ssl_verify)
         worker = XtreamLoaderWorker(
             base_url,
@@ -220,7 +220,7 @@ class ContentLoadingMixin:
         if headers is None:
             headers = self.provider_manager.headers
         provider = self.provider_manager.current_provider
-        prefer_https = provider.get("prefer_https", self.config_manager.prefer_https)
+        prefer_https = provider_prefers_https(provider, self.config_manager.prefer_https)
         verify_ssl = provider.get("ssl_verify", self.config_manager.ssl_verify)
         worker = STBCategoriesWorker(
             url,
@@ -278,8 +278,12 @@ class ContentLoadingMixin:
 
         selected_provider = self.provider_manager.current_provider
         headers = self.provider_manager.headers
-        prefer_https = selected_provider.get("prefer_https", self.config_manager.prefer_https)
-        url = stb_endpoint(stb_portal_base(selected_provider.get("url", ""), prefer_https))
+        url = stb_endpoint(
+            stb_portal_base(
+                selected_provider.get("url", ""),
+                provider_prefers_https(selected_provider, self.config_manager.prefer_https),
+            )
+        )
 
         verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
         loader = ContentLoader(
@@ -311,8 +315,12 @@ class ContentLoadingMixin:
         elif config_type == "STB":
             # Use STB API
             headers = self.provider_manager.headers
-            prefer_https = selected_provider.get("prefer_https", self.config_manager.prefer_https)
-            url = stb_endpoint(stb_portal_base(selected_provider.get("url", ""), prefer_https))
+            url = stb_endpoint(
+                stb_portal_base(
+                    selected_provider.get("url", ""),
+                    provider_prefers_https(selected_provider, self.config_manager.prefer_https),
+                )
+            )
 
             verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
             loader = ContentLoader(
@@ -336,7 +344,7 @@ class ContentLoadingMixin:
         content_data = self.provider_manager.current_provider_content.get(self.content_type, {})
         resolved_base = content_data.get("resolved_base", "")
 
-        prefer_https = selected_provider.get("prefer_https", self.config_manager.prefer_https)
+        prefer_https = provider_prefers_https(selected_provider, self.config_manager.prefer_https)
         verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
         worker = XtreamSeriesInfoWorker(
             base_url=selected_provider.get("url", ""),
@@ -443,7 +451,12 @@ class ContentLoadingMixin:
                 return
 
             headers = self.provider_manager.headers
-            url = stb_endpoint(stb_portal_base(selected_provider.get("url", "")))
+            url = stb_endpoint(
+                stb_portal_base(
+                    selected_provider.get("url", ""),
+                    provider_prefers_https(selected_provider, self.config_manager.prefer_https),
+                )
+            )
 
             verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
             loader = ContentLoader(

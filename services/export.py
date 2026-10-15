@@ -1,6 +1,8 @@
 import logging
 import re
 
+from services.provider_api import stb_portal_base
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,8 @@ def save_m3u_content(content_data, file_path):
 
 
 def save_stb_content(base_url, content_data, mac, file_path):
+    base_url = stb_portal_base(base_url)  # callers may pass a full portal URL like http://host/c/
+
     def url_formatter(item):
         cmd_url = item.get("cmd", "").replace("ffmpeg ", "")
         if "localhost" in cmd_url:

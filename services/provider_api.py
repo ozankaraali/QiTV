@@ -230,3 +230,9 @@ def xtream_epg_url(
     if limit is not None:
         extra["limit"] = str(limit)
     return _build_xtream_url(base, "player_api.php", username, password, extra)
+
+
+def provider_prefers_https(provider: Dict[str, Any], global_default: bool) -> bool:
+    """A provider's own 'prefer_https' wins; unset (missing/None) falls back to the global setting."""
+    value = provider.get("prefer_https")
+    return global_default if value is None else bool(value)

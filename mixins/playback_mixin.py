@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 import requests
 
-from services.provider_api import stb_create_link_url, stb_portal_base
+from services.provider_api import provider_prefers_https, stb_create_link_url, stb_portal_base
 from services.thread_cleanup import ThreadCleanup
 from widgets.autoplay_dialogs import (
     EpisodeAutoPlayDialog,
@@ -96,7 +96,9 @@ class PlaybackMixin:
 
             self.lock_ui_before_loading()
             thread = QThread()
-            prefer_https = selected_provider.get("prefer_https", self.config_manager.prefer_https)
+            prefer_https = provider_prefers_https(
+                selected_provider, self.config_manager.prefer_https
+            )
             verify_ssl = selected_provider.get("ssl_verify", self.config_manager.ssl_verify)
             worker = LinkCreatorWorker(
                 base_url=base_url,
@@ -291,7 +293,10 @@ class PlaybackMixin:
             selected_provider = self.provider_manager.current_provider
             headers = self.provider_manager.headers
             fetchurl = stb_create_link_url(
-                stb_portal_base(selected_provider.get("url", ""), self.config_manager.prefer_https),
+                stb_portal_base(
+                    selected_provider.get("url", ""),
+                    provider_prefers_https(selected_provider, self.config_manager.prefer_https),
+                ),
                 self.content_type,
                 item.get("cmd"),
                 is_episode=is_episode,

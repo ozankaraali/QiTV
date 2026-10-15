@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog, QTreeWi
 import requests
 
 from services.export import save_m3u_content, save_stb_content
-from services.provider_api import stb_endpoint, stb_portal_base
+from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
 
 if TYPE_CHECKING:
     from config_manager import ConfigManager
@@ -47,7 +47,10 @@ class ExportMixin:
 
     def fetch_and_export_all_live_channels(self, file_path):
         selected_provider = self.provider_manager.current_provider
-        base_url = stb_portal_base(selected_provider.get("url", ""))
+        base_url = stb_portal_base(
+            selected_provider.get("url", ""),
+            provider_prefers_https(selected_provider, self.config_manager.prefer_https),
+        )
         mac = selected_provider.get("mac", "")
 
         try:
@@ -124,7 +127,10 @@ class ExportMixin:
             provider = self.provider_manager.current_provider
             config_type = provider.get("type", "")
             if config_type == "STB":
-                base_url = provider.get("url", "")
+                base_url = stb_portal_base(
+                    provider.get("url", ""),
+                    provider_prefers_https(provider, self.config_manager.prefer_https),
+                )
                 mac = provider.get("mac", "")
                 save_stb_content(base_url, items, mac, file_path)
             else:
@@ -143,7 +149,10 @@ class ExportMixin:
                 self.content_type, {}
             )
 
-            base_url = provider.get("url", "")
+            base_url = stb_portal_base(
+                provider.get("url", ""),
+                provider_prefers_https(provider, self.config_manager.prefer_https),
+            )
             config_type = provider.get("type", "")
             mac = provider.get("mac", "")
 
@@ -205,7 +214,10 @@ class ExportMixin:
     def fetch_and_export_all_series(self, file_path):
         """Fetch all series, seasons, and episodes, then export to M3U."""
         selected_provider = self.provider_manager.current_provider
-        base_url = stb_portal_base(selected_provider.get("url", ""))
+        base_url = stb_portal_base(
+            selected_provider.get("url", ""),
+            provider_prefers_https(selected_provider, self.config_manager.prefer_https),
+        )
         mac = selected_provider.get("mac", "")
 
         # Get the current content (series in categories)
@@ -329,7 +341,10 @@ class ExportMixin:
         selected_provider = self.provider_manager.current_provider
         headers = self.provider_manager.headers
         base_url = stb_endpoint(
-            stb_portal_base(selected_provider.get("url", ""), self.config_manager.prefer_https)
+            stb_portal_base(
+                selected_provider.get("url", ""),
+                provider_prefers_https(selected_provider, self.config_manager.prefer_https),
+            )
         )
 
         params = {
