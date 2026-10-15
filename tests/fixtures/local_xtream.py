@@ -1,9 +1,9 @@
 """A fake Xtream-shaped provider on 127.0.0.1 for the Library window tests and manual runs.
 
 `XtreamFixture` answers the Xtream player API the catalog uses: 2 VOD categories with 3 movies
-each, 1 series with 1 season of 2 episodes, no live channels and an empty guide. Every movie and episode URL
-the catalog builds plays tests/fixtures/smoke.mp4, read from the file (with byte ranges, so
-libVLC can seek). Titles are fictional; there are no credentials and no network beyond the
+each, 1 series with 1 season of 2 episodes, no live channels and an empty guide. Every movie
+and episode URL the catalog builds plays tests/fixtures/smoke.mp4, read from the file (with
+byte ranges, so libVLC can seek). Titles are fictional; there are no credentials and no network beyond the
 loopback address.
 
     with XtreamFixture() as xtream:

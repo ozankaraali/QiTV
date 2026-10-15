@@ -1,8 +1,8 @@
 """Welcome card: shown while no provider is configured (spec §8), centred over the video.
 
-The QiTV logo sits above the title. Its one control is the accent Add provider button, focused: a click on it, or Enter (OK on a
-remote, routed by the TV shell), emits `addRequested`, and the window opens provider setup.
-1 u = 1% of the overlay host's width.
+The QiTV logo sits above the title. Its one control is the accent Add provider button,
+focused: a click on it, or Enter (OK on a remote, routed by the TV shell), emits
+`addRequested`, and the window opens provider setup. 1 u = 1% of the overlay host's width.
 """
 
 from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, Signal

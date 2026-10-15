@@ -1,10 +1,11 @@
 import os
+import sys
 from types import SimpleNamespace
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, Qt, qInstallMessageHandler
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -23,6 +24,10 @@ from ui.overlays.drawer import (
 )
 
 PREVIEW_WAIT_MS = PREVIEW_DEBOUNCE_MS + 120
+_OFFSCREEN_NOISE = (
+    "This plugin does not support raise()",
+    "This plugin does not support setting window masks",
+)
 
 
 def make(live=None):
@@ -426,6 +431,20 @@ class HostedDrawerInputTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        previous = None
+
+        def quiet(mode, context, message):
+            # The offscreen platform has no window stacking or masks and says so on every
+            # raise_() and setMask() of the host: artefacts of the test platform.
+            if message in _OFFSCREEN_NOISE:
+                return
+            if previous is not None:
+                previous(mode, context, message)
+            else:
+                sys.stderr.write(f"{message}\n")
+
+        previous = qInstallMessageHandler(quiet)
+        cls.addClassCleanup(qInstallMessageHandler, previous)
 
     def setUp(self):
         self.catalog = FakeCatalog()

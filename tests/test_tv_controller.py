@@ -628,7 +628,18 @@ class ControllerTestCase(unittest.TestCase):
             now=lambda: NOW,
             **extra,
         )
-        self.addCleanup(controller.shutdown)  # late zap timers must not reach a dead overlay
+        live = extra.get("live")
+
+        def close():
+            controller.shutdown()  # late zap timers must not reach a dead overlay
+            # The fakes report the releases the shutdown waits for, so no capped wait
+            # (LiveTuner's input wait, the main stream's) outlives the test and logs later.
+            if self.session.holding:
+                self.session.let_go()
+            if live is not None:
+                live.released.emit()
+
+        self.addCleanup(close)
         return controller
 
     def overlays(self, column):
