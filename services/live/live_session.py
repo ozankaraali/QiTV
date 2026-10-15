@@ -49,9 +49,9 @@ stay-live cannot slow down to win buffer back; the nearest the target within sta
 band; else the nearest above it ("behind live" for a moment while stay-live catches up).
 
 Interruptions while playing from the pipeline:
-- VLC ended or failed: reopen at the position, or at the oldest buffered point with "Rewound
-  past the buffer" when the ring evicted it (after a long pause, say). Resuming from a pause
-  checks for that eviction first. Nothing is reopened once the session ended: playback runs
+- VLC ended or failed: reopen at the position, or 5 s past the oldest buffered point with
+  "Rewound past the buffer" (once until VLC plays again) when the ring evicted it (after a
+  long pause, say). Resuming from a pause checks for that eviction first. Nothing is reopened once the session ended: playback runs
   to the end of the buffer. Interruptions that do not reach playing again within
   `ready_timeout_ms` fall back.
 - `sessionFailed("disk")`: the helper went on in RAM without the history: a notice, then go
@@ -116,6 +116,7 @@ _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _JUMP_S = 1.0  # get_time deltas further than this from wall clock x rate are not trusted
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
+_REWIND_MARGIN_S = 5.0  # an evicted position reopens this far past the oldest point
 _EASE_BURSTS = 4  # how many bursts the step of a landing burst is eased in over
 _BELOW_TARGET_S = 0.25  # Go live never lands a mean lag further below the target
 _NUDGE_S = 0.75  # StayLive nudges the rate beyond the target plus this
@@ -228,6 +229,7 @@ class LiveSession(QObject):
         self._open_s = _OPEN_SEED_S  # VLC's open time, averaged over this object's opens
         self._opened_at: Optional[float] = None  # a pipeline play() not yet Playing
         self._ready_seen = False  # the session is ready: Stable may still wait for its cushion
+        self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
         # Bursty sources: (estimate, correction, when, position) at the last tick.
         self._smoothed: Optional[tuple[float, float, float, float]] = None
         self._wire_engine(engine, connect=True)
@@ -302,6 +304,7 @@ class LiveSession(QObject):
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
         self._edge_seen = self._smoothed = None
+        self._rewound = False
         self._base = self._elapsed = 0.0
         self._last_ms, self._last_wall = 0, self._clock()
         self._set_rate(1.0)  # every channel starts at normal speed
@@ -667,6 +670,8 @@ class LiveSession(QObject):
             took = min(self._clock() - self._opened_at, _OPEN_MAX_S)
             self._open_s += _OPEN_WEIGHT * (took - self._open_s)
             self._opened_at = None
+        if state == _PLAYING:
+            self._rewound = False
         if state in (_PLAYING, _PAUSED):
             self._failing_since = None
         if state == _PLAYING and self._paused:
@@ -957,16 +962,22 @@ class LiveSession(QObject):
         return True
 
     def _reopen_at_position(self) -> None:
-        """Reopen where playback was, or at the oldest buffered point when that is gone."""
+        """Reopen where playback was; when the ring evicted that, `_REWIND_MARGIN_S` past its
+        oldest point (the oldest segment itself may be evicted before VLC asks for it), with
+        "Rewound past the buffer" once until VLC plays again.
+        """
         assert self._sid is not None
         position = self._advance()
         start = self._buffer_start()
-        span = _locate(self._engine.spans(self._sid), max(position, start))
+        expired = position < start - _EXPIRED_S
+        at = start + _REWIND_MARGIN_S if expired else max(position, start)
+        span = _locate(self._engine.spans(self._sid), at)
         seq = span.seq if span is not None else self._oldest_seq()
         if seq is None or not self._open_at(seq):
             self._retry = _Retry.RESUME
             return
-        if position < start - _EXPIRED_S:
+        if expired and not self._rewound:
+            self._rewound = True
             self.notice.emit(REWOUND)
 
     def _gave_up(self) -> bool:

@@ -1251,18 +1251,23 @@ class PositionTests(LiveSessionCase):
 
 
 class InterruptionTests(LiveSessionCase):
-    def test_a_long_pause_past_the_ring_rewinds_to_the_oldest(self):
-        sid = self.ready(segments(0, 3), live_edge=6.0)
-        self.playback.set_state(PlaybackState.PLAYING)
-        self.step(1.0)
+    def pause_past_the_ring(self, sid):
+        """Pause for 5 minutes, while the ring moves on to 300-312 s."""
         self.live.toggle_pause()
         self.playback.set_state(PlaybackState.PAUSED)
         self.step(300.0, media=0)
-        self.engine.buffer(sid, segments(150, 3, start=300.0), live_edge=306.5)
+        self.engine.buffer(sid, segments(150, 6, start=300.0), live_edge=312.5)
+
+    def test_a_long_pause_past_the_ring_rewinds_a_margin_past_the_oldest(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(1.0)
+        self.pause_past_the_ring(sid)
         self.live.toggle_pause()
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 150))
+        # 5 s past the oldest point, so the next eviction does not beat VLC's request.
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 152))
         self.assertEqual(self.notices, [REWOUND])
-        self.assertEqual(self.live.position(), 300.0)
+        self.assertEqual(self.live.position(), 304.0)
         self.assertEqual(self.playback.paused, [True])  # reopened, not unpaused in place
         self.playback.set_state(PlaybackState.PLAYING)
         self.assertEqual(self.playback.paused, [True])
@@ -1275,15 +1280,45 @@ class InterruptionTests(LiveSessionCase):
         self.assertEqual(self.playback.paused, [True, False])
         self.assertEqual(len(self.playback.plays), 1)
 
-    def test_an_ended_stream_past_the_ring_reopens_at_the_oldest(self):
+    def test_an_ended_stream_past_the_ring_reopens_a_margin_past_the_oldest(self):
         sid = self.ready(segments(0, 3), live_edge=6.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(1.0)
-        self.engine.buffer(sid, segments(50, 3, start=100.0), live_edge=106.0)
+        self.engine.buffer(sid, segments(50, 6, start=100.0), live_edge=112.0)
         self.playback.set_state(PlaybackState.ENDED)
         self.playback.ended.emit()
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 50))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 52))
         self.assertEqual(self.notices, [REWOUND])
+
+    def test_a_short_ring_rewinds_to_its_newest_closed_segment_at_most(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(1.0)
+        self.engine.buffer(sid, segments(50, 2, start=100.0), live_edge=104.5)
+        self.playback.set_state(PlaybackState.ENDED)
+        self.playback.ended.emit()
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 51))
+
+    def test_a_rewind_is_said_once_per_resume(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(1.0)
+        self.pause_past_the_ring(sid)
+        self.live.toggle_pause()
+        # The ring moved on again before VLC's request: a 404, and the retry rewinds too.
+        self.engine.buffer(sid, segments(153, 6, start=306.0), live_edge=318.5)
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 155))
+        self.assertEqual(self.notices, [REWOUND])
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(1.0)
+        self.live.toggle_pause()  # a second long pause is news again
+        self.playback.set_state(PlaybackState.PAUSED)
+        self.step(300.0, media=0)
+        self.engine.buffer(sid, segments(300, 6, start=600.0), live_edge=612.5)
+        self.live.toggle_pause()
+        self.assertEqual(self.notices, [REWOUND, REWOUND])
 
     def test_an_error_inside_the_buffer_reopens_at_the_position(self):
         sid = self.ready(segments(0, 5), live_edge=10.5)
