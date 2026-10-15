@@ -1,9 +1,9 @@
 """Bounded segment rings for the live time-shift pipeline: RAM (default) and disk.
 
-One writer thread appends keyframe-aligned MPEG-TS segments; several reader threads
-read them progressively (including the still-open one), lease-free with `read_at` or
-under a lease, and wait for more data. Eviction removes the oldest *completed* segments first; the open segment
-and leased segments are never removed while in use. Error texts are fixed strings.
+One writer thread appends keyframe-aligned MPEG-TS segments; several reader threads read
+them progressively (including the still-open one) with `read_at`, which pins nothing, and
+wait on `changed` for more data. Eviction removes the oldest *completed* segments first;
+the open segment is never removed. Error texts are fixed strings.
 """
 
 from __future__ import annotations
@@ -47,12 +47,11 @@ class Segment:
     size: int = 0
     complete: bool = False
     retired: bool = False
-    readers: int = 0
     charge: int = 0
 
 
 class Ring(ABC):
-    """Shared eviction, lease and wakeup logic; subclasses own the storage."""
+    """Shared eviction and wakeup logic; subclasses own the storage."""
 
     _LIMIT_TEXT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 
@@ -63,8 +62,8 @@ class Ring(ABC):
         # Lock order: _disk_lock (storage operations) outside _state_lock (metadata).
         self._disk_lock = threading.Lock()
         self._state_lock = threading.RLock()
-        # While holding `changed` only wait/notify, the read-only properties and `lease`
-        # are safe; read/release/append/close take the disk lock first (lock order).
+        # While holding `changed` only wait/notify and the read-only properties are safe;
+        # read_at/append/close take the disk lock first (lock order).
         self.changed = threading.Condition(self._state_lock)
         self._segments: dict[int, Segment] = {}
         self._completed: deque[Segment] = deque()
@@ -223,8 +222,7 @@ class Ring(ABC):
             self.changed.notify_all()
 
     def _delete_locked(self, segment: Segment) -> None:
-        # Metadata is removed before the storage is freed so no new reader can
-        # acquire a lease between the two operations.
+        # Metadata is removed before the storage is freed, so no reader looks it up again.
         with self._state_lock:
             self._segments.pop(segment.seq, None)
         self._unlink(segment)
@@ -236,52 +234,9 @@ class Ring(ABC):
         with self._state_lock:
             segment = self._completed.popleft()
             segment.retired = True
-            delete = not segment.readers
-        if delete:
-            self._delete_locked(segment)
+        self._delete_locked(segment)
 
     # ---- reader side ------------------------------------------------------------------
-    def lease(self, seq: int) -> Segment | None:
-        """Lease a completed or open segment; None if absent, retired or closed.
-
-        None with `seq < oldest_seq` means evicted; otherwise it is not opened yet
-        (use `wait_for_seq`).
-        """
-        with self._state_lock:
-            segment = self._segments.get(seq)
-            if segment is None or segment.retired or self.closed:
-                return None
-            segment.readers += 1
-            return segment
-
-    def release(self, segment: Segment) -> None:
-        with self._disk_lock:
-            with self._state_lock:
-                segment.readers -= 1
-                delete = segment.retired and not segment.readers and not self.closed
-            if delete:
-                try:
-                    self._delete_locked(segment)
-                except OSError:
-                    # Freed (and its charge released) when the ring closes.
-                    _LOG.warning("A retired temporary segment could not be removed yet.")
-
-    def read(self, segment: Segment, offset: int, size: int) -> _Bytes:
-        """Return up to `size` bytes at `offset`, never beyond what was written."""
-        if size <= 0 or offset < 0:
-            return b""
-        with self._disk_lock:
-            if self.closed:
-                return b""
-            with self._state_lock:
-                size = min(size, segment.size - offset)
-            if size <= 0:
-                return b""
-            try:
-                return self._read(segment, offset, size)
-            except OSError, KeyError:
-                raise RingError(_READ_FAILED) from None
-
     def read_at(self, seq: int, offset: int, size: int) -> tuple[_Bytes, bool, int] | None:
         """Lease-free read: `(data, complete, header_len)`, or None if `seq` is absent,
         retired or the ring is closed.
@@ -305,14 +260,6 @@ class Ring(ABC):
                 return self._read(segment, offset, size), complete, header_len
             except OSError, KeyError:
                 raise RingError(_READ_FAILED) from None
-
-    def wait_for(self, segment: Segment, offset: int, timeout: float) -> bool:
-        def ready() -> bool:
-            return segment.size > offset or segment.complete or self.closed
-
-        with self.changed:
-            self.changed.wait_for(ready, timeout)
-            return ready()
 
     def wait_for_seq(self, seq: int, timeout: float) -> str:
         """Wait for segment `seq`: "open" (open or complete), "evicted", "closed", "timeout"."""

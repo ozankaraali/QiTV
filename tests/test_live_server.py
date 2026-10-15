@@ -326,9 +326,7 @@ class StreamServerTests(unittest.TestCase):
         for _ in range(SEGMENT // APPEND):
             writer.append(APPEND)
         server.add_session("slow", ring, lambda: False)
-        # Responses read with the lease-free read_at; a lease would pin the segment it reads.
-        lease = patch.object(ring, "lease", wraps=ring.lease).start()
-        self.addCleanup(patch.stopall)
+        # Responses read with read_at, which pins nothing (the ring has no leases any more).
         client = self.client(server.stream_url("slow", 0), rcvbuf=4096)
         self.assertEqual(client.status, 200)
         paused = time.monotonic()
@@ -355,7 +353,6 @@ class StreamServerTests(unittest.TestCase):
         self.assertTrue(client.eof)
         self.assertTrue(expected.startswith(body), "served bytes not in the original stream")
         self.assertLess(len(body), len(header(0)) + SEGMENT, "the reader was never blocked")
-        lease.assert_not_called()
 
     def test_paused_reader_is_cut_off_cleanly_and_never_blocks_the_ram_writer(self):
         self.check_paused_reader_falls_behind(RamRing(CAP), budget=0.5)

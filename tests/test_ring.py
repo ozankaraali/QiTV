@@ -15,7 +15,6 @@ from services.live.ring import (
     DiskRing,
     RamRing,
     RingError,
-    Segment,
     cleanup_session_dir,
     remove_stale_sessions,
 )
@@ -103,8 +102,8 @@ class RamRingTests(unittest.TestCase):
         self.assertLessEqual(ring.charged, 100)
         self.assertEqual(ring.newest_seq, 5)
         self.assertEqual(ring.oldest_seq, 4)
-        self.assertIsNone(ring.lease(0))
-        self.assertIsNotNone(ring.lease(5))
+        self.assertIsNone(ring.read_at(0, 0, 1))
+        self.assertIsNotNone(ring.read_at(5, 0, 1))
 
     def test_open_segment_never_evicted_and_oversize_raises(self):
         ring = RamRing(50)
@@ -126,85 +125,59 @@ class RamRingTests(unittest.TestCase):
         with self.assertRaisesRegex(RingError, "must be positive"):
             RamRing(0)
 
-    def test_leased_retired_segment_survives_until_release(self):
-        ring = RamRing(30)
-        ring.open_segment(0, b"")
-        ring.append(b"a" * 10)
-        ring.complete(0)
-        lease = ring.lease(0)
-        self.assertIsInstance(lease, Segment)
-        ring.open_segment(1, b"")
-        ring.append(b"b" * 10)
-        ring.complete(1)
-        ring.open_segment(2, b"")
-        ring.append(b"c" * 10)
-        ring.append(b"d" * 5)
-        self.assertTrue(lease.retired)
-        self.assertEqual(ring.read(lease, 0, 10), b"a" * 10)
-        self.assertEqual(ring.charged, 25)
-        ring.release(lease)
-        self.assertEqual(ring.charged, 15)
-        self.assertIsNone(ring.lease(0))
-
-    def test_open_segment_can_be_leased_and_read_progressively(self):
+    def test_open_segment_is_read_progressively(self):
         ring = RamRing(1000)
         ring.open_segment(0, b"HDR")
-        lease = ring.lease(0)
         ring.append(b"abc")
         ring.append(b"def")
-        self.assertEqual(ring.read(lease, 0, 100), b"HDRabcdef")
-        self.assertEqual(ring.read(lease, 2, 4), b"Rabc")
-        self.assertEqual(ring.read(lease, 9, 4), b"")
+        self.assertEqual(ring.read_at(0, 0, 100), (b"HDRabcdef", False, 3))
+        self.assertEqual(ring.read_at(0, 2, 4), (b"Rabc", False, 3))
+        self.assertEqual(ring.read_at(0, 9, 4), (b"", False, 3))
 
-    def test_wait_for_wakes_on_append_complete_and_close(self):
+    def test_changed_wakes_waiters_on_append_complete_and_close(self):
         ring = RamRing(1000)
         ring.open_segment(0, b"")
-        seg = ring.lease(0)
-        self.assertFalse(ring.wait_for(seg, 0, 0.05))
-        results = []
-
-        def waiter(offset):
-            results.append(ring.wait_for(seg, offset, 5))
-
-        for action, offset in (
-            (lambda: ring.append(b"x"), 0),
-            (lambda: ring.complete(0), 1),
+        for name, action, ready in (
+            ("append", lambda: ring.append(b"x"), lambda: ring.bytes > 0),
+            ("complete", lambda: ring.complete(0), lambda: ring.open_seq is None),
+            ("close", ring.close, lambda: ring.closed),
         ):
-            thread = threading.Thread(target=waiter, args=(offset,))
-            thread.start()
-            time.sleep(0.05)
-            action()
-            thread.join(2)
-            self.assertFalse(thread.is_alive())
-        self.assertEqual(results, [True, True])
-        ring2 = RamRing(1000)
-        ring2.open_segment(0, b"")
-        seg2 = ring2.lease(0)
-        thread = threading.Thread(target=lambda: results.append(ring2.wait_for(seg2, 0, 5)))
-        thread.start()
-        time.sleep(0.05)
-        ring2.close()
-        thread.join(2)
-        self.assertFalse(thread.is_alive())
-        self.assertTrue(results[-1])
+            with self.subTest(name):
+                woke = []
+
+                def waiter(ready=ready, woke=woke):
+                    with ring.changed:
+                        woke.append(ring.changed.wait_for(ready, 5))
+                    woke.append(time.monotonic())
+
+                thread = threading.Thread(target=waiter)
+                thread.start()
+                time.sleep(0.05)
+                acted = time.monotonic()
+                action()
+                thread.join(2)
+                self.assertFalse(thread.is_alive())
+                self.assertTrue(woke[0])
+                self.assertLess(woke[1] - acted, 1.0, "the waiter was not notified")
 
     def test_reads_across_appends_and_slow_reader_never_blocks_writer(self):
         ring = RamRing(10_000)
         ring.open_segment(0, b"")
-        seg = ring.lease(0)
         expected = bytearray()
         collected = bytearray()
-        done = threading.Event()
 
         def reader():
             offset = 0
-            while not done.is_set() or offset < seg.size:
-                if ring.wait_for(seg, offset, 0.05):
-                    chunk = ring.read(seg, offset, 7)
-                    offset += len(chunk)
-                    collected.extend(chunk)
-                    if seg.complete and not chunk:
-                        break
+            while True:
+                data, complete, _ = ring.read_at(0, offset, 7)
+                if data:
+                    offset += len(data)
+                    collected.extend(data)
+                elif complete:
+                    break
+                else:
+                    with ring.changed:
+                        ring.changed.wait(0.05)
 
         thread = threading.Thread(target=reader)
         thread.start()
@@ -213,14 +186,12 @@ class RamRingTests(unittest.TestCase):
             expected.extend(piece)
             ring.append(piece)
         ring.complete(0)
-        done.set()
         thread.join(5)
         self.assertEqual(bytes(collected), bytes(expected))
 
     def test_open_segment_auto_completes_previous_and_notifies_on_empty_header(self):
         ring = RamRing(1000)
         ring.open_segment(0, b"a")
-        first = ring.lease(0)
         woke = []
         thread = threading.Thread(target=lambda: woke.append(ring.wait_for_seq(1, 5)))
         thread.start()
@@ -228,7 +199,7 @@ class RamRingTests(unittest.TestCase):
         ring.open_segment(1, b"")
         thread.join(2)
         self.assertEqual(woke, ["open"])
-        self.assertTrue(first.complete)
+        self.assertEqual(ring.read_at(0, 0, 0), (b"", True, 1))  # complete
         self.assertEqual(ring.open_seq, 1)
 
     def test_wait_for_seq_open_evicted_closed_and_timeout(self):
@@ -240,7 +211,7 @@ class RamRingTests(unittest.TestCase):
         ring.append(b"b" * 10)
         ring.open_segment(2, b"")
         ring.append(b"c" * 15)
-        self.assertIsNone(ring.lease(0))
+        self.assertIsNone(ring.read_at(0, 0, 1))
         self.assertLess(0, ring.oldest_seq)
         self.assertEqual(ring.wait_for_seq(0, 0.02), "evicted")
         self.assertEqual(ring.wait_for_seq(2, 0.02), "open")
@@ -259,48 +230,13 @@ class RamRingTests(unittest.TestCase):
         with ring.changed:
             self.assertTrue(ring.changed.wait_for(lambda: ring.newest_seq is not None, 1))
 
-    def test_slow_reader_holding_lease_does_not_block_writer(self):
-        ring = RamRing(300)
-        ring.open_segment(0, b"")
-        ring.append(b"z" * 100)
-        ring.complete(0)
-        lease = ring.lease(0)
-        got = []
-
-        def slow():
-            got.append(ring.read(lease, 0, 100))
-            time.sleep(1.0)
-            got.append(ring.read(lease, 0, 100))
-            ring.release(lease)
-
-        thread = threading.Thread(target=slow)
-        thread.start()
-        time.sleep(0.05)
-        start = time.monotonic()
-        ring.open_segment(1, b"")
-        for _ in range(10):
-            ring.append(b"y" * 10)
-        ring.complete(1)
-        ring.open_segment(2, b"")
-        for _ in range(15):
-            ring.append(b"w" * 10)
-        self.assertLess(time.monotonic() - start, 0.3)
-        self.assertTrue(lease.retired)
-        self.assertIsNone(ring.lease(0))
-        thread.join(5)
-        self.assertEqual(got, [b"z" * 100, b"z" * 100])
-        self.assertLessEqual(ring.charged, 300)
-        self.assertEqual(ring.bytes, ring.charged)
-        self.assertNotIn(0, ring._segments)
-
     def test_create_failure_still_completes_and_notifies_previous(self):
         ring = RamRing(1000)
         ring.open_segment(0, b"a")
-        previous = ring.lease(0)
         with patch.object(ring, "_create", side_effect=OSError("x")):
             with self.assertRaises(RingError):
                 ring.open_segment(1, b"b")
-        self.assertTrue(previous.complete)
+        self.assertEqual(ring.read_at(0, 0, 0), (b"", True, 1))  # complete
         self.assertIsNone(ring.open_seq)
 
     def test_append_without_open_segment_and_after_close(self):
@@ -313,7 +249,7 @@ class RamRingTests(unittest.TestCase):
             ring.append(b"x")
         self.assertEqual(ring.charged, 0)
 
-    def test_read_at_returns_data_completion_and_header_length_without_a_lease(self):
+    def test_read_at_returns_data_completion_and_header_length(self):
         ring = RamRing(1000)
         ring.open_segment(0, b"hh")
         ring.append(b"abc")
@@ -324,25 +260,18 @@ class RamRingTests(unittest.TestCase):
         self.assertIsNone(ring.read_at(1, 0, 10))  # not opened yet
         ring.complete(0)
         self.assertEqual(ring.read_at(0, 4, 10), (b"c", True, 2))
-        segment = ring.lease(0)
-        self.assertEqual(segment.readers, 1)  # read_at took no lease
-        ring.release(segment)
 
-    def test_read_at_returns_none_for_retired_evicted_and_closed_segments(self):
+    def test_read_at_returns_none_for_evicted_and_closed_segments(self):
         ring = RamRing(25)
         ring.open_segment(0, b"")
         ring.append(b"a" * 10)
         ring.open_segment(1, b"")
         ring.append(b"b" * 10)
-        held = ring.lease(0)  # a legacy reader keeps segment 0 retired but stored
         ring.open_segment(2, b"")
         ring.append(b"c" * 10)
-        self.assertTrue(held.retired)
-        self.assertIsNone(ring.read_at(0, 0, 10))  # retired
-        self.assertIsNone(ring.read_at(1, 0, 10))  # evicted
-        self.assertEqual(ring.read(held, 0, 10), b"a" * 10)  # the legacy path still works
-        ring.release(held)
-        self.assertIsNone(ring.read_at(0, 0, 10))  # deleted
+        self.assertEqual(ring.charged, 20)  # an evicted segment is freed at once
+        self.assertIsNone(ring.read_at(0, 0, 10))  # evicted
+        self.assertEqual(ring.read_at(1, 0, 10), (b"b" * 10, True, 0))
         self.assertEqual(ring.read_at(2, 0, 10), (b"c" * 10, False, 0))
         ring.close()
         self.assertIsNone(ring.read_at(2, 0, 10))  # closed
@@ -376,7 +305,7 @@ class DiskRingTests(unittest.TestCase):
         self.rings.append(ring)
         return ring
 
-    def test_cap_counts_open_segment_disk_blocks_and_evicted_reader_lease(self):
+    def test_cap_counts_open_segment_disk_blocks_and_eviction_frees_at_once(self):
         ring = self.ring()
         unit = ring._unit
         ring._max_bytes = 3 * unit
@@ -385,31 +314,24 @@ class DiskRingTests(unittest.TestCase):
             return ring._directory / f"segment-{seq}.ts"
 
         ring.open_segment(0, bytes(unit))
-        first = ring.lease(0)
         ring.complete(0)
         ring.open_segment(1, bytes(unit))
         ring.complete(1)
-        second = ring._segments[1]
-        self.assertFalse(first.retired, "Age alone must not evict history that fits in the cache")
-        self.assertEqual(ring.oldest_seq, 0)
         ring.open_segment(2, bytes(unit))
-        current = ring._segments[2]
-        ring.append(b"x")
-        self.assertTrue(first.retired)
-        self.assertTrue(path(0).exists(), "leased bytes disappeared before reader closed")
-        self.assertFalse(path(1).exists())
-        self.assertTrue(second.retired)
+        self.assertEqual(ring.oldest_seq, 0, "Age alone must not evict history that fits")
+        ring.append(b"x")  # a second block for the open segment: the oldest goes
+        self.assertEqual(ring.oldest_seq, 1)
+        self.assertFalse(path(0).exists())
+        self.assertTrue(path(1).exists())
         self.assertEqual(ring.charged, 3 * unit)
         self.assertEqual(ring.bytes, 2 * unit + 1)
-        ring.release(first)
-        self.assertFalse(path(0).exists())
-        self.assertEqual(ring.bytes, unit + 1)
         before = path(2).stat().st_size
         with self.assertRaises(RingError):
-            ring.append(bytes(3 * unit))
+            ring.append(bytes(3 * unit))  # the open segment alone would pass the cap
         self.assertEqual(path(2).stat().st_size, before)
         self.assertLessEqual(ring.charged, ring._max_bytes)
-        self.assertEqual(current.size, unit + 1)
+        self.assertEqual(ring.read_at(2, 0, 0), (b"", False, unit))
+        self.assertEqual(ring.bytes, unit + 1)
         directory = ring._directory
         ring.close()
         self.assertFalse(directory.exists())
@@ -482,15 +404,12 @@ class DiskRingTests(unittest.TestCase):
     def test_read_across_appends_and_progressive_open_segment(self):
         ring = self.ring()
         ring.open_segment(0, b"HDR")
-        seg = ring.lease(0)
         ring.append(b"abc")
-        self.assertEqual(ring.read(seg, 0, 100), b"HDRabc")
+        self.assertEqual(ring.read_at(0, 0, 100), (b"HDRabc", False, 3))
         ring.append(b"def")
-        self.assertEqual(ring.read(seg, 4, 100), b"bcdef")
-        self.assertFalse(ring.wait_for(seg, 9, 0.05))
+        self.assertEqual(ring.read_at(0, 4, 100), (b"bcdef", False, 3))
         ring.complete(0)
-        self.assertTrue(ring.wait_for(seg, 9, 0.05))
-        ring.release(seg)
+        self.assertEqual(ring.read_at(0, 9, 100), (b"", True, 3))
 
     def test_teardown_leaves_nothing_behind(self):
         ring = self.ring()
@@ -517,16 +436,6 @@ class DiskRingTests(unittest.TestCase):
         (ring._directory / "segment-59.ts").unlink()
         with self.assertRaises(RingError) as caught:
             ring.read_at(59, 0, 3)
-        self.assertEqual(str(caught.exception), "The temporary buffer could not be read.")
-
-    def test_read_failure_raises_fixed_error(self):
-        ring = self.ring()
-        ring.open_segment(0, b"abc")
-        seg = ring.lease(0)
-        ring.complete(0)  # closes the writer handle so Windows can unlink
-        (ring._directory / "segment-0.ts").unlink()
-        with self.assertRaises(RingError) as caught:
-            ring.read(seg, 0, 3)
         self.assertEqual(str(caught.exception), "The temporary buffer could not be read.")
 
     def test_stop_aborts_manager_lock_wait(self):
@@ -557,24 +466,6 @@ class DiskRingTests(unittest.TestCase):
         )
         with self.assertRaises(RingError):
             ring.append(b"x")
-
-    def test_release_unlink_failure_is_logged_and_freed_at_close(self):
-        ring = self.ring()
-        unit = ring._unit
-        ring._max_bytes = 3 * unit
-        ring.open_segment(0, b"a")
-        ring.complete(0)
-        lease = ring.lease(0)
-        ring.open_segment(1, bytes(unit))
-        ring.open_segment(2, bytes(unit))
-        ring.append(b"b")
-        self.assertTrue(lease.retired)
-        with patch.object(ring, "_unlink", side_effect=OSError("busy")):
-            ring.release(lease)
-        directory = ring._directory
-        ring.close()
-        self.assertFalse(directory.exists())
-        self.assertEqual(ring.charged, 0)
 
     def test_remove_stale_sessions_sweeps_under_the_manager_lock(self):
         # Run once at startup, so a crashed run's buffers go even if no disk session starts.

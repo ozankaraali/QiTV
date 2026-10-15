@@ -715,6 +715,23 @@ class GeometryRestoreTests(WindowCase):
 class FitToAreaTests(unittest.TestCase):
     AREA = QRect(0, 25, 1024, 743)  # a 1024×768 display below the macOS menu bar
     TITLE = QMargins(0, 28, 0, 0)
+class OffScreenRestoreTests(WindowCase):
+    """A geometry saved on a monitor that is gone (Minor 13)."""
+
+    def prepare_config(self):
+        positions = self.config.config["window_positions"]
+        positions["tv_window"] = {"x": 5000, "y": 4000, "width": 640, "height": 400}
+
+    def test_the_restored_window_is_moved_onto_the_screen_at_startup(self):
+        self.show()
+        window = self.window
+        area = window.screen().availableGeometry()
+        self.assertTrue(
+            wait_until(lambda: area.contains(window.frameGeometry())), f"{window.geometry()}"
+        )
+        self.assertEqual(window.size().toTuple(), (640, 400))
+
+
 
     def test_a_window_that_fits_stays_put(self):
         rect = QRect(60, 103, 800, 450)
@@ -759,6 +776,22 @@ class FullscreenExitTests(WindowCase):
     def test_a_window_that_fits_comes_back_unchanged(self):
         self.show()
         window = self.window
+    def test_an_exit_the_window_did_not_ask_for_returns_to_the_geometry_from_before(self):
+        # The green button: the platform leaves fullscreen itself and may restore another
+        # frame (macOS 26 restored the size first asked for).
+        self.show()
+        window = self.window
+        area = window.screen().availableGeometry()
+        window.setGeometry(area.x() + 40, area.y() + 40, area.width() // 2, area.height() // 2)
+        before = window.geometry()
+        window.toggle_fullscreen()
+        self.assertTrue(wait_until(window.isFullScreen))
+        window.setWindowState(window.windowState() & ~Qt.WindowState.WindowFullScreen)
+        window.setGeometry(area.x(), area.y(), area.width() // 3, area.height() // 3)
+        self.assertTrue(
+            wait_until(lambda: window.geometry() == before, 4000), f"{window.geometry()}"
+        )
+
         area = window.screen().availableGeometry()
         window.setGeometry(area.x() + 40, area.y() + 40, area.width() // 2, area.height() // 2)
         before = window.geometry()
