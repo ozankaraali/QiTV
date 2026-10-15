@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import math
 from typing import Callable
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -146,6 +146,9 @@ class Transport(Overlay):
         self._clock.setInterval(30_000)
         self._clock.timeout.connect(self._tick)
         self._clock.start()
+        if parent is not None:
+            parent.installEventFilter(self)
+        self._fit()
         self.hide()
 
     # ---- public API ---------------------------------------------------------------------------
@@ -205,6 +208,7 @@ class Transport(Overlay):
         self.update()
 
     def poke(self) -> None:
+        self._fit()
         self.show()
         self.update()
         self._idle.start()
@@ -302,6 +306,18 @@ class Transport(Overlay):
         return ("Stay live", tail)
 
     # ---- geometry -----------------------------------------------------------------------------
+
+    def _fit(self) -> None:
+        """Cover the whole host, as the banner and toast lay themselves out from it."""
+        parent = self.parentWidget()
+        if parent is not None and self.geometry() != parent.rect():
+            self.setGeometry(parent.rect())
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        # Even while hidden: the next show then needs no layout pass.
+        if obj is self.parentWidget() and event.type() == QEvent.Type.Resize:
+            self._fit()
+        return False
 
     @staticmethod
     def _chip_font(un: Units) -> QFont:

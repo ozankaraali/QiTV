@@ -4,8 +4,9 @@
 
 The app runs in a child process: an isolated QITV_CONFIG_DIR, the local two-channel M3U
 fixture (tests/fixtures/local_provider.py), the real TVWindow and libVLC. The script drives it:
-drawer → play → zap, then the overlay host against the video surface after a move and resize,
-in and out of fullscreen and after a minimize, then a close and a clean exit.
+drawer → play → zap → the transport over the whole host, then the overlay host against the
+video surface after a move and resize, in and out of fullscreen and after a minimize, then a
+close and a clean exit.
 
 Every check is written to <out>/smoke.json as {"name", "ok", "detail"}; any failed check makes
 the exit code non-zero. The overlay gate (spec D4) passes only when every expected "overlay: …"
@@ -41,8 +42,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from PySide6 import __version__ as PYSIDE_VERSION  # noqa: E402
-from PySide6.QtCore import QPoint, QRect, Qt, QTimer, qVersion  # noqa: E402
-from PySide6.QtGui import QGuiApplication, QImage, QPainter  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer, qVersion  # noqa: E402
+from PySide6.QtGui import QGuiApplication, QImage, QMouseEvent, QPainter  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 import qdarktheme  # noqa: E402
@@ -63,7 +64,9 @@ from ui.tv_window import TVWindow, fit_to_area, frame_margins  # noqa: E402
 logger = logging.getLogger(__name__)
 
 REPORT = "smoke.json"
-SCREENSHOTS = ("01-drawer.png", "02-banner.png", "03-fullscreen.png")
+SCREENSHOTS = ("01-drawer.png", "02-banner.png", "02-transport.png", "03-fullscreen.png")
+TRANSPORT_SCREENSHOT = SCREENSHOTS[2]
+TRANSPORT_TIMEOUT_MS = 2_000
 VIDEO_SNAPSHOT = "02-video.png"
 VLC_LOG = "libvlc.log"  # libVLC's verbose log of the run (local fixture URLs only)
 DISPLAY_OPENED = 'using vout display module "'  # libVLC opened a video display (vout_display)
@@ -494,6 +497,21 @@ class Driver:
     def _key(self, key: Any) -> None:
         QTest.keyClick(self.window, key)
 
+    def _move_mouse(self) -> None:
+        """A mouse move over the middle of the video, sent to the surface (the real pointer
+        stays where it is)."""
+        surface = self.window.surface
+        local = QPointF(surface.width() / 2, surface.height() / 2)
+        event = QMouseEvent(
+            QEvent.Type.MouseMove,
+            local,
+            QPointF(surface.mapToGlobal(local)),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(surface, event)
+
     def _fitted(self, rect: QRect) -> QRect:
         """Where TVWindow returns a window from fullscreen: `rect` inside the work area."""
         w = self.window
@@ -664,6 +682,21 @@ class Driver:
                     shown, detail = True, f"informational on CI macOS: {video}"
             report.check("VLC shows the video in the surface", shown, detail)
 
+        # The transport: a mouse move over the playing video shows it over the whole host.
+        report.step("show the transport")
+        transport = w.overlays.transport
+        self._move_mouse()
+        shown = yield from self._wait(transport.isVisible, TRANSPORT_TIMEOUT_MS)
+        yield 200  # its first paint and the host's mask
+        host_rect = w.host.rect()
+        report.check(
+            "the transport covers the overlay host",
+            shown and w.host.isVisible() and transport.geometry() == host_rect,
+            f"transport {_rect(transport.geometry())} "
+            f"{'shown' if transport.isVisible() else 'hidden'}, host {_rect(host_rect)}",
+        )
+        self._capture(TRANSPORT_SCREENSHOT)
+
         # The window checks need overlays that hold still: pause (the clip would end and
         # toast) and open the drawer, which stays up until closed, then let the rest settle.
         report.step("pause and open the drawer")
@@ -698,7 +731,7 @@ class Driver:
         yield from self._settle(changed_at)
         report.check(WINDOW_CHANGES[1], entered, self._states())
         self._check_glued(GLUE_STEPS[2], changed_at, quiet)
-        self._capture(SCREENSHOTS[2])
+        self._capture(SCREENSHOTS[3])
 
         report.step("5. leave fullscreen")
         quiet = yield from self._quiet()

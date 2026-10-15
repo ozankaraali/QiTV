@@ -916,6 +916,50 @@ class RealOverlayTests(ControllerTestCase):
         self.assertFalse(overlays.drawer.isVisible())
 
 
+class BottomOverlayTests(ControllerTestCase):
+    """The banner and the full-host transport share the bottom: only one shows at a time."""
+
+    def setUp(self):
+        super().setUp()
+        self.host = QWidget()
+        self.addCleanup(self.host.close)
+        self.host.resize(1280, 720)
+        self.banner, self.transport = ZapBanner(self.host), Transport(self.host)
+        self.controller = self.make_controller(self.column)
+        self.host.show()
+        self.controller.start()
+
+    def test_the_transport_replaces_the_banner_and_a_zap_replaces_the_transport(self):
+        self.play(0)
+        self.assertTrue(self.banner.isVisible())
+        self.controller.mouse_moved()
+        self.assertTrue(self.transport.isVisible())
+        self.assertEqual(self.transport.geometry(), self.host.rect())
+        self.assertFalse(self.banner.isVisible())
+        self.clock.now += 5
+        self.controller.handle(Action.CH_NEXT)  # a zap announces the new channel instead
+        self.assertTrue(self.banner.isVisible())
+        self.assertFalse(self.transport.isVisible())
+
+    def test_a_media_key_zap_keeps_the_transport(self):
+        self.play(0)
+        self.clock.now += 5
+        self.controller.handle(Action.MEDIA_NEXT)
+        self.assertTrue(self.transport.isVisible())
+        self.assertFalse(self.banner.isVisible())
+
+    def test_number_entry_keeps_the_banner(self):
+        self.play(0)
+        self.controller.mouse_moved()
+        self.assertTrue(self.transport.isVisible())
+        self.controller.handle(Action.DIGIT, "2")
+        self.assertTrue(self.banner.isVisible())
+        self.assertFalse(self.transport.isVisible())
+        self.controller.mouse_moved()
+        self.assertTrue(self.banner.isVisible())
+        self.assertFalse(self.transport.isVisible())
+
+
 class ReviewFixTests(ControllerTestCase):
     """Fix round 1: findings from the review of the first controller."""
 

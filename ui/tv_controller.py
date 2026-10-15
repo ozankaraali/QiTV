@@ -347,7 +347,7 @@ class TVController(QObject):
             self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
         self.overlays.column.close()
         self._channel = channel
-        self.overlays.banner.show_info(self.banner_info(channel))
+        self._show_banner(channel)
         if stay:
             # The channel already playing was chosen again: never restart it, and drop a
             # pending choice when it settles (the "stay" marker is the playing target).
@@ -658,6 +658,8 @@ class TVController(QObject):
     def _on_digits(self, text: str) -> None:
         self._digits = text
         if not self._closed:
+            if text:
+                self.overlays.transport.dismiss()
             self.overlays.banner.show_digits(text)
 
     def _on_number_not_found(self, number: str) -> None:
@@ -825,7 +827,12 @@ class TVController(QObject):
             return
         channel = self._channel or self.zap.context.current()
         if channel is not None:
-            self.overlays.banner.show_info(self.banner_info(channel))
+            self._show_banner(channel)
+
+    def _show_banner(self, channel: dict) -> None:
+        """Announce `channel`; the banner and the transport share the bottom of the video."""
+        self.overlays.transport.dismiss()
+        self.overlays.banner.show_info(self.banner_info(channel))
 
     def _seek(self, delta_ms: int) -> None:
         if self.session.is_seekable():
@@ -838,6 +845,9 @@ class TVController(QObject):
         target = self._current
         if target is None or not self._has_media() or self.overlays.drawer.isVisible():
             return
+        if self._digits:
+            return  # the banner shows the number being typed
+        self.overlays.banner.dismiss()
         if target.live and not self.overlays.transport.isVisible():
             self._show_live_transport(target)
         else:

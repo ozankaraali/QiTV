@@ -3,9 +3,9 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from ui.overlays.transport import Transport
 
@@ -170,6 +170,47 @@ class TransportCase(unittest.TestCase):
         self.assertTrue(mask.contains(QPoint(640, 10)))
         self.assertTrue(mask.contains(QPoint(640, 700)))
         self.assertFalse(mask.contains(QPoint(640, 360)))
+
+
+class HostSizingTests(unittest.TestCase):
+    """The transport fills its host, as the banner and toast lay themselves out from it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def host(self, width=1280, height=720):
+        host = QWidget()
+        host.resize(width, height)
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        return host
+
+    def test_fills_its_host_from_the_start(self):
+        host = self.host()
+        transport = Transport(host)
+        self.assertEqual(transport.geometry(), host.rect())
+
+    def test_fills_its_host_on_show_and_after_every_resize(self):
+        host = self.host()
+        transport = Transport(host)
+        host.show()
+        transport.show_vod("Film", "")
+        self.assertEqual(transport.geometry(), host.rect())
+        host.resize(1600, 900)
+        self.assertEqual(transport.geometry(), QRect(0, 0, 1600, 900))
+        transport.dismiss()
+        host.resize(960, 540)  # while hidden too: the next show needs no layout pass
+        self.assertEqual(transport.geometry(), QRect(0, 0, 960, 540))
+        transport.poke()
+        self.assertEqual(transport.geometry(), host.rect())
+
+    def test_a_host_resized_before_it_was_ever_shown_is_followed_on_show(self):
+        host = self.host(400, 300)
+        transport = Transport(host)
+        host.resize(1280, 720)  # pending until the host shows
+        transport.show_live("News", "")
+        self.assertEqual(transport.geometry(), QRect(0, 0, 1280, 720))
 
 
 if __name__ == "__main__":

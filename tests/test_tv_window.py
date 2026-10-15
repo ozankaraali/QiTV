@@ -217,6 +217,20 @@ class TVWindowTests(WindowCase):
         self.close_window()
         self.assertFalse(timer.isActive())
 
+    def test_the_transport_covers_the_overlay_host(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertFalse(drawer.isVisible())
+        host, transport = self.window.host, self.window.overlays.transport
+        transport.show_vod("Film", "")
+        self.assertTrue(wait_until(host.isVisible))
+        self.assertEqual(host.size(), self.window.surface.size())
+        self.assertEqual(transport.geometry(), host.rect())
+        self.window.resize(self.window.width() - 120, self.window.height() - 80)
+        self.assertTrue(wait_until(lambda: host.size() == self.window.surface.size()))
+        self.assertEqual(transport.geometry(), host.rect())
+
     def test_video_is_not_bound_without_native_window_ids(self):
         # libVLC crashes drawing into the offscreen platform's fake window ids.
         with mock.patch.object(self.window.session, "set_window") as set_window:
