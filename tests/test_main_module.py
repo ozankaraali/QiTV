@@ -36,6 +36,21 @@ class MainModuleTests(unittest.TestCase):
         )
         self.assertEqual(first, "multiprocessing.freeze_support()")
 
+    def test_the_smoke_test_runs_only_with_its_flag_and_variable(self):
+        # The packaged apps' CI smoke test: release users never start it by accident.
+        import main
+
+        argv = ["qitv", "--smoke", "--out", "smoke-frozen", "--pipeline"]
+        self.assertEqual(
+            main.smoke_arguments(argv, {"QITV_SMOKE": "1"}), ["--out", "smoke-frozen", "--pipeline"]
+        )
+        self.assertIsNone(main.smoke_arguments(argv, {}))
+        self.assertIsNone(main.smoke_arguments(argv, {"QITV_SMOKE": "0"}))
+        self.assertIsNone(
+            main.smoke_arguments(["qitv", "--out", "x", "--smoke"], {"QITV_SMOKE": "1"})
+        )
+        self.assertIsNone(main.smoke_arguments(["qitv"], {"QITV_SMOKE": "1"}))
+
     def test_the_frozen_apps_bundle_the_live_helper(self):
         # The helper process is spawned from the bundle; its source imports these lazily.
         wanted = {"services.live.worker", "m3u8", "Cryptodome.Cipher.AES"}

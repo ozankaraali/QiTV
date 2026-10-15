@@ -3,6 +3,10 @@
 Used by the TV window tests, the TV smoke script and manual runs, always inside a temporary
 QITV_CONFIG_DIR. Set QITV_CONFIG_DIR, call write_local_provider(dir), then build the managers
 and call seed_channels(provider_manager, provider) before the window starts.
+
+`fixture_dir` is where smoke.mp4 is (the packaged app has no fixtures of its own: the smoke
+test passes the checkout's). With `live_url`, a third channel plays that live stream (the
+smoke test's `tests/fixtures/live_source.LiveSource`); pass the same values to both calls.
 """
 
 from __future__ import annotations
@@ -18,13 +22,17 @@ PROVIDER_NAME = "Local fixture"
 GROUP = "Fixture"
 
 
-def channel_urls() -> list[str]:
+def channel_urls(fixture_dir: str | os.PathLike = FIXTURE_DIR) -> list[str]:
     """Two file:// URLs of the same clip; they differ, so a zap changes the played URL."""
-    return [SMOKE_MP4.as_uri(), f"{FIXTURE_DIR.as_uri()}/./{SMOKE_MP4.name}"]
+    directory = Path(fixture_dir).resolve()
+    return [(directory / SMOKE_MP4.name).as_uri(), f"{directory.as_uri()}/./{SMOKE_MP4.name}"]
 
 
-def channels() -> list[dict]:
+def channels(
+    fixture_dir: str | os.PathLike = FIXTURE_DIR, live_url: Optional[str] = None
+) -> list[dict]:
     """The playlist's entries as the M3U parser would store them."""
+    urls = channel_urls(fixture_dir) + ([live_url] if live_url else [])
     return [
         {
             "id": number,
@@ -37,12 +45,16 @@ def channels() -> list[dict]:
             "tv_genre_id": GROUP,
             "number": str(number),
         }
-        for number, url in enumerate(channel_urls(), start=1)
+        for number, url in enumerate(urls, start=1)
     ]
 
 
 def write_local_provider(
-    config_dir: str | os.PathLike, providers: Optional[list[dict]] = None
+    config_dir: str | os.PathLike,
+    providers: Optional[list[dict]] = None,
+    *,
+    fixture_dir: str | os.PathLike = FIXTURE_DIR,
+    live_url: Optional[str] = None,
 ) -> dict:
     """Write the playlist, config.json and cache/provider/index.json under `config_dir`.
 
@@ -53,7 +65,7 @@ def write_local_provider(
     root.mkdir(parents=True, exist_ok=True)
     playlist = root / "fixture.m3u"
     lines = ["#EXTM3U"]
-    for channel in channels():
+    for channel in channels(fixture_dir, live_url):
         lines += [f'#EXTINF:-1 group-title="{GROUP}",{channel["name"]}', channel["cmd"]]
     playlist.write_text("\n".join(lines) + "\n", encoding="utf-8")
     provider = {"type": "M3UPLAYLIST", "name": PROVIDER_NAME, "url": str(playlist)}
@@ -66,19 +78,26 @@ def write_local_provider(
     return provider
 
 
-def seed_channels(provider_manager, provider: dict) -> None:
+def seed_channels(
+    provider_manager,
+    provider: dict,
+    *,
+    fixture_dir: str | os.PathLike = FIXTURE_DIR,
+    live_url: Optional[str] = None,
+) -> None:
     """Store channels() as the provider's fresh live content (written by the cache writer).
 
     The M3U parser keeps only http(s) entries, so the file:// playlist alone loads no
     channels. The cached content stands in for the parsed playlist; it stays fresh for
     ProviderManager.CONTENT_CACHE_TTL.
     """
+    contents = channels(fixture_dir, live_url)
     provider_manager.current_provider = provider
     provider_manager.current_provider_content = {
         "itv": {
             "categories": [{"id": "*", "title": "All"}, {"id": GROUP, "title": GROUP}],
-            "contents": channels(),
-            "sorted_channels": {GROUP: [0, 1]},
+            "contents": contents,
+            "sorted_channels": {GROUP: list(range(len(contents)))},
         }
     }
     provider_manager.mark_content_fresh("itv")

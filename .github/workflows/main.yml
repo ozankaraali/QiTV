@@ -45,9 +45,9 @@ jobs:
               echo "openbox did not start"
               exit 1
             fi
-            uv run python scripts/smoke_tv.py --out smoke-out
+            uv run python scripts/smoke_tv.py --out smoke-out --pipeline
           '
-        timeout-minutes: 5
+        timeout-minutes: 8
         env:
           QT_QPA_PLATFORM: xcb
       - name: Upload smoke results
@@ -60,6 +60,33 @@ jobs:
         run: uv run pyinstaller qitv-linux.spec
       - name: Rename binary
         run: mv dist/qitv dist/qitv-linux
+      - name: Smoke test the packaged app
+        # The same scenario through main.py's --smoke entry: the live helper must spawn from
+        # the bundle. The fixtures come from the checkout; the app has none.
+        run: |
+          xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
+            openbox &
+            xcompmgr &
+            for i in $(seq 50); do
+              xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break
+              sleep 0.2
+            done
+            if ! xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id"; then
+              echo "openbox did not start"
+              exit 1
+            fi
+            dist/qitv-linux --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
+          '
+        timeout-minutes: 8
+        env:
+          QT_QPA_PLATFORM: xcb
+          QITV_SMOKE: '1'
+      - name: Upload packaged smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-frozen-linux
+          path: smoke-frozen/
       - name: Upload Linux artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -107,8 +134,8 @@ jobs:
           QT_QPA_FONTDIR: C:\Windows\Fonts
       - name: Smoke test
         if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        run: uv run python scripts/smoke_tv.py --out smoke-out
-        timeout-minutes: 5
+        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline
+        timeout-minutes: 8
       - name: Upload smoke results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -119,6 +146,26 @@ jobs:
         run: uv run pyinstaller qitv-windows.spec
       - name: Rename binary
         run: ren dist\qitv.exe qitv-windows.exe
+      - name: Smoke test the packaged app
+        # A windowed app: the shell would not wait for it, and it has no console (its logs
+        # are in smoke-frozen). Its exit code is the smoke test's.
+        shell: pwsh
+        run: |
+          $smoke = Start-Process -FilePath dist\qitv-windows.exe -PassThru -ArgumentList @(
+            "--smoke", "--out", "$PWD\smoke-frozen", "--pipeline", "--fixtures", "$PWD\tests\fixtures")
+          $null = $smoke.Handle  # keeps the exit code readable once it exits
+          $smoke.WaitForExit()
+          Get-Content -Path smoke-frozen\runner.log -ErrorAction SilentlyContinue
+          exit $smoke.ExitCode
+        timeout-minutes: 8
+        env:
+          QITV_SMOKE: '1'
+      - name: Upload packaged smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-frozen-windows
+          path: smoke-frozen/
       - name: Upload Windows artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -158,8 +205,8 @@ jobs:
           QT_QPA_PLATFORM: offscreen
       - name: Smoke test
         if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        run: uv run python scripts/smoke_tv.py --out smoke-out
-        timeout-minutes: 5
+        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline
+        timeout-minutes: 8
       - name: Upload smoke results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -170,6 +217,19 @@ jobs:
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         run: codesign --force --deep --sign - dist/qitv.app
+      - name: Smoke test the packaged app
+        # The same scenario through main.py's --smoke entry: the live helper must spawn from
+        # the bundle. The fixtures come from the checkout; the app has none.
+        run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
+        timeout-minutes: 8
+        env:
+          QITV_SMOKE: '1'
+      - name: Upload packaged smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-frozen-macos-arm
+          path: smoke-frozen/
       - name: Zip macOS App
         run: cd dist && zip -r qitv-macos-universal.zip qitv.app
       - name: Upload macOS artifact
@@ -211,8 +271,8 @@ jobs:
           QT_QPA_PLATFORM: offscreen
       - name: Smoke test
         if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        run: uv run python scripts/smoke_tv.py --out smoke-out
-        timeout-minutes: 5
+        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline
+        timeout-minutes: 8
       - name: Upload smoke results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -223,6 +283,19 @@ jobs:
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         run: codesign --force --deep --sign - dist/qitv.app
+      - name: Smoke test the packaged app
+        # The same scenario through main.py's --smoke entry: the live helper must spawn from
+        # the bundle. The fixtures come from the checkout; the app has none.
+        run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
+        timeout-minutes: 8
+        env:
+          QITV_SMOKE: '1'
+      - name: Upload packaged smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-frozen-macos-intel
+          path: smoke-frozen/
       - name: Zip macOS App
         run: cd dist && zip -r qitv-macos-intel.zip qitv.app
       - name: Upload macOS artifact

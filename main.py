@@ -13,8 +13,11 @@ import platform
 import shutil
 import sys
 import time
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence
 import warnings
+
+SMOKE_FLAG = "--smoke"
+SMOKE_ENV = "QITV_SMOKE"
 
 
 def qt_platform_override(system: str, environ: Mapping[str, str]) -> Optional[str]:
@@ -25,6 +28,17 @@ def qt_platform_override(system: str, environ: Mapping[str, str]) -> Optional[st
     """
     if system == "Linux" and not environ.get("QT_QPA_PLATFORM") and environ.get("DISPLAY"):
         return "xcb;wayland"
+    return None
+
+
+def smoke_arguments(argv: Sequence[str], environ: Mapping[str, str]) -> Optional[list[str]]:
+    """The smoke test's arguments when this run is one, else None (start the app).
+
+    `qitv --smoke <args>` runs scripts/smoke_tv.py inside the packaged app (CI's frozen smoke
+    test), and only with QITV_SMOKE=1 set: without it, release users get the app as usual.
+    """
+    if environ.get(SMOKE_ENV) == "1" and list(argv[1:2]) == [SMOKE_FLAG]:
+        return list(argv[2:])
     return None
 
 
@@ -144,4 +158,9 @@ def main() -> int:
 if __name__ == "__main__":
     # First: a frozen build's helper process stops here instead of starting the app.
     multiprocessing.freeze_support()
+    smoke = smoke_arguments(sys.argv, os.environ)
+    if smoke is not None:
+        from scripts.smoke_tv import main as smoke_main
+
+        sys.exit(smoke_main(smoke))
     sys.exit(main())

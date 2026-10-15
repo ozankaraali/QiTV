@@ -1,20 +1,33 @@
 """Smoke test of the TV window with real libVLC on the local fixture provider (spec §11).
 
-    uv run python scripts/smoke_tv.py --out smoke-out [--seconds 3]
+    uv run python scripts/smoke_tv.py --out smoke-out [--seconds 3] [--pipeline]
+    QITV_SMOKE=1 <packaged app> --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
 
-The app runs in a child process: an isolated QITV_CONFIG_DIR, the local two-channel M3U
-fixture (tests/fixtures/local_provider.py), the real TVWindow and libVLC. The script drives it:
+The app runs in a child process: an isolated QITV_CONFIG_DIR, the local M3U fixture
+(tests/fixtures/local_provider.py), the real TVWindow and libVLC. The script drives it:
 drawer → play → zap → the transport over the whole host, then the overlay host against the
 video surface after a move and resize, in and out of fullscreen and after a minimize, then a
-close and a clean exit.
+close and a clean exit. In the packaged app, main.py's `--smoke` entry runs this script (the
+parent and the child are the app itself); the fixtures come from the checkout (`--fixtures`).
+
+`--pipeline` adds the live time-shift pipeline before the close. This script serves
+tests/fixtures/live.ts on 127.0.0.1 as an endless real-time channel (live_source.LiveSource),
+Channel 3 of the playlist, and the app has time-shift consent (its buffer on disk). Down zaps
+to it: it must play from the loopback stream; a 4 s pause leaves it at least 3 s behind live;
+L (Go live) brings the lag under the target + 1.5 s within 6 s; ← moves the position back
+8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live; after the close no
+helper process and nothing in the timeshift directory remain. Lags and positions are the
+LiveSession timeline's (`timelineChanged`), not VLC's.
 
 Every check is written to <out>/smoke.json as {"name", "ok", "detail"}; any failed check makes
 the exit code non-zero. The overlay gate (spec D4) passes only when every expected "overlay: …"
 check and every window change they rely on is present and passed; a platform that fails it
-gets the Qt-drawn frame fallback. Screenshots are the overlay host's grab() composited over
-black (OS capture needs permissions), plus a libVLC snapshot of the video. Nothing here touches
-the network: Python-level lookups and connections beyond this machine are refused and recorded
-as a failure.
+gets the Qt-drawn frame fallback. With --pipeline, the pipeline gate likewise needs every
+"pipeline: …" check present and passed. Screenshots are the overlay host's grab() composited
+over black (OS capture needs permissions), plus libVLC snapshots of the video. Nothing here
+touches the network: Python-level lookups and connections beyond this machine are refused and
+recorded as a failure. Logs go to <out>/runner.log and <out>/app.log as well (the Windows app
+has no console).
 """
 
 from __future__ import annotations
@@ -30,12 +43,14 @@ import logging
 import os
 from pathlib import Path
 import platform
+import re
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 from typing import Any, Callable, Generator, Optional
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -54,7 +69,10 @@ from image_manager import ImageManager  # noqa: E402
 from provider_manager import ProviderManager  # noqa: E402
 from services import playback, thread_cleanup  # noqa: E402
 from services.playback import VLC_LOG_ENV, PlaybackSession, PlaybackState  # noqa: E402
+from services.vlc_profile import PlayKind  # noqa: E402
+from tests.fixtures.live_source import LIVE_TS, LiveSource  # noqa: E402
 from tests.fixtures.local_provider import (  # noqa: E402
+    FIXTURE_DIR,
     channel_urls,
     seed_channels,
     write_local_provider,
@@ -107,6 +125,54 @@ WINDOW_CHANGES = (
     "the window restores",
 )
 SCENARIO_CHECK = "the smoke scenario runs to the end"
+
+RUNNER_LOG = "runner.log"
+APP_LOG = "app.log"
+FAULTS = "faults.txt"  # Python stacks of a hang or crash when there is no stderr (Windows app)
+
+# ---- the live time-shift pipeline (--pipeline) ----
+PIPELINE_PREFIX = "pipeline: "
+PIPELINE_SCREENSHOTS = ("04-timeshift.png", "05-catching-up.png")
+PIPELINE_VIDEO = "04-video.png"
+PIPELINE_BUDGET_S = 150.0  # what the pipeline phase may add before the hang dump
+LIVE_CHANNEL = "Channel 3"
+LIVE_PLAY_TIMEOUT_MS = 20_000  # the release of Channel 2, up to 6 s for ready, VLC's open
+WARM_UP_MS = 1_000  # play this long before the pause
+PAUSE_MS = 4_000
+PAUSED_LAG_S = 3.0
+STATE_CHANGE_MS = 3_000  # for VLC to pause or play again
+FRESH_TIMELINE_MS = 2_000  # LiveSession emits its timeline every 250 ms
+GO_LIVE_MS = 6_000
+GO_LIVE_MARGIN_S = 1.5
+HISTORY_S = 14.0  # buffered behind the position before the seek: 10 s back stays inside it
+HISTORY_TIMEOUT_MS = 20_000
+SEEK_BACK = (8.0, 12.0)  # seconds the position may move back for ← (10 s, segment-aligned)
+SPEED = 1.5
+SPEED_TIMEOUT_MS = 3_000
+CATCH_UP_TIMEOUT_MS = 60_000  # at 1.5x the lag shrinks by only 0.5 s a second
+RATE_TOLERANCE = 0.01
+
+TUNED_CHECK = f"{PIPELINE_PREFIX}{LIVE_CHANNEL} plays from the loopback time-shift stream"
+ON_DISK_CHECK = f"{PIPELINE_PREFIX}its buffer is on disk in the timeshift directory"
+PAUSE_CHECK = f"{PIPELINE_PREFIX}a 4 s pause leaves it at least 3 s behind live"
+GO_LIVE_CHECK = f"{PIPELINE_PREFIX}Go live brings the lag under the target + 1.5 s within 6 s"
+SEEK_CHECK = f"{PIPELINE_PREFIX}seeking back 10 s moves the position back 8-12 s"
+SPEED_CHECK = f"{PIPELINE_PREFIX}1.5x is applied while time-shifted"
+LIVE_AGAIN_CHECK = f"{PIPELINE_PREFIX}the speed returns to 1x once back at live"
+NO_HELPER_CHECK = f"{PIPELINE_PREFIX}no live helper process remains after the close"
+EMPTY_DIR_CHECK = f"{PIPELINE_PREFIX}the timeshift directory is empty after the close"
+PIPELINE_CHECKS = (
+    TUNED_CHECK,
+    ON_DISK_CHECK,
+    PAUSE_CHECK,
+    GO_LIVE_CHECK,
+    SEEK_CHECK,
+    SPEED_CHECK,
+    LIVE_AGAIN_CHECK,
+    NO_HELPER_CHECK,
+    EMPTY_DIR_CHECK,
+)
+_STREAM_PATH = re.compile(r"/[^/]+/[^/]+(/stream/[0-9]+\.ts)$")  # /<token>/<session>/stream/…
 
 
 def glue_check(when: str) -> str:
@@ -169,7 +235,7 @@ class Report:
         os.replace(temporary, self.path)
 
 
-def _summarize(data: dict[str, Any]) -> None:
+def _summarize(data: dict[str, Any], pipeline: bool) -> None:
     outcome = {c["name"]: c["ok"] for c in data["checks"]}
     failed = [name for name, ok in outcome.items() if not ok]
     qt_platform = (data.get("environment") or {}).get("qt_platform")
@@ -183,8 +249,18 @@ def _summarize(data: dict[str, Any]) -> None:
         "failed": gate_failed,
         "missing": missing,
     }
+    gates = [data["overlay_gate"]]
+    if pipeline:
+        data["pipeline_gate"] = {
+            "ok": False,
+            "failed": [n for n in failed if n.startswith(PIPELINE_PREFIX)],
+            "missing": [n for n in PIPELINE_CHECKS if n not in outcome],
+        }
+        gate = data["pipeline_gate"]
+        gate["ok"] = not gate["failed"] and not gate["missing"]
+        gates.append(gate)
     data["failed"] = failed
-    data["ok"] = not failed and data["overlay_gate"]["ok"]
+    data["ok"] = not failed and all(gate["ok"] for gate in gates)
 
 
 # ---- the parent: runs the app and judges its exit ---------------------------------------------
@@ -212,35 +288,53 @@ def _native_stack(pid: int, out: Path) -> Optional[str]:
     return path.name if path.exists() else None
 
 
-def run_smoke(out: Path, seconds: float) -> int:
-    out.mkdir(parents=True, exist_ok=True)
-    for name in (REPORT, *SCREENSHOTS, VIDEO_SNAPSHOT, HANG_STACK, VLC_LOG):
+def _frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _child_command(args: list[str]) -> list[str]:
+    """The app under test: this script again, or the packaged app's `--smoke` entry."""
+    if _frozen():
+        return [sys.executable, "--smoke", *args]  # main.py; QITV_SMOKE=1 is inherited
+    return [sys.executable, "-X", "faulthandler", str(Path(__file__).resolve()), *args]
+
+
+def _hang_budget(seconds: float, pipeline: bool) -> float:
+    """Seconds after which the app dumps its Python stacks (it keeps going)."""
+    return HANG_DUMP_S + seconds + (PIPELINE_BUDGET_S if pipeline else 0.0)
+
+
+def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
+    stale = (*SCREENSHOTS, *PIPELINE_SCREENSHOTS, VIDEO_SNAPSHOT, PIPELINE_VIDEO, FAULTS)
+    for name in (REPORT, *stale, HANG_STACK, VLC_LOG):
         (out / name).unlink(missing_ok=True)
-    limit = HANG_DUMP_S + seconds + KILL_GRACE_S
-    command = [
-        sys.executable,
-        "-X",
-        "faulthandler",
-        str(Path(__file__).resolve()),
-        "--child",
-        "--out",
-        str(out),
-        "--seconds",
-        str(seconds),
-    ]
+    limit = _hang_budget(seconds, pipeline) + KILL_GRACE_S
+    args = ["--child", "--out", str(out), "--seconds", str(seconds), "--fixtures", str(fixtures)]
+    source = LiveSource(fixtures / LIVE_TS.name) if pipeline else None
+    if source is not None:
+        args += ["--live-url", source.url]
+        logger.info("Serving %s at %s", LIVE_TS.name, source.url)
     hang_stack = None
-    with tempfile.TemporaryDirectory(prefix="qitv-smoke-", ignore_cleanup_errors=True) as config:
-        env = dict(os.environ, QITV_CONFIG_DIR=config)
-        env[VLC_LOG_ENV] = str(out / VLC_LOG)
-        process = subprocess.Popen(command, cwd=ROOT, env=env)
-        try:
-            code: Optional[int] = process.wait(timeout=limit)
-        except subprocess.TimeoutExpired:
-            hang_stack = _native_stack(process.pid, out)
-            process.kill()
-            process.wait()
-            code = None
-        exited_at = time.time()
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="qitv-smoke-", ignore_cleanup_errors=True
+        ) as config:
+            env = dict(os.environ, QITV_CONFIG_DIR=config)
+            env[VLC_LOG_ENV] = str(out / VLC_LOG)
+            process = subprocess.Popen(
+                _child_command(args), cwd=None if _frozen() else ROOT, env=env
+            )
+            try:
+                code: Optional[int] = process.wait(timeout=limit)
+            except subprocess.TimeoutExpired:
+                hang_stack = _native_stack(process.pid, out)
+                process.kill()
+                process.wait()
+                code = None
+            exited_at = time.time()
+    finally:
+        if source is not None:
+            source.close()
 
     report = Report(out / REPORT)
     try:
@@ -262,17 +356,25 @@ def run_smoke(out: Path, seconds: float) -> int:
     else:
         elapsed = exited_at - close_at
         report.check(within, elapsed <= EXIT_LIMIT_S, f"{elapsed:.1f} s")
-    _summarize(report.data)
+    if source is not None:
+        report.data.setdefault("pipeline", {})["source_connections"] = source.connections
+    report.data["frozen"] = _frozen()
+    _summarize(report.data, pipeline)
     report.save()
-    gate = report.data["overlay_gate"]
+    gates = [("overlay", report.data["overlay_gate"])]
+    if pipeline:
+        gates.append(("pipeline", report.data["pipeline_gate"]))
     logger.info(
-        "Smoke %s: %d checks, %d failed%s; overlay gate %s%s. Report: %s",
+        "Smoke %s: %d checks, %d failed%s; %s. Report: %s",
         "passed" if report.data["ok"] else "FAILED",
         len(report.data["checks"]),
         len(report.data["failed"]),
         f" ({'; '.join(report.data['failed'])})" if report.data["failed"] else "",
-        "passed" if gate["ok"] else "FAILED",
-        f" (missing: {'; '.join(gate['missing'])})" if gate["missing"] else "",
+        "; ".join(
+            f"{name} gate {'passed' if gate['ok'] else 'FAILED'}"
+            + (f" (missing: {'; '.join(gate['missing'])})" if gate["missing"] else "")
+            for name, gate in gates
+        ),
         out / REPORT,
     )
     return 0 if report.data["ok"] else 1
@@ -330,6 +432,55 @@ def _no_display_reason(log: Path) -> Optional[str]:
         and ("error" in line or "fail" in line.lower() or "cannot" in line or "no " in line)
     ]
     return "libVLC never opened a video display: " + (" | ".join(lines[:5]) or "no error logged")
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether process `pid` still runs; a zombie (exited, not yet reaped) does not."""
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenProcess(0x1000, 0, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: someone else's process
+        try:
+            code = ctypes.c_uint32()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        stat = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+    except OSError, subprocess.SubprocessError:
+        return True
+    return bool(stat) and not stat.startswith("Z")
+
+
+def _entries(directory: Optional[str]) -> list[str]:
+    """What `directory` holds (none when it does not exist)."""
+    if not directory or not os.path.isdir(directory):
+        return []
+    return sorted(os.listdir(directory))
+
+
+def _redacted(url: Optional[str]) -> str:
+    """A loopback stream URL without its token and session id."""
+    if not url:
+        return str(url)
+    parts = urlsplit(url)
+    path = _STREAM_PATH.sub(r"/…\1", parts.path)
+    return f"{parts.scheme}://{parts.netloc}{path}"
 
 
 def _rect(rect: Any) -> list[int]:
@@ -403,23 +554,34 @@ class Resyncs:
         return [f"{at - moment:+.2f}s {shown}" for at, shown in self.calls if at >= moment]
 
 
-def run_app(out: Path, seconds: float) -> int:
+def run_app(out: Path, seconds: float, fixtures: Path, live_url: Optional[str]) -> int:
     """Start the TV window over the fixture provider and drive it; returns app.exec()'s code."""
-    faulthandler.dump_traceback_later(HANG_DUMP_S + seconds)  # a hang shows where; keeps going
+    # The packaged app has no -X faulthandler, and the Windows one no stderr.
+    faults = sys.stderr if sys.stderr is not None else open(out / FAULTS, "w", encoding="utf-8")
+    faulthandler.enable(file=faults)
+    budget = _hang_budget(seconds, live_url is not None)
+    faulthandler.dump_traceback_later(budget, file=faults)  # a hang shows where; keeps going
     attempts: list[str] = []
     _refuse_network(attempts)
     report = Report(out / REPORT)
     report.data.update(seconds=seconds, screenshots={}, video={})
+    if live_url is not None:
+        report.data["pipeline"] = {"source_url": live_url}  # a local fixture: no credentials
     report.step("start the app")
 
     config_dir = os.environ["QITV_CONFIG_DIR"]
-    provider = write_local_provider(config_dir)
+    provider = write_local_provider(config_dir, fixture_dir=fixtures, live_url=live_url)
     app = QApplication([sys.argv[0]])
     config = ConfigManager()
+    if live_url is not None:
+        # Time-shift consent: the buffer goes to disk, so the empty directory at the end
+        # shows that it was cleaned up (the smallest size the setting allows).
+        config.timeshift_enabled = True
+        config.timeshift_max_mib = 256
     images = ImageManager(config, config.max_cache_image_size * 1024 * 1024)
     providers = ProviderManager(config)
     epg = EpgManager(config, providers)
-    seed_channels(providers, provider)
+    seed_channels(providers, provider, fixture_dir=fixtures, live_url=live_url)
     qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})  # as main.py does
 
     screen = QGuiApplication.primaryScreen()
@@ -440,7 +602,7 @@ def run_app(out: Path, seconds: float) -> int:
     logger.info("Environment: %s", report.data["environment"])
 
     window = TVWindow(app, config, providers, images, epg)
-    driver = Driver(window, report, out, seconds)
+    driver = Driver(window, report, out, seconds, fixtures, live_url)
     window.show()
     QTimer.singleShot(0, driver.start)
     code = app.exec()
@@ -452,13 +614,24 @@ def run_app(out: Path, seconds: float) -> int:
 class Driver:
     """Runs the scenario as a generator: each yield is the delay in ms before the next step."""
 
-    def __init__(self, window: Any, report: Report, out: Path, seconds: float) -> None:
+    def __init__(
+        self,
+        window: Any,
+        report: Report,
+        out: Path,
+        seconds: float,
+        fixtures: Path,
+        live_url: Optional[str],
+    ) -> None:
         self.window = window
         self.report = report
         self.out = out
         self.seconds = seconds
+        self.fixtures = fixtures
+        self.live_url = live_url
         self.cocoa = QGuiApplication.platformName() == "cocoa"
         self.resyncs = Resyncs(window.host)
+        self.timeline: list[tuple[float, dict[str, Any]]] = []  # (when, LiveSession state)
         self.finished = False
         self.problem = ""
         self._steps = self._scenario()
@@ -601,7 +774,7 @@ class Driver:
             return None
         return getattr(session, "_player", None)
 
-    def _video_facts(self) -> Optional[dict[str, Any]]:
+    def _video_facts(self, snapshot: str = VIDEO_SNAPSHOT) -> Optional[dict[str, Any]]:
         """The video output's facts; None while a worker still owns the player."""
         if getattr(self.window.session, "_player", None) is None:  # no libVLC
             return {"vout": 0}
@@ -613,9 +786,9 @@ class Driver:
             facts["size"] = list(player.video_get_size(0))
         except Exception as e:
             facts["size"] = repr(e)
-        path = self.out / VIDEO_SNAPSHOT
+        path = self.out / snapshot
         facts["snapshot"] = (
-            VIDEO_SNAPSHOT
+            snapshot
             if player.video_take_snapshot(0, str(path), 0, 0) == 0 and path.exists()
             else None
         )
@@ -626,7 +799,7 @@ class Driver:
     def _scenario(self) -> Generator[int, None, None]:
         w, report = self.window, self.report
         drawer, banner, session = w.overlays.drawer, w.overlays.banner, w.session
-        first, second = channel_urls()
+        first, second = channel_urls(self.fixtures)
         report.check("libVLC is available", isinstance(session, PlaybackSession))
         w.raise_()
         w.activateWindow()
@@ -798,9 +971,200 @@ class Driver:
         report.check(WINDOW_CHANGES[4], restored, self._states())
         self._check_glued(GLUE_STEPS[4], changed_at, quiet)
 
-        # 6. Close; the parent judges the exit code and time.
+        if self.live_url is not None:
+            yield from self._pipeline()
+
+        # 6. Close; the parent judges the exit code and time, after_exit the helper and buffer.
         report.step("6. close")
         self._close()
+
+    # ---- the live time-shift pipeline (--pipeline) --------------------------------------------
+
+    def _pipeline(self) -> Generator[int, None, None]:
+        """Channel 3 through the time-shift pipeline; the close after it is the last step."""
+        w, report = self.window, self.report
+        live, engine, session = w.live_session, w.engine, w.session
+        facts = report.data["pipeline"]
+        if live is None or engine is None:
+            report.check(TUNED_CHECK, False, "no time-shift pipeline: libVLC is unavailable")
+            return
+        facts["timeshift_dir"] = str(engine.root_dir)
+        live.timelineChanged.connect(self._on_timeline)
+
+        # 1-2. Down zaps from Channel 2 to Channel 3, the paced live source: it plays from
+        # the loopback stream once the pipeline session is ready.
+        report.step("pipeline 1. tune Channel 3")
+        self._key(Qt.Key.Key_Escape)  # close the drawer: Down zaps again
+        yield from self._wait(lambda: not w.overlays.drawer.isVisible(), 2000)
+        self._key(Qt.Key.Key_Down)
+        tuned = yield from self._wait(self._pipeline_playing, LIVE_PLAY_TIMEOUT_MS)
+        report.check(TUNED_CHECK, tuned, self._stream_facts())
+        if not tuned:
+            return  # the checks still missing fail the pipeline gate
+        facts["helper_pid"] = self._helper_pid()
+        buffers = [n for n in _entries(facts["timeshift_dir"]) if n.startswith(".qitv-timeshift-")]
+        report.check(ON_DISK_CHECK, bool(buffers), f"{facts['timeshift_dir']}: {buffers}")
+        yield WARM_UP_MS
+        facts["video"] = self._video_facts(PIPELINE_VIDEO)  # inspection only, no check
+        report.save()
+
+        # 3. Pause for 4 s, then resume: it plays on time-shifted, at least 3 s behind.
+        report.step("pipeline 3. pause and resume")
+        self._key(Qt.Key.Key_Space)
+        paused = yield from self._wait(
+            lambda: session.state() is PlaybackState.PAUSED, STATE_CHANGE_MS
+        )
+        yield PAUSE_MS
+        self._key(Qt.Key.Key_Space)
+        playing = yield from self._wait(
+            lambda: session.state() is PlaybackState.PLAYING, STATE_CHANGE_MS
+        )
+        state = yield from self._fresh(time.monotonic(), lambda s: not s["paused"])
+        report.check(
+            PAUSE_CHECK,
+            paused and playing and state is not None and state["lag"] >= PAUSED_LAG_S,
+            f"VLC paused {paused}, playing again {playing}; {self._describe(state)}",
+        )
+        self._capture(PIPELINE_SCREENSHOTS[0])  # Space shows the transport: the time-shift bar
+
+        # 4. Go live (L): the lag comes back under the target + 1.5 s within 6 s.
+        report.step("pipeline 4. Go live")
+        pressed = time.monotonic()
+        self._key(Qt.Key.Key_L)
+        state = yield from self._fresh(
+            pressed, lambda s: s["lag"] < s["target"] + GO_LIVE_MARGIN_S, GO_LIVE_MS
+        )
+        report.check(
+            GO_LIVE_CHECK,
+            state is not None,
+            f"{self._describe(state)}; lags since L: {self._lags_since(pressed)}",
+        )
+
+        # 5. Seek back 10 s (←): the position moves back 8-12 s (segments are about 2 s).
+        report.step("pipeline 5. seek back 10 s")
+        buffered = yield from self._wait(lambda: self._history() >= HISTORY_S, HISTORY_TIMEOUT_MS)
+        before = yield from self._fresh(time.monotonic())
+        pressed = time.monotonic()
+        self._key(Qt.Key.Key_Left)
+        after = yield from self._fresh(pressed)
+        low, high = SEEK_BACK
+        moved = None if before is None or after is None else before["position"] - after["position"]
+        report.check(
+            SEEK_CHECK,
+            moved is not None and low <= moved <= high,
+            f"moved back {moved if moved is None else round(moved, 2)} s: before "
+            f"{self._describe(before)}; after {self._describe(after)}"
+            + ("" if buffered else f"; less than {HISTORY_S:g} s was buffered behind it"),
+        )
+
+        # 6. 1.5x while time-shifted (the transport's speed chip): applied, then back to 1x
+        # once stay-live reaches live. Catching up gains only 0.5 s a second.
+        report.step("pipeline 6. 1.5x speed")
+        yield from self._wait(lambda: session.state() is PlaybackState.PLAYING, STATE_CHANGE_MS)
+        requested = time.monotonic()
+        w.overlays.transport.speedRequested.emit(SPEED)
+        state = yield from self._fresh(
+            requested, lambda s: s["rate"] == SPEED and s["mode"] == "catching_up", SPEED_TIMEOUT_MS
+        )
+        vlc_rate = yield from self._vlc_rate(SPEED)
+        report.check(
+            SPEED_CHECK,
+            state is not None and vlc_rate is not None and abs(vlc_rate - SPEED) < RATE_TOLERANCE,
+            f"VLC rate {vlc_rate}; {self._describe(state)}",
+        )
+        self._move_mouse()
+        yield from self._wait(w.overlays.transport.isVisible, TRANSPORT_TIMEOUT_MS)
+        yield 200
+        self._capture(PIPELINE_SCREENSHOTS[1])
+
+        report.step("pipeline 6. back at live")
+        state = yield from self._fresh(
+            requested, lambda s: s["mode"] == "live" and s["rate"] == 1.0, CATCH_UP_TIMEOUT_MS
+        )
+        took = time.monotonic() - requested
+        vlc_rate = yield from self._vlc_rate(1.0)
+        report.check(
+            LIVE_AGAIN_CHECK,
+            state is not None and vlc_rate is not None and abs(vlc_rate - 1.0) < RATE_TOLERANCE,
+            f"after {took:.1f} s: VLC rate {vlc_rate}; {self._describe(state)}",
+        )
+
+    def _on_timeline(self, state: dict) -> None:
+        self.timeline.append((time.monotonic(), dict(state)))
+
+    def _fresh(
+        self,
+        since: float,
+        predicate: Callable[[dict[str, Any]], bool] = lambda _state: True,
+        timeout_ms: int = FRESH_TIMELINE_MS,
+    ) -> Generator[int, None, Optional[dict[str, Any]]]:
+        """The first timeline state emitted after `since` that satisfies `predicate`."""
+        found: list[dict[str, Any]] = []
+
+        def seen() -> bool:
+            for at, state in self.timeline:
+                if at > since and predicate(state):
+                    found.append(state)
+                    return True
+            return False
+
+        yield from self._wait(seen, timeout_ms)
+        return found[0] if found else None
+
+    def _history(self) -> float:
+        """Seconds buffered behind the latest position."""
+        if not self.timeline:
+            return 0.0
+        state = self.timeline[-1][1]
+        return float(state["position"]) - float(state["start"])
+
+    def _lags_since(self, moment: float) -> list[float]:
+        return [round(float(s["lag"]), 3) for at, s in self.timeline if at > moment][:30]
+
+    @staticmethod
+    def _describe(state: Optional[dict[str, Any]]) -> str:
+        if state is None:
+            return "no such timeline state"
+        keys = ("mode", "rate", "paused", "lag", "target", "position", "start", "live_edge")
+        return ", ".join(
+            f"{k} {round(state[k], 3) if isinstance(state[k], float) else state[k]}" for k in keys
+        )
+
+    def _pipeline_playing(self) -> bool:
+        live, session = self.window.live_session, self.window.session
+        url = session.url or ""
+        return (
+            live.is_pipeline()
+            and session.kind is PlayKind.LIVE_PIPELINE
+            and urlsplit(url).hostname == "127.0.0.1"
+            and _STREAM_PATH.search(urlsplit(url).path) is not None
+            and session.state() is PlaybackState.PLAYING
+        )
+
+    def _stream_facts(self) -> str:
+        live, session = self.window.live_session, self.window.session
+        return (
+            f"mode {live.mode!r}, {session.state().value} {session.kind} from "
+            f"{_redacted(session.url)}"
+        )
+
+    def _helper_pid(self) -> Optional[int]:
+        """The live helper's pid: the engine keeps it private, so it is read here only."""
+        supervisor = getattr(self.window.engine, "_supervisor", None)
+        return getattr(getattr(supervisor, "_process", None), "pid", None)
+
+    def _vlc_rate(self, expected: float) -> Generator[int, None, Optional[float]]:
+        """libVLC's playback rate once it is `expected` (or after a few seconds)."""
+        rates: list[float] = []
+
+        def read() -> bool:
+            player = self._player()
+            if player is not None:
+                rates.append(float(player.get_rate()))
+            return bool(rates) and abs(rates[-1] - expected) < RATE_TOLERANCE
+
+        yield from self._wait(read, SPEED_TIMEOUT_MS)
+        return rates[-1] if rates else None
 
     def _close(self) -> None:
         self.report.data["close_requested_at"] = time.time()
@@ -825,20 +1189,39 @@ class Driver:
         report.check(
             "no background threads are pending", not thread_cleanup.has_pending_threads(), pending
         )
+        if self.live_url is not None:
+            self._after_pipeline()
         shots = report.data["screenshots"]
-        report.check(
-            "the screenshots are saved", all(shots.get(name) for name in SCREENSHOTS), shots
-        )
+        expected = SCREENSHOTS + (PIPELINE_SCREENSHOTS if self.live_url is not None else ())
+        report.check("the screenshots are saved", all(shots.get(name) for name in expected), shots)
         report.check("nothing touches the network", not attempts, attempts)
         report.data["overlay_shows_and_hides"] = len(self.resyncs.calls)
         report.save()
+
+    def _after_pipeline(self) -> None:
+        """Step 7: the close stopped the live helper and removed its buffer."""
+        report, facts = self.report, self.report.data["pipeline"]
+        pid = facts.get("helper_pid")
+        if pid is None:
+            report.check(NO_HELPER_CHECK, False, "the helper's pid was never recorded")
+        else:
+            alive = _process_alive(pid)
+            report.check(NO_HELPER_CHECK, not alive, f"pid {pid} {'runs' if alive else 'is gone'}")
+        directory = facts.get("timeshift_dir")
+        left = _entries(directory)
+        report.check(
+            EMPTY_DIR_CHECK,
+            directory is not None and not left,
+            f"{directory}: {left}" if directory else "the pipeline never ran",
+        )
+        facts["timeline_states"] = len(self.timeline)
 
 
 # ---- entry point ------------------------------------------------------------------------------
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--out", required=True, help="directory for smoke.json and screenshots")
     parser.add_argument(
         "--seconds",
@@ -846,14 +1229,42 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=DEFAULT_SECONDS,
         help="how long to watch Channel 2 play after the zap, at least 1 (default: %(default)s)",
     )
-    parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    parser.add_argument(
+        "--pipeline",
+        action="store_true",
+        help="also play a live channel through the time-shift pipeline",
     )
+    parser.add_argument(
+        "--fixtures",
+        help="the directory with smoke.mp4 and live.ts (required in the packaged app, which "
+        "has none; default: the checkout's tests/fixtures)",
+    )
+    parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--live-url", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if args.fixtures is None and _frozen():
+        parser.error("--fixtures is required in the packaged app")
     out = Path(args.out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    handlers: list[logging.Handler] = [
+        logging.FileHandler(out / (APP_LOG if args.child else RUNNER_LOG), "w", encoding="utf-8")
+    ]
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=handlers,
+    )
+    fixtures = Path(args.fixtures or FIXTURE_DIR).resolve()
     seconds = max(MIN_SECONDS, args.seconds)
-    return run_app(out, seconds) if args.child else run_smoke(out, seconds)
+    if args.child:
+        return run_app(out, seconds, fixtures, args.live_url)
+    try:
+        return run_smoke(out, seconds, fixtures, args.pipeline)
+    except Exception:
+        logger.exception("The smoke test could not run")
+        return 2
 
 
 if __name__ == "__main__":
