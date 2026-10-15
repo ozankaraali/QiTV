@@ -551,6 +551,40 @@ class PlayerJobTests(unittest.TestCase):
         self.assertEqual(self.opened(), [A])
         self.assertIs(self.session.state(), PlaybackState.IDLE)
 
+    def test_input_ended_follows_the_stop_once_the_worker_let_go(self):
+        ended = []
+        self.session.inputEnded.connect(lambda: ended.append(True))
+        self.assertFalse(self.session.holds_input())
+        self.play(A)
+        self.assertTrue(self.session.holds_input())  # its provider connection may be open
+        self.session.stop()
+        self.assertTrue(self.session.holds_input())
+        self.assertEqual(ended, [])  # the worker still ends the input
+        self.runner.finish()
+        self.assertFalse(self.session.holds_input())
+        self.assertEqual(ended, [True])
+
+    def test_input_ended_waits_for_a_stop_owed_after_a_zap(self):
+        ended = []
+        self.session.inputEnded.connect(lambda: ended.append(True))
+        self.play(A)
+        self.play(B)
+        self.session.stop()
+        self.runner.finish()  # the zap's join: the stop is still owed
+        self.assertEqual(ended, [])
+        self.assertTrue(self.session.holds_input())
+        self.runner.finish()
+        self.assertEqual(ended, [True])
+
+    def test_a_zap_that_opens_the_next_input_does_not_report_an_end(self):
+        ended = []
+        self.session.inputEnded.connect(lambda: ended.append(True))
+        self.play(A)
+        self.play(B)
+        self.runner.finish()
+        self.assertEqual(ended, [])
+        self.assertTrue(self.session.holds_input())
+
     def test_release_during_a_pending_join_stops_then_releases_off_the_gui_thread(self):
         self.play(A)
         self.play(B)

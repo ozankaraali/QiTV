@@ -113,6 +113,9 @@ class PlaybackSession(QObject):
     errorOccurred = Signal(str)
     ended = Signal()
     seekableChanged = Signal(bool)
+    # libVLC let go of its input after a stop: the stream's connection is closed. Only
+    # while holds_input() is True after a stop() does one follow.
+    inputEnded = Signal()
 
     def __init__(
         self,
@@ -198,6 +201,10 @@ class PlaybackSession(QObject):
         if not self._player_free():
             return False
         return bool(self._player.is_seekable())
+
+    def holds_input(self) -> bool:
+        """libVLC holds an input, or a worker still ends one: its connection may be open."""
+        return self._has_input or self._job is not None
 
     # --- output -----------------------------------------------------------------------
     def set_window(self, win_id: int) -> None:
@@ -307,6 +314,8 @@ class PlaybackSession(QObject):
         elif self._stop_owed:
             self._stop_owed = False
             self._run_job(_Job.STOP)
+        if not self._released and not self.holds_input():
+            self.inputEnded.emit()
 
     def _cancel_pending(self) -> None:
         """Cancel delayed work (audio restore, restart) belonging to the old media."""
@@ -539,6 +548,7 @@ class Session(Protocol):
     errorOccurred: Any
     ended: Any
     seekableChanged: Any
+    inputEnded: Any
 
     @property
     def url(self) -> Optional[str]: ...
@@ -553,6 +563,8 @@ class Session(Protocol):
     def length_ms(self) -> int: ...
 
     def is_seekable(self) -> bool: ...
+
+    def holds_input(self) -> bool: ...
 
     def set_window(self, win_id: int) -> None: ...
 
@@ -603,6 +615,7 @@ class NullSession(QObject):
     errorOccurred = Signal(str)
     ended = Signal()
     seekableChanged = Signal(bool)
+    inputEnded = Signal()
 
     @property
     def url(self) -> Optional[str]:
@@ -622,6 +635,9 @@ class NullSession(QObject):
         return 0
 
     def is_seekable(self) -> bool:
+        return False
+
+    def holds_input(self) -> bool:
         return False
 
     def set_window(self, win_id: int) -> None:
