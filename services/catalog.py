@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 SECTION_CONTENT_TYPES = {"live": "itv", "movies": "vod", "series": "series"}
 ALL_GROUP_ID = "*"
+NO_SERIES_MESSAGE = "This provider has no series"
 
 
 def normalize_seasons(series_name: str, items: list[dict]) -> list[dict]:
@@ -225,6 +226,8 @@ class CatalogService(QObject):
         self._setup_running = False
         self._pending_setup: Optional[tuple[Optional[str], bool]] = None
         self._pending_groups: set[tuple[int, str, str]] = set()
+        self._pending_seasons: set[tuple[int, str]] = set()
+        self._pending_episodes: set[tuple[int, str, str]] = set()
         self._link_ids = itertools.count(1)
 
     # --- providers -------------------------------------------------------------------
@@ -246,6 +249,8 @@ class CatalogService(QObject):
         self._generation += 1
         self._epg_ready = False
         self._pending_groups.clear()
+        self._pending_seasons.clear()
+        self._pending_episodes.clear()
         if self._setup_running:
             self._pending_setup = (name, force_refresh)
             return
@@ -486,8 +491,12 @@ class CatalogService(QObject):
 
     # --- series -----------------------------------------------------------------------
     def _series_cache(self) -> dict:
-        content = self.provider_manager.current_provider_content.setdefault("series", {})
-        return content if isinstance(content, dict) else {}
+        contents = self.provider_manager.current_provider_content
+        content = contents.setdefault("series", {})
+        if not isinstance(content, dict):
+            logger.debug("Replacing non-dict series content %r", type(content))
+            content = contents["series"] = {}
+        return content
 
     def seasons(self, series: dict) -> Optional[list[dict]]:
         cached = self._series_cache().get("seasons", {}).get(str(series.get("id")))
@@ -497,6 +506,14 @@ class CatalogService(QObject):
         if self.seasons(series) is not None:
             self._emit_later(self.seasonsReady, str(series.get("id")))
             return
+        series_id = str(series.get("id"))
+        if self.provider_type() not in ("XTREAM", "STB"):
+            self._emit_later(self.seasonsFailed, series_id, NO_SERIES_MESSAGE)
+            return
+        key = (self._generation, series_id)
+        if key in self._pending_seasons:
+            return
+        self._pending_seasons.add(key)
         provider = self.current_provider()
         verify = provider.get("ssl_verify", self.config.ssl_verify)
         https = provider_prefers_https(provider, self.config.prefer_https)
@@ -525,6 +542,7 @@ class CatalogService(QObject):
         self._start(worker, "seasons", series, self._on_seasons_loaded, self._on_seasons_error)
 
     def _on_seasons_loaded(self, job, payload) -> None:
+        self._pending_seasons.discard((job[1], str(job[2].get("id"))))
         if not self._current(job):
             return
         series = job[2]
@@ -538,6 +556,7 @@ class CatalogService(QObject):
         self.seasonsReady.emit(str(series.get("id")))
 
     def _on_seasons_error(self, job, message: str) -> None:
+        self._pending_seasons.discard((job[1], str(job[2].get("id"))))
         if self._current(job):
             self.seasonsFailed.emit(str(job[2].get("id")), message)
 
@@ -563,6 +582,14 @@ class CatalogService(QObject):
         if self.episodes(series, season) is not None:
             self._emit_later(self.episodesReady, str(series.get("id")), str(season.get("id")))
             return
+        series_id, season_id = str(series.get("id")), str(season.get("id"))
+        if self.provider_type() != "STB":
+            self._emit_later(self.episodesFailed, series_id, season_id, NO_SERIES_MESSAGE)
+            return
+        key = (self._generation, series_id, season_id)
+        if key in self._pending_episodes:
+            return
+        self._pending_episodes.add(key)
         provider = self.current_provider()
         worker = self.factory.stb_list(
             url=stb_endpoint(
@@ -585,9 +612,10 @@ class CatalogService(QObject):
         )
 
     def _on_episodes_loaded(self, job, payload) -> None:
+        series, season = job[2]
+        self._pending_episodes.discard((job[1], str(series.get("id")), str(season.get("id"))))
         if not self._current(job):
             return
-        series, season = job[2]
         season_id = str(season.get("id"))
         selected = next(
             (item for item in payload.get("items") or [] if str(item.get("id")) == season_id),
@@ -611,14 +639,18 @@ class CatalogService(QObject):
         self.episodesReady.emit(str(series.get("id")), season_id)
 
     def _on_episodes_error(self, job, message: str) -> None:
+        series, season = job[2]
+        self._pending_episodes.discard((job[1], str(series.get("id")), str(season.get("id"))))
         if self._current(job):
-            series, season = job[2]
             self.episodesFailed.emit(str(series.get("id")), str(season.get("id")), message)
 
     # --- links ------------------------------------------------------------------------
     def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
         """Resolve a playable URL. STB portals mint a fresh link; others play `cmd` directly."""
         request_id = next(self._link_ids)
+        if section not in SECTION_CONTENT_TYPES:
+            self._emit_later(self.linkFailed, request_id, f"Unknown section: {section}")
+            return request_id
         if self.provider_type() != "STB":
             url = str(item.get("cmd") or "").strip()
             if url:
