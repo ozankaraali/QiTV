@@ -67,9 +67,12 @@ class ZapContext:
         return index, self.channels[index]
 
     @staticmethod
-    def _number(channel: dict) -> str:
+    def number_of(channel: dict) -> str:
+        """A channel's number as text ("" when it has none)."""
         value = channel.get("number")
         return "" if value is None else str(value).strip()
+
+    _number = number_of  # the earlier private name
 
     def by_number(self, text: str) -> Optional[dict]:
         """The channel with this number in the group, else in the fallback list."""
@@ -84,10 +87,10 @@ class ZapContext:
     def _find_number(cls, channels: list[dict], wanted: int) -> Optional[dict]:
         # Compared numerically ("0" matches "00"); with duplicates the first channel wins.
         for channel in channels:
-            number = cls._number(channel)
+            number = cls.number_of(channel)
             if number.isdecimal() and int(number) == wanted:
                 return channel
-        if not any(cls._number(c) for c in channels):
+        if not any(cls.number_of(c) for c in channels):
             if 1 <= wanted <= len(channels):  # nothing is numbered: list positions stand in
                 return channels[wanted - 1]
         return None
@@ -174,9 +177,17 @@ class ZapController(QObject):
             else:
                 self.close_column()
 
-    def _request(self, channel: dict) -> None:
+    def note_request(self, channel: dict) -> None:
+        """Record a tune the shell started itself (drawer pick, autotune, column click).
+
+        It becomes the current target, as if this controller had asked for it, without
+        emitting tuneRequested: the next step() moves on from it.
+        """
         self._target = channel
         self._pending = [*self._pending, channel][-3:]
+
+    def _request(self, channel: dict) -> None:
+        self.note_request(channel)
         self.tuneRequested.emit(channel)
 
     def step(self, delta: int) -> None:
@@ -224,6 +235,12 @@ class ZapController(QObject):
         self._digits += d
         self.digitsChanged.emit(self._digits)
         self._digit_timer.start()
+
+    def cancel_digits(self) -> None:
+        """Abandon number entry (Esc): stop the commit timer and clear the digits."""
+        self._digit_timer.stop()
+        self._digits = ""
+        self.digitsChanged.emit("")
 
     def _commit_digits(self) -> None:
         text, self._digits = self._digits, ""

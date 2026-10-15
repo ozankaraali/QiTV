@@ -208,6 +208,36 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.step(1)  # nothing tuned on the new provider: starts at the first channel
         self.assertEqual(self.tunes[-1], other[0])
 
+    def test_note_request_anchors_the_next_step_without_tuning(self):
+        nine = {"id": 9, "name": "Nine", "number": "9"}
+        ten = {"id": 10, "name": "Ten", "number": "10"}
+        self.zap.set_context(ZapContext("g", CHANNELS + [nine, ten]))
+        self.zap.note_request(nine)  # e.g. a drawer pick the shell tuned itself
+        self.assertEqual(self.tunes, [])
+        self.clock.now += 5
+        self.zap.step(1)
+        self.assertEqual(self.tunes, [ten])
+        self.zap.tuned(nine)  # the late confirmation does not cancel the newer zap
+        self.zap.tuned(ten)
+        self.zap.previous()
+        self.assertEqual(self.tunes[-1], nine)
+
+    def test_cancel_digits(self):
+        self.zap.digit("7")
+        self.zap.cancel_digits()
+        self.assertEqual(self.digits, ["7", ""])
+        QTest.qWait(150)
+        self.assertEqual((self.tunes, self.missing), ([], []))
+        self.zap.digit("2")  # a new entry starts from scratch
+        QTest.qWait(150)
+        self.assertEqual(self.tunes, [CHANNELS[1]])
+
+    def test_number_of_is_public(self):
+        self.assertEqual(ZapContext.number_of({"number": " 07 "}), "07")
+        self.assertEqual(ZapContext.number_of({"number": 0}), "0")
+        self.assertEqual(ZapContext.number_of({}), "")
+        self.assertEqual(ZapContext._number({"number": 5}), "5")
+
     def test_number_zero_and_duplicates(self):
         ctx = ZapContext(
             "g", [{"id": 1, "number": "00"}, {"id": 2, "number": "5"}, {"id": 3, "number": "5"}]
