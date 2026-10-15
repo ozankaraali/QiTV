@@ -96,6 +96,10 @@ _Addition = tuple[int, float, float, bool]  # seq, start, end, discontinuity
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
 _BURST_SHARE = 0.5  # a burst's bytes arrive within this share of the time until the next
 _FIRST_BURST_S = 1.5  # a burst this long counts at once, before a second one confirms it
+# The connect burst counts for its period (up to the next burst) when that is longer than its
+# media, but at most this many times its media and this many seconds:
+_CONNECT_PERIOD_RATIO = 3.0
+_CONNECT_PERIOD_MAX_S = 12.0
 _BURST_SPREAD = 1.5  # two bursts in a row are alike when neither is larger by more than this
 _BURST_RUN = 3  # the estimate is the largest of this many latest bursts
 _STEADY_BURSTS = 3.0  # this many estimates' worth of seconds without a gap: steady again
@@ -120,7 +124,13 @@ class BurstMeter:
 
     The first clear burst (at least `_FIRST_BURST_S`) is the estimate at once, so the target,
     the mean lag and the stall bound follow from the second burst on, before stay-live could
-    eat the buffer catching up with a lag that is only the sawtooth. Once two bursts in a row
+    eat the buffer catching up with a lag that is only the sawtooth. When that is the burst at
+    connect and it brought less than its period (2-4 s, then the first 10 s burst ~9 s later),
+    the gap says more about the provider's cadence than the media: the estimate is the period,
+    though at most `_CONNECT_PERIOD_RATIO` times the media and `_CONNECT_PERIOD_MAX_S`, since
+    a steady source that paused after connect (an on-demand restream starting up) looks the
+    same; for such a source the bounds keep the slow-down that builds a burst's room short.
+    It holds only until bursts are alike: the run counts the media, as for any burst. Once two bursts in a row
     are alike (within `_BURST_SPREAD`), the estimate is the largest of the last `_BURST_RUN`
     alike ones: a burst larger than the estimate would starve the player before the next one
     lands (and count as a stall), one smaller costs nothing. A burst unlike the one before
@@ -135,6 +145,7 @@ class BurstMeter:
         self._estimate = 0.0
         self._run: deque[float] = deque(maxlen=_BURST_RUN)
         self._last_wall: float | None = None  # the latest arrival
+        self._connect = True  # the burst that ends next is the first since the start
         self._start_wall = 0.0  # the current burst's first arrival
         self._start_media = 0.0  # the media position before it
         self._media = 0.0  # the media position after the latest arrival
@@ -163,16 +174,22 @@ class BurstMeter:
         next burst began `period` seconds after it did."""
         if media <= 0 or took > _BURST_SHARE * period:
             self._run.clear()  # about as long to deliver as to play: no burst
+            self._connect = False
             return
         size = min(media, period)  # more than plays until the next one: a backlog
         run = self._run
         if run and max(size, run[-1]) > _BURST_SPREAD * min(size, run[-1]):
             run.clear()  # unlike the one before: a new run starts
         run.append(size)
+        connect, self._connect = self._connect, False
         if len(run) >= 2:
             self._estimate = max(run)
         elif not self._estimate and size >= _FIRST_BURST_S:
-            self._estimate = size  # the first clear burst, until others confirm or correct it
+            # The first clear burst, until others confirm or correct it.
+            if connect and period > size:
+                bound = min(_CONNECT_PERIOD_RATIO * size, _CONNECT_PERIOD_MAX_S)
+                size = max(size, min(period, bound))
+            self._estimate = size
 
 
 class _Cancelled(Exception):

@@ -91,6 +91,35 @@ class BurstMeterTests(unittest.TestCase):
         series += bursts(10.0, 10.0, 10.0, 5, media=30.0)
         self.assertEqual(set(measured(series)[5:]), {10.0})
 
+    def test_a_short_connect_burst_takes_its_gap_as_the_period(self):
+        # Re-measured on the owner's channel: 3.84 s at connect, the first 10 s burst 8.5 s
+        # later, then 10 s every 10 s. The gap says more than the connect burst's media.
+        series = bursts(0.0, 3.84, 0.0, 1)
+        series += bursts(8.5, 10.0, 10.0, 4, media=3.84)
+        readings = measured(series)
+        self.assertEqual(set(readings[:5]), {0.0})
+        self.assertEqual(set(readings[5:15]), {8.5})  # one 10 s burst is not two alike
+        self.assertEqual(set(readings[15:]), {10.0})
+
+    def test_the_connect_period_counts_for_at_most_three_times_its_media(self):
+        # A steady source that paused 20 s after its first 2 s, then sends in real time.
+        series = bursts(0.0, 2.0, 0.0, 1) + steady(22.0, 30.0, media=2.0)
+        readings = measured(series)
+        self.assertEqual(readings[5], 6.0)
+        self.assertEqual(set(readings[5 + round(18.0 / 0.1) + 1 :]), {0.0})  # 3 x 6 s steady
+
+    def test_the_connect_period_counts_for_at_most_twelve_seconds(self):
+        series = bursts(0.0, 6.0, 0.0, 1) + bursts(20.0, 6.0, 6.0, 2, media=6.0)
+        self.assertEqual(measured(series)[5], 12.0)
+
+    def test_only_the_connect_burst_takes_its_gap(self):
+        # Bursty, then steady (back to 0), then bursty again: the media, not the gap.
+        series = bursts(0.0, 4.0, 4.0, 3) + steady(12.0, 13.0, media=12.0)
+        series += bursts(28.0, 2.0, 0.0, 1, media=25.0) + bursts(35.0, 2.0, 2.0, 1, media=27.0)
+        readings = measured(series)
+        self.assertEqual(readings[15 + 130 - 1], 0.0)  # steady again
+        self.assertEqual(readings[-5], 2.0)
+
     def test_the_estimate_is_the_largest_of_the_last_three_alike_bursts(self):
         # 9, 10, 11 and 9 s bursts, each landing as the one before has played.
         series, media = [], 0.0
@@ -98,7 +127,7 @@ class BurstMeterTests(unittest.TestCase):
             series += bursts(wall, size, 0.0, 1, media=media)
             media += size
         readings = measured(series)
-        self.assertEqual(readings[5], 9.0)  # the first: provisional
+        self.assertEqual(readings[5], 10.0)  # the connect burst counts for its period
         self.assertEqual(readings[10], 10.0)  # 9 and 10 alike: the larger
         self.assertEqual(readings[15], 11.0)
         self.assertEqual(readings[20], 11.0)  # 10, 11, 9
@@ -132,12 +161,13 @@ class BurstMeterTests(unittest.TestCase):
         self.assertEqual(set(measured(series)), {0.0})
 
     def test_a_hiccup_right_after_connect_is_steady_again_soon(self):
-        # 2 s at connect, 3 s without a byte, then steady: a clear burst, at first.
+        # 2 s at connect, 3 s without a byte, then steady: a clear burst at first, counted
+        # for its period (3 s, within three times its media).
         series = bursts(0.0, 2.0, 0.0, 1) + steady(3.0, 20.0, media=2.0)
         readings = measured(series)
-        self.assertEqual(readings[5], 2.0)
-        steady_from = 5 + round(6.0 / 0.1) + 1  # three estimates without a gap: 6 s
-        self.assertEqual(readings[steady_from - 12], 2.0)
+        self.assertEqual(readings[5], 3.0)
+        steady_from = 5 + round(9.0 / 0.1) + 1  # three estimates without a gap: 9 s
+        self.assertEqual(readings[steady_from - 12], 3.0)
         self.assertEqual(set(readings[steady_from:]), {0.0})
 
     def test_a_bursty_source_that_turns_continuous_is_steady_again(self):

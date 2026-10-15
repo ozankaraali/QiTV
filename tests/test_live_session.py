@@ -1237,16 +1237,23 @@ class StayLiveTests(LiveSessionCase):
         burst of room is built, then at 1x, without flapping, and nothing starves after."""
         sid = self.start()
         feed = Feed(self, sid, burst=10.0, edge=3.84, first=8.5, metered=True).ready()
-        feed.run(28.5)  # the third burst landed: two alike 10 s bursts
+        feed.run(8.5)  # the first 10 s burst landed: its 8.5 s gap is the provisional burst
+        first = len(self.timelines) - 1
+        self.assertEqual(self.timelines[first]["target"], 8.5)
+        feed.run(20.0)  # the third burst landed: two alike 10 s bursts
         self.assertEqual(self.timelines[-1]["target"], 10.0)
         timelines = len(self.timelines) - 1
         feed.run(150.0)
         after = self.timelines[timelines:]
         self.assertEqual({state["rate"] for state in after}, {0.95, 1.0})
-        # Slowed once, then normal speed for good: no flapping.
+        # From the first burst on: slowed once, then normal speed for good, no flapping, no
+        # catch-up and no stall shown in the gaps.
         rates = self.playback.rates
         self.assertEqual(rates[rates.index(0.95) :], [0.95, 1.0])
-        self.assertFalse(any(state["stalled"] for state in after))
+        early = self.timelines[first:]
+        self.assertEqual({state["rate"] for state in early}, {0.95, 1.0})
+        self.assertFalse(any(state["stalled"] for state in early))
+        self.assertGreaterEqual(min(state["target"] for state in early), 8.5)
         built = feed.before[-3:]  # the room when each of the last bursts landed
         self.assertGreaterEqual(min(built), 10.0 / 2 - 0.5)
         starved, arrivals = feed.starved_s, len(feed.before)
