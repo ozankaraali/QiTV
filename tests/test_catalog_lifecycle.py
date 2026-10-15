@@ -310,6 +310,22 @@ class CatalogQueueTests(unittest.TestCase):
         self.assertEqual(groups, ["1", "2"])
         self.assertEqual(providers.current_provider_content["vod"]["contents"], {})
 
+    def test_is_loading_while_a_setup_runs_or_waits(self):
+        runner = ManualRunner()
+        service, _, factory = self._stb_movies(runner)
+        factory.results["provider_setup"] = {"result": {"name": "S"}}
+        self.assertFalse(service.is_loading())
+        service.select_provider()
+        self.assertTrue(service.is_loading())
+        runner.complete(0)  # ready; the EPG load runs
+        self.assertFalse(service.is_loading())
+        service.select_provider()  # waits behind the EPG load
+        self.assertTrue(service.is_loading())
+        runner.complete(1)  # EPG done; the setup starts
+        self.assertTrue(service.is_loading())
+        runner.complete(2)
+        self.assertFalse(service.is_loading())
+
     def test_requests_during_setup_fail_fast(self):
         runner = ManualRunner()
         service, _, factory = self._stb_movies(runner)

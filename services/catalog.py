@@ -373,6 +373,14 @@ class CatalogService(QObject):
             return
         self._start_setup(name, force_refresh)
 
+    def is_loading(self) -> bool:
+        """True while a provider setup is running or queued.
+
+        Requests made meanwhile fail with PROVIDER_LOADING_MESSAGE; ask again on
+        providerReady.
+        """
+        return self._setup_active()
+
     def _setup_active(self) -> bool:
         """True while a provider setup is running or waiting to run."""
         return self._state_job == "provider" or self._pending_setup is not None
