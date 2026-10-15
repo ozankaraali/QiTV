@@ -1,4 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+#
+# macOS: QiTV.app as one directory inside the bundle, with VLC's own libVLC in it.
+#
+# The app ships VLC.app's whole libVLC, nothing trimmed (lib/ and plugins/), and needs no VLC
+# install:
+# - libvlc and libvlccore sit at the bundle's top (Contents/Frameworks, sys._MEIPASS);
+# - the plugins sit where that libvlccore looks for them: <its directory>/vlc/plugins;
+# - before python-vlc loads, main.py points it at these (services/vlc_bundle.py), since
+#   python-vlc prefers /Applications/VLC.app and its plugins when that exists.
+# One directory, not one file: a one-file app unpacks into a new directory at every launch,
+# and macOS validates each freshly written plugin on its first load (56 s on an Intel Mac);
+# inside the .app that happens once.
 
 import os
 from pathlib import Path
@@ -14,13 +26,14 @@ def read_version():
 
 APP_VERSION = read_version()
 
-VLC_PATH = '/Applications/VLC.app/Contents'  # Adjust this path if necessary
+VLC_PATH = '/Applications/VLC.app/Contents/MacOS'  # where VLC's installer puts it
 
 a = Analysis(
     ['main.py'],
-    pathex=[VLC_PATH],
+    pathex=[],
     binaries=[
-        (os.path.join(VLC_PATH, 'MacOS/plugins/*'), 'plugins'),
+        (os.path.join(VLC_PATH, 'lib', '*'), '.'),
+        (os.path.join(VLC_PATH, 'plugins', '*'), 'vlc/plugins'),
     ],
     datas=[
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
@@ -47,25 +60,26 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries + [
-        ("libvlc.dylib", os.path.join(VLC_PATH, 'MacOS/lib/libvlc.dylib'), "BINARY"),
-        ("libvlccore.dylib", os.path.join(VLC_PATH, 'MacOS/lib/libvlccore.dylib'), "BINARY")
-        ],
-    #a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='QiTV',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    upx=False,
     console=False,
     icon='assets/qitv.icns',
 )
-app = BUNDLE(
+coll = COLLECT(
     exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='QiTV',
+)
+app = BUNDLE(
+    coll,
     name='QiTV.app',
     icon='assets/qitv.icns',
     bundle_identifier='com.ozankaraali.QiTV',

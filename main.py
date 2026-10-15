@@ -158,6 +158,10 @@ def main() -> int:
 if __name__ == "__main__":
     # First: a frozen build's helper process stops here instead of starting the app.
     multiprocessing.freeze_support()
+    # Then, before anything imports vlc: a packaged app loads the libVLC it ships.
+    from services.vlc_bundle import use_bundled_vlc
+
+    use_bundled_vlc()
     smoke = smoke_arguments(sys.argv, os.environ)
     if smoke is not None:
         from scripts.smoke_tv import main as smoke_main

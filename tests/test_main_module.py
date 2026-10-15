@@ -81,6 +81,34 @@ class MainModuleTests(unittest.TestCase):
         ]
         self.assertEqual(destinations, ["vlc/plugins"])
 
+    def test_the_bundled_libvlc_is_chosen_before_anything_imports_vlc(self):
+        source = (REPO / "main.py").read_text(encoding="utf-8")
+        block = source.split('if __name__ == "__main__":', 1)[1]
+        self.assertLess(block.index("freeze_support()"), block.index("use_bundled_vlc()"))
+        self.assertLess(block.index("use_bundled_vlc()"), block.index("smoke_main"))
+        self.assertLess(block.index("use_bundled_vlc()"), block.index("main()"))
+
+    def test_the_mac_app_is_one_directory_with_vlc_plugins_where_its_libvlccore_looks(self):
+        # libvlccore on macOS loads plugins from <its directory>/vlc/plugins; one directory,
+        # so that macOS validates the plugins once, not after every launch's unpacking.
+        tree = ast.parse((REPO / "qitv-macos.spec").read_text(encoding="utf-8"))
+        calls = {
+            getattr(node.func, "id", ""): node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+        }
+        binaries = next(k.value for k in calls["Analysis"].keywords if k.arg == "binaries")
+        destinations = {
+            ast.literal_eval(item.elts[1])
+            for item in binaries.elts
+            if isinstance(item, ast.Tuple) and "plugins" in ast.unparse(item.elts[0])
+        }
+        self.assertEqual(destinations, {"vlc/plugins"})
+        exclude = next(k.value for k in calls["EXE"].keywords if k.arg == "exclude_binaries")
+        self.assertIs(ast.literal_eval(exclude), True)
+        self.assertEqual(getattr(calls["BUNDLE"].args[0], "id", ""), "coll")
+        self.assertIn("COLLECT", calls)
+
 
 if __name__ == "__main__":
     unittest.main()
