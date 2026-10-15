@@ -1,19 +1,28 @@
-"""Transport overlay: title row on top, seek line and buttons at the bottom (VOD and plain live)."""
+"""Transport overlay: title row on top, seek line and buttons at the bottom.
 
-from datetime import datetime
+Modes: VOD, plain live (direct play) and time-shift (live through the pipeline). Time-shift shows
+the bar over the buffered range, or, at the live edge, the stay-live latency indicator.
+"""
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontMetricsF,
     QLinearGradient,
     QMouseEvent,
     QPainter,
     QPaintEvent,
+    QPen,
     QRegion,
 )
 from PySide6.QtWidgets import QWidget
 
+from services.live.stay_live import TARGETS, Mode
 from ui.overlays.base import Overlay
 from ui.overlays.painting import (
     Units,
@@ -29,10 +38,55 @@ from ui.theme import PALETTE, qcolor
 SPEEDS = (1.0, 1.25, 1.5, 2.0)
 TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
+EDGE_MARGIN_S = 1.0  # this far past the stay-live target counts as behind live
+MINUS = "−"
 
 
 def _speed_label(rate: float) -> str:
     return f"{rate:g}x"
+
+
+def fmt_behind(seconds: float) -> str:
+    """'−MM:SS' behind live ('−H:MM:SS' from an hour); a negative lag reads as zero."""
+    total = int(max(0.0, seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{MINUS}{hours}:{minutes:02d}:{secs:02d}"
+    return f"{MINUS}{minutes:02d}:{secs:02d}"
+
+
+def _local_now() -> datetime:
+    return datetime.now().astimezone()
+
+
+@dataclass(frozen=True)
+class _Timeline:
+    """One `LiveSession.timelineChanged` state, in timeline seconds."""
+
+    start: float
+    end: float
+    position: float
+    live_edge: float
+    lag: float
+    mode: Mode
+    rate: float
+    paused: bool
+    target: float
+
+    @classmethod
+    def from_state(cls, state: dict) -> "_Timeline":
+        return cls(
+            start=float(state["start"]),
+            end=float(state["end"]),
+            position=float(state["position"]),
+            live_edge=float(state["live_edge"]),
+            lag=float(state["lag"]),
+            mode=Mode(state["mode"]),
+            rate=float(state["rate"]),
+            paused=bool(state["paused"]),
+            target=float(state.get("target", TARGETS["normal"])),
+        )
 
 
 class Transport(Overlay):
@@ -44,12 +98,22 @@ class Transport(Overlay):
     audioRequested = Signal()
     subtitleRequested = Signal()
     nextRequested = Signal()
+    goLiveRequested = Signal()
+    programmeStartRequested = Signal()
+    seekToRequested = Signal(float)
 
-    def __init__(self, parent: QWidget | None = None, idle_ms: int = 3000) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        idle_ms: int = 3000,
+        now: Callable[[], datetime] = _local_now,
+    ) -> None:
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._now = now
         self._live = False
+        self._timeshift = False
         self._title = ""
         self._subtitle = ""
         self._position = 0
@@ -57,7 +121,13 @@ class Transport(Overlay):
         self._paused = False
         self._speed = 1.0
         self._next_available = False
-        self._drag_ms: int | None = None
+        self._timeline: _Timeline | None = None
+        self._ticks: list[tuple[float, str]] = []
+        self._edge = True
+        self._edge_lag: float | None = None
+        self._catching_up = False
+        self._rate = 1.0
+        self._drag: float | None = None  # fraction along the bar while dragging
         self._last_move = QPointF(-1, -1)
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
@@ -76,6 +146,36 @@ class Transport(Overlay):
 
     def show_live(self, title: str, subtitle: str) -> None:
         self._set_mode(True, title, subtitle)
+
+    def show_timeshift(self, title: str, subtitle: str) -> None:
+        """Show a pipeline live channel. A different title (a zap) forgets the old timeline."""
+        self._set_mode(True, title, subtitle, timeshift=True)
+
+    def update_timeline(self, state: dict, ticks: list[tuple[float, str]]) -> None:
+        """Take a `LiveSession.timelineChanged` state; never changes visibility.
+
+        `ticks` are programme starts in timeline seconds with their labels. An optional
+        `target` key is the session's effective stay-live target (default: Normal).
+        """
+        tl = _Timeline.from_state(state)
+        self._timeline = tl
+        self._ticks = [(float(t), str(label)) for t, label in ticks]
+        live = tl.mode is Mode.LIVE
+        self._edge = live and tl.lag < tl.target + EDGE_MARGIN_S
+        self._edge_lag = tl.lag
+        self._catching_up = live and tl.rate > 1.0
+        self._rate = tl.rate
+        self._speed = 1.0 if live else tl.rate  # stay-live's nudges are not a chosen speed
+        self._paused = tl.paused
+        self.update()
+
+    def show_live_edge(self, lag_s: float, catching_up: bool) -> None:
+        """Show the live-edge indicator instead of the bar; never changes visibility."""
+        self._live = self._timeshift = True
+        self._edge = True
+        self._edge_lag = lag_s
+        self._catching_up = catching_up
+        self.update()
 
     def update_position(self, position_ms: int, length_ms: int) -> None:
         self._position = max(0, position_ms)
@@ -100,10 +200,9 @@ class Transport(Overlay):
         self._idle.start()
 
     def dismiss(self) -> None:
-        if self._drag_ms is not None:
+        if self._drag is not None:
             return  # a drag in progress keeps the bar until release
         self._idle.stop()
-        self._drag_ms = None
         self.hide()
 
     def _tick(self) -> None:
@@ -111,10 +210,21 @@ class Transport(Overlay):
             self.update()
 
     def texts(self) -> tuple[str, str]:
+        if self._timeshift:
+            if not self._shows_bar():
+                return ("LIVE", self.indicator_text())
+            tl = self._timeline
+            assert tl is not None
+            buffer_from = fmt_clock(self._wall(tl.live_edge - tl.start))
+            return (f"Buffer from {buffer_from}", f"{fmt_behind(self._shown_lag())} behind live")
         if self._live:
             return ("LIVE", "")
-        shown = self._position if self._drag_ms is None else self._drag_ms
+        shown = self._shown_ms()
         return (fmt_duration(shown), "-" + fmt_duration(max(0, self._length - shown)))
+
+    def indicator_text(self) -> str:
+        head, tail = self._indicator_parts()
+        return f"{head} ● {tail}" if tail else ""
 
     def mask_region(self) -> QRegion:
         top_h = round(self.height() * TOP_FRACTION)
@@ -123,7 +233,73 @@ class Transport(Overlay):
         region += QRegion(QRect(0, self.height() - bottom_h, self.width(), bottom_h))
         return region.translated(self.geometry().topLeft())
 
+    # ---- state helpers ------------------------------------------------------------------------
+
+    def _shows_bar(self) -> bool:
+        if not self._timeshift:
+            return not self._live
+        # A drag keeps the bar even if the session catches up meanwhile.
+        return self._timeline is not None and (not self._edge or self._drag is not None)
+
+    def _behind(self) -> bool:
+        tl = self._timeline
+        return tl is not None and tl.lag >= tl.target + EDGE_MARGIN_S
+
+    def _seekable(self) -> bool:
+        if self._timeshift:
+            return self._timeline is not None and self._timeline.end > self._timeline.start
+        return self._length > 0
+
+    def _shown_ms(self) -> int:
+        return self._position if self._drag is None else round(self._drag * self._length)
+
+    def _shown_t(self) -> float:
+        tl = self._timeline
+        assert tl is not None
+        if self._drag is None:
+            return tl.position
+        return tl.start + self._drag * (tl.end - tl.start)
+
+    def _shown_lag(self) -> float:
+        tl = self._timeline
+        assert tl is not None
+        return tl.lag if self._drag is None else tl.live_edge - self._shown_t()
+
+    def _shown_frac(self) -> float:
+        if self._timeshift:
+            tl = self._timeline
+            assert tl is not None
+            span = tl.end - tl.start
+            frac = (self._shown_t() - tl.start) / span if span > 0 else 1.0
+        else:
+            frac = self._shown_ms() / self._length if self._length else 0.0
+        return min(1.0, max(0.0, frac))
+
+    def _wall(self, seconds_ago: float) -> datetime:
+        """Local wall-clock time `seconds_ago` before now, always timezone-aware."""
+        now = self._now()
+        if now.tzinfo is None:
+            now = now.astimezone()  # a naive clock reads local time
+        then = now.astimezone(timezone.utc) - timedelta(seconds=max(0.0, seconds_ago))
+        return then.astimezone()
+
+    def _indicator_parts(self) -> tuple[str, str]:
+        if self._edge_lag is None:
+            return ("", "")
+        tail = f"{max(0.0, self._edge_lag):.1f} s behind source"
+        if self._catching_up:
+            tail += " · catching up" + (f" {self._rate:g}×" if self._rate > 1.0 else "")
+        return ("Stay live", tail)
+
     # ---- geometry -----------------------------------------------------------------------------
+
+    @staticmethod
+    def _chip_font(un: Units) -> QFont:
+        return un.font(1.2, QFont.Weight.DemiBold)
+
+    @staticmethod
+    def _indicator_font(un: Units) -> QFont:
+        return un.font(1.1, QFont.Weight.DemiBold)
 
     def _layout(self) -> dict[str, QRectF]:
         un = Units(self.width())
@@ -133,7 +309,9 @@ class Transport(Overlay):
         big = un.px(4.6)
         row_top = bottom - big
         rects: dict[str, QRectF] = {}
-        if not self._live:
+        bar = self._shows_bar()
+        shifted = bar and self._timeshift
+        if bar:
             seek_h = un.px(1.9)
             seek_y = row_top - un.px(1.2) - un.px(1.6) - seek_h
             rects["seek"] = QRectF(left, seek_y, right - left, seek_h)
@@ -146,7 +324,7 @@ class Transport(Overlay):
             rects[name] = QRectF(x, cy - size / 2, size, size)
             x += size + gap
 
-        if self._live:
+        if not bar:
             put("play", big, un.px(1.5))
             x = float(right)
             for name in ("fullscreen", "subtitles", "audio"):
@@ -155,12 +333,33 @@ class Transport(Overlay):
                 x -= un.px(1.8)
             pill_w = un.px(5.2)
             rects["live"] = QRectF(x - pill_w - un.px(0.4), cy - un.px(1.1), pill_w, un.px(2.2))
+            if self._timeshift and self._edge_lag is not None:
+                head, tail = self._indicator_parts()
+                fm = QFontMetricsF(self._indicator_font(un))
+                width = (
+                    2 * un.px(1.1)
+                    + fm.horizontalAdvance(head)
+                    + fm.horizontalAdvance(tail)
+                    + 2 * un.px(0.6)
+                    + un.px(0.8)
+                )
+                pill = rects["live"]
+                rects["indicator"] = QRectF(
+                    pill.x() - un.px(0.8) - width, cy - un.px(1.1), width, un.px(2.2)
+                )
         else:
-            put("back10", icon + un.px(1.6), un.px(0.6))
+            skip = icon + un.px(1.6)
+            if shifted:
+                put("start", skip, un.px(0.6))
+            put("back10", skip, un.px(0.6))
             put("play", big, un.px(0.6))
-            put("fwd10", icon + un.px(1.6), un.px(0.6) if self._next_available else un.px(1.0))
-            if self._next_available:
-                put("next", icon + un.px(1.6), un.px(1.0))
+            if shifted:
+                put("fwd10", skip, un.px(0.6))
+                put("fwd60", skip, un.px(1.0))
+            else:
+                put("fwd10", skip, un.px(0.6) if self._next_available else un.px(1.0))
+                if self._next_available:
+                    put("next", skip, un.px(1.0))
             chip_w = un.px(3.6)
             rects["speed"] = QRectF(x, cy - un.px(1.1), chip_w, un.px(2.2))
             x = float(right)
@@ -168,6 +367,10 @@ class Transport(Overlay):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
                 x -= un.px(1.8)
+            if shifted and self._behind():
+                fm = QFontMetricsF(self._chip_font(un))
+                width = 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance("Go live")
+                rects["golive"] = QRectF(x - width, cy - un.px(1.1), width, un.px(2.2))
         return rects
 
     def seek_rect(self) -> QRectF:
@@ -186,8 +389,10 @@ class Transport(Overlay):
         self._paint_title(p, un)
         rects = self._layout()
         text = qcolor(PALETTE.text)
-        if self._live:
+        if "seek" not in rects:
             self._paint_live(p, un, rects, text)
+        elif self._timeshift:
+            self._paint_timeshift(p, un, rects, text)
         else:
             self._paint_vod(p, un, rects, text)
         for name in ("subtitles", "audio", "fullscreen"):
@@ -212,7 +417,7 @@ class Transport(Overlay):
         right = self.width() - un.px(3)
         y = un.px(2.4)
         row_h = un.px(2.6)
-        clock = fmt_clock(datetime.now())
+        clock = fmt_clock(self._wall(0.0))
         p.setFont(un.font(1.8, QFont.Weight.DemiBold))
         p.setPen(qcolor(PALETTE.text))
         clock_w = p.fontMetrics().horizontalAdvance(clock)
@@ -230,15 +435,15 @@ class Transport(Overlay):
             sub = elided(p, self._subtitle, right - clock_w - un.px(2) - sx)
             p.drawText(QRectF(sx, y, right - sx, row_h), Qt.AlignVCenter | Qt.AlignLeft, sub)
 
-    def _paint_vod(self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor) -> None:
-        seek = rects["seek"]
-        shown = self._position if self._drag_ms is None else self._drag_ms
-        frac = shown / self._length if self._length else 0.0
-        frac = min(1.0, max(0.0, frac))
+    def _paint_track(self, p: QPainter, un: Units, seek: QRectF, track_alpha: float) -> QPointF:
+        """Draw the line, played up to the shown position; return where the knob goes."""
+        frac = self._shown_frac()
         track = QRectF(seek.x(), seek.center().y() - un.px(0.55) / 2, seek.width(), un.px(0.55))
-        draw_progress(p, track, frac, track_alpha=0.14)
+        draw_progress(p, track, frac, track_alpha=track_alpha)
+        return QPointF(seek.x() + seek.width() * frac, seek.center().y())
+
+    def _paint_knob(self, p: QPainter, un: Units, kc: QPointF) -> None:
         knob_d = un.px(1.7)
-        kc = QPointF(seek.x() + seek.width() * frac, seek.center().y())
         ring_d = knob_d + 2 * un.px(0.35)
         fill_round(
             p,
@@ -252,30 +457,117 @@ class Transport(Overlay):
             qcolor("#ffffff"),
             knob_d / 2,
         )
-        elapsed, remaining = self.texts()
+
+    def _paint_times(self, p: QPainter, un: Units, rects: dict[str, QRectF]) -> None:
+        first, second = self.texts()
         p.setFont(un.font(1.25))
         p.setPen(qcolor(PALETTE.text, 0.8))
         times = rects["times"]
-        p.drawText(times, Qt.AlignVCenter | Qt.AlignLeft, elapsed)
-        p.drawText(times, Qt.AlignVCenter | Qt.AlignRight, remaining)
-        dark = qcolor(PALETTE.canvas)
-        for name in ("back10", "fwd10", "next"):
+        p.drawText(times, Qt.AlignVCenter | Qt.AlignLeft, first)
+        p.drawText(times, Qt.AlignVCenter | Qt.AlignRight, second)
+
+    def _paint_skips(self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor) -> None:
+        for name, icon, side in (
+            ("start", "prev", un.px(2.4)),
+            ("back10", "back10", un.px(3.0)),
+            ("fwd10", "fwd10", un.px(3.0)),
+            ("fwd60", "next", un.px(2.4)),
+            ("next", "next", un.px(2.4)),
+        ):
             if name not in rects:
                 continue
             r = rects[name]
-            side = un.px(3.0) if name != "next" else un.px(2.4)
             draw_icon(
                 p,
-                name,
+                icon,
                 QRectF(r.center().x() - side / 2, r.center().y() - side / 2, side, side),
                 text,
             )
-        self._paint_play(p, rects["play"], dark)
-        chip = rects["speed"]
+
+    def _paint_speed(self, p: QPainter, un: Units, chip: QRectF, text: QColor) -> None:
         fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
-        p.setFont(un.font(1.2, QFont.Weight.DemiBold))
+        p.setFont(self._chip_font(un))
         p.setPen(text)
         p.drawText(chip, Qt.AlignCenter, _speed_label(self._speed))
+
+    def _paint_vod(self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor) -> None:
+        kc = self._paint_track(p, un, rects["seek"], 0.14)
+        self._paint_knob(p, un, kc)
+        self._paint_times(p, un, rects)
+        self._paint_skips(p, un, rects, text)
+        self._paint_play(p, rects["play"], qcolor(PALETTE.canvas))
+        self._paint_speed(p, un, rects["speed"], text)
+
+    def _paint_timeshift(
+        self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor
+    ) -> None:
+        tl = self._timeline
+        assert tl is not None
+        seek = rects["seek"]
+        cy = seek.center().y()
+        kc = self._paint_track(p, un, seek, 0.3)
+        span = tl.end - tl.start
+        p.setFont(un.font(1.05))
+        fm = p.fontMetrics()
+        tick_h = un.px(1.5)
+        for t, label in self._ticks:
+            if span <= 0 or not tl.start <= t <= tl.end:
+                continue
+            x = seek.x() + seek.width() * (t - tl.start) / span
+            p.fillRect(QRectF(x - 1, cy - tick_h / 2, 2, tick_h), qcolor("#ffffff", 0.55))
+            w = fm.horizontalAdvance(label)
+            lx = min(max(x - w / 2, seek.x()), seek.right() - w)
+            p.setPen(qcolor(PALETTE.text, 0.75))
+            p.drawText(
+                QRectF(lx, cy - tick_h / 2 - un.px(0.3) - un.px(1.5), w + 1, un.px(1.5)),
+                Qt.AlignHCenter | Qt.AlignBottom,
+                label,
+            )
+        dot_d = un.px(1.1)
+        fill_round(
+            p,
+            QRectF(seek.right() - dot_d, cy - dot_d / 2, dot_d, dot_d),
+            qcolor(PALETTE.live),
+            dot_d / 2,
+        )
+        self._paint_knob(p, un, kc)
+        self._paint_bubble(p, un, seek, kc)
+        self._paint_times(p, un, rects)
+        self._paint_skips(p, un, rects, text)
+        dark = qcolor(PALETTE.canvas)
+        self._paint_play(p, rects["play"], dark)
+        self._paint_speed(p, un, rects["speed"], text)
+        chip = rects.get("golive")
+        if chip is not None:
+            fill_round(p, chip, qcolor(PALETTE.accent), chip.height() / 2)
+            d = un.px(0.7)
+            fill_round(
+                p, QRectF(chip.x() + un.px(1.0), chip.center().y() - d / 2, d, d), dark, d / 2
+            )
+            p.setFont(self._chip_font(un))
+            p.setPen(dark)
+            tx = chip.x() + un.px(1.0) + d + un.px(0.5)
+            p.drawText(
+                QRectF(tx, chip.y(), chip.right() - tx, chip.height()),
+                Qt.AlignVCenter | Qt.AlignLeft,
+                "Go live",
+            )
+
+    def _paint_bubble(self, p: QPainter, un: Units, seek: QRectF, kc: QPointF) -> None:
+        """Wall-clock time of the shown position, above the knob."""
+        label = self._wall(self._shown_lag()).strftime("%H:%M:%S")
+        p.setFont(un.font(1.05, QFont.Weight.Bold))
+        w = p.fontMetrics().horizontalAdvance(label) + 2 * un.px(0.6)
+        h = un.px(2.1)
+        x = min(max(kc.x() - w / 2, seek.x()), seek.right() - w)
+        bubble = QRectF(x, seek.center().y() - un.px(2.7) - h, w, h)
+        p.save()
+        p.setPen(QPen(qcolor(PALETTE.accent, 0.8), max(1.0, un.u * 0.1)))
+        p.setBrush(qcolor(PALETTE.canvas, 0.92))
+        p.drawRoundedRect(bubble, un.px(0.35), un.px(0.35))
+        p.restore()
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(bubble, Qt.AlignCenter, label)
 
     def _paint_play(self, p: QPainter, rect: QRectF, dark: QColor) -> None:
         fill_round(p, rect, qcolor(PALETTE.text), rect.width() / 2)
@@ -299,25 +591,41 @@ class Transport(Overlay):
         p.setFont(un.font(1.15, QFont.Weight.Bold))
         p.setPen(qcolor("#ffffff"))
         p.drawText(pill, Qt.AlignCenter, "LIVE")
+        box = rects.get("indicator")
+        if box is None:
+            return
+        fill_round(p, box, qcolor(PALETTE.panel), box.height() / 2)
+        head, tail = self._indicator_parts()
+        p.setFont(self._indicator_font(un))
+        p.setPen(text)
+        fm = p.fontMetrics()
+        x = box.x() + un.px(1.1)
+        p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, head)
+        x += fm.horizontalAdvance(head) + un.px(0.6)
+        d = un.px(0.8)
+        dot = qcolor(PALETTE.warn if self._catching_up else PALETTE.ok)
+        fill_round(p, QRectF(x, box.center().y() - d / 2, d, d), dot, d / 2)
+        x += d + un.px(0.6)
+        p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, tail)
 
     # ---- input --------------------------------------------------------------------------------
 
-    def _ms_at(self, x: float) -> int:
+    def _frac_at(self, x: float) -> float:
         seek = self.seek_rect()
-        frac = min(1.0, max(0.0, (x - seek.x()) / seek.width()))
-        return round(frac * self._length)
+        return min(1.0, max(0.0, (x - seek.x()) / seek.width()))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        event.accept()  # the overlay host behind would open the drawer
         self.poke()
         if event.button() != Qt.LeftButton:
             return
         pos = event.position()
         rects = self._layout()
         seek = rects.get("seek")
-        if seek is not None and self._length > 0:
+        if seek is not None and self._seekable():
             hit = seek.adjusted(0, -seek.height(), 0, seek.height())
             if hit.contains(pos):
-                self._drag_ms = self._ms_at(pos.x())
+                self._drag = self._frac_at(pos.x())
                 self._idle.stop()
                 self.update()
                 return
@@ -328,17 +636,23 @@ class Transport(Overlay):
         if pos != self._last_move:  # ignore synthetic moves from layout changes
             self._last_move = pos
             self.poke()
-        if self._drag_ms is not None:
-            self._drag_ms = self._ms_at(event.position().x())
+        if self._drag is not None:
+            self._drag = self._frac_at(event.position().x())
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.LeftButton and self._drag_ms is not None:
-            target = self._ms_at(event.position().x())
-            self._drag_ms = None
+        if event.button() == Qt.LeftButton and self._drag is not None:
+            self._drag = self._frac_at(event.position().x())
+            timeshift = self._timeshift
+            target_t = self._shown_t() if timeshift else 0.0
+            target_ms = 0 if timeshift else self._shown_ms()
+            self._drag = None
             self.update()
             self._idle.start()
-            self.seekRequested.emit(target)
+            if timeshift:
+                self.seekToRequested.emit(target_t)
+            else:
+                self.seekRequested.emit(target_ms)
 
     def _click(self, rects: dict[str, QRectF], pos: QPointF) -> None:
         for name, rect in rects.items():
@@ -350,6 +664,12 @@ class Transport(Overlay):
                 self.seekRelativeRequested.emit(-10_000)
             elif name == "fwd10":
                 self.seekRelativeRequested.emit(10_000)
+            elif name == "fwd60":
+                self.seekRelativeRequested.emit(60_000)
+            elif name == "start":
+                self.programmeStartRequested.emit()
+            elif name == "golive":
+                self.goLiveRequested.emit()
             elif name == "next":
                 self.nextRequested.emit()
             elif name == "speed":
@@ -368,11 +688,22 @@ class Transport(Overlay):
     def _nearest_speed(self) -> int:
         return min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - self._speed))
 
-    def _set_mode(self, live: bool, title: str, subtitle: str) -> None:
+    def _set_mode(self, live: bool, title: str, subtitle: str, timeshift: bool = False) -> None:
+        if not (timeshift and self._timeshift and title == self._title):
+            self._clear_timeline()
         self._live = live
+        self._timeshift = timeshift
         self._title = title
         self._subtitle = subtitle
-        self._drag_ms = None
+        self._drag = None
         if live:
             self._position = self._length = 0
         self.poke()
+
+    def _clear_timeline(self) -> None:
+        self._timeline = None
+        self._ticks = []
+        self._edge = True
+        self._edge_lag = None
+        self._catching_up = False
+        self._rate = 1.0

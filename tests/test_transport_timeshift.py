@@ -1,0 +1,264 @@
+from datetime import datetime, timezone
+import os
+import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QSignalSpy, QTest
+from PySide6.QtWidgets import QApplication, QWidget
+
+from ui.overlays.transport import Transport, fmt_behind
+
+# 19:42 local time, as an aware datetime: the buffer below starts 58 minutes earlier (18:44).
+NOW = datetime(2026, 10, 15, 19, 42).astimezone()
+PROGRAMME = [(960.0, "19:00 Wild Coasts")]
+
+
+def timeline(**changes):
+    state = {
+        "start": 0.0,
+        "end": 3480.0,
+        "position": 3442.0,
+        "live_edge": 3480.0,
+        "lag": 38.0,
+        "mode": "shifted",
+        "rate": 1.0,
+        "paused": False,
+        "ended": False,
+    }
+    state.update(changes)
+    return state
+
+
+def at_edge(lag=0.9, rate=1.0):
+    return timeline(position=3480.0 - lag, lag=lag, mode="live", rate=rate)
+
+
+class Recorder(QWidget):
+    """Stands in for the OverlayHost: records every press that falls through an overlay."""
+
+    def __init__(self):
+        super().__init__()
+        self.presses = 0
+
+    def mousePressEvent(self, event):
+        self.presses += 1
+
+
+class TimeShiftCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def make(self, idle_ms=3000, now=lambda: NOW, parent=None):
+        t = Transport(parent, idle_ms=idle_ms, now=now)
+        t.setGeometry(0, 0, 1280, 720)
+        t.show()
+        t.grab()  # warm up font loading so timer tests are not skewed by first paint
+        self.addCleanup(t.close)
+        return t
+
+    def shifted(self, **kw):
+        t = self.make(**kw)
+        t.show_timeshift("104 · Nature One HD", "Wild Coasts")
+        t.update_timeline(timeline(), PROGRAMME)
+        return t
+
+    def click(self, t, point):
+        QTest.mouseClick(t, Qt.LeftButton, Qt.NoModifier, point)
+
+    # ---- texts --------------------------------------------------------------------------------
+
+    def test_behind_live_format(self):
+        self.assertEqual(fmt_behind(38), "−00:38")
+        self.assertEqual(fmt_behind(38.9), "−00:38")
+        self.assertEqual(fmt_behind(0), "−00:00")
+        self.assertEqual(fmt_behind(-2.5), "−00:00")
+        self.assertEqual(fmt_behind(605), "−10:05")
+        self.assertEqual(fmt_behind(3725), "−1:02:05")
+
+    def test_shifted_texts(self):
+        t = self.shifted()
+        self.assertEqual(t.texts(), ("Buffer from 18:44", "−00:38 behind live"))
+
+    def test_buffer_start_is_local_wall_clock(self):
+        for now in (NOW.astimezone(timezone.utc), datetime(2026, 10, 15, 19, 42)):
+            t = self.make(now=lambda now=now: now)
+            t.show_timeshift("104", "Nature")
+            t.update_timeline(timeline(), [])
+            self.assertEqual(t.texts()[0], "Buffer from 18:44", now)
+
+    # ---- seeking ------------------------------------------------------------------------------
+
+    def test_click_at_buffer_midpoint_seeks_there(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(
+            timeline(start=100.0, end=400.0, live_edge=400.0, position=350.0, lag=50.0), []
+        )
+        to = QSignalSpy(t.seekToRequested)
+        ms = QSignalSpy(t.seekRequested)
+        r = t.seek_rect()
+        self.click(t, QPoint(round(r.center().x()), round(r.center().y())))
+        self.assertEqual(to.count(), 1)
+        self.assertAlmostEqual(to.at(0)[0], 250.0, delta=1.0)
+        self.assertEqual(ms.count(), 0)
+
+    def test_drag_previews_lag_and_survives_idle(self):
+        t = self.shifted(idle_ms=60)
+        spy = QSignalSpy(t.seekToRequested)
+        r = t.seek_rect()
+        y = round(r.center().y())
+        QTest.mousePress(t, Qt.LeftButton, Qt.NoModifier, QPoint(round(r.right() - 2), y))
+        QTest.mouseMove(t, QPoint(round(r.center().x()), y))
+        self.assertEqual(t.texts()[1], "−29:00 behind live")
+        QTest.qWait(250)
+        self.assertTrue(t.isVisible())
+        t.update_timeline(at_edge(), PROGRAMME)  # caught up mid-drag: the bar stays until release
+        self.assertIn("seek", t._layout())
+        QTest.mouseRelease(t, Qt.LeftButton, Qt.NoModifier, QPoint(round(r.center().x()), y))
+        self.assertEqual(spy.count(), 1)
+        self.assertAlmostEqual(spy.at(0)[0], 1740.0, delta=6.0)
+        self.assertTrue(t.isVisible())
+        QTest.qWait(250)
+        self.assertFalse(t.isVisible())
+
+    # ---- buttons ------------------------------------------------------------------------------
+
+    def test_go_live_chip_only_when_behind(self):
+        t = self.shifted()
+        spy = QSignalSpy(t.goLiveRequested)
+        self.click(t, t.button_rect("golive").center().toPoint())
+        self.assertEqual(spy.count(), 1)
+        self.assertGreater(t.button_rect("subtitles").x(), t.button_rect("golive").right())
+        # Paused for a moment: the bar shows, but 3 s is under the default target (2.5 s) + 1 s.
+        t.update_timeline(timeline(position=3477.0, lag=3.0), PROGRAMME)
+        self.assertIn("seek", t._layout())
+        self.assertNotIn("golive", t._layout())
+        t.update_timeline(timeline(position=3476.5, lag=3.5), PROGRAMME)
+        self.assertIn("golive", t._layout())
+        # The session reports its effective target (Stable, or an HLS burst).
+        t.update_timeline(timeline(position=3473.5, lag=6.5, target=6.0), PROGRAMME)
+        self.assertNotIn("golive", t._layout())
+        t.update_timeline(timeline(position=3473.0, lag=7.0, target=6.0), PROGRAMME)
+        self.assertIn("golive", t._layout())
+        # Stay-live drifted far behind: still live mode, but the bar and Go live show.
+        t.update_timeline(at_edge(lag=4.0, rate=1.10), PROGRAMME)
+        self.assertIn("seek", t._layout())
+        self.assertIn("golive", t._layout())
+        t.update_timeline(at_edge(), PROGRAMME)
+        self.assertNotIn("golive", t._layout())
+        self.assertNotIn("seek", t._layout())
+
+    def test_timeshift_buttons_emit(self):
+        t = self.shifted()
+        start = QSignalSpy(t.programmeStartRequested)
+        self.click(t, t.button_rect("start").center().toPoint())
+        self.assertEqual(start.count(), 1)
+        rel = QSignalSpy(t.seekRelativeRequested)
+        for name in ("back10", "fwd10", "fwd60"):
+            self.click(t, t.button_rect(name).center().toPoint())
+        self.assertEqual([rel.at(i)[0] for i in range(3)], [-10_000, 10_000, 60_000])
+        speed = QSignalSpy(t.speedRequested)
+        self.click(t, t.button_rect("speed").center().toPoint())
+        self.assertEqual(speed.at(0)[0], 1.25)
+        play = QSignalSpy(t.playPauseRequested)
+        self.click(t, t.button_rect("play").center().toPoint())
+        self.assertEqual(play.count(), 1)
+        left_to_right = ["start", "back10", "play", "fwd10", "fwd60", "speed"]
+        xs = [t.button_rect(name).x() for name in left_to_right]
+        self.assertEqual(xs, sorted(xs))
+
+    def test_speed_chip_follows_the_session_rate(self):
+        t = self.shifted()
+        t.update_timeline(timeline(mode="catching_up", rate=1.5), PROGRAMME)
+        speed = QSignalSpy(t.speedRequested)
+        self.click(t, t.button_rect("speed").center().toPoint())
+        self.assertEqual(speed.at(0)[0], 2.0)
+        t.update_timeline(at_edge(lag=4.0, rate=1.05), PROGRAMME)  # stay-live's nudge, not a choice
+        self.click(t, t.button_rect("speed").center().toPoint())
+        self.assertEqual(speed.at(1)[0], 1.25)
+
+    def test_clicks_on_the_bar_and_chips_do_not_fall_through(self):
+        host = Recorder()
+        host.resize(1280, 720)
+        host.show()
+        self.addCleanup(host.close)
+        t = self.make(parent=host)
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(timeline(), PROGRAMME)
+        for point in (
+            t.seek_rect().center().toPoint(),
+            t.button_rect("golive").center().toPoint(),
+            t.button_rect("speed").center().toPoint(),
+            t.button_rect("start").center().toPoint(),
+        ):
+            self.click(t, point)
+        self.assertEqual(host.presses, 0)
+
+    # ---- live edge ----------------------------------------------------------------------------
+
+    def test_live_edge_shows_the_indicator_instead_of_the_bar(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(at_edge(), PROGRAMME)
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.9 s behind source"))
+        layout = t._layout()
+        self.assertNotIn("seek", layout)
+        self.assertNotIn("golive", layout)
+        self.assertLess(layout["indicator"].right(), layout["live"].x())
+        play = QSignalSpy(t.playPauseRequested)
+        self.click(t, t.button_rect("play").center().toPoint())
+        self.assertEqual(play.count(), 1)
+
+    def test_indicator_shows_catching_up_while_rate_above_one(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(at_edge(lag=3.2, rate=1.05), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● 3.2 s behind source · catching up 1.05×")
+        t.update_timeline(at_edge(lag=2.6, rate=1.0), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● 2.6 s behind source")
+        t.show_live_edge(3.0, True)
+        self.assertIn("catching up", t.texts()[1])
+        t.show_live_edge(0.9, False)
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.9 s behind source"))
+
+    def test_show_live_edge_drops_the_bar(self):
+        t = self.shifted()
+        t.show_live_edge(1.2, False)
+        self.assertNotIn("seek", t._layout())
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 1.2 s behind source"))
+
+    def test_new_channel_forgets_the_old_timeline(self):
+        t = self.shifted()
+        t.show_timeshift("104 · Nature One HD", "Coasts at night")
+        self.assertEqual(t.texts()[0], "Buffer from 18:44")  # same channel, new programme
+        t.show_timeshift("105 · Science", "Stars")
+        self.assertEqual(t.texts(), ("LIVE", ""))  # nothing measured yet on this channel
+        self.assertNotIn("indicator", t._layout())
+
+    def test_plain_modes_leave_timeshift(self):
+        t = self.shifted()
+        t.show_live("104", "Nature")
+        self.assertEqual(t.texts(), ("LIVE", ""))
+        self.assertNotIn("start", t._layout())
+        self.assertNotIn("indicator", t._layout())
+        t.show_vod("A", "b")
+        t.update_position(30_000, 120_000)
+        self.assertEqual(t.texts(), ("0:30", "-1:30"))
+        self.assertNotIn("golive", t._layout())
+
+    def test_grab_renders_both_states(self):
+        t = self.shifted()
+        self.assertFalse(t.grab().isNull())
+        t.update_timeline(at_edge(), PROGRAMME)
+        self.assertFalse(t.grab().isNull())
+        t.update_timeline(at_edge(lag=3.2, rate=1.05), PROGRAMME)
+        self.assertFalse(t.grab().isNull())
+        t.update_timeline(timeline(start=0.0, end=0.0, live_edge=0.0, position=0.0, lag=0.0), [])
+        self.assertFalse(t.grab().isNull())  # nothing buffered yet
+
+
+if __name__ == "__main__":
+    unittest.main()
