@@ -3,8 +3,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import elapse
 
 from services.zapping import ZapContext, ZapController
 
@@ -81,7 +81,7 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.step(1)
         self.assertEqual(self.columns, [True])
         self.assertEqual(self.tunes, [CHANNELS[1]])
-        QTest.qWait(120)
+        elapse(120)
         self.assertEqual(self.tunes, [CHANNELS[1], CHANNELS[3]])
 
     def test_rest_on_already_tuned_channel_does_nothing(self):
@@ -90,14 +90,14 @@ class ZapControllerTests(unittest.TestCase):
         self.clock.now += 0.1
         self.zap.step(1)
         self.zap.step(-1)
-        QTest.qWait(120)
+        elapse(120)
         self.assertEqual(self.tunes, [CHANNELS[1]])
 
     def test_digits(self):
         self.zap.digit("0")
         self.zap.digit("7")
         self.assertEqual(self.digits, ["0", "07"])
-        QTest.qWait(150)
+        elapse(150)
         self.assertEqual(self.tunes, [CHANNELS[3]])
         self.assertEqual(self.digits[-1], "")
 
@@ -106,12 +106,12 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.set_context(ZapContext("g", CHANNELS, fallback=CHANNELS + [outside]))
         for d in "101":
             self.zap.digit(d)
-        QTest.qWait(150)
+        elapse(150)
         self.assertEqual((self.tunes, self.missing), ([outside], []))
 
     def test_unknown_number(self):
         self.zap.digit("9")
-        QTest.qWait(150)
+        elapse(150)
         self.assertEqual((self.tunes, self.missing, self.digits[-1]), ([], ["9"], ""))
 
     def test_max_digits(self):
@@ -136,7 +136,7 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.highlightChanged.connect(lambda c, i: highlights.append((c, i)))
         self.zap.step(1)
         self.assertEqual(highlights, [(CHANNELS[2], 2)])
-        QTest.qWait(120)
+        elapse(120)
         self.assertEqual(self.tunes, [CHANNELS[1], CHANNELS[2]])
 
     def test_set_context_with_shorter_list_is_safe(self):
@@ -147,7 +147,7 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.step(1)
         self.zap.set_context(ZapContext("h", CHANNELS[:1]))
         self.assertEqual(self.columns, [True, False])
-        QTest.qWait(120)
+        elapse(120)
         self.assertEqual(self.tunes, [CHANNELS[1]])
 
     def test_out_of_band_tune_reanchors_or_closes_column(self):
@@ -158,7 +158,7 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.tuned(CHANNELS[3])
         self.clock.now += 0.1
         self.zap.step(-1)
-        QTest.qWait(120)
+        elapse(120)
         self.assertEqual(self.tunes[-1], CHANNELS[2])
         self.zap.tuned({"id": 99, "name": "Other"})
         self.assertEqual(self.columns[-1], False)
@@ -200,7 +200,7 @@ class ZapControllerTests(unittest.TestCase):
         self.assertEqual((self.zap.context.group_key, self.zap.context.channels), ("", []))
         before = list(self.tunes)
         self.zap.previous()
-        QTest.qWait(150)  # neither the rest timer nor the digit timer fires
+        elapse(150)  # neither the rest timer nor the digit timer fires
         self.assertEqual(self.tunes, before)
         other = [{"id": "b1", "name": "B1", "cmd": "b1"}, {"id": "b2", "name": "B2", "cmd": "b2"}]
         self.zap.set_context(ZapContext("h", other))
@@ -226,10 +226,10 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.digit("7")
         self.zap.cancel_digits()
         self.assertEqual(self.digits, ["7", ""])
-        QTest.qWait(150)
+        elapse(150)
         self.assertEqual((self.tunes, self.missing), ([], []))
         self.zap.digit("2")  # a new entry starts from scratch
-        QTest.qWait(150)
+        elapse(150)
         self.assertEqual(self.tunes, [CHANNELS[1]])
 
     def test_number_of_is_public(self):
@@ -252,7 +252,7 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.highlightChanged.connect(lambda c, i: highlights.append((c, i)))
         self.zap.step(1)  # highlights CH2
         self.zap.tuned(CHANNELS[1])  # late confirmation of press 1
-        QTest.qWait(120)
+        elapse(120)
         self.assertEqual(self.tunes, [CHANNELS[1], CHANNELS[2]])
         self.assertEqual(highlights, [(CHANNELS[2], 2)])
 

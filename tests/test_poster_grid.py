@@ -10,10 +10,12 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import elapse, timeline
 
 from services.library import Details
 from ui.library.poster_grid import (
     FAVORITE,
+    HOVER_DWELL_MS,
     PLAY,
     REQUEST_DELAY_MS,
     START_OVER,
@@ -128,7 +130,9 @@ class PosterGridTests(unittest.TestCase):
         return [v for n, v in self.events if n == name]
 
     def settle_requests(self):
-        QTest.qWait(REQUEST_DELAY_MS + 60)
+        """Let the grid's request timer fire: paints restart it, so run the pending ones first."""
+        QApplication.processEvents()
+        elapse(REQUEST_DELAY_MS + 60)
 
     def visible_rows(self, grid, count):
         cols = grid.columns()
@@ -362,9 +366,8 @@ class PosterGridTests(unittest.TestCase):
     def test_hover_dwell_makes_a_poster_current(self):
         self.grid.set_sections([("", titles(30))])
         move_mouse(self.grid.viewport(), self.grid.item_rect(4).center())
-        QTest.qWait(100)
-        self.assertEqual(self.grid.current_index(), 0)
-        QTest.qWait(200)
+        self.assertEqual(elapse(100, self.grid.current_index), 0)
+        elapse(HOVER_DWELL_MS + 50)
         self.assertEqual(self.grid.current_index(), 4)
         self.assertEqual(self.grid.verticalScrollBar().value(), 0)
 
@@ -377,18 +380,20 @@ class PosterGridTests(unittest.TestCase):
         )
         before = self.grid.item_rect(below)
         move_mouse(self.grid.viewport(), before.center())
-        QTest.qWait(300)
+        elapse(HOVER_DWELL_MS + 50)
         self.assertEqual(self.grid.current_index(), below)
         self.assertEqual(self.grid.item_rect(below).top(), before.top())
 
     def test_hover_moving_on_restarts_the_dwell(self):
         self.grid.set_sections([("", titles(30))])
         move_mouse(self.grid.viewport(), self.grid.item_rect(4).center())
-        QTest.qWait(150)
-        move_mouse(self.grid.viewport(), self.grid.item_rect(5).center())
-        QTest.qWait(150)
-        self.assertEqual(self.grid.current_index(), 0)
-        QTest.qWait(150)
+        _, current = timeline(
+            # the pointer moves on before the first poster's dwell ends
+            (150, lambda: move_mouse(self.grid.viewport(), self.grid.item_rect(5).center())),
+            (300, self.grid.current_index),  # past the first dwell, before the second one ends
+        )
+        self.assertEqual(current, 0)
+        elapse(HOVER_DWELL_MS + 50)
         self.assertEqual(self.grid.current_index(), 5)
 
     # 6

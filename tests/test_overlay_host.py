@@ -10,6 +10,7 @@ from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow
 from shiboken6 import isValid
+from timer_fixtures import elapse
 
 from ui.overlay_host import OverlayHost
 from ui.overlays.base import Overlay
@@ -111,14 +112,14 @@ class PointerBehaviourMixin:
         got = self.collect()
         QTest.mouseClick(self.target(), Qt.MouseButton.LeftButton)
         self.assertEqual(got["clicked"], 0)
-        QTest.qWait(QApplication.doubleClickInterval() + 100)
+        elapse(QApplication.doubleClickInterval() + 100)
         self.assertEqual(got["clicked"], 1)
 
     def test_double_click_cancels_the_click(self):
         got = self.collect()
         QTest.mouseClick(self.target(), Qt.MouseButton.LeftButton)
         QTest.mouseDClick(self.target(), Qt.MouseButton.LeftButton)
-        QTest.qWait(QApplication.doubleClickInterval() + 100)
+        elapse(QApplication.doubleClickInterval() + 100)
         self.assertEqual(got["doubleClicked"], 1)
         self.assertEqual(got["clicked"], 0)
 

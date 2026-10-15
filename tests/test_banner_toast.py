@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import timeline, wait_until
 
 from services.epg_view import Programme
 from ui.overlays.toast import Toast
@@ -56,14 +57,16 @@ class BannerTest(Base):
     def test_hides_after_timer(self):
         b = ZapBanner(self.host, visible_ms=60)
         b.show_info(info())
-        QTest.qWait(400)
-        self.assertFalse(b.isVisible())
+        self.assertTrue(b.isVisible())
+        self.assertTrue(wait_until(b.isHidden))  # 60 ms, then a 250 ms fade
 
     def test_digits_keep_visible(self):
         b = ZapBanner(self.host, visible_ms=60)
         b.show_info(info())
         b.show_digits("4")
-        QTest.qWait(400)
+        twin = ZapBanner(self.host, visible_ms=60)  # shown after b, without digits
+        twin.show_info(info())
+        self.assertTrue(wait_until(twin.isHidden))
         self.assertTrue(b.isVisible())
 
     def test_empty_digits_restart_timer(self):
@@ -71,8 +74,7 @@ class BannerTest(Base):
         b.show_info(info())
         b.show_digits("4")
         b.show_digits("")
-        QTest.qWait(400)
-        self.assertFalse(b.isVisible())
+        self.assertTrue(wait_until(b.isHidden))
 
     def test_grab_with_and_without_epg(self):
         for epg in (True, False):
@@ -148,18 +150,17 @@ class ToastTest(Base):
         t = Toast(self.host)
         t.show_message("x", ms=60)
         self.assertTrue(t.isVisible())
-        QTest.qWait(300)
-        self.assertFalse(t.isVisible())
+        self.assertTrue(wait_until(t.isHidden))
 
     def test_new_message_restarts_timer(self):
         t = Toast(self.host)
         t.show_message("one", ms=150)
-        QTest.qWait(100)
-        t.show_message("two", ms=300)
-        QTest.qWait(150)
-        self.assertTrue(t.isVisible())
-        QTest.qWait(300)
-        self.assertFalse(t.isVisible())
+        _, visible = timeline(
+            (100, lambda: t.show_message("two", ms=300)),  # before the first one's 150 ms
+            (250, t.isVisible),  # past the first one's 150 ms, before the second one's 400
+        )
+        self.assertTrue(visible)
+        self.assertTrue(wait_until(t.isHidden))
 
     def test_long_message_fits_host(self):
         t = Toast(self.host)
