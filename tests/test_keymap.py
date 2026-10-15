@@ -40,9 +40,10 @@ class ClosedKeymapTests(unittest.TestCase):
     def test_backspace_is_previous_channel(self):
         self.assertEqual(closed(K.Key_Backspace), (Action.PREVIOUS, ""))
 
-    def test_enter_and_return_open_the_drawer(self):
-        self.assertEqual(closed(K.Key_Return, "\r"), (Action.OPEN_DRAWER, ""))
-        self.assertEqual(closed(K.Key_Enter, "\r", KEYPAD), (Action.OPEN_DRAWER, ""))
+    def test_enter_and_return_are_ok(self):
+        # OK opens the drawer, or tunes the fast-zap column's highlight while it is open
+        self.assertEqual(closed(K.Key_Return, "\r"), (Action.OK, ""))
+        self.assertEqual(closed(K.Key_Enter, "\r", KEYPAD), (Action.OK, ""))
 
     def test_left_right_seek(self):
         self.assertEqual(closed(K.Key_Left), (Action.SEEK_BACK, ""))
@@ -139,8 +140,17 @@ class OpenKeymapTests(unittest.TestCase):
     def test_windows_altgr_types(self):
         altgr = CTRL | ALT  # Windows reports AltGr as Ctrl+Alt
         for key, text in ((K.Key_L, "ł"), (K.Key_Q, "@"), (K.Key_E, "€")):
-            self.assertEqual(opened(key, text, altgr), (Action.NAV_TEXT, text))
+            self.assertEqual(
+                resolve(key.value, altgr, text, drawer_open=True, platform="win32"),
+                (Action.NAV_TEXT, text),
+            )
         self.assertIsNone(opened(K.Key_A, "\x01", CTRL))  # Ctrl+A is a control character
+
+    def test_ctrl_alt_is_a_shortcut_outside_windows(self):
+        for platform in ("darwin", "linux"):  # ⌘⌥ on macOS; Linux reports AltGr otherwise
+            self.assertIsNone(
+                resolve(K.Key_E.value, CTRL | ALT, "e", drawer_open=True, platform=platform)
+            )
 
     def test_media_keys_work_with_the_drawer_open(self):
         self.assertEqual(opened(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))

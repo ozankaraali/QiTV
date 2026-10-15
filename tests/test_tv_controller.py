@@ -23,7 +23,7 @@ from ui.overlays.drawer import Drawer
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.zap_banner import ZapBanner
-from ui.tv_controller import Overlays, TVController
+from ui.tv_controller import Overlays, TVController, scrub
 
 NOW = datetime(2026, 10, 15, 20, 30, tzinfo=timezone.utc)
 CHANNELS = [
@@ -1069,7 +1069,7 @@ class ReviewFixTests(ControllerTestCase):
         self.play(0)
         self.controller.handle(Action.CH_NEXT)
         self.controller.handle(Action.CH_NEXT)  # burst: column on Three
-        self.controller.handle(Action.OPEN_DRAWER)
+        self.controller.handle(Action.OK)
         self.assertFalse(self.column.visible)
         self.assertEqual(self.drawer.named("open_drawer"), [])
         self.ready("http://stream/2")  # Two settles; the queued Three is requested
@@ -1131,6 +1131,142 @@ class ReviewFixTests(ControllerTestCase):
         self.assertEqual(self.banner.calls, [])
         self.assertEqual(self.drawer.calls, [])
         self.assertEqual(self.column.calls, [])
+
+
+class FixRound2Tests(ControllerTestCase):
+    """Fix round 2: the loading queue, OK versus the drawer, re-choosing the playing channel."""
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.catalog.providerReady.emit("Home")
+
+    def test_two_loading_failures_keep_the_newest_choice(self):
+        self.play(0)
+        self.catalog.loading = True
+        self.tune(1)
+        self.catalog.linkFailed.emit(2, PROVIDER_LOADING_MESSAGE)
+        self.tune(2)  # the newest choice, sent while Two waits for the provider
+        self.catalog.linkFailed.emit(3, PROVIDER_LOADING_MESSAGE)
+        self.catalog.loading = False
+        self.catalog.providerReady.emit("Home")
+        self.assertEqual(self.requested(), ["One", "Two", "Three", "Three"])
+        self.ready("http://stream/3")
+        self.assertEqual(self.played_urls(), ["http://stream/1", "http://stream/3"])
+
+    def test_a_direct_request_clears_a_stale_loading_queue(self):
+        self.play(0)
+        self.catalog.loading = True
+        self.tune(1)
+        self.catalog.linkFailed.emit(2, PROVIDER_LOADING_MESSAGE)
+        self.catalog.loading = False
+        self.tune(2)
+        self.ready("http://stream/3")
+        self.assertEqual(self.requested(), ["One", "Two", "Three"])
+        self.assertEqual(self.played_urls(), ["http://stream/1", "http://stream/3"])
+
+    def burst_to_column(self):
+        self.play(0)
+        self.controller.handle(Action.CH_NEXT)
+        self.controller.handle(Action.CH_NEXT)  # burst: the column opens on Three
+        self.assertTrue(self.column.visible)
+
+    def test_video_click_with_the_column_open_opens_the_drawer(self):
+        self.burst_to_column()
+        self.controller.video_clicked()
+        self.assertFalse(self.column.visible)
+        self.assertEqual(self.drawer.named("open_drawer"), [("2",)])
+        self.ready("http://stream/2")
+        QTest.qWait(80)  # the column's highlight is not tuned
+        self.assertEqual(self.requested(), ["One", "Two"])
+
+    def test_channel_list_with_the_column_open_opens_the_drawer(self):
+        self.burst_to_column()
+        self.controller.handle(Action.OPEN_DRAWER)  # the menu's "Channel list"
+        self.assertFalse(self.column.visible)
+        self.assertTrue(self.drawer.visible)
+        self.ready("http://stream/2")
+        QTest.qWait(80)
+        self.assertEqual(self.requested(), ["One", "Two"])
+
+    def test_ok_opens_the_drawer_without_the_column(self):
+        self.play(0)
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.drawer.named("open_drawer"), [("1",)])
+
+    def test_media_next_does_nothing_with_the_drawer_open(self):
+        self.play(0)
+        self.drawer.open_drawer()
+        self.controller.handle(Action.MEDIA_NEXT)
+        self.controller.handle(Action.MEDIA_NEXT)
+        self.controller.handle(Action.PLAY_PAUSE)  # play/pause still works
+        self.assertEqual(self.requested(), ["One"])
+        self.assertFalse(self.column.visible)
+        self.assertEqual(self.session.toggles, 1)
+
+    def test_ok_on_the_playing_row_does_not_restart_it(self):
+        self.play(0)
+        self.controller.handle(Action.CH_NEXT)
+        self.ready("http://stream/2")
+        self.controller.handle(Action.CH_PREV)  # burst: column on One
+        self.controller.handle(Action.CH_NEXT)  # column on Two, which is playing
+        self.controller.handle(Action.OK)
+        QTest.qWait(60)
+        self.assertEqual(self.requested(), ["One", "Two"])
+        self.assertFalse(self.column.visible)
+        self.assertEqual(self.banner.info.name, "Two")
+
+    def test_row_click_on_the_playing_row_does_not_restart_it(self):
+        self.play(0)
+        self.controller.handle(Action.CH_NEXT)
+        self.ready("http://stream/2")
+        self.controller.handle(Action.CH_PREV)  # burst: the column opens
+        self.column.rowClicked.emit(1)  # Two, which is playing
+        self.assertEqual(self.requested(), ["One", "Two"])
+        self.assertFalse(self.column.visible)
+
+    def test_choosing_the_playing_channel_drops_a_pending_choice(self):
+        self.play(0)
+        self.tune(1)  # Two in flight
+        self.tune(0)  # back to One, which is still playing: stay
+        self.tune(0)
+        self.catalog.linkReady.emit(2, "http://stream/2")
+        self.assertEqual(self.requested(), ["One", "Two"])
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+        self.controller.handle(Action.CH_NEXT)  # the zap moves on from One
+        self.assertEqual(self.requested(), ["One", "Two", "Two"])
+
+    def test_scrub_keeps_ordinary_question_marks(self):
+        self.assertEqual(scrub("Who?Me: http://h/a?b=c failed"), "Who?Me: … failed")
+        self.assertEqual(scrub("player_api.php?username=u&password=p"), "…")
+        self.assertEqual(scrub("Why? Because"), "Why? Because")
+
+    def test_external_failure_restores_the_playing_channel(self):
+        self.play(0)
+        self.config.play_in_vlc = True
+        self.external.result = (False, "VLC Media Player is not installed.")
+        self.play(2)
+        self.banner.dismiss()
+        self.controller.handle(Action.INFO)
+        self.assertEqual(self.banner.info.name, "One")
+
+    def test_play_exception_restores_the_playing_channel(self):
+        self.play(0)
+
+        def broken(url, **kwargs):
+            raise RuntimeError(f"cannot open {url}")
+
+        self.session.play = broken
+        with self.assertLogs("ui.tv_controller", "WARNING") as logs:
+            self.play(2)
+        self.assertEqual(
+            logs.output,
+            ["WARNING:ui.tv_controller:Could not play Three: cannot open … (RuntimeError)"],
+        )
+        self.assertEqual(self.toast.messages()[-1], ("Three: cannot open …", "error"))
+        self.banner.dismiss()
+        self.controller.handle(Action.INFO)
+        self.assertEqual(self.banner.info.name, "One")
 
 
 class LogoTests(ControllerTestCase):

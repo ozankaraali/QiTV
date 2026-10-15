@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import sys
 from typing import Any
 
 from PySide6.QtCore import Qt
@@ -13,7 +14,8 @@ class Action(str, Enum):
     CH_PREV = "ch_prev"
     DIGIT = "digit"
     PREVIOUS = "previous"
-    OPEN_DRAWER = "open_drawer"
+    OK = "ok"  # Enter/Return: the column's highlight while it is open, else the drawer
+    OPEN_DRAWER = "open_drawer"  # the drawer itself (menu, click)
     SEEK_BACK = "seek_back"
     SEEK_FWD = "seek_fwd"
     PLAY_PAUSE = "play_pause"
@@ -64,8 +66,8 @@ _PLAYER_KEYS = {
     _K.Key_Down.value: Action.CH_NEXT,
     _K.Key_PageDown.value: Action.CH_NEXT,
     _K.Key_Backspace.value: Action.PREVIOUS,
-    _K.Key_Return.value: Action.OPEN_DRAWER,
-    _K.Key_Enter.value: Action.OPEN_DRAWER,
+    _K.Key_Return.value: Action.OK,
+    _K.Key_Enter.value: Action.OK,
     _K.Key_Left.value: Action.SEEK_BACK,
     _K.Key_Right.value: Action.SEEK_FWD,
     _K.Key_Escape.value: Action.ESCAPE,
@@ -106,7 +108,12 @@ def as_int(value: Any) -> int:
 
 
 def resolve(
-    key: int, modifiers: Qt.KeyboardModifier, text: str, *, drawer_open: bool
+    key: int,
+    modifiers: Qt.KeyboardModifier,
+    text: str,
+    *,
+    drawer_open: bool,
+    platform: str = sys.platform,
 ) -> tuple[Action, str] | None:
     """Map a key press to (action, payload); the payload is the digit or the typed text."""
     key, mods = as_int(key), as_int(modifiers)
@@ -120,7 +127,7 @@ def resolve(
     if drawer_open:
         if key in _DRAWER_KEYS:
             return _DRAWER_KEYS[key], ""
-        return _text(text, mods)
+        return _text(text, mods, windows=platform.startswith("win"))
     if key in _PLAYER_KEYS:
         return _PLAYER_KEYS[key], ""
     if key in _CHANNEL_KEYS:
@@ -136,16 +143,16 @@ def resolve(
     return None
 
 
-def _text(text: str, mods: int) -> tuple[Action, str] | None:
+def _text(text: str, mods: int, *, windows: bool) -> tuple[Action, str] | None:
     """Printable text for the drawer filter.
 
-    Ctrl/⌘ and Meta never type, except Ctrl+Alt, which is how Windows reports AltGr (ł, @,
-    €). Alt (macOS Option) composes letters such as ç, so it may type, but not digits,
-    which it only modifies on other platforms.
+    Ctrl/⌘ and Meta never type, except Ctrl+Alt on Windows, which is how it reports AltGr
+    (ł, @, €); on macOS ⌘⌥ is a shortcut. Alt (macOS Option) composes letters such as ç, so
+    it may type, but not digits, which it only modifies on other platforms.
     """
     if not text or not text.isprintable():
         return None
-    altgr = mods & _CTRL and mods & _ALT and not mods & _META
+    altgr = windows and mods & _CTRL and mods & _ALT and not mods & _META
     if mods & (_CTRL | _META) and not altgr:
         return None
     if mods & _ALT and all(c in _DIGITS for c in text):

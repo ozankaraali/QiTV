@@ -46,7 +46,7 @@ _VOLUME_MODIFIERS = (
 )
 _PINNED_TITLES = {FAVORITES_GROUP: "Favorites", RECENT_GROUP: "Recent"}
 _ADDRESS = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S*", re.IGNORECASE)
-_QUERY = re.compile(r"\S*\?\S+")
+_QUERY = re.compile(r"\S*\?\S*=\S*")  # a query string carries "=": "Who?Me" stays
 
 
 def scrub(text: object) -> str:
@@ -232,6 +232,8 @@ class TVController(QObject):
                 self.zap.step(delta)
         elif action in (Action.MEDIA_NEXT, Action.MEDIA_PREV):
             delta = 1 if action is Action.MEDIA_NEXT else -1
+            if drawer.isVisible():
+                return  # the drawer is browsing; play/pause still works
             if self._playing_vod():
                 self._seek(delta * SEEK_STEP_MS)
             else:
@@ -242,11 +244,14 @@ class TVController(QObject):
                 self.zap.digit(payload)
         elif action is Action.PREVIOUS:
             self.zap.previous()
-        elif action is Action.OPEN_DRAWER:
+        elif action is Action.OK:
             if self.overlays.column.isVisible():
                 self._on_column_row(self.overlays.column.current_index())  # tune it now
             else:
                 self._open_drawer()
+        elif action is Action.OPEN_DRAWER:
+            self.overlays.column.close()
+            self._open_drawer()
         elif action in (Action.SEEK_BACK, Action.SEEK_FWD):
             self._seek(-SEEK_STEP_MS if action is Action.SEEK_BACK else SEEK_STEP_MS)
         elif action is Action.PLAY_PAUSE:
@@ -336,11 +341,20 @@ class TVController(QObject):
         if group_key != context.group_key or context.index_of(channel) < 0:
             # Numbers reach every live channel, not only the group's (TV numbers are global).
             self.zap.set_context(ZapContext(group_key, channels, fallback=self._all_live()))
-        if not from_zap:
+        playing = self._playing_live()
+        stay = playing is not None and ZapContext.same(channel, playing.item)
+        if not from_zap and not stay:
             self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
         self.overlays.column.close()
         self._channel = channel
         self.overlays.banner.show_info(self.banner_info(channel))
+        if stay:
+            # The channel already playing was chosen again: never restart it, and drop a
+            # pending choice when it settles (the "stay" marker is the playing target).
+            if self._inflight is not None or self._queued is not None:
+                self._queued = playing
+            self.zap.tuned(channel)
+            return
         title = str(channel.get("name") or "")
         self._request(_Target(channel, "live", title, group_key=group_key))
 
@@ -376,6 +390,7 @@ class TVController(QObject):
         if self._inflight is not None:
             self._queued = target  # replaces any older queued target
             return
+        self._queued = None  # the target sent now is the newest choice
         request_id = self.catalog.request_link(
             target.item, section=target.section, is_episode=target.section == "series"
         )
@@ -394,23 +409,41 @@ class TVController(QObject):
         self._inflight = None
         return target
 
+    def _follow_queue(self, settled: _Target) -> bool:
+        """Act on a choice made while `settled` was in flight; False when there was none."""
+        queued, self._queued = self._queued, None
+        if queued is None:
+            return False
+        if self._is_stay(queued):
+            logger.debug("Dropping the link for %s: staying on %s", settled.title, queued.title)
+        else:
+            logger.debug(
+                "Dropping the link for %s: %s was chosen since", settled.title, queued.title
+            )
+            self._request(queued)
+        return True
+
+    def _is_stay(self, target: Optional[_Target]) -> bool:
+        """True for the marker that keeps the playing channel (see _tune)."""
+        return target is not None and target is self._current and self._has_media()
+
     def _on_link_ready(self, request_id: int, url: str) -> None:
         target = self._take(request_id)
         if target is None:
             return
-        queued, self._queued = self._queued, None
-        if queued is not None:
-            if not queued.same_as(target):
-                logger.debug(
-                    "Dropping the link for %s: %s was chosen since", target.title, queued.title
-                )
-                self._request(queued)
-                return
+        queued = self._queued
+        if queued is not None and not self._is_stay(queued) and queued.same_as(target):
+            self._queued = None
             target = queued  # chosen again meanwhile: this link serves the newest choice
+        elif self._follow_queue(target):
+            return
+        previous = self._current
         try:
             self._deliver(target, url)
         except Exception as e:
+            self._current = previous  # whatever was playing before is still the current one
             self._log_failure(f"play {target.title}", e)
+            self._restore_channel()
             self._error(f"{target.title}: {e}")
 
     def _on_link_failed(self, request_id: int, message: str) -> None:
@@ -418,17 +451,20 @@ class TVController(QObject):
         if target is None:
             return
         if message == PROVIDER_LOADING_MESSAGE:
-            # A provider setup is running; providerReady asks again for the newest target.
+            # A provider setup is running; providerReady asks again for the newest choice:
+            # one queued meanwhile is newer than the target that just failed.
             if self._queued is None:
                 self._queued = target
             return
-        queued, self._queued = self._queued, None
-        if queued is not None:
-            self._request(queued)  # the failed target was superseded: no error for it
-            return
+        if self._follow_queue(target):
+            return  # the failed target was superseded: no error for it
+        self._restore_channel()
+        self._error(f"{target.title}: {message}")
+
+    def _restore_channel(self) -> None:
+        """After a failed tune, INFO and the drawer follow the channel still playing."""
         current = self._current
         self._channel = current.item if current is not None and current.live else None
-        self._error(f"{target.title}: {message}")
 
     def _deliver(self, target: _Target, url: str) -> None:
         provider = self.catalog.current_provider_name()
@@ -441,6 +477,7 @@ class TVController(QObject):
                 first, _, rest = (message or "").strip().partition("\n")
                 if rest.strip():
                     logger.info("External player: %s", scrub(rest))
+                self._restore_channel()
                 self._error(first.strip() or "The external player could not start")
                 return
             self._current, self._cid = target, None
@@ -500,6 +537,8 @@ class TVController(QObject):
         # request still in flight may never settle: ask again for the newest target, unless
         # the provider changed and its channels belong to the old one.
         pending = self._queued or (self._inflight[1] if self._inflight is not None else None)
+        if self._is_stay(pending):
+            pending = None  # the playing channel was the newest choice: nothing to ask again
         self._drop_links()
         if self._provider is not None and name != self._provider:
             self.zap.reset()
@@ -817,6 +856,10 @@ class TVController(QObject):
 
     def _has_media(self) -> bool:
         return self._state in _ACTIVE_STATES
+
+    def _playing_live(self) -> Optional[_Target]:
+        current = self._current
+        return current if current is not None and current.live and self._has_media() else None
 
     def _playing_vod(self) -> bool:
         return self._current is not None and not self._current.live and self._has_media()
