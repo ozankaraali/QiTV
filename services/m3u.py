@@ -15,7 +15,7 @@ def parse_m3u(data: str, categorize: bool = False):
         If categorize=False: List of items
         If categorize=True: Dict with 'categories', 'contents', 'sorted_channels'
     """
-    lines = data.split("\n")
+    lines = data.lstrip("﻿").splitlines()
     items = []
     item = {}
     id_counter = 0
