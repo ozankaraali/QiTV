@@ -30,7 +30,7 @@ class BannerInfo:
     next: Programme | None
     upcoming: list[Programme] = field(default_factory=list)
     is_live: bool = True
-    clock: datetime = field(default_factory=datetime.now)
+    clock: datetime = field(default_factory=lambda: datetime.now().astimezone())
 
 
 class ZapBanner(Overlay):
@@ -70,6 +70,9 @@ class ZapBanner(Overlay):
             self._timer.start(self._visible_ms)
 
     def show_digits(self, text: str) -> None:
+        if not text and not self.isVisible():
+            self._digits = ""
+            return
         self._digits = text
         self._reveal()
         if text:
@@ -154,6 +157,10 @@ class ZapBanner(Overlay):
 
         # number
         number_text = self._digits or (info.number if info else "")
+        while num_font.pixelSize() > 8 and (
+            QFontMetrics(num_font).horizontalAdvance(number_text) > 9 * u - 2
+        ):
+            num_font.setPixelSize(num_font.pixelSize() - 1)
         p.setFont(num_font)
         p.setPen(accent if self._digits else qcolor(PALETTE.text, 0.95))
         p.drawText(QRectF(left, row_top, 9 * u, row_h), Qt.AlignLeft | Qt.AlignVCenter, number_text)

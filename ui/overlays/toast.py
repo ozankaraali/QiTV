@@ -15,6 +15,7 @@ class Toast(Overlay):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._text = ""
+        self._shown = ""
         self._kind = "info"
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -41,11 +42,16 @@ class Toast(Overlay):
 
     def _layout(self) -> None:
         units = self._units()
-        text_w = QFontMetrics(self._font()).horizontalAdvance(self._text)
-        width = text_w + units.px(3.2)
-        height = QFontMetrics(self._font()).height() + units.px(1.6)
+        metrics = QFontMetrics(self._font())
         parent = self.parentWidget()
-        host_w = parent.width() if parent is not None else width
+        pad = units.px(3.2)
+        host_w = (
+            parent.width() if parent is not None else metrics.horizontalAdvance(self._text) + pad
+        )
+        max_text = max(1, host_w - 2 * units.px(2.4) - pad)
+        self._shown = metrics.elidedText(self._text, Qt.ElideRight, max_text)
+        width = metrics.horizontalAdvance(self._shown) + pad
+        height = metrics.height() + units.px(1.6)
         self.setGeometry((host_w - width) // 2, units.px(2.4), width, height)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
@@ -65,5 +71,5 @@ class Toast(Overlay):
         p.drawRoundedRect(rect, radius, radius)
         p.setFont(self._font())
         p.setPen(qcolor(PALETTE.text))
-        p.drawText(self.rect(), Qt.AlignCenter, self._text)
+        p.drawText(self.rect(), Qt.AlignCenter, self._shown)
         p.end()

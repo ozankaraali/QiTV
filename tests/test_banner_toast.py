@@ -80,6 +80,35 @@ class BannerTest(Base):
             b.show_info(info(epg))
             self.assertFalse(b.grab().isNull())
 
+    def test_default_clock_is_aware_and_grabs_with_epg(self):
+        b = ZapBanner(self.host)
+        now = datetime.now().astimezone()
+        epg = BannerInfo(
+            number="1",
+            name="X",
+            logo=None,
+            now=Programme("A", now - timedelta(minutes=10), now + timedelta(minutes=50)),
+            next=None,
+        )
+        self.assertIsNotNone(epg.clock.tzinfo)
+        b.show_info(epg)
+        self.assertFalse(b.grab().isNull())
+
+    def test_empty_digits_without_info_does_nothing(self):
+        b = ZapBanner(self.host)
+        b.show_digits("")
+        self.assertFalse(b.isVisible())
+        b.show_info(info())
+        b.dismiss()
+        b.show_digits("")
+        self.assertFalse(b.isVisible())
+
+    def test_many_digits_grab(self):
+        b = ZapBanner(self.host)
+        b.show_info(info())
+        b.show_digits("10428")
+        self.assertFalse(b.grab().isNull())
+
     def test_resizes_with_parent(self):
         b = ZapBanner(self.host)
         b.show_info(info())
@@ -95,6 +124,22 @@ class ToastTest(Base):
         self.assertTrue(t.isVisible())
         QTest.qWait(300)
         self.assertFalse(t.isVisible())
+
+    def test_new_message_restarts_timer(self):
+        t = Toast(self.host)
+        t.show_message("one", ms=150)
+        QTest.qWait(100)
+        t.show_message("two", ms=300)
+        QTest.qWait(150)
+        self.assertTrue(t.isVisible())
+        QTest.qWait(300)
+        self.assertFalse(t.isVisible())
+
+    def test_long_message_fits_host(self):
+        t = Toast(self.host)
+        t.show_message("w" * 500)
+        self.assertGreaterEqual(t.x(), 0)
+        self.assertLessEqual(t.width(), self.host.width())
 
     def test_width_grows_with_text(self):
         t = Toast(self.host)
