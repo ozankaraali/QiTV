@@ -7,14 +7,16 @@ The small surface takes the left button (the shell's click would open the drawer
 asks for a swap, and a drag moves it and, on release, snaps it to the nearest corner. These
 are the Qt mouse events the shell reads on the main surface (libVLC's own mouse handling is
 off, so they reach Qt on macOS too). Other buttons, the wheel and moves go on to the shell.
+The PiP label's pill, drawn over the small surface, forwards its own presses the same way
+(pill_press, pill_move, pill_release).
 """
 
 from dataclasses import dataclass
 import logging
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QGuiApplication, QMouseEvent
+from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
 from ui.overlays.painting import Units
@@ -68,6 +70,7 @@ class _Press:
     origin: QPoint  # the surface's position then, in the container
     dragging: bool = False
     void: bool = False  # the layout changed meanwhile, or the second press of a double-click
+    surface_events: bool = True  # False: the label's pill forwards the rest of it
 
 
 class PipFrame(QObject):
@@ -86,12 +89,16 @@ class PipFrame(QObject):
         self._shown = False
         self._corner = self._saved_corner()
         self._press: _Press | None = None
-        # A click swapped: the double-click's second press belongs to it, wherever it lands.
-        self._swallow_double = False
+        # Where and when a click swapped. A second press there within the double-click
+        # interval belongs to that click, whichever surface (now in the corner) it lands on:
+        # Qt need not make a double-click of presses on two native windows.
+        self._swap_at: QPoint | None = None
+        self._swap_clock = QElapsedTimer()
         self._reported = QRect()
-        container.installEventFilter(self)
-        for surface in self._surfaces.values():
-            surface.installEventFilter(self)
+        self._closed = False
+        # Removed by close(), or by Qt once this frame is deleted with the container.
+        for watched in (container, main_surface, pip_surface):
+            watched.installEventFilter(self)
         self._layout()
 
     # ---- public API ---------------------------------------------------------------------
@@ -124,6 +131,31 @@ class PipFrame(QObject):
     def corner(self) -> str:
         return self._corner
 
+    def close(self) -> None:
+        """Stop watching the player page and the surfaces (the window's shutdown)."""
+        if self._closed:
+            return
+        self._closed = True
+        self._press = None
+        for watched in (self._container, *self._surfaces.values()):
+            if isValid(watched):
+                watched.removeEventFilter(self)
+
+    # The label's pill covers part of the small surface; it forwards its presses (globals).
+    def pill_press(self, position: QPoint) -> None:
+        if self._shown and not self._closed:
+            self._begin(self._small(), position, surface_events=False)
+
+    def pill_move(self, position: QPoint) -> None:
+        press = self._press
+        if press is not None and not press.surface_events and not press.void:
+            self._drag(press, position)
+
+    def pill_release(self, position: QPoint) -> None:
+        press = self._press
+        if press is not None and not press.surface_events:
+            self._release(press, position)
+
     # ---- layout -------------------------------------------------------------------------
 
     def _small(self) -> QWidget:
@@ -132,20 +164,7 @@ class PipFrame(QObject):
     def _saved_corner(self) -> str:
         return _valid_corner(getattr(self._config, "pip_corner", DEFAULT_CORNER))
 
-    def _alive(self) -> bool:
-        # The garbage collector can clear this wrapper while Qt, deleting the container,
-        # still sends events through the C++ object's filter.
-        container, surfaces = getattr(self, "_container", None), getattr(self, "_surfaces", {})
-        return (
-            container is not None
-            and isValid(container)
-            and bool(surfaces)
-            and all(isValid(s) for s in surfaces.values())
-        )
-
     def _layout(self) -> None:
-        if not self._alive():
-            return
         if self._press is not None:
             self._press.void = True  # its release neither swaps nor snaps
         self._surfaces[self._large].setGeometry(self._container.rect())
@@ -183,14 +202,13 @@ class PipFrame(QObject):
     # ---- mouse --------------------------------------------------------------------------
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if not self._alive():
-            return False
+        # The event type first: a page being deleted still sends others (hide, deactivate)
+        # through this filter, possibly after the garbage collector cleared this wrapper.
         kind = event.type()
-        if watched is self._container:
-            if kind in _LAYOUT_EVENTS:
+        if kind in _LAYOUT_EVENTS:
+            if watched is self._container:
                 self._layout()
-            return False
-        if kind in _MOUSE_EVENTS and isinstance(event, QMouseEvent):
+        elif kind in _MOUSE_EVENTS and isinstance(event, QMouseEvent):
             return self._mouse(watched, event)
         return False
 
@@ -203,30 +221,41 @@ class PipFrame(QObject):
         if kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
             if event.button() != left:
                 return False
-            if kind == QEvent.Type.MouseButtonDblClick and self._swallow_double:
-                self._swallow_double = False
-                self._press = _Press(watched, position, watched.pos(), void=True)
-                return True
-            self._swallow_double = False
-            small = self._small()
-            if not self._shown or watched is not small:
-                return False
-            self._press = _Press(small, position, small.pos())
-            return True
+            return self._begin(watched, position, surface_events=True)
         press = self._press
-        if press is None or watched is not press.surface:
+        if press is None or not press.surface_events or watched is not press.surface:
             return False
         if kind == QEvent.Type.MouseMove:
             if not event.buttons() & left:  # the release was lost (left the window)
-                self._release(press, clicked=False)
+                self._release(press, None)
                 return False
             if not press.void:
                 self._drag(press, position)
             return True
         if kind == QEvent.Type.MouseButtonRelease and event.button() == left:
-            self._release(press, clicked=True)
+            self._release(press, position)
             return True
         return False
+
+    def _begin(self, surface: QWidget, position: QPoint, *, surface_events: bool) -> bool:
+        """A left press on `surface` (or the pill over it); False when it is not the frame's."""
+        void = self._second_press(position)
+        if not void and (not self._shown or surface is not self._small()):
+            return False
+        self._press = _Press(
+            surface, position, surface.pos(), void=void, surface_events=surface_events
+        )
+        return True
+
+    def _second_press(self, position: QPoint) -> bool:
+        """The second press of a double-click whose first click swapped (any press ends it)."""
+        at, self._swap_at = self._swap_at, None
+        distance = QGuiApplication.styleHints().mouseDoubleClickDistance()
+        return (
+            at is not None
+            and self._swap_clock.elapsed() <= QApplication.doubleClickInterval()
+            and (position - at).manhattanLength() <= distance
+        )
 
     def _drag(self, press: _Press, position: QPoint) -> None:
         delta = position - press.start
@@ -243,12 +272,14 @@ class PipFrame(QObject):
         )
         self._report()
 
-    def _release(self, press: _Press, *, clicked: bool) -> None:
+    def _release(self, press: _Press, position: QPoint | None) -> None:
+        """The button came up at `position` (None: the release was lost)."""
         self._press = None
         if press.void:
             return
         if press.dragging:
             self._snap()
-        elif clicked:
-            self._swallow_double = True
+        elif position is not None:
+            self._swap_at = QPoint(position)
+            self._swap_clock.start()
             self.swapRequested.emit()

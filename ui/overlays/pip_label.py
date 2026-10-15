@@ -1,12 +1,14 @@
 """PiP label: the small surface's channel and state, a speaker for the mixer and a close button.
 
 It covers the small surface (follow()), but only its pill and buttons take the mouse and the
-host's mask: a click anywhere else on the small video reaches the surface below.
+host's mask: a click anywhere else on the small video reaches the surface below. The pill
+stands for that video: its press, moves and release go to the PiP frame (pillPressed …), which
+swaps on a click and moves the PiP on a drag, as it does for the surface itself.
 """
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QPen, QRegion
 from PySide6.QtWidgets import QWidget
 
@@ -29,6 +31,7 @@ class _Layout:
     close: QRectF
     mixer: QRectF
     name: str  # elided to fit
+    state: str  # elided to fit, unless "LIVE"
     name_font: QFont
     state_font: QFont
     pad: float
@@ -40,7 +43,10 @@ class _Layout:
 class PipLabel(Overlay):
     closeRequested = Signal()
     mixerRequested = Signal()  # the speaker: the mixer opens with the PiP row selected
-    swapRequested = Signal()  # a click on the pill, as on the small video below it
+    # The left button on the pill, in global coordinates: for PipFrame.pill_press/_move/_release.
+    pillPressed = Signal(QPoint)
+    pillMoved = Signal(QPoint)
+    pillReleased = Signal(QPoint)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -48,6 +54,7 @@ class PipLabel(Overlay):
         self._name = ""
         self._state = CONNECTING
         self._audible = False  # the small slot starts muted
+        self._pill_held = False
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
@@ -81,6 +88,11 @@ class PipLabel(Overlay):
     def info(self) -> tuple[str, str]:
         return self._name, self._state
 
+    def shown_text(self) -> tuple[str, str]:
+        """The name and state as painted: elided ("…") to fit the pill."""
+        layout = self._layout()
+        return layout.name, layout.state
+
     def is_audible(self) -> bool:
         return self._audible
 
@@ -111,16 +123,22 @@ class PipLabel(Overlay):
         close = QRectF(self.width() - inset - height, inset, height, height)
         mixer = close.translated(-(height + un.px(0.4)), 0)
         dot, dot_gap = max(6, round(states.height() * 0.42)), un.px(0.4)
+        room = max(0.0, mixer.left() - un.px(0.6) - inset)  # the pill ends before the speaker
+        elide = Qt.TextElideMode.ElideRight
         if self._state == LIVE:
+            state = LIVE
             state_w = dot + dot_gap + states.horizontalAdvance(LIVE)
         else:
-            state_w = states.horizontalAdvance(self._state)
-        room = max(0.0, mixer.left() - un.px(0.6) - inset)
+            state = states.elidedText(self._state, elide, max(0, int(room - 2 * pad)))
+            state_w = states.horizontalAdvance(state)
+        # The name gives way first; it may shrink to "…" or, with no room for that, to nothing.
         name_room = int(room - 2 * pad - gap - state_w)
-        name = names.elidedText(self._name, Qt.TextElideMode.ElideRight, max(0, name_room))
+        name = names.elidedText(self._name, elide, name_room) if name_room > 0 else ""
         width = 2 * pad + state_w + (gap + names.horizontalAdvance(name) if name else 0)
         pill = QRectF(inset, inset, min(width, room), height)
-        return _Layout(pill, close, mixer, name, name_font, state_font, pad, gap, dot, dot_gap)
+        return _Layout(
+            pill, close, mixer, name, state, name_font, state_font, pad, gap, dot, dot_gap
+        )
 
     def _region(self) -> QRegion:
         """The pill and buttons, in label coordinates (empty with nothing to cover)."""
@@ -212,7 +230,7 @@ class PipLabel(Overlay):
                 else qcolor(PALETTE.text, PALETTE.text_muted_alpha)
             )
             p.setPen(color)
-            p.drawText(rest, align, self._state)
+            p.drawText(rest, align, layout.state)
         p.restore()
 
     def _paint_cross(self, p: QPainter, rect: QRectF) -> None:
@@ -226,7 +244,7 @@ class PipLabel(Overlay):
         p.drawLine(centre + QPointF(arm, -arm), centre + QPointF(-arm, arm))
         p.restore()
 
-    # ---- input: the pill and buttons take the left button ---------------------------------
+    # ---- input: the buttons act on a press; the pill is the small video's ------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() in NAV_BUTTONS:
@@ -242,13 +260,34 @@ class PipLabel(Overlay):
         elif layout.mixer.contains(pos):
             self.mixerRequested.emit()
         elif layout.pill.contains(pos):
-            self.swapRequested.emit()
+            self._pill_held = True
+            self.pillPressed.emit(event.globalPosition().toPoint())
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if not self._pill_held:
+            event.ignore()  # the host shows the transport
+            return
+        event.accept()
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.pillMoved.emit(event.globalPosition().toPoint())
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         event.accept()
+        if self._pill_held and event.button() == Qt.MouseButton.LeftButton:
+            self._pill_held = False
+            self.pillReleased.emit(event.globalPosition().toPoint())
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() in NAV_BUTTONS:
             event.ignore()  # the host counts a quick second Back as another press
             return
-        event.accept()  # not a second press: a double-click must not swap back
+        event.accept()
+        on_pill = self._layout().pill.contains(event.position())
+        if event.button() == Qt.MouseButton.LeftButton and on_pill:
+            # A press like any other: the frame knows whether it ends a swapping click.
+            self._pill_held = True
+            self.pillPressed.emit(event.globalPosition().toPoint())
+
+    def hideEvent(self, event) -> None:
+        self._pill_held = False
+        super().hideEvent(event)
