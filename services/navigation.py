@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import logging
-from typing import Any, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, Signal
 
@@ -14,6 +15,7 @@ SECTION_TITLES = {"live": "Live TV", "movies": "Movies", "series": "Series"}
 FAVORITES_GROUP = "@favorites"
 RECENT_GROUP = "@recent"
 _RECENT_LIMIT = 20
+_MEMO_LIMIT = 64  # memoized child lists kept (least recently used are dropped)
 
 
 @dataclass(frozen=True)
@@ -78,8 +80,9 @@ class NavModel(QObject):
         self._errors: dict[tuple, str] = {}
         self._ready_sections: set[str] = set()
         self._pending_group: Optional[tuple[str, str]] = None
-        self._memo: dict[str, Any] = {}
-        self._fingerprint: Optional[tuple] = None
+        # children() results, keyed by parent and stamped with what they depend on.
+        self._memo: OrderedDict[tuple, tuple[tuple, Any]] = OrderedDict()
+        self._events = 0  # bumped by every catalog event handled here, and by retry()
         catalog.sectionReady.connect(self._on_section_ready)
         catalog.groupReady.connect(self._on_group_ready)
         catalog.seasonsReady.connect(self._on_seasons_ready)
@@ -116,16 +119,35 @@ class NavModel(QObject):
                 NavNode("section", s, SECTION_TITLES.get(s, s.title()), s)
                 for s in self.catalog.sections()
             ]
+        section = self.section_of(parent)
+        state = (self._data_version(), self._events)
         if parent.layer == "section":
-            if ("section", parent.key) in self._errors:
-                return []
-            pinned = self._pinned_groups() if parent.key == "live" else []
-            groups = [
-                NavNode("group", g.id, g.title, g, g.count) for g in self.catalog.groups(parent.key)
-            ]
-            return pinned + groups
+            pinned = self._pinned_deps() if parent.key == "live" else ()
+            return self._cached(
+                ("section", parent.key), state + pinned, lambda: self._section_children(parent)
+            )
         if parent.layer == "group":
-            return self._group_items(parent)
+            if parent.key == FAVORITES_GROUP:
+                return [_item_node(i) for i in self._favorite_items()]
+            if parent.key == RECENT_GROUP:
+                return [_item_node(i) for i in self._recent_items()]
+            return self._cached(
+                ("group", section, parent.key), state, lambda: self._group_items(parent)
+            )
+        series = next((n for n in reversed(self._path) if n.layer == "item"), None)
+        key = (parent.layer, section, series.key if series else None, parent.key)
+        return self._cached(key, state, lambda: self._series_children(parent))
+
+    def _section_children(self, parent: NavNode) -> list[NavNode]:
+        if ("section", parent.key) in self._errors:
+            return []
+        pinned = self._pinned_groups() if parent.key == "live" else []
+        groups = [
+            NavNode("group", g.id, g.title, g, g.count) for g in self.catalog.groups(parent.key)
+        ]
+        return pinned + groups
+
+    def _series_children(self, parent: NavNode) -> Optional[list[NavNode]]:
         if parent.layer == "item" and self.section_of(parent) == "series":
             seasons = self.catalog.seasons(parent.payload)
             if seasons is None:
@@ -148,10 +170,6 @@ class NavModel(QObject):
         return []
 
     def _group_items(self, group: NavNode) -> Optional[list[NavNode]]:
-        if group.key == FAVORITES_GROUP:
-            return [_item_node(i) for i in self._favorite_items()]
-        if group.key == RECENT_GROUP:
-            return [_item_node(i) for i in self._recent_items()]
         section = self.section_of(group) or "live"
         items = self.catalog.items(section, group.key)
         if items is None:
@@ -162,6 +180,44 @@ class NavModel(QObject):
                 return self._load(key, lambda: self.catalog.request_group(section, group.key))
             return self._load(("section", section), lambda: self.catalog.request_section(section))
         return [_item_node(i) for i in items]
+
+    # --- memoization -------------------------------------------------------------------
+    def _data_version(self) -> object:
+        """The catalog's content version, or this model's event count when it has none."""
+        version = getattr(self.catalog, "content_version", None)
+        return version() if callable(version) else self._events
+
+    def _favorites_fingerprint(self) -> tuple:
+        return tuple(self.config.favorites or [])
+
+    def _history_fingerprint(self) -> tuple:
+        history = self.config.watch_history or []
+        return (len(history), repr(history[0]) if history else None)
+
+    def _pinned_deps(self) -> tuple:
+        return (
+            self._favorites_fingerprint(),
+            self._history_fingerprint(),
+            self.catalog.current_provider_name(),
+        )
+
+    def _cached(
+        self, key: tuple, deps: tuple, compute: Callable[[], Optional[list]]
+    ) -> Optional[list]:
+        """compute() once per key while deps stay equal; None (still loading) is not kept."""
+        entry = self._memo.get(key)
+        if entry is not None and entry[0] == deps:
+            self._memo.move_to_end(key)
+            return list(entry[1])
+        value = compute()
+        if value is None:
+            self._memo.pop(key, None)
+            return None
+        self._memo[key] = (deps, value)
+        self._memo.move_to_end(key)
+        while len(self._memo) > _MEMO_LIMIT:
+            self._memo.popitem(last=False)
+        return list(value)
 
     def _load(self, key: tuple, request) -> Optional[list[NavNode]]:
         if key in self._errors:
@@ -200,6 +256,7 @@ class NavModel(QObject):
             self._ready_sections.discard(key[1])
             self._pending.add(key)
             self.catalog.request_section(key[1])
+        self._events += 1
         self.changed.emit()
 
     def _all_live_items(self) -> list[dict]:
@@ -212,28 +269,14 @@ class NavModel(QObject):
                     result.append(item)
         return result
 
-    def _check_memo(self) -> None:
-        history = self.config.watch_history or []
-        fingerprint = (
-            tuple(self.config.favorites or []),
-            len(history),
-            repr(history[0]) if history else None,
-        )
-        if fingerprint != self._fingerprint:
-            self._fingerprint = fingerprint
-            self._memo.clear()
-
     def _favorite_items(self) -> list[dict]:
-        self._check_memo()
-        if "fav" not in self._memo:
-            self._memo["fav"] = self._compute_favorites()
-        return cast(list[dict], self._memo["fav"])
+        # Scanning every live channel is the expensive part: a zap (history) must not redo it.
+        deps = (self._data_version(), self._favorites_fingerprint())
+        return cast(list[dict], self._cached(("@favorites",), deps, self._compute_favorites))
 
     def _recent_items(self) -> list[dict]:
-        self._check_memo()
-        if "recent" not in self._memo:
-            self._memo["recent"] = self._compute_recent()
-        return cast(list[dict], self._memo["recent"])
+        deps = (self._history_fingerprint(), self.catalog.current_provider_name())
+        return cast(list[dict], self._cached(("@recent",), deps, self._compute_recent))
 
     def _compute_favorites(self) -> list[dict]:
         names = set(self.config.favorites or [])
@@ -255,10 +298,8 @@ class NavModel(QObject):
         return result
 
     def _pinned_groups(self) -> list[NavNode]:
-        self._check_memo()
-        if "pinned" not in self._memo:
-            self._memo["pinned"] = self._compute_pinned()
-        return list(self._memo["pinned"])
+        deps = (self._data_version(),) + self._pinned_deps()
+        return cast(list[NavNode], self._cached(("@pinned",), deps, self._compute_pinned))
 
     def _compute_pinned(self) -> list[NavNode]:
         pinned = []
@@ -331,13 +372,13 @@ class NavModel(QObject):
 
     # --- catalog events ------------------------------------------------------------------
     def _settled(self, key: tuple) -> None:
-        self._memo.clear()
+        self._events += 1
         self._pending.discard(key)
         self._errors.pop(key, None)
         self.changed.emit()
 
     def _on_section_ready(self, section: str) -> None:
-        self._memo.clear()
+        self._events += 1
         self._ready_sections.add(section)
         self._pending.discard(("section", section))
         self._errors.pop(("section", section), None)
@@ -371,6 +412,7 @@ class NavModel(QObject):
 
     def _fail(self, key: tuple, message: str) -> None:
         logger.info("Load failed for %s", key)  # the message is for the user, not the log
+        self._events += 1
         if key[0] == "section":
             self._ready_sections.discard(key[1])
         self._pending.discard(key)
@@ -388,6 +430,7 @@ class NavModel(QObject):
 
     def _on_provider_ready(self, name: str) -> None:
         self._memo.clear()
+        self._events += 1
         self._pending.clear()
         self._errors.clear()
         self._ready_sections.clear()

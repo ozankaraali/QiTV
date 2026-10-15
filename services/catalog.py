@@ -328,6 +328,7 @@ class CatalogService(QObject):
         self.runner = runner if runner is not None else JobRunner(self)
         self.factory = factory or WorkerFactory()
         self._generation = 0
+        self._content_version = 0  # bumped whenever the catalog content may have changed
         self._epg_ready = False
         self._ready_provider: Optional[str] = None
         # Serial provider-state queue: setups and EPG loads never overlap.
@@ -359,11 +360,19 @@ class CatalogService(QObject):
     def provider_type(self) -> str:
         return str(self.current_provider().get("type", "")).upper()
 
+    def content_version(self) -> int:
+        """Changes whenever groups, items, seasons or episodes may have changed.
+
+        Views memoize what they build from the catalog against it.
+        """
+        return self._content_version
+
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
         # Only one setup runs at a time; the generation bumps now so results of anything
         # issued for the previous provider are ignored, and queued catalog requests and a
         # queued EPG load (both for the previous provider) are dropped.
         self._generation += 1
+        self._content_version += 1  # the setup replaces the provider's content
         self._epg_ready = False
         self._ready_provider = None
         self._catalog_queue.clear()
@@ -405,6 +414,8 @@ class CatalogService(QObject):
 
         True when a queued provider setup took over (the finished job is superseded).
         """
+        if self._state_job == "provider":
+            self._content_version += 1  # the setup has finished replacing the content
         self._state_job = None
         if self._pending_setup is not None:
             pending, self._pending_setup = self._pending_setup, None
@@ -553,6 +564,7 @@ class CatalogService(QObject):
         self._fail(self.sectionFailed, job.data, message)
 
     def _store_section(self, ct: str, payload) -> None:
+        self._content_version += 1
         self.provider_manager.current_provider_content[ct] = payload
         self.provider_manager.mark_content_fresh(ct)
         self.provider_manager.save_provider()
@@ -653,6 +665,7 @@ class CatalogService(QObject):
             self._fail(self.groupFailed, section, group_id, GROUP_UNAVAILABLE_MESSAGE)
             return
         content.setdefault("contents", {})[group_id] = list(payload.get("items") or [])
+        self._content_version += 1
         self.provider_manager.save_provider()
         self.groupReady.emit(section, group_id)
 
@@ -667,6 +680,7 @@ class CatalogService(QObject):
         if not isinstance(content, dict):
             logger.debug("Replacing non-dict series content %r", type(content))
             content = contents["series"] = {}
+            self._content_version += 1
         return cast(dict, content)
 
     def seasons(self, series: dict) -> Optional[list[dict]]:
@@ -720,6 +734,7 @@ class CatalogService(QObject):
         raw = payload.get("seasons") if "seasons" in payload else payload.get("items")
         items = normalize_seasons(series.get("name", "Unknown Series"), list(raw or []))
         cache.setdefault("seasons", {})[str(series.get("id"))] = items
+        self._content_version += 1
         self.provider_manager.save_provider()
         self.seasonsReady.emit(str(series.get("id")))
 
@@ -806,6 +821,7 @@ class CatalogService(QObject):
             episodes.append(episode)
         by_season = self._series_cache().setdefault("episodes", {})
         by_season.setdefault(str(series.get("id")), {})[season_id] = episodes
+        self._content_version += 1
         self.provider_manager.save_provider()
         self.episodesReady.emit(str(series.get("id")), season_id)
 

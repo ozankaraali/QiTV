@@ -39,6 +39,10 @@ class FakeCatalog(QObject):
     def provider_type(self):
         return self.ptype
 
+    def content_version(self):
+        # Changes whenever the fake's content does (tests mutate it directly).
+        return hash(repr((self.live, self.movies, self.season_map, self.loaded, self.ptype)))
+
     def provider_names(self):
         return ["Home", "Backup"]
 
@@ -277,6 +281,51 @@ class NavModelTests(unittest.TestCase):
         self.config.favorites = []
         groups = self.nav.children(live)
         self.assertNotIn(FAVORITES_GROUP, [n.key for n in groups])
+
+    def test_group_children_are_memoized_until_the_catalog_changes(self):
+        # Finding m5: columns() rebuilt every node on each call (~70 ms for 50k channels).
+        self.nav.reset_to("live", "10")
+        group = self.nav.path[-1]
+        first = self.nav.children(group)
+        calls = self.catalog.items_calls
+        self.assertIs(self.nav.children(group)[0], first[0])
+        self.assertEqual(self.catalog.items_calls, calls)
+        self.catalog.live["10"] = [{"id": 3, "name": "Three"}]
+        self.assertEqual([n.title for n in self.nav.children(group)], ["Three"])
+
+    def test_a_zap_does_not_rescan_favorites_or_rebuild_groups(self):
+        home = self.nav.children(None)[0]
+        self.nav.open(home)
+        live = self.nav.children(home)[0]
+        self.nav.open(live)
+        self.nav.children(live)
+        group = next(n for n in self.nav.children(live) if n.key == "10")
+        nodes = self.nav.children(group)
+        calls = self.catalog.items_calls
+        # A zap records history: only the recent list changes.
+        self.config.watch_history = [
+            {"provider_name": "Home", "item_type": "channel", "item_data": {"id": 2, "name": "Two"}}
+        ] + self.config.watch_history
+        pinned = self.nav.children(live)
+        self.assertEqual(self.catalog.items_calls, calls)
+        recent = next(n for n in pinned if n.key == RECENT_GROUP)
+        self.assertEqual([n.title for n in self.nav.children(recent)], ["Two", "One"])
+        self.assertIs(self.nav.children(group)[0], nodes[0])
+        self.assertEqual(self.catalog.items_calls, calls)
+
+    def test_without_a_content_version_catalog_events_invalidate(self):
+        class VersionlessCatalog(FakeCatalog):
+            content_version = None
+
+        catalog = VersionlessCatalog()
+        nav = NavModel(catalog, self.config)
+        nav.reset_to("live", "10")
+        group = nav.path[-1]
+        self.assertEqual([n.title for n in nav.children(group)], ["One", "Two"])
+        catalog.live["10"] = [{"id": 3, "name": "Three"}]
+        self.assertEqual([n.title for n in nav.children(group)], ["One", "Two"])  # memoized
+        catalog.groupReady.emit("live", "10")
+        self.assertEqual([n.title for n in nav.children(group)], ["Three"])
 
     def test_section_failure_stops_loading_and_retry_requests_again(self):
         # Nothing saved for the section: the failure is an error row (finding I2 keeps a

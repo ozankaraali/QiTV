@@ -252,6 +252,28 @@ class CatalogQueueTests(unittest.TestCase):
         self.assertIsNone(nav.load_error(parent))
         self.assertEqual([n.title for n in children], ["One", "Two"])
 
+    def test_content_version_changes_with_the_catalog(self):
+        runner = ManualRunner()
+        service, providers, factory = self._stb_movies(runner)
+        factory.results["provider_setup"] = {"result": {"name": "S"}}
+        versions = [service.content_version()]
+
+        def changed():
+            versions.append(service.content_version())
+            return versions[-1] != versions[-2]
+
+        service.request_group("movies", "1")
+        self.assertFalse(changed())  # requested, nothing stored yet
+        runner.complete(0)
+        self.assertTrue(changed())  # the group's items are stored
+        service.request_seasons({"id": 9, "name": "Show"})
+        runner.complete(1)
+        self.assertTrue(changed())
+        service.select_provider()
+        self.assertTrue(changed())
+        runner.complete(2)  # the setup replaced the content
+        self.assertTrue(changed())
+
     def _stb_movies(self, runner):
         provider = {"name": "S", "type": "STB", "url": "http://portal/c/"}
         service, providers, factory, _ = make_service(provider, runner=runner)
