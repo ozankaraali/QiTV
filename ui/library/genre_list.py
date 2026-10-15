@@ -10,12 +10,12 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QFont, QPainter
+from PySide6.QtGui import QFont, QFontMetricsF, QPainter
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QWidget
 
-from services.library import Genre
+from services.library import CONTINUE, MY_LIST, NEW, Genre
 from ui.overlays.channel_rows import ChannelListView
-from ui.overlays.painting import Units, elided, fill_round
+from ui.overlays.painting import Units, draw_icon, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 WIDTH_U = 18.0
@@ -30,6 +30,9 @@ DEFAULT_HOST_WIDTH = 1280
 KindRole = Qt.UserRole + 20
 CountRole = Qt.UserRole + 21
 IdRole = Qt.UserRole + 22
+PINNED_ICONS = {CONTINUE: "clock", NEW: "sparkle", MY_LIST: "star"}
+ICON_SCALE = 1.2  # icon box / cap height: the glyphs sit inside a padded unit box
+ICON_GAP_U = 0.7
 HEADER = "header"
 GENRE = "genre"
 
@@ -139,6 +142,12 @@ class _GenreDelegate(QStyledItemDelegate):
         p.setFont(units.font(1.15))
         p.setPen(qcolor(PALETTE.text))
         left = rect.x() + pad
+        icon = PINNED_ICONS.get(index.data(IdRole))
+        if icon:
+            size = QFontMetricsF(p.font()).capHeight() * ICON_SCALE
+            color = qcolor(PALETTE.accent) if icon == "star" else qcolor(PALETTE.text)
+            draw_icon(p, icon, QRectF(left, rect.center().y() - size / 2, size, size), color)
+            left += size + ICON_GAP_U * u
         p.drawText(
             QRectF(left, rect.y(), max(0.0, right - left), rect.height()),
             Qt.AlignLeft | Qt.AlignVCenter,

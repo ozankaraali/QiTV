@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 CONTINUE, NEW, MY_LIST = "@continue", "@new", "@mylist"
-PINNED_TITLES = {CONTINUE: "⟲ Continue", NEW: "✦ New", MY_LIST: "★ My list"}
+PINNED_TITLES = {CONTINUE: "Continue", NEW: "New", MY_LIST: "My list"}
 NEW_LIMIT = 48
 MIN_YEAR = 1800
 MEMO_SIZE = 64

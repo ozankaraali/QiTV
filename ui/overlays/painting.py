@@ -302,6 +302,21 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             hands.lineTo(0.64, 0.58)
             line(hands)
             fill(_poly([(0.5, 0.08), (0.5, 0.32), (0.32, 0.2)]))
+        elif name == "clock":
+            face = QPainterPath()
+            face.addEllipse(QRectF(0.1, 0.1, 0.8, 0.8))
+            line(face)
+            hands = QPainterPath(QPointF(0.5, 0.25))
+            hands.lineTo(0.5, 0.5)
+            hands.lineTo(0.68, 0.6)
+            line(hands)
+        elif name == "sparkle":
+            pts = []
+            for i in range(8):
+                ang = math.radians(-90 + i * 45)
+                rad = 0.46 if i % 2 == 0 else 0.13
+                pts.append((0.5 + rad * math.cos(ang), 0.5 + rad * math.sin(ang)))
+            fill(_poly(pts))
         elif name == "live_dot":
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))

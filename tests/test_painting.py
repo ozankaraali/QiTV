@@ -40,6 +40,8 @@ ICONS = [
     "search",
     "star",
     "recent",
+    "clock",
+    "sparkle",
     "live_dot",
 ]
 
