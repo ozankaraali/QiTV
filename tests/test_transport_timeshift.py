@@ -149,21 +149,16 @@ class TimeShiftCase(unittest.TestCase):
         self.click(t, t.button_rect("golive").center().toPoint())
         self.assertEqual(spy.count(), 1)
         self.assertGreater(t.button_rect("subtitles").x(), t.button_rect("golive").right())
-        # Paused for a moment: the bar shows, but 3 s is under the default target (2.5 s) + 1 s.
+        # Shifted or catching up (a chosen speed) always shows the chip, close to live or not.
         t.update_timeline(timeline(position=3477.0, lag=3.0), PROGRAMME)
         self.assertIn("seek", t._layout())
-        self.assertNotIn("golive", t._layout())
-        t.update_timeline(timeline(position=3476.5, lag=3.5), PROGRAMME)
         self.assertIn("golive", t._layout())
-        # The session reports its effective target (Stable, or an HLS burst).
-        t.update_timeline(timeline(position=3473.5, lag=6.5, target=6.0), PROGRAMME)
-        self.assertNotIn("golive", t._layout())
-        t.update_timeline(timeline(position=3473.0, lag=7.0, target=6.0), PROGRAMME)
+        t.update_timeline(timeline(position=3479.0, lag=1.0, mode="catching_up"), PROGRAMME)
         self.assertIn("golive", t._layout())
-        # Stay-live drifted far behind: still live mode, but the bar and Go live show.
+        # Stay-live far behind the target is still live: the edge row, no bar, no chip.
         t.update_timeline(at_edge(lag=5.0, rate=1.10), PROGRAMME)
-        self.assertIn("seek", t._layout())
-        self.assertIn("golive", t._layout())
+        self.assertNotIn("seek", t._layout())
+        self.assertNotIn("golive", t._layout())
         t.update_timeline(at_edge(), PROGRAMME)
         self.assertNotIn("golive", t._layout())
         self.assertNotIn("seek", t._layout())
@@ -194,6 +189,8 @@ class TimeShiftCase(unittest.TestCase):
         self.click(t, t.button_rect("speed").center().toPoint())
         self.assertEqual(speed.at(0)[0], 2.0)
         t.update_timeline(at_edge(lag=4.0, rate=1.05), PROGRAMME)  # stay-live's nudge, not a choice
+        self.assertNotIn("speed", t._layout())  # the edge row has no speed chip
+        t.update_timeline(timeline(position=3476.0, lag=4.0), PROGRAMME)  # the nudge is not kept
         self.click(t, t.button_rect("speed").center().toPoint())
         self.assertEqual(speed.at(1)[0], 1.25)
 
@@ -247,25 +244,35 @@ class TimeShiftCase(unittest.TestCase):
         self.assertNotIn("seek", t._layout())
         self.assertEqual(t.texts(), ("LIVE", "Stay live ● 1.2 s behind source"))
 
-    def test_edge_row_holds_through_the_deadband(self):
-        # Default target 2.5 s: the edge row is entered under 3.5 s and left at 4.5 s.
+    def test_live_mode_shows_the_edge_row_whatever_the_lag(self):
+        # After Go live on a long-GOP source the lag sits above the target while stay-live closes it.
         t = self.shifted()
-        t.update_timeline(at_edge(lag=4.0), PROGRAMME)
-        self.assertIn("seek", t._layout())  # still the bar: 4.0 s is not under 3.5 s
-        t.update_timeline(at_edge(lag=3.4), PROGRAMME)
+        t.update_timeline(at_edge(lag=20.0, rate=1.10), PROGRAMME)
+        layout = t._layout()
+        self.assertNotIn("seek", layout)
+        self.assertNotIn("golive", layout)
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 20.0 s behind source · catching up 1.1×"))
+        t.update_timeline(at_edge(lag=20.0), PROGRAMME)
         self.assertNotIn("seek", t._layout())
-        for lag in (4.0, 4.4, 3.6):  # a bursty source swings inside the band
-            t.update_timeline(at_edge(lag=lag), PROGRAMME)
-            self.assertNotIn("seek", t._layout(), lag)
-            self.assertEqual(t.texts()[0], "LIVE", lag)
-        t.update_timeline(at_edge(lag=4.5), PROGRAMME)
-        self.assertIn("seek", t._layout())
-        self.assertIn("golive", t._layout())
-        t.update_timeline(at_edge(lag=3.6), PROGRAMME)
-        self.assertIn("seek", t._layout())  # back in the band, so the bar holds
+        self.assertNotIn("catching up", t.texts()[1])
+
+    def test_shifted_mode_shows_the_bar_even_when_close_to_live(self):
+        t = self.shifted()
+        for mode in ("shifted", "catching_up"):
+            t.update_timeline(timeline(position=3479.0, lag=1.0, mode=mode), PROGRAMME)
+            self.assertIn("seek", t._layout(), mode)
+            self.assertIn("golive", t._layout(), mode)
+
+    def test_drag_keeps_the_bar_in_live_mode(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
         t.update_timeline(at_edge(lag=1.0), PROGRAMME)
-        t.update_timeline(timeline(position=3479.0, lag=1.0), PROGRAMME)
-        self.assertIn("seek", t._layout())  # a pause leaves the edge at once
+        t._drag = 0.5
+        t.update_timeline(at_edge(lag=1.0), PROGRAMME)
+        self.assertIn("seek", t._layout())
+        t._drag = None
+        t.update_timeline(at_edge(lag=1.0), PROGRAMME)
+        self.assertNotIn("seek", t._layout())
 
     def test_non_finite_or_negative_lag_reads_as_zero(self):
         for bad in (float("inf"), float("-inf"), float("nan"), -4.0):
@@ -277,7 +284,6 @@ class TimeShiftCase(unittest.TestCase):
             self.assertFalse(t.grab().isNull())
             t.update_timeline(timeline(lag=bad), PROGRAMME)
             self.assertEqual(t.texts()[1], "−00:00 behind live", bad)
-            self.assertNotIn("golive", t._layout())
             self.assertFalse(t.grab().isNull())
         t.show_live_edge(float("inf"), False)
         self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.0 s behind source"))

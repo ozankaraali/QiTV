@@ -1,7 +1,9 @@
 """Transport overlay: title row on top, seek line and buttons at the bottom.
 
 Modes: VOD, plain live (direct play) and time-shift (live through the pipeline). Time-shift shows
-the bar over the buffered range, or, at the live edge, the stay-live latency indicator.
+the bar over the buffered range, or, while the session's stay-live mode is LIVE, the stay-live
+latency indicator (it reads "catching up" while stay-live nudges the rate). The bar and the Go live
+chip show only when the viewer left live (shifted, or a chosen speed); a drag keeps the bar.
 """
 
 from dataclasses import dataclass
@@ -41,8 +43,6 @@ from ui.theme import PALETTE, qcolor
 SPEEDS = (1.0, 1.25, 1.5, 2.0)
 TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
-EDGE_ENTER_S = 1.0  # under target + this, the edge row shows; from it, Go live does
-EDGE_LEAVE_S = 2.0  # the edge row holds until target + this (a bursty source swings)
 TICK_LABEL_MAX_U = 25.0
 MINUS = "−"
 
@@ -175,8 +175,7 @@ class Transport(Overlay):
         self._timeline = tl
         self._ticks = [(float(t), str(label)) for t, label in ticks]
         live = tl.mode is Mode.LIVE
-        margin = EDGE_LEAVE_S if self._edge else EDGE_ENTER_S
-        self._edge = live and tl.lag < tl.target + margin
+        self._edge = live
         self._edge_lag = tl.lag
         self._catching_up = live and tl.rate > 1.0
         self._rate = tl.rate
@@ -260,7 +259,7 @@ class Transport(Overlay):
 
     def _behind(self) -> bool:
         tl = self._timeline
-        return tl is not None and tl.lag >= tl.target + EDGE_ENTER_S
+        return tl is not None and tl.mode is not Mode.LIVE
 
     def _seekable(self) -> bool:
         if self._timeshift:
