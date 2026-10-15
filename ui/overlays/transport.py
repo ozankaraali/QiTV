@@ -2,8 +2,9 @@
 
 Modes: VOD, plain live (direct play) and time-shift (live through the pipeline). Time-shift shows
 the bar over the buffered range, or, while the session's stay-live mode is LIVE, the stay-live
-latency indicator (it reads "catching up" while stay-live nudges the rate). The bar and the Go live
-chip show only when the viewer left live (shifted, or a chosen speed); a drag keeps the bar.
+latency indicator (it reads "catching up" while stay-live nudges the rate, and "Reconnecting…"
+while the source has stalled). The bar and the Go live chip show only when the viewer left live
+(shifted, or a chosen speed); a drag keeps the bar.
 """
 
 from dataclasses import dataclass
@@ -83,6 +84,7 @@ class _Timeline:
     rate: float
     paused: bool
     target: float
+    stalled: bool
 
     @classmethod
     def from_state(cls, state: dict) -> "_Timeline":
@@ -96,6 +98,7 @@ class _Timeline:
             rate=float(state["rate"]),
             paused=bool(state["paused"]),
             target=float(state.get("target", TARGETS["normal"])),
+            stalled=bool(state.get("stalled", False)),
         )
 
 
@@ -136,6 +139,7 @@ class Transport(Overlay):
         self._edge = True
         self._edge_lag: float | None = None
         self._catching_up = False
+        self._stalled = False  # the source stalled at the live edge: "Reconnecting…"
         self._rate = 1.0
         # A bar fraction, not a time: the knob stays under the cursor while the buffer slides.
         self._drag: float | None = None
@@ -169,7 +173,8 @@ class Transport(Overlay):
         """Take a `LiveSession.timelineChanged` state; never changes visibility.
 
         `ticks` are programme starts in timeline seconds with their labels. An optional
-        `target` key is the session's effective stay-live target (default: Normal).
+        `target` key is the session's effective stay-live target (default: Normal), and an
+        optional `stalled` key says the source stalled (the live-edge row reads "Reconnecting…").
         """
         tl = _Timeline.from_state(state)
         self._timeline = tl
@@ -177,7 +182,8 @@ class Transport(Overlay):
         live = tl.mode is Mode.LIVE
         self._edge = live
         self._edge_lag = tl.lag
-        self._catching_up = live and tl.rate > 1.0
+        self._stalled = live and tl.stalled
+        self._catching_up = live and tl.rate > 1.0 and not self._stalled
         self._rate = tl.rate
         self._speed = 1.0 if live else tl.rate  # stay-live's nudges are not a chosen speed
         self._paused = tl.paused
@@ -189,6 +195,7 @@ class Transport(Overlay):
         self._edge = True
         self._edge_lag = _seconds(lag_s)
         self._catching_up = catching_up
+        self._stalled = False
         self.update()
 
     def update_position(self, position_ms: int, length_ms: int) -> None:
@@ -302,6 +309,8 @@ class Transport(Overlay):
     def _indicator_parts(self) -> tuple[str, str]:
         if self._edge_lag is None:
             return ("", "")
+        if self._stalled:
+            return ("Stay live", "Reconnecting…")
         tail = f"{self._edge_lag:.1f} s behind source"
         if self._catching_up:
             tail += " · catching up" + (f" {self._rate:g}×" if self._rate > 1.0 else "")
@@ -665,7 +674,8 @@ class Transport(Overlay):
         p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, head)
         x += fm.horizontalAdvance(head) + un.px(0.6)
         d = un.px(0.8)
-        dot = qcolor(PALETTE.warn if self._catching_up else PALETTE.ok)
+        # Green only on target: amber while catching up or reconnecting.
+        dot = qcolor(PALETTE.warn if self._catching_up or self._stalled else PALETTE.ok)
         fill_round(p, QRectF(x, box.center().y() - d / 2, d, d), dot, d / 2)
         x += d + un.px(0.6)
         p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, tail)
@@ -788,4 +798,5 @@ class Transport(Overlay):
         self._edge = True
         self._edge_lag = None
         self._catching_up = False
+        self._stalled = False
         self._rate = 1.0

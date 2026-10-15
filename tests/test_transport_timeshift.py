@@ -9,6 +9,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ui.overlays.transport import Transport, fmt_behind
+from ui.theme import PALETTE
 
 # 19:42 local time, as an aware datetime: the buffer below starts 58 minutes earlier (18:44).
 NOW = datetime(2026, 10, 15, 19, 42).astimezone()
@@ -237,6 +238,35 @@ class TimeShiftCase(unittest.TestCase):
         self.assertIn("catching up", t.texts()[1])
         t.show_live_edge(0.9, False)
         self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.9 s behind source"))
+
+    def dot_colors(self, t):
+        """Colours along the middle of the indicator pill, as painted."""
+        box = t._layout()["indicator"]
+        image = t.grab().toImage()
+        y = round(box.center().y() * image.devicePixelRatio())
+        xs = range(
+            round(box.left() * image.devicePixelRatio()),
+            round(box.right() * image.devicePixelRatio()),
+        )
+        return {image.pixelColor(x, y).name() for x in xs}
+
+    def test_a_stall_at_the_edge_reads_reconnecting_without_the_on_target_dot(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(at_edge(lag=2.6), PROGRAMME)
+        self.assertIn(PALETTE.ok.lower(), self.dot_colors(t))
+        t.update_timeline(dict(at_edge(lag=2.6, rate=1.05), stalled=True), PROGRAMME)
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● Reconnecting…"))
+        colors = self.dot_colors(t)
+        self.assertNotIn(PALETTE.ok.lower(), colors)
+        self.assertIn(PALETTE.warn.lower(), colors)
+        t.update_timeline(dict(at_edge(lag=2.6), stalled=False), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● 2.6 s behind source")
+
+    def test_a_stall_while_shifted_keeps_the_bar(self):
+        t = self.shifted()
+        t.update_timeline(timeline(stalled=True), PROGRAMME)
+        self.assertEqual(t.texts(), ("Buffer from 18:44", "−00:38 behind live"))
 
     def test_show_live_edge_drops_the_bar(self):
         t = self.shifted()

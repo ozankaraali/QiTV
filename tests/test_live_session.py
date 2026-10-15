@@ -206,13 +206,27 @@ class Feed:
     Media arrives `burst` seconds at a time every `burst` seconds (raw TS when 0: a quarter
     second at a time), each arrival optionally jittered, cut into `gop` second segments
     whose newest stays open until the next arrival, as in the real segmenter. VLC plays at
-    the last rate set while it has data and buffers at the edge; LiveSession ticks every
+    the last rate set while it has data; at the edge it reports `starved` (BUFFERING; real
+    libVLC 3 keeps reporting PLAYING with its clock standing still). While `stalled` the
+    source sends nothing: the edge stands still and no state arrives. LiveSession ticks every
     0.25 s.
     """
 
     DT = 0.05
 
-    def __init__(self, case, sid, *, burst, edge=60.0, gop=2.0, jitter=0.0, seed=1, first=None):
+    def __init__(
+        self,
+        case,
+        sid,
+        *,
+        burst,
+        edge=60.0,
+        gop=2.0,
+        jitter=0.0,
+        seed=1,
+        first=None,
+        starved=PlaybackState.BUFFERING,
+    ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
         self.jitter, self.rng = jitter, random.Random(seed)
@@ -220,6 +234,8 @@ class Feed:
         self.next_arrival = self.nominal
         self.next_tick = case.clock.now + 0.25
         self.position, self.media, self.plays_seen = None, 0.0, 0
+        self.starved, self.stalled = starved, False
+        self.starved_s = 0.0  # how long VLC had nothing to play
         self.before = []  # the lag right before each arrival
         self.push()
 
@@ -249,13 +265,15 @@ class Feed:
         for _ in range(round(seconds / self.DT)):
             case.clock.now = now = round(case.clock.now + self.DT, 6)
             if now >= self.next_arrival - 1e-9:
-                if self.position is not None:
+                if self.position is not None and not self.stalled:
                     self.before.append(self.edge - self.position)
                 while now >= self.next_arrival - 1e-9:
-                    self.edge += self.chunk
+                    if not self.stalled:
+                        self.edge += self.chunk
                     self.nominal += self.chunk
                     self.next_arrival = self.nominal + self.rng.uniform(-self.jitter, self.jitter)
-                self.push()
+                if not self.stalled:
+                    self.push()
             self.sync()
             if self.position is not None and playback.current in (
                 PlaybackState.PLAYING,
@@ -265,7 +283,8 @@ class Feed:
                 advance = max(0.0, min(rate * self.DT, self.edge - self.position))
                 state = PlaybackState.PLAYING
                 if advance < rate * self.DT - 1e-9:
-                    state = PlaybackState.BUFFERING
+                    state = self.starved
+                    self.starved_s += self.DT
                 if state is not playback.current:
                     playback.set_state(state)
                 self.position += advance
@@ -1024,6 +1043,94 @@ class StayLiveTests(LiveSessionCase):
         self.step(0.25)
         self.assertEqual(self.playback.rates, [])
         self.assertEqual(self.timelines[-1]["target"], 6.0)
+
+
+class StallTests(LiveSessionCase):
+    """The source stops sending at the live edge; libVLC 3 keeps reporting Playing meanwhile.
+
+    The review's scenarios (6 s HLS bursts, Normal): stalls of 15, 30 and 60 s.
+    """
+
+    def settle(self, *, burst=6.0):
+        sid = self.start()
+        feed = Feed(self, sid, burst=burst, edge=12.0, starved=PlaybackState.PLAYING).ready()
+        feed.run(60.0)
+        self.assertEqual(self.playback.rates[-1:], [1.0] if self.playback.rates else [])
+        return feed
+
+    def test_a_stall_at_the_edge_reopens_nothing_and_does_not_catch_up_after(self):
+        for seconds in (15.0, 30.0, 60.0):
+            with self.subTest(stall=seconds):
+                self.live = self.make()
+                feed = self.settle()
+                plays, timelines = len(self.playback.plays), len(self.timelines)
+                feed.stalled = True
+                feed.run(seconds)
+                during = self.timelines[timelines:]
+                self.assertEqual(len(self.playback.plays), plays)  # no reopen storm
+                # Shown as a stall once the edge is a burst plus 2 s late, never before.
+                late = [state["stalled"] for state in during[4 * 9 :]]
+                self.assertTrue(all(late))
+                self.assertFalse(any(state["stalled"] for state in during[: 4 * 8]))
+                self.assertLess(max(state["lag"] for state in during), 12.0)
+                feed.stalled = False
+                rates, timelines = len(self.playback.rates), len(self.timelines)
+                feed.run(6.5)  # the first burst after the stall has landed
+                self.assertFalse(self.timelines[-1]["stalled"])
+                starved = feed.starved_s
+                feed.run(30.0)
+                self.assertEqual(len(self.playback.plays), plays)
+                after = self.playback.rates[rates:]
+                self.assertTrue(all(rate <= 1.0 for rate in after), after)  # no catch-up
+                self.assertEqual(self.timelines[-1]["rate"], 1.0)
+                self.assertLess(feed.starved_s - starved, 0.5)  # no underrun at every burst
+                reported = [state["lag"] for state in self.timelines[timelines + 4 * 7 :]]
+                self.assertLess(max(reported), 7.0)  # not "59 s behind source" at the edge
+
+    def test_a_raw_ts_stall_is_shown_without_nudging_or_reopening(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=30.0, starved=PlaybackState.PLAYING).ready()
+        self.live.go_live()
+        feed.sync()
+        feed.run(20.0)
+        plays, rates, timelines = (
+            len(self.playback.plays),
+            len(self.playback.rates),
+            len(self.timelines),
+        )
+        feed.stalled = True
+        feed.run(40.0)
+        during = self.timelines[timelines:]
+        self.assertFalse(any(state["stalled"] for state in during[:7]))  # up to 2 s: a hiccup
+        self.assertTrue(all(state["stalled"] for state in during[9:]))
+        self.assertEqual(len(self.playback.plays), plays)
+        self.assertTrue(all(rate <= 1.0 for rate in self.playback.rates[rates:]))  # no nudge
+        feed.stalled = False
+        feed.run(1.0)
+        self.assertFalse(self.timelines[-1]["stalled"])
+        self.assertEqual(len(self.playback.plays), plays)
+
+    def test_a_frozen_vlc_clock_counts_as_buffering(self):
+        sid = self.ready(segments(0, 2), live_edge=4.0, latency="stable")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)  # 3.75 s behind a 6 s target: nothing to do
+        self.step(0.25, media=0)
+        self.step(0.25, media=0)  # VLC says Playing, but its clock stood still for 0.5 s
+        self.engine.buffer(sid, segments(0, 20), live_edge=40.0)  # the edge moves on
+        self.step(0.25, media=0)
+        self.assertEqual(self.playback.rates, [])
+        self.assertEqual(len(self.playback.plays), 1)  # no reopen at live either
+        self.assertFalse(self.timelines[-1]["stalled"])  # the source is fine
+        self.step(0.25)  # the clock moves again: 39 s behind, so back to live
+        self.assertEqual(len(self.playback.plays), 2)
+
+    def test_the_timeline_is_not_stalled_once_the_source_ended(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionEnded.emit(sid)
+        for _ in range(12):
+            self.step(0.25)
+        self.assertFalse(self.timelines[-1]["stalled"])
 
 
 class PositionTests(LiveSessionCase):
