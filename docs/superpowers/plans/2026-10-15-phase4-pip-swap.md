@@ -37,6 +37,36 @@
 - **Zapping, digits, the banner, the transport, seek and Go live** always act on the large slot. The small slot keeps recording into its ring and keeps playing muted.
 - Live channels only. Opening PiP during VOD shows the toast `"Picture-in-picture is for live TV"`.
 
+## Owner amendment (2026-10-15): two volume controls, PiP in 2.0.0
+
+The owner asked for picture-in-picture in 2.0.0 (bottom-right by default, swap by click or key) and for two volume controls ("feels like TV UI").
+
+- **Audio default:** as above, audio follows the large surface. The small slot starts muted at its own remembered level (config `pip_volume`, default 30).
+- **Mixer overlay** (`ui/overlays/mixer.py`, new Task 3b below):
+  - shown on any volume action (volume keys, `+`/`-`, mute, the wheel in VOD, media volume keys);
+  - TV-style, bottom-centre;
+  - **one row ("Main") without PiP; two rows ("Main" and "PiP", labelled with each slot's channel name) while PiP is open;**
+  - each row has a speaker icon, a slider bar and a value;
+  - while it is visible:
+    - ↑/↓ change the selected row by 5;
+    - ←/→ or Tab switch rows;
+    - `M` mutes the selected row;
+    - clicking or dragging a slider sets that row;
+    - clicking a speaker toggles mute;
+  - it auto-hides 3 s after the last change;
+  - the PiP row unmutes the small slot when raised above 0;
+  - **swapping moves each level with its stream** (the volumes belong to the streams, not to the screen positions);
+  - the speaker icon on the PiP label (Task 2) opens the mixer with the PiP row selected.
+- **Tests:**
+  - a single row without PiP;
+  - two rows with PiP;
+  - the auto-hide timer (via tests/timer_fixtures.py);
+  - keys adjust the selected row;
+  - a swap carries the levels;
+  - the PiP row raised from 0 unmutes the small session;
+  - mute toggles.
+- **Task order:** 1 → 2 → 3 → 3b → 4.
+
 ## Review Focus
 
 1. **Provider limit 1** (most STB): `P` must never open a second upstream. The toast appears and the main stream is untouched (Task 1).
