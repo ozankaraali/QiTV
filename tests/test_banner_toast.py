@@ -46,6 +46,26 @@ class Base(unittest.TestCase):
 
 
 class BannerTest(Base):
+    def test_content_top_bounds_what_it_paints(self):
+        # A bottom-corner PiP rises above content_top() while the banner shows (F1): nothing
+        # but the scrim (one colour per row) may be painted above it.
+        b = ZapBanner(self.host)
+        for epg in (True, False):
+            with self.subTest(epg=epg):
+                b.show_info(info(epg))
+                image = b.grab().toImage()
+                top = b.content_top() - b.y()
+                self.assertGreater(top, 0)
+
+                def plain(y):
+                    first = image.pixel(0, y)
+                    return all(image.pixel(x, y) == first for x in range(image.width()))
+
+                self.assertTrue(all(plain(y) for y in range(top)))
+                first_painted = next(y for y in range(top, image.height()) if not plain(y))
+                if epg:  # the tallest row: it starts right at content_top()
+                    self.assertLess(first_painted - top, round(1280 * 0.02))
+
     def test_show_info_makes_visible(self):
         b = ZapBanner(self.host)
         b.show_info(info())

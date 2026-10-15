@@ -52,6 +52,7 @@ from ui.brand import logo_aspect
 from ui.keymap import SHORTCUTS, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
+from ui.overlays.zap_banner import BannerInfo
 from ui.settings_dialog import OptionsDialog
 from ui.shortcuts_dialog import ShortcutsDialog, table_rows
 from ui.tv_menus import ISSUES_URL, AboutDialog
@@ -243,6 +244,19 @@ class TVWindowTests(WindowCase):
         elapse(50)
         middle = surface.mapTo(window, surface.rect().center())
         self.assertEqual(window.grab().toImage().pixelColor(middle).name(), "#000000")
+
+    def test_a_bottom_corner_pip_rises_above_the_zap_banner(self):
+        # F1: the banner's clock and Now/Next text ran under the PiP in the corner.
+        self.show()
+        frame, banner = self.window.pip_frame, self.window.overlays.banner
+        frame.show_pip()
+        corner = frame.small_rect()
+        banner.show_info(BannerInfo("1", "Channel 1", None, None, None))
+        self.assertTrue(wait_until(lambda: frame.small_rect().bottom() < banner.content_top()))
+        self.assertTrue(wait_until(lambda: not frame.lifting()))
+        self.assertLess(frame.small_rect().bottom(), banner.content_top())
+        banner.dismiss()
+        self.assertTrue(wait_until(lambda: frame.small_rect() == corner))
 
     def test_hosts_the_options_dialog(self):
         for name in HOST_METHODS + HOST_ATTRIBUTES:

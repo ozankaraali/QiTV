@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import math
 
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPropertyAnimation, QRectF, Qt, QTimer
 from PySide6.QtGui import (
@@ -40,6 +41,27 @@ class BannerTexts:
     clock: str  # the time now, beside the name
     now_span: str  # " · HH:MM – HH:MM" after the current programme's title, or ""
     next_line: str  # "Next  HH:MM Title  ·  HH:MM Title", or ""
+
+
+# The info row's metrics, in units (u = 1% of the host width).
+_NAME_U, _NOW_U, _NEXT_U = 2.6, 1.9, 1.5  # font sizes
+_GAPS_U = (0.6, 0.7, 0.7)  # name/now, now/bar, bar/next
+_BAR_U = 0.45
+_LOGO_U = 8.0
+_BOTTOM_U = 3.0  # from the bottom edge to the row
+
+
+def _row_height(units: Units, has_epg: bool) -> tuple[float, float]:
+    """(row, body): the info row's height, and its lines' (name, now, with a guide bar+next)."""
+
+    def lh(size: float, weight=QFont.Weight.Normal) -> int:
+        return QFontMetrics(units.font(size, weight)).height()
+
+    gap1, gap2, gap3 = (units.px(g) for g in _GAPS_U)
+    body: float = lh(_NAME_U, QFont.Weight.Bold) + gap1 + lh(_NOW_U)
+    if has_epg:
+        body += gap2 + max(2.0, _BAR_U * units.u) + gap3 + lh(_NEXT_U)
+    return max(body, _LOGO_U * units.u), body
 
 
 def banner_texts(info: BannerInfo) -> BannerTexts:
@@ -105,6 +127,16 @@ class ZapBanner(Overlay):
         self._digits = ""
         self.hide()
 
+    def content_top(self) -> int:
+        """Where its tallest info row starts (host coordinates); only the scrim is above.
+
+        A bottom corner's PiP rises above it while the banner shows (BottomBand). The
+        tallest row, not this channel's: the PiP keeps its place through a zap.
+        """
+        units = Units(self.width())
+        row_h, _body = _row_height(units, has_epg=True)
+        return math.floor(self.y() + self.height() - _BOTTOM_U * units.u - row_h)
+
     # ---- internals ----------------------------------------------------------------------
 
     def _reveal(self) -> None:
@@ -154,24 +186,21 @@ class ZapBanner(Overlay):
         text = qcolor(PALETTE.text)
         accent = qcolor(PALETTE.accent)
         num_font = units.font(5.4, QFont.Weight.Light)
-        name_font = units.font(2.6, QFont.Weight.Bold)
+        name_font = units.font(_NAME_U, QFont.Weight.Bold)
         clock_font = units.font(2.1, QFont.Weight.DemiBold)
-        now_font = units.font(1.9)
-        now_bold = units.font(1.9, QFont.Weight.DemiBold)
-        next_font = units.font(1.5)
+        now_font = units.font(_NOW_U)
+        now_bold = units.font(_NOW_U, QFont.Weight.DemiBold)
+        next_font = units.font(_NEXT_U)
 
         def lh(font: QFont) -> int:
             return QFontMetrics(font).height()
 
         has_epg = info is not None and info.now is not None
-        gap1, gap2, gap3 = units.px(0.6), units.px(0.7), units.px(0.7)
-        bar_h = max(2.0, 0.45 * u)
-        body_h: float = lh(name_font) + gap1 + lh(now_font)
-        if has_epg:
-            body_h += gap2 + bar_h + gap3 + lh(next_font)
-        logo_s = 8 * u
-        row_h = max(body_h, logo_s)
-        row_bottom = self.height() - 3 * u
+        gap1, gap2, gap3 = (units.px(g) for g in _GAPS_U)
+        bar_h = max(2.0, _BAR_U * u)
+        row_h, body_h = _row_height(units, has_epg)
+        logo_s = _LOGO_U * u
+        row_bottom = self.height() - _BOTTOM_U * u
         row_top = row_bottom - row_h
         left, gap = 3 * u, 2 * u
         right = self.width() - 3 * u

@@ -422,9 +422,12 @@ class TVWindow(QMainWindow):
         self.pip_frame.smallRectChanged.connect(self.mixer.avoid)
         # Clicks on the small picture reach it through the overlays (but their buttons).
         self.pip_frame.smallRectChanged.connect(self.host.set_hole)
-        # While the transport or the mixer shows, a bottom corner's PiP rises above the
-        # transport's controls; the mixer sits on them, or 4u from the bottom.
-        self.bottom_band = BottomBand(self.overlays.transport, self.mixer, self.pip_frame, self)
+        # While the transport, the mixer or the zap banner shows, a bottom corner's PiP rises
+        # above the transport's controls or the banner's row; the mixer sits on the controls,
+        # or 4u from the bottom.
+        self.bottom_band = BottomBand(
+            self.overlays.transport, self.mixer, self.overlays.banner, self.pip_frame, self
+        )
         self.pip_label.pillPressed.connect(self.pip_frame.pill_press)
         self.pip_label.pillMoved.connect(self.pip_frame.pill_move)
         self.pip_label.pillReleased.connect(self.pip_frame.pill_release)
