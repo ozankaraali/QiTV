@@ -70,6 +70,7 @@ from services.playback import NullSession, PlaybackSession, Session, create_inst
 from services.thread_cleanup import has_pending_threads
 from services.watch_state import WatchState
 from services.zapping import ZapController
+from ui.brand import logo_path
 from ui.export_flow import ExportFlow
 from ui.keymap import Action, resolve
 from ui.library.library_screen import LibraryScreen
@@ -107,8 +108,10 @@ FULLSCREEN_SETTLE_MS = 5000  # the longest wait for macOS to report a fullscreen
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
 HOME_URL = "https://github.com/ozankaraali/QiTV"
 ISSUES_URL = f"{HOME_URL}/issues"
+ABOUT_LOGO_PX = 64
+ABOUT_STYLE = "QLabel#qt_msgbox_label { min-width: 340px; }"
 ABOUT_TEXT = (
-    "<p><b>QiTV {version}</b></p>"
+    "{logo}<p><b>QiTV {version}</b></p>"
     "<p>A TV-first IPTV player for STB portals, Xtream and M3U playlists.</p>"
     '<p><a href="{home}">{home}</a><br><a href="{issues}">Report an issue</a></p>'
 )
@@ -136,8 +139,14 @@ def _local_now() -> datetime:
 
 
 def about_text() -> str:
-    """The About box: the version (pyproject.toml, as packaged) and the project's links."""
-    return ABOUT_TEXT.format(version=get_app_version(), home=HOME_URL, issues=ISSUES_URL)
+    """The About box: the logo above the version (pyproject.toml, as packaged) and the links."""
+    path = logo_path()
+    logo = (
+        f'<p><img src="{path.as_uri()}" width="{ABOUT_LOGO_PX}" height="{ABOUT_LOGO_PX}"></p>'
+        if path.is_file()
+        else ""
+    )
+    return ABOUT_TEXT.format(logo=logo, version=get_app_version(), home=HOME_URL, issues=ISSUES_URL)
 
 
 def _native_video_handles() -> bool:
@@ -644,9 +653,7 @@ class TVWindow(QMainWindow):
         box.setTextFormat(Qt.TextFormat.RichText)
         box.setText(about_text())
         box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        icon = self.windowIcon()
-        if not icon.isNull():
-            box.setIconPixmap(icon.pixmap(64, 64))
+        box.setStyleSheet(ABOUT_STYLE)  # wide enough for the links on one line each
         box.exec()
 
     def check_updates(self) -> None:

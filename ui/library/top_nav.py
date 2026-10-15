@@ -1,9 +1,15 @@
-"""The Library's top bar: QiTV, Live TV / Movies / Series, and the Search and source pills."""
+"""The Library's top bar: the QiTV logo, Live TV / Movies / Series, and the Search and source pills.
+
+The logo is about the height of the old "QiTV" wordmark's capitals ×1.6, vertically centred; the
+tabs start the same gap after it as they did after the wordmark. Its name stays for assistive
+technology (the accessible name) and as the logo's tooltip.
+"""
 
 from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QPainter
-from PySide6.QtWidgets import QWidget
+from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QHelpEvent, QPainter
+from PySide6.QtWidgets import QToolTip, QWidget
 
+from ui.brand import BRAND_NAME, logo_aspect, logo_pixmap
 from ui.overlays.painting import Units, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -14,6 +20,10 @@ ALL_TABS = ["live", "movies", "series"]
 SEARCH_LABEL = "⌕ Search"
 PILL_H_U = 3.2
 MAX_SOURCE_U = 22.0
+BRAND_FONT_U = 1.6  # the old wordmark's size: the logo is sized from its capitals
+LOGO_CAP_FACTOR = 1.6
+LOGO_LEFT_U = 2.0
+LOGO_GAP_U = 3.0  # between the logo and the first tab
 
 
 class TopNav(QWidget):
@@ -24,6 +34,7 @@ class TopNav(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
+        self.setAccessibleName(BRAND_NAME)
         self._tabs = list(ALL_TABS)
         self._active = "live"
         self._source = ""
@@ -65,6 +76,19 @@ class TopNav(QWidget):
 
     def activate(self) -> None:
         self._trigger(self._focus_item)
+
+    def logo_rect(self) -> QRectF:
+        """Where the logo is drawn: whole pixels, so it stays crisp."""
+        units = Units(self._host_width())
+        brand_font = units.font(BRAND_FONT_U, QFont.Weight.Bold)
+        if logo_pixmap(1) is None:  # the asset is missing: the name, as before
+            width = QFontMetrics(brand_font).horizontalAdvance(BRAND_NAME)
+            return QRectF(LOGO_LEFT_U * units.u, 0, width, self.height())
+        height = round(QFontMetricsF(brand_font).capHeight() * LOGO_CAP_FACTOR)
+        width = round(height * logo_aspect())
+        return QRectF(
+            round(LOGO_LEFT_U * units.u), round((self.height() - height) / 2), width, height
+        )
 
     # ---- internals --------------------------------------------------------------------------
 
@@ -109,8 +133,7 @@ class TopNav(QWidget):
         x -= 1.0 * u + search_w
         rects["search"] = QRectF(x, top, search_w, pill_h)
         # tabs
-        brand_font = units.font(1.6, QFont.Weight.Bold)
-        x = 2.0 * u + QFontMetrics(brand_font).horizontalAdvance("QiTV") + 3.0 * u
+        x = self.logo_rect().right() + LOGO_GAP_U * u
         tab_fm = QFontMetrics(units.font(1.3, QFont.Weight.DemiBold))
         for tab in self._tabs:
             width = tab_fm.horizontalAdvance(TAB_LABELS[tab])
@@ -146,6 +169,15 @@ class TopNav(QWidget):
             self._relayout()
         return False
 
+    def event(self, event) -> bool:
+        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            if self.logo_rect().contains(event.position()):
+                QToolTip.showText(event.globalPos(), BRAND_NAME, self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(event)
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.update()
@@ -172,9 +204,14 @@ class TopNav(QWidget):
         p.fillRect(0, self.height() - 1, self.width(), 1, qcolor(PALETTE.text, 0.06))
         rects = self._item_rects()
         height = self.height()
-        p.setFont(units.font(1.6, QFont.Weight.Bold))
-        p.setPen(qcolor(PALETTE.text))
-        p.drawText(QRectF(2.0 * u, 0, 10 * u, height), Qt.AlignLeft | Qt.AlignVCenter, "QiTV")
+        logo_rect = self.logo_rect()
+        logo = logo_pixmap(logo_rect.height())
+        if logo is not None:
+            p.drawPixmap(logo_rect.topLeft(), logo)
+        else:
+            p.setFont(units.font(BRAND_FONT_U, QFont.Weight.Bold))
+            p.setPen(qcolor(PALETTE.text))
+            p.drawText(logo_rect, Qt.AlignLeft | Qt.AlignVCenter, BRAND_NAME)
         for tab in self._tabs:
             rect = rects[tab]
             active = tab == self._active

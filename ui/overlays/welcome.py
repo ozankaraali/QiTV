@@ -1,6 +1,6 @@
 """Welcome card: shown while no provider is configured (spec §8), centred over the video.
 
-Its one control is the accent Add provider button, focused: a click on it, or Enter (OK on a
+The QiTV logo sits above the title. Its one control is the accent Add provider button, focused: a click on it, or Enter (OK on a
 remote, routed by the TV shell), emits `addRequested`, and the window opens provider setup.
 1 u = 1% of the overlay host's width.
 """
@@ -9,6 +9,7 @@ from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
+from ui.brand import logo_aspect, logo_pixmap
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, fill_round
 from ui.pointer import NAV_BUTTONS
@@ -22,6 +23,8 @@ TITLE_U = 2.4
 BODY_U = 1.2
 BODY_OPACITY = 0.7
 PAD_U = 3.0
+LOGO_U = 5.0  # the logo's height, above the title
+LOGO_GAP_U = 1.6
 GAP_U = 1.4
 BUTTON_GAP_U = 2.4
 BUTTON_H_U = 4.0
@@ -64,6 +67,23 @@ class WelcomeCard(Overlay):
         self.addRequested.emit()
         return True
 
+    def logo_rect(self) -> QRectF:
+        """The logo, centred above the title (empty when the asset is missing)."""
+        units = Units(self._host_width())
+        if logo_pixmap(1) is None:
+            return QRectF(self.width() / 2, units.px(PAD_U), 0, 0)
+        height = units.px(LOGO_U)
+        width = round(height * logo_aspect())
+        return QRectF(round((self.width() - width) / 2), units.px(PAD_U), width, height)
+
+    def title_rect(self) -> QRectF:
+        units = Units(self._host_width())
+        pad = units.px(PAD_U)
+        logo = self.logo_rect()
+        top = logo.bottom() + (units.px(LOGO_GAP_U) if logo.height() else 0)
+        title_h, _body_h = self._text_heights(units, self.width() - 2 * pad)
+        return QRectF(pad, top, self.width() - 2 * pad, title_h)
+
     def button_rect(self) -> QRectF:
         units = self._units()
         metrics = QFontMetrics(self._button_font(units))
@@ -74,9 +94,12 @@ class WelcomeCard(Overlay):
 
     # ---- layout -----------------------------------------------------------------------------
 
-    def _units(self) -> Units:
+    def _host_width(self) -> int:
         parent = self.parentWidget()
-        return Units(parent.width() if parent is not None else DEFAULT_HOST_WIDTH)
+        return parent.width() if parent is not None else DEFAULT_HOST_WIDTH
+
+    def _units(self) -> Units:
+        return Units(self._host_width())
 
     @staticmethod
     def _title_font(units: Units) -> QFont:
@@ -104,8 +127,10 @@ class WelcomeCard(Overlay):
         width = units.px(WIDTH_U)
         pad = units.px(PAD_U)
         title_h, body_h = self._text_heights(units, width - 2 * pad)
+        logo_h = units.px(LOGO_U) + units.px(LOGO_GAP_U) if logo_pixmap(1) is not None else 0
         height = (
             pad
+            + logo_h
             + title_h
             + units.px(GAP_U)
             + body_h
@@ -137,13 +162,18 @@ class WelcomeCard(Overlay):
         p.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         pad = units.px(PAD_U)
         inner = self.width() - 2 * pad
-        title_h, body_h = self._text_heights(units, inner)
+        _title_h, body_h = self._text_heights(units, inner)
+        logo_rect = self.logo_rect()
+        logo = logo_pixmap(logo_rect.height()) if logo_rect.height() else None
+        if logo is not None:
+            p.drawPixmap(logo_rect.topLeft(), logo)
+        title = self.title_rect()
         p.setFont(self._title_font(units))
         p.setPen(qcolor(PALETTE.text))
-        p.drawText(QRectF(pad, pad, inner, title_h), _TEXT_FLAGS, TITLE_TEXT)
+        p.drawText(title, _TEXT_FLAGS, TITLE_TEXT)
         p.setFont(self._body_font(units))
         p.setPen(qcolor(PALETTE.text, BODY_OPACITY))
-        body_top = pad + title_h + units.px(GAP_U)
+        body_top = title.bottom() + units.px(GAP_U)
         p.drawText(QRectF(pad, body_top, inner, body_h), _TEXT_FLAGS, BODY_TEXT)
         self._paint_button(p, units)
         p.end()

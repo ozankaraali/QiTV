@@ -45,6 +45,7 @@ from tests.fixtures.local_provider import (
 from tests.fixtures.local_xtream import XtreamFixture
 from tests.http_fixtures import LocalSource
 from tests.ts_fixtures import make_stream
+from ui.brand import logo_path
 from ui.keymap import SHORTCUTS, resolve, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
@@ -1370,6 +1371,8 @@ class HelpAndAboutTests(WindowCase):
         text = box.return_value.setText.call_args[0][0]
         self.assertIn(f"QiTV {get_app_version()}", text)
         self.assertIn(ISSUES_URL, text)
+        logo = text.index(f'<img src="{logo_path().as_uri()}"')  # the logo, above the name
+        self.assertLess(logo, text.index("QiTV"))
         box.return_value.exec.assert_called_once_with()
 
     def test_check_for_updates_and_report_an_issue(self):

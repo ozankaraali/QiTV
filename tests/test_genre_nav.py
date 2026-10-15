@@ -1,16 +1,22 @@
 import os
+from pathlib import Path
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QFont, QFontMetricsF, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
 from services.library import Genre
+from ui import brand
+from ui.brand import logo_pixmap
 from ui.library.genre_list import PREVIEW_DEBOUNCE_MS, GenreList
 from ui.library.top_nav import TopNav
+from ui.overlays.painting import Units
 
 GENRES = [
     Genre("continue", "Continue", 4, pinned=True),
@@ -244,6 +250,66 @@ class TopNavTests(unittest.TestCase):
         self.nav.move_by(5)
         self.nav.activate()
         self.assertEqual(len(self.sources), 1)
+
+    def painted(self):
+        """What the nav paints: the texts it draws and the target rects of its pixmaps."""
+        texts, pixmaps = [], []
+        draw_text, draw_pixmap = QPainter.drawText, QPainter.drawPixmap
+
+        def text(painter, *args):
+            texts.append(args[-1])
+            return draw_text(painter, *args)
+
+        def pixmap(painter, *args):
+            pixmaps.append(args[0])
+            return draw_pixmap(painter, *args)
+
+        with (
+            mock.patch.object(QPainter, "drawText", text),
+            mock.patch.object(QPainter, "drawPixmap", pixmap),
+        ):
+            self.nav.grab()
+        return texts, pixmaps
+
+    def test_the_logo_replaces_the_wordmark(self):
+        texts, pixmaps = self.painted()
+        self.assertNotIn("QiTV", texts)
+        self.assertIn("Live TV", texts)
+        logo = self.nav.logo_rect()
+        self.assertEqual(pixmaps, [logo.topLeft()])  # whole pixels: crisp
+        units = Units(1280)
+        cap = QFontMetricsF(units.font(1.6, QFont.Weight.Bold)).capHeight()
+        self.assertAlmostEqual(logo.height(), cap * 1.6, delta=0.5)
+        self.assertAlmostEqual(logo.center().y(), self.nav.height() / 2, delta=0.5)
+        self.assertAlmostEqual(logo.left(), 2.0 * units.u, delta=0.5)
+        self.assertEqual(self.nav.accessibleName(), "QiTV")
+
+    def test_the_tabs_start_after_the_logo(self):
+        u = Units(1280).u
+        logo = self.nav.logo_rect()
+        self.assertGreater(logo.width(), 0)
+        self.assertAlmostEqual(self.nav._item_rects()["live"].left(), logo.right() + 3.0 * u)
+
+    def test_without_the_logo_file_the_name_is_drawn(self):
+        missing = Path(__file__).parent / "no-such-logo.png"
+        with (
+            mock.patch.object(brand, "_master", None),
+            mock.patch.object(brand, "_missing_logged", False),
+            mock.patch.object(brand, "logo_path", return_value=missing),
+            self.assertLogs("ui.brand", "WARNING"),
+        ):
+            texts, pixmaps = self.painted()
+            u = Units(1280).u
+            live = self.nav._item_rects()["live"].left()
+            self.assertAlmostEqual(live, self.nav.logo_rect().right() + 3.0 * u)
+        self.assertIn("QiTV", texts)
+        self.assertEqual(pixmaps, [])
+
+    def test_the_logo_is_crisp_at_the_screen_density(self):
+        pixmap = logo_pixmap(24, 2.0)
+        self.assertEqual(pixmap.devicePixelRatio(), 2.0)
+        self.assertEqual(pixmap.deviceIndependentSize().height(), 24)
+        self.assertEqual(pixmap.height(), 48)
 
     def test_grab_at_widths(self):
         for width in (1280, 800):

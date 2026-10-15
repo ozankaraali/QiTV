@@ -24,6 +24,7 @@ a = Analysis(
     ],
     datas=[
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
+        ('assets/qitv.png', 'assets'),  # the logo the Library, welcome card and About show
     ],
     hiddenimports=[
         # The live time-shift helper process (spawned) and what its source imports.

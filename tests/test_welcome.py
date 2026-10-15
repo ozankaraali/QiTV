@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QRectF, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -56,6 +56,14 @@ class WelcomeCardTests(unittest.TestCase):
         self.assertAlmostEqual(geometry.center().y(), 360, delta=1)
         self.assertEqual(self.card.mask_region().boundingRect(), geometry)
         self.assertFalse(self.card.grab().isNull())
+
+    def test_the_logo_sits_above_the_title(self):
+        self.card.show_card()
+        logo, title = self.card.logo_rect(), self.card.title_rect()
+        self.assertGreater(logo.height(), 0)
+        self.assertLess(logo.bottom(), title.top())
+        self.assertAlmostEqual(logo.center().x(), self.card.width() / 2, delta=1)
+        self.assertTrue(QRectF(self.card.rect()).contains(logo))
 
     def test_it_follows_the_host_size(self):
         self.card.show_card()
