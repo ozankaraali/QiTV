@@ -9,7 +9,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from services.library import Details
-from ui.library.series_view import SeriesView
+from ui.library.series_view import SeriesView, episode_duration
 
 app = QApplication.instance() or QApplication([])
 
@@ -115,6 +115,127 @@ class SeriesViewTests(unittest.TestCase):
         view.set_progress_provider(lambda ep: {1: 0.95, 2: 0.4}.get(ep["series"]))
         view.set_episodes(ss[0], episodes(3))
         self.assertEqual([view.row_badges(i) for i in range(3)], ["✓", "", ""])
+
+    def test_reset_same_episodes_keeps_selection(self):
+        view = self.make()
+        ss = seasons()
+        view.set_seasons(ss)
+        view.set_episodes(ss[0], episodes(10))
+        view.move_by(0, 1)
+        view.move_by(0, 1)
+        self.assertEqual(view.current_episode()["series"], 3)
+        view.set_episodes(ss[0], episodes(10))
+        self.assertEqual(view.current_episode()["series"], 3)
+        view.set_episodes(ss[0], episodes(2))  # selected episode gone: row 0
+        self.assertEqual(view.current_episode()["series"], 1)
+
+    def test_stale_episodes_ignored(self):
+        view = self.make()
+        ss = seasons()
+        view.set_seasons(ss)
+        view.move_by(1, 0)
+        view.set_episodes(ss[0], episodes(3))
+        self.assertIsNone(view.current_episode())
+        self.assertIs(view.current_season(), ss[1])
+
+    def test_seasons_error_retries(self):
+        view = self.make()
+        retry = []
+        view.retryRequested.connect(lambda: retry.append(1))
+        view.set_seasons(None, error="down")
+        view.activate()
+        self.assertEqual(retry, [1])
+
+    def test_seasons_enter_flushes_pending_selection(self):
+        view = self.make()
+        got = []
+        view.seasonSelected.connect(got.append)
+        ss = seasons()
+        view.set_seasons(ss)
+        view.move_by(1, 0)
+        view.activate()
+        self.assertEqual(got, [ss[1]])
+
+    def test_seasons_enter_with_episodes_moves_down(self):
+        view = self.make()
+        ss = seasons()
+        view.set_seasons(ss)
+        view.set_episodes(ss[0], episodes(3))
+        view.move_by(0, 1)
+        view.move_by(0, -1)
+        view.move_by(0, -1)
+        self.assertEqual(view.focus_zone, "seasons")
+        view.activate()
+        self.assertEqual(view.focus_zone, "episodes")
+
+    def test_down_at_last_row_stays(self):
+        view = self.make()
+        ss = seasons()
+        view.set_seasons(ss)
+        view.set_episodes(ss[0], episodes(3))
+        for _ in range(5):
+            view.move_by(0, 1)
+        self.assertEqual(view.current_episode()["series"], 3)
+        self.assertEqual(view.focus_zone, "episodes")
+
+    def test_up_without_seasons_stays(self):
+        view = self.make()
+        ss = seasons()
+        view.set_episodes(ss[0], episodes(3))
+        view.move_by(0, -1)
+        self.assertEqual(view.focus_zone, "episodes")
+
+    def test_left_on_first_chip_goes_back(self):
+        view = self.make()
+        back = []
+        view.backRequested.connect(lambda: back.append(1))
+        view.set_seasons(seasons())
+        view.move_by(-1, 0)
+        self.assertEqual(back, [1])
+
+    def test_page_moves_by_visible_rows(self):
+        view = self.make()
+        ss = seasons()
+        view.set_seasons(ss)
+        view.set_episodes(ss[0], episodes(100))
+        view.show()
+        QTest.qWait(30)
+        view.page(1)
+        first = view.current_episode()["series"]
+        self.assertGreater(first, 2)
+        view.page(-1)
+        self.assertEqual(view.current_episode()["series"], 1)
+
+    def test_start_over_button(self):
+        view = self.make()
+        got_start, got_play = [], []
+        view.startOverRequested.connect(lambda s, e: got_start.append((s, e)))
+        view.episodeActivated.connect(lambda s, e: got_play.append((s, e)))
+        ss = seasons()
+        eps = episodes(3)
+        view.set_seasons(ss)
+        view.set_progress_provider(lambda ep: {2: 0.4}.get(ep["series"]))
+        view.set_episodes(ss[0], eps)
+        view.move_by(1, 0)  # row 1 has no progress: ignored
+        view.activate()
+        self.assertEqual(got_play, [(ss[0], eps[0])])
+        view.move_by(0, 1)
+        view.move_by(1, 0)
+        view.activate()
+        self.assertEqual(got_start, [(ss[0], eps[1])])
+        view.move_by(-1, 0)
+        view.activate()
+        self.assertEqual(got_play[-1], (ss[0], eps[1]))
+
+    def test_duration_shapes(self):
+        self.assertEqual(episode_duration({"duration": "45"}), "45 min")
+        self.assertEqual(episode_duration({"duration": 45}), "45 min")
+        self.assertEqual(episode_duration({"duration": 65}), "1h 05m")
+        self.assertEqual(episode_duration({"info": {"duration": "00:42:10"}}), "42 min")
+        self.assertEqual(episode_duration({"description": {"duration": "01:05:00"}}), "1h 05m")
+        self.assertEqual(episode_duration({"info": {"duration_secs": 2700}}), "45 min")
+        self.assertEqual(episode_duration({"duration": "45 min"}), "45 min")
+        self.assertEqual(episode_duration({}), "")
 
     def test_large_list_paints_fast(self):
         view = self.make()

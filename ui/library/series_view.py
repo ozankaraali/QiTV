@@ -2,11 +2,16 @@
 
 Units: 1 u = 1% of the Library screen's width (this widget's width). Everything is painted;
 the episodes list is a model/view that only paints the visible rows. The widget never takes
-keyboard focus: the Library controller routes keys to ``move_by``/``activate``/``escape``.
+keyboard focus: the Library controller routes keys to ``move_by``/``activate``/``escape``/
+``page``.
+
+The poster is 14u wide at 2:3 (21u tall), but is capped to the header height minus 2u so it
+never overflows the 34% header: at 16:9 it comes out slightly narrower than 14u.
 """
 
 from collections.abc import Callable
 import logging
+import re
 
 from PySide6.QtCore import (
     QAbstractListModel,
@@ -22,6 +27,7 @@ from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QWidget
 
 from services.library import Details
 from services.navigation import episode_key, item_key
+from ui.library.poster_grid import poster_url
 from ui.overlays.channel_rows import ChannelListView
 from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, RADIUS_CARD, qcolor
@@ -46,6 +52,7 @@ LOADING_TEXT = "Loading…"
 ERROR_TEXT = "Couldn't load — press Enter to retry"
 EMPTY_SEASONS_TEXT = "No seasons"
 EMPTY_EPISODES_TEXT = "No episodes"
+START_OVER_TEXT = "↺ Start over"
 
 SEASONS, EPISODES = "seasons", "episodes"
 
@@ -53,6 +60,10 @@ NumberRole = Qt.UserRole + 40
 TitleRole = Qt.UserRole + 41
 DurationRole = Qt.UserRole + 42
 ProgressRole = Qt.UserRole + 43
+
+
+def is_resumable(progress: float | None) -> bool:
+    return progress is not None and 0 < progress < WATCHED_AT
 
 
 def episode_number(episode: dict, row: int) -> str:
@@ -63,15 +74,47 @@ def episode_number(episode: dict, row: int) -> str:
     return str(row + 1)
 
 
+def _minutes(value) -> int | None:
+    """Minutes from STB minutes (number or numeric string) or Xtream "HH:MM:SS"/"MM:SS"."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    match = re.fullmatch(r"(\d+)\s*(?:min|m)", text, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    parts = text.split(":")
+    if 2 <= len(parts) <= 3 and all(part.strip().isdigit() for part in parts):
+        nums = [int(part) for part in parts]
+        if len(nums) == 2:
+            return nums[0]  # MM:SS
+        return nums[0] * 60 + nums[1] + (1 if nums[2] >= 30 else 0)
+    return None
+
+
 def episode_duration(episode: dict) -> str:
-    value = episode.get("duration")
-    if value in (None, "") and isinstance(episode.get("info"), dict):
-        value = episode["info"].get("duration")
-    if value in (None, "", 0, "0"):
+    """ "N min", or "1h 05m" above an hour; "" when unknown."""
+    sources = [episode]
+    for key in ("info", "description"):
+        if isinstance(episode.get(key), dict):
+            sources.append(episode[key])
+    minutes: int | None = None
+    for source in sources:
+        secs = source.get("duration_secs")
+        if secs not in (None, "") and str(secs).isdigit() and int(secs):
+            minutes = round(int(secs) / 60)
+        else:
+            minutes = _minutes(source.get("duration"))
+        if minutes:
+            break
+    if not minutes or minutes <= 0:
         return ""
-    if isinstance(value, (int, float)) or str(value).isdigit():
-        return f"{int(value)} min"
-    return str(value)
+    if minutes >= 60:
+        return f"{minutes // 60}h {minutes % 60:02d}m"
+    return f"{minutes} min"
 
 
 class EpisodesModel(QAbstractListModel):
@@ -79,7 +122,7 @@ class EpisodesModel(QAbstractListModel):
         super().__init__(parent)
         self._items: list[dict] = []
         self._provider: Callable[[dict], float | None] | None = None
-        self._progress: dict[int, float | None] = {}
+        self._progress: dict[str, float | None] = {}
 
     def set_episodes(self, items: list[dict]) -> None:
         self.beginResetModel()
@@ -102,16 +145,24 @@ class EpisodesModel(QAbstractListModel):
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._items)
 
+    def row_of(self, key: str) -> int:
+        for row, item in enumerate(self._items):
+            if episode_key(item) == key:
+                return row
+        return -1
+
     def progress(self, row: int) -> float | None:
-        if row not in self._progress:
+        item = self._items[row]
+        key = episode_key(item)
+        if key not in self._progress:
             value: float | None = None
             if self._provider is not None:
                 try:
-                    value = self._provider(self._items[row])
+                    value = self._provider(item)
                 except Exception:
                     logger.exception("progress provider failed")
-            self._progress[row] = value
-        return self._progress[row]
+            self._progress[key] = value
+        return self._progress[key]
 
     def data(self, index, role=Qt.DisplayRole):
         row = index.row()
@@ -156,7 +207,8 @@ class EpisodeRowDelegate(QStyledItemDelegate):
 
         progress = index.data(ProgressRole)
         watched = progress is not None and progress >= WATCHED_AT
-        resuming = progress is not None and 0 < progress < WATCHED_AT
+        resuming = is_resumable(progress)
+        show_button = resuming and selected and active
         left = rect.x() + 1.8 * u
         right = rect.right() - 1.8 * u
 
@@ -187,8 +239,28 @@ class EpisodeRowDelegate(QStyledItemDelegate):
                 "✓",
             )
 
+        btn_w = 9.5 * u if show_button else 0.0
+        if show_button:
+            btn = QRectF(
+                right - dur_w - check_w - btn_w,
+                rect.center().y() - 1.5 * u,
+                btn_w - 0.8 * u,
+                3.0 * u,
+            )
+            if getattr(option.widget, "button_active", False):
+                fill_round(p, btn, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), 1.5 * u)
+                p.setRenderHint(QPainter.Antialiasing, True)
+                p.setPen(qcolor(PALETTE.accent))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(btn.adjusted(0.75, 0.75, -0.75, -0.75), 1.5 * u, 1.5 * u)
+            else:
+                fill_round(p, btn, qcolor(PALETTE.text, 0.12), 1.5 * u)
+            p.setFont(units.font(1.0, QFont.Weight.DemiBold))
+            p.setPen(qcolor(PALETTE.text))
+            p.drawText(btn, Qt.AlignCenter, START_OVER_TEXT)
+
         title_x = left + 5.0 * u
-        title_w = right - dur_w - check_w - 1.0 * u - title_x
+        title_w = right - dur_w - check_w - btn_w - 1.0 * u - title_x
         p.setFont(units.font(1.2))
         p.setPen(qcolor(PALETTE.text))
         shift = -0.55 * u if resuming else 0.0
@@ -209,6 +281,7 @@ class EpisodesView(ChannelListView):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.focus_active = False
+        self.button_active = False  # the focused row's "Start over" button has focus
 
 
 class SeriesView(QWidget):
@@ -230,6 +303,7 @@ class SeriesView(QWidget):
         self._episodes: list[dict] | None = None
         self._episodes_error: str | None = None
         self._zone = SEASONS
+        self._button = False  # focus is on the current row's Start over button
         self._moved = False  # the user chose a zone; don't pull focus back to the episodes
         self._poster_url = ""
         self._plot_lines_cache: tuple[int, str, list[str]] | None = None
@@ -264,11 +338,10 @@ class SeriesView(QWidget):
         self._model.set_episodes([])
         self._debounce.stop()
         self._zone = SEASONS
+        self._button = False
         self._moved = False
         self._plot_lines_cache = None
-        self._poster_url = str(
-            series.get("logo") or series.get("cover") or series.get("screenshot_uri") or ""
-        )
+        self._poster_url = poster_url(series)
         if self._poster_url and self._posters is not None:
             self._posters.request([self._poster_url])
         self._sync()
@@ -294,12 +367,15 @@ class SeriesView(QWidget):
     ) -> None:
         if self._season is not None and item_key(season) != item_key(self._season):
             return  # a superseded season's result
+        previous = self.current_episode()
         self._season = season
         self._episodes = episodes
         self._episodes_error = error
+        self._button = False
         self._model.set_episodes(episodes or [])
         if episodes:
-            self._view.setCurrentIndex(self._model.index(0))
+            row = self._model.row_of(episode_key(previous)) if previous is not None else -1
+            self._view.setCurrentIndex(self._model.index(max(0, row)))
             if not self._moved:
                 self._zone = EPISODES
         elif self._zone == EPISODES:
@@ -348,6 +424,7 @@ class SeriesView(QWidget):
     def _sync(self) -> None:
         self._view.setVisible(not self._status())
         self._view.focus_active = self._zone == EPISODES
+        self._view.button_active = self._button and self._zone == EPISODES
         self._view.viewport().update()
         self.update()
 
@@ -355,8 +432,39 @@ class SeriesView(QWidget):
     def move_by(self, dx: int, dy: int) -> None:
         if self._zone == SEASONS:
             self._move_seasons(dx, dy)
+        elif dx:
+            self._move_button(dx)
         else:
             self._move_episodes(dy)
+
+    def page(self, delta: int) -> None:
+        """PageUp/PageDown: move the episodes selection by whole visible pages."""
+        if self._zone != EPISODES or not self._model.rowCount():
+            return
+        row_h = max(1, self._view.sizeHintForRow(0))
+        visible = max(1, self._view.viewport().height() // row_h)
+        self._select_row(self._view.currentIndex().row() + delta * visible)
+
+    def _select_row(self, row: int) -> None:
+        row = min(self._model.rowCount() - 1, max(0, row))
+        index = self._model.index(row)
+        self._button = False
+        self._view.setCurrentIndex(index)
+        self._view.scrollTo(index)
+        self._sync()
+
+    def _current_resumable(self) -> bool:
+        row = self._view.currentIndex().row()
+        return 0 <= row < self._model.rowCount() and is_resumable(self._model.progress(row))
+
+    def _move_button(self, dx: int) -> None:
+        if dx > 0 and self._current_resumable() and not self._button:
+            self._button = True
+        elif dx < 0 and self._button:
+            self._button = False
+        else:
+            return
+        self._sync()
 
     def _move_seasons(self, dx: int, dy: int) -> None:
         seasons = self._seasons or []
@@ -385,13 +493,11 @@ class SeriesView(QWidget):
         if dy < 0 and row <= 0:
             if self._seasons:
                 self._moved = True
+                self._button = False
                 self._zone = SEASONS
                 self._sync()
             return
-        row = min(self._model.rowCount() - 1, max(0, row + dy))
-        index = self._model.index(row)
-        self._view.setCurrentIndex(index)
-        self._view.scrollTo(index)
+        self._select_row(row + dy)
 
     def activate(self) -> None:
         if self._is_error():
@@ -401,10 +507,17 @@ class SeriesView(QWidget):
             if self._debounce.isActive():
                 self._debounce.stop()
                 self._emit_season()
+            elif self._episodes:
+                self._moved = True
+                self._zone = EPISODES
+                self._sync()
             return
         episode = self.current_episode()
         if episode is not None and self._season is not None:
-            self.episodeActivated.emit(self._season, episode)
+            if self._button:
+                self.startOverRequested.emit(self._season, episode)
+            else:
+                self.episodeActivated.emit(self._season, episode)
 
     def escape(self) -> bool:
         self.backRequested.emit()
@@ -417,6 +530,7 @@ class SeriesView(QWidget):
     def _on_row_clicked(self, row: int) -> None:
         self._moved = True
         self._zone = EPISODES
+        self._button = False
         self._view.setCurrentIndex(self._model.index(row))
         self._sync()
         self.activate()
@@ -592,6 +706,3 @@ class SeriesView(QWidget):
                 )
                 fill_round(p, underline, qcolor(PALETTE.accent), 0.125 * u)
         p.restore()
-
-
-__all__ = ["SeriesView", "EpisodesModel", "episode_key"]
