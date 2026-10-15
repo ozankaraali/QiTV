@@ -266,6 +266,7 @@ Everything is tested headless.
   - `release(segment)`;
   - `read(segment, offset, size) -> bytes`;
   - `wait_for(segment, offset, timeout) -> bool`: True when `segment.size > offset`, the segment completed, or the ring closed;
+  - `wait_for_seq(seq, timeout) -> str` (added by the Task 4 review): `"open"`, `"evicted"`, `"closed"` or `"timeout"`;
   - `close()`, which wakes all waiters and frees storage;
   - properties `oldest_seq`, `newest_seq`, `open_seq`, `bytes` (logical) and `charged` (cap accounting).
 - `class RamRing(Ring)`: `__init__(self, max_bytes=128 * 1024 * 1024)`; segments are `bytearray`s; the charge is the byte length.
@@ -383,8 +384,7 @@ Everything is tested headless.
     - for `n == seq`, send from offset 0 (with its PAT/PMT header); for later segments, send from `header_len`, so the byte stream stays the original;
     - for each 64 KiB chunk: `lease(n)` (None means the segment was evicted, so end the response), `ring.read`, `release`, and only then write the chunk to the socket. **A lease is never held across socket I/O**: a paused VLC blocks the write indefinitely, and a held lease would pin a charged segment until `append` hits the cap;
     - when caught up with an open segment, `ring.wait_for(segment, offset, 0.5)` and loop;
-    - move to `n+1` once `n` is complete and fully sent;
-    - if `n+1` is gone (evicted under a slow reader), end the response;
+    - once `n` is complete and fully sent, wait for the next segment with `ring.wait_for_seq(n+1, 0.5)` (added in Task 4's fix round): `"open"` continues with `n+1`; `"evicted"` (a slow reader fell behind) or `"closed"` ends the response; `"timeout"` loops, ending the response only when the session has ended;
     - if the session ended and the last segment is fully sent, end the response.
   - Stop and session removal wake waiters and end responses.
 - **Sockets:**
