@@ -24,6 +24,7 @@ _AUDIO_RESTORE_MS = 500
 _RESTART_DELAY_MS = 300
 _RESUME_GIVE_UP_MS = 3000
 _RESUME_END_MARGIN_MS = 1000
+_STALL_BUDGET_RESET_MS = 30000  # healthy playback after a stall refills the retry budget
 
 
 class PlaybackState(str, Enum):
@@ -93,6 +94,7 @@ class PlaybackSession(QObject):
         self._last_time = -1
         self._stalls = 0
         self._restarted = False
+        self._since_stall = QElapsedTimer()  # started at each counted stall
         self._poll = QTimer(self, interval=poll_ms)
         self._poll.timeout.connect(self._tick)
         self._released = False
@@ -348,12 +350,21 @@ class PlaybackSession(QObject):
             state not in (PlaybackState.PLAYING, PlaybackState.BUFFERING)
             or current != self._last_time
         ):
+            if (
+                self._stalls
+                and state is PlaybackState.PLAYING
+                and current != self._last_time
+                and self._since_stall.elapsed() >= _STALL_BUDGET_RESET_MS
+            ):
+                logger.info("Playback recovered; the stall budget is reset")
+                self._stalls, self._restarted = 0, False
             self._last_time = current
             self._stall_clock.restart()
             return
         if self._stall_clock.elapsed() < self._stall_ms:
             return
         self._stall_clock.restart()
+        self._since_stall.start()
         self._stalls += 1
         if self._stalls <= _STALL_AUDIO_RETRIES:
             logger.warning("Playback stalled (attempt %d); cycling the audio track", self._stalls)

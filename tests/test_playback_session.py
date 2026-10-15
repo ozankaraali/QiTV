@@ -117,6 +117,25 @@ class PlaybackSessionTests(unittest.TestCase):
                 session._watch_stall(PlaybackState.PLAYING)
         self.assertGreaterEqual(session._stalls, 1)
 
+    def test_stall_budget_resets_after_healthy_playback(self):
+        # Finding m3: after a recovery the budget never refilled, so a later stall went
+        # straight to the last resort.
+        session = self._stalling_session()
+        with mock.patch.object(session, "time_ms", return_value=500):
+            for _ in range(3):
+                session._watch_stall(PlaybackState.PLAYING)
+        self.assertEqual(session._stalls, 2)
+        clock = iter(range(1000, 100000, 250))
+        with (
+            mock.patch("services.playback._STALL_BUDGET_RESET_MS", 100),
+            mock.patch.object(session, "time_ms", side_effect=lambda: next(clock)),
+        ):
+            session._watch_stall(PlaybackState.PLAYING)
+            self.assertEqual(session._stalls, 2)  # not healthy for long enough yet
+            QTest.qWait(150)
+            session._watch_stall(PlaybackState.PLAYING)
+        self.assertEqual((session._stalls, session._restarted), (0, False))
+
     def test_audio_restore_does_not_touch_a_replaced_media(self):
         session = self._stalling_session()
         session.play(FIXTURE.as_uri(), kind=PlayKind.LIVE)
