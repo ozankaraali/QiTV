@@ -301,6 +301,39 @@ class DrawerTests(unittest.TestCase):
         self.record_hand_offs()
         return self.drawer._columns["left"]
 
+    # ---- the Settings gear beside the provider's name ----------------------------------------
+
+    def click(self, point):
+        QTest.mouseClick(self.drawer, Qt.LeftButton, Qt.NoModifier, point.toPoint())
+
+    def test_a_gear_right_after_the_provider_name_opens_settings(self):
+        self.drawer.open_drawer("1")
+        self.record_hand_offs()
+        gear, crumb = self.drawer.settings_gear_rect(), self.drawer.breadcrumb_text_rect()
+        left = self.drawer._columns["left"].rect
+        self.assertFalse(crumb.isEmpty())  # the provider's name is on the row
+        self.assertAlmostEqual(gear.center().y(), crumb.center().y(), delta=1)  # on its row
+        self.assertGreaterEqual(gear.left(), crumb.right())  # after the name, not over it
+        self.assertLess(gear.left() - crumb.right(), self.drawer._units.px(2.0))  # beside it
+        self.assertLessEqual(gear.right(), left.right())
+        self.click(gear.center())
+        self.assertEqual(self.actions, [SETTINGS_ROW])
+
+    def test_the_gear_is_there_on_the_sources_layer_too(self):
+        self.open_on_the_sources()
+        gear = self.drawer.settings_gear_rect()
+        self.assertTrue(self.drawer._columns["left"].rect.contains(gear.toRect()))
+        self.click(gear.center())
+        self.assertEqual(self.actions, [SETTINGS_ROW])
+
+    def test_a_click_beside_the_gear_opens_nothing(self):
+        self.drawer.open_drawer("1")
+        self.record_hand_offs()
+        gear = self.drawer.settings_gear_rect()
+        self.click(gear.center() + QPointF(gear.width() * 2, 0))
+        self.click(self.drawer.breadcrumb_text_rect().center())
+        self.assertEqual(self.actions, [])
+
     def test_the_sources_column_ends_with_settings_and_add_provider(self):
         column = self.open_on_the_sources()
         rows = [column.model.index(r) for r in range(column.model.rowCount())]

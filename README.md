@@ -56,7 +56,7 @@ On a first start QiTV opens with a [publicly available playlist](https://github.
    - **STB:** the portal address and your MAC address (serial number and device ID only if your provider asks for them).
 4. Press **Verify Provider** to check the details, then **Save**. QiTV loads the channels, and the Library loads the provider's movies and series.
 
-If you have no provider at all, QiTV shows a welcome card whose **Add provider** button does the same. Settings is also in the menu bar (<kbd>Ctrl/⌘+,</kbd>). To switch between providers, pick one in the channel list's sources column or in the **Providers** menu.
+If you have no provider at all, QiTV shows a welcome card whose **Add provider** button does the same. Settings is one click away too: the **⚙** right after your provider's name at the top of the channel list, or the menu bar (<kbd>Ctrl/⌘+,</kbd>). To switch between providers, pick one in the channel list's sources column or in the **Providers** menu.
 
 QiTV keeps each provider's lists for six hours and refreshes them in the background, so they open at once. If your provider allows only one or two streams at a time, QiTV never opens more: set **Max simultaneous streams** in the provider's settings when QiTV cannot read the limit from the provider.
 
