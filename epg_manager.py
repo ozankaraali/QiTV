@@ -22,6 +22,7 @@ from services.provider_api import (
     stb_endpoint,
     xtream_xmltv_url,
 )
+from services.redact import redact_url, safe_exc
 
 logger = logging.getLogger(__name__)
 
@@ -444,7 +445,7 @@ class EpgManager:
         """Fetch EPG from Xtream provider using XMLTV endpoint."""
         provider_hash = _xtream_cache_key(provider_url, username)
         xmltv_url = xtream_xmltv_url(provider_url, username, password)
-        logger.debug("Xtream XMLTV URL: %s", xmltv_url)
+        logger.debug("Xtream XMLTV URL: %s", redact_url(xmltv_url))
         prefer_https = provider_prefers_https(
             self.provider_manager.current_provider, self.config_manager.prefer_https
         )
@@ -467,7 +468,9 @@ class EpgManager:
                 raise RuntimeError("Failed to fetch Xtream XMLTV EPG")
             if r.status_code != 200:
                 logger.warning(
-                    f"Failed to fetch Xtream EPG, status code: {r.status_code} for URL: {xmltv_url}"
+                    "Failed to fetch Xtream EPG: status %s from %s",
+                    r.status_code,
+                    redact_url(xmltv_url),
                 )
                 self._mark_epg_unavailable(provider_hash)
             else:
@@ -482,7 +485,7 @@ class EpgManager:
                 else:
                     self._mark_epg_unavailable(provider_hash)
         except Exception as e:
-            logger.error(f"Error fetching Xtream EPG: {e}")
+            logger.error("Error fetching Xtream EPG: %s", safe_exc(e))
             self._mark_epg_unavailable(provider_hash)
 
         self.save_index()
@@ -497,7 +500,7 @@ class EpgManager:
                 write_xmltv_body(r, xmltv_file_path)
             except ValueError as e:
                 # An archive without XML leaves no file, so the index is left untouched.
-                logger.warning(f"Error fetching XMLTV from {url}: {e}")
+                logger.warning("Error fetching XMLTV from %s: %s", redact_url(url), safe_exc(e))
 
             if os.path.exists(xmltv_file_path):
                 self.epg = self._index_programs(xmltv_file_path)

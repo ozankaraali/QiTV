@@ -5,6 +5,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Qt, QThread, Slot
 
+from services.redact import safe_traceback
 from services.thread_cleanup import ThreadCleanup
 
 logger = logging.getLogger(__name__)
@@ -34,8 +35,13 @@ class _WorkerGuard(QObject):
     def run(self) -> None:
         try:
             self._worker.run()
-        except Exception:
-            logger.exception("Background task raised")
+        except Exception as e:
+            # requests exceptions repeat the URL, credentials and all: the text and the
+            # traceback's message never reach the log.
+            logger.error(
+                "Background task %s raised %s", type(self._worker).__name__, type(e).__name__
+            )
+            logger.debug("Background task failure:\n%s", safe_traceback(e))
             if not self._terminal:
                 self._worker.error.emit(FAILED_MESSAGE)
         else:

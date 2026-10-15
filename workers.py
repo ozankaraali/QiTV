@@ -19,6 +19,7 @@ from services.provider_api import (
     xtream_choose_resolved_base,
     xtream_player_api_url,
 )
+from services.redact import safe_exc, safe_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +243,7 @@ class XtreamLoaderWorker(QObject):
                         categories_map[cid] = cname
                         categories.append({"id": cid, "title": cname})
             except Exception as e:
-                logger.warning(f"Failed to fetch categories: {e}")
+                logger.warning("Failed to fetch categories: %s", safe_exc(e))
 
             # Add "All" category
             categories.insert(0, {"id": "*", "title": "All"})
@@ -458,7 +459,7 @@ class XtreamSeriesInfoWorker(QObject):
             )
 
         except Exception as e:
-            logger.error(f"Worker error: {e}")
+            logger.error("Xtream series info failed: %s", safe_exc(e))
             self.error.emit(str(e))
 
 
@@ -636,7 +637,7 @@ class SetProviderThread(QThread):
             else:
                 self.epg_manager.set_current_epg()
         except Exception as e:
-            logger.warning(f"Error in initializing provider: {e}")
+            logger.warning("Error in initializing provider: %s", safe_exc(e))
 
 
 class ProviderSetupWorker(QObject):
@@ -662,7 +663,7 @@ class ProviderSetupWorker(QObject):
         except Exception as e:
             # The text can carry portal URLs and credentials: log only the type at warning.
             logger.warning("Provider setup failed (%s)", type(e).__name__)
-            logger.debug("Provider setup failure", exc_info=True)
+            logger.debug("Provider setup failure:\n%s", safe_traceback(e))
             self.error.emit(str(e))
 
 
@@ -684,7 +685,7 @@ class EpgLoadWorker(QObject):
             self.finished.emit({})
         except Exception as e:
             logger.warning("EPG load failed (%s)", type(e).__name__)
-            logger.debug("EPG load failure", exc_info=True)
+            logger.debug("EPG load failure:\n%s", safe_traceback(e))
             self.error.emit(str(e))
 
 

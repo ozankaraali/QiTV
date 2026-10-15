@@ -16,6 +16,7 @@ import tzlocal
 from urlobject import URLObject
 
 from services.provider_api import provider_prefers_https
+from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +413,7 @@ class StbHandshake:
                     ssl_verify_override=ssl_verify_override,
                     _prefer_attempted=True,
                 )
-            logger.warning("Error in handshake: %s", e)
+            logger.warning("STB handshake failed: %s", safe_exc(e))
             return False
 
     @staticmethod
