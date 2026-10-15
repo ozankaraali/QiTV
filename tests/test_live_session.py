@@ -1,13 +1,15 @@
 import os
 import time
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+import services.live.live_session as live_session
 from services.live.live_session import LiveSession
 from services.live.timeline import Span
 from services.playback import PlaybackState
@@ -18,8 +20,10 @@ app = QApplication.instance() or QApplication([])
 URL = "http://provider.example/live/user/secret/42.ts"
 UNAVAILABLE = "Time-shift isn't available for this channel"
 LOST = "Lost the time-shift buffer; playing live"
+BUFFERED = "Lost the connection; playing what's buffered"
 DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
+DIRECT = (URL, PlayKind.LIVE, "normal")
 MiB = 1024 * 1024
 
 
@@ -46,6 +50,8 @@ class FakeEngine(QObject):
         self.up = True
         self.opened = []  # (sid, url, keyword arguments)
         self.closed = []
+        self.events = []  # ("open", sid) as sessions open
+        self._answered = set()
         self._spans = {}
         self._snapshots = {}
 
@@ -59,10 +65,23 @@ class FakeEngine(QObject):
     def open_session(self, url, **kwargs):
         sid = f"s{len(self.opened) + 1}"
         self.opened.append((sid, url, kwargs))
+        self.events.append(("open", sid))
         return sid
 
     def close_session(self, sid):
         self.closed.append(sid)
+
+    def answer(self):
+        """The helper confirms every close so far."""
+        for sid in self.closed:
+            if sid not in self._answered:
+                self._answered.add(sid)
+                self.sessionClosed.emit(sid)
+
+    def lose(self):
+        """A second helper death: time-shift is off for the run."""
+        self.up = False
+        self.available.emit(False)
 
     def spans(self, sid):
         return list(self._spans.get(sid, []))
@@ -89,6 +108,7 @@ class FakeEngine(QObject):
             "ended": False,
             "burst_s": burst,
         }
+        self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def reset(self, sid):
         """The helper holding `sid` died: its spans and snapshot are gone."""
@@ -157,12 +177,13 @@ class Clock:
 
 class LiveSessionCase(unittest.TestCase):
     def setUp(self):
-        self.engine = FakeEngine()
-        self.playback = FakePlayback()
         self.clock = Clock()
         self.live = self.make()
 
     def make(self, **kwargs):
+        """A LiveSession on fresh fakes: an earlier one stays wired only to its own."""
+        self.engine = FakeEngine()
+        self.playback = FakePlayback()
         kwargs.setdefault("tick_ms", 3_600_000)  # ticks are driven by the test
         kwargs.setdefault("clock", self.clock)
         live = LiveSession(self.engine, self.playback, **kwargs)
@@ -172,9 +193,14 @@ class LiveSessionCase(unittest.TestCase):
         live.notice.connect(self.notices.append)
         live.failed.connect(self.failures.append)
         live.released.connect(lambda: self.releases.append(True))
+        live.released.connect(lambda: self.engine.events.append(("released",)))
         live.timelineChanged.connect(self.timelines.append)
+        self.addCleanup(self.engine.answer)  # runs after live.stop (cleanups are LIFO)
         self.addCleanup(live.stop)
         return live
+
+    def patch(self, name, value):
+        self.enterContext(mock.patch.object(live_session, name, value))
 
     # ---- helpers ----------------------------------------------------------------------
     def start(self, latency="normal", disk=False, max_bytes=128 * MiB):
@@ -211,6 +237,20 @@ class LiveSessionCase(unittest.TestCase):
                 self.fail("timed out")
             QTest.qWait(10)
 
+    def active_timers(self):
+        return [timer for timer in self.live.findChildren(QTimer) if timer.isActive()]
+
+    def assert_falls_back(self, sid, notice, plays_before):
+        """Closed, nothing direct until the close is confirmed, then direct play."""
+        self.assertIn(sid, self.engine.closed)
+        self.assertEqual(len(self.playback.plays), plays_before)
+        self.assertNotIn("direct", self.modes)
+        self.engine.answer()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.assertEqual(self.notices[-1], notice)
+        self.assertEqual(self.modes[-1], "direct")
+        self.assertFalse(self.live.is_pipeline())
+
 
 class StartTests(LiveSessionCase):
     def test_ready_plays_the_oldest_segment_through_the_pipeline(self):
@@ -229,9 +269,14 @@ class StartTests(LiveSessionCase):
         )
         self.assertEqual(self.playback.plays, [])  # nothing plays before ready
 
+        modes_at_open = []
+        self.playback.stateChanged.connect(
+            lambda state: modes_at_open.append(self.live.mode) if state == "opening" else None
+        )
         self.engine.buffer(sid, [], open_seq=0)  # the first segment is still open
         self.engine.sessionReady.emit(sid)
         self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
+        self.assertEqual(modes_at_open, ["pipeline"])  # set before the first play
         self.assertEqual(self.modes, ["pipeline"])
         self.assertTrue(self.live.is_pipeline())
         self.assertEqual(self.live.mode, "pipeline")
@@ -249,9 +294,23 @@ class StartTests(LiveSessionCase):
             with self.subTest(latency=latency):
                 self.start(latency=latency)
                 self.assertEqual(self.engine.opened[-1][2]["live_delay"], delay)
+                self.live.stop()
+                self.engine.answer()
 
-    def test_an_unavailable_engine_plays_directly(self):
-        self.engine.up = False
+    def test_opens_before_the_helper_says_hello(self):
+        self.engine.up = False  # spawning: no hello yet, but no available(False) either
+        sid = self.start()
+        self.assertEqual([opened[0] for opened in self.engine.opened], [sid])
+        self.assertEqual(self.playback.plays, [])
+        self.engine.up = True
+        self.engine.available.emit(True)
+        self.engine.buffer(sid, [], open_seq=0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
+        self.assertEqual(self.modes, ["pipeline"])
+
+    def test_a_dead_engine_plays_directly_at_once(self):
+        self.engine.lose()
         self.start(latency="low")
         self.assertEqual(self.engine.opened, [])
         self.assertEqual(self.playback.plays, [(URL, PlayKind.LIVE, "low")])
@@ -259,24 +318,32 @@ class StartTests(LiveSessionCase):
         self.assertEqual(self.modes, ["direct"])
         self.assertFalse(self.live.is_pipeline())
 
-    def test_an_unsupported_source_plays_directly(self):
+    def test_an_unsupported_source_falls_back_once_the_session_closed(self):
         sid = self.start()
         self.engine.sessionFailed.emit(sid, "unsupported", "This stream format isn't supported.")
-        self.assertEqual(self.engine.closed, [sid])
-        self.assertEqual(self.playback.plays, [(URL, PlayKind.LIVE, "normal")])
+        self.assert_falls_back(sid, UNAVAILABLE, 0)
         self.assertEqual(self.notices, [UNAVAILABLE])
         self.assertEqual(self.modes, ["direct"])
 
-    def test_not_ready_in_time_plays_directly(self):
+    def test_not_ready_in_time_falls_back(self):
         self.live = self.make(ready_timeout_ms=50)
         sid = self.start()
-        self.wait_until(lambda: self.playback.plays)
-        self.assertEqual(self.engine.closed, [sid])
-        self.assertEqual(self.playback.plays, [(URL, PlayKind.LIVE, "normal")])
-        self.assertEqual(self.notices, [UNAVAILABLE])
-        self.assertEqual(self.modes, ["direct"])
+        self.wait_until(lambda: self.engine.closed)
+        self.assert_falls_back(sid, UNAVAILABLE, 0)
         self.engine.buffer(sid, [], open_seq=0)
         self.engine.sessionReady.emit(sid)  # too late
+        self.assertEqual(len(self.playback.plays), 1)
+
+    def test_a_fallback_plays_directly_after_the_close_cap(self):
+        self.patch("_CLOSE_CAP_MS", 50)
+        sid = self.start()
+        with self.assertLogs("services.live.live_session", "WARNING"):
+            self.engine.sessionFailed.emit(sid, "network", "The stream could not be reached.")
+            self.assertEqual(self.playback.plays, [])
+            self.wait_until(lambda: self.playback.plays)
+        self.assertEqual(self.playback.plays, [DIRECT])
+        self.assertEqual(self.notices, [UNAVAILABLE])
+        self.engine.answer()  # a late confirmation changes nothing
         self.assertEqual(len(self.playback.plays), 1)
 
     def test_a_disk_failure_before_ready_keeps_waiting(self):
@@ -299,20 +366,39 @@ class StartTests(LiveSessionCase):
         self.assertEqual(self.playback.plays, [])
         self.assertEqual(self.modes, [])
 
-    def test_zapping_during_the_wait_closes_the_old_session_and_ignores_it(self):
+    def test_zapping_waits_for_the_old_session_to_close(self):
         first = self.start()
-        second = self.start()
+        self.start()
         self.assertEqual(self.engine.closed, [first])
-        self.assertEqual(self.releases, [])  # the old upstream is not closed yet
+        self.assertEqual(len(self.engine.opened), 1)  # the new one opens after the close
         self.engine.buffer(first, [], open_seq=0)
         self.engine.sessionReady.emit(first)
         self.engine.sessionFailed.emit(first, "network", "The stream could not be reached.")
         self.assertEqual(self.playback.plays, [])
-        self.engine.sessionClosed.emit(first)
-        self.assertEqual(self.releases, [True])
+        self.assertEqual(self.releases, [])
+        self.engine.answer()
+        second = self.engine.last_sid
+        self.assertEqual(self.engine.events, [("open", first), ("released",), ("open", second)])
         self.engine.buffer(second, [], open_seq=0)
         self.engine.sessionReady.emit(second)
         self.assertEqual(self.playback.plays, [self.stream(second, 0)])
+
+    def test_zapping_opens_after_the_close_cap(self):
+        self.patch("_CLOSE_CAP_MS", 50)
+        self.start()
+        with self.assertLogs("services.live.live_session", "WARNING"):
+            self.start()
+            self.wait_until(lambda: len(self.engine.opened) == 2)
+        self.assertEqual(self.engine.events[1:], [("released",), ("open", "s2")])
+
+    def test_start_resets_the_position(self):
+        self.ready(segments(5, 3, start=10.0), live_edge=16.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(1.0)
+        self.live.stop()
+        self.engine.answer()
+        self.start()
+        self.assertEqual(self.live.position(), 0.0)
 
 
 class ReleaseTests(LiveSessionCase):
@@ -324,14 +410,25 @@ class ReleaseTests(LiveSessionCase):
         self.assertEqual(self.releases, [])
         self.engine.sessionClosed.emit("other")
         self.assertEqual(self.releases, [])
-        self.engine.sessionClosed.emit(sid)
+        self.engine.answer()
         self.assertEqual(self.releases, [True])
         self.engine.sessionClosed.emit(sid)
         self.assertEqual(self.releases, [True])
         self.assertEqual(self.live.mode, "")
+        self.assertEqual(self.active_timers(), [])
+
+    def test_released_after_the_close_cap(self):
+        self.patch("_CLOSE_CAP_MS", 50)
+        self.ready(segments(0, 2))
+        with self.assertLogs("services.live.live_session", "WARNING"):
+            self.live.stop()
+            self.wait_until(lambda: self.releases)
+        self.engine.answer()
+        self.assertEqual(self.releases, [True])
+        self.assertEqual(self.active_timers(), [])
 
     def test_direct_mode_releases_right_after_stopping_playback(self):
-        self.engine.up = False
+        self.engine.lose()
         self.start()
         stops = []
         self.live.released.connect(lambda: stops.append(self.playback.stops))
@@ -339,15 +436,33 @@ class ReleaseTests(LiveSessionCase):
         self.assertEqual(stops, [1])
         self.live.stop()  # idle: nothing more
         self.assertEqual(self.releases, [True])
+        self.assertEqual(self.active_timers(), [])
 
-    def test_after_a_fallback_stop_releases_at_once(self):
-        sid = self.ready(segments(0, 2))
+    def test_a_stop_during_the_fallback_wait_releases_on_that_close(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
         self.engine.sessionFailed.emit(sid, "network", "The stream could not be reached.")
-        self.assertEqual(self.engine.closed, [sid])
+        self.live.stop()
+        self.assertEqual(self.releases, [])
+        self.engine.answer()
+        self.assertEqual(self.releases, [True])
+        self.assertEqual(len(self.playback.plays), 1)  # the fallback was cancelled
+        self.assertEqual(self.notices, [])
+        self.assertEqual(self.active_timers(), [])
+
+    def test_after_a_completed_fallback_stop_releases_at_once(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.engine.sessionFailed.emit(sid, "network", "The stream could not be reached.")
+        self.engine.answer()
+        self.assertEqual(self.active_timers(), [])
         self.live.stop()
         self.assertEqual(self.releases, [True])
-        self.engine.sessionClosed.emit(sid)  # the fallback's close owes no release
-        self.assertEqual(self.releases, [True])
+
+    def test_timers_are_idle_after_a_fallback(self):
+        sid = self.start()
+        self.engine.sessionFailed.emit(sid, "unsupported", "This stream format isn't supported.")
+        self.engine.answer()
+        self.assertEqual(self.playback.plays, [DIRECT])
+        self.assertEqual(self.active_timers(), [])
 
 
 class SeekTests(LiveSessionCase):
@@ -386,26 +501,38 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 1))
 
     def test_seek_clamps_to_the_closed_segments(self):
-        sid = self.ready(segments(3, 4, start=6.0), live_edge=15.0)
+        # A 10 s open segment follows the closed ones: it is not addressable.
+        sid = self.ready(segments(3, 3, start=6.0), live_edge=22.0)
         self.live.seek_to(-50.0)
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 3))
-        self.live.seek_to(500.0)
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 6))
+        self.live.seek_to(15.0)
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 5))
 
-    def test_seek_with_nothing_buffered_is_ignored(self):
-        self.ready([], open_seq=0)
+    def test_seek_with_nothing_closed_yet_is_ignored(self):
+        self.ready([], open_seq=0, live_edge=10.0)
         self.live.seek_to(0.0)
         self.assertEqual(len(self.playback.plays), 1)
 
-    def test_seeking_back_leaves_live_but_near_the_edge_does_not(self):
+    def test_seeking_back_leaves_live(self):
         self.ready(segments(0, 10), live_edge=20.0)
         self.playback.set_state(PlaybackState.PLAYING)
-        self.live.seek_to(18.0)  # within the target of the edge: still live
-        self.step(0.25)
-        self.assertEqual(self.timelines[-1]["mode"], "live")
         self.live.seek_to(4.0)
         self.step(0.25)
         self.assertEqual(self.timelines[-1]["mode"], "shifted")
+
+    def test_a_seek_near_live_goes_live(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(4.0)
+        self.live.seek_to(18.0)  # within the 2.5 s target of the edge
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 8))
+        self.step(0.25)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+        self.live.seek_to(4.0)
+        self.live.seek_relative(30.0)  # past the edge
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 8))
+        self.step(0.25)
+        self.assertEqual(self.timelines[-1]["mode"], "live")
 
     def test_go_live_picks_the_newest_segment_at_least_the_target_behind(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
@@ -423,11 +550,11 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["mode"], "live")
         self.assertEqual(self.playback.rates, [1.5, 1.0, 1.05])
 
-    def test_go_live_uses_the_hls_burst_as_the_target(self):
+    def test_go_live_with_bursts_aims_half_a_burst_further_back(self):
         sid = self.ready(segments(0, 10), live_edge=20.0, burst=6.0)
         self.live.go_live()
-        # The 6 s burst outweighs Normal's 2.5 s: at most 14.0, so segment 7.
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 7))
+        # The 6 s burst is the target; plus half a burst, at most 11.0: segment 5.
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 5))
 
     def test_go_live_takes_the_newest_segment_when_none_is_far_enough_behind(self):
         sid = self.ready(segments(5, 2, start=10.0), live_edge=14.0, burst=6.0)
@@ -455,12 +582,22 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["rate"], 1.5)
         self.assertEqual(self.playback.rates, [1.5])
 
+    def test_speed_at_live_is_ignored(self):
+        self.ready(segments(0, 2), live_edge=4.0, latency="stable")
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.set_speed(1.5)
+        self.assertEqual(self.playback.rates, [])
+        self.step(0.25)
+        self.assertEqual(self.playback.rates, [])
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+
     def test_direct_mode_passes_pause_through_and_ignores_seeks(self):
-        self.engine.up = False
+        self.engine.lose()
         self.start()
         self.live.toggle_pause()
         self.live.seek_to(5.0)
         self.live.set_speed(2.0)
+        self.live.go_live()
         self.assertEqual(self.playback.toggles, 1)
         self.assertEqual(len(self.playback.plays), 1)
         self.assertEqual(self.playback.rates, [])
@@ -495,32 +632,47 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.playback.rates, [])
         self.assertEqual(self.timelines[-1]["target"], 6.0)
 
-    def test_hls_bursts_settle_without_rate_flapping(self):
-        """6 s segments arrive whole every 6 s: one catch-up, then a steady rate."""
+    def play_bursts(self, initial_edge, seconds=120):
+        """6 s segments arrive whole every 6 s while VLC plays at the rate it is given."""
         sid = self.start()
-        edge, closed = 12.0, 2
-        burst = dict(length=6.0)
+        edge, closed = initial_edge, int(initial_edge // 6)
         self.engine.buffer(
-            sid, segments(0, closed, **burst), live_edge=edge, open_seq=closed, burst=6.0
+            sid, segments(0, closed, length=6.0), live_edge=edge, open_seq=closed, burst=6.0
         )
         self.engine.sessionReady.emit(sid)
         self.playback.set_state(PlaybackState.PLAYING)
         position, lags = 0.0, []
-        for tick in range(1, 481):  # two minutes
+        for tick in range(1, seconds * 4 + 1):
+            plays = len(self.playback.plays)
             advance = 0.25 * (self.playback.rates[-1] if self.playback.rates else 1.0)
             position += advance
             if tick % 24 == 0:
                 edge, closed = edge + 6.0, closed + 1
                 self.engine.buffer(
-                    sid, segments(0, closed, **burst), live_edge=edge, open_seq=closed, burst=6.0
+                    sid, segments(0, closed, length=6.0), live_edge=edge, open_seq=closed, burst=6.0
                 )
             self.step(0.25, media=advance)
+            if len(self.playback.plays) > plays:  # reopened: playback restarts there
+                position = self.live.position()
+                self.playback.set_state(PlaybackState.PLAYING)
             lags.append(edge - position)
+        return lags
+
+    def test_hls_bursts_settle_without_rate_flapping(self):
+        lags = self.play_bursts(12.0)
         self.assertEqual(len(self.playback.plays), 1)  # no reopen
         self.assertEqual(self.playback.rates, [1.10, 1.05, 1.0])  # once down, no flapping
         self.assertGreater(min(lags[-24:]), 2.0)  # headroom before every burst
         reported = [timeline["lag"] for timeline in self.timelines[-24:]]
         self.assertLess(max(reported) - min(reported), 0.5)  # the mean, not the sawtooth
+
+    def test_hls_bursts_settle_after_reopening_at_live(self):
+        lags = self.play_bursts(60.0)
+        self.assertEqual(len(self.playback.plays), 2)  # one reopen at live, no loop
+        rates = self.playback.rates
+        self.assertEqual(rates, sorted(rates, reverse=True))  # only ever down
+        self.assertEqual(rates[-1], 1.0)
+        self.assertGreater(min(lags[-24:]), 2.0)
 
     def test_no_rate_change_while_buffering(self):
         self.ready(segments(0, 2), live_edge=4.0)
@@ -634,28 +786,28 @@ class InterruptionTests(LiveSessionCase):
 
     def test_errors_without_playing_end_in_direct_play(self):
         self.live = self.make(ready_timeout_ms=1000)
-        self.ready(segments(0, 5), live_edge=10.5)
+        sid = self.ready(segments(0, 5), live_edge=10.5)
         with self.assertLogs("services.live.live_session", "WARNING"):
             for _ in range(3):
                 self.clock.now += 0.6
                 self.playback.errorOccurred.emit("The stream could not be opened")
-        self.assertEqual(self.playback.plays[-1], (URL, PlayKind.LIVE, "normal"))
-        self.assertEqual(len(self.playback.plays), 4)  # ready, two reopens, direct
+        self.assert_falls_back(sid, LOST, 3)  # ready, two reopens
         self.assertEqual(self.notices, [LOST])
         self.assertEqual(self.modes, ["pipeline", "direct"])
 
     def test_a_synchronous_open_error_retries_on_the_tick_without_recursion(self):
         self.live = self.make(ready_timeout_ms=1000)
         self.playback.fail_on_play = True
-        self.ready(segments(0, 5), live_edge=10.5)
+        sid = self.ready(segments(0, 5), live_edge=10.5)
         self.assertEqual(len(self.playback.plays), 1)
         self.step(0.5)
         self.assertEqual(len(self.playback.plays), 2)
-        self.playback.fail_on_play = False
+        timelines = len(self.timelines)
         with self.assertLogs("services.live.live_session", "WARNING"):
-            self.step(0.6)
-        self.assertEqual(self.playback.plays[-1], (URL, PlayKind.LIVE, "normal"))
-        self.assertEqual(self.notices, [LOST])
+            self.step(1.1)  # over a second of failures since the first retry
+        self.assertEqual(len(self.timelines), timelines)  # nothing after the fallback
+        self.playback.fail_on_play = False
+        self.assert_falls_back(sid, LOST, 2)
 
     def test_after_the_session_ended_an_error_does_not_reopen(self):
         sid = self.ready(segments(0, 3), live_edge=6.0)
@@ -672,33 +824,99 @@ class InterruptionTests(LiveSessionCase):
         self.assertTrue(self.timelines[-1]["ended"])
         self.assertEqual(self.timelines[-1]["live_edge"], 6.0)
 
-    def test_a_disk_failure_after_ready_goes_live_in_memory(self):
+    def test_a_disk_failure_after_ready_goes_live_on_the_ram_ring(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
         self.live.seek_to(2.0)
-        self.engine.buffer(sid, segments(10, 1, start=20.0), live_edge=23.0)
+        # The failure arrives before any state of the swapped-in RAM ring.
         self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
         self.assertEqual(self.notices, [DISK])
+        self.assertEqual(len(self.playback.plays), 2)
+        self.playback.errorOccurred.emit("The stream could not be played")  # cut off
+        self.assertEqual(len(self.playback.plays), 2)  # not reopened on the old spans
+        self.engine.buffer(sid, segments(10, 1, start=20.0), live_edge=23.0)
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 10))
+        self.assertEqual(self.notices, [DISK])
         self.assertEqual(self.modes, ["pipeline"])
 
-    def test_the_source_giving_up_after_ready_plays_directly(self):
-        for kind in ("network", "timeout", "http"):
+    def test_a_disk_failure_without_a_new_state_falls_back(self):
+        self.live = self.make(ready_timeout_ms=1000)
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+        self.step(0.25)
+        self.assertEqual(self.engine.closed, [])
+        with self.assertLogs("services.live.live_session", "WARNING"):
+            self.step(1.1)  # no state of the RAM ring for over the ready timeout
+        self.assert_falls_back(sid, LOST, 1)
+
+    def test_the_source_giving_up_before_the_ram_ring_reports_falls_back(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.live.seek_to(4.0)
+        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+        self.engine.sessionFailed.emit(sid, "network", "The stream could not be reached.")
+        self.assert_falls_back(sid, LOST, 2)  # no history is left to play
+        self.assertEqual(self.notices, [DISK, LOST])
+
+    def test_the_source_giving_up_at_live_falls_back(self):
+        for kind in ("network", "timeout", "http", "tls", "unsupported", "crashed", "new-kind"):
             with self.subTest(kind=kind):
                 self.notices.clear()
                 self.modes.clear()
                 sid = self.ready(segments(0, 3), live_edge=6.0)
-                self.live.set_speed(1.5)
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.step(0.25)  # lag 5.75: stay-live runs at 1.10
+                self.assertEqual(self.playback.rates[-1], 1.10)
+                plays = len(self.playback.plays)
                 self.engine.sessionFailed.emit(sid, kind, "The stream could not be reached.")
-                self.assertIn(sid, self.engine.closed)
-                self.assertEqual(self.playback.plays[-1], (URL, PlayKind.LIVE, "normal"))
+                self.assert_falls_back(sid, LOST, plays)
+                self.assertEqual(self.playback.rates[-1], 1.0)
                 self.assertEqual(self.notices, [LOST])
                 self.assertEqual(self.modes, ["pipeline", "direct"])
                 self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped.")
                 self.assertEqual(self.notices, [LOST])  # one fallback only
 
+    def test_the_source_giving_up_while_shifted_plays_the_buffer_to_its_end(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(4.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        self.engine.sessionFailed.emit(sid, "network", "The stream could not be reached.")
+        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped.")  # ignored
+        self.assertEqual(self.notices, [BUFFERED])
+        self.assertTrue(self.timelines[-1]["ended"])
+        self.assertEqual(self.engine.closed, [])
+        self.assertEqual(len(self.playback.plays), plays)
+        self.live.seek_to(8.0)  # the buffer is still there
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 4))
+        self.step(0.25)
+        self.assertTrue(self.timelines[-1]["ended"])
+        self.playback.set_state(PlaybackState.ENDED)
+        self.playback.ended.emit()  # the end of what was buffered
+        self.assert_falls_back(sid, LOST, plays + 1)
+        self.assertEqual(self.notices, [BUFFERED, LOST])
+
+    def test_go_live_after_the_source_gave_up_falls_back(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.live.seek_to(4.0)
+        self.engine.sessionFailed.emit(sid, "http", "The provider refused the stream.")
+        self.assertEqual(self.notices, [BUFFERED])
+        self.live.go_live()
+        self.assert_falls_back(sid, LOST, 2)
+
+    def test_a_session_crash_while_shifted_plays_the_buffer(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.live.seek_to(4.0)
+        self.engine.sessionFailed.emit(sid, "crashed", "The live buffer stopped unexpectedly.")
+        self.assertEqual(self.notices, [BUFFERED])
+        self.assertTrue(self.timelines[-1]["ended"])
+        self.playback.errorOccurred.emit("The stream could not be played")
+        self.assert_falls_back(sid, LOST, 2)
+
     def test_direct_play_errors_are_reported(self):
         sid = self.ready(segments(0, 3), live_edge=6.0)
         self.engine.sessionFailed.emit(sid, "network", "The stream could not be reached.")
+        self.engine.answer()
         plays = len(self.playback.plays)
         self.playback.errorOccurred.emit("The stream could not be played")
         self.assertEqual(self.failures, ["The stream could not be played"])
@@ -706,15 +924,18 @@ class InterruptionTests(LiveSessionCase):
 
 
 class HelperDeathTests(LiveSessionCase):
+    def die(self, sid):
+        self.engine.up = False
+        self.engine.reset(sid)
+        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
+
     def test_helper_death_reopens_at_live_then_a_second_death_plays_directly(self):
         sid = self.ready(segments(0, 3), live_edge=6.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(0.25)
         ticks = len(self.timelines)
 
-        self.engine.up = False
-        self.engine.reset(sid)
-        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
+        self.die(sid)
         self.playback.errorOccurred.emit("The stream could not be played")  # the dead server
         self.step(0.25)
         self.assertEqual(len(self.playback.plays), 1)
@@ -729,54 +950,124 @@ class HelperDeathTests(LiveSessionCase):
         self.assertEqual(self.engine.closed, [])
         self.assertEqual(self.modes, ["pipeline"])
 
-        self.engine.up = False
-        self.engine.reset(sid)
-        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
-        self.engine.available.emit(False)
-        self.assertEqual(self.playback.plays[-1], (URL, PlayKind.LIVE, "normal"))
+        self.die(sid)
+        self.engine.lose()  # no helper is left, so neither is an upstream: at once
+        self.assertEqual(self.playback.plays[-1], DIRECT)
         self.assertEqual(self.notices, [LOST])
         self.assertEqual(self.modes, ["pipeline", "direct"])
         self.assertEqual(self.engine.closed, [sid])
+        self.assertEqual(self.active_timers(), [])
 
         self.engine.up = True  # never again in this run
         self.start()
         self.assertEqual(len(self.engine.opened), 1)
         self.assertEqual(self.notices, [LOST, UNAVAILABLE])
 
-    def test_an_internal_failure_while_the_helper_is_up_plays_directly(self):
+    def test_internal_always_waits_for_the_reopen(self):
         sid = self.ready(segments(0, 3), live_edge=6.0)
         self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
-        self.assertEqual(self.playback.plays[-1], (URL, PlayKind.LIVE, "normal"))
-        self.assertEqual(self.notices, [LOST])
+        self.assertEqual(self.engine.closed, [])  # no is_available() guess: it is a death
+        self.assertEqual(self.notices, [])
+        self.engine.available.emit(True)
+        self.engine.buffer(sid, segments(0, 5), live_edge=10.0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 3))
 
-    def test_a_reopen_that_never_gets_ready_plays_directly(self):
-        self.live = self.make(ready_timeout_ms=50)
-        sid = self.ready(segments(0, 3), live_edge=6.0)
+    def test_internal_before_ready_waits_for_the_reopen(self):
+        sid = self.start()
         self.engine.up = False
         self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
+        self.assertEqual(self.engine.closed, [])
         self.engine.up = True
         self.engine.available.emit(True)
-        self.wait_until(lambda: self.notices)
-        self.assertEqual(self.notices, [LOST])
-        self.assertEqual(self.playback.plays[-1], (URL, PlayKind.LIVE, "normal"))
+        self.engine.buffer(sid, [], open_seq=0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
+        self.assertEqual(self.notices, [])
 
-    def test_a_reopen_that_fails_plays_directly(self):
+    def test_recovery_is_bounded(self):
+        self.patch("_RECOVERY_MS", 50)
         sid = self.ready(segments(0, 3), live_edge=6.0)
-        self.engine.up = False
-        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
+        self.die(sid)
+        self.engine.up = True
+        self.engine.available.emit(True)  # but the reopened session never gets ready
+        self.wait_until(lambda: self.engine.closed)
+        self.assert_falls_back(sid, LOST, 1)
+
+    def test_recovery_is_bounded_without_a_new_helper(self):
+        self.patch("_RECOVERY_MS", 50)
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.die(sid)
+        self.wait_until(lambda: self.engine.closed)
+        self.assert_falls_back(sid, LOST, 1)
+
+    def test_a_reopen_that_fails_falls_back(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.die(sid)
         self.engine.up = True
         self.engine.available.emit(True)
         self.engine.sessionFailed.emit(sid, "network", "The stream could not be reached.")
-        self.assertEqual(self.notices, [LOST])
-        self.assertEqual(self.playback.plays[-1], (URL, PlayKind.LIVE, "normal"))
+        self.assert_falls_back(sid, LOST, 1)
 
-    def test_engine_lost_during_the_wait_plays_directly_once(self):
+    def test_a_crash_of_the_reopened_session_falls_back(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.die(sid)
+        self.engine.up = True
+        self.engine.available.emit(True)
+        self.engine.sessionFailed.emit(sid, "crashed", "The live buffer stopped unexpectedly.")
+        self.assert_falls_back(sid, LOST, 1)
+
+    def test_internal_while_recovering_keeps_waiting_until_the_cap(self):
+        self.patch("_RECOVERY_MS", 200)
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.die(sid)
+        self.engine.up = True
+        self.engine.available.emit(True)
+        self.die(sid)  # the restarted helper died too: still waiting, but bounded
+        self.assertEqual(self.engine.closed, [])
+        self.wait_until(lambda: self.engine.closed)
+        self.assert_falls_back(sid, LOST, 1)
+
+    def test_stop_while_recovering(self):
+        self.patch("_RECOVERY_MS", 50)
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.die(sid)
+        self.live.stop()
+        self.assertEqual(self.engine.closed, [sid])
+        self.engine.answer()
+        self.assertEqual(self.releases, [True])
+        self.assertEqual(self.active_timers(), [])
+        self.engine.up = True
+        self.engine.available.emit(True)
+        self.engine.buffer(sid, segments(0, 5), live_edge=10.0)
+        self.engine.sessionReady.emit(sid)
+        QTest.qWait(100)
+        self.assertEqual(len(self.playback.plays), 1)
+        self.assertEqual(self.notices, [])
+
+    def test_engine_lost_during_the_wait_plays_directly_at_once(self):
         sid = self.start()
         self.engine.up = False
         self.engine.sessionFailed.emit(sid, "internal", "The live buffer is not available.")
-        self.engine.available.emit(False)
+        self.assertEqual(self.playback.plays, [])  # waiting for the reopen
+        self.engine.lose()
         self.assertEqual(self.notices, [UNAVAILABLE])
-        self.assertEqual(self.playback.plays, [(URL, PlayKind.LIVE, "normal")])
+        self.assertEqual(self.playback.plays, [DIRECT])
+        self.assertEqual(self.active_timers(), [])
+
+    def test_available_outside_recovery_is_harmless(self):
+        sid = self.start()
+        self.engine.available.emit(True)  # waiting
+        self.engine.buffer(sid, segments(0, 3), live_edge=6.0)
+        self.engine.sessionReady.emit(sid)
+        self.engine.available.emit(True)  # playing
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
+        self.engine.sessionFailed.emit(sid, "unsupported", "This stream format isn't supported.")
+        self.engine.answer()
+        self.engine.available.emit(True)  # direct
+        self.assertEqual(len(self.playback.plays), 2)
+        self.assertEqual(self.notices, [LOST])
+        self.assertEqual(self.modes, ["pipeline", "direct"])
 
 
 if __name__ == "__main__":

@@ -1,44 +1,57 @@
 """Play one live channel through the time-shift pipeline, or directly when it cannot.
 
-`LiveSession` lives on the GUI thread. `start()` opens a `LiveEngine` session and waits for
-its `sessionReady`; then VLC plays the loopback stream from the oldest buffered segment with
-the pipeline profile. Unsupported sources, failures before ready, an unavailable engine and
-a ready that does not come within `ready_timeout_ms` play the provider URL directly instead
-(`PlayKind.LIVE`), with the notice "Time-shift isn't available for this channel".
+`LiveSession` lives on the GUI thread. `start()` opens a `LiveEngine` session (also before
+the helper's first hello: the engine queues it) and waits for its `sessionReady`; then VLC
+plays the loopback stream from the oldest buffered segment with the pipeline profile.
+
+Falling back (spec §9) never overlaps two upstream connections: the session is closed and
+the provider URL plays directly (`PlayKind.LIVE`) once the engine confirms the close, or
+after `_CLOSE_CAP_MS`. Only `available(False)` plays directly at once: no helper, so no
+upstream, is left. Unsupported sources, failures before ready and a ready that does not
+come within `ready_timeout_ms` fall back with "Time-shift isn't available for this
+channel"; after `available(False)` every start plays directly for the rest of the run.
 
 Position (spec §6.3): the start of the opened segment plus VLC's `get_time()` deltas; a
 delta further than 1 s from wall clock × rate (counted only while VLC plays) is replaced by
 wall clock × rate, so a timestamp jump in the stream does not move the position. Seeking
 reopens the stream at a segment (about 2 s granularity) and keeps the pause intent: a
-reopened stream is paused again as soon as it plays (port map §8.19).
+reopened stream is paused again as soon as it plays (port map §8.19). A seek to within the
+target of the live edge goes live instead.
 
 Every `tick_ms` the lag behind the live edge feeds `StayLive`, whose target is the latency
 setting's or the HLS burst (`burst_s`), whichever is larger: segments that arrive whole
 would make a smaller target underrun at every segment. With bursts the lag is a sawtooth
 as tall as a burst, so the lag used (and reported) is its mean over the last `burst_s`
 seconds: held against the instantaneous peak, the rate would change at every burst and
-settle only once the lag before each burst is under 0.75 s.
+settle only once the lag before each burst is under 0.75 s. Stay-live waits for one full
+burst after each (re)open before it acts, since a shorter mean depends on where in the
+sawtooth it began. Go live aims half a burst further back, so a late burst does not stall
+playback.
 
 Interruptions while playing from the pipeline:
 - VLC ended or failed: reopen at the position, or at the oldest buffered point with "Rewound
   past the buffer" when the ring evicted it (after a long pause, say). Resuming from a pause
   checks for that eviction first. Nothing is reopened once the session ended: playback runs
-  to the end of the buffer. Reopens that never reach playing for `ready_timeout_ms` play
-  directly.
-- `sessionFailed("disk")`: the helper went on in RAM without the history: notice, go live.
-- `sessionFailed("internal")` from a helper death (the engine is unavailable): wait for
-  `available(True)` and the engine's reopen of the session, then go live; a reopen that is
-  not ready within `ready_timeout_ms` of `available(True)` plays directly. An "internal"
-  failure while the engine is up is the helper's own and no reopen follows: play directly.
-- Any other `sessionFailed` (the source gave up), or `available(False)`: play directly with
-  "Lost the time-shift buffer; playing live". `available(False)` keeps every later start
-  direct for the rest of the run.
+  to the end of the buffer. Interruptions that do not reach playing again within
+  `ready_timeout_ms` fall back.
+- `sessionFailed("disk")`: the helper went on in RAM without the history: a notice, then go
+  live on the RAM ring's first state (`sessionUpdated`), not on the old ring's spans; fall
+  back when that state does not come within `ready_timeout_ms`.
+- `sessionFailed("internal")` means a helper death: wait for the engine's reopen of the
+  session, then go live; after `_RECOVERY_MS` without it, fall back. (Before ready, the
+  ready timeout bounds the same wait.)
+- Any other kind is final (the source gave up, the helper's session "crashed", or a kind
+  this code does not know): at the live edge, fall back with "Lost the time-shift buffer;
+  playing live". Time-shifted behind the target, keep playing the buffer ("Lost the
+  connection; playing what's buffered", timeline `ended`), and fall back when it runs out
+  or on Go live. Before ready, fall back with "Time-shift isn't available…".
 
 Engine signals for any session but the current one are ignored, and so are failures after
-`sessionEnded` (only `sessionClosed` follows those). `released()` is emitted when the
-upstream is closed: on `sessionClosed` of a stopped session, or right after
-`playback.stop()` in direct mode. `failed(message)` reports a playback error in direct
-mode; pipeline playback errors are recovered here and never reported.
+`sessionEnded` (only `sessionClosed` follows those). `released()` follows `stop()` once no
+session this object opened is still open (or after `_CLOSE_CAP_MS`): at once in direct
+mode. A `start()` during that wait opens its session only after `released()`.
+`failed(message)` reports a playback error in direct mode; pipeline playback errors are
+recovered here and never reported.
 """
 
 from __future__ import annotations
@@ -52,7 +65,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.live.stay_live import TARGETS, StayLive
+from services.live.stay_live import TARGETS, Mode, StayLive
 from services.live.timeline import Span
 from services.playback import PlaybackState, Session
 from services.vlc_profile import PlayKind
@@ -66,8 +79,11 @@ _LOG = logging.getLogger(__name__)
 LIVE_DELAY = {"low": 3.0, "normal": 6.0, "stable": 12.0}
 UNAVAILABLE = "Time-shift isn't available for this channel"
 LOST = "Lost the time-shift buffer; playing live"
+BUFFERED = "Lost the connection; playing what's buffered"
 DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
+_CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
+_RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _JUMP_S = 1.0  # get_time deltas further than this from wall clock x rate are not trusted
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
 _PLAYING = PlaybackState.PLAYING.value
@@ -76,9 +92,11 @@ _PAUSED = PlaybackState.PAUSED.value
 
 class _Phase(Enum):
     IDLE = "idle"
+    STARTING = "starting"  # start() waits for an earlier session to close
     WAITING = "waiting"  # the pipeline session is opening; nothing plays yet
     PIPELINE = "pipeline"  # VLC plays the loopback stream
     RECOVERING = "recovering"  # the helper died: waiting for the engine's reopen
+    FALLING_BACK = "falling_back"  # direct play waits for the session to close
     DIRECT = "direct"  # VLC plays the provider URL
 
 
@@ -126,17 +144,26 @@ class LiveSession(QObject):
         self._ready_timer.timeout.connect(self._on_ready_timeout)
         self._tick_timer = QTimer(self, interval=tick_ms)
         self._tick_timer.timeout.connect(self._tick)
+        self._recovery_timer = QTimer(self, singleShot=True)
+        self._recovery_timer.timeout.connect(self._on_recovery_timeout)
+        self._close_timer = QTimer(self, singleShot=True)
+        self._close_timer.timeout.connect(self._on_close_cap)
         self._phase = _Phase.IDLE
         self._mode = ""
         self._dead = False  # available(False): direct play for the rest of the run
         self._sid: Optional[str] = None
-        self._owed: set[str] = set()  # stopped sessions whose sessionClosed emits released()
+        self._unclosed: set[str] = set()  # closed here, not yet confirmed by the engine
+        self._release_owed = False  # stop() was called: released() once nothing is open
+        self._fallback_notice = ""
         self._url = ""
         self._latency = "normal"
         self._user_agent: Optional[str] = None
+        self._open_args: dict[str, Any] = {}
         self._stay = StayLive()
         self._snapshot_cache: dict[str, Any] = {}
-        self._ended = False
+        self._ended = False  # the session's input is over: no reopen, no stay-live
+        self._source_lost = False  # ended by a source failure: fall back when it runs out
+        self._live_on_update = False  # go live on the next state (after a disk failure)
         self._paused = False
         self._rate = 1.0
         # Position: _base (the opened segment's start) + _elapsed, sampled from VLC.
@@ -148,8 +175,10 @@ class LiveSession(QObject):
         self._failing_since: Optional[float] = None  # first interruption since VLC played
         self._opening = False  # inside playback.play(): its errors are retried on a tick
         self._lags: deque[tuple[float, float]] = deque()  # (wall, lag) over the last burst
+        self._lags_from: Optional[float] = None  # when the current run of lag samples began
         engine.available.connect(self._on_available)
         engine.sessionReady.connect(self._on_ready)
+        engine.sessionUpdated.connect(self._on_updated)
         engine.sessionFailed.connect(self._on_failed)
         engine.sessionEnded.connect(self._on_ended)
         engine.sessionClosed.connect(self._on_closed)
@@ -180,41 +209,39 @@ class LiveSession(QObject):
         self.stop()
         self._url, self._user_agent = url, user_agent
         self._latency = latency if latency in TARGETS else "normal"
+        self._open_args = {
+            "headers": dict(headers),
+            "verify_ssl": verify_ssl,
+            "disk": disk,
+            "max_bytes": max_bytes,
+        }
         self._stay = StayLive(self._latency)
         self._snapshot_cache = {}
-        self._ended = self._paused = False
+        self._ended = self._source_lost = self._live_on_update = self._paused = False
         self._retry = self._failing_since = None
-        self._lags.clear()
+        self._clear_lags()
+        self._base = self._elapsed = 0.0
+        self._last_ms, self._last_wall = 0, self._clock()
         self._set_rate(1.0)  # every channel starts at normal speed
-        if self._dead or not self._engine.is_available():
-            self._go_direct(UNAVAILABLE)
+        if self._unclosed:
+            self._phase = _Phase.STARTING  # after the earlier upstream closed (released)
             return
-        self._sid = self._engine.open_session(
-            url,
-            headers=headers,
-            verify_ssl=verify_ssl,
-            disk=disk,
-            max_bytes=max_bytes,
-            live_delay=LIVE_DELAY[self._latency],
-        )
-        self._phase = _Phase.WAITING
-        self._ready_timer.start()
+        self._begin()
 
     def stop(self) -> None:
         """Stop playback and close the session; `released()` follows (see the docstring)."""
         if self._phase is _Phase.IDLE:
             return
-        self._ready_timer.stop()
-        self._tick_timer.stop()
+        self._stop_timers()
         self._phase = _Phase.IDLE
         self._mode = ""
         sid, self._sid = self._sid, None
         self._playback.stop()
-        if sid is None:  # direct: the fallback already closed any session
-            self.released.emit()
-            return
-        self._owed.add(sid)
-        self._engine.close_session(sid)
+        if sid is not None:
+            self._close(sid)
+        self._release_owed = True
+        if not self._unclosed:
+            self._all_closed()
 
     def toggle_pause(self) -> None:
         if self._phase is _Phase.DIRECT:
@@ -237,12 +264,14 @@ class LiveSession(QObject):
     def seek_to(self, t: float) -> None:
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return
+        snapshot = self._snapshot()
+        if t >= self._live_edge(snapshot) - self._target(snapshot):
+            self.go_live()  # at the edge: not a segment back, and back to LIVE
+            return
         span = _locate(self._engine.spans(self._sid), t)
         if span is None:  # nothing buffered yet
             return
-        snapshot = self._snapshot()
-        if t < self._live_edge(snapshot) - self._target(snapshot):
-            self._stay.user_seeked_back()
+        self._stay.user_seeked_back()
         self._open_at(span.seq)
 
     def seek_relative(self, dt: float) -> None:
@@ -252,6 +281,10 @@ class LiveSession(QObject):
         """Reopen at the newest segment at least the target behind the live edge, at 1x."""
         try:
             if self._phase is _Phase.PIPELINE:
+                self._live_on_update = False
+                if self._source_lost:
+                    self._fall_back(LOST)  # nothing newer is buffered: play the channel
+                    return
                 self._advance()
                 self._set_rate(1.0)
                 self._paused = False
@@ -263,8 +296,8 @@ class LiveSession(QObject):
             self._stay.user_go_live()
 
     def set_speed(self, rate: float) -> None:
-        if self._phase is not _Phase.PIPELINE or rate <= 0:
-            return
+        if self._phase is not _Phase.PIPELINE or rate <= 0 or self._stay.mode is Mode.LIVE:
+            return  # at the edge, stay-live owns the rate
         self._advance()  # the time so far counts at the old rate
         self._set_rate(rate)
         self._stay.user_speed(rate)
@@ -287,19 +320,90 @@ class LiveSession(QObject):
             return self._advance()
         return self._base + self._elapsed
 
+    # ---- sessions ----------------------------------------------------------------------
+    def _begin(self) -> None:
+        """Open the pipeline session for the channel `start()` stored."""
+        if self._dead:
+            self._fall_back(UNAVAILABLE)
+            return
+        self._sid = self._engine.open_session(
+            self._url, **self._open_args, live_delay=LIVE_DELAY[self._latency]
+        )
+        self._phase = _Phase.WAITING
+        self._ready_timer.start()
+
+    def _close(self, sid: str) -> None:
+        self._engine.close_session(sid)
+        if not self._dead:  # without a helper no upstream is left to wait for
+            self._unclosed.add(sid)
+            self._close_timer.start(_CLOSE_CAP_MS)
+
+    def _all_closed(self) -> None:
+        """No session this object opened is open: run what waited for that."""
+        if self._release_owed:
+            self._release_owed = False
+            self.released.emit()
+        if self._unclosed:
+            return  # a released() handler started and stopped another channel
+        if self._phase is _Phase.FALLING_BACK:
+            self._play_direct()
+        elif self._phase is _Phase.STARTING:
+            self._begin()
+
+    def _fall_back(self, message: str) -> None:
+        """Close the session, then play directly once its upstream is closed (spec §9)."""
+        self._stop_timers()
+        sid, self._sid = self._sid, None
+        self._phase = _Phase.FALLING_BACK
+        self._fallback_notice = message
+        self._paused = self._source_lost = self._live_on_update = False
+        self._retry = self._failing_since = None
+        if sid is not None:
+            self._close(sid)
+        if not self._unclosed:
+            self._play_direct()
+
+    def _play_direct(self) -> None:
+        self._phase = _Phase.DIRECT
+        self._mode = "direct"
+        self._playback.play(
+            self._url, kind=PlayKind.LIVE, latency=self._latency, user_agent=self._user_agent
+        )
+        self._set_rate(1.0)
+        self.notice.emit(self._fallback_notice)
+        self.modeChanged.emit(self._mode)
+
+    def _recover(self) -> None:
+        self._phase = _Phase.RECOVERING
+        self._tick_timer.stop()
+        self._retry = self._failing_since = None
+        self._live_on_update = False
+        self._snapshot_cache = {}
+        self._clear_lags()
+        self._recovery_timer.start(_RECOVERY_MS)
+
+    def _stop_timers(self) -> None:
+        self._ready_timer.stop()
+        self._tick_timer.stop()
+        self._recovery_timer.stop()
+
     # ---- engine ------------------------------------------------------------------------
     def _on_available(self, available: bool) -> None:
         if available:
-            if self._phase is _Phase.RECOVERING:
-                self._ready_timer.start()  # the engine just reopened the session
-            return
+            return  # a recovering session goes on with its own sessionReady
         self._dead = True
-        if self._phase is _Phase.WAITING:
-            self._go_direct(UNAVAILABLE)
-        elif self._phase is _Phase.RECOVERING or (
-            self._phase is _Phase.PIPELINE and not self._ended
+        waited = bool(self._unclosed)
+        self._unclosed.clear()  # no helper: no upstream is left
+        self._close_timer.stop()
+        phase = self._phase
+        if phase is _Phase.WAITING:
+            self._fall_back(UNAVAILABLE)
+        elif phase is _Phase.RECOVERING or (
+            phase is _Phase.PIPELINE and (self._source_lost or not self._ended)
         ):
-            self._go_direct(LOST)
+            self._fall_back(LOST)
+        elif waited:
+            self._all_closed()
 
     def _on_ready(self, sid: str) -> None:
         if sid != self._sid:
@@ -310,22 +414,28 @@ class LiveSession(QObject):
                 return  # not playable yet: the timeout still runs
             self._ready_timer.stop()
             self._phase = _Phase.PIPELINE
+            self._mode = "pipeline"
             self._tick_timer.start()
             if not self._open_at(seq):
                 self._retry = _Retry.RESUME
-            self._mode = "pipeline"
             self.modeChanged.emit(self._mode)
         elif self._phase is _Phase.RECOVERING:
-            self._ready_timer.stop()
+            self._recovery_timer.stop()
             self._phase = _Phase.PIPELINE
             self._tick_timer.start()
             self.go_live()
 
+    def _on_updated(self, sid: str, _snapshot: dict) -> None:
+        if sid == self._sid and self._live_on_update and self._phase is _Phase.PIPELINE:
+            self.go_live()
+
     def _on_ready_timeout(self) -> None:
         if self._phase is _Phase.WAITING:
-            self._go_direct(UNAVAILABLE)
-        elif self._phase is _Phase.RECOVERING:
-            self._go_direct(LOST)
+            self._fall_back(UNAVAILABLE)
+
+    def _on_recovery_timeout(self) -> None:
+        if self._phase is _Phase.RECOVERING:
+            self._fall_back(LOST)
 
     def _on_failed(self, sid: str, kind: str, _message: str) -> None:
         if sid != self._sid or self._ended:
@@ -333,27 +443,48 @@ class LiveSession(QObject):
         if kind == "disk":  # not final: the helper went on in RAM
             self.notice.emit(DISK)
             if self._phase is _Phase.PIPELINE:
-                self.go_live()  # the history went with the disk ring
+                # The history went with the disk ring; the spans still describe it.
+                self._live_on_update = True
             return
-        if self._phase is _Phase.WAITING:
-            self._go_direct(UNAVAILABLE)
-        elif kind != "internal":
-            self._go_direct(LOST)  # the source gave up
-        elif self._phase is _Phase.PIPELINE:
-            if self._engine.is_available():
-                self._go_direct(LOST)  # the helper's own failure: no reopen follows
-            else:
+        if kind == "internal":
+            # A helper death: the engine reopens the session on available(True), or
+            # reports available(False). Waiting is bounded by the ready timeout before
+            # ready, and by the recovery cap after (also when the restarted helper dies).
+            if self._phase is _Phase.PIPELINE:
                 self._recover()
-        # "internal" while recovering: a second death; available(False) follows.
+            return
+        # Every other kind is final: the session's input is over.
+        if self._phase is _Phase.WAITING:
+            self._fall_back(UNAVAILABLE)
+        elif (
+            self._phase is _Phase.PIPELINE
+            and not self._live_on_update  # else the history went with the disk ring
+            and self._behind_live()
+        ):
+            self._ended = self._source_lost = True  # the buffer still plays
+            self.notice.emit(BUFFERED)
+            self._emit_timeline()
+        else:  # at the live edge, or recovering: nothing buffered is worth keeping
+            self._fall_back(LOST)
 
     def _on_ended(self, sid: str) -> None:
         if sid == self._sid:
             self._ended = True
 
     def _on_closed(self, sid: str) -> None:
-        if sid in self._owed:
-            self._owed.discard(sid)
-            self.released.emit()
+        if sid not in self._unclosed:
+            return
+        self._unclosed.discard(sid)
+        if not self._unclosed:
+            self._close_timer.stop()
+            self._all_closed()
+
+    def _on_close_cap(self) -> None:
+        if not self._unclosed:
+            return
+        _LOG.warning("The live buffer did not confirm a close in time; going on without it.")
+        self._unclosed.clear()
+        self._all_closed()
 
     # ---- playback ----------------------------------------------------------------------
     def _on_state(self, state: str) -> None:
@@ -373,57 +504,79 @@ class LiveSession(QObject):
     def _on_interrupted(self) -> None:
         if self._phase is not _Phase.PIPELINE:
             return
-        if self._ended:
-            self._emit_timeline()  # it ran to the end of the buffer
-            return
-        if self._gave_up():
-            return
         if self._opening:
-            self._retry = _Retry.RESUME  # failed inside play(): retry on the next tick
+            self._retry = _Retry.RESUME  # failed inside play(): handled on the next tick
             return
-        self._reopen_at_position()
+        self._resume()
+        if self._phase is _Phase.PIPELINE and self._ended:
+            self._emit_timeline()  # it ran to the end of the buffer
+
+    def _resume(self) -> None:
+        """Get playing again after an interruption, or fall back once nothing more can."""
+        self._retry = None
+        if self._source_lost:
+            self._fall_back(LOST)  # the buffer ran out: play the channel live
+        elif self._ended or self._gave_up():
+            return
+        elif not self._live_on_update:  # else the RAM ring's first state goes live
+            self._reopen_at_position()
 
     # ---- ticks -------------------------------------------------------------------------
     def _tick(self) -> None:
         if self._phase is not _Phase.PIPELINE:
             return
         if self._retry is not None:
-            if self._gave_up():
-                return
-            if self._retry is _Retry.LIVE:
+            if self._retry is _Retry.RESUME:
+                self._resume()
+            elif not self._gave_up():
                 self.go_live()
-            else:
-                self._reopen_at_position()
             if self._phase is not _Phase.PIPELINE:
-                return
+                return  # it fell back
             if self._retry is not None:
                 self._emit_timeline()
                 return
+        if self._live_on_update:  # waiting for the RAM ring's first state
+            if not self._gave_up():
+                self._emit_timeline()
+            return
         snapshot = self._snapshot()
-        position = self._advance()
-        lag = self._mean_lag(self._live_edge(snapshot) - position, snapshot)
-        reported: Optional[float] = lag
-        if not self._ended:  # an ended source has no live edge left to stay near
+        instant = max(0.0, self._live_edge(snapshot) - self._advance())
+        lag = self._mean_lag(instant, snapshot)
+        reported: Optional[float] = instant if lag is None else lag
+        # An ended source has no live edge left to stay near.
+        if not self._ended and lag is not None:
             self._stay.target = self._target(snapshot)
             decision = self._stay.update(lag, self._playback.state() is PlaybackState.BUFFERING)
             self._set_rate(decision.rate)
             if decision.reopen_live:
                 self.go_live()
+                if self._phase is not _Phase.PIPELINE:
+                    return
                 reported = None  # the reopen moved the position
         self._emit_timeline(reported)
 
-    def _mean_lag(self, lag: float, snapshot: Mapping[str, Any]) -> float:
-        """`lag`, or its mean over the last burst when the source delivers in bursts."""
-        lag = max(0.0, lag)
+    def _mean_lag(self, lag: float, snapshot: Mapping[str, Any]) -> Optional[float]:
+        """`lag`, or for a source that delivers in bursts its mean over the last burst.
+
+        None until the samples since the last clear span a whole burst.
+        """
         burst = _number(snapshot.get("burst_s"))
         if burst <= 0:
-            self._lags.clear()
+            self._clear_lags()
             return lag
         now = self._clock()
+        if self._lags_from is None:
+            self._lags_from = now
         self._lags.append((now, lag))
         while now - self._lags[0][0] >= burst:
             self._lags.popleft()
+        if now - self._lags_from < burst:
+            return None
         return sum(sample for _, sample in self._lags) / len(self._lags)
+
+    def _clear_lags(self) -> None:
+        self._lags.clear()
+        self._lags_from = None
 
     def _emit_timeline(self, lag: Optional[float] = None) -> None:
         """Report the timeline; `lag` is this tick's (mean) lag, else the current one."""
@@ -464,6 +617,13 @@ class LiveSession(QObject):
     def _buffer_start(self, snapshot: Optional[Mapping[str, Any]] = None) -> float:
         return _number((self._snapshot() if snapshot is None else snapshot).get("start"))
 
+    def _behind_live(self) -> bool:
+        """Time-shifted by the user and further back than the target."""
+        if self._stay.mode is Mode.LIVE:
+            return False
+        snapshot = self._snapshot()
+        return self._advance() < self._live_edge(snapshot) - self._target(snapshot)
+
     def _oldest_seq(self) -> Optional[int]:
         """The oldest buffered segment, which may be the open one."""
         assert self._sid is not None
@@ -487,9 +647,11 @@ class LiveSession(QObject):
         if not spans:
             return self._oldest_seq()
         snapshot = self._snapshot()
-        latest = self._live_edge(snapshot) - self._target(snapshot)
-        behind = [span for span in spans if span.start <= latest]
-        return (behind or spans)[-1].seq
+        burst = _number(snapshot.get("burst_s"))
+        # Half a burst more: the lag before the next burst then stays near the target.
+        behind = self._target(snapshot) + (burst / 2 if burst > 0 else 0.0)
+        latest = self._live_edge(snapshot) - behind
+        return ([span for span in spans if span.start <= latest] or spans)[-1].seq
 
     def _advance(self) -> float:
         """Add the play time since the last sample to the position (spec §6.3)."""
@@ -516,7 +678,7 @@ class LiveSession(QObject):
             return False
         self._base, self._elapsed = self._start_of(seq), 0.0
         self._last_ms, self._last_wall = 0, self._clock()
-        self._lags.clear()  # lags from before the jump say nothing about the new position
+        self._clear_lags()  # lags from before the jump say nothing about the new position
         self._retry = None
         self._opening = True
         try:
@@ -546,7 +708,7 @@ class LiveSession(QObject):
             self.notice.emit(REWOUND)
 
     def _gave_up(self) -> bool:
-        """After `ready_timeout_ms` of interruptions without VLC playing, play directly."""
+        """After `ready_timeout_ms` of interruptions without VLC playing, fall back."""
         now = self._clock()
         if self._failing_since is None:
             self._failing_since = now
@@ -554,28 +716,5 @@ class LiveSession(QObject):
         if now - self._failing_since <= self._ready_timeout_s:
             return False
         _LOG.warning("The time-shift stream kept failing; playing the channel directly.")
-        self._go_direct(LOST)
+        self._fall_back(LOST)
         return True
-
-    def _recover(self) -> None:
-        self._phase = _Phase.RECOVERING
-        self._tick_timer.stop()
-        self._retry = self._failing_since = None
-        self._snapshot_cache = {}
-
-    def _go_direct(self, message: str) -> None:
-        self._ready_timer.stop()
-        self._tick_timer.stop()
-        sid, self._sid = self._sid, None
-        if sid is not None:
-            self._engine.close_session(sid)  # no release is owed: the run goes on
-        self._phase = _Phase.DIRECT
-        self._paused = False
-        self._retry = self._failing_since = None
-        self._playback.play(
-            self._url, kind=PlayKind.LIVE, latency=self._latency, user_agent=self._user_agent
-        )
-        self._set_rate(1.0)
-        self._mode = "direct"
-        self.notice.emit(message)
-        self.modeChanged.emit(self._mode)
