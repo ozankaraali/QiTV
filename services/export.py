@@ -6,9 +6,11 @@ from services.provider_api import stb_portal_base
 logger = logging.getLogger(__name__)
 
 
-def _write_export_file(content_data, file_path, url_formatter, extinf_formatter):
+def _write_export_file(content_data, file_path, url_formatter, extinf_formatter) -> int:
     """
     Common export logic for M3U files.
+
+    Returns the number of entries written; raises OSError when the file can't be written.
 
     Args:
         content_data: List of content items to export
@@ -28,8 +30,10 @@ def _write_export_file(content_data, file_path, url_formatter, extinf_formatter)
                     count += 1
             logger.info(f"Items exported: {count}")
             logger.info(f"Content list has been saved to {file_path}")
-    except IOError as e:
-        logger.warning(f"Error saving content list: {e}")
+        return count
+    except OSError as e:
+        logger.warning("Error saving content list: %s", type(e).__name__)
+        raise
 
 
 def save_m3u_content(content_data, file_path):
@@ -43,14 +47,14 @@ def save_m3u_content(content_data, file_path):
         xmltv_id = item.get("xmltv_id", "")
         return f'#EXTINF:-1 tvg-id="{xmltv_id}" tvg-logo="{logo}" group-title="{group}" ,{name}'
 
-    _write_export_file(content_data, file_path, url_formatter, extinf_formatter)
+    return _write_export_file(content_data, file_path, url_formatter, extinf_formatter)
 
 
 def save_stb_content(base_url, content_data, mac, file_path):
     base_url = stb_portal_base(base_url)  # callers may pass a full portal URL like http://host/c/
 
     def url_formatter(item):
-        cmd_url = item.get("cmd", "").replace("ffmpeg ", "")
+        cmd_url = (item.get("cmd") or "").replace("ffmpeg ", "")
         if "localhost" in cmd_url:
             id_match = re.search(r"/(ch|vod)/(\d+)_", cmd_url)
             if id_match:
@@ -72,4 +76,4 @@ def save_stb_content(base_url, content_data, mac, file_path):
         xmltv_id = item.get("xmltv_id", "")
         return f'#EXTINF:-1 tvg-id="{xmltv_id}" tvg-logo="{logo}" ,{name}'
 
-    _write_export_file(content_data, file_path, url_formatter, extinf_formatter)
+    return _write_export_file(content_data, file_path, url_formatter, extinf_formatter)

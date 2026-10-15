@@ -32,6 +32,9 @@ MSG_LOAD_LIVE = "Load Live TV first."
 MSG_NOTHING_LOADED = "Nothing is loaded in this section yet."
 MSG_CANCELLED = "Export cancelled"
 MSG_NO_EPISODES = "No episodes found to export."
+MSG_UNREACHABLE = "Couldn\u2019t reach the provider to fetch episodes."
+MSG_WRITE_FAILED = "Export failed: couldn\u2019t write the file"
+POLL_SECONDS = 0.05
 
 
 class ExportKind(str, Enum):
@@ -78,14 +81,22 @@ def export_available(
 
 
 def write_items(provider: dict, items: list[dict], path: str) -> int:
-    """Write items to an M3U file at ``path``; returns the number of items given."""
+    """Write items to an M3U file at ``path``; returns the entries written; OSError if it fails."""
     if provider.get("type") == "STB":
-        save_stb_content(
+        return save_stb_content(
             stb_portal_base(provider.get("url", "")), items, provider.get("mac", ""), path
         )
-    else:
-        save_m3u_content(items, path)
-    return len(items)
+    return save_m3u_content(items, path)
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def _dicts(js: Optional[dict]) -> list[dict]:
+    """The dict entries of a listing's ``data`` (none when missing or malformed)."""
+    data = js.get("data") if isinstance(js, dict) else None
+    return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
 
 
 class ExportWorker(QObject):
@@ -125,6 +136,11 @@ class ExportWorker(QObject):
                 self._run_complete()
             else:
                 self._run_simple()
+        except _Cancelled:
+            self.error.emit(MSG_CANCELLED)
+        except OSError as e:
+            logger.error("Export write failed: %s", safe_exc(e))
+            self.error.emit(MSG_WRITE_FAILED)
         except Exception as e:
             logger.error("Export failed: %s", safe_exc(e))
             self.error.emit(f"Export failed: {type(e).__name__}")
@@ -143,33 +159,42 @@ class ExportWorker(QObject):
         series_list = collect_items(self._content, "series")
         total = len(series_list)
         episodes: list[dict] = []
-        for done, series in enumerate(series_list, start=1):
-            if self._cancel.is_set():
-                self.error.emit(MSG_CANCELLED)
-                return
-            name = series.get("name", "Unknown")
-            self.progress.emit(done - 1, total, str(name))
-            seasons = self._fetch(series, 0, "name")
-            for season in (seasons or {}).get("data", []):
-                if self._cancel.is_set():
-                    self.error.emit(MSG_CANCELLED)
-                    return
-                data = self._fetch(series, season.get("id"), "added")
-                for episode in (data or {}).get("data", []):
-                    episode["series_name"] = name
-                    episode["season_name"] = season.get("name", "")
-                    episodes.append(episode)
-            self.progress.emit(done, total, str(name))
-        if self._cancel.is_set():
-            self.error.emit(MSG_CANCELLED)
-            return
+        reached = 0
+        with requests.Session() as session:
+            for done, series in enumerate(series_list, start=1):
+                self._check_cancel()
+                name = series.get("name", "Unknown")
+                self.progress.emit(done - 1, total, str(name))
+                seasons = self._fetch(session, series, 0, "name")
+                if seasons is not None:
+                    reached += 1
+                for season in _dicts(seasons):
+                    self._check_cancel()
+                    data = self._fetch(session, series, season.get("id"), "added")
+                    for episode in _dicts(data):
+                        episode["series_name"] = name
+                        episode["season_name"] = season.get("name", "")
+                        episodes.append(episode)
+                self.progress.emit(done, total, str(name))
+        self._check_cancel()
         if not episodes:
-            self.error.emit(MSG_NO_EPISODES)
+            self.error.emit(MSG_NO_EPISODES if reached or not total else MSG_UNREACHABLE)
             return
-        self.finished.emit(write_items(self._provider, episodes, self._path))
+        count = write_items(self._provider, episodes, self._path)
+        self.finished.emit(count)
 
-    def _fetch(self, series: dict, season_id: Any, sortby: str) -> Optional[dict]:
-        """One STB series listing (season_id 0 lists the seasons); None on failure."""
+    def _check_cancel(self) -> None:
+        if self._cancel.is_set():
+            raise _Cancelled
+
+    def _fetch(
+        self, session: requests.Session, series: dict, season_id: Any, sortby: str
+    ) -> Optional[dict]:
+        """One STB series listing (season_id 0 lists the seasons); None on failure.
+
+        The request runs on a helper thread so cancelling returns at once even while the
+        portal stalls; the abandoned request is aborted by closing the session.
+        """
         base = stb_endpoint(
             stb_portal_base(
                 self._provider.get("url", ""),
@@ -185,18 +210,31 @@ class ExportWorker(QObject):
             "sortby": sortby,
             "JsHttpRequest": "1-xml",
         }
-        try:
-            response = requests.get(
-                base,
-                headers=self._headers,
-                params=params,
-                timeout=REQUEST_TIMEOUT,
-                verify=self._verify_ssl,
-            )
-            if response.status_code == 200:
-                js = response.json().get("js", {})
-                return js if isinstance(js, dict) else None
-            logger.warning("Series listing returned HTTP %s", response.status_code)
-        except (requests.RequestException, ValueError) as e:
-            logger.warning("Series listing failed: %s", safe_exc(e))
-        return None
+        box: dict[str, Any] = {}
+        done = threading.Event()
+
+        def request() -> None:
+            try:
+                response = session.get(
+                    base,
+                    headers=self._headers,
+                    params=params,
+                    timeout=REQUEST_TIMEOUT,
+                    verify=self._verify_ssl,
+                )
+                if response.status_code == 200:
+                    js = response.json().get("js", {})
+                    box["result"] = js if isinstance(js, dict) else None
+                else:
+                    logger.warning("Series listing returned HTTP %s", response.status_code)
+            except (requests.RequestException, ValueError, AttributeError) as e:
+                logger.warning("Series listing failed: %s", safe_exc(e))
+            finally:
+                done.set()
+
+        threading.Thread(target=request, daemon=True).start()
+        while not done.wait(POLL_SECONDS):
+            if self._cancel.is_set():
+                session.close()
+                raise _Cancelled
+        return box.get("result")
