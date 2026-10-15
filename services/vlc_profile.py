@@ -14,6 +14,7 @@ _UNKNOWN_MIN_CACHING_MS = 1500
 
 class PlayKind(str, Enum):
     LIVE = "live"  # a live channel played directly from the provider
+    LIVE_PIPELINE = "live_pipeline"  # a live channel served from the loopback time-shift server
     VOD_FILE = "vod_file"  # a container file: mkv/mp4/avi/webm/mov/m4v
     VOD_STREAM = "vod_stream"  # known on-demand content in a stream format (ts/m3u8)
     UNKNOWN = "unknown"  # M3U entries: may be live or on demand
@@ -36,8 +37,18 @@ def media_options(
         f":http-user-agent={user_agent or DEFAULT_USER_AGENT}",
         ":avcodec-hw=any",
         ":avcodec-fast",
-        ":http-reconnect=true",
     ]
+    if kind is PlayKind.LIVE_PIPELINE:
+        # Loopback segments arrive on time from QiTV's own server, so VLC only needs a small
+        # buffer and must not retry on its own: the pipeline reconnects upstream.
+        return options + [
+            ":network-caching=300",
+            ":live-caching=300",
+            ":clock-jitter=0",
+            ":ts-trust-pcr=0",
+            ":http-reconnect=false",
+        ]
+    options.append(":http-reconnect=true")
     if kind in (PlayKind.LIVE, PlayKind.UNKNOWN):
         caching = _LIVE_CACHING_MS.get(latency, _LIVE_CACHING_MS["normal"])
         if kind is PlayKind.UNKNOWN:

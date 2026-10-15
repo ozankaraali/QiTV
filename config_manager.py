@@ -128,6 +128,8 @@ class ConfigManager:
     DEFAULT_OPTION_MOUSE_WHEEL = "channel"
     MOUSE_WHEEL_CHOICES = ("channel", "volume")
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
+    DEFAULT_OPTION_TIMESHIFT_ENABLED = False
+    DEFAULT_OPTION_TIMESHIFT_MAX_MIB = 2048
     TV_DEFAULTS_VERSION = 1
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
     DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
@@ -254,7 +256,12 @@ class ConfigManager:
             "mouse_wheel_action": ConfigManager.DEFAULT_OPTION_MOUSE_WHEEL,
             "start_with_last_channel": ConfigManager.DEFAULT_OPTION_START_WITH_LAST_CHANNEL,
             "last_live_channel": None,
+            "timeshift_enabled": ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
+            "timeshift_max_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB,
         }
+        if "timeshift_minutes" in self.config:  # the time limit was retired for a size limit
+            del self.config["timeshift_minutes"]
+            need_update = True
         for key, value in missing_defaults.items():
             if key not in self.config:
                 self.config[key] = value
@@ -344,6 +351,12 @@ class ConfigManager:
         "start_with_last_channel", DEFAULT_OPTION_START_WITH_LAST_CHANNEL, coerce=bool
     )
     last_live_channel = _config_property("last_live_channel", None)
+    timeshift_enabled = _config_property(
+        "timeshift_enabled", DEFAULT_OPTION_TIMESHIFT_ENABLED, coerce=lambda value: value is True
+    )
+    timeshift_max_mib = _config_property(
+        "timeshift_max_mib", DEFAULT_OPTION_TIMESHIFT_MAX_MIB, coerce=int, clamp=(256, 16384)
+    )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
 
@@ -405,6 +418,8 @@ class ConfigManager:
             "mouse_wheel_action": ConfigManager.DEFAULT_OPTION_MOUSE_WHEEL,
             "start_with_last_channel": ConfigManager.DEFAULT_OPTION_START_WITH_LAST_CHANNEL,
             "last_live_channel": None,
+            "timeshift_enabled": ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
+            "timeshift_max_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB,
             "tv_defaults_version": ConfigManager.TV_DEFAULTS_VERSION,
         }
 

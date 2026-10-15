@@ -148,5 +148,46 @@ class TvConfigTests(unittest.TestCase):
         self.assertEqual(ConfigManager().last_live_channel, record)
 
 
+class TimeshiftConfigTests(unittest.TestCase):
+    _load = TvConfigTests._load
+
+    def test_defaults(self):
+        config, _ = self._load(None)
+        self.assertFalse(config.timeshift_enabled)
+        self.assertEqual(config.timeshift_max_mib, 2048)
+
+    def test_existing_config_gains_the_keys_and_loses_the_time_limit(self):
+        saved = {"timeshift_enabled": True, "timeshift_minutes": 90, "timeshift_max_mib": 4096}
+        config, path = self._load(saved)
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertNotIn("timeshift_minutes", on_disk)
+        self.assertTrue(on_disk["timeshift_enabled"])
+        self.assertEqual(on_disk["timeshift_max_mib"], 4096)
+        config, path = self._load({})
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIs(on_disk["timeshift_enabled"], False)
+        self.assertEqual(on_disk["timeshift_max_mib"], 2048)
+
+    def test_only_a_literal_true_grants_disk_consent(self):
+        config, _ = self._load(None)
+        for value in (None, "false", "true", 1, [], {}):
+            with self.subTest(value=value):
+                config.config["timeshift_enabled"] = value
+                self.assertFalse(config.timeshift_enabled)
+        config.timeshift_enabled = True
+        self.assertTrue(config.timeshift_enabled)
+        config.timeshift_enabled = False
+        self.assertFalse(config.timeshift_enabled)
+
+    def test_size_is_clamped(self):
+        config, _ = self._load(None)
+        for value, expected in ((1, 256), (99999, 16384), (4096, 4096), ("junk", 2048)):
+            with self.subTest(value=value):
+                config.config["timeshift_max_mib"] = value
+                self.assertEqual(config.timeshift_max_mib, expected)
+        config.timeshift_max_mib = 10
+        self.assertEqual(config.timeshift_max_mib, 256)
+
+
 if __name__ == "__main__":
     unittest.main()

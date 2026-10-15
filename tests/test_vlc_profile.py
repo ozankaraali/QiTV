@@ -23,6 +23,31 @@ class ClassifyTests(unittest.TestCase):
         self.assertIs(classify("http://h/stream", None), PlayKind.UNKNOWN)
 
 
+class PipelineProfileTests(unittest.TestCase):
+    def test_loopback_pipeline_options(self):
+        options = media_options(PlayKind.LIVE_PIPELINE)
+        for expected in (
+            ":network-caching=300",
+            ":live-caching=300",
+            ":clock-jitter=0",
+            ":ts-trust-pcr=0",
+            ":http-reconnect=false",
+        ):
+            self.assertIn(expected, options)
+        self.assertNotIn(":http-reconnect=true", options)
+        self.assertNotIn(":no-audio-time-stretch", options)
+        self.assertIsNone(option(options, "adaptive-livedelay"))
+
+    def test_latency_setting_does_not_change_the_pipeline_profile(self):
+        self.assertEqual(
+            media_options(PlayKind.LIVE_PIPELINE, latency="stable"),
+            media_options(PlayKind.LIVE_PIPELINE, latency="low"),
+        )
+
+    def test_direct_live_keeps_reconnect(self):
+        self.assertIn(":http-reconnect=true", media_options(PlayKind.LIVE))
+
+
 class MediaOptionsTests(unittest.TestCase):
     def test_removed_v1_options(self):
         for kind in PlayKind:
@@ -61,7 +86,8 @@ class MediaOptionsTests(unittest.TestCase):
     def test_common_options(self):
         for kind in PlayKind:
             options = media_options(kind)
-            self.assertIn(":http-reconnect=true", options)
+            reconnect = "false" if kind is PlayKind.LIVE_PIPELINE else "true"
+            self.assertIn(f":http-reconnect={reconnect}", options)
             self.assertIn(":avcodec-hw=any", options)
 
 

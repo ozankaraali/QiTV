@@ -12,12 +12,14 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QRadioButton,
+    QSlider,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -206,6 +208,7 @@ class OptionsDialog(QDialog):
 
         # Add tab with settings
         self.create_settings_ui()
+        self.create_timeshift_ui()
 
         # Add tab with providers
         self.create_providers_ui()
@@ -321,6 +324,89 @@ class OptionsDialog(QDialog):
         self.auto_play_movies_checkbox.setChecked(self.config_manager.auto_play_movies)
         self.settings_layout.addRow(self.auto_play_movies_checkbox)
 
+    def create_timeshift_ui(self):
+        tab = QWidget(self)
+        tab.setObjectName("timeshiftSettings")
+        self.options_tab.addTab(tab, "Time-shift")
+        layout = QVBoxLayout(tab)
+        self.timeshift_checkbox = QCheckBox(
+            "Use disk for a longer time-shift buffer.\n"
+            "QiTV deletes the oldest data automatically and cleans up when you stop, "
+            "change channel or quit.",
+            tab,
+        )
+        self.timeshift_checkbox.setObjectName("timeshiftEnabled")
+        self.timeshift_checkbox.setChecked(self.config_manager.timeshift_enabled)
+        layout.addWidget(self.timeshift_checkbox)
+
+        cache = QGroupBox("Disk cache", tab)
+        cache_layout = QVBoxLayout(cache)
+        self.timeshift_size_label = QLabel(cache)
+        self.timeshift_size_label.setObjectName("timeshiftCacheSizeLabel")
+        cache_layout.addWidget(self.timeshift_size_label)
+
+        self.timeshift_size_slider = QSlider(Qt.Orientation.Horizontal, cache)
+        self.timeshift_size_slider.setObjectName("timeshiftCacheSize")
+        self.timeshift_size_slider.setAccessibleName("Time-shift disk cache size")
+        self.timeshift_size_slider.setRange(256, 16384)
+        self.timeshift_size_slider.setSingleStep(256)
+        self.timeshift_size_slider.setPageStep(1024)
+        self.timeshift_size_slider.setTickInterval(1024)
+        self.timeshift_size_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.timeshift_size_slider.setValue(self.config_manager.timeshift_max_mib)
+        cache_layout.addWidget(self.timeshift_size_slider)
+        scale = QHBoxLayout()
+        scale.addWidget(QLabel("256 MiB", cache))
+        scale.addStretch()
+        scale.addWidget(QLabel("16 GiB", cache))
+        cache_layout.addLayout(scale)
+
+        cache_layout.addWidget(QLabel("<b>Estimated rewind</b>", cache))
+        estimates = QFormLayout()
+        self.timeshift_1080p_estimate = QLabel(cache)
+        self.timeshift_4k_estimate = QLabel(cache)
+        estimates.addRow("1080p at 8 Mb/s:", self.timeshift_1080p_estimate)
+        estimates.addRow("4K at 25 Mb/s:", self.timeshift_4k_estimate)
+        cache_layout.addLayout(estimates)
+        assumptions = QLabel(
+            "These are example bitrates, not quality settings. Actual rewind time "
+            "depends on the channel's bitrate, codec and audio tracks. "
+            "Video and audio are not re-encoded.",
+            cache,
+        )
+        assumptions.setWordWrap(True)
+        cache_layout.addWidget(assumptions)
+        self.timeshift_size_slider.valueChanged.connect(self._update_timeshift_estimates)
+        self._update_timeshift_estimates(self.timeshift_size_slider.value())
+        cache.setEnabled(self.timeshift_checkbox.isChecked())
+        self.timeshift_checkbox.toggled.connect(cache.setEnabled)
+        layout.addWidget(cache)
+
+        explanation = QLabel(
+            "Without disk, each live channel keeps about two minutes in memory.\n\n"
+            "This is temporary playback history, not a permanent recording. The cache size "
+            "is the only history limit: when it fills, the oldest content is replaced. "
+            "Recording continues while paused or rewound.\n\n"
+            "After Save, enabling and cache-size changes apply on the next channel you open.",
+            tab,
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        layout.addStretch()
+
+    def _update_timeshift_estimates(self, mib):
+        size = f"{mib} MiB" if mib < 1024 else f"{mib / 1024:.2f}".rstrip("0").rstrip(".") + " GiB"
+        self.timeshift_size_label.setText(f"<b>Cache size: {size}</b>")
+        self.timeshift_size_label.setToolTip(f"{mib:,} MiB of disk space, not RAM.")
+        for bitrate, label in (
+            (8, self.timeshift_1080p_estimate),
+            (25, self.timeshift_4k_estimate),
+        ):
+            minutes = max(1, round(mib * 1024 * 1024 * 8 / (bitrate * 1_000_000 * 60)))
+            hours, remainder = divmod(minutes, 60)
+            duration = f"{hours} h {remainder} min" if hours else f"{minutes} min"
+            label.setText(f"About {duration}")
+
     def create_providers_ui(self):
         self.providers_tab = QWidget(self)
         self.options_tab.addTab(self.providers_tab, "Providers")
@@ -384,6 +470,16 @@ class OptionsDialog(QDialog):
         )
         self.providers_layout.addRow(self.provider_prefer_https_checkbox)
         self.providers_layout.addRow(self.provider_ssl_verify_checkbox)
+
+        self.max_streams_label = QLabel("Max simultaneous streams:", self.providers_tab)
+        self.max_streams_input = QSpinBox(self.providers_tab)
+        self.max_streams_input.setRange(0, 10)
+        self.max_streams_input.setSpecialValueText("Automatic")
+        self.max_streams_input.setToolTip(
+            "How many streams this provider allows at once. Automatic uses what the provider "
+            "reports."
+        )
+        self.providers_layout.addRow(self.max_streams_label, self.max_streams_input)
 
         self.verify_apply_group = QWidget(self.providers_tab)
         self.verify_button = QPushButton("Verify Provider", self.verify_apply_group)
@@ -597,6 +693,8 @@ class OptionsDialog(QDialog):
         self.provider_ssl_verify_checkbox.setChecked(
             self.edited_provider.get("ssl_verify", self.ssl_verify_checkbox.isChecked())
         )
+        self.max_streams_input.setValue(int(self.edited_provider.get("max_streams", 0) or 0))
+        self._loaded_max_streams = self.max_streams_input.value()
         self._loaded_provider_network = {
             "prefer_https": self.provider_prefer_https_checkbox.isChecked(),
             "ssl_verify": self.provider_ssl_verify_checkbox.isChecked(),
@@ -715,6 +813,8 @@ class OptionsDialog(QDialog):
         self.config_manager.smooth_paused_seek = self.smooth_paused_seek_checkbox.isChecked()
         self.config_manager.auto_play_episodes = self.auto_play_episodes_checkbox.isChecked()
         self.config_manager.auto_play_movies = self.auto_play_movies_checkbox.isChecked()
+        self.config_manager.timeshift_enabled = self.timeshift_checkbox.isChecked()
+        self.config_manager.timeshift_max_mib = self.timeshift_size_slider.value()
 
         need_to_refresh_content_list_size = False
 
@@ -860,6 +960,9 @@ class OptionsDialog(QDialog):
             provider["type"] = "XTREAM"
             provider["username"] = self.username_input.text()
             provider["password"] = self.password_input.text()
+        # Automatic is the absence of the key; an existing key keeps its explicit 0.
+        if "max_streams" in provider or self.max_streams_input.value() != self._loaded_max_streams:
+            provider["max_streams"] = self.max_streams_input.value()
         for key, checkbox in (
             ("prefer_https", self.provider_prefer_https_checkbox),
             ("ssl_verify", self.provider_ssl_verify_checkbox),
