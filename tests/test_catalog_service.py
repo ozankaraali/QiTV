@@ -346,6 +346,20 @@ class CatalogServiceTests(unittest.TestCase):
         runner.complete(1)
         self.assertIsNone(service.loading_provider())
 
+    def test_a_forced_setup_loads_its_guide_with_force(self):
+        # The drawer's refresh needs no refresh_epg(): it would be dropped (no ready provider
+        # during the setup), and the setup forces the guide itself.
+        runner = ManualRunner()
+        provider = {"name": "X", "type": "XTREAM", "url": "h:1"}
+        service, _, factory, epg_manager = make_service(provider, runner=runner)
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        factory.results["epg"] = {"result": {}}
+        service.select_provider(force_refresh=True)
+        service.refresh_epg(force=True)
+        self.assertEqual([call[0] for call in factory.calls], ["provider_setup"])
+        runner.complete(0)
+        self.assertEqual(factory.calls[-1], ("epg", (epg_manager, True), {}))
+
     def test_a_queued_forced_refresh_is_never_downgraded_for_the_same_provider(self):
         runner = ManualRunner()
         provider = {"name": "X", "type": "XTREAM", "url": "h:1"}

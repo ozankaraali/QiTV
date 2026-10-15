@@ -231,7 +231,9 @@ class TVMenus(QObject):
             self.refresh_content()
 
     def refresh_content(self) -> None:
-        """Load the provider's channels and guide again (the drawer's ↻, Ctrl/⌘+R)."""
+        """Load the provider's channels and guide again (the drawer's ↻, Ctrl/⌘+R).
+
+        The forced provider setup loads the guide with force once it is ready.
+        """
         self._window.set_provider(force_update=True)
-        self._window.reload_epg()
         self._window.screens.notify("Refreshing channels and guide…")

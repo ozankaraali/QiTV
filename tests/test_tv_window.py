@@ -1625,7 +1625,8 @@ class DrawerSettingsTests(WindowCase):
                 drawer, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point
             )
             set_provider.assert_called_once_with(force_update=True)
-            reload_epg.assert_called_once_with()
+            # The forced provider setup loads the guide with force itself (review Minor 1).
+            reload_epg.assert_not_called()
             self.assertEqual(self.toasts[-1], ("Refreshing channels and guide…", "info"))
             refresh = self.menu_actions()["Refresh Channels and Guide"]
             self.assertEqual(refresh.shortcut(), QKeySequence("Ctrl+R"))
