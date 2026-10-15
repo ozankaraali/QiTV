@@ -51,16 +51,21 @@ class ZapContext:
         index = (base + delta) % len(self.channels)
         return index, self.channels[index]
 
+    @staticmethod
+    def _number(channel: dict) -> str:
+        value = channel.get("number")
+        return "" if value is None else str(value).strip()
+
     def by_number(self, text: str) -> Optional[dict]:
         # Compared numerically ("0" matches "00"); with duplicates the first channel wins.
         if not text.isdecimal():
             return None
         wanted = int(text)
         for channel in self.channels:
-            number = str(channel.get("number") or "").strip()
+            number = self._number(channel)
             if number.isdecimal() and int(number) == wanted:
                 return channel
-        if not any(str(c.get("number") or "").strip() for c in self.channels):
+        if not any(self._number(c) for c in self.channels):
             position = wanted
             if 1 <= position <= len(self.channels):
                 return self.channels[position - 1]
@@ -92,6 +97,7 @@ class ZapController(QObject):
         self._column_open = False
         self._highlight: Optional[int] = None
         self._tuned: Optional[dict] = None
+        self._pending: list[dict] = []  # requested, not yet confirmed by tuned()
         self._target: Optional[dict] = None  # last channel we asked to tune (may still be pending)
         self._previous: Optional[dict] = None
         self._digits = ""
@@ -112,18 +118,26 @@ class ZapController(QObject):
         if self._tuned is not None and not ZapContext.same(self._tuned, channel):
             self._previous = self._tuned
         self._tuned = channel
-        self._target = channel
         self.context.set_current(channel)
+        requested = any(ZapContext.same(p, channel) for p in self._pending)
+        if requested and (self._rest.isActive() or not ZapContext.same(channel, self._target)):
+            # Late confirmation of an older request: a newer one is still on its way.
+            self._pending = [p for p in self._pending if not ZapContext.same(p, channel)]
+            return
+        self._pending.clear()
+        self._target = channel
         self._rest.stop()
         if self._column_open:
             index = self.context.index_of(channel)
             if index >= 0:
                 self._highlight = index
+                self.highlightChanged.emit(channel, index)
             else:
                 self.close_column()
 
     def _request(self, channel: dict) -> None:
         self._target = channel
+        self._pending = [*self._pending, channel][-3:]
         self.tuneRequested.emit(channel)
 
     def step(self, delta: int) -> None:
@@ -183,5 +197,8 @@ class ZapController(QObject):
         self.digitsChanged.emit("")
 
     def previous(self) -> None:
-        if self._previous is not None:
-            self._request(self._previous)
+        dest = self._previous
+        if dest is not None and ZapContext.same(dest, self._target):
+            dest = self._tuned  # second press before tuned(): toggle back
+        if dest is not None and not ZapContext.same(dest, self._target):
+            self._request(dest)

@@ -157,6 +157,39 @@ class ZapControllerTests(unittest.TestCase):
         self.assertEqual(ctx.by_number("0")["id"], 1)
         self.assertEqual(ctx.by_number("5")["id"], 2)
 
+    def test_late_confirmation_does_not_cancel_second_press(self):
+        self.zap.step(1)  # requests CH1
+        self.clock.now += 0.2
+        highlights = []
+        self.zap.highlightChanged.connect(lambda c, i: highlights.append((c, i)))
+        self.zap.step(1)  # highlights CH2
+        self.zap.tuned(CHANNELS[1])  # late confirmation of press 1
+        QTest.qWait(120)
+        self.assertEqual(self.tunes, [CHANNELS[1], CHANNELS[2]])
+        self.assertEqual(highlights, [(CHANNELS[2], 2)])
+
+    def test_out_of_band_reanchor_emits_highlight(self):
+        self.zap.step(1)
+        self.zap.tuned(CHANNELS[1])
+        self.clock.now += 0.1
+        self.zap.step(1)
+        highlights = []
+        self.zap.highlightChanged.connect(lambda c, i: highlights.append((c, i)))
+        self.zap.tuned(CHANNELS[3])
+        self.assertEqual(highlights, [(CHANNELS[3], 3)])
+
+    def test_numeric_zero_number(self):
+        ctx = ZapContext("g", [{"id": 1, "number": 0}, {"id": 2, "number": 5}])
+        self.assertEqual(ctx.by_number("0")["id"], 1)
+
+    def test_previous_twice_toggles(self):
+        self.zap.tuned(CHANNELS[2])
+        self.zap.previous()
+        self.zap.previous()
+        self.assertEqual(self.tunes, [CHANNELS[0], CHANNELS[2]])
+        self.zap.previous()
+        self.assertEqual(self.tunes[-1], CHANNELS[0])
+
 
 if __name__ == "__main__":
     unittest.main()
