@@ -231,15 +231,25 @@ jobs:
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
-        run: codesign --force --deep --sign - dist/qitv.app
+        run: |
+          codesign --force --deep --sign - dist/qitv.app
+          codesign --verify --deep --strict dist/qitv.app
+      - name: Hide the system VLC from the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The app ships its own libVLC: its smoke must pass with no VLC installed.
+        run: sudo mv /Applications/VLC.app "$RUNNER_TEMP/VLC.app"
       - name: Smoke test the packaged app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
-        # the bundle. The fixtures come from the checkout; the app has none.
+        # the bundle, and libVLC and its plugins must load from it. The fixtures come from
+        # the checkout; the app has none.
         run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: Restore the system VLC
+        if: always()
+        run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -247,7 +257,8 @@ jobs:
           name: smoke-frozen-macos-arm
           path: smoke-frozen/
       - name: Zip macOS App
-        run: cd dist && zip -r qitv-macos-universal.zip qitv.app
+        # ditto keeps the bundle's symlinks, which its signature seals (zip -r copies them).
+        run: cd dist && ditto -c -k --keepParent qitv.app qitv-macos-universal.zip
       - name: Upload macOS artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -303,15 +314,25 @@ jobs:
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
-        run: codesign --force --deep --sign - dist/qitv.app
+        run: |
+          codesign --force --deep --sign - dist/qitv.app
+          codesign --verify --deep --strict dist/qitv.app
+      - name: Hide the system VLC from the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The app ships its own libVLC: its smoke must pass with no VLC installed.
+        run: sudo mv /Applications/VLC.app "$RUNNER_TEMP/VLC.app"
       - name: Smoke test the packaged app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
-        # the bundle. The fixtures come from the checkout; the app has none.
+        # the bundle, and libVLC and its plugins must load from it. The fixtures come from
+        # the checkout; the app has none.
         run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: Restore the system VLC
+        if: always()
+        run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
       - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -319,7 +340,8 @@ jobs:
           name: smoke-frozen-macos-intel
           path: smoke-frozen/
       - name: Zip macOS App
-        run: cd dist && zip -r qitv-macos-intel.zip qitv.app
+        # ditto keeps the bundle's symlinks, which its signature seals (zip -r copies them).
+        run: cd dist && ditto -c -k --keepParent qitv.app qitv-macos-intel.zip
       - name: Upload macOS artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

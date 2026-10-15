@@ -10,6 +10,10 @@ video surface after a move and resize, in and out of fullscreen and after a mini
 close and a clean exit. In the packaged app, main.py's `--smoke` entry runs this script (the
 parent and the child are the app itself); the fixtures come from the checkout (`--fixtures`).
 
+Before the close the app records which libVLC it loaded (libvlc, libvlccore and plugin
+paths, as the loader sees them, and python-vlc's choice) in smoke.json; a packaged app must
+have loaded them all from its own bundle (an installed VLC would mix in or stand in).
+
 `--pipeline` adds the live time-shift pipeline before the close. This script serves
 tests/fixtures/live.ts on 127.0.0.1 as an endless real-time channel (live_source.LiveSource),
 Channel 3 of the playlist, and the app has time-shift consent (its buffer on disk). Down zaps
@@ -136,6 +140,8 @@ WINDOW_CHANGES = (
     "the window restores",
 )
 SCENARIO_CHECK = "the smoke scenario runs to the end"
+# The packaged app only: everything libVLC loaded (libvlc, libvlccore, plugins) is the app's own.
+BUNDLED_VLC_CHECK = "the packaged app plays with its own libVLC and plugins"
 
 MUTE_ENV = "QITV_SMOKE_MUTE"  # "1": libVLC plays audio to a dummy output (local runs)
 
@@ -387,6 +393,8 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
     if code is None:
         _kill_helper(report)
     stopped = f"stopped after {limit:.0f} s" if code is None else f"exit code {code}"
+    if _frozen() and BUNDLED_VLC_CHECK not in report.names():
+        report.check(BUNDLED_VLC_CHECK, False, f"never recorded ({report.data.get('step')})")
     if SCENARIO_CHECK not in report.names():  # the app died or hung on the way
         report.check(SCENARIO_CHECK, False, f"{stopped} during: {report.data.get('step')}")
     report.check("the app exits with code 0", code == 0, stopped)
@@ -500,6 +508,89 @@ def _no_display_reason(log: Path) -> Optional[str]:
         and ("error" in line or "fail" in line.lower() or "cannot" in line or "no " in line)
     ]
     return "libVLC never opened a video display: " + (" | ".join(lines[:5]) or "no error logged")
+
+
+def _loaded_images() -> list[str]:
+    """The paths of the shared libraries this process has loaded (best effort)."""
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None)
+        libc._dyld_image_count.restype = ctypes.c_uint32
+        libc._dyld_get_image_name.restype = ctypes.c_char_p
+        libc._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+        names = (libc._dyld_get_image_name(i) for i in range(libc._dyld_image_count()))
+        return [name.decode(errors="replace") for name in names if name]
+    if sys.platform == "win32":
+        psapi = ctypes.WinDLL("psapi")  # type: ignore[attr-defined]
+        kernel32 = ctypes.WinDLL("kernel32")  # type: ignore[attr-defined]
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.GetModuleFileNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        psapi.EnumProcessModules.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        modules = (ctypes.c_void_p * 4096)()
+        needed = ctypes.c_uint32()
+        process = kernel32.GetCurrentProcess()
+        if not psapi.EnumProcessModules(
+            process, modules, ctypes.sizeof(modules), ctypes.byref(needed)
+        ):
+            return []
+        paths = []
+        name = ctypes.create_unicode_buffer(32768)
+        for module in modules[: min(needed.value // ctypes.sizeof(ctypes.c_void_p), 4096)]:
+            if kernel32.GetModuleFileNameW(module, name, len(name)):
+                paths.append(name.value)
+        return paths
+    try:
+        with open("/proc/self/maps", encoding="utf-8", errors="replace") as maps:
+            fields = (line.split(None, 5) for line in maps)
+            return sorted({f[5].strip() for f in fields if len(f) == 6 and f[5].startswith("/")})
+    except OSError:
+        return []
+
+
+def _libvlc_facts() -> dict[str, Any]:
+    """Which libVLC this process loaded, and from where: python-vlc's view and the loader's."""
+    vlc = playback.vlc
+    found: dict[str, list[str]] = {"libvlc": [], "libvlccore": [], "plugins": []}
+    for path in _loaded_images():
+        name = os.path.basename(path).lower()
+        if "_plugin." in name:
+            found["plugins"].append(path)
+        elif name.startswith("libvlccore."):
+            found["libvlccore"].append(path)
+        elif name.startswith("libvlc."):
+            found["libvlc"].append(path)
+    plugin_dirs: dict[str, int] = {}
+    for path in found["plugins"]:
+        directory = os.path.dirname(path)
+        plugin_dirs[directory] = plugin_dirs.get(directory, 0) + 1
+    return {
+        "python_vlc_library": getattr(getattr(vlc, "dll", None), "_name", None),
+        "python_vlc_plugin_path": getattr(vlc, "plugin_path", None),
+        "VLC_PLUGIN_PATH": os.environ.get("VLC_PLUGIN_PATH"),
+        "libvlc": found["libvlc"],
+        "libvlccore": found["libvlccore"],
+        "plugin_dirs": plugin_dirs,
+        "bundle": getattr(sys, "_MEIPASS", None),
+    }
+
+
+def _bundled(facts: dict[str, Any]) -> bool:
+    """libvlc, libvlccore and at least one plugin are loaded, all from the app's bundle."""
+    bundle = facts.get("bundle")
+    if not bundle:
+        return False
+    top = os.path.normcase(os.path.realpath(bundle)) + os.sep
+
+    def inside(path: Any) -> bool:
+        return isinstance(path, str) and os.path.normcase(os.path.realpath(path)).startswith(top)
+
+    paths = [*facts["libvlc"], *facts["libvlccore"], *facts["plugin_dirs"]]
+    loaded = all(facts[key] for key in ("libvlc", "libvlccore", "plugin_dirs"))
+    return loaded and inside(facts["python_vlc_library"]) and all(inside(p) for p in paths)
 
 
 def _process_alive(pid: int) -> bool:
@@ -1314,8 +1405,16 @@ class Driver:
         return rates[-1] if rates else None
 
     def _close(self) -> None:
-        self.report.data["close_requested_at"] = time.time()
-        self.report.save()
+        report = self.report
+        try:  # while libVLC still holds what it plays with
+            facts = _libvlc_facts()
+        except Exception as e:  # diagnostics only: never stop the close
+            facts = {"error": repr(e)}
+        report.data["libvlc_loaded"] = facts
+        if _frozen():
+            report.check(BUNDLED_VLC_CHECK, "error" not in facts and _bundled(facts), facts)
+        report.data["close_requested_at"] = time.time()
+        report.save()
         self.window.close()
 
     def after_exit(self, code: int, attempts: list[str]) -> None:
