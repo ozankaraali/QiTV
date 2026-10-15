@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
-
-logger = logging.getLogger(__name__)
 
 
 class ZapContext:
@@ -23,9 +20,12 @@ class ZapContext:
     def same(a: Optional[dict], b: Optional[dict]) -> bool:
         if not a or not b:
             return False
-        for key in ("id", "cmd", "name"):
+        for key in ("id", "cmd"):
             if a.get(key) is not None and b.get(key) is not None:
                 return str(a.get(key)) == str(b.get(key))
+        # name is only a fallback when neither side has a stable identifier
+        if all(c.get(k) is None for c in (a, b) for k in ("id", "cmd")):
+            return a.get("name") is not None and a.get("name") == b.get("name")
         return False
 
     def index_of(self, channel: dict) -> int:
@@ -52,13 +52,16 @@ class ZapContext:
         return index, self.channels[index]
 
     def by_number(self, text: str) -> Optional[dict]:
-        digits = text.lstrip("0") or "0"
+        # Compared numerically ("0" matches "00"); with duplicates the first channel wins.
+        if not text.isdecimal():
+            return None
+        wanted = int(text)
         for channel in self.channels:
-            number = str(channel.get("number") or "").strip().lstrip("0") or None
-            if number == digits:
+            number = str(channel.get("number") or "").strip()
+            if number.isdecimal() and int(number) == wanted:
                 return channel
         if not any(str(c.get("number") or "").strip() for c in self.channels):
-            position = int(digits)
+            position = wanted
             if 1 <= position <= len(self.channels):
                 return self.channels[position - 1]
         return None
@@ -89,6 +92,7 @@ class ZapController(QObject):
         self._column_open = False
         self._highlight: Optional[int] = None
         self._tuned: Optional[dict] = None
+        self._target: Optional[dict] = None  # last channel we asked to tune (may still be pending)
         self._previous: Optional[dict] = None
         self._digits = ""
         self._rest = QTimer(self, singleShot=True, interval=rest_ms)
@@ -97,6 +101,9 @@ class ZapController(QObject):
         self._digit_timer.timeout.connect(self._commit_digits)
 
     def set_context(self, context: ZapContext) -> None:
+        self._rest.stop()
+        self.close_column()
+        self._highlight = None
         self.context = context
         if self._tuned is not None:
             context.set_current(self._tuned)
@@ -105,20 +112,38 @@ class ZapController(QObject):
         if self._tuned is not None and not ZapContext.same(self._tuned, channel):
             self._previous = self._tuned
         self._tuned = channel
+        self._target = channel
         self.context.set_current(channel)
         self._rest.stop()
+        if self._column_open:
+            index = self.context.index_of(channel)
+            if index >= 0:
+                self._highlight = index
+            else:
+                self.close_column()
+
+    def _request(self, channel: dict) -> None:
+        self._target = channel
+        self.tuneRequested.emit(channel)
 
     def step(self, delta: int) -> None:
         now = self._clock()
         burst = (now - self._last_step) < self._burst_s
         self._last_step = now
-        start = self._highlight if (self._column_open and self._highlight is not None) else None
+        if self._column_open and self._highlight is not None:
+            start: Optional[int] = self._highlight
+        elif self._target is not None:
+            start = self.context.index_of(self._target)
+            if start < 0:
+                start = None
+        else:
+            start = None
         target = self.context.peek(delta, start)
         if target is None:
             return
         index, channel = target
         if not burst and not self._column_open:
-            self.tuneRequested.emit(channel)
+            self._request(channel)
             return
         if not self._column_open:
             self._column_open = True
@@ -134,11 +159,11 @@ class ZapController(QObject):
             self.columnRequested.emit(False)
 
     def _tune_highlight(self) -> None:
-        if self._highlight is None:
+        if self._highlight is None or not 0 <= self._highlight < len(self.context.channels):
             return
         channel = self.context.channels[self._highlight]
-        if not ZapContext.same(channel, self._tuned):
-            self.tuneRequested.emit(channel)
+        if not ZapContext.same(channel, self._target):
+            self._request(channel)
 
     def digit(self, d: str) -> None:
         if not d.isdigit() or len(self._digits) >= self._max_digits:
@@ -151,11 +176,12 @@ class ZapController(QObject):
         text, self._digits = self._digits, ""
         channel = self.context.by_number(text) if text else None
         if channel is not None:
-            self.tuneRequested.emit(channel)
+            if not ZapContext.same(channel, self._target):
+                self._request(channel)
         elif text:
             self.numberNotFound.emit(text)
         self.digitsChanged.emit("")
 
     def previous(self) -> None:
         if self._previous is not None:
-            self.tuneRequested.emit(self._previous)
+            self._request(self._previous)

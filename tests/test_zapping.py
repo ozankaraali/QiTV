@@ -111,6 +111,52 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.previous()
         self.assertEqual(self.tunes, [CHANNELS[0]])
 
+    def test_second_press_during_async_tune_advances_without_duplicate(self):
+        self.zap.step(1)  # immediate tune of CHANNELS[1]; tuned() not called yet
+        self.clock.now += 0.2
+        highlights = []
+        self.zap.highlightChanged.connect(lambda c, i: highlights.append((c, i)))
+        self.zap.step(1)
+        self.assertEqual(highlights, [(CHANNELS[2], 2)])
+        QTest.qWait(120)
+        self.assertEqual(self.tunes, [CHANNELS[1], CHANNELS[2]])
+
+    def test_set_context_with_shorter_list_is_safe(self):
+        self.zap.step(1)
+        self.zap.tuned(CHANNELS[1])
+        self.clock.now += 0.1
+        self.zap.step(1)
+        self.zap.step(1)
+        self.zap.set_context(ZapContext("h", CHANNELS[:1]))
+        self.assertEqual(self.columns, [True, False])
+        QTest.qWait(120)
+        self.assertEqual(self.tunes, [CHANNELS[1]])
+
+    def test_out_of_band_tune_reanchors_or_closes_column(self):
+        self.zap.step(1)
+        self.zap.tuned(CHANNELS[1])
+        self.clock.now += 0.1
+        self.zap.step(1)
+        self.zap.tuned(CHANNELS[3])
+        self.clock.now += 0.1
+        self.zap.step(-1)
+        QTest.qWait(120)
+        self.assertEqual(self.tunes[-1], CHANNELS[2])
+        self.zap.tuned({"id": 99, "name": "Other"})
+        self.assertEqual(self.columns[-1], False)
+
+    def test_same_identity_rules(self):
+        self.assertFalse(ZapContext.same({"id": 1, "name": "A"}, {"cmd": "x", "name": "A"}))
+        self.assertTrue(ZapContext.same({"name": "A"}, {"name": "A"}))
+        self.assertTrue(ZapContext.same({"id": 1, "name": "A"}, {"id": "1", "name": "B"}))
+
+    def test_number_zero_and_duplicates(self):
+        ctx = ZapContext(
+            "g", [{"id": 1, "number": "00"}, {"id": 2, "number": "5"}, {"id": 3, "number": "5"}]
+        )
+        self.assertEqual(ctx.by_number("0")["id"], 1)
+        self.assertEqual(ctx.by_number("5")["id"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
