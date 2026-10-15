@@ -362,7 +362,7 @@ class StbHandshake:
                 "hw_version_2": "bb8b74cdcaa19c7f6a6bdfecc8e91b7e4b5ea556",
                 "timestamp": "1729441259",
                 "api_signature": "262",
-                "prehash": {prehash},
+                "prehash": prehash,
             }
             encoded_params = urlencode(params)
 
