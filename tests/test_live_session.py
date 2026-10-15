@@ -1372,6 +1372,9 @@ class EngineShutdownTests(LiveSessionCase):
         old.available.emit(False)  # the old engine is no longer heard
         old.sessionFailed.emit(sid, "network", "The stream could not be reached.")
         self.assertTrue(self.live.is_pipeline())
+        self.live.stop()
+        self.engine.answer()  # the cleanup answers only the first engine
+        self.assertEqual(self.active_timers(), [])
 
 
 class StreamLimitTests(LiveSessionCase):
