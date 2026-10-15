@@ -1,18 +1,19 @@
 [project]
 name = "qitv"
-version = "1.14.1"
+version = "2.0.0"
 description = "A cross-platform STB and IPTV player client"
 # Qt and the theme package currently support Python 3.14, but not 3.15.
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "aiohttp[speedups]>=3.14.3",
-    "av==18.1.0",
-    "certifi>=2026.7.22",
     "m3u8==6.0.0",
+    "mpv>=1.0.8",
     "orjson>=3.12.0",
     "packaging>=26.3",
+    "pycryptodomex>=3.24.1",
     "pyqtdarktheme-fork>=2.3.6",
     "pyside6>=6.11.2",
+    "python-vlc==3.0.21203",
     "requests>=2.34.2",
     "tzlocal>=5.4.4",
     "urllib3>=2.8.0",
@@ -45,12 +46,6 @@ plugins = []
 # QMessageBox.Yes, etc.) and widget attributes are not recognised.
 # Only disable error codes that are directly caused by broken stubs.
 disable_error_code = ["attr-defined", "call-overload", "union-attr"]
-
-# Mixin classes use stub method bodies (``def foo(self): ...``) to declare
-# the interface that the concrete host class provides at runtime.
-[[tool.mypy.overrides]]
-module = "mixins.*"
-disable_error_code = ["empty-body"]
 
 [tool.flake8]
 max-line-length = 100

@@ -1,48 +1,15 @@
-name: Build and verify bundled MPV
+name: Build and verify
 
 on:
   push:
-    branches: [main, verify/bundled-mpv]
+    branches:
+      - main
+      - tv/vlc
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  build:
-    name: Build and smoke ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux
-            runner: ubuntu-22.04
-            target: linux-x86_64
-            spec: qitv-linux.spec
-            artifact: qitv-linux
-          - name: windows
-            runner: windows-2022
-            target: windows-x86_64
-            spec: qitv-windows.spec
-            artifact: qitv-windows.exe
-          - name: macos-arm64
-            runner: macos-15
-            target: darwin-arm64
-            spec: qitv-macos.spec
-            artifact: qitv-macos-arm64.zip
-          - name: macos-intel
-            runner: macos-15-intel
-            target: darwin-x86_64
-            spec: qitv-macos.spec
-            artifact: qitv-macos-intel.zip
-    defaults:
-      run:
-        shell: bash
-    env:
-      QT_QPA_PLATFORM: offscreen
-      MACOSX_DEPLOYMENT_TARGET: '13.0'
+  build-linux:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,285 +18,444 @@ jobs:
         with:
           python-version: '3.14'
           enable-cache: true
-      - name: Install pinned Go toolchain for uosc
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: '1.27.1'
-          cache-dependency-path: assets/mpv/uosc/sources/ziggy/go.sum
-      - name: Install Linux native build and Qt dependencies
-        if: runner.os == 'Linux'
+      - name: Install VLC and xcb dependencies
+        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0 xvfb openbox xcompmgr x11-utils
+      - name: Silence ALSA
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config nasm \
-            autoconf autoconf-archive automake libtool libltdl-dev libx11-dev libxext-dev libxrandr-dev \
-            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxpresent-dev libxkbcommon-dev \
-            libgl1-mesa-dev libegl1 libasound2-dev libpulse-dev libxcb-cursor0 xvfb \
-            libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 libxcb-xinerama0 \
-            libxcb-shape0 libxcb-randr0 libxcb-xfixes0 libxcb-sync1 libx11-xcb1
-      - name: Install macOS native build tools
-        if: runner.os == 'macOS'
-        run: brew install cmake ninja nasm autoconf autoconf-archive automake libtool pkgconf
-      - name: Select Windows x64 compiler
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-        with:
-          arch: x64
-      - name: Install Windows assembler and select LLVM tools
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install nasm --yes --no-progress
-          "$env:ProgramFiles\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Install Windows FFmpeg build tools
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          & C:\msys64\usr\bin\bash.exe -lc 'pacman -S --noconfirm --needed make diffutils pkgconf'
-          if ($LASTEXITCODE -ne 0) { throw 'MSYS2 build-tool installation failed' }
-      - name: Sync Python dependencies
+          printf 'pcm.!default { type null }\n' > ~/.asoundrc
+      - name: Sync dependencies
+        id: sync
         run: uv sync --frozen --dev
-      - name: Identify native build inputs and toolchain
-        id: native-key
-        run: |
-          key="$(uv run --frozen --no-sync python scripts/prepare_mpv.py --target '${{ matrix.target }}' --print-cache-key)"
-          echo "key=$key" >> "$GITHUB_OUTPUT"
-      - name: Restore matching native runtime and sources
-        id: native-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          key: ${{ steps.native-key.outputs.key }}
-          path: |
-            native/mpv
-            native/mpv-sources-${{ matrix.target }}.tar.gz
-      - name: Prepare pinned standalone MPV and corresponding sources
-        run: uv run --frozen --no-sync python scripts/prepare_mpv.py --target '${{ matrix.target }}'
-      - name: Identify private PyAV build inputs
-        id: pyav-key
-        run: |
-          key="$(uv run --frozen --no-sync python scripts/prepare_pyav.py --target '${{ matrix.target }}' --print-cache-key)"
-          echo "key=$key" >> "$GITHUB_OUTPUT"
-      - name: Restore private PyAV wheel and matching sources
-        id: pyav-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          key: ${{ steps.pyav-key.outputs.key }}
-          path: |
-            native/pyav
-            native/pyav-sources-${{ matrix.target }}.tar.gz
-      - name: Build and install LGPL-only PyAV runtime
+      - name: Run tests
+        timeout-minutes: 20
+        id: tests
+        run: uv run python -m unittest discover -s tests -v
         env:
-          MSYS2_ARG_CONV_EXCL: '*'
-          MSYS_NO_PATHCONV: '1'
-        run: uv run --frozen --no-sync python scripts/prepare_pyav.py --target '${{ matrix.target }}'
-      - name: Run application and native integrity regressions
-        timeout-minutes: 5
-        run: uv run --frozen --no-sync python -m unittest discover -s tests -v
-      - name: Smoke source backend against real bundled MPV
-        timeout-minutes: 2
+          QT_QPA_PLATFORM: offscreen
+      - name: Smoke test
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        # openbox handles fullscreen and minimize; xcompmgr makes the overlays translucent.
         run: |
-          uv run --frozen --no-sync python scripts/smoke_mpv.py --fixture tests/fixtures/mpv-smoke.mp4 \
-            --report build/mpv-smoke/source.json
-      - name: Exercise actual native video output
-        timeout-minutes: 2
-        run: |
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py --render --fixture tests/fixtures/mpv-smoke.mp4 \
-              --report build/mpv-smoke/source-render.json
-          else
-            uv run --frozen --no-sync python scripts/smoke_mpv.py --render --fixture tests/fixtures/mpv-smoke.mp4 \
-              --report build/mpv-smoke/source-render.json
-          fi
-      - name: Exercise spawned time-shift and native controls
-        timeout-minutes: 2
-        run: |
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            QT_QPA_PLATFORM=xcb xvfb-run -a uv run --frozen --no-sync python scripts/smoke_mpv.py \
-              --timeshift --render --fixture tests/fixtures/mpv-smoke.mp4 \
-              --report build/mpv-smoke/source-timeshift.json
-          else
-            uv run --frozen --no-sync python scripts/smoke_mpv.py \
-              --timeshift --render --fixture tests/fixtures/mpv-smoke.mp4 \
-              --report build/mpv-smoke/source-timeshift.json
-          fi
-      - name: Package app with prepared native runtime
-        run: uv run --frozen --no-sync pyinstaller --noconfirm --clean ${{ matrix.spec }}
-      - name: Sign macOS application
-        if: runner.os == 'macOS'
-        run: |
-          codesign --force --deep --sign - dist/QiTV.app
-          codesign --verify --deep --strict --verbose=2 dist/QiTV.app
-      - name: Smoke frozen Linux app without source runtime
-        timeout-minutes: 3
-        if: runner.os == 'Linux'
-        run: |
-          mv native/mpv native/.mpv-source-only
-          mv native/pyav native/.pyav-source-only
-          trap 'mv "$GITHUB_WORKSPACE/native/.mpv-source-only" "$GITHUB_WORKSPACE/native/mpv"; mv "$GITHUB_WORKSPACE/native/.pyav-source-only" "$GITHUB_WORKSPACE/native/pyav"' EXIT
-          mkdir -p "$RUNNER_TEMP/qitv-frozen-smoke"
-          cd "$RUNNER_TEMP/qitv-frozen-smoke"
-          QT_QPA_PLATFORM=xcb xvfb-run -a "$GITHUB_WORKSPACE/dist/qitv" --smoke-mpv --render \
-            --fixture "$GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4" \
-            --report "$GITHUB_WORKSPACE/build/mpv-smoke/frozen.json"
-          QT_QPA_PLATFORM=xcb xvfb-run -a "$GITHUB_WORKSPACE/dist/qitv" --smoke-mpv --timeshift --render \
-            --fixture "$GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4" \
-            --report "$GITHUB_WORKSPACE/build/mpv-smoke/frozen-timeshift.json"
-      - name: Smoke frozen macOS app without source runtime
-        timeout-minutes: 3
-        if: runner.os == 'macOS'
-        run: |
-          mv native/mpv native/.mpv-source-only
-          mv native/pyav native/.pyav-source-only
-          trap 'mv "$GITHUB_WORKSPACE/native/.mpv-source-only" "$GITHUB_WORKSPACE/native/mpv"; mv "$GITHUB_WORKSPACE/native/.pyav-source-only" "$GITHUB_WORKSPACE/native/pyav"' EXIT
-          mkdir -p "$RUNNER_TEMP/qitv-frozen-smoke"
-          cd "$RUNNER_TEMP/qitv-frozen-smoke"
-          "$GITHUB_WORKSPACE/dist/QiTV.app/Contents/MacOS/QiTV" --smoke-mpv --render \
-            --fixture "$GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4" \
-            --report "$GITHUB_WORKSPACE/build/mpv-smoke/frozen.json"
-          "$GITHUB_WORKSPACE/dist/QiTV.app/Contents/MacOS/QiTV" --smoke-mpv --timeshift --render \
-            --fixture "$GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4" \
-            --report "$GITHUB_WORKSPACE/build/mpv-smoke/frozen-timeshift.json"
-      - name: Smoke frozen Windows app without source runtime
-        timeout-minutes: 3
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Move-Item native/mpv native/.mpv-source-only
-          Move-Item native/pyav native/.pyav-source-only
-          try {
-            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/qitv-frozen-smoke" | Out-Null
-            $exe = "$env:GITHUB_WORKSPACE/dist/qitv.exe"
-            $fixture = "$env:GITHUB_WORKSPACE/tests/fixtures/mpv-smoke.mp4"
-            foreach ($mode in @('direct', 'timeshift')) {
-              $reportName = if ($mode -eq 'timeshift') { 'frozen-timeshift.json' } else { 'frozen.json' }
-              $report = "$env:GITHUB_WORKSPACE/build/mpv-smoke/$reportName"
-              $arguments = @('--smoke-mpv', '--render', '--fixture', "`"$fixture`"", '--report', "`"$report`"")
-              if ($mode -eq 'timeshift') { $arguments += '--timeshift' }
-              $process = Start-Process -FilePath $exe -WorkingDirectory "$env:RUNNER_TEMP/qitv-frozen-smoke" `
-                -ArgumentList $arguments -PassThru
-              if (-not $process.WaitForExit(90000)) {
-                taskkill /PID $process.Id /T /F
-                throw "Frozen $mode smoke exceeded 90 seconds"
-              }
-              if ($process.ExitCode -ne 0) { throw "Frozen $mode smoke exited $($process.ExitCode)" }
-              if (-not (Get-Content $report -Raw | ConvertFrom-Json).ok) { throw "Frozen $mode smoke reported failure" }
-            }
-          } finally {
-            Move-Item "$env:GITHUB_WORKSPACE/native/.mpv-source-only" "$env:GITHUB_WORKSPACE/native/mpv"
-            Move-Item "$env:GITHUB_WORKSPACE/native/.pyav-source-only" "$env:GITHUB_WORKSPACE/native/pyav"
-          }
-      - name: Name Linux release artifact
-        if: runner.os == 'Linux'
+          xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
+            openbox &
+            xcompmgr &
+            for i in $(seq 50); do
+              xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break
+              sleep 0.2
+            done
+            if ! xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id"; then
+              echo "openbox did not start"
+              exit 1
+            fi
+            uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
+          '
+        timeout-minutes: 8
+        env:
+          QT_QPA_PLATFORM: xcb
+      - name: Upload smoke results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-linux
+          path: smoke-out/
+      - name: Package App with PyInstaller for Linux
+        id: package
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
+        run: uv run pyinstaller qitv-linux.spec
+      - name: Rename binary
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: mv dist/qitv dist/qitv-linux
-      - name: Name Windows release artifact
-        if: runner.os == 'Windows'
-        run: mv dist/qitv.exe dist/qitv-windows.exe
-      - name: Archive macOS release application
-        if: runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent dist/QiTV.app dist/${{ matrix.artifact }}
-      - name: Upload runnable app
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: packaged-app-${{ matrix.name }}
-          path: dist/${{ matrix.artifact }}
-          if-no-files-found: error
-      - name: Upload matching native source archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: mpv-sources-${{ matrix.target }}
-          path: native/mpv-sources-${{ matrix.target }}.tar.gz
-          if-no-files-found: error
-          compression-level: 0
-      - name: Upload matching PyAV and FFmpeg sources
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: pyav-sources-${{ matrix.target }}
-          path: native/pyav-sources-${{ matrix.target }}.tar.gz
-          if-no-files-found: error
-          compression-level: 0
-      - name: Upload actual source and frozen smoke evidence
+      - name: Hide the system VLC from the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The app ships its own libVLC: its smoke must pass with no VLC installed. The apt
+        # packages' libvlc, libvlccore and plugin directory move aside until the restore.
+        run: |
+          set -eu
+          hidden="$RUNNER_TEMP/system-vlc"
+          mkdir -p "$hidden/lib"
+          dpkg -L libvlc5 libvlccore9 | grep -E '/libvlc(core)?\.so\.[0-9.]+$' > "$hidden/paths"
+          while read -r lib; do sudo mv "$lib" "$hidden/lib/"; done < "$hidden/paths"
+          dpkg -L vlc-plugin-base | grep -m1 -E '/vlc/plugins$' > "$hidden/plugins-path"
+          sudo mv "$(cat "$hidden/plugins-path")" "$hidden/plugins"
+          echo "Hidden:"; cat "$hidden/paths" "$hidden/plugins-path"
+          if python3 -c "import ctypes; ctypes.CDLL('libvlc.so.5')" 2>/dev/null; then
+            echo "::error::the system libVLC still loads"; exit 1
+          fi
+      - name: Smoke test the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The same scenario through main.py's --smoke entry: the live helper must spawn from
+        # the bundle. The fixtures come from the checkout; the app has none.
+        run: |
+          xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
+            openbox &
+            xcompmgr &
+            for i in $(seq 50); do
+              xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break
+              sleep 0.2
+            done
+            if ! xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id"; then
+              echo "openbox did not start"
+              exit 1
+            fi
+            dist/qitv-linux --smoke --out smoke-frozen --pipeline --pip --fixtures tests/fixtures
+          '
+        timeout-minutes: 8
+        env:
+          QT_QPA_PLATFORM: xcb
+          QITV_SMOKE: '1'
+      - name: Restore the system VLC
+        if: always()
+        run: |
+          hidden="$RUNNER_TEMP/system-vlc"
+          if [ -f "$hidden/paths" ]; then
+            while read -r lib; do
+              moved="$hidden/lib/$(basename "$lib")"
+              if [ -e "$moved" ] || [ -L "$moved" ]; then sudo mv "$moved" "$lib"; fi
+            done < "$hidden/paths"
+          fi
+          if [ -d "$hidden/plugins" ]; then sudo mv "$hidden/plugins" "$(cat "$hidden/plugins-path")"; fi
+      - name: Upload packaged smoke results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mpv-smoke-${{ matrix.name }}
-          path: |
-            build/mpv-smoke/*.json
-            build/mpv-smoke/*.png
-            build/mpv-smoke/*.log
-          if-no-files-found: warn
-      - name: Cache verified native runtime and matching sources
-        if: success() && steps.native-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+          name: smoke-frozen-linux
+          path: smoke-frozen/
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          key: ${{ steps.native-key.outputs.key }}
-          path: |
-            native/mpv
-            native/mpv-sources-${{ matrix.target }}.tar.gz
-      - name: Cache verified private PyAV and matching sources
-        if: success() && steps.pyav-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+          name: packaged-app-linux
+          path: dist/qitv-linux
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          key: ${{ steps.pyav-key.outputs.key }}
-          path: |
-            native/pyav
-            native/pyav-sources-${{ matrix.target }}.tar.gz
+          python-version: '3.14'
+          enable-cache: true
+      - name: Get latest VLC version
+        id: vlc-version
+        shell: powershell
+        run: |
+          $info = choco info vlc --limit-output
+          $version = ($info -split '\|')[1]
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Cache VLC installer
+        id: vlc-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: C:\vlc-cache
+          key: vlc-windows-${{ steps.vlc-version.outputs.version }}
+      - name: Install VLC using Chocolatey
+        run: choco install vlc -y --cache-location=C:\vlc-cache
+      - name: Sync dependencies
+        id: sync
+        run: uv sync --frozen --dev
+      - name: Run tests
+        timeout-minutes: 20
+        id: tests
+        # Qt's offscreen plugin on Windows reads fonts only from QT_QPA_FONTDIR (the PySide6
+        # wheel ships none), so without it every glyph is a box as wide as the pixel size.
+        run: |
+          $fonts = @(Get-ChildItem -Path $env:QT_QPA_FONTDIR -Filter *.ttf -ErrorAction Stop)
+          if ($fonts.Count -eq 0) { throw "No TrueType fonts in $env:QT_QPA_FONTDIR" }
+          Write-Host "$($fonts.Count) TrueType fonts in $env:QT_QPA_FONTDIR"
+          uv run python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QPA_FONTDIR: C:\Windows\Fonts
+      - name: Smoke test
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
+        timeout-minutes: 8
+      - name: Upload smoke results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-windows
+          path: smoke-out/
+      - name: Package App with PyInstaller for Windows
+        id: package
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
+        run: uv run pyinstaller qitv-windows.spec
+      - name: Rename binary
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: ren dist\qitv.exe qitv-windows.exe
+      - name: Hide the system VLC from the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The app ships its own libVLC: its smoke must pass with no VLC installed.
+        shell: pwsh
+        run: Rename-Item -Path "C:\Program Files\VideoLAN" -NewName "VideoLAN.hidden"
+      - name: Smoke test the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # A windowed app: the shell would not wait for it, and it has no console (its logs
+        # are in smoke-frozen). Its exit code is the smoke test's.
+        shell: pwsh
+        run: |
+          $smoke = Start-Process -FilePath dist\qitv-windows.exe -PassThru -ArgumentList @(
+            "--smoke", "--out", "$PWD\smoke-frozen", "--pipeline", "--pip", "--fixtures", "$PWD\tests\fixtures")
+          $null = $smoke.Handle  # keeps the exit code readable once it exits
+          $smoke.WaitForExit()
+          Get-Content -Path smoke-frozen\runner.log -ErrorAction SilentlyContinue
+          exit $smoke.ExitCode
+        timeout-minutes: 8
+        env:
+          QITV_SMOKE: '1'
+      - name: Restore the system VLC
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\Program Files\VideoLAN.hidden") {
+            Rename-Item -Path "C:\Program Files\VideoLAN.hidden" -NewName "VideoLAN"
+          }
+      - name: Upload packaged smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-frozen-windows
+          path: smoke-frozen/
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packaged-app-windows
+          path: dist/qitv-windows.exe
+
+  build-macos-universal:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: '3.14'
+          enable-cache: true
+      - name: Get latest VLC version
+        id: vlc-version
+        run: |
+          VLC_VERSION=$(brew info --json=v2 --cask vlc | python3 -c "import sys,json; print(json.load(sys.stdin)['casks'][0]['version'])")
+          echo "version=$VLC_VERSION" >> $GITHUB_OUTPUT
+      - name: Cache VLC.app
+        id: vlc-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /Applications/VLC.app
+          key: vlc-macos-arm64-${{ steps.vlc-version.outputs.version }}
+      - name: Install VLC
+        if: steps.vlc-cache.outputs.cache-hit != 'true'
+        run: brew install --cask vlc
+      - name: Sync dependencies
+        id: sync
+        run: uv sync --frozen --dev
+      - name: Run tests
+        timeout-minutes: 20
+        id: tests
+        run: uv run python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QITV_GUI_TESTS: '1'  # tests that show real windows (a GUI session)
+      - name: Smoke test
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
+        timeout-minutes: 8
+      - name: Upload smoke results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-macos-arm
+          path: smoke-out/
+      - name: Package App with PyInstaller for macOS
+        id: package
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
+        run: uv run pyinstaller qitv-macos.spec
+      - name: Ad-Hoc Sign the app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: |
+          codesign --force --deep --sign - dist/qitv.app
+          # PyInstaller and the signature above rewrote every plugin, so the plugins.dat copied
+          # from VLC.app no longer matches them and libVLC would load all ~340 plugins at every
+          # start (macOS checks each one on a fresh download's first start). Write the cache
+          # again with the bundle's own libVLC (VLC 3's vlc-cache-gen is libvlc_new with
+          # --reset-plugins-cache), sign that file again, and re-seal the bundle without
+          # touching its binaries (a --deep re-sign would make the cache stale again).
+          uv run python -c "from services.vlc_bundle import use_bundled_vlc; assert use_bundled_vlc(top='dist/QiTV.app/Contents/Frameworks', system='Darwin'); import vlc; vlc.Instance(['--reset-plugins-cache', '--quiet']).release()"
+          codesign --force --sign - dist/QiTV.app/Contents/Frameworks/vlc/plugins/plugins.dat
+          codesign --force --sign - dist/qitv.app
+          codesign --verify --deep --strict dist/qitv.app
+      - name: Hide the system VLC from the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The app ships its own libVLC: its smoke must pass with no VLC installed.
+        run: sudo mv /Applications/VLC.app "$RUNNER_TEMP/VLC.app"
+      - name: Smoke test the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The same scenario through main.py's --smoke entry: the live helper must spawn from
+        # the bundle, and libVLC and its plugins must load from it. The fixtures come from
+        # the checkout; the app has none.
+        run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --pip --fixtures tests/fixtures
+        timeout-minutes: 8
+        env:
+          QITV_SMOKE: '1'
+      - name: The packaged app's plugin cache is current
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: |
+          grep -q "loading plugins cache file .*/Contents/Frameworks/vlc/plugins/plugins.dat" smoke-frozen/libvlc.log
+          if grep -m5 "stale plugins cache" smoke-frozen/libvlc.log; then
+            echo "::error::libVLC found the bundle's plugins.dat stale"; exit 1
+          fi
+      - name: Restore the system VLC
+        if: always()
+        run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
+      - name: Upload packaged smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-frozen-macos-arm
+          path: smoke-frozen/
+      - name: Zip macOS App
+        # ditto keeps the bundle's symlinks, which its signature seals (zip -r copies them).
+        run: cd dist && ditto -c -k --keepParent qitv.app qitv-macos-universal.zip
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packaged-app-macos-universal
+          path: dist/qitv-macos-universal.zip
+
+  build-macos-intel:
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: '3.14'
+          enable-cache: true
+      - name: Get latest VLC version
+        id: vlc-version
+        run: |
+          VLC_VERSION=$(brew info --json=v2 --cask vlc | python3 -c "import sys,json; print(json.load(sys.stdin)['casks'][0]['version'])")
+          echo "version=$VLC_VERSION" >> $GITHUB_OUTPUT
+      - name: Cache VLC.app
+        id: vlc-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /Applications/VLC.app
+          key: vlc-macos-intel-${{ steps.vlc-version.outputs.version }}
+      - name: Install VLC
+        if: steps.vlc-cache.outputs.cache-hit != 'true'
+        run: brew install --cask vlc
+      - name: Sync dependencies
+        id: sync
+        run: uv sync --frozen --dev
+      - name: Run tests
+        timeout-minutes: 20
+        id: tests
+        run: uv run python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QITV_GUI_TESTS: '1'  # tests that show real windows (a GUI session)
+      - name: Smoke test
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
+        timeout-minutes: 8
+      - name: Upload smoke results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-macos-intel
+          path: smoke-out/
+      - name: Package App with PyInstaller for macOS (Intel)
+        id: package
+        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
+        run: uv run pyinstaller qitv-macos.spec
+      - name: Ad-Hoc Sign the app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: |
+          codesign --force --deep --sign - dist/qitv.app
+          # PyInstaller and the signature above rewrote every plugin, so the plugins.dat copied
+          # from VLC.app no longer matches them and libVLC would load all ~340 plugins at every
+          # start (macOS checks each one on a fresh download's first start). Write the cache
+          # again with the bundle's own libVLC (VLC 3's vlc-cache-gen is libvlc_new with
+          # --reset-plugins-cache), sign that file again, and re-seal the bundle without
+          # touching its binaries (a --deep re-sign would make the cache stale again).
+          uv run python -c "from services.vlc_bundle import use_bundled_vlc; assert use_bundled_vlc(top='dist/QiTV.app/Contents/Frameworks', system='Darwin'); import vlc; vlc.Instance(['--reset-plugins-cache', '--quiet']).release()"
+          codesign --force --sign - dist/QiTV.app/Contents/Frameworks/vlc/plugins/plugins.dat
+          codesign --force --sign - dist/qitv.app
+          codesign --verify --deep --strict dist/qitv.app
+      - name: Hide the system VLC from the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The app ships its own libVLC: its smoke must pass with no VLC installed.
+        run: sudo mv /Applications/VLC.app "$RUNNER_TEMP/VLC.app"
+      - name: Smoke test the packaged app
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        # The same scenario through main.py's --smoke entry: the live helper must spawn from
+        # the bundle, and libVLC and its plugins must load from it. The fixtures come from
+        # the checkout; the app has none.
+        run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --pip --fixtures tests/fixtures
+        timeout-minutes: 8
+        env:
+          QITV_SMOKE: '1'
+      - name: The packaged app's plugin cache is current
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: |
+          grep -q "loading plugins cache file .*/Contents/Frameworks/vlc/plugins/plugins.dat" smoke-frozen/libvlc.log
+          if grep -m5 "stale plugins cache" smoke-frozen/libvlc.log; then
+            echo "::error::libVLC found the bundle's plugins.dat stale"; exit 1
+          fi
+      - name: Restore the system VLC
+        if: always()
+        run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
+      - name: Upload packaged smoke results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-frozen-macos-intel
+          path: smoke-frozen/
+      - name: Zip macOS App
+        # ditto keeps the bundle's symlinks, which its signature seals (zip -r copies them).
+        run: cd dist && ditto -c -k --keepParent qitv.app qitv-macos-intel.zip
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packaged-app-macos-intel
+          path: dist/qitv-macos-intel.zip
 
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build
+    needs: [build-linux, build-windows, build-macos-universal, build-macos-intel]
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Read release version
+      - name: Get Version
+        id: get_version
         run: |
-          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
-          echo "VERSION=$version" >> "$GITHUB_ENV"
-      - name: Download all four app artifacts
+          version=$(python3 -c "
+          import tomllib
+          with open('pyproject.toml','rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          ")
+          echo "VERSION=$version" >> $GITHUB_ENV
+      - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: packaged-app-*
-          merge-multiple: true
-          path: release-assets
-      - name: Download matching native source archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: mpv-sources-*
-          merge-multiple: true
-          path: release-assets
-      - name: Download matching PyAV and FFmpeg source archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: pyav-sources-*
-          merge-multiple: true
-          path: release-assets
-      - name: Create prerelease and publish binaries with corresponding sources
+      - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          token: ${{ github.token }}
+          token: ${{ secrets.GH_TOKEN }}
           tag_name: v${{ env.VERSION }}
           name: v${{ env.VERSION }}
-          target_commitish: ${{ github.sha }}
           body: |
             > **Please always download this free software from [Releases](https://github.com/ozankaraali/QiTV/releases) instead of using others' distributions, which may have malware. Always keep the [original repository](https://github.com/ozankaraali/QiTV) as reference.**
-
-            Each platform includes QiTV's standalone MPV player and LGPL-only time-shift runtime. Matching MPV and PyAV/FFmpeg source archives are published below; native licenses and build provenance are included inside the app.
           generate_release_notes: true
           draft: false
           prerelease: true
-          fail_on_unmatched_files: true
           files: |
-            release-assets/qitv-linux
-            release-assets/qitv-windows.exe
-            release-assets/qitv-macos-arm64.zip
-            release-assets/qitv-macos-intel.zip
-            release-assets/mpv-sources-linux-x86_64.tar.gz
-            release-assets/mpv-sources-windows-x86_64.tar.gz
-            release-assets/mpv-sources-darwin-arm64.tar.gz
-            release-assets/mpv-sources-darwin-x86_64.tar.gz
-            release-assets/pyav-sources-linux-x86_64.tar.gz
-            release-assets/pyav-sources-windows-x86_64.tar.gz
-            release-assets/pyav-sources-darwin-arm64.tar.gz
-            release-assets/pyav-sources-darwin-x86_64.tar.gz
+            packaged-app-linux/qitv-linux
+            packaged-app-windows/qitv-windows.exe
+            packaged-app-macos-universal/qitv-macos-universal.zip
+            packaged-app-macos-intel/qitv-macos-intel.zip

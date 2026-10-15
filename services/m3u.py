@@ -1,6 +1,18 @@
 import re
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+
+
+def decode_playlist(response) -> str:
+    """Decode an HTTP playlist response.
+
+    When the server declares no charset, ``response.text`` would fall back to ISO-8859-1 and
+    mangle UTF-8 names; decode the bytes as UTF-8 (dropping any BOM) instead.
+    """
+    content_type = response.headers.get("Content-Type", "") or ""
+    if "charset" in content_type.lower():
+        return response.text
+    return response.content.decode("utf-8-sig", errors="replace")
 
 
 def parse_m3u(data: str, categorize: bool = False):
@@ -15,7 +27,7 @@ def parse_m3u(data: str, categorize: bool = False):
         If categorize=False: List of items
         If categorize=True: Dict with 'categories', 'contents', 'sorted_channels'
     """
-    lines = data.split("\n")
+    lines = re.split(r"\r\n|\r|\n", data.lstrip("\ufeff"))
     items = []
     item = {}
     id_counter = 0
@@ -49,8 +61,8 @@ def parse_m3u(data: str, categorize: bool = False):
             item["user_agent"] = user_agent
 
         elif line.startswith("http"):
-            urlobject = urlparse(line)
-            item["cmd"] = urlobject.geturl()
+            # Round-trip through urlparse: it drops stray tabs and other control whitespace.
+            item["cmd"] = urlparse(line).geturl()
             items.append(item)
 
     # Return flat list if not categorizing
@@ -61,6 +73,38 @@ def parse_m3u(data: str, categorize: bool = False):
     return _build_categorized_structure(items)
 
 
+def split_group_title(title: Optional[str]) -> List[str]:
+    """The groups an M3U group-title names, in order.
+
+    iptv-org writes a channel of several categories as one title, "Animation;Kids;Music": its
+    parts are stripped, empty ones dropped and a repeated one kept once. A title without ";"
+    is one group, as it is. No title: no group.
+    """
+    if not title:
+        return []
+    if ";" not in title:
+        return [title]
+    return list(dict.fromkeys(part.strip() for part in title.split(";") if part.strip()))
+
+
+def split_cached_groups(payload: Any) -> Any:
+    """A playlist cached before group titles were split ("A;B" as one group), with its groups
+    rebuilt from its channels: no download. Any other payload comes back as it is.
+
+    Split groups never keep a ";", so one in a group id marks the old shape.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    categories, contents = payload.get("categories"), payload.get("contents")
+    if not isinstance(categories, list) or not isinstance(contents, list):
+        return payload
+    if not any(isinstance(c, dict) and ";" in str(c.get("id", "")) for c in categories):
+        return payload
+    if not all(isinstance(item, dict) for item in contents):
+        return payload
+    return _build_categorized_structure(contents)
+
+
 def _build_categorized_structure(items: List[Dict]) -> Dict:
     """Build categorized structure from M3U items with group-title support.
 
@@ -69,36 +113,25 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
         - contents: List of all items with tv_genre_id field added
         - sorted_channels: Dict mapping category_id -> list of item indices
     """
-    categories_map: Dict[str, str] = {}
     sorted_channels: Dict[str, List[int]] = {}
-    contents: List[Dict] = []
 
-    # Group items by category
+    # Group items by category. The group title is also the category id: it is stable
+    # across refreshes/processes and cannot collide. A channel of several groups is listed
+    # in each, as one item: "All" (the contents) has it once.
     for idx, item in enumerate(items):
-        group = item.get("group") or "Uncategorized"
-        category_id = group  # Stable across refreshes/processes; no hash collisions.
-
-        # Add to categories map
-        if category_id not in categories_map:
-            categories_map[category_id] = group
-
+        category_ids = split_group_title(item.get("group")) or ["Uncategorized"]
         # Add tv_genre_id for compatibility with STB/Xtream structure
-        item["tv_genre_id"] = category_id
+        item["tv_genre_id"] = category_ids[0]
         item["number"] = str(idx + 1)
-        contents.append(item)
-
-        # Add to sorted_channels mapping
-        if category_id not in sorted_channels:
-            sorted_channels[category_id] = []
-        sorted_channels[category_id].append(idx)
+        for category_id in category_ids:
+            sorted_channels.setdefault(category_id, []).append(idx)
 
     # Build categories list
     categories = [{"id": "*", "title": "All"}]
-    for cat_id, cat_name in sorted(categories_map.items(), key=lambda x: x[1]):
-        categories.append({"id": cat_id, "title": cat_name})
+    categories.extend({"id": group, "title": group} for group in sorted(sorted_channels))
 
     return {
         "categories": categories,
-        "contents": contents,
+        "contents": items,
         "sorted_channels": sorted_channels,
     }

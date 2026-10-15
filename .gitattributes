@@ -1,5 +1,0 @@
-# Patches must match LF source files extracted from upstream archives.
-/native/patches/** text eol=lf
-
-# Preserve the vendored scripts, sources, and fonts byte-for-byte on Windows too.
-/assets/mpv/** -text

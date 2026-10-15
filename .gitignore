@@ -26,17 +26,11 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Vendored uosc modules and native-helper source, not Python build outputs
-!/assets/mpv/uosc/lib/
-!/assets/mpv/uosc/sources/ziggy/src/ziggy/lib/
-
-# Prepared native runtimes (specifications remain tracked)
-/native/mpv/
-/native/.mpv-*/
-/native/mpv-sources-*.tar.gz
-/native/pyav/
-/native/.pyav-*/
-/native/pyav-sources-*.tar.gz
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
 
 # Installer logs
 pip-log.txt
@@ -170,3 +164,8 @@ cython_debug/
 config.json
 
 .DS_Store
+
+# Local design/test tooling
+.superpowers/
+.playwright-mcp/
+.claude/worktrees/

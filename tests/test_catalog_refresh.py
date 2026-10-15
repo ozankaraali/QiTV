@@ -1,5 +1,6 @@
+"""Catalog freshness, cache writes and season reuse (once the old channel list's tests)."""
+
 import os
-from pathlib import Path
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -8,16 +9,15 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage
-from PySide6.QtTest import QTest
+from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
-from channel_list import ChannelList
-from config_manager import ConfigManager
-from epg_manager import EpgManager
-from image_manager import ImageManager
-from provider_manager import ProviderManager
+from services.catalog import CatalogService
+from services.jobs import ImmediateRunner
+from services.provider_manager import ProviderManager
+from tests.test_catalog_service import FakeFactory, make_service
+from tests.test_series_view import FakePosters
+from ui.library.series_view import SeriesView
 
 
 class ProviderCacheTests(unittest.TestCase):
@@ -42,11 +42,13 @@ class ProviderCacheTests(unittest.TestCase):
 
     def test_category_save_does_not_extend_catalog_freshness(self):
         manager = self.manager
-        with patch("provider_manager.time.time", return_value=1000):
+        with patch("services.provider_manager.time.time", return_value=1000):
             manager.current_provider_content = {"itv": {"categories": []}}
             manager.mark_content_fresh("itv")
             manager.save_provider()
-        with patch("provider_manager.time.time", return_value=1000 + manager.CONTENT_CACHE_TTL - 1):
+        with patch(
+            "services.provider_manager.time.time", return_value=1000 + manager.CONTENT_CACHE_TTL - 1
+        ):
             manager.current_provider_content["itv"]["contents"] = {"news": []}
             manager.current_provider_content["series"] = {"categories": []}
             manager.mark_content_fresh("series")
@@ -54,7 +56,9 @@ class ProviderCacheTests(unittest.TestCase):
             manager.set_current_provider(self.progress)
             self.assertFalse(manager.is_content_stale("itv"))
         manager._cache_writer.submit(lambda: None).result(timeout=5)
-        with patch("provider_manager.time.time", return_value=1000 + manager.CONTENT_CACHE_TTL):
+        with patch(
+            "services.provider_manager.time.time", return_value=1000 + manager.CONTENT_CACHE_TTL
+        ):
             manager.set_current_provider(self.progress)
             self.assertTrue(manager.is_content_stale("itv"))
             self.assertFalse(manager.is_content_stale("series"))
@@ -86,195 +90,163 @@ class ProviderCacheTests(unittest.TestCase):
         self.assertNotIn("itv", manager.current_provider_content)
         self.assertEqual(manager.get_all_providers_cached_content(), [])
 
+    @staticmethod
+    def playlist_cached_before_the_split():
+        """An M3U playlist as 2.0 cached it before group titles with ";" were split."""
+        return {
+            "categories": [
+                {"id": "*", "title": "All"},
+                {"id": "Animation;Kids", "title": "Animation;Kids"},
+                {"id": "Kids", "title": "Kids"},
+            ],
+            "contents": [
+                {
+                    "id": 1,
+                    "name": "Toons",
+                    "group": "Animation;Kids",
+                    "tv_genre_id": "Animation;Kids",
+                    "number": "1",
+                    "cmd": "http://example.test/1",
+                },
+                {
+                    "id": 2,
+                    "name": "Blocks",
+                    "group": "Kids",
+                    "tv_genre_id": "Kids",
+                    "number": "2",
+                    "cmd": "http://example.test/2",
+                },
+            ],
+            "sorted_channels": {"Animation;Kids": [0], "Kids": [1]},
+        }
 
-class PlayerSignals(QObject):
-    mediaEnded = Signal(str)
-    positionChanged = Signal(str, int, int)
-    errorOccurred = Signal(str)
-    shutdownFinished = Signal()
-    backRequested = Signal()
-    forwardRequested = Signal()
-    channelNextRequested = Signal()
-    channelPrevRequested = Signal()
+    def cache(self, payload):
+        manager = self.manager
+        manager.current_provider_content = {"itv": payload}
+        manager.mark_content_fresh("itv")
+        manager.save_provider()
+        manager._cache_writer.submit(lambda: None).result(timeout=5)
 
-    def shutdown(self):
-        self.shutdownFinished.emit()
+    def test_a_playlist_cached_before_the_split_is_split_when_it_loads(self):
+        # Review Minor 3: upgraders see split groups at once, with no download.
+        self.cache(self.playlist_cached_before_the_split())
+        manager = self.manager
+        manager.set_current_provider(self.progress)
+        itv = manager.current_provider_content["itv"]
+        self.assertEqual([c["title"] for c in itv["categories"]], ["All", "Animation", "Kids"])
+        self.assertEqual(itv["sorted_channels"], {"Animation": [0], "Kids": [0, 1]})
+        self.assertEqual([c["name"] for c in itv["contents"]], ["Toons", "Blocks"])
+        self.assertFalse(manager.is_content_stale("itv"))  # still the cached, fresh content
+        searched = dict(manager.get_all_providers_cached_content())["Fixture"]["itv"]
+        self.assertEqual(searched["sorted_channels"], {"Animation": [0], "Kids": [0, 1]})
 
-    def is_running(self):
-        return False
+    def test_xtream_and_stb_caches_are_read_as_they_are(self):
+        manager = self.manager
+        for kind in ("XTREAM", "STB"):
+            with self.subTest(kind=kind):
+                manager.providers[0]["type"] = kind
+                manager.current_provider = manager.providers[0]
+                self.cache(self.playlist_cached_before_the_split())
+                # The cached content as a provider setup and search read it (no handshake).
+                itv = dict(manager.get_all_providers_cached_content())["Fixture"]["itv"]
+                self.assertEqual(itv["sorted_channels"], {"Animation;Kids": [0], "Kids": [1]})
 
 
-class CatalogNavigationTests(unittest.TestCase):
+def _content(name):
+    return {
+        "categories": [{"id": "*", "title": "All"}],
+        "contents": [{"id": 1, "name": name, "cmd": "http://example.test/1"}],
+        "sorted_channels": {"*": [0]},
+    }
+
+
+class CatalogFreshnessTests(unittest.TestCase):
+    """CatalogService serves a section from the provider cache only while it is fresh."""
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        config_path = str(Path(self.directory.name) / "config.json")
-        with patch.object(ConfigManager, "_get_config_path", return_value=config_path):
-            with patch.object(ConfigManager, "_migrate_old_config"):
-                self.config = ConfigManager()
-        self.config.epg_source = "No Source"
-        self.config.channel_epg = False
-        self.config.channel_logos = False
-        self.config.show_stb_content_info = False
-        self.config.selected_provider_name = "Fixture"
-        self.manager = ProviderManager(self.config)
-        self.manager.providers = [{"name": "Fixture", "type": "XTREAM", "url": ""}]
-        self.manager.current_provider = self.manager.providers[0]
-        self.images = ImageManager(self.config)
-        self.epg = EpgManager(self.config, self.manager)
-        self.player = PlayerSignals()
-        with patch.object(ChannelList, "set_provider"):
-            self.window = ChannelList(
-                self.app, self.player, self.config, self.manager, self.images, self.epg
-            )
-        self.window.content_refresh_timer.stop()
-
-    def tearDown(self):
-        self.window.cancel_content_render()
-        self.window.stop_image_loading()
-        self.wait_until(lambda: not getattr(self.window, "_retired_image_loaders", []))
-        self.window.refresh_on_air_timer.stop()
-        self.window.deleteLater()
-        self.player.deleteLater()
-        self.app.processEvents()
-        self.manager._cache_writer.shutdown(wait=True)
-        self.directory.cleanup()
-
-    def wait_until(self, predicate):
-        for _ in range(500):
-            self.app.processEvents()
-            if predicate():
-                return
-            QTest.qWait(10)
-        self.fail("Background UI operation did not complete")
-
-    def test_late_position_belongs_to_previous_item_after_selection_changes(self):
-        self.window._current_content_id = "new-item"
-        self.player.positionChanged.emit("previous-item", 25000, 100000)
-        self.assertEqual(self.config.get_playback_position("previous-item"), 25000)
-        self.assertIsNone(self.config.get_playback_position("new-item"))
-
-    def test_back_reuses_cached_seasons_without_mutating_names(self):
-        window = self.window
-        series = {"id": "7", "name": "Show"}
-        seasons = [{"id": "1", "number": "1", "o_name": "Season 1", "name": "Show.Season 1"}]
-        self.manager.current_provider_content = {"series": {"seasons": {"7": seasons}}}
-        window.content_type = "series"
-        window.current_series = series
-        window.current_season = seasons[0]
-        window.navigation_stack = [("series", series, "1")]
-        window.display_content([{"number": "1", "ename": "Episode 1"}], content="episode")
-        with patch.object(
-            window, "load_xtream_series_info", side_effect=AssertionError("refetched")
-        ):
-            window.go_back()
-        self.assertEqual(window.current_list_content, "season")
-        self.assertEqual(window.content_list.currentItem().text(1), "Season 1")
-        self.assertEqual(seasons[0]["name"], "Show.Season 1")
-
-    def test_logos_follow_items_after_sort_and_retire_on_back(self):
-        window = self.window
-        self.config.channel_logos = True
-        urls = []
-        for color in ("red", "blue"):
-            path = Path(self.directory.name) / f"{color}.png"
-            image = QImage(8, 8, QImage.Format_RGB32)
-            image.fill(QColor(color))
-            image.save(str(path))
-            urls.append((f"http://example.test/{color}", str(path)))
-        paths = dict(urls)
-
-        async def cached_image(session, url, iconified):
-            return paths[url]
-
-        rows = [
-            {"id": 1, "number": "2", "name": "Zed", "logo": urls[0][0]},
-            {"id": 2, "number": "1", "name": "Alpha", "logo": urls[1][0]},
-        ]
-        with patch.object(self.images, "cache_image_from_url", side_effect=cached_image):
-            window.display_content(rows, content="channel")
-            window.content_list.sortItems(1, Qt.AscendingOrder)
-            self.wait_until(lambda: window.image_loader is None)
-            for row, expected in enumerate(("blue", "red")):
-                icon = window.content_list.topLevelItem(row).icon(1)
-                self.assertFalse(icon.isNull())
-                self.assertEqual(icon.pixmap(8, 8).toImage().pixelColor(4, 4), QColor(expected))
-            window.display_content(rows, content="channel")
-            window.display_categories([{"id": "news", "title": "News"}])
-            self.wait_until(lambda: not getattr(window, "_retired_image_loaders", []))
-        self.assertEqual(window.content_list.topLevelItem(0).text(0), "News")
-        self.assertTrue(window.content_list.topLevelItem(0).icon(0).isNull())
-
-    def test_back_interrupts_large_population_without_late_rows(self):
-        window = self.window
-        category = {"id": "news", "title": "News"}
-        rows = [{"id": i, "number": str(i), "name": f"Channel {i}"} for i in range(3000)]
-        self.manager.current_provider_content = {
-            "itv": {"categories": [category], "contents": rows}
-        }
-        self.manager.mark_content_fresh("itv")
-        window.current_category = category
-        window.navigation_stack = [("root", None, "News")]
-        rows_when_clicked = []
-
-        def click_back():
-            rows_when_clicked.append(window.content_list.topLevelItemCount())
-            window.top_bar.back_button.click()
-
-        window.display_content(rows, content="channel")
-        QTimer.singleShot(0, click_back)
-        self.wait_until(lambda: window.current_list_content == "category")
-        QTest.qWait(30)
-        self.assertLess(rows_when_clicked[0], len(rows))
-        self.assertEqual(window.content_list.topLevelItemCount(), 1)
-        self.assertEqual(window.content_list.currentItem().text(0), "News")
-
-    def test_refresh_preserves_category_selection_and_sort_after_population(self):
-        window = self.window
-        rows = [{"id": i, "number": str(i), "name": f"Channel {i:04d}"} for i in range(600)]
-        other = {"id": 999, "number": "999", "name": "Other category"}
-        window.current_category = {"id": "news", "title": "News"}
-        self.manager.current_provider_content = {
-            "itv": {"contents": rows + [other], "sorted_channels": {"news": list(range(600))}}
-        }
-        window.display_content(rows, content="channel")
-        self.wait_until(lambda: window._content_renderer is None)
-        window.content_list.sortItems(0, Qt.DescendingOrder)
-        selected = window.content_list.findItems("500", Qt.MatchExactly, 0)[0]
-        window.content_list.setCurrentItem(selected)
-        window.refresh_channels()
-        self.wait_until(lambda: window._content_renderer is None)
-        self.assertEqual(window.content_list.topLevelItemCount(), 600)
-        self.assertEqual(window.content_list.topLevelItem(0).text(0), "599")
-        self.assertEqual(window.content_list.currentItem().data(0, Qt.UserRole)["data"]["id"], 500)
-
-    def test_numeric_and_epg_sort_keys_preserve_display_values(self):
-        window = self.window
-        rows = [
-            {"id": 1, "number": "10", "name": "Zed"},
-            {"id": 2, "number": "002", "name": "Alpha"},
-            {"id": 3, "number": "", "name": "Missing"},
-        ]
-        window.display_content(rows, content="channel")
-        self.assertEqual(
-            [window.content_list.topLevelItem(i).text(0) for i in range(3)],
-            ["002", "10", ""],
+        self.addCleanup(self.directory.cleanup)
+        self.config = SimpleNamespace(
+            get_config_dir=lambda: self.directory.name,
+            selected_provider_name="Fixture",
+            prefer_https=False,
+            ssl_verify=True,
+            channel_epg=False,
+            save_config=lambda: None,
         )
-        window.content_list.sortItems(1, Qt.AscendingOrder)
-        self.assertEqual(window.content_list.topLevelItem(0).text(1), "Alpha")
-        window.content_list.setColumnCount(4)
-        for i in range(3):
-            item = window.content_list.topLevelItem(i)
-            item.setData(2, Qt.UserRole, [75, None, 20][i])
-            item.setData(3, Qt.UserRole, ["Zulu", "", "Alpha"][i])
-        window.content_list.sortItems(2, Qt.AscendingOrder)
-        self.assertEqual(window.content_list.topLevelItem(0).data(2, Qt.UserRole), 20)
-        self.assertIsNone(window.content_list.topLevelItem(2).data(2, Qt.UserRole))
-        window.content_list.sortItems(3, Qt.AscendingOrder)
-        self.assertEqual(window.content_list.topLevelItem(0).data(3, Qt.UserRole), "")
+        self.manager = ProviderManager(self.config)
+        self.addCleanup(self.manager._cache_writer.shutdown, wait=True)
+        self.manager.providers = [
+            {"name": "Fixture", "type": "M3UPLAYLIST", "url": "https://example.test/a"}
+        ]
+        self.manager.set_current_provider(SimpleNamespace(emit=lambda message: None))
+        self.factory = FakeFactory()
+        self.factory.results["m3u"] = {"result": _content("Fresh")}
+        epg = SimpleNamespace(get_programs_for_channel=lambda channel, start, limit: [])
+        self.service = CatalogService(
+            self.config, self.manager, epg, runner=ImmediateRunner(), factory=self.factory
+        )
+
+    def loads(self):
+        return [call for call in self.factory.calls if call[0] == "m3u"]
+
+    def request_live(self):
+        self.service.request_section("live")
+        QCoreApplication.processEvents()  # a cached section is reported from the event loop
+
+    def test_a_section_is_reloaded_only_after_six_hours(self):
+        self.assertEqual(ProviderManager.CONTENT_CACHE_TTL, 6 * 60 * 60)
+        with patch("services.provider_manager.time.time", return_value=1000):
+            self.request_live()
+        self.assertEqual(len(self.loads()), 1)
+        with patch("services.provider_manager.time.time", return_value=1000 + 6 * 60 * 60 - 1):
+            self.request_live()
+        self.assertEqual(len(self.loads()), 1)
+        with patch("services.provider_manager.time.time", return_value=1000 + 6 * 60 * 60):
+            self.request_live()
+        self.assertEqual(len(self.loads()), 2)
+
+    def test_a_same_name_provider_edit_reloads_instead_of_using_the_old_channels(self):
+        self.request_live()
+        self.manager._cache_writer.submit(lambda: None).result(timeout=5)
+        self.manager.providers[0]["url"] = "https://example.test/b"
+        self.manager.set_current_provider(SimpleNamespace(emit=lambda message: None))
+        self.assertIsNone(self.service.items("live", "*"))
+        self.factory.results["m3u"] = {"result": _content("Edited")}
+        self.request_live()
+        self.assertEqual(len(self.loads()), 2)
+        self.assertEqual([i["name"] for i in self.service.items("live", "*")], ["Edited"])
+
+
+class SeasonReuseTests(unittest.TestCase):
+    """Back from a season's episodes shows the cached seasons, named as the provider names them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_cached_seasons_are_reused_without_renaming_them(self):
+        service, _, factory, _ = make_service(
+            {"name": "X", "type": "XTREAM", "url": "h:1", "username": "u", "password": "p"}
+        )
+        factory.results["xtream_series"] = {
+            "result": {"seasons": [{"id": "1", "name": "Season 1", "episodes": []}]}
+        }
+        series = {"id": "7", "name": "Show"}
+        service.request_seasons(series)
+        service.request_seasons(series)  # Back to the seasons: served from the cache
+        QCoreApplication.processEvents()
+        self.assertEqual(len(factory.calls), 1)
+        [season] = service.seasons(series)
+        self.assertEqual((season["name"], season["o_name"]), ("Show.Season 1", "Season 1"))
+
+        view = SeriesView(FakePosters())
+        self.addCleanup(view.close)
+        self.assertEqual(view.season_label(season, 0), "Season 1")
 
 
 if __name__ == "__main__":

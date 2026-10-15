@@ -1,49 +1,71 @@
 # -*- mode: python ; coding: utf-8 -*-
+#
+# macOS: QiTV.app as one directory inside the bundle, with VLC's own libVLC in it.
+#
+# The app ships VLC.app's whole libVLC, nothing trimmed (lib/ and plugins/), and needs no VLC
+# install:
+# - libvlc and libvlccore sit at the bundle's top (Contents/Frameworks, sys._MEIPASS);
+# - the plugins sit where that libvlccore looks for them: <its directory>/vlc/plugins;
+# - before python-vlc loads, main.py points it at these (services/vlc_bundle.py), since
+#   python-vlc prefers /Applications/VLC.app and its plugins when that exists.
+# One directory, not one file: a one-file app unpacks into a new directory at every launch,
+# and macOS validates each freshly written plugin on its first load (56 s on an Intel Mac);
+# inside the .app that happens once.
 
-import json
+import os
 from pathlib import Path
-import sys
 import tomllib
 
-from PyInstaller.building.datastruct import Tree
 
-ROOT = Path(SPECPATH)
-sys.path.insert(0, str(ROOT))
-from scripts.prepare_pyav import validate_installed
+def read_version():
+    # SPECPATH is provided by PyInstaller and points to the spec file directory
+    pyproj = Path(SPECPATH) / 'pyproject.toml'
+    with pyproj.open('rb') as f:
+        return tomllib.load(f)['project']['version']
 
-NATIVE_PYAV = ROOT / 'native' / 'pyav'
-validate_installed(NATIVE_PYAV)
-with (ROOT / 'pyproject.toml').open('rb') as file:
-    APP_VERSION = tomllib.load(file)['project']['version']
-NATIVE_MPV = ROOT / 'native' / 'mpv'
-if not (NATIVE_MPV / 'bundle.json').is_file():
-    raise SystemExit('Prepare bundled MPV first: uv run scripts/prepare_mpv.py')
-if not json.loads((NATIVE_MPV / 'bundle.json').read_text()).get('redistributable'):
-    raise SystemExit('Diagnostic MPV is not a release input; run the default source preparation.')
+
+APP_VERSION = read_version()
+
+VLC_PATH = '/Applications/VLC.app/Contents/MacOS'  # where VLC's installer puts it
 
 a = Analysis(
-    [str(ROOT / 'main.py')],
-    pathex=[str(ROOT)],
-    binaries=[],
-    datas=[
-        (str(ROOT / 'pyproject.toml'), '.'),
-        (str(ROOT / 'assets'), 'assets'),
-        (str(NATIVE_PYAV / 'bundle.json'), 'native/pyav'),
-        (str(NATIVE_PYAV / 'licenses'), 'native/pyav/licenses'),
+    ['main.py'],
+    pathex=[],
+    binaries=[
+        (os.path.join(VLC_PATH, 'lib', '*'), '.'),
+        (os.path.join(VLC_PATH, 'plugins', '*'), 'vlc/plugins'),
     ],
-    hiddenimports=['scripts.smoke_mpv'],
+    datas=[
+        ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
+        ('assets/qitv.png', 'assets'),  # the logo the Library, welcome card and About show
+        # QiTV's license, and those of what the app ships (VLC, Qt, Python libraries).
+        ('LICENSE', '.'),
+        ('THIRD-PARTY-NOTICES.md', '.'),
+        ('licenses', 'licenses'),
+    ],
+    hiddenimports=[
+        # The live time-shift helper process (spawned) and what its source imports.
+        'services.live.worker',
+        'm3u8',
+        'Cryptodome.Cipher.AES',
+        # Loaded on first use (services/lazy_import.py): no import statement names them.
+        'aiohttp',
+        'asyncio',
+        'requests',
+        'urlobject',
+    ],
     hookspath=[],
-    hooksconfig={},
     runtime_hooks=[],
-    excludes=['vlc', 'mpv'],
+    excludes=[],
     noarchive=False,
+    #https://github.com/pyinstaller/pyinstaller/issues/7851#issuecomment-1677986648
+    module_collection_mode={
+        'vlc': 'py',
+    }
 )
 
-# Preserve the prepared MPV closure, install names and signatures. BUNDLE places
-# this complete data tree in Resources and cross-links it from sys._MEIPASS.
-# Native executable DATA keeps its execute bit; Analysis must not rewrite it.
-native_mpv = Tree(str(NATIVE_MPV), prefix='native/mpv', typecode='DATA')
 pyz = PYZ(a.pure)
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -55,21 +77,20 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
-    icon=str(ROOT / 'assets' / 'qitv.icns'),
+    icon='assets/qitv.icns',
 )
-collection = COLLECT(
+coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
-    native_mpv,
     strip=False,
     upx=False,
     name='QiTV',
 )
 app = BUNDLE(
-    collection,
+    coll,
     name='QiTV.app',
-    icon=str(ROOT / 'assets' / 'qitv.icns'),
+    icon='assets/qitv.icns',
     bundle_identifier='com.ozankaraali.QiTV',
     version=APP_VERSION,
     info_plist={
@@ -84,5 +105,5 @@ app = BUNDLE(
         'LSApplicationCategoryType': 'public.app-category.video',
         'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication',
-    },
+    }
 )

@@ -1,63 +1,96 @@
-from copy import deepcopy
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-import orjson
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from config_manager import ConfigManager
+from PySide6.QtWidgets import QApplication, QMainWindow
+
+from services.config_manager import ConfigManager
 
 
-class ConfigMigrationTests(unittest.TestCase):
-    def test_missing_channel_window_restored_without_losing_provider_or_history(self):
-        manager = ConfigManager.__new__(ConfigManager)
-        retained = {
-            "selected_provider_name": "My provider",
-            "data": [
-                {"name": "My provider", "type": "M3UPLAYLIST", "url": "https://example.test/live"}
-            ],
-            "favorites": ["News"],
-            "watch_history": [{"content_id": "My provider:42", "position": 123}],
-            "playback_positions": {"My provider:42": 123},
+class WindowConfigMigrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_a_1x_config_gains_the_tv_window_without_resetting_saved_state(self):
+        # A 1.x config names only the old windows. A missing window entry once kept the
+        # player from starting (KeyError in 1.13.7); the TV window's entry is added instead.
+        channel_geometry = {
+            "x": 120,
+            "y": 140,
+            "width": 580,
+            "height": 720,
+            "splitter_ratio": 0.6,
+            "splitter_content_info_ratio": 0.4,
         }
-        manager.config = deepcopy(retained)
-        manager.config["window_positions"] = {"video_player": {"x": 10, "y": 20}}
+        saved_state = {
+            "selected_provider_name": "Saved provider",
+            "favorites": ["Saved channel"],
+            "playback_positions": {"Saved movie": {"position": 45000, "duration": 90000}},
+            "window_positions": {"channel_list": channel_geometry},
+            "check_updates": False,
+        }
         with tempfile.TemporaryDirectory() as directory:
-            manager.config_path = str(Path(directory) / "config.json")
-            manager.update_patcher()
-            saved = orjson.loads(Path(manager.config_path).read_bytes())
-        for key, value in retained.items():
-            self.assertEqual(saved[key], value)
-        self.assertEqual(
-            saved["window_positions"], ConfigManager.default_config()["window_positions"]
-        )
-        self.assertFalse(saved["timeshift_enabled"])
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(json.dumps(saved_state), encoding="utf-8")
+            with (
+                patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)),
+                patch.object(ConfigManager, "_migrate_old_config"),
+            ):
+                config = ConfigManager()
+                window = QMainWindow()
+                restored = QMainWindow()
+                try:
+                    config.apply_window_settings("tv_window", window)
+                    window.setGeometry(80, 100, 640, 360)
+                    config.save_window_settings(window, "tv_window")
+                    reloaded = ConfigManager()
+                    reloaded.apply_window_settings("tv_window", restored)
+                    self.assertEqual(restored.geometry(), window.geometry())
+                    # Kept as it was: going back to 1.x finds its windows where they were.
+                    self.assertEqual(
+                        reloaded.config["window_positions"]["channel_list"], channel_geometry
+                    )
+                    for key in ("selected_provider_name", "favorites", "playback_positions"):
+                        self.assertEqual(reloaded.config[key], saved_state[key])
+                finally:
+                    window.deleteLater()
+                    restored.deleteLater()
+                    self.app.processEvents()
 
-    def test_migration_retires_time_limit_without_losing_geometry_consent_or_capacity(self):
-        manager = ConfigManager.__new__(ConfigManager)
-        manager.config = ConfigManager.default_config()
-        geometry = {"x": 20, "y": 30, "width": 550, "height": 650, "splitter_ratio": 0.6}
-        manager.config["window_positions"]["channel_list"] = deepcopy(geometry)
-        manager.config.update(timeshift_enabled=True, timeshift_minutes=90, timeshift_max_mib=4096)
+
+class WatchHistoryIdentityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_stb_episodes_sharing_a_series_id_are_kept_apart(self):
+        from services.watch_state import WatchState
+
         with tempfile.TemporaryDirectory() as directory:
-            manager.config_path = str(Path(directory) / "config.json")
-            manager.update_patcher()
-            saved = orjson.loads(Path(manager.config_path).read_bytes())
-        self.assertEqual(saved["window_positions"]["channel_list"], geometry)
-        self.assertTrue(saved["timeshift_enabled"])
-        self.assertNotIn("timeshift_minutes", saved)
-        self.assertEqual(saved["timeshift_max_mib"], 4096)
-
-    def test_only_explicit_boolean_consent_permits_disk_recording(self):
-        manager = ConfigManager.__new__(ConfigManager)
-        for value in (None, "false", "true", 1, [], {}):
-            with self.subTest(value=value):
-                manager.config = {"timeshift_enabled": value}
-                self.assertFalse(manager.timeshift_enabled)
-        manager.timeshift_enabled = True
-        self.assertTrue(manager.timeshift_enabled)
-        manager.timeshift_enabled = False
-        self.assertFalse(manager.timeshift_enabled)
+            config_path = Path(directory) / "config.json"
+            with (
+                patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)),
+                patch.object(ConfigManager, "_migrate_old_config"),
+            ):
+                config = ConfigManager()
+                watch = WatchState(config)
+                ep1 = {"id": "7", "name": "Show", "season": "1", "series": "1"}
+                ep2 = {"id": "7", "name": "Show", "season": "1", "series": "2"}
+                movie = {"id": "9", "name": "Film"}
+                watch.record_play("P", ep1, item_type="episode", link="a")
+                watch.record_play("P", ep2, item_type="episode", link="b")
+                watch.record_play("P", movie, item_type="movie", link="c")
+                watch.record_play("P", movie, item_type="movie", link="d")
+                history = config.watch_history
+                self.assertEqual([h["link"] for h in history], ["d", "b", "a"])
+                self.assertEqual(history[1]["content_id"], "P:7:s1:e2")
+                self.assertEqual(history[0]["content_id"], "P:9")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 import logging
-from typing import Dict, Optional
-from urllib.parse import quote, urlencode
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urlencode, urlsplit
+
+from services.redact import redact_url, safe_exc
 
 logger = logging.getLogger(__name__)
 
@@ -17,13 +19,48 @@ def base_from_url(url: str) -> str:
         netloc = rest.split("/", 1)[0]
         return f"{scheme}://{netloc}"
     except Exception as e:
-        logger.warning("Failed to parse base from URL %s: %s", url, e)
+        logger.warning("Failed to parse base from URL %s: %s", redact_url(url), safe_exc(e))
         return url
+
+
+def https_fallback_candidates(url: str, prefer_https: bool) -> List[str]:
+    """Return the URLs to try in order: the HTTPS form first when it is preferred."""
+    if prefer_https and url.startswith("http://"):
+        return ["https://" + url[len("http://") :], url]
+    return [url]
+
+
+def stb_portal_base(url: str, prefer_https: bool = False) -> str:
+    """Reduce an STB portal URL to 'scheme://netloc', upgrading http when HTTPS is preferred."""
+    parts = urlsplit(url)
+    scheme = "https" if prefer_https and parts.scheme == "http" else parts.scheme
+    return f"{scheme}://{parts.netloc}"
 
 
 def stb_endpoint(base: str) -> str:
     """Return the STB load.php endpoint given a base host URL."""
     return f"{base}/server/load.php"
+
+
+def stb_create_link_url(
+    base: str, content_type: str, cmd: str, *, is_episode: bool = False, series: Any = None
+) -> str:
+    """Build the STB create_link URL that resolves an item's cmd into a playable link.
+
+    Episodes are requested as VOD with their episode number in ``series``. Unlike
+    :func:`stb_request_url`, ``cmd`` keeps '/' unescaped and ``series`` is passed as-is,
+    matching what portals have always received from this client.
+    """
+    if is_episode:
+        link_type = "vod" if content_type == "series" else content_type
+        series_query = f"&series={series}"
+    else:
+        link_type = content_type
+        series_query = ""
+    return (
+        f"{stb_endpoint(base)}?type={link_type}&action=create_link"
+        f"&cmd={quote(cmd)}{series_query}&JsHttpRequest=1-xml"
+    )
 
 
 def stb_request_url(
@@ -195,3 +232,9 @@ def xtream_epg_url(
     if limit is not None:
         extra["limit"] = str(limit)
     return _build_xtream_url(base, "player_api.php", username, password, extra)
+
+
+def provider_prefers_https(provider: Dict[str, Any], global_default: bool) -> bool:
+    """A provider's own 'prefer_https' wins; unset (missing/None) falls back to the global setting."""
+    value = provider.get("prefer_https")
+    return global_default if value is None else bool(value)

@@ -4,7 +4,7 @@ import threading
 import unittest
 from urllib.parse import parse_qs, urlsplit
 
-from workers import XtreamLoaderWorker
+from services.workers import XtreamLoaderWorker
 
 
 class XtreamRequestTests(unittest.TestCase):

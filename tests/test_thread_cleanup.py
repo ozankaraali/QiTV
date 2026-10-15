@@ -67,19 +67,18 @@ class ThreadCleanupTests(unittest.TestCase):
         """Exercise the real content lifecycle, including loss of its QObject owner."""
         self.run_scenario("content-loading")
 
-    def test_delayed_link_and_resume_cannot_restart_a_closing_window(self):
-        self.run_scenario("closing-playback")
+    def test_job_runner_teardown_survives_gui_object_churn(self):
+        """Hundreds of jobs finishing while the GUI destroys connected QObjects must not hang.
 
-    def test_windows_update_stops_recording_and_waits_for_native_shutdown(self):
-        self.run_scenario("windows-update")
-
-    def test_windows_update_launch_failure_is_reported_before_quitting(self):
-        self.run_scenario("windows-update-error")
+        A worker deleted on its own thread made Qt call back into Python while holding a
+        signal-slot mutex, deadlocking against the GUI thread holding the GIL.
+        """
+        self.run_scenario("jobrunner-churn")
 
 
 def run_child(scenario, playlist):
     # Keep QApplication, production imports, and crash-prone threads out of the
-    # unittest runner. Every scenario uses only isolated configuration/fixtures.
+    # unittest runner. No window, playback backend, or user config is needed.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from PySide6.QtCore import QEventLoop, QObject, Qt, QThread, QTimer, Slot
     from PySide6.QtWidgets import QApplication
@@ -124,9 +123,9 @@ def run_child(scenario, playlist):
             self.timer.start()
 
         def block(self):
-            # QObject deferred destruction runs after QThread.finished, but is
-            # still inside native thread teardown. Never leave it blocked on a
-            # failing assertion or a GUI-side blocking wait regression.
+            # Connected directly to QThread.finished: it runs on the worker thread
+            # inside native thread teardown, before the thread can be joined. Never
+            # leave it blocked on a failing assertion or a GUI-side blocking wait.
             self.entered.set()
             if not self.release.wait(5):
                 self.expired.set()
@@ -171,10 +170,14 @@ def run_child(scenario, playlist):
         gate = TeardownGate()
         observer = Observer()
         destroyed = threading.Event()
+        worker_destroyed_on = []
         thread = QThread()
         worker = Worker()
         worker.moveToThread(thread)
-        worker.destroyed.connect(gate.block, Qt.DirectConnection)
+        thread.finished.connect(gate.block, Qt.DirectConnection)
+        worker.destroyed.connect(
+            lambda *_: worker_destroyed_on.append(threading.get_ident()), Qt.DirectConnection
+        )
         thread.destroyed.connect(lambda *_: destroyed.set())
         thread.started.connect(worker.run)
         cleanup = ThreadCleanup(thread, worker)
@@ -183,73 +186,101 @@ def run_child(scenario, playlist):
         thread.start()
         del cleanup, thread, worker
         try:
-            wait_until(gate.entered.is_set, "worker deferred deletion was never reached")
+            wait_until(gate.entered.is_set, "native thread teardown was never reached")
             gate.assert_pending(thread_ref, worker_ref)
             case.assertEqual(observer.completions, [], "completion preceded native join")
+            case.assertEqual(worker_destroyed_on, [], "worker destroyed before the native join")
         finally:
             gate.finish(destroyed)
         case.assertEqual(observer.completions, [(True, True)])
+        # Never destroyed on its own thread (that deadlocks against the GIL): the
+        # cleanup releases it on the GUI thread once the thread has been joined.
+        wait_until(lambda: worker_ref() is None, "worker was not released after the join")
+        case.assertEqual(worker_destroyed_on, [threading.get_ident()])
     elif scenario == "content-loading":
-        from mixins.content_loading_mixin import ContentLoadingMixin
-        from workers import M3ULoaderWorker
+        from services.catalog import ALL_GROUP_ID, CatalogService, WorkerFactory
+        from services.workers import M3ULoaderWorker
 
-        class Consumer(QObject, ContentLoadingMixin):
+        class Providers:
+            """The ProviderManager surface CatalogService reads; the playlist is never fresh."""
+
             def __init__(self):
-                super().__init__()
-                self._bg_jobs = []
-                self.content_loader = None
-                self.config_manager = SimpleNamespace(ssl_verify=True, prefer_https=False)
-                self.provider_manager = SimpleNamespace(current_provider={})
-                self.loads = 0
-                self.names = ()
-                self.results_on_gui = True
-                self.errors = []
+                self.providers = [{"name": "Local", "type": "M3UPLAYLIST", "url": playlist}]
+                self.current_provider = self.providers[0]
+                self.current_provider_content = {}
+                self.headers = {}
 
-            # Only view/render hooks are replaced; worker creation, signal
-            # delivery, cancellation, and job retirement are production code.
-            def cancel_content_render(self):
+            def is_content_stale(self, content_type):
+                return True
+
+            def mark_content_fresh(self, content_type):
                 pass
 
-            def update_ui_on_loading(self, loading):
-                self.loading = loading
+            def save_provider(self):
+                pass
 
-            def statusBar(self):
-                return SimpleNamespace(
-                    showMessage=lambda message, duration: self.errors.append(message)
-                )
+        class GatedM3ULoaderWorker(M3ULoaderWorker):
+            def run(self):
+                # Hold native teardown open once the real worker has finished.
+                QThread.currentThread().finished.connect(gate.block, Qt.DirectConnection)
+                super().run()
 
-            def _on_catalog_loaded(self, payload):
-                self.loads += 1
-                self.names = tuple(item["name"] for item in payload["contents"])
-                self.results_on_gui &= QThread.currentThread() == app.thread()
+        class Factory(WorkerFactory):
+            """The production factory; the last load's worker holds its thread's teardown."""
 
-        consumer = Consumer()
+            gated = False
+            last = None
+
+            def m3u(self, url, verify_ssl, prefer_https):
+                if not self.gated:
+                    return super().m3u(url, verify_ssl, prefer_https)
+                self.last = GatedM3ULoaderWorker(url, verify_ssl=verify_ssl)
+                return self.last
+
+        config = SimpleNamespace(
+            selected_provider_name="Local", prefer_https=False, ssl_verify=True, channel_epg=False
+        )
+        epg = SimpleNamespace(get_programs_for_channel=lambda channel, start, limit: [])
+        factory = Factory()
+        # Only the provider and EPG stand-ins are fakes: the worker factory, the JobRunner
+        # threads, signal delivery and job retirement are production code.
+        consumer = CatalogService(config, Providers(), epg, factory=factory)
+        loads, names, errors, on_gui = [], [()], [], []
+
+        def loaded(section):
+            loads.append(section)
+            names[0] = tuple(item["name"] for item in consumer.items(section, ALL_GROUP_ID))
+            on_gui.append(QThread.currentThread() == app.thread())
+
+        consumer.sectionReady.connect(loaded)
+        consumer.sectionFailed.connect(lambda section, message: errors.append(message))
         for number in range(512):
-            consumer.load_m3u_playlist(playlist)
+            consumer.request_section("live")
             wait_until(
-                lambda: consumer.loads == number + 1 and not has_pending_threads(),
+                lambda: len(loads) == number + 1 and not has_pending_threads(),
                 f"local playlist load {number + 1} did not complete",
             )
-        case.assertEqual(consumer.names, ("First channel", "Second channel"))
-        case.assertTrue(consumer.results_on_gui)
-        case.assertFalse(consumer.loading)
-        case.assertEqual(consumer.errors, [])
+        case.assertEqual(names[0], ("First channel", "Second channel"))
+        case.assertTrue(all(on_gui))
+        case.assertFalse(consumer.is_loading())
+        case.assertEqual(errors, [])
 
-        # Close the consumer after its real result arrives but before native
-        # cleanup can finish. The consumer's job list must not be the sole owner.
+        # Destroy the consumer (and its JobRunner) after its real result arrives but before
+        # native cleanup can finish. Its job list must not be the sole owner.
         gate = TeardownGate()
         destroyed = threading.Event()
         consumer_destroyed = threading.Event()
-        worker = M3ULoaderWorker(playlist)
-        worker.destroyed.connect(gate.block, Qt.DirectConnection)
+        factory.gated = True
         consumer.destroyed.connect(lambda *_: consumer_destroyed.set())
-        consumer._start_content_worker(worker, consumer._on_catalog_loaded)
+        consumer.request_section("live")
+        worker = factory.last
+        factory.last = None
         thread = worker.thread()
         thread.destroyed.connect(lambda *_: destroyed.set())
         thread_ref, worker_ref = weakref.ref(thread), weakref.ref(worker)
         try:
             wait_until(
-                lambda: gate.entered.is_set() and consumer.loads == 513,
+                lambda: gate.entered.is_set() and len(loads) == 513,
                 "last playlist result did not reach deferred worker deletion",
             )
             consumer.deleteLater()
@@ -259,220 +290,50 @@ def run_child(scenario, playlist):
             gate.assert_pending(thread_ref, worker_ref)
         finally:
             gate.finish(destroyed)
-    elif scenario in ("closing-playback", "windows-update", "windows-update-error"):
-        from unittest.mock import patch
+    elif scenario == "jobrunner-churn":
+        import faulthandler
 
-        from PySide6.QtCore import QProcess, Signal
-        from PySide6.QtWidgets import QMainWindow, QMessageBox
+        from PySide6.QtCore import Signal
+        from PySide6.QtTest import QTest
 
-        from channel_list import ChannelList
-        from mpv_player import MpvPlayer
-        import update_checker
+        from services.jobs import JobRunner
 
-        class Player(MpvPlayer):
-            """Use a harmless stdin-driven child at the native MPV boundary."""
+        # A deadlock exits with a stack dump instead of waiting for the parent's timeout.
+        faulthandler.dump_traceback_later(45, exit=True)
 
-            def __init__(self):
-                super().__init__(SimpleNamespace())
-                self.starts = []
-                self.quit_requested = False
+        class Worker(QObject):
+            finished = Signal(object)
+            error = Signal(str)
 
-            def _start(self):
-                self.starts.append(self._pending.url)
-                self._pending = None
-                process = QProcess(self)
-                self._process = process
-                process.finished.connect(lambda code, status: self._finished(process, code, status))
-                process.start(sys.executable, ["-c", "import sys; sys.stdin.read()"])
+            def run(self):
+                self.finished.emit(1)
 
-            def _begin_quit(self):
-                # The test releases stdin separately, just as MPV can take time
-                # to honor the IPC quit request while a recorder is stopping.
-                self.quit_requested = True
+        class Churn(QObject):
+            ping = Signal()
 
-        class Window(ChannelList):
-            def __init__(self, player):
-                # Omit catalog/UI construction; retain real playback and closure.
-                QMainWindow.__init__(self)
-                self.app = app
-                self.player = player
-                self._closing = False
-                self._shutdown_complete = False
-                self._bg_jobs = []
-                self._provider_setup_running = False
-                self._current_content_id = None
-                self._pending_link_ctx = None
-                self.content_type = "itv"
-                self.provider_manager = SimpleNamespace(current_provider={"type": "STB"})
-                self.config_manager = SimpleNamespace(
-                    play_in_vlc=False,
-                    play_in_mpv=False,
-                    save_window_settings=lambda *_: None,
-                )
-                self.image_manager = SimpleNamespace(save_index=lambda: None)
-                self.epg_manager = SimpleNamespace(save_index=lambda: None)
-                self.content_refresh_timer = QTimer(self)
-                self.refresh_on_air_timer = QTimer(self)
-
-            def cancel_content_loading(self):
+            @Slot()
+            def pong(self):
                 pass
 
-            def stop_image_loading(self):
-                pass
-
-            def unlock_ui_after_loading(self):
-                pass
-
-        player = Player()
-        window = Window(player)
-        shutdowns = []
-        window.shutdownFinished.connect(lambda: shutdowns.append(True))
-        window.show()
-        app.setQuitOnLastWindowClosed(True)
-        timed_out = []
-        watchdog = QTimer()
-        watchdog.setSingleShot(True)
-        watchdog.timeout.connect(lambda: (timed_out.append(True), app.quit()))
-        watchdog.start(10000)
-        quits = []
-        app.aboutToQuit.connect(lambda: quits.append(True))
-
-        if scenario == "closing-playback":
-
-            class LinkWorker(QObject):
-                finished = Signal(dict)
-
-                @Slot()
-                def run(self):
-                    release_link.wait(5)
-                    self.finished.emit({"link": "https://example.invalid/late"})
-
-            # Ordinary stop/replay remains allowed before application closure.
-            window._play_content("https://example.invalid/first")
-            wait_until(lambda: player._process.state() == QProcess.Running, "child did not start")
-            player.stop()
-            window._play_content_with_position("https://example.invalid/replay", 12000)
-            case.assertEqual(player._pending.url, "https://example.invalid/replay")
-            player.stop()
-            player._process.closeWriteChannel()
-            wait_until(lambda: not player.is_running(), "initial child did not exit")
-            starts = list(player.starts)
-
-            release_link = threading.Event()
-            thread = QThread()
-            worker = LinkWorker()
-            worker.moveToThread(thread)
-            thread.started.connect(worker.run)
-            worker.finished.connect(window._on_link_created, Qt.QueuedConnection)
-            worker.finished.connect(thread.quit)
-            window._bg_jobs.append((thread, worker))
-            ThreadCleanup(thread, worker).finished.connect(lambda _: window._bg_jobs.clear())
-            thread.start()
-
-            def close_during_link():
-                window.close()
-                case.assertTrue(window._closing)
-                case.assertTrue(window.isVisible(), "window did not wait for the link worker")
-                # Already queued resume/autoplay callbacks must not launch or
-                # schedule another provider worker either.
-                window._play_content_with_position("https://example.invalid/resume", 12000)
-                window._play_content_with_resume_check("https://example.invalid/dialog", {})
-                window.play_item({"cmd": "https://example.invalid/autoplay"})
-                release_link.set()
-
-            QTimer.singleShot(0, close_during_link)
-            try:
-                app.exec()
-            finally:
-                release_link.set()
-            case.assertFalse(timed_out, "late playback prevented application shutdown")
-            case.assertEqual(player.starts, starts, "closing launched a fresh player")
-            case.assertIsNone(player._pending)
-            case.assertFalse(window.isVisible())
-        else:
-
-            class Recorder(QThread):
-                def __init__(self):
-                    super().__init__()
-                    self.stop_requested = threading.Event()
-
-                def run(self):
-                    self.stop_requested.wait(5)
-
-                def request_stop(self):
-                    self.stop_requested.set()
-
-            gate = TeardownGate()
-            recorder = Recorder()
-            recorder.finished.connect(gate.block, Qt.DirectConnection)
-            destroyed = threading.Event()
-            recorder.destroyed.connect(lambda *_: destroyed.set())
-            player._recorder = recorder
-            ThreadCleanup(recorder).finished.connect(player._recording_finished)
-            recorder.start()
-            # Set up the independent native process without stopping recording.
-            player._pending = SimpleNamespace(url="https://example.invalid/live")
-            player._start()
-            wait_until(lambda: player._process.state() == QProcess.Running, "child did not start")
-            launches = []
-            warnings = []
-            quit_snapshots = []
-            app.aboutToQuit.connect(lambda: quit_snapshots.append((list(launches), list(warnings))))
-
-            def dismiss_failure():
-                for widget in app.topLevelWidgets():
-                    if isinstance(widget, QMessageBox):
-                        warnings.append(widget.text())
-                        widget.accept()
-
-            def launch(command, **kwargs):
-                case.assertFalse(has_pending_threads(), "installer raced native thread teardown")
-                case.assertFalse(player.is_running(), "installer raced the old player process")
-                launches.append(command)
-                if scenario == "windows-update-error":
-                    QTimer.singleShot(0, dismiss_failure)
-                    raise OSError("fixture launch failure")
-
-            def install():
-                update_checker._perform_windows_update(
-                    "downloaded.exe", "https://example.invalid/release"
-                )
-                case.assertTrue(recorder.stop_requested.is_set(), "update never stopped recording")
-                case.assertTrue(player.quit_requested)
-                gate.assert_pending(weakref.ref(recorder), weakref.ref(recorder))
-                case.assertEqual(launches, [])
-                gate.finish(destroyed)
-                case.assertTrue(player.is_running())
-                case.assertEqual(launches, [], "installer did not wait for the native child")
-                player._process.closeWriteChannel()
-
-            with (
-                patch.object(update_checker.subprocess, "Popen", side_effect=launch),
-                patch.object(update_checker.subprocess, "DETACHED_PROCESS", 8, create=True),
-                patch.object(
-                    update_checker.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True
-                ),
-            ):
-                QTimer.singleShot(0, install)
-                try:
-                    app.exec()
-                finally:
-                    gate.release.set()
-                    recorder.stop_requested.set()
-            case.assertFalse(timed_out, "update deadlocked during shutdown")
-            expected = [["downloaded.exe", "--replace", sys.executable]]
-            case.assertEqual(launches, expected)
-            expected_warnings = (
-                ["Failed to launch the update."] if scenario.endswith("-error") else []
-            )
-            case.assertEqual(quit_snapshots, [(expected, expected_warnings)])
-        watchdog.stop()
-        case.assertEqual(quits, [True])
-        from PySide6.QtGui import QCloseEvent
-
-        window.closeEvent(QCloseEvent())
-        case.assertEqual(shutdowns, [True], "repeated close emitted shutdown completion again")
-        case.assertFalse(has_pending_threads())
+        runner = JobRunner()
+        delivered = []
+        rounds, per_round = 60, 8
+        for _ in range(rounds):
+            for _ in range(per_round):
+                runner.run_worker(Worker(), lambda _context, payload: delivered.append(payload))
+            # GUI-thread churn: destroy connected Python-created QObjects while jobs end.
+            churn = [Churn() for _ in range(40)]
+            for sender, receiver in zip(churn, churn[1:]):
+                sender.ping.connect(receiver.pong)
+            for item in churn:
+                item.deleteLater()
+            del churn
+            QTest.qWait(5)
+        wait_until(
+            lambda: runner.pending() == 0 and len(delivered) == rounds * per_round,
+            "jobs did not all deliver and retire",
+        )
+        faulthandler.cancel_dump_traceback_later()
     else:
         raise ValueError(f"Unknown scenario: {scenario}")
 

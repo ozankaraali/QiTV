@@ -1,17 +1,45 @@
-import multiprocessing
+"""QiTV's entry point.
 
-# PyInstaller must dispatch spawned workers before importing Qt, libmpv or
-# application configuration. Source-mode children import this as __mp_main__.
-if __name__ == "__main__":
-    multiprocessing.freeze_support()
+Only the standard library is imported at module level: helper processes started with
+multiprocessing's "spawn" import this module again (as __mp_main__), and frozen builds must
+reach freeze_support() before anything heavy. Qt, the UI and the services load in main().
+"""
 
 import ctypes
 import logging
+import multiprocessing
 import os
 import platform
 import shutil
 import sys
 import time
+from typing import Mapping, Optional, Sequence
+import warnings
+
+SMOKE_FLAG = "--smoke"
+SMOKE_ENV = "QITV_SMOKE"
+
+
+def qt_platform_override(system: str, environ: Mapping[str, str]) -> Optional[str]:
+    """The QT_QPA_PLATFORM to set before Qt starts, or None to leave Qt's choice.
+
+    libVLC embeds its video and the overlay host stays glued only on X11. Qt 6 picks
+    Wayland in Wayland sessions, so Linux prefers XWayland when an X display exists.
+    """
+    if system == "Linux" and not environ.get("QT_QPA_PLATFORM") and environ.get("DISPLAY"):
+        return "xcb;wayland"
+    return None
+
+
+def smoke_arguments(argv: Sequence[str], environ: Mapping[str, str]) -> Optional[list[str]]:
+    """The smoke test's arguments when this run is one, else None (start the app).
+
+    `qitv --smoke <args>` runs scripts/smoke_tv.py inside the packaged app (CI's frozen smoke
+    test), and only with QITV_SMOKE=1 set: without it, release users get the app as usual.
+    """
+    if environ.get(SMOKE_ENV) == "1" and list(argv[1:2]) == [SMOKE_FLAG]:
+        return list(argv[2:])
+    return None
 
 
 def handle_replace_flag():
@@ -47,25 +75,19 @@ def handle_replace_flag():
         logging.error(f"Failed to perform update replacement: {e}")
 
 
-if __name__ == "__main__":
+def main() -> int:
     from PySide6 import QtGui
-    from PySide6.QtCore import QLoggingCategory, QTimer, qInstallMessageHandler
+    from PySide6.QtCore import QLoggingCategory, qInstallMessageHandler
     from PySide6.QtWidgets import QApplication
     import qdarktheme
 
-    from channel_list import ChannelList
-    from config_manager import ConfigManager, get_app_version
-    from epg_manager import EpgManager
-    from image_manager import ImageManager
-    from mpv_player import MpvPlayer
-    from provider_manager import ProviderManager
-    from sleep_manager import allow_sleep, prevent_sleep
-    from update_checker import check_for_updates
-
-    if "--smoke-mpv" in sys.argv:
-        from scripts.smoke_mpv import main as smoke_main
-
-        sys.exit(smoke_main([arg for arg in sys.argv[1:] if arg != "--smoke-mpv"]))
+    from services.config_manager import ConfigManager, get_app_version
+    from services.epg_manager import EpgManager
+    from services.image_manager import ImageManager
+    from services.provider_manager import ProviderManager
+    from services.sleep_manager import allow_sleep, prevent_sleep
+    from ui.tv_window import TVWindow
+    from ui.update_dialogs import check_for_updates
 
     # Basic logging configuration (tweak level as needed)
     logging.basicConfig(
@@ -77,8 +99,13 @@ if __name__ == "__main__":
     if platform.system() == "Windows":
         handle_replace_flag()
 
+    # Suppress noisy third-party warnings
+    warnings.filterwarnings("ignore", category=SyntaxWarning, module="vlc")
     # Reduce Qt info logs that are not actionable
     QLoggingCategory.setFilterRules("qt.accessibility.*=false\nqt.qpa.fonts.*=false")
+    qt_platform = qt_platform_override(platform.system(), os.environ)
+    if qt_platform:
+        os.environ["QT_QPA_PLATFORM"] = qt_platform
     app = QApplication(sys.argv)
 
     # Optional: capture Qt warnings to help debug thread/timer issues
@@ -110,36 +137,34 @@ if __name__ == "__main__":
 
     if platform.system() == "Windows":
         myappid = f"com.ozankaraali.qitv.{get_app_version()}"
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)  # type: ignore
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
+    qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})
 
     prevent_sleep()
     try:
-        player = MpvPlayer(config_manager, parent=app)
-        channel_list = ChannelList(
-            app, player, config_manager, provider_manager, image_manager, epg_manager
-        )
-        qdarktheme.setup_theme("auto", custom_colors={"primary": "#C96B43"})
-        channel_list.show()
-
-        def _bring_main_window_to_front():
-            try:
-                if channel_list.isMinimized():
-                    channel_list.showNormal()
-                channel_list.raise_()
-                channel_list.activateWindow()
-            except Exception:
-                pass
-
-        # Bring the app to foreground on startup. A second delayed attempt
-        # helps on desktops where theme/app init races with activation.
-        QTimer.singleShot(0, _bring_main_window_to_front)
-        QTimer.singleShot(250, _bring_main_window_to_front)
+        window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
+        window.show()
 
         if config_manager.check_updates:
             check_for_updates(config_manager=config_manager)
 
-        sys.exit(app.exec())
+        return app.exec()
     finally:
         allow_sleep()
+
+
+if __name__ == "__main__":
+    # First: a frozen build's helper process stops here instead of starting the app.
+    multiprocessing.freeze_support()
+    # Then, before anything imports vlc: a packaged app loads the libVLC it ships.
+    from services.vlc_bundle import use_bundled_vlc
+
+    use_bundled_vlc()
+    smoke = smoke_arguments(sys.argv, os.environ)
+    if smoke is not None:
+        from scripts.smoke_tv import main as smoke_main
+
+        sys.exit(smoke_main(smoke))
+    sys.exit(main())

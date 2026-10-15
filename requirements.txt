@@ -60,27 +60,6 @@ attrs==26.1.0 \
     --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309 \
     --hash=sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32
     # via aiohttp
-av==18.1.0 \
-    --hash=sha256:025f84494cb23278498f03b0d8117d3e47a1cbc9c44b97eb31875cf02251e46b \
-    --hash=sha256:08a9ae288299cfcbf739dba4ad0c53b9b71f45184303dd45947920d022fed695 \
-    --hash=sha256:191224788d87af06c31784a395bb73f14b72f33d7f4871ace0157de2abdc6276 \
-    --hash=sha256:3c8b1f8b46f99d52e2d8b0ed5d0cdadf172d24794d46e2077b16e44ed08e26ff \
-    --hash=sha256:47bfc286e1bc9de7ab4681fc2b575cd2460a66919d31ffe1bd5aa54fae531a28 \
-    --hash=sha256:5509ec12aaa19fd6601de13cfa6f4cdad450da07982118510592875d970454d6 \
-    --hash=sha256:5548b79e2bf1f59b3e9aedc918a72d9dc45b9adaac10ff9470d5dbdda0002e47 \
-    --hash=sha256:5cd9085028902c9880622bd37a12fd4b33060f06a52311f6f4867ca9f29a2c3b \
-    --hash=sha256:6fc837cc51adf80331ac850779cd53b5d4c4460b0ebe9057a02a921c6736f19d \
-    --hash=sha256:8a032e8d8ebc73dec079364b9b4a6837638a2d106e8472314e685ffbf163e700 \
-    --hash=sha256:ab5ac081bc9eaf54109120d4e56284674fecfbe520d9aa1707c7fa911ec5f4d2 \
-    --hash=sha256:ae75d8bb6467895ed1f8572ededf7ffa49eac07f6e483222f5d7d62a41d12f04 \
-    --hash=sha256:b30a4e8d934558e19602b68998a4d9ac9f250fa0dacef216f7e8e40153b13316 \
-    --hash=sha256:b36b0bae9e4c62f9487c99481ec15e4e3870fcc868522cd6d18fc2d6bfa04f01 \
-    --hash=sha256:cf8a17466bef07765dbdecc9e66ed9b25d20b4e14f654fbf35345a58ac45fa0c \
-    --hash=sha256:d49a5c542dfdc00f43c6cdb6cc41dac1781ee206fe180b56aa7433dfa816dfae \
-    --hash=sha256:e4d48b9f12cad009cc72fe4f4099107de5e819c95f82767f4fd01a01481c0661 \
-    --hash=sha256:e7ea063f6690193ea335a1d592d6e0274350d45e2ed6af83ee107cb90cbfd84f \
-    --hash=sha256:ea1480b7a8d5405cb5f382b344731bf125fd2c1c6fae3964f6c48595628387ff
-    # via qitv
 brotli==1.2.0 ; platform_python_implementation == 'CPython' and sys_platform != 'android' and sys_platform != 'ios' \
     --hash=sha256:3219bd9e69868e57183316ee19c84e03e8f8b5a1d1f2667e1aa8c2f91cb061ac \
     --hash=sha256:6c12dad5cd04530323e723787ff762bac749a7b256a5bece32b2243dd5c27b21 \
@@ -110,9 +89,7 @@ brotlicffi==1.2.0.2 ; platform_python_implementation != 'CPython' \
 certifi==2026.7.22 \
     --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \
     --hash=sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55
-    # via
-    #   qitv
-    #   requests
+    # via requests
 cffi==2.1.1 ; (platform_python_implementation != 'CPython' and sys_platform == 'android') or (platform_python_implementation != 'CPython' and sys_platform == 'ios') or (sys_platform != 'android' and sys_platform != 'ios') \
     --hash=sha256:0beceaabe56af686895136a2de78db54ecd8e4046b236b8fd6d6cb61389e9bf2 \
     --hash=sha256:1a18a57b58cfb21fc28d72e876acf10eaed67a1ed96226f92af4df681d571c4c \
@@ -250,6 +227,10 @@ idna==3.20 \
 m3u8==6.0.0 \
     --hash=sha256:566d0748739c552dad10f8c87150078de6a0ec25071fa48e6968e96fc6dcba5d \
     --hash=sha256:7ade990a1667d7a653bcaf9413b16c3eb5cd618982ff46aaff57fe6d9fa9c0fd
+    # via qitv
+mpv==1.0.8 \
+    --hash=sha256:95dbd4d869cd8de7a27914ad33e776accc0f01cb82a6d5b31ca439ade2208ffb \
+    --hash=sha256:dcf77f612e3f5ce49bd89393f37d286de7ac290db6b0800f1fdcfe0aeb5ba9b8
     # via qitv
 multidict==6.9.0 \
     --hash=sha256:0548fdffa634c495b866d89e02ae58a9588cedaeeb972f6ced433e20dee1db5f \
@@ -389,6 +370,27 @@ pycparser==3.0 ; (implementation_name != 'PyPy' and platform_python_implementati
     --hash=sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29 \
     --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
     # via cffi
+pycryptodomex==3.24.1 \
+    --hash=sha256:09081666ffc599976c0b8b29caf2cf82212c0f05bed233c8f8ed53e4f6e1d356 \
+    --hash=sha256:3bbcc1807502da4b5d66c94357a99589c8547aa9ad2f9ecfa537b2e9a347538b \
+    --hash=sha256:48d9058dd4c8f3af83e048b6ff83d9c6300841c42579f77fdfab19e49156a512 \
+    --hash=sha256:514d685de4b0227d35d7114047fbd575bf162bff373e07af665aa41eee089dd0 \
+    --hash=sha256:569fdbeff936cbd5beb852b3969dc2f58fb255bd221b3f7a8999c035c30ec958 \
+    --hash=sha256:794f32227a480ab3b39971ac4a53dfa8ed444e28c0ddecbdc35f26d038bb46da \
+    --hash=sha256:7a81e9be7084af3591912475b22c5d0646a9160f3974b6b7300138781fffdc0d \
+    --hash=sha256:82eb0dd8a95be97f03527b108ee49f9b86a7c534fa47fa7a510be3eab8ea9acd \
+    --hash=sha256:8321c315c4418dfe45a811b792380438ec81185deaaf202dbcd77711b4f51796 \
+    --hash=sha256:9a732b9f5603b153dcdc071d6b342f192981907519827f2c1e4aeac41e2b34c2 \
+    --hash=sha256:9b94a8c647c1f80b4c82c7ac9642dda94a71abbb4efa29ad652c410ad7a39879 \
+    --hash=sha256:9bb353c764c144a9fc03302ef3763ad0c3e75bc7ca41f445cc98455f36da6c59 \
+    --hash=sha256:9dd5104a1d8ccf725a3c1b40b21d5ed47530b6499abba30955c174d895c1be2f \
+    --hash=sha256:a692d2484ca8fa2c69f45c63f2b30cd00b8512834e3a522fc297d981dde5b34c \
+    --hash=sha256:bd06ab1d9cf90e8b198daae3b364e9ac23a640d210bb8faddad6627cf2e33be7 \
+    --hash=sha256:cc64f4e1fc07a155ef31eb9815183a6a8eb13dfd6876ab049c01125223aa0c40 \
+    --hash=sha256:e87928d8f37952ba53d215836cb3d89c63c1367f037d055c3a5b3f4403f4c6b6 \
+    --hash=sha256:eeac2c9acbd2d9f0ca493fdf692ce8245ca37cbebee08c496025868d4b8ef70f \
+    --hash=sha256:f3ed97cdde1d96894057778095238bad3dd94d3e46dc07d6d618e6d4b7700cce
+    # via qitv
 pyqtdarktheme-fork==2.3.6 \
     --hash=sha256:876dc8cc0e01468a3f7fe5a860dfd422ccab48b33beef18dfdecb6312c20c556 \
     --hash=sha256:9ab287a033a4742767bcb6698fb60247beef7967d74eb949f7ab36ee866ff1d7
@@ -416,6 +418,10 @@ pyside6-essentials==6.11.2 \
     # via
     #   pyside6
     #   pyside6-addons
+python-vlc==3.0.21203 \
+    --hash=sha256:1613451a31b692ec276296ceeae0c0ba82bfc2d094dabf9aceb70f58944a6320 \
+    --hash=sha256:52d0544b276b11e58b6c0b748c3e0518f94f74b1b4cd328c83a59eacabead1ec
+    # via qitv
 requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
