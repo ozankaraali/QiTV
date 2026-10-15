@@ -10,7 +10,14 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
 
 from services.connection_budget import ConnectionBudget
-from services.sessions import PIP_LEVEL, RELEASE_CAP_MS, SessionManager, Slot
+from services.sessions import (
+    PIP_FAILED,
+    PIP_LEVEL,
+    RELEASE_CAP_MS,
+    SessionManager,
+    Slot,
+    limit_message,
+)
 
 app = QApplication.instance() or QApplication([])
 
@@ -73,7 +80,7 @@ class FakeLive(QObject):
 
     def start(self, url, **kwargs):
         if self.fail_start:
-            raise RuntimeError("The engine could not open it")
+            raise RuntimeError("could not open http://user:secret@provider.test/2.ts")
         self.log.append((self.name, "live", "start", url))
 
     def stop(self):
@@ -93,8 +100,9 @@ class _Fixture(unittest.TestCase):
         self.main = Slot("main", FakePlayback("main", self.log), FakeLive("main", self.log))
         self.pip = Slot("pip", FakePlayback("pip", self.log), FakeLive("pip", self.log))
         self.manager = SessionManager(self.main, self.pip, self.budget, release_cap_ms=self.cap_ms)
-        self.denied, self.timelines = [], []
+        self.denied, self.failures, self.timelines = [], [], []
         self.manager.denied.connect(self.denied.append)
+        self.manager.pipFailed.connect(self.failures.append)
         self.manager.largeChanged.connect(lambda name: self.log.append(("manager", "large", name)))
         self.manager.pipStateChanged.connect(lambda on: self.log.append(("manager", "pip", on)))
         self.manager.slotTimeline.connect(lambda name, state: self.timelines.append((name, state)))
@@ -126,7 +134,9 @@ class _Fixture(unittest.TestCase):
         ]
 
     def last_mute(self, slot):
-        return [call for call in self.calls(slot, "player") if call[0] == "set_muted"][-1][1]
+        """The player's mute as libVLC has it: the last set_muted, else unmuted (its default)."""
+        mutes = [call[1] for call in self.calls(slot, "player") if call[0] == "set_muted"]
+        return mutes[-1] if mutes else False
 
     def pip_states(self):
         return [e[2] for e in self.log if e[:2] == ("manager", "pip")]
@@ -170,6 +180,7 @@ class SessionManagerTests(_Fixture):
         )
         self.pump()
         self.assertEqual(self.denied, [1])
+        self.assertEqual(self.failures, [])  # the denial is the toast
         self.assertEqual(self.calls("pip"), [])
         self.assertEqual(self.pip_states(), [])
         self.assertFalse(self.manager.pip_open())
@@ -312,6 +323,60 @@ class LevelTests(_Fixture):
         self.assertFalse([e for e in self.log[before:] if e[2] == "set_volume"])
 
 
+class AudibleSmallTests(_Fixture):
+    """The user made the small slot audible from the mixer: a swap keeps both audible."""
+
+    def test_a_small_slot_raised_above_zero_stays_audible_across_swaps(self):
+        self.open_granted(B)
+        self.manager.set_level("pip", 40)
+        before = len(self.log)
+        self.assertTrue(self.manager.swap())
+        self.assertIs(self.manager.large(), self.pip)
+        self.assertEqual(self.log[before:], [("manager", "large", "pip")])
+        self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (False, False))
+        self.manager.swap()
+        self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (False, False))
+        self.assertEqual((self.last_mute("main"), self.last_mute("pip")), (False, False))
+        self.assertEqual((self.manager.level("main"), self.manager.level("pip")), (100, 40))
+
+    def test_a_small_slot_unmuted_explicitly_stays_audible_across_a_swap(self):
+        self.open_granted(B)
+        self.manager.set_muted("pip", False)
+        self.manager.swap()
+        self.assertIs(self.manager.large(), self.pip)
+        self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (False, False))
+        self.assertEqual((self.last_mute("main"), self.last_mute("pip")), (False, False))
+
+    def test_muting_the_small_slot_again_lets_audio_follow_the_large_picture(self):
+        self.open_granted(B)
+        self.manager.set_level("pip", 40)
+        self.manager.set_muted("pip", True)
+        self.manager.swap()
+        self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (True, False))
+
+    def test_closing_an_audible_large_pip_leaves_main_audible(self):
+        self.open_granted(B)
+        self.manager.set_level("pip", 40)
+        self.manager.swap()
+        self.manager.close_pip()
+        self.assertIs(self.manager.large(), self.main)
+        self.assertFalse(self.manager.muted("main"))
+        self.assertFalse(self.last_mute("main"))
+
+    def test_a_reopened_pip_starts_muted_at_its_remembered_level(self):
+        self.open_granted(B)
+        self.manager.set_level("pip", 40)
+        self.manager.close_pip()
+        self.open(C)
+        self.pump()
+        self.assertTrue(self.manager.muted("pip"))
+        self.assertEqual(
+            self.calls("pip", "player")[-2:], [("set_volume", 40), ("set_muted", True)]
+        )
+        self.manager.swap()  # back to the default: audio follows the large picture
+        self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (True, False))
+
+
 class PipLifecycleTests(_Fixture):
     def test_closing_before_the_grant_gives_the_ticket_back(self):
         self.hold_main(2)
@@ -343,19 +408,38 @@ class PipLifecycleTests(_Fixture):
         self.budget.request(PROVIDER, 2, purpose="main")  # a zap waits for the PiP's slot
         self.pip.live.released.emit()
         self.pump()
-        self.assertEqual(self.denied, [2])
+        self.assertEqual(self.failures, ["Your provider allows 2 streams at a time"])
+        self.assertEqual(self.denied, [])  # one toast: the open PiP failed
         self.assertEqual(self.pip_states(), [True, False])
         self.assertIs(self.manager.large(), self.main)
         self.assertNotIn(("start", C["cmd"]), self.calls("pip", "live"))
         self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "main"])
 
-    def test_a_start_that_raises_gives_the_ticket_back(self):
+    def test_a_start_that_raises_gives_the_ticket_back_and_reports_a_fixed_message(self):
         self.pip.live.fail_start = True
-        with self.assertLogs("services.sessions", "WARNING"):
+        with self.assertLogs("services.sessions", "WARNING") as logs:
             self.open_granted(B)
+        self.assertEqual(self.failures, [PIP_FAILED])
+        self.assertNotIn("secret", " ".join(logs.output))
         self.assertEqual(self.pip_states(), [])
         self.assertFalse(self.manager.pip_open())
         self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+
+    def test_a_change_that_fails_to_start_closes_pip_and_reports_it(self):
+        self.open_granted(B)
+        self.manager.swap()
+        self.pip.live.fail_start = True
+        with self.assertLogs("services.sessions", "WARNING"):
+            self.open(C)
+            self.pump()
+        self.assertEqual(self.failures, [PIP_FAILED])
+        self.assertEqual(self.pip_states(), [True, False])
+        self.assertIs(self.manager.large(), self.main)
+        self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+
+    def test_the_limit_message_counts_streams(self):
+        self.assertEqual(limit_message(1), "Your provider allows 1 stream at a time")
+        self.assertEqual(limit_message(3), "Your provider allows 3 streams at a time")
 
 
 class ReleaseCapTests(_Fixture):

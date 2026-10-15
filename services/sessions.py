@@ -13,10 +13,12 @@ release) is `ui.live_tuner.LiveTuner`'s. This manager opens, changes and closes 
   closed (or after `RELEASE_CAP_MS`, a backstop to LiveSession's own caps), and only then
   asks for a new one: the old stream is always released before the new one opens.
 
-Audio follows the large picture: the small slot is muted, and the large one keeps the user's
-mute, which a swap moves from the old large slot to the new one. Each stream also has a
-volume level of its own, which stays with it across swaps; the PiP slot opens muted at its
-level, and raising the small slot's level above 0 unmutes it (the mixer's PiP row).
+Audio follows the large picture: the PiP opens muted, and while the small slot stays muted
+a swap mutes the new small slot and moves the user's mute from the old large slot to the new
+one. Once the user makes the small slot audible (the mixer's PiP row raised above 0, or an
+explicit unmute), a swap changes no mute: each stream keeps its own, so both stay audible;
+muting the small slot again brings the default back. Each stream also has a volume level of
+its own, which always stays with it across swaps.
 """
 
 from __future__ import annotations
@@ -38,6 +40,12 @@ PURPOSE = "pip"  # the budget purpose of the PiP stream (LiveTuner's is "main")
 RELEASE_CAP_MS = 2500  # LiveSession caps its own waits for the release at 2 s
 MAIN_LEVEL = 100  # libVLC's default volume
 PIP_LEVEL = 30  # the PiP stream's level until the mixer sets one (config pip_volume's default)
+PIP_FAILED = "Couldn't open this channel in picture-in-picture"
+
+
+def limit_message(limit: int) -> str:
+    """The toast for a provider limit that leaves no stream for the PiP."""
+    return f"Your provider allows {limit} stream{'s' if limit != 1 else ''} at a time"
 
 
 @dataclass
@@ -63,6 +71,9 @@ class SessionManager(QObject):
     largeChanged = Signal(str)  # name of the slot that is now large
     pipStateChanged = Signal(bool)  # PiP open/closed
     denied = Signal(int)  # limit (budget refused PiP)
+    # A fixed message: the PiP's live session did not start, or the budget refused a channel
+    # change of a PiP it had granted (then without denied). PiP is closed by then.
+    pipFailed = Signal(str)
     slotTimeline = Signal(str, dict)  # slot name, LiveSession timeline dict
 
     def __init__(
@@ -116,15 +127,19 @@ class SessionManager(QObject):
     def swap(self) -> bool:
         """Exchange the large and small roles; False (and nothing changes) when PiP is closed.
 
-        No stream is played, stopped or started: only the audio moves to the new large slot.
+        No stream is played, stopped or started, and no level changes. A muted small slot
+        takes the user's mute of the large one, which is muted in its place; a small slot the
+        user made audible keeps both streams' mutes as they are (module docstring).
         """
         small = self.small()
         if small is None:
             return False
-        users_mute = self._muted[self._large.name]
-        self._set_mute(self._large, True)  # the new small slot
+        large = self._large
         self._large = small
-        self._set_mute(small, users_mute)
+        if self._muted[small.name]:  # the default: audio follows the large picture
+            users_mute = self._muted[large.name]
+            self._set_mute(large, True)  # the new small slot
+            self._set_mute(small, users_mute)
         self.largeChanged.emit(small.name)
         return True
 
@@ -179,8 +194,12 @@ class SessionManager(QObject):
             return
         ticket = self._budget.request(pending.provider, pending.limit, purpose=PURPOSE, queue=False)
         if ticket == DENIED:  # only a limit denies, so it is a number
+            was_open = self._open  # a channel change: the PiP had a slot
             self.close_pip()
-            self.denied.emit(pending.limit)
+            if was_open:
+                self.pipFailed.emit(limit_message(int(pending.limit or 0)))
+            else:
+                self.denied.emit(pending.limit)
             return
         self._pip.ticket = ticket
 
@@ -207,6 +226,7 @@ class SessionManager(QObject):
             except Exception:
                 logger.debug("Stopping the PiP live session after a failed start failed too")
             self.close_pip()
+            self.pipFailed.emit(PIP_FAILED)
             return
         if opening:
             self._open = True
