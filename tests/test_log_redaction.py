@@ -206,5 +206,58 @@ class LogPathTests(unittest.TestCase):
                 self.assertNoSecrets(logs.output)
 
 
+class DebugCurlTests(unittest.TestCase):
+    """QITV_DEBUG_CURL prints the STB EPG request as curl: the device and token stay masked."""
+
+    SERIAL, DEVICE, TOKEN = "SN0042QX", "DEV9F3A", "tok3n5ecret"
+    HEADERS = {
+        "User-Agent": "MAG200",
+        "Cookie": f"mac={MAC}; stb_lang=en; timezone=UTC; PHPSESSID=null; sn={SERIAL}; "
+        f"device_id={DEVICE};",
+        "Authorization": f"Bearer {TOKEN}",
+    }
+
+    def curl_log(self, mode):
+        import asyncio
+
+        import aiohttp
+
+        from services.content_loader import ContentLoader
+
+        class Session:
+            def get(self, *args, **kwargs):
+                raise aiohttp.ClientError("refused")
+
+        loader = ContentLoader(
+            "http://portal.test/server/load.php",
+            self.HEADERS,
+            "itv",
+            action="get_epg_info",
+            period=5,
+        )
+        with (
+            patch.dict(os.environ, {"QITV_DEBUG_CURL": mode}),
+            self.assertLogs("services.content_loader", "INFO") as logs,
+        ):
+            asyncio.run(loader.fetch_page(Session(), 1, max_retries=1, timeout=1))
+        return next(line for line in logs.output if "curl" in line)
+
+    def test_cookie_values_and_the_token_are_masked_by_default(self):
+        line = self.curl_log("1")
+        for secret in (MAC, self.SERIAL, self.DEVICE, self.TOKEN):
+            self.assertNotIn(secret, line)
+        self.assertIn(
+            '-H "Cookie: mac=…; stb_lang=…; timezone=…; PHPSESSID=…; sn=…; device_id=…;"', line
+        )
+        self.assertIn('-H "Authorization: Bearer …"', line)
+        self.assertIn('-H "User-Agent: MAG200"', line)
+        self.assertIn("action=get_epg_info", line)
+
+    def test_raw_shows_them(self):
+        line = self.curl_log("raw")
+        for secret in (MAC, self.SERIAL, self.DEVICE, self.TOKEN):
+            self.assertIn(secret, line)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,45 @@ logger = logging.getLogger(__name__)
 aiohttp = lazy_module("aiohttp")
 asyncio = lazy_module("asyncio")
 
+_HIDDEN = "…"
+
+
+def _debug_header_value(name: str, value: object, raw: bool) -> str:
+    """A header's value for QITV_DEBUG_CURL: Cookie and Authorization values are masked.
+
+    The cookie carries the device (MAC, serial, device id), Authorization the portal's
+    token. Their names stay, so the request still reads; QITV_DEBUG_CURL=raw shows them.
+    """
+    text = str(value)
+    if raw:
+        return text
+    lowered = name.lower()
+    if lowered == "cookie":
+        parts = [part.strip() for part in text.split(";")]
+        return "; ".join(
+            f"{part.split('=', 1)[0]}={_HIDDEN}" if "=" in part else part for part in parts
+        ).rstrip()
+    if lowered in ("authorization", "proxy-authorization"):
+        scheme = text.split(" ", 1)
+        return f"{scheme[0]} {_HIDDEN}" if len(scheme) == 2 else _HIDDEN
+    return text
+
+
+def debug_curl(url: str, params: dict, headers: dict, timeout: float, mode: str) -> str:
+    """A copy-paste curl command for a request (QITV_DEBUG_CURL; `mode` "raw" unmasks)."""
+    query = urlencode(params, doseq=True, quote_via=quote)
+    full_url = f"{url}?{query}" if query else url
+    raw = mode.strip().lower() == "raw"
+
+    def escape(text: object) -> str:
+        return str(text).replace('"', '\\"')
+
+    flags = " ".join(
+        f'-H "{escape(k)}: {escape(_debug_header_value(k, v, raw))}"'
+        for k, v in (headers or {}).items()
+    )
+    return f'curl -sS -m {timeout} {flags} "{full_url}"'
+
 
 class ContentLoader(QThread):
     content_loaded = Signal(dict)
@@ -63,26 +102,14 @@ class ContentLoader(QThread):
                 if attempt:
                     logger.debug(f"Retrying page {page}...")
                 params = self.get_params(page)
-                # For EPG debugging: emit a copy-paste-friendly curl with headers when enabled
-                try:
-                    if (
-                        os.getenv("QITV_DEBUG_CURL")
-                        and self.action in ("get_epg_info", "get_short_epg")
-                        and page == 1
-                    ):
-                        q = urlencode(params, doseq=True, quote_via=quote)
-                        full_url = f"{self.url}?{q}" if q else self.url
-
-                        def _esc(v: str) -> str:
-                            return str(v).replace('"', '\\"')
-
-                        hdrs = " ".join(
-                            [f'-H "{_esc(k)}: {_esc(v)}"' for k, v in (self.headers or {}).items()]
-                        )
-                        curl_cmd = f"curl -sS -m {timeout} {hdrs} \"{full_url}\""
-                        logger.info(f"EPG curl: {curl_cmd}")
-                except Exception as e:
-                    logger.debug("Could not format EPG curl command: %s", e)
+                # For EPG debugging: a copy-paste-friendly curl with headers when enabled
+                mode = os.getenv("QITV_DEBUG_CURL")
+                if mode and self.action in ("get_epg_info", "get_short_epg") and page == 1:
+                    try:
+                        command = debug_curl(self.url, params, self.headers, timeout, mode)
+                        logger.info("EPG curl: %s", command)
+                    except Exception as e:
+                        logger.debug("Could not format EPG curl command: %s", type(e).__name__)
                 async with session.get(
                     self.url, headers=self.headers, params=params, timeout=timeout
                 ) as response:
