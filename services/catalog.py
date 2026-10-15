@@ -778,6 +778,9 @@ class CatalogService(QObject):
             (item for item in payload.get("items") or [] if str(item.get("id")) == season_id),
             None,
         )
+        # Episodes copy the series dict, so its id is the series id: the season keeps
+        # S1E1 and S2E1 apart for watch state and navigation.
+        season_number = season.get("number")
         episodes = []
         for number in (selected or {}).get("series", []) or []:
             episode = dict(series)
@@ -787,8 +790,11 @@ class CatalogService(QObject):
                     "ename": f"Episode {number}",
                     "cmd": selected.get("cmd") if selected else None,
                     "series": number,
+                    "season_id": season_id,
                 }
             )
+            if season_number not in (None, ""):
+                episode["season"] = str(season_number)
             episodes.append(episode)
         by_season = self._series_cache().setdefault("episodes", {})
         by_season.setdefault(str(series.get("id")), {})[season_id] = episodes

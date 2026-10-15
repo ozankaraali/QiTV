@@ -98,6 +98,33 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(episodes[0]["cmd"], "C1")
         self.assertEqual(episodes[0]["name"], "Show")
 
+    def test_stb_episodes_carry_their_season(self):
+        # Finding I4: episodes copied the series dict without a season, so S1E1 == S2E1.
+        from services.navigation import _item_node
+        from services.watch_state import WatchState
+
+        provider = {"name": "S", "type": "STB", "url": "http://portal/c/"}
+        service, _, factory, _ = make_service(provider)
+        series = {"id": "777", "name": "Show", "category_id": "5", "cmd": "x"}
+        factory.results["stb_list"] = {
+            "result": {
+                "items": [
+                    {"id": "777:1", "name": "Season 1", "cmd": "c1", "series": [1, 2]},
+                    {"id": "777:2", "name": "Season 2", "cmd": "c2", "series": [1, 2]},
+                ]
+            }
+        }
+        service.request_seasons(series)
+        first = []
+        for season in service.seasons(series):
+            service.request_episodes(series, season)
+            first.append(service.episodes(series, season)[0])
+        self.assertEqual([e["season_id"] for e in first], ["777:1", "777:2"])
+        self.assertEqual([e["season"] for e in first], ["1", "2"])
+        ids = [WatchState.content_id("S", e, item_type="episode") for e in first]
+        self.assertEqual(ids, ["S:777:s1:e1", "S:777:s2:e1"])
+        self.assertNotEqual(_item_node(first[0], "episode"), _item_node(first[1], "episode"))
+
     def test_links(self):
         service, _, _, _ = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})
         ready, failed = collect(service.linkReady), collect(service.linkFailed)
