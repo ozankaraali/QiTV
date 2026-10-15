@@ -158,6 +158,15 @@ _XTREAM_CATALOG_ACTIONS = {
 }
 
 
+def _max_connections(user_info) -> Optional[int]:
+    """Xtream reports the account's concurrent stream limit as a string or int."""
+    try:
+        value = int(str(user_info.get("max_connections", "")).strip())
+    except AttributeError, ValueError:
+        return None
+    return value if value > 0 else None
+
+
 class XtreamLoaderWorker(QObject):
     """Worker for loading Xtream content (Live/VOD/Series) using Player API v2."""
 
@@ -322,6 +331,7 @@ class XtreamLoaderWorker(QObject):
                 "resolved_base": resolved_base,
                 "stream_base": resolved_base,
                 "stream_ext": stream_ext,
+                "max_connections": _max_connections(user_info),
             }
 
             self.finished.emit(result)
@@ -622,3 +632,76 @@ class SetProviderThread(QThread):
                 self.epg_manager.set_current_epg()
         except Exception as e:
             logger.warning(f"Error in initializing provider: {e}")
+
+
+class ProviderSetupWorker(QObject):
+    """Select the configured provider (STB handshake, disk cache) without loading EPG."""
+
+    finished = Signal(object)
+    error = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, provider_manager, force_refresh: bool = False):
+        super().__init__()
+        self.provider_manager = provider_manager
+        self.force_refresh = force_refresh
+
+    def run(self):
+        try:
+            self.provider_manager.set_current_provider(self.progress)
+            if self.force_refresh:
+                self.provider_manager.clear_current_provider_cache()
+            self.finished.emit({"name": self.provider_manager.current_provider.get("name", "")})
+        except Exception as e:
+            logger.warning("Provider setup failed: %s", e)
+            self.error.emit(str(e))
+
+
+class EpgLoadWorker(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, epg_manager, force_refresh: bool = False):
+        super().__init__()
+        self.epg_manager = epg_manager
+        self.force_refresh = force_refresh
+
+    def run(self):
+        try:
+            if self.force_refresh:
+                self.epg_manager.force_refresh_current_epg()
+            else:
+                self.epg_manager.set_current_epg()
+            self.finished.emit({})
+        except Exception as e:
+            logger.warning("EPG load failed: %s", e)
+            self.error.emit(str(e))
+
+
+class StbListWorker(QObject):
+    """Run one STB ContentLoader listing synchronously inside this worker's thread."""
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, **loader_kwargs):
+        super().__init__()
+        self.loader_kwargs = loader_kwargs
+
+    def run(self):
+        from content_loader import ContentLoader
+
+        results: list = []
+        errors: list = []
+        loader = ContentLoader(**self.loader_kwargs)
+        loader.content_loaded.connect(results.append, Qt.DirectConnection)
+        loader.error.connect(errors.append, Qt.DirectConnection)
+        try:
+            loader.run()
+        except Exception as e:
+            self.error.emit(str(e))
+            return
+        if results:
+            self.finished.emit(results[-1])
+        else:
+            self.error.emit(errors[-1] if errors else "The portal returned no data")
