@@ -35,13 +35,23 @@ class PendingAction:
     def action(self) -> Optional[Pending]:
         return self._action
 
-    def activate(self, action: Pending, *, current: str, loading: bool) -> str:
+    def activate(
+        self,
+        action: Pending,
+        *,
+        current: str,
+        loading: bool,
+        loading_provider: Optional[str] = None,
+    ) -> str:
         """RUN when `action` can run now, else it waits: SWITCH (select its provider) or WAIT.
 
         While a switch is under way (to `target`, or a setup started elsewhere: `loading`),
         every activation waits, even for the provider the catalog names: the provider
-        manager names the new provider before it is ready.
+        manager names the new provider before it is ready. `loading_provider`, when known,
+        is where that setup goes: an action for it waits without another switch.
         """
+        if loading and loading_provider is not None:
+            self.target = loading_provider  # startup, Settings or another switch
         if self.target is None and not loading and action.provider == current:
             self.cancel()
             return RUN

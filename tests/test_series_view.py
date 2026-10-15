@@ -85,6 +85,17 @@ class SeriesViewTests(unittest.TestCase):
         view.set_seasons(ss, current={"id": "9"})
         self.assertIs(view.current_season(), ss[0])
 
+    def test_set_episodes_opens_at_the_given_episode_once(self):
+        view = self.make()
+        ss = seasons()
+        view.set_seasons(ss)
+        eps = episodes()
+        view.set_episodes(ss[0], eps, current=eps[3])
+        self.assertIs(view.current_episode(), eps[3])
+        view.move_by(0, 1)  # the user moves on
+        view.set_episodes(ss[0], episodes(), current=eps[3])  # a repeated result
+        self.assertEqual(view.current_episode()["ename"], "Episode 5")
+
     def test_activate_episode(self):
         view = self.make()
         got = []

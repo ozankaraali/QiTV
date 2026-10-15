@@ -40,6 +40,21 @@ class PendingActionTests(unittest.TestCase):
         self.assertEqual(self.pending.activate(a, current="P", loading=True), SWITCH)
         self.assertEqual(self.pending.on_ready("P"), (RUN, a))
 
+    def test_a_setup_already_loading_the_provider_is_waited_for(self):
+        a = act("P")  # P is loading at startup or after Settings; nothing switched here
+        self.assertEqual(
+            self.pending.activate(a, current="P", loading=True, loading_provider="P"), WAIT
+        )
+        self.assertEqual(self.pending.target, "P")
+        self.assertEqual(self.pending.on_ready("P"), (RUN, a))
+
+    def test_a_setup_loading_another_provider_switches(self):
+        self.assertEqual(
+            self.pending.activate(act("P"), current="P", loading=True, loading_provider="Q"),
+            SWITCH,
+        )
+        self.assertEqual(self.pending.target, "P")
+
     def test_a_different_provider_becoming_ready_drops_it(self):
         self.pending.activate(act("Q"), current="P", loading=False)
         self.assertEqual(self.pending.on_ready("R"), (None, None))

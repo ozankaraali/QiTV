@@ -9,7 +9,15 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 from services import library
-from services.library import CONTINUE, MY_LIST, NEW, LibraryModel, Sort, history_season
+from services.library import (
+    CONTINUE,
+    MY_LIST,
+    NEW,
+    LibraryModel,
+    Sort,
+    history_episode,
+    history_season,
+)
 from services.watch_state import WatchState
 
 app = QApplication.instance() or QApplication([])
@@ -458,6 +466,16 @@ class HistorySeasonTests(unittest.TestCase):
     def test_series_id_and_season_number(self):
         history = [self.entry({"id": "e5", "series_id": "7", "season": "3"})]
         self.assertIs(history_season(history, "P", {"id": "7"}, self.SEASONS), self.SEASONS[2])
+
+    def test_history_episode_is_the_newest_entry_of_the_series(self):
+        newest = {"id": "7", "season_id": "2", "series": "4"}
+        history = [
+            self.entry({"id": "9", "season_id": "3"}),
+            self.entry(newest),
+            self.entry({"id": "7", "season_id": "1", "series": "1"}),
+        ]
+        self.assertIs(history_episode(history, "P", {"id": "7"}), newest)
+        self.assertIsNone(history_episode(history, "Q", {"id": "7"}))
 
     def test_unknown(self):
         series = {"id": "7"}

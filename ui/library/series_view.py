@@ -368,11 +368,20 @@ class SeriesView(QWidget):
         self._sync()
 
     def set_episodes(
-        self, season: dict, episodes: list[dict] | None, error: str | None = None
+        self,
+        season: dict,
+        episodes: list[dict] | None,
+        error: str | None = None,
+        *,
+        current: dict | None = None,
     ) -> None:
+        """Show a season's episodes. `current` opens at that episode, but only while no
+        episode of the list is current yet: a repeated result keeps the user's row."""
         if self._season is not None and item_key(season) != item_key(self._season):
             return  # a superseded season's result
         previous = self.current_episode()
+        if previous is None:
+            previous = current
         self._season = season
         self._episodes = episodes
         self._episodes_error = error
@@ -380,7 +389,9 @@ class SeriesView(QWidget):
         self._model.set_episodes(episodes or [])
         if episodes:
             row = self._model.row_of(episode_key(previous)) if previous is not None else -1
-            self._view.setCurrentIndex(self._model.index(max(0, row)))
+            index = self._model.index(max(0, row))
+            self._view.setCurrentIndex(index)
+            self._view.scrollTo(index)
             if not self._moved:
                 self._zone = EPISODES
         elif self._zone == EPISODES:

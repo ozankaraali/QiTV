@@ -330,6 +330,49 @@ class CatalogServiceTests(unittest.TestCase):
         runner.complete(1)
         self.assertEqual(ready, [("X",)])
 
+    def test_loading_provider_names_the_setup_that_will_report(self):
+        runner = ManualRunner()
+        provider = {"name": "X", "type": "XTREAM", "url": "h:1"}
+        service, _, factory, _ = make_service(provider, runner=runner)
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        factory.results["epg"] = {"result": {}}
+        self.assertIsNone(service.loading_provider())
+        service.select_provider()  # the selected provider, as at startup
+        self.assertEqual(service.loading_provider(), "X")
+        service.select_provider("B")
+        self.assertEqual(service.loading_provider(), "B")  # queued: it is the one to report
+        runner.complete(0)
+        self.assertEqual(service.loading_provider(), "B")
+        runner.complete(1)
+        self.assertIsNone(service.loading_provider())
+
+    def test_a_queued_forced_refresh_is_never_downgraded_for_the_same_provider(self):
+        runner = ManualRunner()
+        provider = {"name": "X", "type": "XTREAM", "url": "h:1"}
+        service, _, factory, _ = make_service(provider, runner=runner)
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        service.select_provider("A")
+        service.select_provider("X", force_refresh=True)  # Settings changed X
+        service.select_provider("X")  # the Library asks for X again
+        runner.complete(0)
+        self.assertEqual(
+            factory.calls[-1], ("provider_setup", (service.provider_manager, True), {})
+        )
+
+    def test_a_queued_forced_refresh_for_another_provider_is_replaced(self):
+        runner = ManualRunner()
+        provider = {"name": "X", "type": "XTREAM", "url": "h:1"}
+        service, _, factory, _ = make_service(provider, runner=runner)
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        service.select_provider("A")
+        service.select_provider("X", force_refresh=True)
+        service.select_provider("B")
+        runner.complete(0)
+        self.assertEqual(
+            factory.calls[-1], ("provider_setup", (service.provider_manager, False), {})
+        )
+        self.assertEqual(service.config.selected_provider_name, "B")
+
     def test_setup_failure_names_the_requested_provider(self):
         service, _, factory, _ = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})
         factory.results["provider_setup"] = {"fail": "nope"}

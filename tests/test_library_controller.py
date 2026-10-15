@@ -75,6 +75,11 @@ class FakeCatalog(QObject):
     def is_loading(self):
         return self.loading
 
+    def loading_provider(self):
+        if not self.loading:
+            return None
+        return self.selected[-1] if self.selected else self.name
+
     def current_provider_name(self):
         return self.name
 
@@ -669,6 +674,56 @@ class LibraryControllerTests(unittest.TestCase):
         self.catalog.name = "Q"
         self.catalog.providerReady.emit("Q")
         self.assertEqual(len(self.played), 1)
+
+    def test_a_title_of_the_provider_loading_at_startup_waits_without_a_second_setup(self):
+        ctl = self.open_movies()
+        notices = []
+        ctl.notice.connect(notices.append)
+        self.catalog.loading = True  # P's setup is still running (startup, Settings)
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.catalog.selected, [])
+        self.assertEqual(notices, [])
+        self.assertEqual(self.played, [])
+        self.catalog.providerReady.emit("P")
+        self.assertEqual([i["name"] for i, _k, _c in self.played], ["Dune Songs"])
+
+    def test_the_source_menu_can_pick_the_old_provider_during_a_switch(self):
+        ctl = self.search_salt()
+        self.activate_name(ctl, "Salt Lake")  # switching to Q; P is still named current
+        actions = ctl._source_menu().actions()
+        self.addCleanup(actions[0].parent().deleteLater)
+        actions[0].trigger()  # P after all
+        self.assertEqual(self.catalog.selected, ["Q", "P"])
+        actions[0].trigger()  # already the target: no second setup
+        self.assertEqual(self.catalog.selected, ["Q", "P"])
+        self.catalog.providerReady.emit("P")
+        self.assertEqual(self.played, [])  # the Q hit was dropped
+
+    def history_series_view(self, position):
+        latest = {**episodes("2")[1], "season": "2"}  # S2 E2
+        self.config.watch_history.insert(
+            0, {"item_data": latest, "item_type": "episode", "provider_name": "P"}
+        )
+        cid = WatchState.content_id("P", latest, item_type="episode")
+        self.config.playback_positions[cid] = {"position": position, "duration": 1_000_000}
+        self.catalog.season_map["77"] = SEASONS
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        self.model.select_genre("s")  # past Continue, which lists a resumable episode
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.catalog.episode_map[("77", "2")] = episodes("2")
+        self.catalog.episodesReady.emit("77", "2")
+        return ctl
+
+    def test_series_opens_at_the_history_episode(self):
+        self.history_series_view(position=400_000)
+        self.assertEqual(self.screen.series.current_season()["id"], "2")
+        self.assertEqual(self.screen.series.current_episode()["ename"], "Episode 2")
+
+    def test_series_opens_after_a_finished_history_episode(self):
+        self.history_series_view(position=950_000)
+        self.assertEqual(self.screen.series.current_episode()["ename"], "Episode 3")
 
     def test_leaving_search_returns_to_the_series_that_was_open(self):
         self.catalog.item_map[("series", "s")] = [SERIES, {"id": "78", "name": "Amber Coast"}]

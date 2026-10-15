@@ -19,7 +19,16 @@ from PySide6.QtCore import QObject, QPoint, Signal
 from PySide6.QtWidgets import QMenu
 
 from services.catalog import PROVIDER_LOADING_MESSAGE
-from services.library import PINNED_TITLES, SORT_LABELS, Details, LibraryModel, Sort, history_season
+from services.library import (
+    PINNED_TITLES,
+    SORT_LABELS,
+    Details,
+    LibraryModel,
+    Sort,
+    history_episode,
+    history_season,
+)
+from services.navigation import episode_key
 from services.pending_action import LOAD, RUN, SWITCH, Pending, PendingAction
 from services.search import Hit
 from services.watch_state import RESUME_MAX_RATIO, WatchState
@@ -100,6 +109,7 @@ class LibraryController(QObject):
         self._series_provider = ""
         self._series_details: Optional[Details] = None
         self._series_back = "browse"
+        self._history_episode: Optional[dict] = None  # the series' newest watched episode
         # search and cross-provider activations
         self._search = SearchSession(provider_manager, jobs, model, watch, self)
         self._pending = PendingAction()
@@ -434,7 +444,12 @@ class LibraryController(QObject):
         return menu
 
     def _choose_source(self, name: str) -> None:
-        if self._closed or name == self._catalog.current_provider_name():
+        if self._closed:
+            return
+        catalog = self._catalog
+        loading = catalog.loading_provider() if catalog.is_loading() else None
+        heading_to = self._pending.target or loading or catalog.current_provider_name()
+        if name == heading_to:  # already there, or already on the way
             return
         self._pending.switching(name)
         self._catalog.select_provider(name)  # the model re-opens its section when ready
@@ -544,10 +559,12 @@ class LibraryController(QObject):
         While a provider switch is under way every activation waits, even one for the
         provider the catalog already names: the provider manager names it before it is ready.
         """
+        loading = self._catalog.is_loading()
         step = self._pending.activate(
             Pending(provider, run, section),
             current=self._catalog.current_provider_name(),
-            loading=self._catalog.is_loading(),
+            loading=loading,
+            loading_provider=self._catalog.loading_provider() if loading else None,
         )
         if step == RUN:
             run()
@@ -646,6 +663,9 @@ class LibraryController(QObject):
         self._series_details = details
         view.set_series(series, details)
         view.set_progress_provider(self._episode_progress)
+        self._history_episode = history_episode(
+            self._config.watch_history, self._catalog.current_provider_name(), series
+        )
         seasons = self._catalog.seasons(series)
         if seasons is None:
             self._catalog.request_seasons(series)
@@ -685,7 +705,25 @@ class LibraryController(QObject):
         if episodes is None:
             self._catalog.request_episodes(self._series, season)
         else:
-            self._screen.series.set_episodes(season, episodes)
+            self._show_episodes(season, episodes)
+
+    def _show_episodes(self, season: dict, episodes: Optional[list[dict]]) -> None:
+        start = self._start_episode(episodes or [])
+        self._screen.series.set_episodes(season, episodes, current=start)
+
+    def _start_episode(self, episodes: list[dict]) -> Optional[dict]:
+        """The history episode when it is in `episodes`, or the next one once it was finished."""
+        episode = self._history_episode
+        if episode is None:
+            return None
+        key = episode_key(episode)
+        row = next((k for k, e in enumerate(episodes) if episode_key(e) == key), -1)
+        if row < 0:
+            return None
+        progress = self._episode_progress(episodes[row])
+        if progress is not None and progress >= RESUME_MAX_RATIO and row + 1 < len(episodes):
+            row += 1
+        return episodes[row]
 
     def _season_by_id(self, season_id: str) -> Optional[dict]:
         season = self._screen.series.current_season()
@@ -696,7 +734,7 @@ class LibraryController(QObject):
     def _on_episodes_ready(self, series_id: str, season_id: str) -> None:
         season = self._season_by_id(season_id)
         if self._series is not None and self._is_current_series(series_id) and season:
-            self._screen.series.set_episodes(season, self._catalog.episodes(self._series, season))
+            self._show_episodes(season, self._catalog.episodes(self._series, season))
 
     def _on_episodes_failed(self, series_id: str, season_id: str, message: str) -> None:
         season = self._season_by_id(season_id)
@@ -740,6 +778,7 @@ class LibraryController(QObject):
         back = self._series_back
         self._series = None
         self._series_details = None
+        self._history_episode = None
         self._set_mode(back)
         has_titles = self._screen.grid.current_index() >= 0
         self._focus("grid" if has_titles else ("search" if back == "search" else "genres"))

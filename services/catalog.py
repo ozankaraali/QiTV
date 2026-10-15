@@ -335,6 +335,7 @@ class CatalogService(QObject):
         # Serial provider-state queue: setups and EPG loads never overlap.
         self._state_job: Optional[str] = None  # "provider" or "epg" while one runs
         self._pending_setup: Optional[tuple[Optional[str], bool]] = None
+        self._setup_target: Optional[str] = None  # the provider the running setup loads
         self._pending_epg: Optional[bool] = None  # a queued EPG load (its force flag)
         # Catalog network jobs: keys are (generation, kind, ...) for queued and running jobs.
         self._catalog_queue: list[_CatalogRequest] = []
@@ -381,9 +382,24 @@ class CatalogService(QObject):
         self._catalog_queue.clear()
         self._pending_epg = None
         if self._state_job is not None:
+            queued = self._pending_setup
+            if queued is not None and queued[1] and self._target(queued[0]) == self._target(name):
+                force_refresh = True  # a queued forced refresh (Settings) must still clear
             self._pending_setup = (name, force_refresh)
             return
         self._start_setup(name, force_refresh)
+
+    def _target(self, name: Optional[str]) -> str:
+        """The provider a setup for `name` loads: None means the selected provider."""
+        return name if name is not None else str(self.config.selected_provider_name or "")
+
+    def loading_provider(self) -> Optional[str]:
+        """The provider whose setup will report next (queued, else running), else None."""
+        if self._pending_setup is not None:
+            return self._target(self._pending_setup[0])
+        if self._state_job == "provider":
+            return self._setup_target
+        return None
 
     def is_loading(self) -> bool:
         """True while a provider setup is running or queued.
@@ -419,6 +435,7 @@ class CatalogService(QObject):
         target = name if name is not None else self.config.selected_provider_name
         worker = self.factory.provider_setup(self.provider_manager, force_refresh)
         self._state_job = "provider"
+        self._setup_target = target
         self._start(
             worker,
             "provider",

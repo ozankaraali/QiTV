@@ -208,8 +208,8 @@ def _letter(item: dict) -> str:
     return letter_of(title_of(item))
 
 
-def history_season(history, provider: str, series: dict, seasons: list[dict]) -> Optional[dict]:
-    """The season of the newest watch-history entry for `series`, when it is known.
+def history_episode(history, provider: str, series: dict) -> Optional[dict]:
+    """The episode of the newest watch-history entry for `series`, when it is known.
 
     `history` is newest first (ConfigManager.watch_history). STB episodes copy the series
     dict, so their id is the series id, and carry `season_id`; an entry may also name its
@@ -229,16 +229,23 @@ def history_season(history, provider: str, series: dict, seasons: list[dict]) ->
         owner = episode.get("series_id")
         if owner is None and episode.get("season_id") is not None:
             owner = episode.get("id")
-        if owner is None or str(owner) != series_id:
-            continue
-        season_id, number = episode.get("season_id"), episode.get("season")
-        for season in seasons:
-            if season_id is not None and str(season.get("id")) == str(season_id):
-                return season
-        for season in seasons:
-            if number not in (None, "") and str(season.get("number")) == str(number):
-                return season
+        if owner is not None and str(owner) == series_id:
+            return episode
+    return None
+
+
+def history_season(history, provider: str, series: dict, seasons: list[dict]) -> Optional[dict]:
+    """The season (one of `seasons`) of `history_episode`, when it is known."""
+    episode = history_episode(history, provider, series)
+    if episode is None:
         return None
+    season_id, number = episode.get("season_id"), episode.get("season")
+    for season in seasons:
+        if season_id is not None and str(season.get("id")) == str(season_id):
+            return season
+    for season in seasons:
+        if number not in (None, "") and str(season.get("number")) == str(number):
+            return season
     return None
 
 
