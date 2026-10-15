@@ -12,6 +12,11 @@ own one):
   `RELEASE_CAP_MS`; `released` follows then. A ticket that never started goes back at once.
 
 `released` from a stop this object did not make (or after its cap) is ignored.
+
+A `HeldSlot` is the slot of a stream that plays outside a `LiveSession`: the main player's
+direct channel, movie or episode. It is taken at once, whatever the limit (the player's own
+release gate already orders its streams), so that other consumers (Phase 4's PiP) see the
+slot taken; its owner gives it back once the player let go of that stream.
 """
 
 from __future__ import annotations
@@ -131,3 +136,22 @@ class BudgetedStream(QObject):
                 "The %s stream did not report its upstream closed; going on.", self.purpose
             )
             self._on_released()
+
+
+class HeldSlot:
+    """A budget ticket for a stream that plays outside a `LiveSession` (see the docstring)."""
+
+    def __init__(self, budget: ConnectionBudget, purpose: str) -> None:
+        self.budget = budget
+        self.purpose = purpose
+        self.ticket: Optional[int] = None
+
+    def take(self, provider: str) -> None:
+        """Hold a ticket for `provider` in place of any held one; never queued."""
+        self.give_back()
+        self.ticket = self.budget.request(provider, None, purpose=self.purpose)
+
+    def give_back(self) -> None:
+        ticket, self.ticket = self.ticket, None
+        if ticket is not None:
+            self.budget.release(ticket)

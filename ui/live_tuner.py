@@ -11,7 +11,10 @@ later, as a backstop to its own caps). Only the newest open waits: a newer one r
 
 A pipeline tune also takes a slot of the provider's connection budget (purpose "main") and
 starts once the slot is granted and the old stream is released; the old slot goes back on
-that release. A `BudgetedStream` holds that slot and waits for the release (the PiP slot's
+that release. A direct play (`open(direct=True)`: a channel the pipeline cannot read, a
+movie, an episode) holds a "main" slot too (`HeldSlot`, the selected provider's), from its
+start until libVLC let go of its stream, so a PiP sees the slot taken; it never waits for
+one, since this gate already orders the main player's streams. A `BudgetedStream` holds that slot and waits for the release (the PiP slot's
 `SessionManager` uses one too). With a limit of one, the new request waits at the head of
 the queue, so the freed slot goes to it and to no other consumer. A pause or Go live pressed
 during that wait applies once the tune starts.
@@ -25,7 +28,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.budgeted_stream import BudgetedStream
+from services.budgeted_stream import BudgetedStream, HeldSlot
 from services.connection_budget import ConnectionBudget
 from services.live.live_session import LiveSession
 from services.playback import Session
@@ -59,7 +62,7 @@ class LiveTuner(QObject):
     ) -> None:
         super().__init__(parent)
         self.session = session
-        self.config = config  # live_latency, timeshift_enabled, timeshift_max_mib
+        self.config = config  # live_latency, timeshift_*, selected_provider_name (its slots)
         self.live = live
         self.budget = budget if budget is not None else ConnectionBudget(self)
         self.timeline: Optional[dict] = None  # the running tune's last timelineChanged state
@@ -70,6 +73,7 @@ class LiveTuner(QObject):
         self._pause = False  # pressed while the pending tune waited: applied at its start
         self._input_wait = False  # a direct play was stopped; inputEnded has not come
         self._direct = False  # the player plays a provider stream an open() asked for
+        self._held = HeldSlot(self.budget, PURPOSE)  # that stream's slot, until VLC let go
         self._action: Optional[Callable[[], None]] = None  # an open waiting for the release
         self._action_direct = False
         self._input_cap = QTimer(self, singleShot=True, interval=RELEASE_CAP_MS)
@@ -120,7 +124,9 @@ class LiveTuner(QObject):
             self.session.stop()
             if self.session.holds_input():
                 self._input_wait = True
-                self._input_cap.start()
+                self._input_cap.start()  # the slot goes back with the input
+            else:
+                self._held.give_back()
 
     def shutdown(self) -> None:
         direct = self._direct
@@ -135,6 +141,8 @@ class LiveTuner(QObject):
         if self._action is not None:
             action, self._action = self._action, None
             self._direct = self._action_direct
+            if self._direct:
+                self._held.take(str(getattr(self.config, "selected_provider_name", "") or ""))
             action()
         elif self._pending is not None and stream is not None and stream.is_granted():
             self._start()
@@ -180,6 +188,7 @@ class LiveTuner(QObject):
         if self._input_wait:
             self._input_wait = False
             self._input_cap.stop()
+            self._held.give_back()
             self._proceed()
 
     def _on_input_cap(self) -> None:
