@@ -305,6 +305,22 @@ class TopNavTests(unittest.TestCase):
         self.assertIn("QiTV", texts)
         self.assertEqual(pixmaps, [])
 
+    def test_the_logo_is_made_for_the_widgets_own_screen(self):
+        drawn = []
+        draw_pixmap = QPainter.drawPixmap
+
+        def pixmap(painter, *args):
+            drawn.append(args[1])
+            return draw_pixmap(painter, *args)
+
+        with (
+            mock.patch.object(self.nav, "devicePixelRatioF", return_value=3.0),
+            mock.patch.object(QPainter, "drawPixmap", pixmap),
+        ):
+            self.nav.grab()
+        self.assertEqual([p.devicePixelRatio() for p in drawn], [3.0])
+        self.assertEqual(drawn[0].height(), round(self.nav.logo_rect().height() * 3))
+
     def test_the_logo_is_crisp_at_the_screen_density(self):
         pixmap = logo_pixmap(24, 2.0)
         self.assertEqual(pixmap.devicePixelRatio(), 2.0)

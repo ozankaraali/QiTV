@@ -1,10 +1,11 @@
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QRectF, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -64,6 +65,22 @@ class WelcomeCardTests(unittest.TestCase):
         self.assertLess(logo.bottom(), title.top())
         self.assertAlmostEqual(logo.center().x(), self.card.width() / 2, delta=1)
         self.assertTrue(QRectF(self.card.rect()).contains(logo))
+
+    def test_the_logo_is_made_for_the_cards_own_screen(self):
+        self.card.show_card()
+        drawn = []
+        draw_pixmap = QPainter.drawPixmap
+
+        def pixmap(painter, *args):
+            drawn.append(args[1])
+            return draw_pixmap(painter, *args)
+
+        with (
+            mock.patch.object(self.card, "devicePixelRatioF", return_value=2.0),
+            mock.patch.object(QPainter, "drawPixmap", pixmap),
+        ):
+            self.card.grab()
+        self.assertEqual([p.devicePixelRatio() for p in drawn], [2.0])
 
     def test_it_follows_the_host_size(self):
         self.card.show_card()

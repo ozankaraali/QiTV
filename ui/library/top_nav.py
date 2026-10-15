@@ -9,7 +9,7 @@ from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QHelpEvent, QPainter
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from ui.brand import BRAND_NAME, logo_aspect, logo_pixmap
+from ui.brand import BRAND_NAME, logo_aspect, logo_available, logo_pixmap
 from ui.overlays.painting import Units, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -81,7 +81,7 @@ class TopNav(QWidget):
         """Where the logo is drawn: whole pixels, so it stays crisp."""
         units = Units(self._host_width())
         brand_font = units.font(BRAND_FONT_U, QFont.Weight.Bold)
-        if logo_pixmap(1) is None:  # the asset is missing: the name, as before
+        if not logo_available():  # the asset is missing: the name, as before
             width = QFontMetrics(brand_font).horizontalAdvance(BRAND_NAME)
             return QRectF(LOGO_LEFT_U * units.u, 0, width, self.height())
         height = round(QFontMetricsF(brand_font).capHeight() * LOGO_CAP_FACTOR)
@@ -205,8 +205,9 @@ class TopNav(QWidget):
         rects = self._item_rects()
         height = self.height()
         logo_rect = self.logo_rect()
-        logo = logo_pixmap(logo_rect.height())
+        logo = logo_pixmap(logo_rect.height(), self.devicePixelRatioF())
         if logo is not None:
+            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
             p.drawPixmap(logo_rect.topLeft(), logo)
         else:
             p.setFont(units.font(BRAND_FONT_U, QFont.Weight.Bold))

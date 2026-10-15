@@ -46,12 +46,12 @@ from tests.fixtures.local_xtream import XtreamFixture
 from tests.http_fixtures import LocalSource
 from tests.test_keymap import resolve_text
 from tests.ts_fixtures import make_stream
-from ui.brand import logo_path
+from ui.brand import logo_aspect
 from ui.keymap import SHORTCUTS, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.shortcuts_dialog import ShortcutsDialog, table_rows
-from ui.tv_menus import ISSUES_URL
+from ui.tv_menus import ISSUES_URL, AboutDialog
 from ui.tv_window import (
     ABANDONED_EXIT_CODE,
     CLOSE_RETRY_MS,
@@ -1478,14 +1478,21 @@ class HelpAndAboutTests(WindowCase):
         self.assertEqual(shown.table.item(0, 0).text(), "Watching TV")
 
     def test_about_names_the_version_and_the_links(self):
-        with mock.patch("ui.tv_menus.QMessageBox") as box:
+        with mock.patch("ui.tv_menus.AboutDialog") as dialog:
             self.menu_actions()["About QiTV"].trigger()
-        text = box.return_value.setText.call_args[0][0]
+        dialog.assert_called_once_with(self.window)
+        dialog.return_value.exec.assert_called_once_with()
+        about = AboutDialog(self.window)
+        self.addCleanup(about.deleteLater)
+        text = about.text.text()
         self.assertIn(f"QiTV {get_app_version()}", text)
         self.assertIn(ISSUES_URL, text)
-        logo = text.index(f'<img src="{logo_path().as_uri()}"')  # the logo, above the name
-        self.assertLess(logo, text.index("QiTV"))
-        box.return_value.exec.assert_called_once_with()
+        # The same cropped logo as the top bar and the card, above the text, at 64 px.
+        logo = about.logo.pixmap()
+        self.assertEqual(logo.deviceIndependentSize().height(), 64)
+        self.assertAlmostEqual(logo.width() / logo.height(), logo_aspect(), delta=0.02)
+        layout = about.layout()
+        self.assertLess(layout.indexOf(about.logo), layout.indexOf(about.text))
 
     def test_check_for_updates_and_report_an_issue(self):
         with (

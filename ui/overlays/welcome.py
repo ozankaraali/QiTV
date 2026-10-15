@@ -9,7 +9,7 @@ from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
-from ui.brand import logo_aspect, logo_pixmap
+from ui.brand import logo_aspect, logo_available, logo_pixmap
 from ui.overlays.base import Overlay
 from ui.overlays.painting import Units, fill_round
 from ui.pointer import NAV_BUTTONS
@@ -70,7 +70,7 @@ class WelcomeCard(Overlay):
     def logo_rect(self) -> QRectF:
         """The logo, centred above the title (empty when the asset is missing)."""
         units = Units(self._host_width())
-        if logo_pixmap(1) is None:
+        if not logo_available():
             return QRectF(self.width() / 2, units.px(PAD_U), 0, 0)
         height = units.px(LOGO_U)
         width = round(height * logo_aspect())
@@ -127,7 +127,7 @@ class WelcomeCard(Overlay):
         width = units.px(WIDTH_U)
         pad = units.px(PAD_U)
         title_h, body_h = self._text_heights(units, width - 2 * pad)
-        logo_h = units.px(LOGO_U) + units.px(LOGO_GAP_U) if logo_pixmap(1) is not None else 0
+        logo_h = units.px(LOGO_U) + units.px(LOGO_GAP_U) if logo_available() else 0
         height = (
             pad
             + logo_h
@@ -164,8 +164,10 @@ class WelcomeCard(Overlay):
         inner = self.width() - 2 * pad
         _title_h, body_h = self._text_heights(units, inner)
         logo_rect = self.logo_rect()
-        logo = logo_pixmap(logo_rect.height()) if logo_rect.height() else None
+        ratio = self.devicePixelRatioF()
+        logo = logo_pixmap(logo_rect.height(), ratio) if logo_rect.height() else None
         if logo is not None:
+            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
             p.drawPixmap(logo_rect.topLeft(), logo)
         title = self.title_rect()
         p.setFont(self._title_font(units))

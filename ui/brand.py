@@ -1,8 +1,9 @@
 """The QiTV logo (assets/qitv.png) for the Library's top bar, the welcome card and About.
 
 The app icon's transparent margin and soft shadow are cropped off, so a logo drawn `n` pixels
-tall is the rounded square itself. Pixmaps are made at the screen's device pixel ratio, so they
-stay crisp on HiDPI displays. GUI thread only.
+tall is the rounded square itself. Pixmaps are made, with smooth scaling, at the device pixel
+ratio of the widget that draws them (its screen's), so they stay crisp on HiDPI displays.
+GUI thread only.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import sys
 from typing import Optional
 
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QBitmap, QGuiApplication, QImage, QPixmap, QRegion
+from PySide6.QtGui import QBitmap, QImage, QPixmap, QRegion
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +55,24 @@ def _load_master() -> Optional[QImage]:
     return _master
 
 
+def logo_available() -> bool:
+    """The logo asset can be drawn (else the name is shown instead)."""
+    return _load_master() is not None
+
+
 def logo_aspect() -> float:
     """Width over height of the drawn logo (1.0 when it is missing)."""
     master = _load_master()
     return master.width() / master.height() if master is not None else 1.0
 
 
-def device_ratio() -> float:
-    app = QGuiApplication.instance()
-    return float(app.devicePixelRatio()) if isinstance(app, QGuiApplication) else 1.0
-
-
-def logo_pixmap(height: float, ratio: Optional[float] = None) -> Optional[QPixmap]:
-    """The logo `height` logical pixels tall at `ratio` (the screen's by default); None when
-    the asset is missing."""
+def logo_pixmap(height: float, ratio: float) -> Optional[QPixmap]:
+    """The logo `height` logical pixels tall for a widget whose devicePixelRatioF() is `ratio`;
+    None when the asset is missing."""
     master = _load_master()
     if master is None or height <= 0:
         return None
-    ratio = ratio or device_ratio()
+    ratio = ratio if ratio > 0 else 1.0
     key = (round(height), ratio)
     pixmap = _pixmaps.get(key)
     if pixmap is None:

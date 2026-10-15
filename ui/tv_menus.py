@@ -16,12 +16,12 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import QMenu, QMessageBox
+from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLayout, QWidget
 
 from config_manager import get_app_version
 from services.exporter import ExportKind
 from services.navigation import ADD_PROVIDER_ROW, SETTINGS_ROW
-from ui.brand import logo_path
+from ui.brand import logo_pixmap
 from ui.keymap import Action
 from ui.shortcuts_dialog import ShortcutsDialog
 from update_checker import check_for_updates
@@ -31,9 +31,9 @@ logger = logging.getLogger(__name__)
 HOME_URL = "https://github.com/ozankaraali/QiTV"
 ISSUES_URL = f"{HOME_URL}/issues"
 ABOUT_LOGO_PX = 64
-ABOUT_STYLE = "QLabel#qt_msgbox_label { min-width: 340px; }"
+ABOUT_TEXT_MIN_W = 340  # wide enough for the links on one line each
 ABOUT_TEXT = (
-    "{logo}<p><b>QiTV {version}</b></p>"
+    "<p><b>QiTV {version}</b></p>"
     "<p>A TV-first IPTV player for STB portals, Xtream and M3U playlists.</p>"
     '<p><a href="{home}">{home}</a><br><a href="{issues}">Report an issue</a></p>'
 )
@@ -46,14 +46,36 @@ _SHORTCUT_MODIFIERS = (
 
 
 def about_text() -> str:
-    """The About box: the logo above the version (pyproject.toml, as packaged) and the links."""
-    path = logo_path()
-    logo = (
-        f'<p><img src="{path.as_uri()}" width="{ABOUT_LOGO_PX}" height="{ABOUT_LOGO_PX}"></p>'
-        if path.is_file()
-        else ""
-    )
-    return ABOUT_TEXT.format(logo=logo, version=get_app_version(), home=HOME_URL, issues=ISSUES_URL)
+    """About's text: the version (pyproject.toml, as packaged) and the project's links."""
+    return ABOUT_TEXT.format(version=get_app_version(), home=HOME_URL, issues=ISSUES_URL)
+
+
+class AboutDialog(QDialog):
+    """About QiTV: the logo (the same cropped one as the Library's top bar and the welcome
+    card, at this window's pixel ratio) above the name, the version and the links."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("About QiTV")
+        self.logo = QLabel(self)
+        ratio = (parent if parent is not None else self).devicePixelRatioF()
+        pixmap = logo_pixmap(ABOUT_LOGO_PX, ratio)
+        if pixmap is not None:
+            self.logo.setPixmap(pixmap)
+        else:
+            self.logo.hide()  # the asset is missing: the name says it
+        self.text = QLabel(about_text(), self)
+        self.text.setTextFormat(Qt.TextFormat.RichText)
+        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.text.setOpenExternalLinks(True)
+        self.text.setMinimumWidth(ABOUT_TEXT_MIN_W)
+        self.text.setWordWrap(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, self)
+        buttons.accepted.connect(self.accept)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.logo)
+        layout.addWidget(self.text)
+        layout.addWidget(buttons)
 
 
 class TVMenus(QObject):
@@ -183,15 +205,8 @@ class TVMenus(QObject):
 
     def show_about(self) -> None:
         window = self._window
-        if window.closing():
-            return
-        box = QMessageBox(window)
-        box.setWindowTitle("About QiTV")
-        box.setTextFormat(Qt.TextFormat.RichText)
-        box.setText(about_text())
-        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        box.setStyleSheet(ABOUT_STYLE)  # wide enough for the links on one line each
-        box.exec()
+        if not window.closing():
+            AboutDialog(window).exec()
 
     def check_updates(self) -> None:
         if not self._window.closing():
