@@ -1,8 +1,8 @@
 """The TV shell's behaviour: wires the catalog, navigation, zapping and playback to the overlays.
 
-Link requests are serialised: at most one is in flight (STB portals mint a link per request and
-providers limit connections). A tune that arrives meanwhile replaces the single queued target,
-and only the newest target ever plays.
+Link requests are serialised in LinkLanes (ui/link_lanes.py): at most one is in flight (STB
+portals mint a link per request and providers limit connections). A tune that arrives
+meanwhile replaces the single queued target, and only the newest target ever plays.
 
 Live channels on http(s) play through the time-shift pipeline (`LiveSession`) when the window
 provides one. `LiveTuner` opens every provider stream (pipeline, direct, movie, external player)
@@ -15,41 +15,45 @@ says so.
 In external-player mode a zap step launches the player only once the zapping settles.
 
 Movies and episodes play through `play_vod` (the drawer and the Library), resuming where they
-stopped. When one ends, autoplay offers the next episode of its series or the next title of
-its genre on the Next card; a next season that is not loaded yet is requested first. The
-transport's Next plays it at once. External players never autoplay (as in v1.13.8).
+stopped; Autoplay (ui/autoplay.py) offers what follows one that ended. While a movie or an
+episode is current, also once it ended, the zap keys stay on it: ↑/↓ and the wheel change the
+volume, and number entry, the previous channel and the guide wait for live TV.
 
-The drawer's context menu requests links beside the tune: one at a time, never in the tune's
-slot, and a link request opens no stream. Its "Play in VLC/MPV" releases the in-app stream
-first, as an external pick does.
+The guide (ui/guide_controller.py) takes the keys while it is open. The drawer's context menu
+(ui/context_actions.py) asks for links on LinkLanes' side lane; its "Play in VLC/MPV" releases
+the in-app stream first, as an external pick does. Only this controller holds the LiveTuner
+and the session: the others call back play_vod, tune or the external play.
 """
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import logging
 import re
-from typing import Callable, Optional, Union
+from typing import Callable, Optional
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
-from PySide6.QtGui import QGuiApplication, QPixmap
-from PySide6.QtWidgets import QAbstractScrollArea, QMenu, QWidget
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QAbstractScrollArea
 
-from services import external_players
+from services import external_players, favorites
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.source import REFUSALS, STREAM_REFUSED
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, episode_key, item_key
-from services.next_episode import NeedEpisodes, NextUp, next_episode, next_movie
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
+from services.next_episode import play_context
 from services.redact import safe_traceback
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind, classify
 from services.zapping import ZapContext
+from ui.autoplay import FINISHED_TEXT, Autoplay
+from ui.context_actions import ContextActions, Launcher, is_channel
+from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
+from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.drawer import Drawer
@@ -60,7 +64,6 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.zap_banner import BannerInfo, ZapBanner
 from ui.pointer import PointerInput
-from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
 
@@ -75,35 +78,13 @@ EXTERNAL_SETTLE_MS = 1000  # the zap burst window: an external player opens once
 LIMITED_TEXT = "Your provider limits concurrent streams"  # when its limit is not known
 REFUSED_TEXT = "The provider refused the stream — it may"  # a plain 403: maybe the limit
 TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
-FINISHED_TEXT = "Finished"
-NOTHING_NEXT_TEXT = "Nothing to play next"
-NEXT_SEASON_FAILED_TEXT = "Couldn't load the next season"
 FAVORITES_SAVE_FAILED_TEXT = "Couldn't save your favorites; they will be lost when QiTV closes"
-# The Library's play context (LibraryController._context): what Next and autoplay follow.
-_PLAY_CONTEXT = {
-    "start_over": False,
-    "series": None,
-    "season": None,
-    "episodes": None,
-    "genre_items": None,
-}
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 _ACTIVE_STATES = frozenset({"opening", "buffering", "playing", "paused"})
 _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
 _PINNED_TITLES = {FAVORITES_GROUP: "Favorites", RECENT_GROUP: "Recent"}
-# While the guide is open these close it first and then act as usual (they tune or open the
-# drawer); the media keys do nothing, as with the drawer open.
-_GUIDE_CLOSERS = (
-    Action.OK,
-    Action.OPEN_DRAWER,
-    Action.PREVIOUS,
-    Action.DIGIT,
-    Action.CH_NEXT,
-    Action.CH_PREV,
-)
-_GUIDE_IGNORED = (Action.MEDIA_NEXT, Action.MEDIA_PREV)
 _ADDRESS = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S*", re.IGNORECASE)
 _QUERY = re.compile(r"\S*\?\S*=\S*")  # a query string carries "=": "Who?Me" stays
 
@@ -112,32 +93,6 @@ def scrub(text: object) -> str:
     """Drop addresses and query strings from a message: they can carry credentials."""
     cleaned = _QUERY.sub("…", _ADDRESS.sub("…", str(text)))
     return " ".join(cleaned.split())
-
-
-def _title(item: Optional[dict], *, episode: bool = False) -> str:
-    """A title's name as the drawer shows it ("" without a title)."""
-    if not isinstance(item, dict):
-        return ""
-    name = (item.get("ename") if episode else None) or item.get("name") or item.get("title")
-    return str(name or "Untitled")
-
-
-def _css(value: str, alpha: Optional[float] = None) -> str:
-    color = qcolor(value, alpha)
-    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alphaF():.2f})"
-
-
-def _menu_style() -> str:
-    """The context menu in the shell's colours, with the shared focus style."""
-    line = _css(PALETTE.text, 0.12)
-    return (
-        f"QMenu {{ background: {_css(PALETTE.panel_raised)}; color: {_css(PALETTE.text)};"
-        f" border: 1px solid {line}; padding: 4px; }}"
-        " QMenu::item { padding: 6px 22px; border: 1.5px solid transparent; border-radius: 6px; }"
-        f" QMenu::item:selected {{ background: {_css(PALETTE.accent, FOCUS_FILL_ALPHA)};"
-        f" border-color: {_css(PALETTE.accent)}; }}"
-        f" QMenu::separator {{ height: 1px; background: {line}; margin: 4px 8px; }}"
-    )
 
 
 @dataclass
@@ -149,53 +104,6 @@ class Overlays:
     toast: Toast
     guide: Guide
     next_card: NextCard
-
-
-@dataclass
-class _Target:
-    """Something to play once its link resolves."""
-
-    item: dict
-    section: str  # "live", "movies" or "series" (an episode)
-    title: str
-    group_key: str = ""
-    subtitle: str = ""
-    zapped: bool = False  # chosen by a zap step (↑/↓, digits, previous), not picked
-    retried: bool = False  # its link was made again after a playback failure (STB tokens)
-    context: Optional[dict] = None  # a movie's or episode's play context (see play_vod)
-    start_over: bool = False  # from the start, not where it stopped
-
-    @property
-    def live(self) -> bool:
-        return self.section == "live"
-
-    @property
-    def item_type(self) -> str:
-        return {"live": "channel", "series": "episode"}.get(self.section, "movie")
-
-    def same_as(self, other: _Target) -> bool:
-        if self.section != other.section or not ZapContext.same(self.item, other.item):
-            return False
-        # STB episodes share the season's cmd and id; the episode number tells them apart.
-        return self.section != "series" or episode_key(self.item) == episode_key(other.item)
-
-
-@dataclass
-class _LinkJob:
-    """A context menu's link request: `then` takes the link once it is ready."""
-
-    target: _Target
-    then: Callable[[str], None] = field(repr=False)
-
-
-@dataclass
-class _Awaiting:
-    """Autoplay waits for a season's episodes before it can name what follows `target`."""
-
-    target: _Target
-    play_now: bool  # the transport's Next: play it at once, without the card
-    series_id: str
-    season_id: str
 
 
 class TVController(QObject):
@@ -237,15 +145,14 @@ class TVController(QObject):
         self._ticks: list[tuple[float, str]] = []
         self._unavailable_noticed: set[tuple[str, str]] = set()  # (provider, channel) this run
         self._held_notice: Optional[tuple[str, str]] = None  # shown once the channel plays
-        self._resume: Optional[_Target] = None  # what stop_live() stopped, for resume_live()
-        self._external_pending: Optional[tuple[_Target, str]] = None
+        self._resume: Optional[Target] = None  # what stop_live() stopped, for resume_live()
+        self._external_pending: Optional[tuple[Target, str]] = None
         self._external_settle = QTimer(self, singleShot=True)
         self._external_settle.timeout.connect(self._launch_settled)
         self._started = False
         self._closed = False
-        self._inflight: Optional[tuple[int, _Target]] = None
-        self._queued: Optional[_Target] = None
-        self._current: Optional[_Target] = None  # handed to the player
+        self._lanes = LinkLanes(catalog, self)
+        self._current: Optional[Target] = None  # handed to the player
         self._cid: Optional[str] = None  # resume key of the VOD being played
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
         self._digits = ""  # number entry under way
@@ -256,11 +163,29 @@ class TVController(QObject):
         self._autotune: Optional[tuple[dict, str]] = None
         self._audio_id: Optional[int] = None
         self._subtitle_id: Optional[int] = None
-        self._guide_channels: tuple[str, list[dict]] = ("", [])  # what the guide opened on
-        self._next: Optional[tuple[dict, str, dict]] = None  # what the Next card offers
-        self._awaiting: Optional[_Awaiting] = None
-        self._side: Optional[tuple[int, _LinkJob]] = None  # the context menu's link request
-        self._side_queue: deque[_LinkJob] = deque()
+        self._guide = GuideController(overlays.guide, parent=self)
+        self._autoplay = Autoplay(
+            catalog=catalog,
+            config=config,
+            card=overlays.next_card,
+            play=self.play_vod,
+            is_current=self._still_current,
+            external_mode=lambda: self._external_launcher() is not None,
+            notify=self._notify,
+            set_hint=overlays.toast.set_hint,
+            show_transport=overlays.transport.poke,
+            parent=self,
+        )
+        self._context = ContextActions(
+            nav=nav,
+            config=config,
+            lanes=self._lanes,
+            external=self.external,
+            toggle_favorite=self._toggle_favorite,
+            play_external=self._play_external,
+            notify=self._notify,
+            parent=self,
+        )
         self._column_wheel = PointerInput(self)
         # While a live link resolves, the banner is shown again before it fades (Minor 11).
         self._tuning = QTimer(self, interval=TUNING_KEEP_MS)
@@ -287,11 +212,10 @@ class TVController(QObject):
         catalog.providerFailed.connect(self._on_provider_failed)
         catalog.sectionReady.connect(self._on_section_ready)
         catalog.sectionFailed.connect(self._on_section_failed)
-        catalog.linkReady.connect(self._on_link_ready)
-        catalog.linkFailed.connect(self._on_link_failed)
+        self._lanes.tuneReady.connect(self._on_tune_ready)
+        self._lanes.tuneFailed.connect(self._on_tune_failed)
+        self._lanes.sideFailed.connect(self._on_side_failed)
         catalog.epgReady.connect(self._on_epg_ready)
-        catalog.episodesReady.connect(self._on_episodes_ready)
-        catalog.episodesFailed.connect(self._on_episodes_failed)
         self.nav.notice.connect(self._on_notice)
         self.nav.providerRequested.connect(self._on_provider_requested)
         zap.tuneRequested.connect(self._on_zap_tune)
@@ -307,9 +231,7 @@ class TVController(QObject):
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
         drawer.contextRequested.connect(self._on_context)
-        self.overlays.guide.tuneRequested.connect(self._on_guide_tune)
-        self.overlays.next_card.playNow.connect(self._on_play_now)
-        self.overlays.next_card.cancelled.connect(self._on_next_cancelled)
+        self._guide.tuneRequested.connect(self._on_guide_tune)
         transport.nextRequested.connect(self._on_next_requested)
         transport.playPauseRequested.connect(self._tuner.toggle_pause)
         transport.seekRequested.connect(session.seek)
@@ -341,8 +263,8 @@ class TVController(QObject):
         if self._closed:
             return
         self._closed = True
-        self._drop_links()
-        self._drop_next()
+        self._lanes.close()
+        self._autoplay.close()
         self._tuning.stop()
         self._cancel_external()
         self._autotune = None
@@ -401,19 +323,19 @@ class TVController(QObject):
 
     def key_context(self) -> str:
         """The keymap context for the next key: the open guide or drawer takes the keys."""
-        if self.overlays.guide.isVisible():
+        if self._guide.is_open():
             return "guide"
         return "drawer" if self.overlays.drawer.isVisible() else "player"
 
     def handle(self, action: Action, payload: str = "") -> None:
         if self._closed:
             return
-        if self.overlays.guide.isVisible() and self._guide_key(action):
+        if self._guide.is_open() and self._guide.handle(action, payload):
             return
         drawer = self.overlays.drawer
         if action in (Action.CH_NEXT, Action.CH_PREV):
             delta = 1 if action is Action.CH_NEXT else -1
-            if self._playing_vod():
+            if self._on_demand():
                 self._change_volume(-VOLUME_STEP * delta)  # ↑ is louder
             else:
                 self.zap.step(delta)
@@ -421,19 +343,20 @@ class TVController(QObject):
             delta = 1 if action is Action.MEDIA_NEXT else -1
             if drawer.isVisible():
                 return  # the drawer is browsing; play/pause still works
-            if self._playing_vod():
+            if self._on_demand():
                 self._seek(delta * SEEK_STEP_MS)
             else:
                 self.zap.step(delta)
                 self._show_transport()
         elif action is Action.DIGIT:
-            if not self._playing_vod():
+            if not self._on_demand():
                 self.zap.digit(payload)
         elif action is Action.PREVIOUS:
-            self.zap.previous()
+            if not self._on_demand():
+                self.zap.previous()
         elif action is Action.OK:
-            if self.overlays.next_card.isVisible():
-                self.overlays.next_card.activate()  # Play now
+            if self._autoplay.card_open():
+                self._autoplay.play_now()
             elif self.overlays.column.isVisible():
                 self._on_column_row(self.overlays.column.current_index())  # tune it now
             else:
@@ -518,7 +441,7 @@ class TVController(QObject):
         if not steps or self._closed:
             return
         volume = as_int(modifiers) & _VOLUME_MODIFIERS
-        if volume or self.config.mouse_wheel_action == "volume" or self._playing_vod():
+        if volume or self.config.mouse_wheel_action == "volume" or self._on_demand():
             self._change_volume(-VOLUME_STEP * steps)
         else:
             self._zap_steps(steps)
@@ -552,6 +475,7 @@ class TVController(QObject):
         if self._closed:
             return
         self._cancel_external()  # a newer choice: the settling external launch is dropped
+        self._lanes.supersede()  # and an external play still waiting for its link
         context = self.zap.context
         if group_key != context.group_key or context.index_of(channel) < 0:
             # Numbers reach every live channel, not only the group's (TV numbers are global).
@@ -566,12 +490,12 @@ class TVController(QObject):
         if stay:
             # The channel already playing was chosen again: never restart it, and drop a
             # pending choice when it settles (the "stay" marker is the playing target).
-            if self._inflight is not None or self._queued is not None:
-                self._queued = playing
+            if self._lanes.busy():
+                self._lanes.queued = playing
             self.zap.tuned(channel)
             return
         title = str(channel.get("name") or "")
-        self._request(_Target(channel, "live", title, group_key=group_key, zapped=from_zap))
+        self._request(Target(channel, "live", title, group_key=group_key, zapped=from_zap))
         self._tuning.start(TUNING_KEEP_MS)
 
     def play_item(self, node: NavNode, siblings: list[NavNode], parent: NavNode) -> None:
@@ -611,14 +535,16 @@ class TVController(QObject):
         """
         if self._closed:
             return
-        context = {**_PLAY_CONTEXT, **(context or {})}
+        context = play_context(context)
         episode = kind == "episode"
+        series = context["series"]
+        self._lanes.supersede()  # a newer choice than an external play waiting for its link
         self._request(
-            _Target(
+            Target(
                 item,
                 "series" if episode else "movies",
-                _title(item, episode=episode),
-                subtitle=_title(context["series"]) if episode else "",
+                item_title(item, episode=episode),
+                subtitle=item_title(series) if episode and isinstance(series, dict) else "",
                 context=context,
                 start_over=bool(context["start_over"]),
             )
@@ -627,37 +553,14 @@ class TVController(QObject):
     def _all_live(self) -> list[dict]:
         return list(self.catalog.items("live", ALL_GROUP_ID) or [])
 
-    def _request(self, target: _Target) -> None:
+    def _request(self, target: Target) -> None:
         self._cancel_external()
-        self._drop_next()  # a newer choice than what the Next card offers
-        if self._inflight is not None:
-            self._queued = target  # replaces any older queued target
-            return
-        self._queued = None  # the target sent now is the newest choice
-        request_id = self.catalog.request_link(
-            target.item, section=target.section, is_episode=target.section == "series"
-        )
-        self._inflight = (request_id, target)
+        self._autoplay.drop()  # a newer choice than what the Next card offers
+        self._lanes.request(target)
 
-    def _drop_links(self) -> None:
-        """Forget every pending link (a provider setup drops their results anyway)."""
-        self._inflight = None
-        self._queued = None
-        self._side = None
-        self._side_queue.clear()
-
-    def _take(self, request_id: int) -> Optional[_Target]:
-        """The in-flight target when `request_id` is the request we are waiting for."""
-        if self._closed or self._inflight is None or self._inflight[0] != request_id:
-            logger.debug("Ignoring the result of link request %s", request_id)
-            return None
-        target = self._inflight[1]
-        self._inflight = None
-        return target
-
-    def _follow_queue(self, settled: _Target) -> bool:
+    def _follow_queue(self, settled: Target) -> bool:
         """Act on a choice made while `settled` was in flight; False when there was none."""
-        queued, self._queued = self._queued, None
+        queued = self._lanes.take_queued()
         if queued is None:
             return False
         if self._is_stay(queued):
@@ -669,32 +572,22 @@ class TVController(QObject):
             self._request(queued)
         return True
 
-    def _is_stay(self, target: Optional[_Target]) -> bool:
+    def _is_stay(self, target: Optional[Target]) -> bool:
         """True for the marker that keeps the playing channel (see _tune)."""
         return target is not None and target is self._current and self._has_media()
 
-    def _on_link_ready(self, request_id: int, url: str) -> None:
-        job = self._take_side(request_id)
-        if job is not None:
-            try:
-                job.then(url)
-            except Exception as e:
-                self._log_failure(f"use the link of {job.target.title}", e)
-                self._error(f"{job.target.title}: {e}")
-            self._next_side_link()
+    def _on_tune_ready(self, target: Target, url: str) -> None:
+        if self._closed:
             return
-        target = self._take(request_id)
-        if target is None:
-            return
-        queued = self._queued
+        queued = self._lanes.queued
         if queued is not None and not self._is_stay(queued) and queued.same_as(target):
-            self._queued = None
+            self._lanes.queued = None
             target = queued  # chosen again meanwhile: this link serves the newest choice
         elif self._follow_queue(target):
             return
         self._play_link(target, url)
 
-    def _play_link(self, target: _Target, url: str) -> None:
+    def _play_link(self, target: Target, url: str) -> None:
         previous = self._current
         try:
             self._deliver(target, url)
@@ -704,29 +597,28 @@ class TVController(QObject):
             self._restore_channel()
             self._error(f"{target.title}: {e}")
 
-    def _on_link_failed(self, request_id: int, message: str) -> None:
-        job = self._take_side(request_id)
-        if job is not None:
-            self._error(f"{job.target.title}: {message}")
-            self._next_side_link()
-            return
-        target = self._take(request_id)
-        if target is None:
+    def _on_tune_failed(self, target: Target, message: str) -> None:
+        if self._closed:
             return
         if message == PROVIDER_LOADING_MESSAGE:
             # A provider setup is running; providerReady asks again for the newest choice:
             # one queued meanwhile is newer than the target that just failed.
-            if self._queued is None:
-                self._queued = target
+            if self._lanes.queued is None:
+                self._lanes.queued = target
             return
         if self._follow_queue(target):
             return  # the failed target was superseded: no error for it
         self._restore_channel()
         self._error(f"{target.title}: {message}")
 
+    def _on_side_failed(self, target: Target, message: str) -> None:
+        """A context menu's link failed (or what used it did)."""
+        if not self._closed:
+            self._error(f"{target.title}: {message}")
+
     def _keep_tuning_banner(self) -> None:
         """Show the banner again while the link of the channel it announces resolves."""
-        pending = self._queued or (self._inflight[1] if self._inflight is not None else None)
+        pending = self._lanes.pending()
         channel, banner = self._channel, self.overlays.banner
         tuning = (
             not self._closed
@@ -747,7 +639,7 @@ class TVController(QObject):
         current = self._current
         self._channel = current.item if current is not None and current.live else None
 
-    def _deliver(self, target: _Target, url: str) -> None:
+    def _deliver(self, target: Target, url: str) -> None:
         item = target.item
         launcher = self._external_launcher()
         self._audio_id = self._subtitle_id = None
@@ -798,12 +690,12 @@ class TVController(QObject):
             if start:
                 self._toast(f"Resumed at {fmt_duration(start)}")
             self.overlays.banner.dismiss()  # the transport takes the bottom of the video
-            self.overlays.transport.set_next_available(self._has_next(target))
+            self.overlays.transport.set_next_available(self._autoplay.has_next(target))
             self.overlays.transport.show_vod(target.title, target.subtitle)
         if self._current is target:  # else opening it failed at once (see _guarded)
             self._delivered(target, url)
 
-    def _guarded(self, target: _Target, open_: Callable[[], None]) -> Callable[[], None]:
+    def _guarded(self, target: Target, open_: Callable[[], None]) -> Callable[[], None]:
         """`open_` as an open once the old stream is released: now, or from a signal later."""
 
         def run() -> None:
@@ -818,12 +710,7 @@ class TVController(QObject):
 
         return run
 
-    def _launch(
-        self,
-        target: _Target,
-        url: str,
-        launcher: Optional[Callable[[str], tuple[bool, str]]] = None,
-    ) -> None:
+    def _launch(self, target: Target, url: str, launcher: Optional[Launcher] = None) -> None:
         """Hand the link to the external player (the in-app stream is released by now).
 
         `launcher` is the context menu's choice; by default, the settings' player.
@@ -843,7 +730,7 @@ class TVController(QObject):
         self._current, self._cid = target, None
         self._delivered(target, url)
 
-    def _delivered(self, target: _Target, url: str) -> None:
+    def _delivered(self, target: Target, url: str) -> None:
         """The target is playing (or opening): confirm the zap and record it in the history."""
         if target.live:
             self.zap.tuned(target.item)
@@ -889,7 +776,7 @@ class TVController(QObject):
     def _limit_text(self, limit: Optional[int]) -> str:
         return f"Your provider allows {limit} streams at a time" if limit else LIMITED_TEXT
 
-    def _tune_pipeline(self, target: _Target, url: str) -> bool:
+    def _tune_pipeline(self, target: Target, url: str) -> bool:
         """Ask for a budget slot for `target` (spec §6.9); it starts once the old one is released.
 
         False when the provider's limit is taken by other streams (Phase 4: picture in
@@ -968,18 +855,17 @@ class TVController(QObject):
             self._unavailable_noticed.add(key)
             self._toast(UNAVAILABLE)
 
-    def _may_retry(self, current: Optional[_Target]) -> bool:
+    def _may_retry(self, current: Optional[Target]) -> bool:
         """An STB channel's link may be made again once per tune (its play token expires)."""
         return (
             current is not None
             and current.live
             and not current.retried
             and self.catalog.provider_type() == "STB"
-            and self._inflight is None
-            and self._queued is None
+            and not self._lanes.busy()
         )
 
-    def _retry(self, current: _Target) -> None:
+    def _retry(self, current: Target) -> None:
         logger.info("Making the link of %s again after a playback failure", current.title)
         self._held_notice = None
         self._stop_tune()  # it failed: its slot goes back, also if the new link does not come
@@ -1069,16 +955,16 @@ class TVController(QObject):
         # A provider setup makes the catalog drop link results requested before it, so a
         # request still in flight may never settle: ask again for the newest target, unless
         # the provider changed and its channels belong to the old one.
-        pending = self._queued or (self._inflight[1] if self._inflight is not None else None)
+        pending = self._lanes.pending()
         if self._is_stay(pending):
             pending = None  # the playing channel was the newest choice: nothing to ask again
-        self._drop_links()
+        self._lanes.drop()
         if self._provider is not None and name != self._provider:
             self.zap.reset()
             self._channel = None
             pending = None
-            self._drop_next()
-            self.overlays.guide.close_guide()  # its channels are the old provider's
+            self._autoplay.drop()
+            self._guide.close()  # its channels are the old provider's
         self._provider = name
         if pending is not None:
             self._request(pending)
@@ -1103,7 +989,7 @@ class TVController(QObject):
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._closed:
             return
-        self._drop_links()
+        self._lanes.drop()
         self._end_loading()
         self._error(f"{name}: {message}" if name else message)
         # The sources, on the failed one, with a row to connect again: never a black screen.
@@ -1145,8 +1031,7 @@ class TVController(QObject):
     def _on_epg_ready(self) -> None:
         if not self._closed:
             self._repaint()
-            if self.overlays.guide.isVisible():
-                self.overlays.guide.invalidate()
+            self._guide.invalidate()
 
     def _on_notice(self, text: str) -> None:
         if not self._closed:
@@ -1154,7 +1039,7 @@ class TVController(QObject):
 
     def _open_drawer_if_idle(self) -> None:
         drawer = self.overlays.drawer
-        busy = self._has_media() or self._inflight is not None or self._queued is not None
+        busy = self._has_media() or self._lanes.busy()
         if not busy and not drawer.isVisible():
             drawer.open_drawer()
 
@@ -1266,148 +1151,18 @@ class TVController(QObject):
             self.watch.flush()
         except Exception as e:
             self._log_failure("save the watch state", e)
-        if self._autoplays(current):
-            self._advance(current, play_now=False)
-        else:
+        if not self._autoplay.on_ended(current):
             self._toast(FINISHED_TEXT)
 
-    # ---- autoplay and Next --------------------------------------------------------------------
-
-    @staticmethod
-    def _has_next(target: _Target) -> bool:
-        """Whether Next can follow `target`: an episode of a known season, a genre's movie."""
-        context = target.context or {}
-        if target.section == "series":
-            return isinstance(context.get("series"), dict) and isinstance(
-                context.get("season"), dict
-            )
-        return target.section == "movies" and bool(context.get("genre_items"))
-
-    def _autoplays(self, target: _Target) -> bool:
-        """Autoplay follows a movie or episode that ended, as the settings allow."""
-        if self._external_launcher() is not None or not self._has_next(target):
-            return False  # external players never autoplay (as in v1.13.8)
-        if self._inflight is not None or self._queued is not None:
-            return False  # something else was chosen and is on its way
-        if target.section == "series":
-            return bool(self.config.auto_play_episodes)
-        return bool(self.config.auto_play_movies)
-
-    def _following(self, target: _Target) -> Union[NextUp, NeedEpisodes, None]:
-        """What follows `target`: the next episode (maybe in a season still to load) or title."""
-        context = target.context or {}
-        if target.section == "series":
-            series, season = context.get("series"), context.get("season")
-            if not isinstance(series, dict) or not isinstance(season, dict):
-                return None
-            return next_episode(
-                self.catalog.seasons(series) or [season],
-                lambda s: self.catalog.episodes(series, s),
-                season,
-                target.item,
-                season_key=item_key,
-                episode_key=episode_key,
-            )
-        following = next_movie(list(context.get("genre_items") or []), target.item, key=item_key)
-        return None if following is None else NextUp(None, following)
-
-    def _advance(self, target: _Target, *, play_now: bool, loaded: str = "") -> None:
-        """Offer (or with `play_now` play) what follows `target`.
-
-        A next season that is not loaded yet is requested first; `loaded` is the season whose
-        episodes just arrived, so a season that still has none does not loop.
-        """
-        result = self._following(target)
-        if isinstance(result, NeedEpisodes):
-            series = (target.context or {}).get("series") or {}
-            season_id = str(result.season.get("id"))
-            if season_id == loaded:  # loaded, yet the catalog still has no episodes for it
-                logger.info("Season %s has no episodes after loading them", season_id)
-                self._toast(NEXT_SEASON_FAILED_TEXT, "error", ERROR_MS)
-                return
-            self._awaiting = _Awaiting(target, play_now, str(series.get("id")), season_id)
-            self.catalog.request_episodes(series, result.season)
-            return
-        if result is None:
-            self._toast(NOTHING_NEXT_TEXT if play_now else FINISHED_TEXT)
-            return
-        context = {**(target.context or {}), "start_over": False}
-        kind = "episode" if target.section == "series" else "movie"
-        if kind == "episode":
-            context["season"] = result.season
-            context["episodes"] = self.catalog.episodes(context["series"], result.season)
-        if play_now:
-            self.play_vod(result.item, kind, context)
-            return
-        self._next = (result.item, kind, context)
-        subtitle = self._next_subtitle(result, kind)
-        self.overlays.next_card.show_next(
-            _title(result.item, episode=kind == "episode"), subtitle, kind=kind
-        )
-
-    def _next_subtitle(self, result: NextUp, kind: str) -> str:
-        """The Next card's second line: season and episode ("S2 · E1"), or a movie's genre."""
-        item = result.item
-        if kind == "movie":
-            category = str(item.get("category_id") or item.get("tv_genre_id") or "")
-            for group in self.catalog.groups("movies") if category else []:
-                if group.id == category:
-                    return str(group.title)
-            return str(item.get("genre") or item.get("genres_str") or "")
-        season = (result.season or {}).get("number") or item.get("season")
-        number = item.get("number") or item.get("episode_num") or item.get("series")
-        parts = [f"{tag}{value}" for tag, value in (("S", season), ("E", number)) if value]
-        return " · ".join(parts)
-
-    def _on_episodes_ready(self, series_id: str, season_id: str) -> None:
-        awaiting = self._awaiting
-        if self._closed or awaiting is None:
-            return
-        if (awaiting.series_id, awaiting.season_id) != (series_id, season_id):
-            return
-        self._awaiting = None
-        if self._still_current(awaiting.target):
-            self._advance(awaiting.target, play_now=awaiting.play_now, loaded=season_id)
-
-    def _on_episodes_failed(self, series_id: str, season_id: str, _message: str) -> None:
-        awaiting = self._awaiting
-        if self._closed or awaiting is None:
-            return
-        if (awaiting.series_id, awaiting.season_id) != (series_id, season_id):
-            return
-        self._awaiting = None
-        if self._still_current(awaiting.target):
-            self._toast(NEXT_SEASON_FAILED_TEXT, "error", ERROR_MS)
-
-    def _still_current(self, target: _Target) -> bool:
-        """Nothing else was chosen since `target` played."""
-        return target is self._current and self._inflight is None and self._queued is None
-
-    def _on_play_now(self) -> None:
-        offered, self._next = self._next, None
-        if offered is not None and not self._closed:
-            self.play_vod(*offered)
-
-    def _on_next_cancelled(self) -> None:
-        if self._closed or self._next is None:
-            return  # dropped by a newer choice (see _drop_next)
-        self._next = None
-        self.overlays.transport.poke()  # the final frame stays, with the transport
-
     def _on_next_requested(self) -> None:
-        """The transport's Next: what follows plays at once, without the card."""
+        """The transport's Next: what follows the movie or episode plays at once."""
         current = self._current
-        if self._closed or current is None or not self._has_next(current):
-            return
-        self._drop_next()
-        self._advance(current, play_now=True)
+        if not self._closed and current is not None:
+            self._autoplay.next_requested(current)
 
-    def _drop_next(self) -> None:
-        """Forget the offer and a wait for episodes; the card closes without a reply."""
-        self._awaiting = None
-        if self._next is not None:
-            self._next = None
-            self.overlays.next_card.escape()
+    def _still_current(self, target: Target) -> bool:
+        """`target` still plays and nothing newer was chosen (autoplay may follow it)."""
+        return target is self._current and not self._lanes.busy()
 
     # ---- tracks -------------------------------------------------------------------------------
 
@@ -1509,64 +1264,27 @@ class TVController(QObject):
 
     def _open_guide(self) -> None:
         """The guide over live TV: the zap group's channels, on the one tuned last."""
-        if self._playing_vod():
+        if self._on_demand():
             return  # it lists live channels
         context = self.zap.context
-        group, channels = context.group_key, list(context.channels)
-        if not channels:
-            group, channels = ALL_GROUP_ID, self._all_live()
-        if not channels:
+        if not self._guide.open(context, self._channel or context.current(), self._all_live):
             return
-        channel = self._channel or context.current()
-        index = next((i for i, c in enumerate(channels) if ZapContext.same(c, channel)), 0)
-        self._guide_channels = (group, channels)
         if self._digits:
             self.zap.cancel_digits()
         self.overlays.column.close()
         self.overlays.banner.dismiss()
         self.overlays.transport.dismiss()
-        self.overlays.guide.open_guide(channels, index)
 
-    def _guide_key(self, action: Action) -> bool:
-        """Route a key to the open guide; False when the usual handling should follow."""
-        guide = self.overlays.guide
-        moves: dict[Action, tuple[Callable[[int], None], int]] = {
-            Action.NAV_UP: (guide.move_by, -1),
-            Action.NAV_DOWN: (guide.move_by, 1),
-            Action.NAV_PAGE_UP: (guide.page, -1),
-            Action.NAV_PAGE_DOWN: (guide.page, 1),
-            Action.NAV_LEFT: (guide.shift, -1),
-            Action.NAV_RIGHT: (guide.shift, 1),
-        }
-        if action in moves:
-            move, delta = moves[action]
-            move(delta)
-        elif action is Action.NAV_ACTIVATE:
-            guide.activate()
-        elif action is Action.ESCAPE:
-            guide.escape()
-        elif action is Action.GUIDE:
-            guide.close_guide()
-        elif action in _GUIDE_CLOSERS:
-            guide.close_guide()
-            return False
-        elif action not in _GUIDE_IGNORED:
-            return False  # playback, volume, fullscreen and favorites work over the guide
-        return True
-
-    def _on_guide_tune(self, channel: dict) -> None:
-        if self._closed:
-            return
-        group, channels = self._guide_channels
-        self.overlays.guide.close_guide()
-        self.tune(channel, group_key=group, channels=channels)
+    def _on_guide_tune(self, channel: dict, group_key: str, channels: list[dict]) -> None:
+        if not self._closed:
+            self.tune(channel, group_key=group_key, channels=channels)
 
     def _escape(self) -> None:
         overlays = self.overlays
         if overlays.drawer.isVisible():
             overlays.drawer.escape()  # clears the filter first, then closes
-        elif overlays.next_card.isVisible():
-            overlays.next_card.escape()  # stays on the final frame
+        elif self._autoplay.cancel():
+            pass  # the Next card closed on the final frame, or the next season's wait ended
         elif self._digits:
             self.zap.cancel_digits()
             overlays.banner.dismiss()
@@ -1578,7 +1296,7 @@ class TVController(QObject):
             self.window_actions.leave_fullscreen()
 
     def _info(self) -> None:
-        if self._playing_vod():
+        if self._on_demand():
             self._show_transport()
             return
         channel = self._channel or self.zap.context.current()
@@ -1597,6 +1315,8 @@ class TVController(QObject):
             self._show_transport()
         elif self._tuner.opening():
             return  # it still opens: the time-shift may yet come
+        elif current is not None and not current.live:
+            return  # a movie or an episode that cannot seek, or that ended
         elif self.live is not None and current is not None and current.live:
             self._toast(UNAVAILABLE)  # played directly: there is no buffer to seek in
         else:
@@ -1614,7 +1334,7 @@ class TVController(QObject):
         else:
             self.overlays.transport.poke()
 
-    def _show_live_transport(self, target: _Target) -> None:
+    def _show_live_transport(self, target: Target) -> None:
         now = self.now_title(target.item)
         subtitle = now[0] if now else ""
         transport = self.overlays.transport
@@ -1634,123 +1354,46 @@ class TVController(QObject):
 
     # ---- favorites and context actions --------------------------------------------------------
 
-    def _is_live_item(self, node: Optional[NavNode]) -> bool:
-        return (
-            node is not None
-            and node.layer == "item"
-            and isinstance(node.payload, dict)
-            and self.nav.section_of(node) == "live"
-        )
-
     def _favorite(self) -> None:
-        """Ctrl+D: the drawer's highlighted channel while it is open, else the current one."""
+        """Ctrl+D: the guide's or the drawer's highlighted channel, else the current one.
+
+        Nothing while a movie or an episode is current (the Library keeps those).
+        """
         drawer = self.overlays.drawer
-        if drawer.isVisible():
+        if self._guide.is_open():
+            channel = self._guide.current_channel()
+        elif drawer.isVisible():
             node = drawer.highlighted()
-            if node is not None and self._is_live_item(node):
-                self._toggle_favorite(node.payload)
-            return
-        channel = None if self._playing_vod() else self._channel or self.zap.context.current()
+            channel = node.payload if node is not None and is_channel(self.nav, node) else None
+        elif self._on_demand():
+            channel = None
+        else:
+            channel = self._channel or self.zap.context.current()
         if channel is not None:
             self._toggle_favorite(channel)
 
     def _toggle_favorite(self, item: dict) -> None:
-        """Favorites are channel names, as NavModel and the Library keep them."""
-        name = item.get("name")
-        if not name:
+        if not favorites.favorite_key(item):
             return
-        favorites = list(self.config.favorites or [])
-        added = name not in favorites
-        self.config.favorites = [*favorites, name] if added else [f for f in favorites if f != name]
+        added = favorites.toggle(self.config, item)
         self.nav.changed.emit()  # the pinned Favorites group follows the list
-        try:
-            self.config.save_config()
-        except Exception as e:
-            self._log_failure("save the favorites", e)
+        if not favorites.save(self.config):
             self._toast(FAVORITES_SAVE_FAILED_TEXT, "error", ERROR_MS)
             return
         self._toast("Added to favorites" if added else "Removed from favorites")
 
     def _on_context(self, node: NavNode, global_pos: QPoint) -> None:
-        """A right-click on a drawer row: its context menu, built now."""
-        if self._closed:
-            return
-        menu = self._context_menu(node)
-        if menu is not None:
-            menu.aboutToHide.connect(menu.deleteLater)
-            menu.popup(global_pos)
-
-    def _context_menu(self, node: NavNode) -> Optional[QMenu]:
-        live = self._is_live_item(node)
-        playable = isinstance(node.payload, dict) and self.nav.is_playable(node)
-        if not live and not playable:
-            return None  # e.g. a series: nothing to play or keep
-        drawer = self.overlays.drawer
-        menu = QMenu(drawer if isinstance(drawer, QWidget) else None)
-        menu.setStyleSheet(_menu_style())
-        item: dict = node.payload
-        if live:
-            kept = item.get("name") in (self.config.favorites or [])
-            text = "Remove from favorites" if kept else "Add to favorites"
-            menu.addAction(text).triggered.connect(lambda _=False: self._toggle_favorite(item))
-        if playable:
-            if live:
-                menu.addSeparator()
-            # Its section and group as the drawer shows them now, not when the link lands.
-            group = next((n.key for n in reversed(self.nav.path) if n.layer == "group"), "")
-            section = self.nav.section_of(node) or "live"
-            target = _Target(item, section, node.title, group_key=group)
-            for text, launcher in (
-                ("Play in VLC", self.external.launch_vlc),
-                ("Play in MPV", self.external.launch_mpv),
-            ):
-                menu.addAction(text).triggered.connect(
-                    lambda _=False, run=launcher: self._link_for(
-                        target, lambda url: self._play_external(target, url, run)
-                    )
-                )
-            menu.addSeparator()
-            menu.addAction("Copy stream link").triggered.connect(
-                lambda _=False: self._link_for(target, self._copy_link)
-            )
-        return menu
-
-    def _link_for(self, target: _Target, then: Callable[[str], None]) -> None:
-        """Request `target`'s link beside the tune's; requests go one at a time."""
+        """A right-click on a drawer row: its context menu."""
         if not self._closed:
-            self._side_queue.append(_LinkJob(target, then))
-            self._next_side_link()
+            self._context.show(node, global_pos, self.overlays.drawer)
 
-    def _next_side_link(self) -> None:
-        if self._closed or self._side is not None or not self._side_queue:
-            return
-        job = self._side_queue.popleft()
-        section = job.target.section
-        request_id = self.catalog.request_link(
-            job.target.item, section=section, is_episode=section == "series"
-        )
-        self._side = (request_id, job)
-
-    def _take_side(self, request_id: int) -> Optional[_LinkJob]:
-        side = self._side
-        if self._closed or side is None or side[0] != request_id:
-            return None
-        self._side = None
-        return side[1]
-
-    def _copy_link(self, url: str) -> None:
-        QGuiApplication.clipboard().setText(url)
-        self._toast("Link copied")
-
-    def _play_external(
-        self, target: _Target, url: str, launcher: Callable[[str], tuple[bool, str]]
-    ) -> None:
+    def _play_external(self, target: Target, url: str, launcher: Launcher) -> None:
         """The context menu's external play: the newest choice, once the in-app stream is gone."""
         if self._closed:
             return
         self._cancel_external()
-        self._drop_next()
-        self._inflight = self._queued = None  # a tune still on its way would open in-app
+        self._autoplay.drop()
+        self._lanes.drop_tune()  # e.g. an STB retry still on its way would open in-app
         self._tuner.open(self._guarded(target, lambda: self._launch(target, url, launcher)))
 
     # ---- state helpers ------------------------------------------------------------------------
@@ -1758,15 +1401,23 @@ class TVController(QObject):
     def _has_media(self) -> bool:
         return self._state in _ACTIVE_STATES or self._tuner.opening()
 
-    def _playing_live(self) -> Optional[_Target]:
+    def _playing_live(self) -> Optional[Target]:
         current = self._current
         return current if current is not None and current.live and self._has_media() else None
 
-    def _playing_vod(self) -> bool:
-        return self._current is not None and not self._current.live and self._has_media()
+    def _on_demand(self) -> bool:
+        """A movie or an episode is current: playing, or ended on its final frame."""
+        current = self._current
+        if current is None or current.live:
+            return False
+        return self._has_media() or self._state == "ended" or self._autoplay.card_open()
 
     def _toast(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
         self.overlays.toast.show_message(text, kind, ms)
+
+    def _notify(self, text: str, kind: str) -> None:
+        """A toast for the shell's helpers: errors stay up longer."""
+        self._toast(text, kind, ERROR_MS if kind == "error" else INFO_MS)
 
     def _error(self, text: str) -> None:
         """Toast an error; addresses and query strings never reach the toast or any log."""
@@ -1782,6 +1433,7 @@ class TVController(QObject):
 
     def _welcome(self) -> None:
         """Until a provider exists (Phase 3 brings the welcome card)."""
+        self._autoplay.drop()  # its "Loading next season…" hint would hide this one
         self._loading = False
         self.overlays.toast.set_hint(WELCOME_TEXT)
 
@@ -1795,6 +1447,7 @@ class TVController(QObject):
 
     def _show_loading(self, name: str) -> None:
         """From a setup's start until the first live section or a failure (Review Focus 5)."""
+        self._autoplay.drop()  # a provider setup: and the hint is the setup's
         self._loading = True
         self.overlays.toast.set_hint(f"Loading {name}…" if name else "Loading…")
 

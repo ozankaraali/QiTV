@@ -236,12 +236,18 @@ class GuideKeymapTests(unittest.TestCase):
         self.assertEqual(guide(K.Key_Minus, "-"), (Action.VOL_DOWN, ""))
         self.assertEqual(guide(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))
 
-    def test_no_zapping_typing_or_number_entry(self):
-        self.assertIsNone(guide(K.Key_7, "7"))
+    def test_digits_and_channel_keys_reach_the_guide(self):
+        # digits jump to a channel number; Ch± move the highlight (the guide routes them)
+        self.assertEqual(guide(K.Key_7, "7"), (Action.DIGIT, "7"))
+        self.assertEqual(guide(K.Key_0, "0", KEYPAD), (Action.DIGIT, "0"))
+        self.assertEqual(guide(K.Key_ChannelUp), (Action.CH_NEXT, ""))
+        self.assertEqual(guide(K.Key_ChannelDown), (Action.CH_PREV, ""))
+
+    def test_nothing_types_or_goes_back(self):
         self.assertIsNone(guide(K.Key_A, "a"))
         self.assertIsNone(guide(K.Key_Backspace, "\x08"))
-        self.assertIsNone(guide(K.Key_ChannelUp))
         self.assertIsNone(guide(K.Key_G, "g", CTRL))
+        self.assertIsNone(guide(K.Key_7, "7", CTRL))
 
 
 class ContextTests(unittest.TestCase):

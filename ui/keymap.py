@@ -112,8 +112,8 @@ _CTRL_KEYS = {
     _K.Key_F.value: Action.FULLSCREEN,
     _K.Key_D.value: Action.FAVORITE,
 }
-# The guide (spec §5.1): the drawer's keys but Backspace, G closes it, and the playback keys
-# keep working; nothing types, zaps or enters a number.
+# The guide (spec §5.1): the drawer's keys but Backspace, digits (a channel number to jump
+# to) and Ch± (one row), G closes it, and the playback keys keep working; nothing types.
 _GUIDE_KEYS = {k: a for k, a in _DRAWER_KEYS.items() if a is not Action.NAV_BACKSPACE}
 _GUIDE_CHARS = {
     key: _PLAYER_CHARS[key]
@@ -187,14 +187,11 @@ def resolve(
         if key in _DRAWER_KEYS:
             return _DRAWER_KEYS[key], ""
         return _text(text, mods, windows=platform.startswith("win"))
-    if context == "guide":
-        if key in _GUIDE_KEYS:
-            return _GUIDE_KEYS[key], ""
-        if held or key not in _GUIDE_CHARS:
-            return None
-        return _GUIDE_CHARS[key], ""
-    if key in _PLAYER_KEYS:
-        return _PLAYER_KEYS[key], ""
+    keys, chars = (
+        (_GUIDE_KEYS, _GUIDE_CHARS) if context == "guide" else (_PLAYER_KEYS, _PLAYER_CHARS)
+    )
+    if key in keys:
+        return keys[key], ""
     if key in _CHANNEL_KEYS:
         return _CHANNEL_KEYS[key], ""
     if held:
@@ -203,8 +200,8 @@ def resolve(
         return Action.DIGIT, chr(key)
     if len(text) == 1 and text in _DIGITS:  # layouts where digits need Shift
         return Action.DIGIT, text
-    if key in _PLAYER_CHARS:
-        return _PLAYER_CHARS[key], ""
+    if key in chars:
+        return chars[key], ""
     return None
 
 

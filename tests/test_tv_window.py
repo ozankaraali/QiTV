@@ -346,7 +346,9 @@ class TVWindowTests(WindowCase):
         self.assertEqual(zap.context.current()["name"], "Channel 1")
         QTest.keyClick(self.window, Qt.Key.Key_G)
         self.assertFalse(guide.isVisible())
-        self.assertIsNotNone(self.window.overlays.next_card)
+        card = self.window.overlays.next_card
+        self.assertIs(card.parentWidget(), self.window.host)  # hosted over the video
+        self.assertIs(card.parentWidget(), guide.parentWidget())
 
     def test_f_and_the_menu_toggle_fullscreen_and_escape_leaves_it(self):
         self.show()

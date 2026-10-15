@@ -357,6 +357,10 @@ class FakeToast(FakeOverlay):
 class FakeGuide(FakeOverlay):
     tuneRequested = Signal(object)
     closed = Signal()
+    current = None
+
+    def current_channel(self):
+        return self.current
 
     def open_guide(self, channels, current):
         self.record("open_guide", channels, current)
@@ -541,6 +545,13 @@ class FakeExternal:
     def __init__(self, result=(True, "")):
         self.calls = []
         self.result = result
+        self.missing = set()  # players find_vlc/find_mpv do not find
+
+    def find_vlc(self):
+        return None if "vlc" in self.missing else "/Applications/VLC.app"
+
+    def find_mpv(self):
+        return None if "mpv" in self.missing else "/usr/local/bin/mpv"
 
     def launch_vlc(self, url):
         self.calls.append(("vlc", url))
@@ -2524,6 +2535,11 @@ class AutoplayCase(ControllerTestCase):
     def link_items(self):
         return [item.get("id") for _, item, _, _ in self.catalog.links]
 
+    def end(self):
+        """As PlaybackSession: the state is "ended" before ended() is emitted."""
+        self.session.stateChanged.emit("ended")
+        self.session.ended.emit()
+
 
 class EpisodeAutoplayTests(AutoplayCase):
     def setUp(self):
@@ -2535,7 +2551,7 @@ class EpisodeAutoplayTests(AutoplayCase):
         self.assertEqual(self.transport.named("set_next_available"), [(True,)])
         self.assertEqual(self.transport.named("show_vod"), [("Episode 1", "Harbour Lights")])
         self.watch.resume["Home:episode:e12"] = 61_000
-        self.session.ended.emit()
+        self.end()
         self.assertEqual(self.next_card.named("show_next"), [("Episode 2", "S1 · E2", "episode")])
         self.assertNotIn(("Finished", "info"), self.toast.messages())
         self.next_card.activate()  # Play now
@@ -2548,12 +2564,12 @@ class EpisodeAutoplayTests(AutoplayCase):
 
     def test_enter_plays_now_and_escape_cancels_while_the_card_shows(self):
         self.play_episode(SEASON_1, 1)
-        self.session.ended.emit()
+        self.end()
         self.controller.handle(Action.OK)
         self.assertEqual(self.link_items(), ["e11", "e12"])
         self.assertEqual(self.drawer.named("open_drawer"), [])  # Enter did not open it
         self.ready("http://vod/e12.mkv")
-        self.session.ended.emit()  # the last episode of a season whose next is unloaded
+        self.end()  # the last episode of a season whose next is unloaded
         self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
         self.catalog.episodesReady.emit("s9", "2")
         self.assertEqual(len(self.next_card.named("show_next")), 2)
@@ -2566,7 +2582,7 @@ class EpisodeAutoplayTests(AutoplayCase):
 
     def test_a_season_boundary_waits_for_the_next_season_then_offers_its_first_episode(self):
         self.play_episode(SEASON_1, 2)
-        self.session.ended.emit()
+        self.end()
         self.assertIn(("episodes", "s9", "2"), self.catalog.requests)
         self.assertEqual(self.next_card.named("show_next"), [])  # not until it loads
         self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1), episode(SEASON_2, 2)]
@@ -2577,7 +2593,7 @@ class EpisodeAutoplayTests(AutoplayCase):
 
     def test_a_failed_next_season_toasts_and_shows_no_card(self):
         self.play_episode(SEASON_1, 2)
-        self.session.ended.emit()
+        self.end()
         self.catalog.episodesFailed.emit("s9", "2", "Couldn't reach the portal")
         self.assertEqual(self.toast.messages()[-1], ("Couldn't load the next season", "error"))
         self.assertEqual(self.next_card.named("show_next"), [])
@@ -2587,7 +2603,7 @@ class EpisodeAutoplayTests(AutoplayCase):
 
     def test_a_season_still_empty_after_loading_is_not_asked_for_again(self):
         self.play_episode(SEASON_1, 2)
-        self.session.ended.emit()
+        self.end()
         self.catalog.episodesReady.emit("s9", "2")  # yet the catalog has none for it
         self.assertEqual(self.catalog.requests.count(("episodes", "s9", "2")), 1)
         self.assertEqual(self.toast.messages()[-1], ("Couldn't load the next season", "error"))
@@ -2596,7 +2612,7 @@ class EpisodeAutoplayTests(AutoplayCase):
     def test_the_last_episode_of_the_last_season_offers_nothing(self):
         self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
         self.play_episode(SEASON_2, 1)
-        self.session.ended.emit()
+        self.end()
         self.assertEqual(self.next_card.named("show_next"), [])
         self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
         self.assertEqual(self.link_items(), ["e21"])
@@ -2610,7 +2626,7 @@ class EpisodeAutoplayTests(AutoplayCase):
     def test_autoplay_off_only_finishes(self):
         self.config.auto_play_episodes = False
         self.play_episode(SEASON_1, 1)
-        self.session.ended.emit()
+        self.end()
         self.assertEqual(self.next_card.named("show_next"), [])
         self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
 
@@ -2624,14 +2640,14 @@ class EpisodeAutoplayTests(AutoplayCase):
         self.controller.play_vod(item, "episode", play_context())  # Continue in Series
         self.ready(item["cmd"])
         self.assertEqual(self.transport.named("set_next_available"), [(False,)])
-        self.session.ended.emit()
+        self.end()
         self.assertEqual(self.next_card.named("show_next"), [])
 
     def test_external_players_never_autoplay(self):
         self.config.play_in_vlc = True
         self.play_episode(SEASON_1, 1)
         self.assertEqual(self.external.calls, [("vlc", "http://vod/e11.mkv")])
-        self.session.ended.emit()
+        self.end()
         self.assertEqual(self.next_card.named("show_next"), [])
         self.assertEqual(self.link_items(), ["e11"])
 
@@ -2646,7 +2662,7 @@ class EpisodeAutoplayTests(AutoplayCase):
         self.controller.play_item(node, [node], season)
         self.ready("http://vod/e11.mkv")
         self.assertEqual(self.transport.named("show_vod"), [("Episode 1", "Harbour Lights")])
-        self.session.ended.emit()
+        self.end()
         self.assertEqual(self.next_card.named("show_next"), [("Episode 2", "S1 · E2", "episode")])
 
 
@@ -2657,7 +2673,7 @@ class MovieAutoplayTests(AutoplayCase):
         self.assertEqual(self.catalog.links[-1][2:], ("movies", False))
         self.ready("http://vod/m2.mkv")
         self.assertEqual(self.transport.named("set_next_available"), [(True,)])
-        self.session.ended.emit()
+        self.end()
         self.assertEqual(self.next_card.named("show_next"), [("Film 3", "Films", "movie")])
         self.next_card.activate()
         self.assertEqual(self.link_items(), ["m2", "m3"])
@@ -2667,7 +2683,7 @@ class MovieAutoplayTests(AutoplayCase):
         films = [movie(1), movie(2)]
         self.controller.play_vod(films[0], "movie", play_context(genre_items=films))
         self.ready("http://vod/m1.mkv")
-        self.session.ended.emit()
+        self.end()
         self.assertEqual(self.next_card.named("show_next"), [])
         self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
 
@@ -2679,7 +2695,7 @@ class MovieAutoplayTests(AutoplayCase):
         nodes = self.nav.children(group)
         self.controller.play_item(nodes[0], [nodes[0]], group)
         self.ready("http://vod/m1.mkv")
-        self.session.ended.emit()
+        self.end()
         self.assertEqual(self.next_card.named("show_next"), [("Film 2", "Films", "movie")])
 
     def test_play_vod_stops_the_live_channel_through_the_release_gate(self):
@@ -2799,6 +2815,31 @@ class ContextMenuTests(ControllerTestCase):
         self.assertEqual(self.external.calls, [("vlc", "http://stream/2")])
         self.assertEqual(self.played_urls(), ["http://stream/1"])
 
+    def test_a_stale_play_in_vlc_never_overrides_a_newer_zap(self):
+        self.play(0)  # One plays in-app
+        self.choose(self.menu_for(self.channels[2]), "Play in VLC")  # Three: link 2 pending
+        self.tune(1)  # then a zap to Two: link 3
+        self.catalog.linkReady.emit(3, "http://stream/2")  # Two plays
+        self.catalog.linkReady.emit(2, "http://stream/3")  # the older external choice lands
+        self.assertEqual(self.external.calls, [])
+        self.assertEqual(self.played_urls(), ["http://stream/1", "http://stream/2"])
+        self.assertEqual(self.session.stops, 1)  # One, for Two; Two keeps playing
+
+    def test_a_copy_is_never_superseded(self):
+        self.choose(self.menu_for(self.channels[2]), "Copy stream link")
+        self.tune(1)
+        self.catalog.linkReady.emit(1, "http://stream/3")
+        self.assertEqual(QGuiApplication.clipboard().text(), "http://stream/3")
+
+    def test_a_missing_player_toasts_and_keeps_playing(self):
+        self.play(0)
+        stops = self.session.stops
+        self.external.missing = {"mpv"}
+        self.choose(self.menu_for(self.channels[1]), "Play in MPV")
+        self.assertEqual(self.requested(), ["One"])  # no link was even asked for
+        self.assertEqual(self.session.stops, stops)
+        self.assertEqual(self.toast.messages()[-1], ("MPV Media Player is not installed.", "error"))
+
     def test_a_failed_external_player_toasts(self):
         self.external.result = (False, "MPV is not installed\nsearched: /usr/bin")
         self.choose(self.menu_for(self.channels[1]), "Play in MPV")
@@ -2814,6 +2855,112 @@ class ContextMenuTests(ControllerTestCase):
         )
         self.nav.reset_to("series")
         self.assertIsNone(self.menu_for(NavNode("item", "s9", "Harbour Lights", SERIES)))
+
+
+class CardRoutingTests(AutoplayCase):
+    """While the Next card is up (the episode ended), zap keys never leave the series."""
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.episode_map[("s9", "1")] = [episode(SEASON_1, 1), episode(SEASON_1, 2)]
+        self.play(1)  # a live channel first: the zap context has channels
+        self.play_episode(SEASON_1, 1)
+        self.end()
+        self.assertTrue(self.next_card.visible)
+        self.links = len(self.catalog.links)
+
+    def test_up_down_and_the_wheel_change_the_volume(self):
+        self.controller.handle(Action.CH_PREV)  # ↑
+        self.assertEqual(self.session.level, 55)
+        self.controller.handle(Action.CH_NEXT)
+        self.controller.wheel(1, NO_MODS)
+        self.assertEqual(self.session.level, 45)
+        self.assertEqual(len(self.catalog.links), self.links)
+        self.assertTrue(self.next_card.visible)
+
+    def test_digits_previous_and_g_do_nothing(self):
+        self.controller.handle(Action.DIGIT, "3")
+        self.controller.handle(Action.PREVIOUS)
+        self.controller.handle(Action.GUIDE)
+        self.assertEqual(self.banner.named("show_digits"), [])
+        self.assertEqual(self.guide.named("open_guide"), [])
+        QTest.qWait(60)  # the zap's digit timer would have tuned by now
+        self.assertEqual(len(self.catalog.links), self.links)
+        self.assertTrue(self.next_card.visible)
+
+    def test_ctrl_d_keeps_the_last_channel_as_it_was(self):
+        self.controller.handle(Action.FAVORITE)
+        self.assertEqual(self.config.favorites, [])
+
+    def test_after_cancelling_the_keys_still_stay_on_demand(self):
+        self.controller.handle(Action.ESCAPE)
+        self.assertFalse(self.next_card.visible)
+        self.controller.handle(Action.CH_NEXT)
+        self.assertEqual(len(self.catalog.links), self.links)
+
+
+class SeasonWaitTests(AutoplayCase):
+    def setUp(self):
+        super().setUp()
+        self.catalog.episode_map[("s9", "1")] = [episode(SEASON_1, 1), episode(SEASON_1, 2)]
+
+    def test_the_wait_for_the_next_season_shows_a_hint_until_it_loads(self):
+        self.play_episode(SEASON_1, 2)
+        self.end()
+        self.assertEqual(self.toast.hint, "Loading next season…")
+        self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
+        self.catalog.episodesReady.emit("s9", "2")
+        self.assertIsNone(self.toast.hint)
+        self.assertEqual(len(self.next_card.named("show_next")), 1)
+
+    def test_escape_cancels_the_wait(self):
+        self.play_episode(SEASON_1, 2)
+        self.end()
+        self.controller.handle(Action.ESCAPE)
+        self.assertIsNone(self.toast.hint)
+        self.assertEqual(self.window.calls, [])  # Esc ended the wait, not fullscreen
+        self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
+        self.catalog.episodesReady.emit("s9", "2")
+        self.assertEqual(self.next_card.named("show_next"), [])
+
+    def test_a_failed_wait_clears_the_hint(self):
+        self.play_episode(SEASON_1, 2)
+        self.end()
+        self.catalog.episodesFailed.emit("s9", "2", "boom")
+        self.assertIsNone(self.toast.hint)
+        self.assertEqual(self.toast.messages()[-1], ("Couldn't load the next season", "error"))
+
+
+class GuideKeyFixTests(ControllerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.play(1)
+        self.controller.handle(Action.GUIDE)
+
+    def test_digits_and_channel_keys_stay_in_the_guide(self):
+        self.guide.current = CHANNELS[1]
+        self.controller.handle(Action.DIGIT, "4")
+        self.controller.handle(Action.CH_NEXT)
+        self.assertEqual(self.guide.named("move_by"), [(2,), (1,)])  # to Four, then one on
+        self.assertEqual(self.banner.named("show_digits"), [])
+        self.assertTrue(self.guide.visible)
+        self.assertEqual(self.requested(), ["Two"])
+
+    def test_ctrl_d_toggles_the_highlighted_row(self):
+        self.guide.current = CHANNELS[3]
+        self.controller.handle(Action.FAVORITE)
+        self.assertEqual(self.config.favorites, ["Four"])
+
+
+class FavoriteFallbackTests(ControllerTestCase):
+    def test_a_channel_without_a_name_is_kept_by_its_title(self):
+        self.controller.start()
+        self.nav.reset_to("live", "10")
+        self.drawer.visible = True
+        self.drawer.highlight = NavNode("item", "7", "Seven", {"id": 7, "title": "Seven"})
+        self.controller.handle(Action.FAVORITE)
+        self.assertEqual(self.config.favorites, ["Seven"])
 
 
 class MouseLayerTests(ControllerTestCase):
