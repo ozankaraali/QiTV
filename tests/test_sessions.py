@@ -9,15 +9,10 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
 
+from services.budgeted_stream import RELEASE_CAP_MS
 from services.connection_budget import ConnectionBudget
-from services.sessions import (
-    PIP_FAILED,
-    PIP_LEVEL,
-    RELEASE_CAP_MS,
-    SessionManager,
-    Slot,
-    limit_message,
-)
+from services.live.source import STREAM_LIMIT, STREAM_REFUSED
+from services.sessions import PIP_FAILED, PIP_LEVEL, SessionManager, Slot, limit_message
 
 app = QApplication.instance() or QApplication([])
 
@@ -71,17 +66,21 @@ class FakeLive(QObject):
     released = Signal()
     timelineChanged = Signal(dict)
     modeChanged = Signal(str)
+    failed = Signal(str)
 
     def __init__(self, name, log):
         super().__init__()
         self.name, self.log = name, log
         self.auto_release = True  # False: the test emits `released` itself
         self.fail_start = False
+        self.fail_inside_start = ""  # a failure LiveSession reports before start() returns
 
     def start(self, url, **kwargs):
         if self.fail_start:
             raise RuntimeError("could not open http://user:secret@provider.test/2.ts")
         self.log.append((self.name, "live", "start", url))
+        if self.fail_inside_start:
+            self.failed.emit(self.fail_inside_start)  # e.g. direct play without libVLC
 
     def stop(self):
         self.log.append((self.name, "live", "stop"))
@@ -231,6 +230,7 @@ class SessionManagerTests(_Fixture):
                 ("pip", "player", "set_muted", True),
                 ("main", "player", "set_muted", False),
                 ("manager", "large", "main"),
+                ("pip", "player", "set_muted", True),  # silent while it stops: no blip
                 ("pip", "live", "stop"),
                 ("manager", "pip", False),
             ],
@@ -249,10 +249,12 @@ class SessionManagerTests(_Fixture):
         before = len(self.log)
         self.open(C)
         self.pump()
-        self.assertEqual(self.log[before:], [("pip", "live", "stop")])
+        self.assertEqual(
+            self.log[before:], [("pip", "player", "set_muted", True), ("pip", "live", "stop")]
+        )
         self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "pip"])  # the old one
         self.pip.live.released.emit()
-        self.assertEqual(self.log[before + 1 :], [])  # the new ticket is granted later
+        self.assertEqual(self.log[before + 2 :], [])  # the new ticket is granted later
         self.pump()
         self.assertEqual(self.calls("pip", "live")[-2:], [("stop",), ("start", C["cmd"])])
         self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "pip"])
@@ -363,10 +365,24 @@ class AudibleSmallTests(_Fixture):
         self.assertFalse(self.manager.muted("main"))
         self.assertFalse(self.last_mute("main"))
 
+    def test_an_audible_pip_changing_channel_is_silent_while_it_stops_then_audible(self):
+        self.open_granted(B)
+        self.manager.set_level("pip", 40)
+        before = len(self.log)
+        self.open(C)
+        self.assertEqual(
+            self.log[before:], [("pip", "player", "set_muted", True), ("pip", "live", "stop")]
+        )
+        self.pump()
+        self.assertFalse(self.manager.muted("pip"))
+        self.assertFalse(self.last_mute("pip"))
+        self.assertEqual(self.calls("pip", "live")[-1], ("start", C["cmd"]))
+
     def test_a_reopened_pip_starts_muted_at_its_remembered_level(self):
         self.open_granted(B)
         self.manager.set_level("pip", 40)
         self.manager.close_pip()
+        self.assertTrue(self.last_mute("pip"))  # muted before it stopped
         self.open(C)
         self.pump()
         self.assertTrue(self.manager.muted("pip"))
@@ -377,7 +393,65 @@ class AudibleSmallTests(_Fixture):
         self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (True, False))
 
 
+class PipFailureTests(_Fixture):
+    """The PiP's LiveSession failed for good while it ran: PiP closes and says why."""
+
+    def test_a_provider_refusal_closes_pip_with_the_limit_message(self):
+        self.open_granted(B)
+        self.manager.swap()
+        self.pip.live.failed.emit(STREAM_LIMIT)
+        self.assertEqual(self.failures, [limit_message(2)])
+        self.assertEqual((self.denied, self.pip_states()), ([], [True, False]))
+        self.assertIs(self.manager.large(), self.main)
+        self.assertEqual(self.calls("pip", "live")[-1], ("stop",))
+        self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+
+    def test_a_soft_refusal_names_the_limit_too(self):
+        self.open_granted(B)
+        self.pip.live.failed.emit(STREAM_REFUSED)
+        self.assertEqual(self.failures, [limit_message(2)])
+
+    def test_a_refusal_with_an_unknown_limit_says_the_provider_limits_streams(self):
+        self.open_granted(B, limit=None)
+        self.pip.live.failed.emit(STREAM_LIMIT)
+        self.assertEqual(self.failures, ["Your provider limits concurrent streams"])
+
+    def test_a_playback_error_closes_pip_with_a_fixed_message(self):
+        self.open_granted(B)
+        self.pip.live.failed.emit("http://user:secret@provider.test/2.ts: 404")
+        self.assertEqual(self.failures, [PIP_FAILED])
+        self.assertEqual(self.pip_states(), [True, False])
+        self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+
+    def test_a_failure_inside_start_leaves_pip_closed(self):
+        self.pip.live.fail_inside_start = "Video needs VLC"
+        self.open_granted(B)
+        self.assertEqual(self.failures, [PIP_FAILED])
+        self.assertEqual(self.pip_states(), [])
+        self.assertFalse(self.manager.pip_open())
+        self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+
+    def test_a_failure_once_pip_is_closed_is_ignored(self):
+        self.open_granted(B)
+        self.manager.close_pip()
+        self.pip.live.failed.emit(STREAM_LIMIT)
+        self.assertEqual((self.failures, self.pip_states()), ([], [True, False]))
+
+
 class PipLifecycleTests(_Fixture):
+    def test_a_change_before_the_first_grant_asks_again_and_ignores_the_stale_grant(self):
+        self.hold_main(2)
+        self.open(B)
+        stale = self.pip.ticket
+        self.open(C)  # before B's grant: B's ticket goes back, C's is asked for
+        self.assertNotEqual(self.pip.ticket, stale)
+        self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "pip"])
+        self.budget.granted.emit(stale)
+        self.assertEqual(self.calls("pip", "live"), [])
+        self.pump()
+        self.assertEqual(self.calls("pip", "live"), [("start", C["cmd"])])
+        self.assertEqual(self.pip_states(), [True])
+
     def test_closing_before_the_grant_gives_the_ticket_back(self):
         self.hold_main(2)
         self.open(B)
@@ -445,12 +519,38 @@ class PipLifecycleTests(_Fixture):
 class ReleaseCapTests(_Fixture):
     cap_ms = 50
 
+    def closed_past_the_cap(self):
+        self.pip.live.auto_release = False
+        self.open_granted(B)
+        self.manager.close_pip()
+        with self.assertLogs("services.budgeted_stream", "WARNING"):
+            elapse(self.cap_ms * 2)
+        self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+
+    def test_after_the_cap_a_reopen_starts(self):
+        self.closed_past_the_cap()
+        self.open(C)
+        self.pump()
+        self.assertEqual(self.calls("pip", "live")[-1], ("start", C["cmd"]))
+        self.assertEqual(self.pip_states(), [True, False, True])
+        self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "pip"])
+
+    def test_a_real_released_after_the_cap_is_ignored(self):
+        self.closed_past_the_cap()
+        self.open(C)
+        self.pump()
+        before = len(self.log)
+        self.pip.live.released.emit()  # B's, late
+        self.assertEqual(self.log[before:], [])
+        self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "pip"])
+        self.assertTrue(self.manager.pip_open())
+
     def test_a_release_that_never_comes_gives_the_ticket_back_after_the_cap(self):
         self.pip.live.auto_release = False
         self.open_granted(B)
         self.manager.close_pip()
         self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "pip"])
-        with self.assertLogs("services.sessions", "WARNING"):
+        with self.assertLogs("services.budgeted_stream", "WARNING"):
             elapse(self.cap_ms * 2)
         self.assertEqual(self.budget.holders(PROVIDER), ["main"])
 

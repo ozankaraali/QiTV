@@ -5,13 +5,16 @@ only: no slot is stopped, restarted or re-pointed, and the surfaces trade geomet
 does that on `largeChanged`).
 
 The main slot's tune path (its budget slot, purpose "main", and the wait for the old stream's
-release) is `ui.live_tuner.LiveTuner`'s. This manager opens, changes and closes the PiP slot:
+release) is `ui.live_tuner.LiveTuner`'s. This manager opens, changes and closes the PiP slot,
+through a `BudgetedStream` of its own:
 - it asks the provider's connection budget for a slot with purpose "pip" and `queue=False`:
   when none is free, `denied(limit)` and nothing opens (a PiP never waits behind the main
-  stream). The budget always grants later, so the slot starts on `granted` for its ticket;
-- a stopped PiP slot gives its ticket back once `LiveSession.released` says its upstream is
-  closed (or after `RELEASE_CAP_MS`, a backstop to LiveSession's own caps), and only then
-  asks for a new one: the old stream is always released before the new one opens.
+  stream). The budget always grants later, so the slot starts once it is granted;
+- a stopped PiP slot (muted first, so nothing is heard while it stops) gives its ticket back
+  once its upstream is closed, and only then asks for a new one: the old stream is always
+  released before the new one opens;
+- when the PiP stream cannot start, fails for good (`LiveSession.failed`) or loses its slot
+  on a channel change, PiP closes and `pipFailed` says why in a fixed message.
 
 Audio follows the large picture: the PiP opens muted, and while the small slot stays muted
 a swap mutes the new small slot and moves the user's mute from the old large slot to the new
@@ -27,24 +30,28 @@ from dataclasses import dataclass
 import logging
 from typing import Any, Optional
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, Signal
 
+from services.budgeted_stream import RELEASE_CAP_MS, BudgetedStream
 from services.connection_budget import DENIED, ConnectionBudget
 from services.live.live_session import LiveSession
+from services.live.source import REFUSALS
 from services.playback import Session
 from services.zapping import ZapContext
 
 logger = logging.getLogger(__name__)
 
 PURPOSE = "pip"  # the budget purpose of the PiP stream (LiveTuner's is "main")
-RELEASE_CAP_MS = 2500  # LiveSession caps its own waits for the release at 2 s
 MAIN_LEVEL = 100  # libVLC's default volume
 PIP_LEVEL = 30  # the PiP stream's level until the mixer sets one (config pip_volume's default)
 PIP_FAILED = "Couldn't open this channel in picture-in-picture"
+LIMITED = "Your provider limits concurrent streams"  # a refusal when the limit is not known
 
 
-def limit_message(limit: int) -> str:
+def limit_message(limit: Optional[int]) -> str:
     """The toast for a provider limit that leaves no stream for the PiP."""
+    if not limit:
+        return LIMITED
     return f"Your provider allows {limit} stream{'s' if limit != 1 else ''} at a time"
 
 
@@ -71,8 +78,9 @@ class SessionManager(QObject):
     largeChanged = Signal(str)  # name of the slot that is now large
     pipStateChanged = Signal(bool)  # PiP open/closed
     denied = Signal(int)  # limit (budget refused PiP)
-    # A fixed message: the PiP's live session did not start, or the budget refused a channel
-    # change of a PiP it had granted (then without denied). PiP is closed by then.
+    # A fixed message: the PiP's live session did not start or failed for good (the limit
+    # message for a provider refusal), or the budget refused a channel change of a PiP it had
+    # granted (then without denied). PiP is closed by then.
     pipFailed = Signal(str)
     slotTimeline = Signal(str, dict)  # slot name, LiveSession timeline dict
 
@@ -90,16 +98,14 @@ class SessionManager(QObject):
         self._budget = budget
         self._large = main
         self._open = False  # pipStateChanged(True) was emitted, and no close since
-        self._running = False  # pip.live.start() was called and not stopped since
         self._pending: Optional[_Open] = None
-        self._releasing: list[int] = []  # given back once the PiP upstream is closed
-        self._live_wait = False  # pip.live.stop() was called; released() has not come
+        self._limit: Optional[int] = None  # the provider limit of the PiP stream that starts
         self._levels = {main.name: MAIN_LEVEL, pip.name: PIP_LEVEL}
         self._muted = {main.name: False, pip.name: True}
-        self._cap = QTimer(self, singleShot=True, interval=release_cap_ms)
-        self._cap.timeout.connect(self._on_cap)
-        budget.granted.connect(self._on_granted)
-        pip.live.released.connect(self._on_released)
+        self._stream = BudgetedStream(pip.live, budget, PURPOSE, cap_ms=release_cap_ms, parent=self)
+        self._stream.granted.connect(self._on_granted)
+        self._stream.released.connect(self._proceed)
+        pip.live.failed.connect(self._on_failed)
         main.live.timelineChanged.connect(self._on_main_timeline)
         pip.live.timelineChanged.connect(self._on_pip_timeline)
 
@@ -176,36 +182,29 @@ class SessionManager(QObject):
             self.pipStateChanged.emit(False)
 
     def _stop_live(self) -> None:
-        pip = self._pip
-        ticket, pip.ticket = pip.ticket, None
-        if self._running:
-            self._running = False
-            if ticket is not None:
-                self._releasing.append(ticket)
-            self._live_wait = True
-            self._cap.start()
-            pip.live.stop()  # released() follows, perhaps at once
-        elif ticket is not None:
-            self._budget.release(ticket)  # never started: nothing upstream to wait for
+        if self._stream.running():
+            # Silent while it stops; the next start applies the slot's own mute again.
+            self._pip.playback.set_muted(True)
+        self._stream.stop()  # its ticket goes back once the upstream is closed
+        self._pip.ticket = None
 
     def _proceed(self) -> None:
-        pending = self._pending
-        if pending is None or self._live_wait or self._pip.ticket is not None:
+        """Ask for the pending channel's slot once no earlier PiP stream is left open."""
+        pending, stream = self._pending, self._stream
+        if pending is None or stream.waiting() or stream.ticket is not None:
             return
-        ticket = self._budget.request(pending.provider, pending.limit, purpose=PURPOSE, queue=False)
+        ticket = stream.request(pending.provider, pending.limit, queue=False)
+        self._pip.ticket = stream.ticket
         if ticket == DENIED:  # only a limit denies, so it is a number
-            was_open = self._open  # a channel change: the PiP had a slot
-            self.close_pip()
-            if was_open:
-                self.pipFailed.emit(limit_message(int(pending.limit or 0)))
+            if self._open:  # a channel change: the PiP had a slot
+                self._fail(limit_message(pending.limit))
             else:
+                self.close_pip()
                 self.denied.emit(pending.limit)
-            return
-        self._pip.ticket = ticket
 
-    def _on_granted(self, ticket: int) -> None:
+    def _on_granted(self) -> None:
         pending, pip = self._pending, self._pip
-        if pending is None or ticket != pip.ticket:
+        if pending is None:
             return
         self._pending = None
         opening = not self._open
@@ -213,39 +212,27 @@ class SessionManager(QObject):
             self._muted[pip.name] = True  # the PiP opens small and muted
         pip.playback.set_volume(self._levels[pip.name])
         self._set_mute(pip, self._muted[pip.name])  # before it starts: no sound escapes
-        self._running = True
+        self._limit = pending.limit
         try:
-            pip.live.start(**pending.start_kwargs)
-        except Exception as error:
+            self._stream.start(**pending.start_kwargs)
+        except Exception as error:  # the stream gave its slot back and stopped the session
             logger.warning("Could not start the PiP channel (%s)", type(error).__name__)
-            self._running = False
-            pip.ticket = None
-            self._budget.release(ticket)
-            try:
-                pip.live.stop()
-            except Exception:
-                logger.debug("Stopping the PiP live session after a failed start failed too")
-            self.close_pip()
-            self.pipFailed.emit(PIP_FAILED)
+            self._fail(PIP_FAILED)
             return
+        if not self._stream.running():
+            return  # it failed inside start() (_on_failed closed it)
         if opening:
             self._open = True
             self.pipStateChanged.emit(True)
 
-    def _on_released(self) -> None:
-        if not self._live_wait:
-            return  # a stop this manager did not make
-        self._live_wait = False
-        self._cap.stop()
-        tickets, self._releasing = self._releasing, []
-        for ticket in tickets:
-            self._budget.release(ticket)
-        self._proceed()
+    def _on_failed(self, message: str) -> None:
+        """The PiP stream failed for good: LiveSession recovered what it could."""
+        if self._stream.running():
+            self._fail(limit_message(self._limit) if message in REFUSALS else PIP_FAILED)
 
-    def _on_cap(self) -> None:
-        if self._live_wait:
-            logger.warning("The PiP channel did not report its stream closed; going on.")
-            self._on_released()
+    def _fail(self, message: str) -> None:
+        self.close_pip()
+        self.pipFailed.emit(message)
 
     # ---- audio --------------------------------------------------------------------------------
 
