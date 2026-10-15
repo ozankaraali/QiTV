@@ -54,6 +54,9 @@ def _item_node(item: dict, layer: str = "item") -> NavNode:
 
 class NavModel(QObject):
     changed = Signal()
+    # A message for the shell to toast, e.g. that a saved catalog is shown because its
+    # refresh failed.
+    notice = Signal(str)
 
     def __init__(self, catalog, config, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -334,6 +337,14 @@ class NavModel(QObject):
         self.changed.emit()
 
     def _on_section_failed(self, section: str, message: str) -> None:
+        if self.catalog.groups(section):
+            # A saved catalog could not be refreshed: keep showing it as a loaded
+            # section, and say so instead of hiding it behind an error row.
+            logger.info("Refreshing section %s failed; showing the saved catalog", section)
+            self._on_section_ready(section)
+            title = SECTION_TITLES.get(section, section.title())
+            self.notice.emit(f"Couldn't refresh {title}; showing saved channels")
+            return
         if self._pending_group and self._pending_group[0] == section:
             self._pending_group = None
         self._fail(("section", section), message)

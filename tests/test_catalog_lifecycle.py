@@ -236,6 +236,22 @@ class CatalogQueueTests(unittest.TestCase):
         service.request_section("live", force=True)  # finished: a new request loads again
         self.assertEqual([c[0] for c in factory.calls], ["xtream", "xtream"])
 
+    def test_failed_refresh_of_a_stale_section_keeps_the_saved_channels(self):
+        # Finding I2, end to end: the stale cache stays visible and autotune can use it.
+        service, providers, factory, _ = make_service({"name": "X", "type": "XTREAM", "url": "h"})
+        providers.current_provider_content["itv"] = XTREAM_PAYLOAD
+        providers.stale.add("itv")
+        factory.results["xtream"] = {"fail": "HTTPConnectionPool: Max retries exceeded"}
+        nav = NavModel(service, SimpleNamespace(favorites=[], watch_history=[]))
+        notices = collect(nav.notice)
+        with self.assertLogs("services.catalog", "INFO"):
+            nav.reset_to("live", "10")  # what the shell does on providerReady
+        self.assertEqual(notices, [("Couldn't refresh Live TV; showing saved channels",)])
+        self.assertEqual(nav.path[-1].key, "10")
+        _, (parent, children) = nav.columns()
+        self.assertIsNone(nav.load_error(parent))
+        self.assertEqual([n.title for n in children], ["One", "Two"])
+
     def _stb_movies(self, runner):
         provider = {"name": "S", "type": "STB", "url": "http://portal/c/"}
         service, providers, factory, _ = make_service(provider, runner=runner)

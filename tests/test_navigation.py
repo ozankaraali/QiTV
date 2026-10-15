@@ -266,7 +266,10 @@ class NavModelTests(unittest.TestCase):
         self.assertNotIn(FAVORITES_GROUP, [n.key for n in groups])
 
     def test_section_failure_stops_loading_and_retry_requests_again(self):
+        # Nothing saved for the section: the failure is an error row (finding I2 keeps a
+        # saved catalog instead; see test_failed_refresh_keeps_the_saved_groups).
         self.catalog.ptype = "XTREAM"
+        self.catalog.loaded = False
         self.nav.reset_to("movies")
         section = self.nav.path[-1]
         changes = []
@@ -278,9 +281,35 @@ class NavModelTests(unittest.TestCase):
         count = self.catalog.requests.count(("section", "movies"))
         self.nav.children(section)
         self.assertEqual(self.catalog.requests.count(("section", "movies")), count)
+        self.catalog.loaded = True
+        self.assertEqual(self.nav.children(section), [])  # the error row, not the groups
         self.nav.retry(section)
         self.assertIsNone(self.nav.load_error(section))
         self.assertTrue(self.nav.children(section))
+
+    def test_failed_refresh_keeps_the_saved_groups(self):
+        # Finding I2: a stale cache whose refresh fails is still shown, with a notice.
+        notices, changes = [], []
+        self.nav.notice.connect(notices.append)
+        self.nav.reset_to("live", "10")
+        self.assertEqual(len(self.nav.path), 3)  # the saved group resolved at once
+        self.nav.reset_to("live")
+        self.nav.changed.connect(lambda: changes.append(1))
+        section = self.nav.path[-1]
+        self.catalog.sectionFailed.emit("live", "Couldn't reach the provider")
+        self.assertEqual(notices, ["Couldn't refresh Live TV; showing saved channels"])
+        self.assertTrue(changes)
+        self.assertIsNone(self.nav.load_error(section))
+        self.assertIn("10", [n.key for n in self.nav.children(section)])
+        self.assertEqual(self.nav.children(self.nav.children(section)[-1])[0].title, "One")
+
+    def test_failed_refresh_resolves_a_pending_group_from_the_saved_catalog(self):
+        self.catalog.loaded = False
+        self.nav.reset_to("live", "10")  # nothing to show yet: the group waits
+        self.catalog.loaded = True  # e.g. the provider setup loaded the saved catalog
+        self.catalog.sectionFailed.emit("live", "down")
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section", "group"])
+        self.assertEqual(self.nav.path[-1].key, "10")
 
     def test_reset_to_with_failing_section_does_not_hang(self):
         self.catalog.loaded = False
