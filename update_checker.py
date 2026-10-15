@@ -4,7 +4,8 @@ import platform
 import re
 import subprocess
 import sys
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
+import weakref
 import webbrowser
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
@@ -32,6 +33,30 @@ ASSET_PATTERNS = {
 
 # Keep references to background threads/workers to avoid premature GC
 _update_jobs: List[Tuple[QThread, "UpdateWorker"]] = []
+# Run before a self-update waits for background threads (weak: a closed window may go).
+_before_update: List["weakref.WeakMethod[Callable[[], None]]"] = []
+
+
+def call_before_update(method: Callable[[], None]) -> None:
+    """Run the bound `method` before a Windows self-update waits for background threads.
+
+    For work whose thread stays up for the whole run until told to stop: the live
+    time-shift engine's supervisor (services/live/engine.py) would make the wait endless.
+    """
+    _before_update[:] = [ref for ref in _before_update if ref() is not None]
+    _before_update.append(weakref.WeakMethod(method))
+
+
+def _run_before_update() -> None:
+    hooks, _before_update[:] = list(_before_update), []
+    for ref in hooks:
+        method = ref()
+        if method is None:
+            continue
+        try:
+            method()
+        except Exception:
+            logger.exception("Could not prepare for the update")
 
 
 class UpdateWorker(QObject):
@@ -499,6 +524,7 @@ def perform_update(downloaded_path: str, release_url: str):
 def _perform_windows_update(downloaded_path: str, release_url: str):
     """Windows: launch new exe with --replace flag, then quit."""
     app = QApplication.instance()
+    _run_before_update()  # once: later retries find nothing left to stop
     if app and has_pending_threads():
         QTimer.singleShot(25, app, lambda: _perform_windows_update(downloaded_path, release_url))
         return

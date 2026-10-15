@@ -30,6 +30,9 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMenu
 from options import OptionsDialog
 from services import thread_cleanup
 from services.catalog import CatalogService
+from services.connection_budget import ConnectionBudget
+from services.live.engine import LiveEngine
+from services.live.live_session import LiveSession
 from services.navigation import NavModel
 from services.playback import NullSession, PlaybackSession, Session, create_instance
 from services.thread_cleanup import has_pending_threads
@@ -45,10 +48,12 @@ from ui.overlays.transport import Transport
 from ui.overlays.zap_banner import ZapBanner
 from ui.tv_controller import Overlays, TVController
 from ui.video_surface import VideoSurface
+from update_checker import call_before_update
 
 logger = logging.getLogger(__name__)
 
 WINDOW_NAME = "tv_window"
+TIMESHIFT_DIR = "timeshift"  # the live buffers' root, in the config directory
 CLOSING_TEXT = "Closing after background requests finish…"
 CLOSE_RETRY_MS = 50
 CLOSE_THREAD_WAIT_MS = 30_000  # then quit anyway: a stuck worker must not keep QiTV open
@@ -236,11 +241,20 @@ class TVWindow(QMainWindow):
         self._instance = vlc_instance if vlc_instance is not None else create_instance()
         self._owns_instance = vlc_instance is None and self._instance is not None
         self.session: Session
+        # The time-shift pipeline (spec §6): only with libVLC, since nothing plays without it.
+        self.engine: Optional[LiveEngine] = None
+        self.live_session: Optional[LiveSession] = None
         if self._instance is None:
             logger.warning("libVLC is unavailable: channels cannot play")
             self.session = NullSession(self)
         else:
             self.session = PlaybackSession(self._instance, self)
+            root = os.path.join(config_manager.get_config_dir(), TIMESHIFT_DIR)
+            self.engine = LiveEngine(root, self)
+            # Connected before the engine starts, so it hears a helper that never comes up.
+            self.live_session = LiveSession(self.engine, self.session)
+            self.engine.start()
+        self.budget = ConnectionBudget(self)
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
 
         # The drawer and column ask the controller for "now" titles, and the controller
@@ -274,9 +288,13 @@ class TVWindow(QMainWindow):
             overlays=self.overlays,
             window_actions=self,
             logos=self.logos,
+            live=self.live_session,
+            budget=self.budget,
             parent=self,
         )
         self.controller = controller
+        # A Windows self-update waits for background threads: the engine's must stop first.
+        call_before_update(self.stop_live)
         for source in (self.surface, self.host):
             source.clicked.connect(self._on_video_clicked)
             source.doubleClicked.connect(controller.video_double_clicked)
@@ -633,6 +651,7 @@ class TVWindow(QMainWindow):
 
     def save_config(self) -> None:
         self.config_manager.save_config()
+        self.controller.settings_saved()
 
     def set_provider(self, force_update: bool = False) -> None:
         self.controller.select_provider(force_refresh=force_update)
@@ -707,7 +726,9 @@ class TVWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         """Close in steps, each after the event loop ran again (`close_retry`).
 
-        1. Stop: the catalog starts no more jobs, playback stops, the geometry is saved.
+        1. Stop: the live stream and the time-shift helper first (its supervisor thread
+           would keep the wait below going), then the catalog starts no more jobs, playback
+           stops, the geometry is saved.
         2. Wait for running QThreads (never block the GUI), with a notice after half a second,
            for at most CLOSE_THREAD_WAIT_MS.
         3. Save the image and EPG indexes and release libVLC. On macOS libVLC removes its
@@ -771,9 +792,20 @@ class TVWindow(QMainWindow):
         )
         atexit.register(_exit_now)
 
+    def stop_live(self) -> None:
+        """Close the live channel's stream, then the time-shift helper (bounded, ~0.1 s).
+
+        Before anything waits for background threads: the engine's supervisor thread runs
+        until its shutdown (window close, Windows self-update). Safe to call again.
+        """
+        self.controller.stop_live()  # live_session.stop(), keeping the budget in step
+        if self.engine is not None:
+            self.engine.shutdown()
+
     def _shut_down(self) -> None:
         self.epg_refresh.stop()
         self._run_steps(
+            ("stop the live pipeline", self.stop_live),
             ("stop the catalog", self.catalog.shutdown),
             ("stop the controller", self.controller.shutdown),
             ("stop loading logos", self.logos.shutdown),

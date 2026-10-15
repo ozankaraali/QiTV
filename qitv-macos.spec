@@ -25,7 +25,12 @@ a = Analysis(
     datas=[
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
     ],
-    hiddenimports=[],
+    hiddenimports=[
+        # The live time-shift helper process (spawned) and what its source imports.
+        'services.live.worker',
+        'm3u8',
+        'Cryptodome.Cipher.AES',
+    ],
     hookspath=[],
     runtime_hooks=[],
     excludes=[],

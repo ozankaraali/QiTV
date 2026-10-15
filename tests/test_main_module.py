@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import subprocess
 import sys
@@ -34,6 +35,19 @@ class MainModuleTests(unittest.TestCase):
             if line.strip() and not line.strip().startswith("#")
         )
         self.assertEqual(first, "multiprocessing.freeze_support()")
+
+    def test_the_frozen_apps_bundle_the_live_helper(self):
+        # The helper process is spawned from the bundle; its source imports these lazily.
+        wanted = {"services.live.worker", "m3u8", "Cryptodome.Cipher.AES"}
+        for name in ("qitv-macos.spec", "qitv-windows.spec", "qitv-linux.spec"):
+            tree = ast.parse((REPO / name).read_text(encoding="utf-8"))
+            analysis = next(
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Analysis"
+            )
+            hidden = next(k.value for k in analysis.keywords if k.arg == "hiddenimports")
+            self.assertLessEqual(wanted, set(ast.literal_eval(hidden)), name)
 
 
 if __name__ == "__main__":

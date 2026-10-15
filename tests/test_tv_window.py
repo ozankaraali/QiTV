@@ -8,6 +8,7 @@ import time
 from typing import Optional
 import unittest
 from unittest import mock
+from urllib.parse import urlsplit
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.*=false")
@@ -32,7 +33,15 @@ from options import OptionsDialog
 from provider_manager import ProviderManager
 from services.playback import NO_VLC_MESSAGE, PlaybackState, create_instance
 from services.thread_cleanup import has_pending_threads
-from tests.fixtures.local_provider import channel_urls, seed_channels, write_local_provider
+from services.vlc_profile import PlayKind
+from tests.fixtures.local_provider import (
+    PROVIDER_NAME,
+    channel_urls,
+    seed_channels,
+    write_local_provider,
+)
+from tests.http_fixtures import LocalSource
+from tests.ts_fixtures import make_stream
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.tv_controller import WELCOME_TEXT
@@ -46,6 +55,7 @@ from ui.tv_window import (
     fit_to_area,
     frame_margins as frame_margins_of,
 )
+import update_checker
 
 INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--quiet"])
 HOST_METHODS = ("save_config", "set_provider", "refresh_channels", "refresh_content_list_size")
@@ -857,6 +867,95 @@ class VlcWindowTests(WindowCase):
         QTest.keyClick(self.window, Qt.Key.Key_Down)
         self.assertTrue(wait_until(self.session_on(channel_urls()[1])))
         self.assertEqual(self.window.zap.context.current()["name"], "Channel 2")
+
+
+class LivePipelineWindowTests(WindowCase):
+    """A live channel on a local HTTP source plays through the time-shift pipeline."""
+
+    vlc_instance = INSTANCE
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.payload = make_stream(60)  # 60 s of H.264 and AAC in MPEG-TS, about 2 MB
+
+    def setUp(self):
+        stop, payload = threading.Event(), self.payload
+
+        def paced(request):  # a live-looking stream, a few times real time
+            try:
+                for offset in range(0, len(payload), 188 * 20):
+                    if stop.wait(0.02):
+                        return
+                    request.wfile.write(payload[offset : offset + 188 * 20])
+            except OSError:
+                pass
+
+        route = lambda _request, _count: (200, {"Content-Type": "video/mp2t"}, paced)  # noqa: E731
+        self.source = LocalSource({"/live/1.ts": route, "/live/2.ts": route})
+        self.addCleanup(self.source.close)  # after the window closed (cleanups run last first)
+        self.addCleanup(stop.set)
+        urls = [f"{self.source.url}/live/1.ts", f"{self.source.url}/live/2.ts"]
+        patcher = mock.patch("tests.fixtures.local_provider.channel_urls", return_value=urls)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+    def test_a_tuned_channel_plays_from_the_loopback_buffer(self):
+        window = self.window
+        modes = []
+        window.live_session.modeChanged.connect(
+            lambda mode: modes.append((mode, window.session.url, window.session.kind))
+        )
+        self.open_first_channel()
+        self.assertTrue(wait_until(lambda: modes))
+        mode, url, kind = modes[0]
+        self.assertEqual(mode, "pipeline")
+        self.assertTrue(url.startswith("http://127.0.0.1:"), url)
+        self.assertNotEqual(urlsplit(url).port, self.source.server.server_port)
+        # /<server token>/<session>/stream/<segment>.ts
+        self.assertRegex(urlsplit(url).path, r"^/[0-9a-f]+/[0-9a-f]+/stream/\d+\.ts$")
+        self.assertEqual(kind, PlayKind.LIVE_PIPELINE)
+        self.assertEqual(window.budget.holders(PROVIDER_NAME), ["main"])
+        self.assertEqual(window.engine._root, Path(self.config_dir) / "timeshift")
+
+    def test_close_stops_the_live_session_then_the_engine_then_the_rest(self):
+        window, order = self.window, []
+
+        def spy(name, method):
+            def call(*args, **kwargs):
+                order.append(name)
+                return method(*args, **kwargs)
+
+            return call
+
+        live, engine, catalog = window.live_session, window.engine, window.catalog
+        for obj, name in ((live, "stop"), (engine, "shutdown"), (catalog, "shutdown")):
+            patcher = mock.patch.object(
+                obj, name, spy(f"{type(obj).__name__}.{name}", getattr(obj, name))
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.open_first_channel()
+        self.assertTrue(wait_until(lambda: live.is_pipeline()))
+        order.clear()  # LiveSession.start() stops first too
+        self.close_window()  # it also checks that no background thread is left
+        self.assertEqual(
+            order[:3], ["LiveSession.stop", "LiveEngine.shutdown", "CatalogService.shutdown"]
+        )
+
+    def test_a_windows_self_update_stops_the_pipeline_before_waiting_for_threads(self):
+        self.show()
+        self.assertTrue(wait_until(self.window.engine.is_available))
+        with (
+            mock.patch("update_checker.subprocess") as process,
+            mock.patch.object(self.app, "closeAllWindows") as close_all,
+        ):
+            update_checker._perform_windows_update("C:/Downloads/qitv.exe", "https://release")
+            self.assertTrue(wait_until(lambda: process.Popen.called))
+        self.assertFalse(self.window.engine.is_available())
+        self.assertEqual(process.Popen.call_args[0][0][:2], ["C:/Downloads/qitv.exe", "--replace"])
+        close_all.assert_called_once_with()
 
 
 class NoProviderTests(WindowCase):

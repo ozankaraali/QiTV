@@ -3,15 +3,25 @@
 Link requests are serialised: at most one is in flight (STB portals mint a link per request and
 providers limit connections). A tune that arrives meanwhile replaces the single queued target,
 and only the newest target ever plays.
+
+Live channels on http(s) play through the time-shift pipeline (`LiveSession`) when the window
+provides one. Each takes a slot of the provider's connection budget (spec §6.9) before it
+starts: a zap stops the old channel and asks for a slot for the new one, which starts only once
+the old upstream is closed (`released`), when its ticket goes back. Pipeline playback errors
+are LiveSession's to recover; it reports what it cannot as `failed`. An STB channel that fails
+gets a fresh link (its play token may have expired) once per tune before the error shows.
+
+In external-player mode a zap step launches the player only once the zapping settles.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 import logging
 import re
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtGui import QPixmap
@@ -19,10 +29,12 @@ from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
+from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
+from services.live.live_session import UNAVAILABLE, LiveSession
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, episode_key, item_key
 from services.redact import safe_traceback
-from services.vlc_profile import classify
+from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind, classify
 from services.zapping import ZapContext
 from ui.keymap import Action, as_int
 from ui.overlays.channel_column import ChannelColumn
@@ -40,7 +52,13 @@ INFO_MS = 3000
 ERROR_MS = 6000
 VOLUME_STEP = 5
 SEEK_STEP_MS = 10_000
+LIVE_SEEK_S = 10.0  # ←/→ while time-shifting (spec §6.7)
 TUNING_KEEP_MS = 3000  # under the banner's 4 s: it is shown again while a link resolves
+EXTERNAL_SETTLE_MS = 1000  # the zap burst window: an external player opens once zapping stops
+LIVE_PURPOSE = "main"  # the budget purpose of the main live stream (Phase 4 adds "pip")
+RAM_RING_MIB = 128  # the time-shift buffer without consent to use the disk (spec §8)
+TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
+_PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 _ACTIVE_STATES = frozenset({"opening", "buffering", "playing", "paused"})
 _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
@@ -74,6 +92,8 @@ class _Target:
     title: str
     group_key: str = ""
     subtitle: str = ""
+    zapped: bool = False  # chosen by a zap step (↑/↓, digits, previous), not picked
+    retried: bool = False  # its link was made again after a playback failure (STB tokens)
 
     @property
     def live(self) -> bool:
@@ -88,6 +108,15 @@ class _Target:
             return False
         # STB episodes share the season's cmd and id; the episode number tells them apart.
         return self.section != "series" or episode_key(self.item) == episode_key(other.item)
+
+
+@dataclass
+class _LiveStart:
+    """A pipeline tune waiting for its budget slot and for the old upstream to close."""
+
+    target: _Target
+    url: str
+    verify_ssl: bool
 
 
 class TVController(QObject):
@@ -105,6 +134,8 @@ class TVController(QObject):
         external=None,
         now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
         logos=None,
+        live: Optional[LiveSession] = None,
+        budget: Optional[ConnectionBudget] = None,
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
@@ -119,6 +150,22 @@ class TVController(QObject):
         self.external = external if external is not None else external_players
         self._now = now
         self._logos = logos
+        # The time-shift pipeline; None plays every live channel directly (no libVLC, tests).
+        self.live = live
+        self.budget = budget if budget is not None else ConnectionBudget(self)
+        self._live_pending: Optional[_LiveStart] = None
+        self._live_ticket: Optional[int] = None  # the budget slot of the pending or running tune
+        self._live_granted = False  # the pending tune's slot was granted
+        self._live_running = False  # live.start() was called and not stopped since
+        self._releasing: list[int] = []  # slots given back once the old upstream is closed
+        self._awaiting_release = False  # live.stop() was called; released() has not come
+        self._live_latency: Optional[str] = None  # the latency the running tune started with
+        self._timeline: Optional[dict] = None  # the running tune's last timelineChanged state
+        self._ticks: list[tuple[float, str]] = []
+        self._unavailable_noticed: set[tuple[str, str]] = set()  # (provider, channel) this run
+        self._external_pending: Optional[tuple[_Target, str]] = None
+        self._external_settle = QTimer(self, singleShot=True)
+        self._external_settle.timeout.connect(self._launch_settled)
         self._started = False
         self._closed = False
         self._inflight: Optional[tuple[int, _Target]] = None
@@ -177,13 +224,24 @@ class TVController(QObject):
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
-        transport.playPauseRequested.connect(session.toggle_pause)
+        transport.playPauseRequested.connect(self._toggle_pause)
         transport.seekRequested.connect(session.seek)
-        transport.seekRelativeRequested.connect(session.seek_relative)
-        transport.speedRequested.connect(session.set_rate)
+        transport.seekRelativeRequested.connect(self._seek_relative_ms)
+        transport.speedRequested.connect(self._set_speed)
+        transport.goLiveRequested.connect(self._go_live)
+        transport.programmeStartRequested.connect(self._programme_start)
+        transport.seekToRequested.connect(self._seek_to)
         transport.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
         transport.audioRequested.connect(self._cycle_audio)
         transport.subtitleRequested.connect(self._cycle_subtitles)
+        self.budget.granted.connect(self._on_live_granted)
+        if self.live is not None:
+            live = self.live
+            live.modeChanged.connect(self._on_live_mode)
+            live.timelineChanged.connect(self._on_live_timeline)
+            live.notice.connect(self._on_live_notice)
+            live.failed.connect(self._on_live_failed)
+            live.released.connect(self._on_live_released)
         if self._logos is not None:
             self._logos.logoReady.connect(self._on_logo_ready)
         # The column's list would scroll on its own; wheel over it zaps instead.
@@ -199,6 +257,7 @@ class TVController(QObject):
         self._closed = True
         self._drop_links()
         self._tuning.stop()
+        self._cancel_external()
         self._autotune = None
         self._loading = False
         self.overlays.toast.set_hint(None)  # e.g. the closing notice needs the toast
@@ -207,6 +266,7 @@ class TVController(QObject):
         except Exception as e:
             self._log_failure("save the watch state", e)
         try:
+            self._stop_live()
             self.session.stop()
         except Exception as e:
             self._log_failure("stop playback", e)
@@ -223,6 +283,23 @@ class TVController(QObject):
         """After a settings change: repaint the rows and reload the guide."""
         self._repaint()
         self.catalog.refresh_epg()
+
+    def stop_live(self) -> None:
+        """Stop the live channel's pipeline (window close, self-update).
+
+        Its budget slot goes back once LiveSession reports the upstream closed (released).
+        """
+        self._stop_live()
+
+    def settings_saved(self) -> None:
+        """Settings were saved: a new live latency reaches the running channel at once.
+
+        The time-shift settings (disk, size) apply from the next tune.
+        """
+        latency = self.config.live_latency
+        if self.live is not None and self._live_running and latency != self._live_latency:
+            self._live_latency = latency
+            self.live.set_latency(latency)
 
     def _repaint(self) -> None:
         """Repaint what depends on settings or EPG: column rows and the open drawer."""
@@ -264,13 +341,20 @@ class TVController(QObject):
             self.overlays.column.close()
             self._open_drawer()
         elif action in (Action.SEEK_BACK, Action.SEEK_FWD):
-            self._seek(-SEEK_STEP_MS if action is Action.SEEK_BACK else SEEK_STEP_MS)
+            back = action is Action.SEEK_BACK
+            if self._pipeline_live() and self.live is not None:
+                self.live.seek_relative(-LIVE_SEEK_S if back else LIVE_SEEK_S)
+                self._show_transport()
+            else:
+                self._seek(-SEEK_STEP_MS if back else SEEK_STEP_MS)
         elif action is Action.PLAY_PAUSE:
-            self.session.toggle_pause()
+            self._toggle_pause()
             self._show_transport()
         elif action is Action.INFO:
             self._info()
-        elif action in (Action.GO_LIVE, Action.GUIDE):
+        elif action is Action.GO_LIVE:
+            self._go_live()
+        elif action is Action.GUIDE:
             self._toast("Coming soon")
         elif action is Action.FULLSCREEN:
             self.window_actions.toggle_fullscreen()
@@ -364,6 +448,7 @@ class TVController(QObject):
     def _tune(self, channel: dict, group_key: str, channels: list[dict], *, from_zap: bool) -> None:
         if self._closed:
             return
+        self._cancel_external()  # a newer choice: the settling external launch is dropped
         context = self.zap.context
         if group_key != context.group_key or context.index_of(channel) < 0:
             # Numbers reach every live channel, not only the group's (TV numbers are global).
@@ -383,7 +468,7 @@ class TVController(QObject):
             self.zap.tuned(channel)
             return
         title = str(channel.get("name") or "")
-        self._request(_Target(channel, "live", title, group_key=group_key))
+        self._request(_Target(channel, "live", title, group_key=group_key, zapped=from_zap))
         self._tuning.start(TUNING_KEEP_MS)
 
     def play_item(self, node: NavNode, siblings: list[NavNode], parent: NavNode) -> None:
@@ -415,6 +500,7 @@ class TVController(QObject):
         return list(self.catalog.items("live", ALL_GROUP_ID) or [])
 
     def _request(self, target: _Target) -> None:
+        self._cancel_external()
         if self._inflight is not None:
             self._queued = target  # replaces any older queued target
             return
@@ -465,6 +551,9 @@ class TVController(QObject):
             target = queued  # chosen again meanwhile: this link serves the newest choice
         elif self._follow_queue(target):
             return
+        self._play_link(target, url)
+
+    def _play_link(self, target: _Target, url: str) -> None:
         previous = self._current
         try:
             self._deliver(target, url)
@@ -513,11 +602,15 @@ class TVController(QObject):
         self._channel = current.item if current is not None and current.live else None
 
     def _deliver(self, target: _Target, url: str) -> None:
-        provider = self.catalog.current_provider_name()
         item = target.item
         launcher = self._external_launcher()
         self._audio_id = self._subtitle_id = None
         if launcher is not None:
+            if target.live and target.zapped:
+                # Each zap step would start a player: only the one zapping settles on does.
+                self._external_pending = (target, url)
+                self._external_settle.start(EXTERNAL_SETTLE_MS)
+                return
             ok, message = launcher(url)
             if not ok:
                 first, _, rest = (message or "").strip().partition("\n")
@@ -527,22 +620,33 @@ class TVController(QObject):
                 self._error(first.strip() or "The external player could not start")
                 return
             self._current, self._cid = target, None
+            self._stop_live()
             if self._has_media():
                 self.session.stop()  # one stream per provider connection
         elif target.live:
-            self._current, self._cid = target, None
-            self.session.play(
-                url,
-                kind=classify(url, self.catalog.is_live("live")),
-                latency=self.config.live_latency,
-                user_agent=item.get("user_agent"),
-            )
-            self._reset_speed()
+            kind = classify(url, self.catalog.is_live("live"))
+            if self._through_pipeline(url, kind):
+                if not self._request_live(target, url):
+                    return  # over the provider's stream limit: nothing opens
+                self._current, self._cid = target, None
+                self.overlays.transport.set_speed(1.0)  # LiveSession starts every tune at 1x
+            else:
+                self._stop_live()
+                self._current, self._cid = target, None
+                self.session.play(
+                    url,
+                    kind=kind,
+                    latency=self.config.live_latency,
+                    user_agent=item.get("user_agent"),
+                )
+                self._reset_speed()
             if self.overlays.transport.isVisible():
                 self._show_live_transport(target)
         else:
+            provider = self.catalog.current_provider_name()
             cid = self.watch.content_id(provider, item, item_type=target.item_type)
             start = self.watch.resume_position(cid)
+            self._stop_live()
             self._current, self._cid = target, cid
             self.session.play(url, kind=classify(url, False), start_ms=start)
             self._reset_speed()
@@ -550,18 +654,247 @@ class TVController(QObject):
                 self._toast(f"Resumed at {fmt_duration(start)}")
             self.overlays.banner.dismiss()  # the transport takes the bottom of the video
             self.overlays.transport.show_vod(target.title, target.subtitle)
+        self._delivered(target, url)
+
+    def _delivered(self, target: _Target, url: str) -> None:
+        """The target is playing (or opening): confirm the zap and record it in the history."""
         if target.live:
-            self.zap.tuned(item)
+            self.zap.tuned(target.item)
         try:
             self.watch.record_play(
-                provider,
-                item,
+                self.catalog.current_provider_name(),
+                target.item,
                 item_type=target.item_type,
                 link=url,
                 group_id=target.group_key if target.live else None,
             )
         except Exception as e:
             self._log_failure(f"record {target.title} in the watch history", e)
+
+    def _launch_settled(self) -> None:
+        """The zapping settled in external-player mode: launch the channel it ended on."""
+        pending, self._external_pending = self._external_pending, None
+        if pending is not None and not self._closed:
+            target, url = pending
+            self._play_link(replace(target, zapped=False), url)
+
+    def _cancel_external(self) -> None:
+        self._external_settle.stop()
+        self._external_pending = None
+
+    # ---- live pipeline ------------------------------------------------------------------------
+
+    def _through_pipeline(self, url: str, kind: PlayKind) -> bool:
+        """Whether a live link plays through the time-shift pipeline.
+
+        Its source reads http(s) only; container files listed as channels (M3U) play as files.
+        """
+        if self.live is None or kind is PlayKind.VOD_FILE:
+            return False
+        return urlsplit(url).scheme.lower() in _PIPELINE_SCHEMES
+
+    def _request_live(self, target: _Target, url: str) -> bool:
+        """Stop the running channel and ask for a budget slot for `target` (spec §6.9).
+
+        False when the provider's limit is taken by other streams (Phase 4: picture in
+        picture): the toast says so and the running channel goes on.
+        """
+        provider = self.catalog.current_provider()
+        name = self.catalog.current_provider_name()
+        limit = self.budget.limit_for(provider, self.catalog.max_connections())
+        others = [p for p in self.budget.holders(name) if p != LIVE_PURPOSE]
+        if limit is not None and (limit <= 0 or len(others) >= limit):
+            logger.info("Not opening %s: the provider allows %s streams", target.title, limit)
+            self._restore_channel()
+            self._toast(f"Your provider allows {limit} streams at a time", "error", ERROR_MS)
+            return False
+        self._stop_live()
+        if self._has_media():
+            self.session.stop()  # a movie or episode: LiveSession stops only live media
+        verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
+        self._live_pending = _LiveStart(target, url, verify_ssl)
+        self._live_ticket = self.budget.request(name, limit, purpose=LIVE_PURPOSE)
+        return True
+
+    def _stop_live(self) -> None:
+        """Stop the pipeline tune or drop the pending one; a held slot goes back on released()."""
+        if self.live is None:
+            return
+        self._live_pending = None
+        self._live_granted = False
+        self._timeline = None
+        self._ticks = []
+        ticket, self._live_ticket = self._live_ticket, None
+        if self._live_running:
+            self._live_running = False
+            self._awaiting_release = True
+            if ticket is not None:
+                self._releasing.append(ticket)
+            self.live.stop()  # released() follows, at once in direct mode
+        elif ticket is not None:
+            self.budget.release(ticket)  # never started: nothing upstream to wait for
+
+    def _on_live_granted(self, ticket: int) -> None:
+        if self._closed or ticket != self._live_ticket or self._live_pending is None:
+            return
+        self._live_granted = True
+        self._start_live()
+
+    def _on_live_released(self) -> None:
+        """The old upstream is closed: its slot goes back, and the next tune may start."""
+        self._awaiting_release = False
+        tickets, self._releasing = self._releasing, []
+        for ticket in tickets:
+            self.budget.release(ticket)
+        if not self._closed:
+            self._start_live()
+
+    def _start_live(self) -> None:
+        """Start the pending tune once its slot is granted and the old upstream is closed."""
+        pending = self._live_pending
+        if self.live is None or pending is None or not self._live_granted:
+            return
+        if self._awaiting_release:
+            return
+        self._live_pending = None
+        config, item = self.config, pending.target.item
+        user_agent = item.get("user_agent") or DEFAULT_USER_AGENT
+        disk = bool(config.timeshift_enabled)
+        mib = config.timeshift_max_mib if disk else RAM_RING_MIB
+        self._live_latency = config.live_latency
+        self._live_running = True
+        self.live.start(
+            pending.url,
+            headers={"User-Agent": user_agent},
+            verify_ssl=pending.verify_ssl,
+            latency=config.live_latency,
+            user_agent=user_agent,
+            disk=disk,
+            max_bytes=mib * 1024 * 1024,
+        )
+
+    def _live_opening(self) -> bool:
+        """A pipeline tune waits for its slot or for the pipeline: nothing plays yet."""
+        if self._live_pending is not None:
+            return True
+        return self._live_running and self.live is not None and not self.live.mode
+
+    def _pipeline_live(self) -> bool:
+        """The current channel plays from the time-shift buffer."""
+        current = self._current
+        return (
+            self.live is not None
+            and self._live_running
+            and current is not None
+            and current.live
+            and self.live.is_pipeline()
+        )
+
+    def _on_live_mode(self, _mode: str) -> None:
+        current = self._current
+        if self._closed or current is None or not current.live:
+            return
+        if self.overlays.transport.isVisible():
+            self._show_live_transport(current)  # the time-shift bar, or plain live
+
+    def _on_live_timeline(self, state: dict) -> None:
+        current = self._current
+        if self._closed or not self._live_running or current is None or not current.live:
+            return
+        self._timeline = state
+        transport = self.overlays.transport
+        if transport.isVisible():
+            self._ticks = self._programme_ticks(current.item, state)
+        transport.update_timeline(state, self._ticks)
+
+    def _programme_ticks(self, channel: dict, state: dict) -> list[tuple[float, str]]:
+        """Programme starts in timeline seconds: the live edge is now (as the transport)."""
+        now = self._now()
+        edge = float(state["live_edge"])
+        since = now - timedelta(seconds=max(0.0, edge - float(state["start"])))
+        return [
+            (edge - (now - p.start).total_seconds(), p.title)
+            for p in self._programmes(channel, since, TICK_PROGRAMMES)
+        ]
+
+    def _on_live_notice(self, text: str) -> None:
+        if self._closed:
+            return
+        if text == UNAVAILABLE:  # once per channel and run
+            current = self._current
+            item = current.item if current is not None else {}
+            channel = str(item.get("cmd") or item.get("id") or item.get("name") or "")
+            key = (self.catalog.current_provider_name(), channel)
+            if key in self._unavailable_noticed:
+                return
+            self._unavailable_noticed.add(key)
+        self._toast(text)
+
+    def _on_live_failed(self, message: str) -> None:
+        """Playback of the live channel failed for good (LiveSession recovered what it could)."""
+        if self._closed:
+            return
+        current = self._current
+        retry = (
+            current is not None
+            and current.live
+            and not current.retried
+            and self.catalog.provider_type() == "STB"
+            and self._inflight is None
+            and self._queued is None
+        )
+        if retry and current is not None:
+            # STB play tokens expire: a fresh link, once per tune, before the error shows.
+            logger.info("Making the link of %s again after a playback failure", current.title)
+            self._request(replace(current, retried=True))
+            return
+        title = current.title if current is not None else ""
+        self._error(f"{title}: {message}" if title else message)
+
+    def _toggle_pause(self) -> None:
+        if self.live is not None and self._live_running:
+            self.live.toggle_pause()  # plays on direct channels too
+        else:
+            self.session.toggle_pause()
+
+    def _seek_relative_ms(self, delta_ms: int) -> None:
+        if self._pipeline_live() and self.live is not None:
+            self.live.seek_relative(delta_ms / 1000.0)
+        else:
+            self.session.seek_relative(delta_ms)
+
+    def _seek_to(self, seconds: float) -> None:
+        if self._pipeline_live() and self.live is not None:
+            self.live.seek_to(seconds)
+
+    def _set_speed(self, rate: float) -> None:
+        if self._pipeline_live() and self.live is not None:
+            self.live.set_speed(rate)
+        else:
+            self.session.set_rate(rate)
+
+    def _go_live(self) -> None:
+        current = self._current
+        if self.live is None or not self._live_running or current is None or not current.live:
+            return
+        self.live.go_live()  # before the stream opens it is remembered (a pause is undone)
+        self._show_transport()
+
+    def _programme_start(self) -> None:
+        """⏮: the start of the programme being watched if buffered, else the oldest point."""
+        current, state = self._current, self._timeline
+        if not self._pipeline_live() or self.live is None or current is None or state is None:
+            return
+        now = self._now()
+        edge, oldest = float(state["live_edge"]), float(state["start"])
+        watching = now - timedelta(seconds=max(0.0, edge - float(state["position"])))
+        target = oldest
+        for programme in self._programmes(current.item, watching, 1):
+            start = edge - (now - programme.start).total_seconds()
+            if programme.is_on(watching) and start >= oldest:
+                target = start
+        self.live.seek_to(target)
+        self._show_transport()
 
     def _reset_speed(self) -> None:
         self.session.set_rate(1.0)
@@ -713,6 +1046,8 @@ class TVController(QObject):
     def _on_highlight(self, channel: dict, index: int) -> None:
         if not self._closed:
             self.overlays.column.highlight(index)
+            if self._external_pending is not None:
+                self._external_settle.start(EXTERNAL_SETTLE_MS)  # still zapping
 
     def _on_digits(self, text: str) -> None:
         self._digits = text
@@ -751,8 +1086,8 @@ class TVController(QObject):
         self.overlays.transport.update_position(position_ms, length_ms)
 
     def _on_error(self, message: str) -> None:
-        if self._closed:
-            return
+        if self._closed or self._live_running:
+            return  # LiveSession recovers pipeline errors and reports the rest (failed)
         title = self._current.title if self._current is not None else ""
         self._error(f"{title}: {message}" if title else message)
 
@@ -760,7 +1095,8 @@ class TVController(QObject):
         if self._closed or self._current is None:
             return
         if self._current.live:
-            self._toast("The stream ended")
+            if not self._pipeline_live():  # the buffer reopens; a direct stream really ended
+                self._toast("The stream ended")
             return
         self._toast("Finished")
         try:
@@ -914,7 +1250,15 @@ class TVController(QObject):
 
     def _show_live_transport(self, target: _Target) -> None:
         now = self.now_title(target.item)
-        self.overlays.transport.show_live(target.title, now[0] if now else "")
+        subtitle = now[0] if now else ""
+        transport = self.overlays.transport
+        if not self._pipeline_live():
+            transport.show_live(target.title, subtitle)
+            return
+        transport.show_timeshift(target.title, subtitle)
+        if self._timeline is not None:
+            self._ticks = self._programme_ticks(target.item, self._timeline)
+            transport.update_timeline(self._timeline, self._ticks)
 
     def _change_volume(self, delta: int) -> None:
         volume = max(0, min(100, self.session.volume() + delta))
@@ -924,7 +1268,7 @@ class TVController(QObject):
     # ---- state helpers ------------------------------------------------------------------------
 
     def _has_media(self) -> bool:
-        return self._state in _ACTIVE_STATES
+        return self._state in _ACTIVE_STATES or self._live_opening()
 
     def _playing_live(self) -> Optional[_Target]:
         current = self._current

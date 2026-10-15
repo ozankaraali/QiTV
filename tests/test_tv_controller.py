@@ -13,9 +13,11 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QWidget
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
+from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
+from services.live.live_session import UNAVAILABLE
 from services.navigation import NavModel, NavNode
-from services.vlc_profile import PlayKind
+from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
 from ui.keymap import Action
@@ -28,6 +30,7 @@ from ui.overlays.zap_banner import ZapBanner
 from ui.tv_controller import Overlays, TVController, scrub
 
 NOW = datetime(2026, 10, 15, 20, 30, tzinfo=timezone.utc)
+MIB = 1024 * 1024
 CHANNELS = [
     {"id": i, "name": name, "number": str(i), "cmd": f"ffrt http://tv/{i}"}
     for i, name in ((1, "One"), (2, "Two"), (3, "Three"), (4, "Four"))
@@ -94,6 +97,9 @@ class FakeCatalog(NavCatalog):
 
     def max_connections(self):
         return 1
+
+    def current_provider(self):
+        return {"name": self.provider, "type": self.ptype}
 
 
 class FakeSession(QObject):
@@ -267,6 +273,9 @@ class FakeTransport(FakeOverlay):
     fullscreenRequested = Signal()
     audioRequested = Signal()
     subtitleRequested = Signal()
+    goLiveRequested = Signal()
+    programmeStartRequested = Signal()
+    seekToRequested = Signal(float)
 
     def show_vod(self, title, subtitle):
         self.record("show_vod", title, subtitle)
@@ -275,6 +284,16 @@ class FakeTransport(FakeOverlay):
     def show_live(self, title, subtitle):
         self.record("show_live", title, subtitle)
         self.visible = True
+
+    def show_timeshift(self, title, subtitle):
+        self.record("show_timeshift", title, subtitle)
+        self.visible = True
+
+    def update_timeline(self, state, ticks):
+        self.record("update_timeline", state, ticks)
+
+    def show_live_edge(self, lag_s, catching_up):
+        self.record("show_live_edge", lag_s, catching_up)
 
     def update_position(self, position, length):
         self.record("update_position", position, length)
@@ -321,6 +340,69 @@ class FakeLogos(QObject):
 
     def request(self, urls):
         self.requested.extend(urls)
+
+
+class FakeLiveSession(QObject):
+    """LiveSession's surface: records calls; the test drives its mode and released()."""
+
+    modeChanged = Signal(str)
+    timelineChanged = Signal(dict)
+    notice = Signal(str)
+    failed = Signal(str)
+    released = Signal()
+
+    def __init__(self, playback):
+        super().__init__()
+        self.playback = playback
+        self.calls = []
+        self.mode = ""
+        self.running = False
+
+    def named(self, name):
+        return [c[1:] for c in self.calls if c[0] == name]
+
+    def is_pipeline(self):
+        return self.mode == "pipeline"
+
+    def start(self, url, **kwargs):
+        self.calls.append(("start", url, kwargs))
+        self.running, self.mode = True, ""
+
+    def stop(self):
+        if not self.running:
+            return
+        self.calls.append(("stop",))
+        self.running, self.mode = False, ""
+        self.playback.stop()
+
+    def play_pipeline(self):
+        """The session is ready: VLC opens the loopback stream."""
+        self.playback.play("http://127.0.0.1:9/t/s1/stream/0.ts", kind=PlayKind.LIVE_PIPELINE)
+        self.mode = "pipeline"
+        self.modeChanged.emit("pipeline")
+
+    def play_direct(self):
+        """It fell back to playing the provider's stream."""
+        self.mode = "direct"
+        self.modeChanged.emit("direct")
+
+    def toggle_pause(self):
+        self.calls.append(("toggle_pause",))
+
+    def seek_to(self, t):
+        self.calls.append(("seek_to", t))
+
+    def seek_relative(self, dt):
+        self.calls.append(("seek_relative", dt))
+
+    def go_live(self):
+        self.calls.append(("go_live",))
+
+    def set_speed(self, rate):
+        self.calls.append(("set_speed", rate))
+
+    def set_latency(self, name):
+        self.calls.append(("set_latency", name))
 
 
 class FakeWindow:
@@ -404,7 +486,7 @@ class ControllerTestCase(unittest.TestCase):
         self.drawer, self.transport, self.toast = FakeDrawer(), FakeTransport(), FakeToast()
         self.controller = self.make_controller(self.column)
 
-    def make_controller(self, column):
+    def make_controller(self, column, **extra):
         controller = TVController(
             config=self.config,
             catalog=self.catalog,
@@ -416,6 +498,7 @@ class ControllerTestCase(unittest.TestCase):
             window_actions=self.window,
             external=self.external,
             now=lambda: NOW,
+            **extra,
         )
         self.addCleanup(controller.shutdown)  # late zap timers must not reach a dead overlay
         return controller
@@ -727,8 +810,8 @@ class KeyTests(ControllerTestCase):
             self.window.calls, ["toggle_fullscreen", "toggle_mini_player", "toggle_fullscreen"]
         )
         self.controller.handle(Action.GUIDE)
-        self.controller.handle(Action.GO_LIVE)
-        self.assertEqual(self.toast.messages(), [("Coming soon", "info")] * 2)
+        self.controller.handle(Action.GO_LIVE)  # nothing to do without a time-shifted channel
+        self.assertEqual(self.toast.messages(), [("Coming soon", "info")])
 
     def test_click_toggles_the_drawer(self):
         self.controller.video_clicked()
@@ -1565,6 +1648,391 @@ class ShutdownTests(ControllerTestCase):
         self.assertEqual(self.session.stops, 1)
         self.catalog.linkReady.emit(2, "http://stream/2")
         self.assertEqual(self.played_urls(), ["http://stream/1"])
+
+
+class PipelineCase(ControllerTestCase):
+    """A controller with the time-shift pipeline (a fake LiveSession) and a real budget."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.ssl_verify = True
+        self.config.timeshift_enabled = False
+        self.config.timeshift_max_mib = 2048
+        self.live = FakeLiveSession(self.session)
+        self.budget = ConnectionBudget()
+        self.controller = self.make_controller(self.column, live=self.live, budget=self.budget)
+        self.controller.start()
+
+    def starts(self):
+        return self.live.named("start")
+
+    def start_channel(self, index):
+        """Tune a channel and wait for its live session to start (the grant is deferred)."""
+        count, running = len(self.starts()), self.live.running
+        self.play(index)
+        if running:  # the old channel's upstream closes first
+            self.assertEqual(self.live.calls[-1], ("stop",))
+            self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == count + 1))
+
+    def start_pipeline(self, index=0):
+        self.start_channel(index)
+        self.live.play_pipeline()
+
+
+class PipelineTuneTests(PipelineCase):
+    def test_a_tune_takes_a_budget_slot_and_starts_the_live_session_on_grant(self):
+        self.play(0)
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual(self.starts(), [])  # the grant is always deferred
+        self.assertTrue(wait_until(lambda: self.starts()))
+        url, kwargs = self.starts()[0]
+        self.assertEqual(url, "http://stream/1")
+        self.assertEqual(
+            kwargs,
+            {
+                "headers": {"User-Agent": DEFAULT_USER_AGENT},
+                "verify_ssl": True,
+                "latency": "low",
+                "user_agent": DEFAULT_USER_AGENT,
+                "disk": False,
+                "max_bytes": 128 * MIB,  # without consent, a RAM ring of 128 MiB
+            },
+        )
+        self.assertEqual(self.session.plays, [])  # the live session plays it, not the controller
+        self.assertEqual(self.zap.context.current(), CHANNELS[0])
+        self.assertEqual(self.watch.plays, [("Home", CHANNELS[0], "channel", url, "10")])
+        self.assertEqual(self.banner.named("show_info")[0][0].name, "One")  # shown at once
+
+    def test_disk_time_shift_uses_the_configured_size_the_channel_agent_and_provider_tls(self):
+        self.config.timeshift_enabled = True
+        self.config.timeshift_max_mib = 4096
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "ssl_verify": False}
+        channel = dict(CHANNELS[0], user_agent="Box/1.0")
+        self.controller.tune(channel, group_key="10", channels=[channel])
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: self.starts()))
+        kwargs = self.starts()[0][1]
+        self.assertEqual(kwargs["headers"], {"User-Agent": "Box/1.0"})
+        self.assertEqual(kwargs["user_agent"], "Box/1.0")
+        self.assertFalse(kwargs["verify_ssl"])
+        self.assertEqual((kwargs["disk"], kwargs["max_bytes"]), (True, 4096 * MIB))
+
+    def test_a_second_tune_stops_the_first_and_starts_only_after_released(self):
+        self.start_pipeline(0)
+        self.play(1)
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        QTest.qWait(30)
+        self.assertEqual(len(self.starts()), 1)  # the old upstream still holds the slot
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        self.assertEqual(self.starts()[1][0], "http://stream/2")
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_an_unlimited_provider_also_waits_for_the_old_upstream(self):
+        self.catalog.ptype = "M3UPLAYLIST"
+        self.start_pipeline(0)
+        self.play(1)
+        QTest.qWait(30)  # its slot is granted at once…
+        self.assertEqual(len(self.starts()), 1)  # …but the old stream is not closed yet
+        self.live.released.emit()
+        self.assertEqual(self.starts()[1][0], "http://stream/2")
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_zapping_past_a_waiting_tune_starts_only_the_newest(self):
+        self.start_pipeline(0)
+        self.play(1)
+        self.play(2)  # Two never started: its queued slot is dropped
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        QTest.qWait(30)
+        self.assertEqual([url for url, _ in self.starts()], ["http://stream/1", "http://stream/3"])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_a_budget_denial_toasts_and_opens_nothing(self):
+        self.budget.request("Home", 1, purpose="pip")  # Phase 4: the PiP holds the only slot
+        self.play(0)
+        QTest.qWait(30)
+        self.assertEqual(
+            self.toast.messages(), [("Your provider allows 1 streams at a time", "error")]
+        )
+        self.assertEqual(self.live.calls, [])
+        self.assertEqual(self.budget.holders("Home"), ["pip"])
+        self.assertEqual(self.watch.plays, [])
+
+    def test_a_channel_file_or_other_scheme_plays_directly(self):
+        self.start_pipeline(0)
+        self.tune(1)
+        self.ready("file:///media/clip.mp4")
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        self.assertEqual(self.session.plays[-1][0], "file:///media/clip.mp4")
+        self.assertEqual(self.session.plays[-1][1]["kind"], PlayKind.VOD_FILE)
+        self.tune(2)
+        self.ready("udp://239.0.0.1:1234")
+        self.assertEqual(self.session.plays[-1][0], "udp://239.0.0.1:1234")
+        self.assertEqual(len(self.starts()), 1)
+        self.live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), [])
+
+    def test_a_movie_stops_the_live_channel_and_gives_its_slot_back(self):
+        self.start_pipeline(0)
+        self.nav.reset_to("movies")
+        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.ready("http://vod/heat.mkv")
+        self.assertIn(("stop",), self.live.calls)
+        self.assertEqual(self.played_urls()[-1], "http://vod/heat.mkv")
+        self.live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), [])
+        self.controller.handle(Action.SEEK_BACK)  # the movie's keys reach the player again
+        self.assertEqual(self.live.named("seek_relative"), [])
+
+    def test_a_channel_after_a_movie_stops_the_movie(self):
+        self.nav.reset_to("movies")
+        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.ready("http://vod/heat.mkv")
+        stops = self.session.stops
+        self.start_channel(0)
+        self.assertEqual(self.session.stops, stops + 1)
+
+    def test_shutdown_stops_the_live_session(self):
+        self.start_pipeline(0)
+        self.controller.shutdown()
+        self.assertEqual(self.live.calls[-1], ("stop",))
+
+    def test_rechoosing_the_channel_while_it_opens_does_not_restart_it(self):
+        self.play(0)
+        self.tune(0)  # still waiting for its slot or the pipeline
+        self.assertTrue(wait_until(lambda: self.starts()))
+        self.tune(0)
+        QTest.qWait(30)
+        self.assertEqual(len(self.starts()), 1)
+        self.assertEqual(self.requested(), ["One"])
+
+
+class PipelineControlTests(PipelineCase):
+    STATE = {
+        "start": 0.0,
+        "end": 3600.0,
+        "position": 3000.0,
+        "live_edge": 3600.0,
+        "lag": 600.0,
+        "mode": "shifted",
+        "rate": 1.0,
+        "paused": False,
+        "ended": False,
+        "target": 2.5,
+    }
+
+    def test_keys_during_live_reach_the_live_session(self):
+        self.start_pipeline(0)
+        before = len(self.live.calls)
+        for action in (Action.SEEK_BACK, Action.SEEK_FWD, Action.GO_LIVE, Action.PLAY_PAUSE):
+            self.controller.handle(action)
+        self.assertEqual(
+            self.live.calls[before:],
+            [("seek_relative", -10.0), ("seek_relative", 10.0), ("go_live",), ("toggle_pause",)],
+        )
+        self.assertEqual((self.session.relative, self.session.toggles), ([], 0))
+
+    def test_transport_requests_reach_the_live_session(self):
+        self.start_pipeline(0)
+        before = len(self.live.calls)
+        transport = self.transport
+        transport.seekRelativeRequested.emit(-10_000)
+        transport.seekRelativeRequested.emit(60_000)  # the +1 min button
+        transport.seekToRequested.emit(42.5)
+        transport.speedRequested.emit(1.5)
+        transport.goLiveRequested.emit()
+        transport.playPauseRequested.emit()
+        self.assertEqual(
+            self.live.calls[before:],
+            [
+                ("seek_relative", -10.0),
+                ("seek_relative", 60.0),
+                ("seek_to", 42.5),
+                ("set_speed", 1.5),
+                ("go_live",),
+                ("toggle_pause",),
+            ],
+        )
+        self.assertEqual((self.session.relative, self.session.rates), ([], []))
+
+    def test_a_direct_fallback_keeps_play_pause_but_has_no_rewind(self):
+        self.start_channel(0)
+        self.live.play_direct()
+        self.controller.handle(Action.SEEK_BACK)
+        self.controller.handle(Action.PLAY_PAUSE)
+        self.assertEqual(self.live.calls[1:], [("toggle_pause",)])
+        self.assertEqual(self.toast.messages(), [("Rewind arrives with time-shift", "info")])
+
+    def test_pause_and_go_live_before_the_stream_opens_reach_the_live_session(self):
+        self.start_channel(0)  # the pipeline is still opening: LiveSession remembers them
+        self.controller.handle(Action.PLAY_PAUSE)
+        self.controller.handle(Action.GO_LIVE)
+        self.assertEqual(self.live.calls[1:], [("toggle_pause",), ("go_live",)])
+
+    def test_go_live_without_a_live_channel_does_nothing(self):
+        self.controller.handle(Action.GO_LIVE)
+        self.start_channel(0)
+        self.nav.reset_to("movies")
+        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.ready("http://vod/heat.mkv")
+        self.controller.handle(Action.GO_LIVE)
+        self.assertEqual(self.live.named("go_live"), [])
+        self.assertEqual(self.toast.messages(), [])
+
+    def test_the_transport_shows_the_time_shift_bar_with_programme_ticks(self):
+        self.catalog.epg[1] = [
+            Programme("News", NOW - timedelta(minutes=30), NOW + timedelta(minutes=30)),
+            Programme("Film", NOW + timedelta(minutes=30), NOW + timedelta(hours=2)),
+        ]
+        self.start_pipeline(0)
+        self.controller.mouse_moved()
+        self.assertEqual(self.transport.named("show_timeshift"), [("One", "News")])
+        self.live.timelineChanged.emit(dict(self.STATE))
+        state, ticks = self.transport.named("update_timeline")[-1]
+        self.assertEqual(state, self.STATE)
+        self.assertEqual(ticks, [(1800.0, "News"), (5400.0, "Film")])  # the edge is now
+
+    def test_the_transport_switches_to_the_bar_when_the_pipeline_plays(self):
+        self.start_channel(0)
+        self.controller.mouse_moved()  # still opening: plain live
+        self.assertEqual(self.transport.named("show_live"), [("One", "")])
+        self.live.play_pipeline()
+        self.assertEqual(self.transport.named("show_timeshift"), [("One", "")])
+        self.live.play_direct()
+        self.assertEqual(self.transport.named("show_live")[-1], ("One", ""))
+
+    def test_programme_start_seeks_to_the_buffered_start_else_the_oldest_point(self):
+        self.catalog.epg[1] = [
+            Programme("News", NOW - timedelta(minutes=30), NOW + timedelta(minutes=30))
+        ]
+        self.start_pipeline(0)
+        self.live.timelineChanged.emit(dict(self.STATE))  # watching 10 min behind: News
+        self.transport.programmeStartRequested.emit()
+        self.live.timelineChanged.emit(dict(self.STATE, start=2000.0))  # its start evicted
+        self.transport.programmeStartRequested.emit()
+        self.catalog.epg[1] = []  # no guide: the oldest point
+        self.transport.programmeStartRequested.emit()
+        self.assertEqual(self.live.named("seek_to"), [(1800.0,), (2000.0,), (2000.0,)])
+
+    def test_a_latency_change_reaches_the_running_channel(self):
+        self.start_pipeline(0)
+        self.controller.settings_saved()  # unchanged
+        self.config.live_latency = "stable"
+        self.controller.settings_saved()
+        self.controller.settings_saved()
+        self.assertEqual(self.live.named("set_latency"), [("stable",)])
+
+
+class PipelineErrorTests(PipelineCase):
+    def test_the_unavailable_notice_shows_once_per_channel(self):
+        self.start_channel(0)
+        self.live.notice.emit(UNAVAILABLE)
+        self.live.notice.emit("Rewound past the buffer")
+        self.start_channel(1)
+        self.live.notice.emit(UNAVAILABLE)
+        self.start_channel(0)
+        self.live.notice.emit(UNAVAILABLE)  # One again: already said
+        self.live.notice.emit("Rewound past the buffer")  # other notices every time
+        self.assertEqual(
+            self.toast.messages(),
+            [
+                (UNAVAILABLE, "info"),
+                ("Rewound past the buffer", "info"),
+                (UNAVAILABLE, "info"),
+                ("Rewound past the buffer", "info"),
+            ],
+        )
+
+    def test_pipeline_playback_errors_are_left_to_the_live_session(self):
+        self.catalog.ptype = "M3UPLAYLIST"  # no link to make again
+        self.start_pipeline(0)
+        self.session.errorOccurred.emit("VLC could not open the stream")
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages(), [])  # LiveSession reopens the buffer
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+
+    def test_a_direct_fallback_reports_its_errors_once_and_its_end(self):
+        self.catalog.ptype = "M3UPLAYLIST"
+        self.start_channel(0)
+        self.live.play_direct()
+        self.session.errorOccurred.emit("Broken")  # LiveSession forwards it as failed
+        self.live.failed.emit("Broken")
+        self.session.ended.emit()
+        self.assertEqual(
+            self.toast.messages(), [("One: Broken", "error"), ("The stream ended", "info")]
+        )
+
+    def test_an_stb_failure_makes_the_link_again_once_per_tune(self):
+        self.start_pipeline(0)  # an STB provider
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.requested(), ["One", "One"])  # a fresh play token
+        self.ready("http://stream/1?play_token=new")
+        self.assertEqual(self.live.calls[-1], ("stop",))
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        self.assertEqual(self.starts()[1][0], "http://stream/1?play_token=new")
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+        self.assertEqual(len(self.catalog.links), 2)
+        self.start_channel(1)  # a new tune may try again
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.requested(), ["One", "One", "Two", "Two"])
+
+    def test_a_failure_after_the_user_moved_on_is_not_retried(self):
+        self.start_pipeline(0)
+        self.tune(1)  # its link is still on the way
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.requested(), ["One", "Two"])
+        self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+
+
+class ExternalZapTests(ControllerTestCase):
+    """External-player mode launches the player once per settled zap, not per step."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch("ui.tv_controller.EXTERNAL_SETTLE_MS", 60)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.config.play_in_vlc = True
+        self.controller.start()
+
+    def test_zap_steps_launch_only_the_channel_the_zapping_settles_on(self):
+        self.play(0)  # a pick launches at once
+        self.assertEqual(self.external.calls, [("vlc", "http://stream/1")])
+        self.clock.now += 5
+        self.controller.handle(Action.CH_NEXT)  # Two
+        self.ready("http://stream/2")
+        self.assertEqual(len(self.external.calls), 1)
+        self.clock.now += 5
+        self.controller.handle(Action.CH_NEXT)  # Three, before Two settled
+        self.ready("http://stream/3")
+        self.assertTrue(wait_until(lambda: len(self.external.calls) == 2))
+        QTest.qWait(120)
+        self.assertEqual(
+            self.external.calls, [("vlc", "http://stream/1"), ("vlc", "http://stream/3")]
+        )
+        self.assertEqual([p[1]["name"] for p in self.watch.plays], ["One", "Three"])
+        self.assertEqual(self.zap.context.current(), CHANNELS[2])
+
+    def test_a_pick_during_the_settling_drops_the_zapped_launch(self):
+        self.play(0)
+        self.clock.now += 5
+        self.controller.handle(Action.CH_NEXT)
+        self.ready("http://stream/2")
+        self.play(3)  # a drawer pick of Four
+        QTest.qWait(120)
+        self.assertEqual(
+            self.external.calls, [("vlc", "http://stream/1"), ("vlc", "http://stream/4")]
+        )
 
 
 if __name__ == "__main__":

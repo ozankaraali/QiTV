@@ -46,7 +46,12 @@ a = Analysis(
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
         ('assets', 'assets'),  # Include icons and desktop file
     ],
-    hiddenimports=[],
+    hiddenimports=[
+        # The live time-shift helper process (spawned) and what its source imports.
+        'services.live.worker',
+        'm3u8',
+        'Cryptodome.Cipher.AES',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
