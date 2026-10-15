@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
+import requests
 
 from services.catalog import (
     LOGIN_REFUSED_MESSAGE,
@@ -80,11 +81,23 @@ class FriendlyErrorTests(unittest.TestCase):
         ):
             self.assertEqual(friendly_error(text), text)
 
-    def test_log_names_the_exception_type_without_the_url(self):
+    def test_log_of_a_text_has_no_url_and_no_type_taken_from_the_text(self):
+        # A worker's text is never parsed for an exception name: a credential such as
+        # "username=AliceError" would be logged as one.
+        leaky = REFUSED.replace("username=alice", "username=AliceError")
         with self.assertLogs("services.catalog", "INFO") as logs:
-            friendly_error(REFUSED)
+            self.assertEqual(friendly_error(leaky), UNREACHABLE_MESSAGE)
         output = "\n".join(logs.output)
-        self.assertIn("NewConnectionError", output)
+        self.assertIn(UNREACHABLE_MESSAGE, output)
+        for secret in ("alice", "Alice", "s3cret", "portal.example", "player_api", "Error"):
+            self.assertNotIn(secret, output)
+
+    def test_log_names_the_type_of_an_exception_object(self):
+        error = requests.ConnectionError(REFUSED)
+        with self.assertLogs("services.catalog", "INFO") as logs:
+            self.assertEqual(friendly_error(error), UNREACHABLE_MESSAGE)
+        output = "\n".join(logs.output)
+        self.assertIn("(ConnectionError)", output)
         for secret in ("alice", "s3cret", "portal.example", "player_api"):
             self.assertNotIn(secret, output)
 

@@ -73,14 +73,14 @@ _UNREACHABLE = re.compile(
     r"|ssl|certificate|no such file|errno",
     re.IGNORECASE,
 )
-_EXCEPTION_TYPE = re.compile(r"\b([A-Z]\w*(?:Error|Exception|Timeout))\b")
 
 
 def friendly_error(message: object) -> str:
-    """Map a worker's error text to a fixed message without URLs or credentials.
+    """Map a worker's error text (or exception) to a fixed message without URLs or credentials.
 
-    The service's own messages pass through. Everything else is classified, and the
-    exception type it names (never the text) is logged at INFO.
+    The service's own messages pass through. Everything else is classified and logged at
+    INFO with the exception's type when an exception object is given. The text is never
+    logged, nor searched for a type name: a credential could look like one.
     """
     text = "" if message is None else str(message)
     if text in _SAFE_MESSAGES or text.startswith(_SAFE_PREFIXES):
@@ -93,12 +93,10 @@ def friendly_error(message: object) -> str:
         friendly = UNREACHABLE_MESSAGE
     else:
         friendly = UNEXPECTED_ANSWER_MESSAGE
-    found = _EXCEPTION_TYPE.search(text)
-    logger.info(
-        "Provider request failed: %s (%s)",
-        friendly,
-        found.group(1) if found else "no exception type named",
-    )
+    if isinstance(message, BaseException):
+        logger.info("Provider request failed: %s (%s)", friendly, type(message).__name__)
+    else:
+        logger.info("Provider request failed: %s", friendly)
     return friendly
 
 
