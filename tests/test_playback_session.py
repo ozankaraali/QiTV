@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse, wait_until
 
 from services.playback import (
+    _AUDIO_POLL_MS,
     _AUDIO_RESTORE_MS,
     NO_VLC_MESSAGE,
     VLC_LOG_ENV,
@@ -512,7 +513,8 @@ class PlayerJobTests(unittest.TestCase):
         session._restore_audio()
         session.set_window(42)  # a variable on the player: no input lock
         session.set_volume(40)  # the audio output has its own locks
-        self.assertEqual(session.volume(), 70)
+        self.assertIn(("audio_set_volume", 40), self.player.calls)
+        self.assertEqual(session.volume(), 40)  # what was asked for
         self.runner.finish()
         # The rate asked for meanwhile belongs to the new media: set before it plays.
         tail = self.player.calls[-3:]
@@ -703,6 +705,7 @@ class _AudioPlayer(_FakePlayer):
         self.state = vlc.State.Opening
         self.output = True  # libVLC opens one with the player
         self.mute, self.level = False, 100
+        self.probes = 0  # audio_get_mute calls: how the session looks for the output
 
     def get_state(self):
         self._call("get_state")
@@ -716,6 +719,7 @@ class _AudioPlayer(_FakePlayer):
         self.output = True
 
     def audio_get_mute(self):
+        self.probes += 1
         return int(self.mute) if self.output else -1
 
     def audio_set_mute(self, muted):
@@ -803,6 +807,58 @@ class AudioSettingsTests(unittest.TestCase):
         self.stopped()
         self.session.set_volume(30)
         self.assertEqual(self.session.volume(), 30)
+
+    def test_volume_before_any_request_is_libvlcs_default_without_an_output(self):
+        self.stopped()
+        self.assertEqual(self.session.volume(), 100)
+        self.session.set_volume(self.session.volume() - 5)  # Vol- while the zap loads
+        self.playing(B, output=True)
+        self.assertEqual(self.player.level, 95)
+
+    def test_volume_remembers_the_level_read_from_an_open_output_without_asking(self):
+        self.player.level = 60
+        self.assertEqual(self.session.volume(), 60)
+        self.stopped()
+        self.assertEqual(self.session.volume(), 60)
+        self.playing(B, output=True)
+        self.assertEqual(self.audio_calls(), [])  # reading it asked for nothing
+
+    def start_waiting_for_output(self):
+        self.stopped()
+        self.session.set_muted(True)
+        self.session.play(B, kind=PlayKind.LIVE)
+        self.player.state = vlc.State.Playing
+
+    def test_the_wanted_audio_lands_soon_after_the_output_opens(self):
+        self.start_waiting_for_output()
+        self.player.open_output()
+        elapse(_AUDIO_POLL_MS * 2)  # no regular poll comes meanwhile (poll_ms is 60 s here)
+        self.assertTrue(self.player.mute)
+
+    def test_the_fast_watch_ends_once_applied(self):
+        self.start_waiting_for_output()
+        self.player.open_output()
+        elapse(_AUDIO_POLL_MS * 2)
+        probes = self.player.probes
+        elapse(_AUDIO_POLL_MS * 4)
+        self.assertEqual(self.player.probes, probes)
+
+    def test_the_fast_watch_gives_up_on_media_without_audio(self):
+        with mock.patch("services.playback._AUDIO_WATCH_MS", _AUDIO_POLL_MS * 3):
+            self.start_waiting_for_output()
+            elapse(_AUDIO_POLL_MS * 6)
+            probes = self.player.probes
+            self.assertGreater(probes, 0)
+            elapse(_AUDIO_POLL_MS * 4)
+        self.assertEqual(self.player.probes, probes)  # the regular poll still tries
+
+    def test_the_fast_watch_ends_with_a_stop(self):
+        self.start_waiting_for_output()
+        self.session.stop()
+        self.runner.finish()
+        probes = self.player.probes
+        elapse(_AUDIO_POLL_MS * 4)
+        self.assertEqual(self.player.probes, probes)
 
     def test_a_player_never_asked_is_left_alone(self):
         self.stopped()

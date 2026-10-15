@@ -127,5 +127,7 @@ class BudgetedStream(QObject):
 
     def _on_cap(self) -> None:
         if self._waiting:
-            logger.warning("The live channel did not report its stream closed; going on.")
+            logger.warning(
+                "The %s stream did not report its upstream closed; going on.", self.purpose
+            )
             self._on_released()

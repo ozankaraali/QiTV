@@ -136,8 +136,9 @@ class ReleaseCapTests(_Fixture):
         self.live.auto_release = False
         self.running_stream()
         self.stream.stop()
-        with self.assertLogs("services.budgeted_stream", "WARNING"):
+        with self.assertLogs("services.budgeted_stream", "WARNING") as logs:
             elapse(self.cap_ms * 2)
+        self.assertIn("The main stream", logs.output[0])  # its purpose
         self.assertEqual((self.budget.holders(P), self.releases), ([], [True]))
         self.running_stream()  # the next stream opens on a new ticket
         self.live.released.emit()  # the first one's, late

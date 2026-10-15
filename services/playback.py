@@ -12,7 +12,9 @@ the GUI thread also no longer waits up to ~100 ms for a join on each zap.
 Mute and volume live on libVLC's audio output, which a stop closes; the next media opens a
 new one once its audio decodes, which can be after the Playing state. Meanwhile libVLC drops
 audio_set_mute and audio_set_volume (measured with 3.0.20), so the session keeps what it was
-asked for and applies it again at the first poll of each media that finds the output.
+asked for and applies it again once each media's output is open: it looks every
+_AUDIO_POLL_MS for _AUDIO_WATCH_MS, then at each regular poll while playing. Without an output
+`volume()` reports what was asked for, else the last level an open output reported.
 """
 
 from __future__ import annotations
@@ -42,6 +44,9 @@ _RESTART_DELAY_MS = 300
 _RESUME_GIVE_UP_MS = 3000
 _RESUME_END_MARGIN_MS = 1000
 _STALL_BUDGET_RESET_MS = 30000  # healthy playback after a stall refills the retry budget
+_AUDIO_POLL_MS = 30  # how often to look for the audio output while mute/volume wait for it
+_AUDIO_WATCH_MS = 5000  # then only the regular poll looks (media without audio never opens one)
+_DEFAULT_VOLUME = 100  # libVLC's, until a level is read from an open audio output
 NO_VLC_MESSAGE = "Video needs VLC: install it from videolan.org and restart QiTV"
 # A file for libVLC's verbose log (the smoke test sets it). For debugging only: libVLC logs
 # every stream URL, and provider URLs can carry credentials.
@@ -181,6 +186,10 @@ class PlaybackSession(QObject):
         self._mute_wanted: Optional[bool] = None
         self._volume_wanted: Optional[int] = None
         self._audio_due = False  # the wanted mute/volume still to be applied to this media
+        self._volume_seen = _DEFAULT_VOLUME  # the last level read from an open audio output
+        self._audio_timer = QTimer(self, singleShot=True, interval=_AUDIO_POLL_MS)
+        self._audio_timer.timeout.connect(self._look_for_audio)
+        self._audio_watch = QElapsedTimer()  # since the wanted audio began waiting
 
     def _player_free(self) -> bool:
         """The GUI thread may call into libVLC: not released, and no job holds its input lock.
@@ -289,6 +298,7 @@ class PlaybackSession(QObject):
             return
         self._has_input = True
         self._poll.start()
+        self._watch_audio()
 
     def _end_input(self) -> None:
         """Stop libVLC's input and outputs on a worker; nothing to do if none is open."""
@@ -338,6 +348,7 @@ class PlaybackSession(QObject):
         """Cancel delayed work (audio restore, restart) belonging to the old media."""
         self._restore_timer.stop()
         self._restart_timer.stop()
+        self._audio_timer.stop()
         self._pending_track = None
 
     def _set_seekable(self, seekable: bool) -> None:
@@ -384,10 +395,12 @@ class PlaybackSession(QObject):
     def volume(self) -> int:
         if self._released:
             return 0
+        if self._volume_wanted is not None:
+            return self._volume_wanted
         value = int(self._player.audio_get_volume())
-        if value < 0 and self._volume_wanted is not None:
-            return self._volume_wanted  # no audio output now: what it will get
-        return max(0, value)
+        if value >= 0:
+            self._volume_seen = value
+        return self._volume_seen  # without an audio output, the last level one reported
 
     def set_volume(self, value: int) -> None:
         if self._released:
@@ -395,6 +408,7 @@ class PlaybackSession(QObject):
         self._volume_wanted = max(0, min(100, int(value)))
         self._audio_due = True
         self._player.audio_set_volume(self._volume_wanted)
+        self._watch_audio()
 
     def toggle_mute(self) -> bool:
         if self._released:
@@ -411,6 +425,21 @@ class PlaybackSession(QObject):
         self._mute_wanted = bool(muted)
         self._audio_due = True
         self._player.audio_set_mute(self._mute_wanted)
+        self._watch_audio()
+
+    def _watch_audio(self) -> None:
+        """Look for the audio output often while the wanted mute/volume wait for it."""
+        if self._audio_due and self._has_input and not self._released:
+            self._audio_watch.start()
+            self._audio_timer.start()
+
+    def _look_for_audio(self) -> None:
+        if self._released or not self._audio_due or not self._has_input:
+            return  # applied, or no media: the next one's open looks again
+        if self._player_free():
+            self._apply_audio()
+        if self._audio_due and self._audio_watch.elapsed() < _AUDIO_WATCH_MS:
+            self._audio_timer.start()
 
     def _apply_audio(self) -> None:
         """Apply the wanted mute and volume once this media's audio output is open."""

@@ -12,9 +12,9 @@ later, as a backstop to its own caps). Only the newest open waits: a newer one r
 A pipeline tune also takes a slot of the provider's connection budget (purpose "main") and
 starts once the slot is granted and the old stream is released; the old slot goes back on
 that release. A `BudgetedStream` holds that slot and waits for the release (the PiP slot's
-`SessionManager` uses one too). With a limit of one, the new request waits at the head of the queue, so the
-freed slot goes to it and to no other consumer. A pause or Go live pressed during that
-wait applies once the tune starts.
+`SessionManager` uses one too). With a limit of one, the new request waits at the head of
+the queue, so the freed slot goes to it and to no other consumer. A pause or Go live pressed
+during that wait applies once the tune starts.
 """
 
 from __future__ import annotations

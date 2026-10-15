@@ -211,7 +211,10 @@ class SessionManager(QObject):
         if opening:
             self._muted[pip.name] = True  # the PiP opens small and muted
         pip.playback.set_volume(self._levels[pip.name])
-        self._set_mute(pip, self._muted[pip.name])  # before it starts: no sound escapes
+        # Asked for before it starts. A player that still has its audio output takes it at
+        # once; after a stop, the next output comes up with the old one's state (muted by
+        # _stop_live) and PlaybackSession applies this within ~30 ms of it opening.
+        self._set_mute(pip, self._muted[pip.name])
         self._limit = pending.limit
         try:
             self._stream.start(**pending.start_kwargs)
