@@ -33,6 +33,25 @@ class BannerInfo:
     clock: datetime = field(default_factory=lambda: datetime.now().astimezone())
 
 
+@dataclass(frozen=True)
+class BannerTexts:
+    """The times and lines the banner paints for a BannerInfo (local wall-clock times)."""
+
+    clock: str  # the time now, beside the name
+    now_span: str  # " · HH:MM – HH:MM" after the current programme's title, or ""
+    next_line: str  # "Next  HH:MM Title  ·  HH:MM Title", or ""
+
+
+def banner_texts(info: BannerInfo) -> BannerTexts:
+    now_span = ""
+    if info.now is not None:
+        now_span = f" · {fmt_clock(info.now.start)} – {fmt_clock(info.now.stop)}"
+    parts = [f"{fmt_clock(q.start)} {q.title}" for q in ([info.next] if info.next else [])]
+    parts += [f"{fmt_clock(q.start)} {q.title}" for q in info.upcoming[:1]]
+    next_line = "Next  " + "  ·  ".join(parts) if parts else ""
+    return BannerTexts(fmt_clock(info.clock), now_span, next_line)
+
+
 class ZapBanner(Overlay):
     def __init__(self, parent: QWidget | None = None, visible_ms: int = 4000) -> None:
         super().__init__(parent)
@@ -181,9 +200,10 @@ class ZapBanner(Overlay):
         bw = right - bx
         y = row_top + (row_h - body_h) / 2
 
+        texts = banner_texts(info)
         # name line + LIVE pill + clock
         p.setFont(clock_font)
-        clock = fmt_clock(info.clock)
+        clock = texts.clock
         clock_w = QFontMetrics(clock_font).horizontalAdvance(clock)
         p.setPen(qcolor(PALETTE.text, 0.9))
         p.drawText(
@@ -220,7 +240,7 @@ class ZapBanner(Overlay):
             p.setFont(now_font)
             p.setPen(accent)
             p.drawText(QRectF(bx, y, nw, lh(now_font)), Qt.AlignLeft | Qt.AlignVCenter, "Now")
-            span = f" · {fmt_clock(info.now.start)} – {fmt_clock(info.now.stop)}"
+            span = texts.now_span
             span_w = QFontMetrics(now_font).horizontalAdvance(span)
             p.setFont(now_bold)
             title = elided(p, info.now.title, bw - nw - span_w)
@@ -240,12 +260,10 @@ class ZapBanner(Overlay):
             y += lh(now_font) + gap2
             draw_progress(p, QRectF(bx, y, bw, bar_h), info.now.progress(info.clock))
             y += bar_h + gap3
-            parts = [f"{fmt_clock(q.start)} {q.title}" for q in ([info.next] if info.next else [])]
-            parts += [f"{fmt_clock(q.start)} {q.title}" for q in info.upcoming[:1]]
-            if parts:
+            if texts.next_line:
                 p.setFont(next_font)
                 p.setPen(qcolor(PALETTE.text, 0.7))
-                line = "Next  " + "  ·  ".join(parts)
+                line = texts.next_line
                 p.drawText(
                     QRectF(bx, y, bw, lh(next_font)),
                     Qt.AlignLeft | Qt.AlignVCenter,

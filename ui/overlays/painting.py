@@ -128,6 +128,9 @@ def draw_logo(p: QPainter, rect: QRectF, name: str, pixmap: QPixmap | None, radi
 
 
 def fmt_clock(dt: datetime) -> str:
+    """HH:MM on the local clock: an aware time (a guide's, in its own zone) is converted."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()
     return dt.strftime("%H:%M")
 
 

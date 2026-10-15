@@ -10,7 +10,7 @@ from timer_fixtures import timeline, wait_until
 
 from services.epg_view import Programme
 from ui.overlays.toast import Toast
-from ui.overlays.zap_banner import BannerInfo, ZapBanner
+from ui.overlays.zap_banner import BannerInfo, ZapBanner, banner_texts
 
 NOW = datetime(2026, 10, 15, 19, 42, tzinfo=timezone.utc)
 
@@ -53,6 +53,30 @@ class BannerTest(Base):
         self.assertEqual(b.info.name, "Nature One HD")
         self.assertEqual(b.height(), round(720 * 0.48))
         self.assertEqual(b.width(), 1280)
+
+    def test_programme_times_are_local_for_a_guide_in_another_zone(self):
+        # H16: the banner showed the guide's own zone ("17:15 – 18:15" at 20:03 local).
+        local_now = datetime(2026, 10, 15, 20, 3).astimezone()
+        guide_zone = timezone(local_now.utcoffset() + timedelta(hours=3))
+
+        def guide(title, start_min, length=60):
+            start = (local_now + timedelta(minutes=start_min)).astimezone(guide_zone)
+            return Programme(title=title, start=start, stop=start + timedelta(minutes=length))
+
+        texts = banner_texts(
+            BannerInfo(
+                number="7",
+                name="News",
+                logo=None,
+                now=guide("Headlines", -48),
+                next=guide("Weather", 12, 15),
+                upcoming=[guide("Sport", 27)],
+                clock=local_now.astimezone(guide_zone),
+            )
+        )
+        self.assertEqual(texts.clock, "20:03")
+        self.assertEqual(texts.now_span, " · 19:15 – 20:15")
+        self.assertEqual(texts.next_line, "Next  20:15 Weather  ·  20:30 Sport")
 
     def test_hides_after_timer(self):
         b = ZapBanner(self.host, visible_ms=60)

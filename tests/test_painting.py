@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -88,9 +89,16 @@ class PaintingTest(unittest.TestCase):
     def test_formats(self):
         self.assertEqual(fmt_duration(37_000), "0:37")
         self.assertEqual(fmt_duration(3_725_000), "1:02:05")
-        from datetime import datetime
-
         self.assertEqual(fmt_clock(datetime(2026, 1, 2, 9, 5)), "09:05")
+
+    def test_the_clock_shows_local_time_for_a_guide_in_another_zone(self):
+        # A UTC guide at 20:03 local read "17:15 – 18:15" on the banner (H16).
+        local = datetime(2026, 10, 15, 20, 3).astimezone()
+        guide_zone = timezone(local.utcoffset() + timedelta(hours=3))  # never the local zone
+        start = local.astimezone(guide_zone)
+        self.assertNotEqual(start.strftime("%H:%M"), "20:03")
+        self.assertEqual(fmt_clock(start), "20:03")
+        self.assertEqual(fmt_clock(datetime(2026, 1, 2, 9, 5)), "09:05")  # naive: as given
 
     def test_every_icon_paints(self):
         for name in ICONS:
