@@ -18,6 +18,12 @@ Style & Tooling
 - Logging: use `logging.getLogger(__name__)` rather than `print`.
 
 Current Work Plan (Living TODO)
+- TV redesign on VLC (branch `tv/vlc`, spec `docs/superpowers/specs/2026-10-15-tv-on-vlc-design.md`). No native builds: VLC from official installers, pure-Python live pipeline. Each phase has a plan in `docs/superpowers/plans/`.
+  - [x] Phase 0 Foundation: tidy-up landed; fixed STB prehash, image cache eviction, overnight EPG stop, per-provider HTTPS, STB export bases, STB next-season autoplay, M3U line endings; design tokens (`ui/theme.py`); CI runs tests on all platforms and releases only from `main`
+  - [ ] Phase 1 TV shell (Live TV): single window, native VLC surface + glued overlay host, zap banner/column/drawer, NavModel/ZapContext, transport
+  - [ ] Phase 2 Live pipeline: TS segmenter, RAM/disk rings, loopback server, timeline, stay-live, connection budget, time-shift UI, CI playback smoke
+  - [ ] Phase 3 Library + guide; remove old windows; release 2.0.0
+  - [ ] Phase 4 PiP + swap
 1) Input/UI polish and correctness
    - [x] Separate dblclick fullscreen from single-click play/pause (video_player.py)
    - [x] Remove unused `installEventFilter(self)` on `video_frame` or implement `eventFilter` explicitly
@@ -72,6 +78,7 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Phase 0 (`tv/vlc`): Restarted from v1.13.8 after retiring the MPV line. Landed a behaviour-preserving service-layer tidy-up and fixed seven bugs it surfaced, each with a regression test (STB profile prehash sent as a set; image cache never evicting and deleting wrong files; overnight EPG stop discarded; global instead of per-provider HTTPS; `…/c//play` STB export URLs; STB next-season autoplay; CRLF/CR/BOM M3U names). Added design tokens and cross-platform CI test runs; releases now publish only from `main`.
 - v1.13.8 (unreleased): Restore missing window geometry during config migration without overwriting saved windows or user preferences. Returning from the MPV experiment left no `window_positions.video_player`, so the VLC-based 1.13.7 release raised `KeyError: 'video_player'` before displaying its windows. A regression covers player initialization and subsequent geometry persistence while preserving existing state.
 - Verification: Confirmed the installed Intel 1.13.7 bundle fails with the MPV-shaped config; a rebuilt 1.13.8 bundle starts with it and restores the missing entry. Native source startup displayed the local catalog, produced a window capture, and closed normally; all 14 tests, focused config types, lint, and the lock check passed. Frozen verification observed native windows and config migration; OS screenshot/interaction permissions were unavailable, and the isolated frozen process was stopped through its supervisor. No new cross-platform CI run has been performed for this patch.
 - Release v1.13.7: Fixed an intermittent native PySide/QThread cleanup crash, observed immediately after waking from sleep and reproduced with repeated local M3U loads. Shared `services/thread_cleanup.py` retains thread/worker wrappers through a successful nonblocking native join before notifying the GUI or deleting the thread. Applied to catalog, images, provider setup/verification, playback links, and updates; app closure waits asynchronously for pending cleanup. VLC playback and existing packaging remain unchanged; no MPV migration was merged.
