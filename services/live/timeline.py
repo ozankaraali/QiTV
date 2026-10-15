@@ -3,7 +3,9 @@
 Pure logic: segment first-PTS values (90 kHz, 33-bit, wrap-aware) and injected wall
 times become contiguous seconds. A missing, backward, zero or oversized PTS delta
 (clock reset, B-frame/equal stamps, encoder restart) falls back to wall time, so the
-timeline stays monotone and nothing is aborted.
+timeline stays monotone and nothing is aborted. Oversized means beyond the forced cut plus
+a margin: a forced cut lands on the first frame at or past 10 s. The wall times are the
+segmenter's stall-free clock (`Segmenter.wall`), so a stalled source adds no time.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ PTS_TICKS_PER_SECOND = 90_000
 _PTS_MODULUS = 1 << 33
 _MIN_WALL_DURATION = 0.04
 _FORCED_CUT = 10.0
+_FORCED_MARGIN = 1.0
+_LIMIT = _FORCED_CUT + _FORCED_MARGIN  # the longest segment a PTS delta may size
 
 log = logging.getLogger(__name__)
 
@@ -45,8 +49,7 @@ class _Open:
 
 
 class Timeline:
-    def __init__(self, target_s: float = 2.0) -> None:
-        self._target = target_s
+    def __init__(self) -> None:
         self._spans: List[Span] = []
         self._end = 0.0
         self._open: Optional[_Open] = None
@@ -72,15 +75,14 @@ class Timeline:
     def _close(
         self, opened: _Open, next_first_pts: Optional[int], wall: float, force_discontinuity=False
     ) -> Span:
-        limit = 5 * self._target
         duration = self._pts_seconds(opened.first_pts, next_first_pts)
         discontinuity = opened.discontinuity or force_discontinuity
-        if duration is None or duration < 0 or duration > limit:
+        if duration is None or duration < 0 or duration > _LIMIT:
             discontinuity = True
             duration = None
         if duration is None or duration == 0:
             # Equal stamps are not a reset, but carry no duration: use wall time.
-            duration = min(max(wall - opened.wall, _MIN_WALL_DURATION), limit)
+            duration = min(max(wall - opened.wall, _MIN_WALL_DURATION), _LIMIT)
         span = Span(opened.seq, self._end, self._end + duration, discontinuity)
         self._spans.append(span)
         self._end = span.end
@@ -112,14 +114,21 @@ class Timeline:
         return self._spans[-1].seq if self._spans else None
 
     def live_edge(self, latest_pts: Optional[int], now_wall: float) -> float:
-        """Buffered end plus open-segment progress; never decreases between calls."""
+        """Buffered end plus open-segment progress; never decreases between calls.
+
+        ``latest_pts`` is on the open segment's own axis (``Segmenter.progress_pts``) and
+        ``now_wall`` on the segmenter's stall-free clock, so neither a stall nor a PTS jump
+        inflates the progress. The edge is held only when a segment closes shorter than
+        the wall-clock progress reported while it was open (a segment whose PTS end comes
+        out earlier than its arrival time); real progress then passes it again.
+        """
         edge = self._end
         opened = self._open
         if opened is not None:
             progress = self._pts_seconds(opened.first_pts, latest_pts)
-            if progress is None or progress < 0 or progress > _FORCED_CUT:
+            if progress is None or progress < 0 or progress > _LIMIT:
                 progress = now_wall - opened.wall
-            edge += min(max(progress, 0.0), _FORCED_CUT)
+            edge += min(max(progress, 0.0), _LIMIT)
         self._max_edge = max(self._max_edge, edge)
         return self._max_edge
 

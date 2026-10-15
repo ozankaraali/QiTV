@@ -424,7 +424,8 @@ class _Session:
             "open": ring.open_seq,
             "start": timeline.start,
             "end": timeline.end,
-            "live_edge": timeline.live_edge(self._segmenter.latest_pts, now),
+            # On the segment's own PTS axis and the stall-free clock: no stall or jump inflates it.
+            "live_edge": timeline.live_edge(self._segmenter.progress_pts, self._segmenter.wall),
             "bytes": ring.bytes,
             "ended": self._ended,
             # HLS: the target duration, which a reload may change; 0.0 for raw TS.

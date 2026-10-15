@@ -163,7 +163,7 @@ def make_stream(
 ) -> bytes:
     n_frames = int(round(seconds * fps))
     gop_frames = max(1, int(round(gop_s * fps)))
-    frame_ticks = CLOCK // fps
+    frame_ticks = round(CLOCK / fps)  # fps may be fractional: 30000 / 1001 gives 3003
     ccs = {0: 0, PMT_PID: 0, VIDEO_PID: 0, AUDIO_PID: 0}
     events: list[tuple[int, int, int]] = []  # (time_ticks, order, index)
     for i in range(n_frames):

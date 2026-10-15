@@ -339,13 +339,17 @@ class CrcTests(unittest.TestCase):
 
 class SegmenterTests(unittest.TestCase):
     def assert_closed_pts(self, events):
-        """A Closed carries the next first PTS; before a discontinuity it may be None (a jump
-        must not be credited to the closing segment)."""
-        nxt = {e.seq: e for e in opens(events)}
+        """A Closed carries the next first PTS. Before a discontinuity it is None (sized by wall
+        time) or the segment's own first PTS plus the media it holds, at most the forced cut
+        plus 1 s: a jump must not be credited to the closing segment."""
+        segment = {e.seq: e for e in opens(events)}
         for c in closes(events)[:-1]:
-            o = nxt[c.seq + 1]
-            allowed = (None, o.first_pts) if o.discontinuity else (o.first_pts,)
-            self.assertIn(c.next_first_pts, allowed)
+            o = segment[c.seq + 1]
+            if not o.discontinuity:
+                self.assertEqual(c.next_first_pts, o.first_pts)
+            elif c.next_first_pts is not None:
+                span = pts_delta(segment[c.seq].first_pts, c.next_first_pts)
+                self.assertTrue(0 < span <= 11 * CLOCK, span)
 
     # 1
     def test_ten_second_stream_cuts_every_two_seconds_from_the_first_keyframe(self):
@@ -544,10 +548,9 @@ class SegmenterTests(unittest.TestCase):
                 self.assertEqual([e.discontinuity for e in o], [k == 3 for k in range(8)])
                 for opened, body in segments(events):
                     self.assertTrue(starts_with_idr(body))
-                # A marker with continuous PTS keeps the exact end; a jump does not.
-                self.assertEqual(
-                    closes(events)[2].next_first_pts, o[3].first_pts if marker else None
-                )
+                # A marker with continuous PTS keeps the exact end; across a jump the segment
+                # ends where the old content does (its last frame's end at 6 s).
+                self.assertEqual(closes(events)[2].next_first_pts, 900000 + 6 * CLOCK)
                 self.assert_closed_pts(events)
 
     def test_rai_on_every_pes_with_b_frame_reordering_is_not_a_discontinuity(self):
@@ -571,7 +574,8 @@ class SegmenterTests(unittest.TestCase):
         for a, b in zip(o, o[1:]):
             if not b.discontinuity:
                 self.assertGreaterEqual(pts_delta(a.first_pts, b.first_pts), TARGET)
-        self.assertIsNone(closes(events)[2].next_first_pts)
+        # The segment from 4 s ends where the old content does, at 5 s, not at the reset PTS.
+        self.assertEqual(closes(events)[2].next_first_pts, 900000 + 5 * CLOCK)
         self.assert_closed_pts(events)
 
     def test_timestamp_jumps_are_flagged_at_the_next_keyframe(self):
@@ -591,9 +595,9 @@ class SegmenterTests(unittest.TestCase):
                 for a, b in zip(o, o[1:]):
                     if not b.discontinuity:
                         self.assertEqual(pts_delta(a.first_pts, b.first_pts), TARGET)
-                # The segment before the jump closes without the jumped PTS (1 s of media,
-                # not 1 s plus the jump).
-                self.assertIsNone(closes(events)[2].next_first_pts)
+                # The segment before the jump closes without the jumped PTS: 1 s of media
+                # (0.8 s before the jump and 0.2 s after it), not 1 s plus the jump.
+                self.assertEqual(closes(events)[2].next_first_pts, 900000 + 125 * FRAME)
                 self.assert_closed_pts(events)
 
     def test_an_outage_that_resumes_mid_gop_cuts_at_the_next_keyframe(self):
@@ -610,6 +614,8 @@ class SegmenterTests(unittest.TestCase):
         self.assertEqual([e.discontinuity for e in o], [k == 4 for k in range(10)])
         for opened, body in segments(events):
             self.assertTrue(starts_with_idr(body))
+        # The segment across the outage holds 2 s of media: 1.52 s before it, 0.48 s after.
+        self.assertEqual(closes(events)[3].next_first_pts, 900000 + 200 * FRAME)
         self.assert_closed_pts(events)
 
     def test_rai_is_relearned_after_every_discontinuity_cut(self):
@@ -624,18 +630,19 @@ class SegmenterTests(unittest.TestCase):
 
     def test_a_pending_segment_is_bounded_in_media_time_under_bursty_feeding(self):
         # One keyframe only; PTS jumps +60 s at frame 112. HLS-like 6 s bursts pause the
-        # feeds, which do not age the segment; 10 s of post-jump media still cut it.
+        # feeds, which do not age the segment; 10 s of media, before and after the jump,
+        # still cut it, and size it exactly.
         data = shift_pts(fx.make_stream(40, gop_s=30.0), 112, 60 * CLOCK)
         points = [(off, (int(t // 6) + 1) * 6.0) for off, t in by_frame(data)]
         _, events = run_at(data, points)
         o = opens(events)
         self.assertTrue(o[1].discontinuity)
-        self.assertEqual(o[1].first_pts, 900000 + 362 * FRAME + 60 * CLOCK)
-        self.assertIsNone(closes(events)[0].next_first_pts)
+        self.assertEqual(o[1].first_pts, 900000 + 250 * FRAME + 60 * CLOCK)
+        self.assertEqual(closes(events)[0].next_first_pts, 900000 + 250 * FRAME)
 
     def test_a_pending_discontinuity_is_force_cut_by_wall_time_only(self):
         # One keyframe only; PTS jumps +60 s at frame 112. The PTS delta must not cut there;
-        # the wall clock does, at 10 s.
+        # the wall clock (and the media held) does, at 10 s.
         data = shift_pts(fx.make_stream(20, gop_s=30.0), 112, 60 * CLOCK)
         _, events = run_at(data, by_frame(data))
         o = opens(events)
@@ -650,6 +657,21 @@ class SegmenterTests(unittest.TestCase):
         self.assertEqual([e.wall for e in o], [0.0, 2.0, 4.0, 6.0, 8.0])
         self.assertEqual([e.discontinuity for e in o], [False, True, True, True, True])
         self.assertTrue(all(e.first_pts is None for e in o))
+
+    def test_a_stall_is_removed_from_the_reported_wall_clock(self):
+        # Video without PTS (every frame a keyframe) is sized by wall time: a 30 s stall after
+        # frame 112 (4.48 s) must not count, in the segment walls or in `wall`. The stall is
+        # removed whole, so frame 113 counts as arriving with frame 112.
+        frames = [(None, fx.h264_access_unit(True), True) for _ in range(250)]
+        data = video_only(frames)
+        points = [(off, t + 30.0 if t > 4.48 else t) for off, t in by_frame(data)]
+        seg, events = run_at(data, points)
+        walls = [(e.wall, type(e)) for e in events if isinstance(e, (Opened, Closed))]
+        expected = [0.0, 2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 9.92]
+        self.assertEqual(len(walls), len(expected))
+        for (wall, _kind), value in zip(walls, expected):
+            self.assertAlmostEqual(wall, value)
+        self.assertAlmostEqual(seg.wall, 9.92)
 
     # 6
     def test_pts_wrap_keeps_two_second_segments(self):
@@ -770,7 +792,9 @@ class SegmenterTests(unittest.TestCase):
                 self.assertEqual(len(silent), 2)
                 o, body = silent[0]
                 self.assertTrue(o.discontinuity)
-                self.assertEqual(o.wall, 18.0)
+                # Bursts 6 s apart are stalls: the stall-free clock stood still. The audio PTS
+                # below shows that the cut came in the burst at 18 s.
+                self.assertEqual(o.wall, 0.0)
                 self.assertEqual(pid_of(body[:PACKET]), fx.AUDIO_PID)
                 self.assertEqual(pusi_pts(body[:PACKET]), 900000 + 749 * fx.AUDIO_FRAME_TICKS)
 

@@ -37,7 +37,10 @@ _REORDER_TICKS = _CLOCK
 _JUMP_TICKS = 3 * _CLOCK  # a longer forward step between two PES is a timestamp jump
 _SCRAMBLED_PACKETS = 8  # scrambled cut-PID packets that prove scrambling ...
 _SCRAMBLED_WINDOW_S = 2.0  # ... in total within this first wall time, later in a row
-_STALL_S = 5.0  # a longer pause between feeds is a stalled source: not silence, not age
+_STALL_S = 5.0  # a longer pause between feeds is a stalled source: removed from the clock
+# A segment's PTS span may pass the forced cut by this much: the cut lands on the first frame at
+# or past it (10.01 s at 29.97 fps).
+_FORCED_MARGIN = _CLOCK
 
 _VIDEO_TYPES = (0x1B, 0x24, 0x02, 0x01)  # H.264, HEVC, MPEG-2, MPEG-1
 _AUDIO_TYPES = (0x03, 0x04, 0x0F, 0x11, 0x81, 0x87)  # MPEG audio, AAC, LATM, AC-3, E-AC-3
@@ -68,7 +71,10 @@ def pts_delta(a: int, b: int) -> int:
 
 @dataclass(frozen=True, slots=True)
 class Opened:
-    """A segment starts. `header` is the latest PAT packet followed by the PMT packets."""
+    """A segment starts. `header` is the latest PAT packet followed by the PMT packets.
+
+    `wall` (here and in `Closed`) is on the segmenter's stall-free clock (`Segmenter.wall`).
+    """
 
     seq: int
     first_pts: int | None
@@ -89,8 +95,10 @@ class Closed:
     """A segment ends.
 
     `next_first_pts` is the PTS where the next segment starts, or the latest PTS at the end of
-    the input. It is None across a discontinuity with a PTS jump or without PTS, so that the
-    segment is sized by wall time.
+    the input. Across a PTS jump it is the segment's own first PTS plus the media it holds:
+    the old content up to its last frame's end, then the new content up to the cut. It is None
+    when that is unknown (no PTS), or beyond the forced cut plus a margin, so that the segment
+    is sized by the stall-free wall clock instead.
     """
 
     seq: int
@@ -122,7 +130,9 @@ class Segmenter:
         self._searching = True  # the next packet start must be proven by three sync bytes
         self._probe: bytearray | None = bytearray()
         self._start_wall: float | None = None
-        self._feed_wall: float | None = None
+        self._feed_wall: float | None = None  # the injected clock at the latest input
+        self._stalled = 0.0  # stalls so far: removed from every wall time used and reported
+        self._wall = 0.0  # the stall-free time of the latest input
         # Program tables.
         self._sections: dict[int, tuple[list[bytes], bytearray]] = {}  # partial PSI by PID
         self._accepted: dict[int, bytes] = {}  # last parsed section by PID
@@ -140,6 +150,10 @@ class Segmenter:
         self._rai_seen = False
         self._last_pts: int | None = None
         self._latest_pts: int | None = None
+        # The cut PID's current content (since the last PTS jump): its furthest PTS and its
+        # shortest forward PTS step (one frame), which give where it ends at a jump.
+        self._top: int | None = None
+        self._frame: int | None = None
         self._pusi_wall = 0.0  # wall time of the last cut-PID PES start (or cut)
         # Other PIDs' (first PTS, last PTS) since then: media time while the cut PID is quiet.
         self._quiet: dict[int, tuple[int, int]] = {}
@@ -152,7 +166,13 @@ class Segmenter:
         self._seg_wall = 0.0
         self._pending = False
         self._jumped = False  # the pending discontinuity came with a PTS jump
-        self._media_ref: int | None = None  # first cut-PID PTS of the segment (or since a jump)
+        # The segment's media age is measured from this PTS (moved back by the media carried
+        # across a jump).
+        self._media_ref: int | None = None
+        # Across a jump the segment holds parts of two contents: the current content's part
+        # starts at `_part_pts`, after `_carried` ticks of earlier media (None when unknown).
+        self._part_pts: int | None = None
+        self._carried: int | None = 0
 
     @property
     def video_pid(self) -> int | None:
@@ -161,6 +181,19 @@ class Segmenter:
     @property
     def latest_pts(self) -> int | None:
         return self._latest_pts
+
+    @property
+    def progress_pts(self) -> int | None:
+        """The latest cut-PID PTS on the open segment's own axis, for its live progress: across
+        a PTS jump, the segment's first PTS plus the media since. None when unknown."""
+        return self._on_segment_axis(self._latest_pts)
+
+    @property
+    def wall(self) -> float:
+        """The stall-free time of the latest input (0.0 before any): the clock of `Opened.wall`
+        and `Closed.wall`. A pause between two inputs longer than `_STALL_S` is a stalled source
+        and is removed whole, so it never counts as media time, silence or segment age."""
+        return self._wall
 
     def discontinuity(self) -> None:
         """Mark the next cut as a discontinuity (the source restarted its timestamps)."""
@@ -173,6 +206,7 @@ class Segmenter:
             return []
         if type(chunk) is not bytes:
             chunk = bytes(chunk)
+        wall = self._tick()
         if self._probe is not None:
             self._check_probe(chunk)
         data = self._buf + chunk if self._buf else chunk
@@ -180,7 +214,7 @@ class Segmenter:
             self._buf = data
             return []
         events: list[Event] = []
-        self._scan(data, self._clock(), events)
+        self._scan(data, wall, events)
         return events
 
     def finish(self) -> list[Closed]:
@@ -188,9 +222,18 @@ class Segmenter:
         if not self._open:
             return []
         self._open = False
-        closed = Closed(self._seq, self._latest_pts, self._clock())
+        closed = Closed(self._seq, self._on_segment_axis(self._latest_pts), self._tick())
         self._seq += 1
         return [closed]
+
+    def _tick(self) -> float:
+        """The stall-free wall time now (see `wall`)."""
+        now = self._clock()
+        if self._feed_wall is not None and now - self._feed_wall > _STALL_S:
+            self._stalled += now - self._feed_wall
+        self._feed_wall = now
+        self._wall = now - self._stalled
+        return self._wall
 
     # -- framing ---------------------------------------------------------------------------
 
@@ -212,11 +255,6 @@ class Segmenter:
     def _scan(self, data: bytes, wall: float, events: list[Event]) -> None:
         if self._start_wall is None:
             self._start_wall = wall
-        if self._feed_wall is not None and wall - self._feed_wall > _STALL_S:
-            stall = wall - self._feed_wall  # a stalled source: neither silence nor segment age
-            self._pusi_wall += stall
-            self._seg_wall += stall
-        self._feed_wall = wall
         # The cut PID went quiet while other packets flow: cut at the next PES start of any PID.
         silent = self._open and wall - self._pusi_wall >= self._forced_s
         n = len(data)
@@ -337,10 +375,19 @@ class Segmenter:
                 if step < -_REORDER_TICKS or step > _JUMP_TICKS:
                     logger.debug("PTS jumped by %.2f s", step / _CLOCK)
                     self._latch()
+                    self._carry()
                     self._jumped = True
-                    self._media_ref = pts
+                    self._part_pts = pts
+                    # The segment ages by all of its media, not only the new content's.
+                    carried = self._carried
+                    self._media_ref = pts if carried is None else (pts - carried) % _PTS_MODULO
+                    self._top = self._frame = None
+                elif step > 0 and (self._frame is None or step < self._frame):
+                    self._frame = step
             self._last_pts = pts
             self._latest_pts = pts
+            if self._top is None or pts_delta(self._top, pts) > 0:
+                self._top = pts
             if self._media_ref is None:
                 self._media_ref = pts
         if rai:
@@ -376,6 +423,26 @@ class Segmenter:
         self._pending = True
         self._rai_seen = False
 
+    def _carry(self) -> None:
+        """At a PTS jump: add the old content's part, up to its last frame's end, to the media
+        of the open segment."""
+        part_pts, top, frame = self._part_pts, self._top, self._frame
+        if self._carried is None or part_pts is None or top is None or frame is None:
+            self._carried = None
+            return
+        part = pts_delta(part_pts, top + frame)
+        self._carried = self._carried + part if part >= 0 else None
+
+    def _on_segment_axis(self, pts: int | None) -> int | None:
+        """`pts` of the current content as a PTS on the open segment's own axis: unchanged
+        unless a PTS jump is pending, then the segment's first PTS plus its media up to `pts`."""
+        if not self._jumped:
+            return pts
+        first, part_pts, carried = self._seg_pts, self._part_pts, self._carried
+        if pts is None or first is None or part_pts is None or carried is None:
+            return None
+        return (first + carried + max(pts_delta(part_pts, pts), 0)) % _PTS_MODULO
+
     def _is_key(self, rai: bool, pts: int | None, pkt: bytes, es: int) -> bool:
         if self._video_pid is None:  # audio only: every audio PES with a PTS is a cut point
             return pts is not None
@@ -387,15 +454,20 @@ class Segmenter:
     def _cut(self, pts: int | None, wall: float, discontinuity: bool) -> list[Event]:
         events: list[Event] = []
         if self._open:
-            # Across a PTS jump, or without PTS, the next PTS says nothing about this segment.
-            first = self._seg_pts
-            exact = not discontinuity or (
-                not self._jumped
-                and pts is not None
-                and first is not None
-                and 0 < pts_delta(first, pts) <= self._forced
-            )
-            events.append(Closed(self._seq, pts if exact else None, wall))
+            end = pts
+            if discontinuity:
+                # Across a PTS jump the next PTS says nothing about this segment: its end is
+                # its first PTS plus the media it holds. Without PTS, or beyond the forced cut,
+                # it is sized by wall time.
+                end = self._on_segment_axis(pts)
+                first = self._seg_pts
+                if (
+                    end is None
+                    or first is None
+                    or not 0 < pts_delta(first, end) <= self._forced + _FORCED_MARGIN
+                ):
+                    end = None
+            events.append(Closed(self._seq, end, wall))
             self._seq += 1
         events.append(Opened(self._seq, pts, self._pat + self._pmt, wall, discontinuity))
         self._open = True
@@ -406,6 +478,8 @@ class Segmenter:
         self._pending = False
         self._jumped = False
         self._media_ref = pts
+        self._part_pts = pts
+        self._carried = 0
         if discontinuity:  # the content may change here: learn again whether it uses RAI
             self._rai_seen = False
         return events
