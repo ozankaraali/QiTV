@@ -9,8 +9,8 @@ from urllib.parse import parse_qs, urlsplit
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 from services import thread_cleanup
 from services.exporter import (
@@ -21,8 +21,6 @@ from services.exporter import (
     write_items,
 )
 from services.jobs import JobRunner
-
-_app = QCoreApplication.instance() or QCoreApplication([])
 
 
 def live_content(n=3):
@@ -110,6 +108,10 @@ def series_content():
 
 
 class ExporterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)

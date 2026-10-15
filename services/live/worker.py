@@ -21,6 +21,10 @@ fixed strings. `kind` is a `SourceError` kind ("unsupported", "network", "tls", 
 or "disk": the disk ring failed and the session goes on in RAM, the only non-final error.
 After a final error or the end of the input the buffer stays playable until "close".
 
+Messages leave through one queue and one writer thread, the only caller of `conn.send`:
+the pipe buffers a few KiB, and a parent that stops reading for a while must never block
+the command loop or a session. Queued states of one session merge (see `_Outbox`).
+
 Each session runs source, segmenter, ring and timeline on its own thread. `close` never
 waits for that thread: a DNS lookup or TCP connect cannot be interrupted, so a closed
 session's thread may linger up to the 60 s connect timeout. Once cancelled it sends
@@ -32,7 +36,9 @@ ring and the server (Qt's QLockFile) are imported only inside the helper.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Sequence
+import contextlib
 import logging
 import multiprocessing
 from multiprocessing.connection import Connection, wait as wait_for_connection
@@ -54,11 +60,14 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 _POLL = 0.1
 _NOTIFY_INTERVAL = 0.25
-_SHUTDOWN_GRACE = 0.25  # the parent terminates the helper 0.5 s after "shutdown"
+# The parent terminates the helper 0.5 s after "shutdown"; both waits are usually instant.
+_SHUTDOWN_GRACE = 0.25  # for session threads to remove their disk buffers
+_FLUSH_GRACE = 0.25  # for the writer to deliver what is queued
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # as the stream server requires
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNSUPPORTED = "The channel's stream cannot be time-shifted."
 _NO_MEDIA = "The channel ended before any video could be buffered."
+_NO_DATA = "The channel sent no data."
 _DISK_FAILED = "The temporary playback buffer could not be created."
 
 _Addition = tuple[int, float, float, bool]  # seq, start, end, discontinuity
@@ -73,6 +82,93 @@ def _close_ring(ring: Ring) -> None:
         ring.close()
     except Exception as error:  # RingError: some disk buffer files could not be removed
         _LOG.warning("A live buffer was not removed completely (%s).", type(error).__name__)
+
+
+def _merge(older: tuple[Any, ...], newer: tuple[Any, ...]) -> tuple[Any, ...]:
+    """One state message with the effect of `older` followed by `newer` on the parent.
+
+    The parent drops spans before `first` and appends the additions at or after it; seqs
+    only grow, so applying the newer `first` to both lists of additions is equivalent. A
+    seq kept twice keeps its newer span, so a merged message is bounded by the ring.
+    """
+    _, sid, snapshot, first, additions = newer
+    kept: dict[int, _Addition] = {}
+    if first is not None:
+        for item in (*older[4], *additions):
+            if item[0] >= first:
+                kept[item[0]] = item
+    return ("state", sid, snapshot, first, list(kept.values()))
+
+
+class _Outbox:
+    """The pipe's only writer: messages queue in FIFO order and never block their sender.
+
+    Queued states of one session merge into one (`_merge`), so a parent that stops reading
+    cannot make the queue grow without bound. Any other message of that session ends the
+    merge, so it keeps its order relative to the states before and after it.
+    """
+
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+        self._lock = threading.Lock()
+        self._wake = threading.Condition(self._lock)
+        # One-item lists, so that a queued state can be merged in place.
+        self._queue: deque[list[tuple[Any, ...]]] = deque()
+        self._states: dict[str, list[tuple[Any, ...]]] = {}  # sid -> its mergeable state
+        self._closing = False
+        self._broken = False
+        self._thread = threading.Thread(target=self._write, name="qitv-live-send", daemon=True)
+        self._thread.start()
+
+    def put(self, message: tuple[Any, ...], session: _Session | None = None) -> None:
+        """Queue `message`; dropped once `session` is cancelled. Never blocks."""
+        with self._wake:
+            # Checked under this lock: `close` cancels a session before it queues
+            # "closed", so nothing the session queues can follow its "closed".
+            if self._closing or self._broken or (session is not None and session.cancelled):
+                return
+            sid = message[1] if len(message) > 1 and isinstance(message[1], str) else None
+            if message[0] == "state" and sid is not None:
+                entry = self._states.get(sid)
+                if entry is not None:
+                    entry[0] = _merge(entry[0], message)
+                    return
+                entry = self._states[sid] = [message]
+            else:
+                if sid is not None:
+                    self._states.pop(sid, None)  # later states queue behind this message
+                entry = [message]
+            self._queue.append(entry)
+            self._wake.notify()
+
+    def close(self, timeout: float) -> None:
+        """Queue nothing more and deliver what is queued, waiting at most `timeout`."""
+        with self._wake:
+            self._closing = True
+            self._wake.notify()
+        self._thread.join(timeout)
+
+    def _write(self) -> None:
+        while True:
+            with self._wake:
+                while not self._queue and not self._closing:
+                    self._wake.wait()
+                if not self._queue:
+                    return
+                entry = self._queue.popleft()
+                message = entry[0]
+                if self._states.get(message[1]) is entry:
+                    del self._states[message[1]]  # a later state queues anew
+            try:
+                self._conn.send(message)
+            except OSError:
+                with self._wake:
+                    self._broken = True  # the owner is gone; the command loop sees EOF
+                    self._queue.clear()
+                    self._states.clear()
+                return
+            except Exception as error:  # nothing was written: the pickling failed
+                _LOG.warning("A live helper message was dropped (%s).", type(error).__name__)
 
 
 class _Session:
@@ -90,8 +186,8 @@ class _Session:
     ) -> None:
         self.sid = sid
         self.stop = threading.Event()
-        # Set under `lock` by the command loop; read under the helper's send lock before
-        # every message, so nothing from this session follows its "closed".
+        # Set under `lock` by the command loop; read under the outbox lock as each message
+        # is queued, so nothing from this session follows its "closed".
         self.cancelled = False
         self.lock = threading.Lock()
         self._helper = helper
@@ -130,7 +226,8 @@ class _Session:
                 pass
             except BaseException as error:
                 _LOG.warning("A live session failed unexpectedly (%s).", type(error).__name__)
-                self._fail("internal", _INTERNAL)
+                with contextlib.suppress(_Cancelled):
+                    self._fail("internal", _INTERNAL)
             finally:
                 self._close_source()
             # Keep serving the buffer until the parent closes the session.
@@ -162,12 +259,14 @@ class _Session:
             raise _Cancelled()
         self._adopt(self._make_ring())
         segmenter = self._segmenter
+        received = 0
         try:
             for item in source.chunks():
                 self._check()
                 if isinstance(item, Discontinuity):
                     segmenter.discontinuity()
                 else:
+                    received += len(item)
                     self._apply(segmenter.feed(item))
             self._check()
             self._apply(segmenter.finish())
@@ -183,7 +282,10 @@ class _Session:
             self._fail("unsupported", str(error))
             return
         if not self._ready:
-            self._fail("unsupported", _NO_MEDIA)
+            if received:
+                self._fail("unsupported", _NO_MEDIA)
+            else:
+                self._fail("network", _NO_DATA)
             return
         self._ended = True
         self._notify(force=True)
@@ -280,8 +382,11 @@ class _Session:
     def _fail(self, kind: str, message: str) -> None:
         """Report a failure that ends the input; the buffered part stays playable."""
         if self._ring is not None:
+            self._check()  # a cancelled session never touches its ring again
             try:
                 self._apply(self._segmenter.finish())
+            except _Cancelled:
+                raise
             except Exception as error:
                 _LOG.info("The last live segment was dropped (%s).", type(error).__name__)
             self._ended = True  # readers stop at the end of the buffer instead of waiting
@@ -289,6 +394,8 @@ class _Session:
         self._send(("error", self.sid, kind, message))
 
     def _notify(self, force: bool = False) -> None:
+        if self.cancelled:
+            return
         now = time.monotonic()
         if not force and now - self._last_notify < _NOTIFY_INTERVAL:
             return
@@ -344,7 +451,10 @@ class _Session:
 
 
 class _Helper:
-    """The command loop: owns the stream server, the sessions and the pipe's send side."""
+    """The command loop: owns the stream server, the sessions and the outbox.
+
+    It never blocks except while waiting for the next command.
+    """
 
     def __init__(self, conn: Connection, root: str) -> None:
         from services.live.server import StreamServer
@@ -352,17 +462,12 @@ class _Helper:
         self.root = root
         self.server: StreamServer = StreamServer()
         self._conn = conn
-        self._send_lock = threading.Lock()
+        self._outbox = _Outbox(conn)
         self._sessions: dict[str, _Session] = {}
 
     def send(self, message: tuple[Any, ...], session: _Session | None = None) -> None:
-        with self._send_lock:
-            if session is not None and session.cancelled:
-                return
-            try:
-                self._conn.send(message)
-            except OSError:
-                pass  # the owner is gone: the command loop sees EOF and shuts down
+        """Queue a message for the parent (dropped once `session` is cancelled)."""
+        self._outbox.put(message, session)
 
     def run(self) -> None:
         """Serve commands until "shutdown" or until the owner closes the pipe."""
@@ -420,8 +525,11 @@ class _Helper:
 
     def fail_all(self) -> None:
         """The command loop failed: report it for every open session before exiting."""
-        for session in list(self._sessions.values()):
-            self.send(("error", session.sid, "internal", _INTERNAL), session)
+        sessions = list(self._sessions.values())
+        for session in sessions:
+            session.cancel()  # nothing of a session follows its "internal" error
+        for session in sessions:
+            self.send(("error", session.sid, "internal", _INTERNAL))
 
     def shutdown(self) -> None:
         sessions = list(self._sessions.values())
@@ -435,6 +543,7 @@ class _Helper:
         deadline = time.monotonic() + _SHUTDOWN_GRACE
         for session in sessions:
             session.thread.join(max(0.0, deadline - time.monotonic()))
+        self._outbox.close(_FLUSH_GRACE)
 
 
 def _exit_with_owner() -> None:

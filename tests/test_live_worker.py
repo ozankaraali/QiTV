@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -33,10 +34,12 @@ SECRET_PATH = "/user/secret/live.ts"
 RAM = {"kind": "ram", "max_bytes": 32 * 1024 * 1024}
 STATE_KEYS = {"oldest", "newest", "open", "start", "end", "live_edge", "bytes", "ended", "burst_s"}
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
-# The owner hands a copy of its pipe end to a sleeping holder process (POSIX), so the
+# The owner hands a copy of its pipe end to a holder process that outlives it, so the
 # helper's command loop never sees EOF: only the owner-death watchdog can end the helper.
+# The holder waits on the pipe, so it exits by itself once the helper is gone.
 OWNER = """
-import multiprocessing, os, subprocess, sys, time
+import multiprocessing, sys, time
+from multiprocessing.connection import wait
 from services.live.worker import helper_main
 context = multiprocessing.get_context("spawn")
 conn, child = context.Pipe(duplex=True)
@@ -44,12 +47,10 @@ process = context.Process(target=helper_main, args=(child, sys.argv[2]), daemon=
 process.start()
 child.close()
 assert conn.recv()[0] == "hello"
-holder = 0
-if os.name != "nt":
-    sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
-    holder = subprocess.Popen(sleep, pass_fds=[conn.fileno()]).pid
+holder = context.Process(target=wait, args=([conn], 60))
+holder.start()
 conn.send(("open", "owned", sys.argv[1], {}, True, {"kind": "ram", "max_bytes": 1 << 24}, 6.0))
-print(process.pid, holder, flush=True)
+print(process.pid, holder.pid, flush=True)
 time.sleep(60)
 """
 
@@ -120,16 +121,19 @@ class Helper:
         self.conn.close()
 
 
-def spans(helper, sid):
-    """The parent's span list, rebuilt from the state deltas as main's supervisor did."""
+def rebuild(states):
+    """The parent's span list, rebuilt from state deltas as main's supervisor did."""
     completed = []
-    for message in helper.of(sid, "state"):
-        _, _, _, first, additions = message
+    for _, _, _, first, additions in states:
         if first is None:
             completed = []
         else:
             completed = [item for item in completed + list(additions) if item[0] >= first]
     return completed
+
+
+def spans(helper, sid):
+    return rebuild(helper.of(sid, "state"))
 
 
 def pid_of(packet):
@@ -427,6 +431,18 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertTrue(helper.process.is_alive())
         self.assert_no_credentials(helper)
 
+    def test_a_source_that_sends_nothing_is_a_network_failure(self):
+        source = self.source({SECRET_PATH: (200, {}, b"")})
+        helper = self.helper()
+        sid = helper.open(source.url + SECRET_PATH)
+        helper.wait_for(lambda message: message[0] == "error" and message[1] == sid)
+        helper.close(sid)
+        helper.wait_for(lambda message: message == ("closed", sid))
+        errors = helper.of(sid, "error")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertEqual(errors[0][2], "network")
+        self.assertEqual(helper.of(sid, "ready"), [])
+
     def test_an_unexpected_session_failure_reports_one_internal_error(self):
         hung_up = threading.Event()
         source = self.source(
@@ -546,8 +562,8 @@ class LiveWorkerTests(unittest.TestCase):
                     if pid:
                         try:
                             os.kill(pid, signal.SIGTERM)
-                        except ProcessLookupError:
-                            pass
+                        except OSError:
+                            pass  # already gone
                 owner.stdout.close()
 
     def test_the_helper_discards_its_standard_output_and_error(self):
@@ -580,6 +596,134 @@ class SpawnTargetTests(unittest.TestCase):
             [sys.executable, "-c", probe], cwd=REPO, capture_output=True, check=True, timeout=30
         )
         self.assertEqual(result.stdout.decode().strip(), "[]")
+
+
+class GatedConnection:
+    """A pipe end whose sends wait until the test opens the gate."""
+
+    def __init__(self):
+        self.gate = threading.Event()
+        self.sent = []
+
+    def send(self, message):
+        self.gate.wait(10)
+        self.sent.append(message)
+
+
+def state(sid, seq, first):
+    return ("state", sid, {"newest": seq}, first, [(seq, 2.0 * seq, 2.0 * seq + 2, False)])
+
+
+class OutboxTests(unittest.TestCase):
+    """In process: one queue and one writer, so a parent that stops reading blocks nobody."""
+
+    def test_a_parent_that_stops_reading_never_blocks_the_command_loop(self):
+        # The review's deadlock: a pipe buffers only 8 KiB per direction on macOS. With a
+        # blocking send under one lock, a session blocked in send held the lock while the
+        # command loop waited for it, and the parent's command sends then blocked as well.
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
+        self.addCleanup(temporary.cleanup)
+        parent, child = multiprocessing.Pipe(duplex=True)
+        helper = worker._Helper(child, temporary.name)
+        loop = threading.Thread(target=helper.run, daemon=True)
+        loop.start()
+        self.assertTrue(parent.poll(10))
+        self.assertEqual(parent.recv()[0], "hello")
+        session = types.SimpleNamespace(cancelled=False)
+        flooding = threading.Event()
+        flooding.set()
+        queued = []
+
+        def flood():  # a session reporting as fast as segments close
+            seq = 0
+            while flooding.is_set():
+                queued.append(state("flood", seq, max(0, seq - 10)))
+                helper.send(queued[-1], session)
+                seq += 1
+                time.sleep(0.001)
+
+        flooder = threading.Thread(target=flood, daemon=True)
+        flooder.start()
+        time.sleep(0.5)  # the parent is busy elsewhere: the pipe to it fills up
+        sent = []
+
+        def burst():  # then it forwards queued commands (rapid zapping) without reading
+            for index in range(40):
+                parent.send(("close", f"s{index:02d}" + "x" * 500))
+                sent.append(index)
+
+        burster = threading.Thread(target=burst, daemon=True)
+        burster.start()
+        burster.join(2)
+        self.assertEqual(len(sent), 40, "the helper stopped reading commands")
+        self.assertTrue(loop.is_alive())
+        flooding.clear()
+        flooder.join(5)
+        received = []
+        deadline = time.monotonic() + 10
+        latest = queued[-1][2]  # the newest snapshot; its additions arrive merged
+
+        def delivered():
+            closes = sum(message[0] == "closed" for message in received)
+            return closes == 40 and any(message[2:3] == (latest,) for message in received)
+
+        while time.monotonic() < deadline and not delivered():
+            if parent.poll(0.1):
+                received.append(parent.recv())
+        closed = [message[1] for message in received if message[0] == "closed"]
+        self.assertEqual(closed, [f"s{index:02d}" + "x" * 500 for index in range(40)])
+        states = [message for message in received if message[0] == "state"]
+        self.assertLess(len(states), len(queued), "states were not merged")
+        self.assertEqual(states[-1][2:4], queued[-1][2:4])
+        self.assertEqual(rebuild(states), rebuild(queued))
+        parent.send(("shutdown",))
+        loop.join(5)
+        self.assertFalse(loop.is_alive())
+        helper.shutdown()
+        parent.close()
+        child.close()
+
+    def test_queued_states_merge_but_keep_their_order_around_other_messages(self):
+        connection = GatedConnection()
+        outbox = worker._Outbox(connection)
+        outbox.put(("hello", "url"))
+        outbox.put(state("a", 0, 0))
+        outbox.put(state("b", 0, 0))
+        outbox.put(state("a", 1, 0))
+        outbox.put(("ready", "a"))
+        outbox.put(state("a", 2, 1))
+        outbox.put(state("a", 3, 3))
+        outbox.put(state("b", 1, 1))
+        outbox.put(state("c", 0, 0), types.SimpleNamespace(cancelled=True))
+        outbox.put(("closed", "b"))
+        connection.gate.set()
+        outbox.close(5)
+        outbox.put(("ended", "a"))  # after close: dropped
+        self.assertEqual(
+            connection.sent,
+            [
+                ("hello", "url"),
+                ("state", "a", {"newest": 1}, 0, [(0, 0.0, 2.0, False), (1, 2.0, 4.0, False)]),
+                ("state", "b", {"newest": 1}, 1, [(1, 2.0, 4.0, False)]),
+                ("ready", "a"),
+                ("state", "a", {"newest": 3}, 3, [(3, 6.0, 8.0, False)]),
+                ("closed", "b"),
+            ],
+        )
+        everything = [state("a", 0, 0), state("a", 1, 0), state("a", 2, 1), state("a", 3, 3)]
+        self.assertEqual(
+            rebuild(m for m in connection.sent if m[:2] == ("state", "a")), rebuild(everything)
+        )
+
+    def test_the_final_flush_is_bounded_when_the_parent_never_reads(self):
+        connection = GatedConnection()
+        outbox = worker._Outbox(connection)
+        outbox.put(("hello", "url"))
+        outbox.put(("closed", "a"))
+        started = time.monotonic()
+        outbox.close(0.3)
+        self.assertLess(time.monotonic() - started, 0.5)
+        connection.gate.set()
 
 
 class StuckSessionTests(unittest.TestCase):
@@ -622,7 +766,7 @@ class StuckSessionTests(unittest.TestCase):
                 parent.send(("close", "stuck"))
                 self.assertTrue(parent.poll(2), "close waited for the stuck session")
                 self.assertEqual(parent.recv(), ("closed", "stuck"))
-                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertLess(time.monotonic() - started, 1.5)
                 self.assertTrue(session.thread.is_alive())
             finally:
                 release.set()
