@@ -30,7 +30,7 @@ class TimeshiftSettingsTests(base.WindowCase):
         texts = " ".join(
             label.text() for label in dialog.findChildren(type(dialog.timeshift_size_label))
         )
-        self.assertIn("Without disk, each live channel keeps about two minutes in memory.", texts)
+        self.assertIn("Without disk, each picture keeps its memory per stream", texts)
         self.assertNotIn("MPV", texts)
         self.assertNotIn("MPV", dialog.timeshift_checkbox.text())
 
@@ -50,6 +50,24 @@ class TimeshiftSettingsTests(base.WindowCase):
         saved = ConfigManager()
         self.assertTrue(saved.timeshift_enabled)
         self.assertEqual(saved.timeshift_max_mib, 4096)
+
+    def test_memory_per_stream_offers_three_sizes_with_its_rewind(self):
+        dialog = self.dialog()
+        combo = dialog.timeshift_ram_combo
+        self.assertEqual([combo.itemData(i) for i in range(combo.count())], [128, 256, 512])
+        self.assertEqual(combo.currentData(), 256)
+        self.assertTrue(combo.isEnabled())  # it is for every stream not on disk
+        self.assertEqual(dialog.timeshift_ram_estimate.text(), "≈ 4 min of HD at 8 Mb/s")
+        combo.setCurrentIndex(combo.findData(512))
+        self.assertEqual(dialog.timeshift_ram_estimate.text(), "≈ 9 min of HD at 8 Mb/s")
+        dialog.save_settings()
+        self.assertEqual(ConfigManager().timeshift_ram_mib, 512)
+
+    def test_memory_per_stream_loads_the_saved_size(self):
+        self.config.timeshift_ram_mib = 128
+        dialog = self.dialog()
+        self.assertEqual(dialog.timeshift_ram_combo.currentData(), 128)
+        self.assertEqual(dialog.timeshift_ram_estimate.text(), "≈ 2 min of HD at 8 Mb/s")
 
     def test_cancel_discards_changes(self):
         dialog = self.dialog()

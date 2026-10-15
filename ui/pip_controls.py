@@ -270,7 +270,8 @@ class PipControls(QObject):
         slot = sessions.other()
         self._views[slot.name] = SlotView(target, context, url)
         self._timelines.pop(slot.name, None)
-        kwargs = start_kwargs(self._live_start(target, url), self.config)
+        # The small picture keeps its time-shift in memory: one disk ring at most (M5 ruling).
+        kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
         sessions.open_pip(
             target.item,
             provider=self.catalog.current_provider(),

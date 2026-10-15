@@ -39,6 +39,7 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.budgeted_stream import BudgetedStream, HeldSlot
+from services.config_manager import ConfigManager
 from services.connection_budget import ConnectionBudget
 from services.live.live_session import LiveSession
 from services.playback import Session
@@ -47,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 RELEASE_CAP_MS = 2000  # the longest wait for libVLC to let go of a direct stream
 PURPOSE = "main"  # the budget purpose of the main live stream (Phase 4 adds "pip")
-RAM_RING_MIB = 128  # the time-shift buffer without consent to use the disk (spec §8)
+DEFAULT_RAM_MIB = ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB  # a config without the key
 
 
 @dataclass
@@ -59,10 +60,16 @@ class LiveStart:
     verify_ssl: bool
 
 
-def start_kwargs(start: LiveStart, config: Any) -> dict[str, Any]:
-    """`LiveSession.start()`'s arguments for `start` with the settings in `config`."""
-    disk = bool(config.timeshift_enabled)
-    mib = config.timeshift_max_mib if disk else RAM_RING_MIB
+def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) -> dict[str, Any]:
+    """`LiveSession.start()`'s arguments for `start` with the settings in `config`.
+
+    The time-shift buffer is on disk with the user's consent (`disk=False`: in memory all
+    the same), else the memory per stream (`timeshift_ram_mib`).
+    """
+    consent = bool(config.timeshift_enabled)
+    disk = consent if disk is None else disk and consent
+    ram = getattr(config, "timeshift_ram_mib", DEFAULT_RAM_MIB)
+    mib = config.timeshift_max_mib if disk else ram
     return {
         "url": start.url,
         "headers": {"User-Agent": start.user_agent},
@@ -72,6 +79,13 @@ def start_kwargs(start: LiveStart, config: Any) -> dict[str, Any]:
         "disk": disk,
         "max_bytes": mib * 1024 * 1024,
     }
+
+
+def one_disk_ring(first: "LiveTuner", second: "LiveTuner") -> None:
+    """The two pictures' tuners: while one keeps its time-shift on disk, the other's tunes
+    keep theirs in memory (the user's disk cap is the total; owner's M5 ruling)."""
+    first.set_disk_allowed(lambda: not second.on_disk())
+    second.set_disk_allowed(lambda: not first.on_disk())
 
 
 class LiveTuner(QObject):
@@ -97,6 +111,7 @@ class LiveTuner(QObject):
         self.purpose = purpose
         self.timeline: Optional[dict] = None  # the running tune's last timelineChanged state
         self._pending: Optional[LiveStart] = None  # a tune waiting for its slot or the release
+        self._disk_allowed: Callable[[], bool] = lambda: True
         # The pipeline tune's budget slot, its start and the wait for its release.
         self._stream: Optional[BudgetedStream] = None
         self._latency: Optional[str] = None  # what the running tune started with
@@ -130,6 +145,16 @@ class LiveTuner(QObject):
         self._held.set_purpose(purpose)
         if self._stream is not None:
             self._stream.set_purpose(purpose)
+
+    def set_disk_allowed(self, allowed: Callable[[], bool]) -> None:
+        """Whether a tune may keep its time-shift on disk now (False: the other picture
+        does: the user's disk cap is the total, so this one stays in memory)."""
+        self._disk_allowed = allowed
+
+    def on_disk(self) -> bool:
+        """The running stream keeps its time-shift on disk."""
+        stream = self._stream
+        return stream is not None and stream.running() and stream.disk
 
     def releasing(self) -> bool:
         """A stopped stream of this player may still hold the provider (`released` follows)."""
@@ -216,7 +241,8 @@ class LiveTuner(QObject):
         self._pending = None
         self._latency = self.config.live_latency
         try:
-            stream.start(**start_kwargs(pending, self.config))
+            disk = None if self._disk_allowed() else False
+            stream.start(**start_kwargs(pending, self.config, disk=disk))
         except Exception as error:  # the stream gave its slot back and stopped the session
             logger.warning("Could not start the live channel (%s)", type(error).__name__)
             self._pause = False

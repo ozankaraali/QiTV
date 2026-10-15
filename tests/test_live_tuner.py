@@ -49,7 +49,7 @@ class FakeLive(QObject):
 
     def __init__(self):
         super().__init__()
-        self.starts = []
+        self.starts, self.kwargs = [], []
         self.mode = ""
         self.running = False
 
@@ -58,6 +58,7 @@ class FakeLive(QObject):
 
     def start(self, url, **kwargs):
         self.starts.append(url)
+        self.kwargs.append(kwargs)
         self.running = True
 
     def stop(self):
@@ -229,10 +230,34 @@ class SlotRoleTests(unittest.TestCase):
             },
         )
         self.config.timeshift_enabled = False
+        self.assertEqual(  # without consent: the memory per stream (default 256 MiB)
+            start_kwargs(LiveStart(URL, "QiTV", False), self.config)["max_bytes"],
+            256 * 1024 * 1024,
+        )
+        self.config.timeshift_ram_mib = 512
         self.assertEqual(
             start_kwargs(LiveStart(URL, "QiTV", False), self.config)["max_bytes"],
-            128 * 1024 * 1024,
+            512 * 1024 * 1024,
         )
+        self.config.timeshift_enabled = True
+        forced = start_kwargs(LiveStart(URL, "QiTV", False), self.config, disk=False)
+        self.assertEqual((forced["disk"], forced["max_bytes"]), (False, 512 * 1024 * 1024))
+
+    def test_one_disk_ring_at_most_the_other_player_keeps_it(self):
+        # Ruling (M5): the user's disk cap is the total: a second stream goes to RAM.
+        self.config.timeshift_ram_mib = 128
+        other = SimpleNamespace(disk=True)
+        self.tuner.set_disk_allowed(lambda: not other.disk)
+        self.start_pipeline()
+        kwargs = self.live.kwargs[-1]
+        self.assertEqual((kwargs["disk"], kwargs["max_bytes"]), (False, 128 * 1024 * 1024))
+        self.assertFalse(self.tuner.on_disk())
+        other.disk = False
+        self.tuner.stop()
+        self.tuner.tune(LiveStart(URL, "QiTV", True), PROVIDER, 2)
+        QTest.qWait(10)
+        self.assertEqual(self.live.kwargs[-1]["disk"], True)
+        self.assertTrue(self.tuner.on_disk())
 
 
 if __name__ == "__main__":

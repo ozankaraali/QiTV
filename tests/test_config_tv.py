@@ -260,6 +260,29 @@ class TimeshiftConfigTests(unittest.TestCase):
         self.assertEqual(config.timeshift_max_mib, 256)
 
 
+class RamRingConfigTests(unittest.TestCase):
+    """Owner (M5): every stream not on the disk ring keeps this much in memory."""
+
+    _load = TvConfigTests._load
+
+    def test_defaults_to_256_mib(self):
+        config, path = self._load(None)
+        self.assertEqual(config.timeshift_ram_mib, 256)
+        self.assertEqual(ConfigManager.default_config()["timeshift_ram_mib"], 256)
+        config, path = self._load({})
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["timeshift_ram_mib"], 256)
+
+    def test_takes_one_of_three_sizes(self):
+        config, _ = self._load(None)
+        for value, expected in ((128, 128), (512, 512), ("512", 512), (300, 256), ("x", 256)):
+            with self.subTest(value=value):
+                config.config["timeshift_ram_mib"] = value
+                self.assertEqual(config.timeshift_ram_mib, expected)
+        config.timeshift_ram_mib = 128
+        self.assertEqual(config.config["timeshift_ram_mib"], 128)
+
+
 class PipConfigTests(unittest.TestCase):
     """Phase 4: the PiP's corner and its own volume level."""
 

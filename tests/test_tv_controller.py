@@ -24,7 +24,7 @@ from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
 from ui.keymap import Action
-from ui.live_tuner import LiveTuner
+from ui.live_tuner import LiveTuner, one_disk_ring
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
@@ -1884,7 +1884,7 @@ class PipelineTuneTests(PipelineCase):
                 "latency": "low",
                 "user_agent": DEFAULT_USER_AGENT,
                 "disk": False,
-                "max_bytes": 128 * MIB,  # without consent, a RAM ring of 128 MiB
+                "max_bytes": 256 * MIB,  # without consent, the memory per stream: 256 MiB
             },
         )
         self.assertEqual(self.session.plays, [])  # the live session plays it, not the controller
@@ -3400,6 +3400,7 @@ class PipCase(ControllerTestCase):
             ),
         )
         self.sessions = SessionManager(self.main_slot, self.pip_slot, self.budget)
+        one_disk_ring(self.main_slot.tuner, self.pip_slot.tuner)  # as the window does
         self.frame = FakeFrame()
         self.label = FakePipLabel()
         self.controller = self.make_controller(
@@ -3470,7 +3471,7 @@ class PipTests(PipCase):
                 "latency": "low",
                 "user_agent": DEFAULT_USER_AGENT,
                 "disk": False,
-                "max_bytes": 128 * MIB,
+                "max_bytes": 256 * MIB,  # the memory per stream
             },
         )
         self.assertTrue(self.sessions.pip_open())
@@ -3482,6 +3483,24 @@ class PipTests(PipCase):
         self.assertEqual(self.transport.named("set_pip_state")[-1], (True, True))
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
         self.assertEqual(len(self.live.named("start")), 2)  # the large picture plays on
+
+    def test_the_small_picture_keeps_its_buffer_in_memory(self):
+        # Ruling (M5): never a second disk ring; the small picture's is the memory per stream.
+        self.config.timeshift_enabled = True
+        self.config.timeshift_max_mib = 4096
+        self.config.timeshift_ram_mib = 512
+        self.start_large(0)
+        self.assertEqual(self.live.named("start")[0][1]["disk"], True)
+        self.open_small(CHANNELS[1])
+        kwargs = self.pip_live.named("start")[0][1]
+        self.assertEqual((kwargs["disk"], kwargs["max_bytes"]), (False, 512 * MIB))
+        self.controller.handle(Action.SWAP)  # the disk ring is small now: a zap stays in RAM
+        self.controller.handle(Action.CH_NEXT)
+        self.ready("http://stream/3")
+        self.pip_live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.pip_live.named("start")) == 2))
+        kwargs = self.pip_live.named("start")[1][1]
+        self.assertEqual((kwargs["disk"], kwargs["max_bytes"]), (False, 512 * MIB))
 
     def test_p_again_closes_pip(self):
         self.start_large(0)

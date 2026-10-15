@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 import orjson as json
 import requests
 
+from services.config_manager import ConfigManager
 from services.multikeydict import MultiKeyDict
 from services.provider_manager import StbHandshake
 from services.thread_cleanup import ThreadCleanup
@@ -330,6 +331,24 @@ class OptionsDialog(QDialog):
         self.timeshift_checkbox.setChecked(self.config_manager.timeshift_enabled)
         layout.addWidget(self.timeshift_checkbox)
 
+        # Every stream not on the disk ring: without disk, and the small picture always.
+        memory = QGroupBox("Memory per stream", tab)
+        memory_layout = QFormLayout(memory)
+        self.timeshift_ram_combo = QComboBox(memory)
+        self.timeshift_ram_combo.setObjectName("timeshiftMemoryPerStream")
+        self.timeshift_ram_combo.setAccessibleName("Time-shift memory per stream")
+        for mib in ConfigManager.TIMESHIFT_RAM_CHOICES:
+            self.timeshift_ram_combo.addItem(f"{mib} MiB", mib)
+        self.timeshift_ram_combo.setCurrentIndex(
+            self.timeshift_ram_combo.findData(self.config_manager.timeshift_ram_mib)
+        )
+        self.timeshift_ram_estimate = QLabel(memory)
+        memory_layout.addRow("Memory per stream:", self.timeshift_ram_combo)
+        memory_layout.addRow("Estimated rewind:", self.timeshift_ram_estimate)
+        self.timeshift_ram_combo.currentIndexChanged.connect(self._update_ram_estimate)
+        self._update_ram_estimate()
+        layout.addWidget(memory)
+
         cache = QGroupBox("Disk cache", tab)
         cache_layout = QVBoxLayout(cache)
         self.timeshift_size_label = QLabel(cache)
@@ -374,16 +393,24 @@ class OptionsDialog(QDialog):
         layout.addWidget(cache)
 
         explanation = QLabel(
-            "Without disk, each live channel keeps about two minutes in memory.\n\n"
+            "Without disk, each picture keeps its memory per stream (picture-in-picture's "
+            "small picture always does).\n\n"
             "This is temporary playback history, not a permanent recording. The cache size "
             "is the only history limit: when it fills, the oldest content is replaced. "
             "Recording continues while paused or rewound.\n\n"
-            "After Save, enabling and cache-size changes apply on the next channel you open.",
+            "After Save, enabling and size changes apply on the next channel you open.",
             tab,
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         layout.addStretch()
+
+    def _update_ram_estimate(self, *_args) -> None:
+        mib = (
+            self.timeshift_ram_combo.currentData() or ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB
+        )
+        minutes = max(1, round(mib * 1024 * 1024 * 8 / (8 * 1_000_000 * 60)))
+        self.timeshift_ram_estimate.setText(f"≈ {minutes} min of HD at 8 Mb/s")
 
     def _update_timeshift_estimates(self, mib):
         size = f"{mib} MiB" if mib < 1024 else f"{mib / 1024:.2f}".rstrip("0").rstrip(".") + " GiB"
@@ -815,6 +842,7 @@ class OptionsDialog(QDialog):
         self.config_manager.auto_play_movies = self.auto_play_movies_checkbox.isChecked()
         self.config_manager.timeshift_enabled = self.timeshift_checkbox.isChecked()
         self.config_manager.timeshift_max_mib = self.timeshift_size_slider.value()
+        self.config_manager.timeshift_ram_mib = self.timeshift_ram_combo.currentData()
         self.config_manager.channel_logos = self.channel_logos_checkbox.isChecked()
 
         if self.epg_source_combo.currentText() != self.config_manager.epg_source:

@@ -127,6 +127,8 @@ class ConfigManager:
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
     DEFAULT_OPTION_TIMESHIFT_ENABLED = False
     DEFAULT_OPTION_TIMESHIFT_MAX_MIB = 2048
+    DEFAULT_OPTION_TIMESHIFT_RAM_MIB = 256  # memory per stream not on the disk ring
+    TIMESHIFT_RAM_CHOICES = (128, 256, 512)
     DEFAULT_OPTION_PIP_CORNER = "br"  # picture in picture: the small picture's corner
     PIP_CORNER_CHOICES = ("br", "bl", "tr", "tl")
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
@@ -249,6 +251,7 @@ class ConfigManager:
             "last_live_channel": None,
             "timeshift_enabled": ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
             "timeshift_max_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB,
+            "timeshift_ram_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB,
         }
         if "timeshift_minutes" in self.config:  # the time limit was retired for a size limit
             del self.config["timeshift_minutes"]
@@ -338,6 +341,13 @@ class ConfigManager:
     timeshift_max_mib = _config_property(
         "timeshift_max_mib", DEFAULT_OPTION_TIMESHIFT_MAX_MIB, coerce=int, clamp=(256, 16384)
     )
+    timeshift_ram_mib = _config_property(
+        "timeshift_ram_mib",
+        DEFAULT_OPTION_TIMESHIFT_RAM_MIB,
+        coerce=lambda value: _one_of(
+            ConfigManager.TIMESHIFT_RAM_CHOICES, ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB
+        )(int(value)),
+    )
     pip_corner = _config_property(
         "pip_corner",
         DEFAULT_OPTION_PIP_CORNER,
@@ -405,6 +415,7 @@ class ConfigManager:
             "last_live_channel": None,
             "timeshift_enabled": ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
             "timeshift_max_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB,
+            "timeshift_ram_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB,
             "tv_defaults_version": ConfigManager.TV_DEFAULTS_VERSION,
         }
 

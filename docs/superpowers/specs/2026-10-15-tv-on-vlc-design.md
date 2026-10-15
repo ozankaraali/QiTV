@@ -247,7 +247,7 @@ Other tokens: radius 10 px (cards) and 14 px (panels); system UI font. Focus is 
 - **Playback position** = start of the opened segment + the elapsed play time measured from VLC's `get_time()` deltas. If those jump by more than 1 s compared with wall clock × rate, wall clock × rate is used instead.
 
 ### 6.4 Rings (`ring.py`)
-- **RAM ring (default, no consent):** 128 MiB per session, about 2 min at 8 Mb/s. Enough for pause, short rewind and stay-live.
+- **RAM ring (default, no consent):** the memory per stream, 256 MiB by default (128, 256 or 512 MiB in Settings → Time-shift), about 4 min at 8 Mb/s. Enough for pause, short rewind and stay-live. Picture in picture's small picture always uses it: one disk ring at most, so the user's disk cap is the total (owner, 2026-10-15).
 - **Disk ring (after consent in Settings):** 256 MiB–16 GiB slider, default 2 GiB. Ported from main: session directories, owner markers and QLockFile, stale-session cleanup, allocation-unit accounting and a 64 MiB free-space reserve. Buffers a crashed run left behind are swept once at startup.
 - Eviction is oldest-first by bytes, and an evicted segment is freed at once: readers hold no lease (each read looks the segment up under the ring's lock). Closing a session frees its ring asynchronously.
 

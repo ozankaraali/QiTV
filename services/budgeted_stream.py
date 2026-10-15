@@ -54,6 +54,7 @@ class BudgetedStream(QObject):
         self.budget = budget
         self.purpose = purpose
         self.ticket: Optional[int] = None  # the pending or running stream's
+        self.disk = False  # the running stream keeps its time-shift on disk
         self._granted = False
         self._running = False  # live.start() was called and not stopped since
         self._releasing: list[int] = []  # given back once the stopped upstream is closed
@@ -95,10 +96,11 @@ class BudgetedStream(QObject):
     def start(self, *args: Any, **kwargs: Any) -> None:
         """Start the live session on the held ticket; if it raises, the ticket goes back."""
         self._running = True
+        self.disk = bool(kwargs.get("disk"))
         try:
             self.live.start(*args, **kwargs)
         except Exception:
-            self._running = self._granted = False
+            self._running = self._granted = self.disk = False
             ticket, self.ticket = self.ticket, None
             if ticket is not None:
                 self.budget.release(ticket)
@@ -111,7 +113,7 @@ class BudgetedStream(QObject):
     def stop(self) -> None:
         """Stop the stream; a held ticket goes back once its upstream is closed."""
         ticket, self.ticket = self.ticket, None
-        self._granted = False
+        self._granted = self.disk = False
         if self._running:
             self._running = False
             if ticket is not None:
