@@ -267,9 +267,19 @@ class Guide(Overlay):
 
     def _set_current(self, row: int) -> None:
         if row != self._current:
+            old, top = self._current, self._top
             self._current = row
             self._ensure_visible()
-            self.update()
+            if self._top != top:
+                self.update()  # the rows scrolled
+                return
+            # Only the two rows' highlight and the footer change: repaint just them.
+            layout = self._layout()
+            visible = self._visible_rows(layout)
+            for changed in (old, row):
+                if changed in visible:
+                    self.update(self._row_rect(layout, changed).toAlignedRect())
+            self.update(layout.footer.toAlignedRect())
 
     def _clamped_top(self, top: int, full: int) -> int:
         return min(max(top, 0), max(0, len(self._channels) - full))
@@ -285,6 +295,10 @@ class Guide(Overlay):
 
     def _visible_rows(self, layout: _Layout) -> range:
         return range(self._top, min(len(self._channels), self._top + layout.painted_rows()))
+
+    def _row_rect(self, layout: _Layout, row: int) -> QRectF:
+        top = layout.rows.top() + (row - self._top) * layout.row_h
+        return QRectF(0, top, layout.rows.width(), layout.row_h)
 
     def _forget_lookups(self) -> None:
         self._cache.clear()
@@ -316,9 +330,10 @@ class Guide(Overlay):
     def _on_logo_ready(self, url: str) -> None:
         if self.isHidden():
             return
-        rows = self._visible_rows(self._layout())
-        if any(self._channels[row].get("logo") == url for row in rows):
-            self.update()
+        layout = self._layout()
+        for row in self._visible_rows(layout):
+            if self._channels[row].get("logo") == url:
+                self.update(self._row_rect(layout, row).toAlignedRect())
 
     def _request_logos(self, rows: range) -> None:
         if self._logos is None:
@@ -406,11 +421,14 @@ class Guide(Overlay):
     def paintEvent(self, event: QPaintEvent) -> None:
         layout = self._layout()
         now = self._now().astimezone()  # aware, like the programme and window times
+        # Only what the update region covers is painted (a move repaints two rows).
+        dirty = event.region()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.TextAntialiasing, True)
         p.fillRect(self.rect(), qcolor(PALETTE.panel, 0.94))
-        self._paint_header(p, layout, now)
+        if dirty.intersects(layout.header.toAlignedRect()):
+            self._paint_header(p, layout, now)
         rows = self._visible_rows(layout)
         self._request_logos(rows)
         p.save()
@@ -419,14 +437,16 @@ class Guide(Overlay):
         boxes: list[_Box] = []
         for row in rows:
             rect = QRectF(0, y, layout.rows.width(), layout.row_h)
-            boxes += self._paint_row(p, layout, row, rect, now)
+            if dirty.intersects(rect.toAlignedRect()):
+                boxes += self._paint_row(p, layout, row, rect, now)
             y += layout.row_h
         # The line runs over the boxes but under their text, so titles stay readable.
         self._paint_now_line(p, layout, now, min(y, layout.rows.bottom()))
         for box, programme, on_now in boxes:
             self._paint_box_text(p, layout.units, box, programme, on_now)
         p.restore()
-        self._paint_footer(p, layout, now)
+        if dirty.intersects(layout.footer.toAlignedRect()):
+            self._paint_footer(p, layout, now)
         p.end()
 
     def _now_x(self, layout: _Layout, now: datetime) -> float | None:

@@ -288,6 +288,59 @@ class GuideTests(unittest.TestCase):
         self.guide.close_guide()
         self.assertEqual(self.closed, [True])  # already closed: no second signal
 
+    def painted(self):
+        """Process events; the rows and footers the guide painted meanwhile."""
+        rows, footers = [], []
+        paint_row, paint_footer = self.guide._paint_row, self.guide._paint_footer
+
+        def row_spy(p, layout, row, rect, now):
+            rows.append(row)
+            return paint_row(p, layout, row, rect, now)
+
+        def footer_spy(p, layout, now):
+            footers.append(True)
+            return paint_footer(p, layout, now)
+
+        self.guide._paint_row, self.guide._paint_footer = row_spy, footer_spy
+        try:
+            QTest.qWait(10)
+            QApplication.processEvents()
+        finally:
+            del self.guide._paint_row, self.guide._paint_footer
+        return rows, footers
+
+    def test_a_move_on_screen_repaints_only_the_two_rows_and_the_footer(self):
+        logos = []
+        self.logos.request = lambda urls: logos.extend(urls)
+        self.guide.open_guide(channels(100), 50)
+        rows, _ = self.painted()
+        visible = sorted(set(rows))
+        self.assertIn(50, visible)
+        layout = self.guide._layout()
+        # The row the footer cuts shares pixels with it: it repaints with the footer.
+        cut = {self.guide._top + layout.full_rows()}
+        self.guide.move_by(1)
+        rows, footers = self.painted()
+        self.assertEqual(sorted(set(rows) - cut), [50, 51])
+        self.assertTrue(footers)
+        self.guide.move_by(-1)
+        self.assertEqual(sorted(set(self.painted()[0]) - cut), [50, 51])
+        self.guide.move_by(40)  # off screen: the rows scroll, all of them repaint
+        rows, _ = self.painted()
+        self.assertEqual(len(rows), len(visible))
+        self.assertIn(90, rows)
+
+    def test_a_logo_repaints_only_its_rows(self):
+        chans = channels(100)
+        self.guide.open_guide(chans, 50)
+        self.painted()
+        self.logos.logoReady.emit(chans[52]["logo"])
+        rows, footers = self.painted()
+        self.assertEqual(rows, [52])
+        self.assertFalse(footers)
+        self.logos.logoReady.emit("http://elsewhere/logo.png")
+        self.assertEqual(self.painted(), ([], []))
+
     def test_follows_host_resize(self):
         self.guide.open_guide(channels(3), 0)
         self.host.resize(960, 540)
