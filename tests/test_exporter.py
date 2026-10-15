@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication
 
 from services import thread_cleanup
 from services.exporter import (
+    MSG_NOTHING_LOADED,
     ExportKind,
     ExportWorker,
     collect_items,
@@ -365,3 +366,22 @@ class ExporterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AvailabilityCostTests(unittest.TestCase):
+    """export_available runs on the GUI thread: it must not build the export's item list."""
+
+    def test_it_stops_at_the_first_loaded_item(self):
+        items = [{"id": i, "name": f"Title {i}"} for i in range(1000)]
+        content = {"vod": {"contents": {"1": items}}}
+        with mock.patch("services.exporter.collect_items", side_effect=AssertionError):
+            self.assertIsNone(
+                export_available(ExportKind.CACHED, {"type": "XTREAM"}, "movies", content)
+            )
+            self.assertIsNone(
+                export_available(ExportKind.ALL_LIVE, {"type": "STB"}, "movies", {"itv": [{}]})
+            )
+            self.assertEqual(
+                export_available(ExportKind.CACHED, {"type": "XTREAM"}, "series", content),
+                MSG_NOTHING_LOADED,
+            )

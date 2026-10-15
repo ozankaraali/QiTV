@@ -63,21 +63,30 @@ def collect_items(content: dict, section: str) -> list[dict]:
     return items
 
 
+def has_items(content: Optional[dict], section: str) -> bool:
+    """Whether the section has a loaded item: stops at the first one (cheap on the GUI thread)."""
+    key = SECTION_KEYS.get(section)
+    if key is None or not isinstance(content, dict):
+        return False
+    return next(iter_items(content.get(key)), None) is not None
+
+
 def export_available(
     kind: ExportKind, provider: dict, section: str, content: Optional[dict] = None
 ) -> Optional[str]:
     """None when the export is allowed, else the user-facing reason.
 
     ``content`` is the provider's loaded content (``current_provider_content``); the brief's
-    three-argument form cannot see what is loaded, so it is an optional fourth argument.
+    three-argument form cannot see what is loaded, so it is an optional fourth argument. It
+    runs on the GUI thread, so it only looks for a first item (the worker collects them).
     """
     if kind == ExportKind.COMPLETE_SERIES:
         if provider.get("type") != "STB" or section != "series":
             return MSG_STB_SERIES_ONLY
         return None
     if kind == ExportKind.ALL_LIVE:
-        return None if collect_items(content or {}, "live") else MSG_LOAD_LIVE
-    return None if collect_items(content or {}, section) else MSG_NOTHING_LOADED
+        return None if has_items(content, "live") else MSG_LOAD_LIVE
+    return None if has_items(content, section) else MSG_NOTHING_LOADED
 
 
 def write_items(provider: dict, items: list[dict], path: str) -> int:
