@@ -20,6 +20,13 @@ def opened(key, text="", mods=NONE):
     return resolve(int(key), mods, text, drawer_open=True)
 
 
+def library(key, text="", mods=NONE):
+    return resolve(int(key), mods, text, context="library")
+
+
+META = Qt.KeyboardModifier.MetaModifier
+
+
 class ClosedKeymapTests(unittest.TestCase):
     """One assertion per row of the spec §5.3 table (no overlay open)."""
 
@@ -160,6 +167,83 @@ class OpenKeymapTests(unittest.TestCase):
         self.assertEqual(opened(K.Key_Space, " ", CTRL), (Action.PLAY_PAUSE, ""))
         self.assertEqual(opened(K.Key_F, "f", CTRL), (Action.FULLSCREEN, ""))
         self.assertEqual(opened(K.Key_F, "f"), (Action.NAV_TEXT, "f"))
+
+
+class LibraryKeymapTests(unittest.TestCase):
+    def test_navigation_keys(self):
+        self.assertEqual(library(K.Key_Up), (Action.NAV_UP, ""))
+        self.assertEqual(library(K.Key_Down, mods=KEYPAD), (Action.NAV_DOWN, ""))
+        self.assertEqual(library(K.Key_Left), (Action.NAV_LEFT, ""))
+        self.assertEqual(library(K.Key_Right), (Action.NAV_RIGHT, ""))
+        self.assertEqual(library(K.Key_PageUp), (Action.NAV_PAGE_UP, ""))
+        self.assertEqual(library(K.Key_PageDown), (Action.NAV_PAGE_DOWN, ""))
+        self.assertEqual(library(K.Key_Home), (Action.NAV_HOME, ""))
+        self.assertEqual(library(K.Key_End), (Action.NAV_END, ""))
+        self.assertEqual(library(K.Key_Return, "\r"), (Action.NAV_ACTIVATE, ""))
+        self.assertEqual(library(K.Key_Enter, "\r", KEYPAD), (Action.NAV_ACTIVATE, ""))
+        self.assertEqual(library(K.Key_Escape, "\x1b"), (Action.ESCAPE, ""))
+        self.assertEqual(library(K.Key_Backspace, "\x08"), (Action.NAV_BACKSPACE, ""))
+
+    def test_text_types(self):
+        self.assertEqual(library(K.Key_A, "a"), (Action.NAV_TEXT, "a"))
+        self.assertEqual(library(K.Key_S, "S", SHIFT), (Action.NAV_TEXT, "S"))
+        self.assertEqual(library(K.Key_Space, " "), (Action.NAV_TEXT, " "))
+        self.assertEqual(library(K.Key_F, "f"), (Action.NAV_TEXT, "f"))
+        self.assertEqual(library(K.Key_D, "d"), (Action.NAV_TEXT, "d"))
+
+    def test_slash_and_ctrl_f_search(self):
+        self.assertEqual(library(K.Key_Slash, "/"), (Action.SEARCH, ""))
+        self.assertEqual(library(K.Key_7, "/", SHIFT), (Action.SEARCH, ""))  # Shift+7 layouts
+        self.assertEqual(library(K.Key_F, "f", CTRL), (Action.SEARCH, ""))
+
+    def test_ctrl_d_favorite(self):
+        self.assertEqual(library(K.Key_D, "d", CTRL), (Action.FAVORITE, ""))
+
+    def test_fullscreen_keeps_a_key(self):
+        # Ctrl+F searches here, so fullscreen takes Ctrl+Meta+F (macOS ⌃⌘F) and F11
+        self.assertEqual(library(K.Key_F, "f", CTRL | META), (Action.FULLSCREEN, ""))
+        self.assertEqual(library(K.Key_F11), (Action.FULLSCREEN, ""))
+
+    def test_shared_shortcuts(self):
+        self.assertEqual(library(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))
+        self.assertEqual(library(K.Key_P, "π", ALT), (Action.MINI_PLAYER, ""))
+        self.assertEqual(library(K.Key_Space, " ", CTRL), (Action.PLAY_PAUSE, ""))
+
+
+class ContextTests(unittest.TestCase):
+    def test_drawer_open_is_an_alias_of_the_context(self):
+        for key, text, mods in (
+            (K.Key_Up, "", NONE),
+            (K.Key_Return, "\r", NONE),
+            (K.Key_A, "a", NONE),
+            (K.Key_F, "f", CTRL),
+            (K.Key_Backspace, "\x08", NONE),
+        ):
+            self.assertEqual(
+                resolve(key.value, mods, text, context="drawer"),
+                resolve(key.value, mods, text, drawer_open=True),
+            )
+            self.assertEqual(
+                resolve(key.value, mods, text, context="player"),
+                resolve(key.value, mods, text, drawer_open=False),
+            )
+
+    def test_player_is_the_default_context(self):
+        self.assertEqual(resolve(K.Key_Up.value, NONE, ""), (Action.CH_PREV, ""))
+
+    def test_library_keys_stay_in_the_library(self):
+        self.assertIsNone(closed(K.Key_Slash, "/"))
+        self.assertEqual(opened(K.Key_Slash, "/"), (Action.NAV_TEXT, "/"))
+        self.assertEqual(opened(K.Key_F, "f", CTRL), (Action.FULLSCREEN, ""))
+        self.assertIsNone(opened(K.Key_D, "d", CTRL))
+
+    def test_unknown_context(self):
+        with self.assertRaises(ValueError):
+            resolve(K.Key_Up.value, NONE, "", context="guide")
+
+    def test_new_actions_exist(self):
+        for name in ("SEARCH", "FAVORITE", "NAV_HOME", "NAV_END", "LIBRARY", "GUIDE", "OPEN_FILE"):
+            self.assertIn(name, Action.__members__)
 
 
 if __name__ == "__main__":

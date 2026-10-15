@@ -39,6 +39,15 @@ class Action(str, Enum):
     NAV_ACTIVATE = "nav_activate"
     NAV_TEXT = "nav_text"
     NAV_BACKSPACE = "nav_backspace"
+    NAV_HOME = "nav_home"
+    NAV_END = "nav_end"
+    SEARCH = "search"
+    FAVORITE = "favorite"
+    LIBRARY = "library"
+    OPEN_FILE = "open_file"
+
+
+CONTEXTS = ("player", "drawer", "library")
 
 
 _K = Qt.Key
@@ -99,6 +108,16 @@ _MEDIA_KEYS = {
 }
 # Shortcuts that work with the drawer open or closed.
 _CTRL_KEYS = {_K.Key_Space.value: Action.PLAY_PAUSE, _K.Key_F.value: Action.FULLSCREEN}
+# The Library (spec §5.4): the drawer's keys plus Home/End. It types like the drawer, so "/"
+# and Ctrl+F search and Ctrl+D toggles My list; fullscreen moves to Ctrl+Meta+F (macOS ⌃⌘F)
+# and F11 because Ctrl+F searches here.
+_LIBRARY_KEYS = {
+    **_DRAWER_KEYS,
+    _K.Key_Home.value: Action.NAV_HOME,
+    _K.Key_End.value: Action.NAV_END,
+    _K.Key_F11.value: Action.FULLSCREEN,
+}
+_LIBRARY_CTRL_KEYS = {_K.Key_F.value: Action.SEARCH, _K.Key_D.value: Action.FAVORITE}
 _DIGITS = "0123456789"
 
 
@@ -112,19 +131,39 @@ def resolve(
     modifiers: Qt.KeyboardModifier,
     text: str,
     *,
-    drawer_open: bool,
+    context: str | None = None,
+    drawer_open: bool | None = None,
     platform: str = sys.platform,
 ) -> tuple[Action, str] | None:
-    """Map a key press to (action, payload); the payload is the digit or the typed text."""
+    """Map a key press to (action, payload); the payload is the digit or the typed text.
+
+    `context` is "player", "drawer" or "library". `drawer_open` is the Phase 1B spelling
+    (True means "drawer", False "player") and is used only when `context` is not given.
+    """
+    if context is None:
+        context = "drawer" if drawer_open else "player"
+    if context not in CONTEXTS:
+        raise ValueError(f"Unknown key context: {context!r}")
     key, mods = as_int(key), as_int(modifiers)
     held = mods & (_CTRL | _ALT | _META)
     if key in _MEDIA_KEYS:
         return _MEDIA_KEYS[key], ""
     if held == _ALT and key == _K.Key_P.value:
         return Action.MINI_PLAYER, ""
+    if context == "library":
+        if held == _CTRL and key in _LIBRARY_CTRL_KEYS:
+            return _LIBRARY_CTRL_KEYS[key], ""
+        if held == _CTRL | _META and key == _K.Key_F.value:
+            return Action.FULLSCREEN, ""
     if held == _CTRL and key in _CTRL_KEYS:
         return _CTRL_KEYS[key], ""
-    if drawer_open:
+    if context == "library":
+        if key in _LIBRARY_KEYS:
+            return _LIBRARY_KEYS[key], ""
+        if (key == _K.Key_Slash.value or text == "/") and not mods & (_CTRL | _META):
+            return Action.SEARCH, ""
+        return _text(text, mods, windows=platform.startswith("win"))
+    if context == "drawer":
         if key in _DRAWER_KEYS:
             return _DRAWER_KEYS[key], ""
         return _text(text, mods, windows=platform.startswith("win"))
@@ -144,7 +183,7 @@ def resolve(
 
 
 def _text(text: str, mods: int, *, windows: bool) -> tuple[Action, str] | None:
-    """Printable text for the drawer filter.
+    """Printable text for the drawer and Library filters.
 
     Ctrl/⌘ and Meta never type, except Ctrl+Alt on Windows, which is how it reports AltGr
     (ł, @, €); on macOS ⌘⌥ is a shortcut. Alt (macOS Option) composes letters such as ç, so
