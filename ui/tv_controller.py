@@ -19,7 +19,8 @@ volume, and number entry, the previous channel and the guide wait for live TV.
 
 The guide (ui/guide_controller.py) takes the keys while it is open. The drawer's context menu
 (ui/context_actions.py) asks for links on LinkLanes' side lane; its "Play in VLC/MPV" releases
-the in-app stream first, as an external pick does. Only this controller holds the LiveTuner
+the in-app stream first, as an external pick does. The transport's "Open in external player"
+offers the same two plays for what plays now. Only this controller holds the LiveTuner
 and the session: the others call back play_vod, tune or the external play.
 
 Picture in picture (spec §7, Phase 4) is PipControls' (ui/pip_controls.py) over the window's
@@ -335,6 +336,7 @@ class TVController(QObject):
         transport.seekRequested.connect(self._seek_ms)
         transport.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
         transport.miniPlayerRequested.connect(self.window_actions.toggle_mini_player)
+        transport.externalRequested.connect(self._on_external_requested)
         transport.audioRequested.connect(self._cycle_audio)
         transport.subtitleRequested.connect(self._cycle_subtitles)
         self._live_controls.wire()
@@ -1508,6 +1510,12 @@ class TVController(QObject):
         """A right-click on a drawer row: its context menu."""
         if not self._closed:
             self._context.show(node, global_pos, self.overlays.drawer)
+
+    def _on_external_requested(self, anchor: QPoint) -> None:
+        """The transport's "Open in external player": what plays now, in VLC or MPV."""
+        target = self._current
+        if not self._closed and target is not None:
+            self._context.show_players(target, anchor, self.overlays.transport)
 
     def _play_external(self, target: Target, url: str, launcher: Launcher) -> None:
         """The context menu's external play: the newest choice, once the in-app stream is gone."""

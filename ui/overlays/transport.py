@@ -6,9 +6,11 @@ latency indicator (it reads "catching up" while stay-live nudges the rate, and "
 while the source has stalled). The bar and the Go live chip show only when the viewer left live
 (shifted, or a chosen speed); a drag keeps the bar.
 
-Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P) and, on
-live TV while the window offers picture in picture, the second channel (P). Hovering those
-three names their keys.
+Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
+TV while the window offers picture in picture the second channel (P), then "Open in external
+player" (the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
+At a small width the Stay live indicator's text is shortened, or the indicator left out, so it
+never runs under the play button.
 """
 
 from dataclasses import dataclass
@@ -16,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import math
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -57,6 +59,7 @@ TOOLTIPS = {
     "pip": "Second channel (P)",
     "mini": "Mini player (Alt+P)",
     "fullscreen": "Fullscreen (F)",
+    "external": "Open in external player",
 }
 _ICONS = {"mini": "mini_player", "pip": "pip"}  # button name -> painting icon, if they differ
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
@@ -130,6 +133,9 @@ class Transport(Overlay):
     seekToRequested = Signal(float)
     pipRequested = Signal()  # the second channel: open picture in picture, or close it
     miniPlayerRequested = Signal()
+    # "Open in external player": the shell's menu opens from this point (the button's
+    # top-left, global coordinates).
+    externalRequested = Signal(QPoint)
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
     def __init__(
@@ -471,17 +477,18 @@ class Transport(Overlay):
             if self._timeshift and self._edge_lag is not None:
                 head, tail = self._indicator_parts()
                 fm = QFontMetricsF(self._indicator_font(un))
-                width = (
-                    2 * un.px(1.1)
-                    + fm.horizontalAdvance(head)
-                    + fm.horizontalAdvance(tail)
-                    + 2 * un.px(0.6)
-                    + un.px(0.8)
-                )
+                bare = 2 * un.px(1.1) + fm.horizontalAdvance(head) + 2 * un.px(0.6) + un.px(0.8)
+                width = bare + fm.horizontalAdvance(tail)
                 pill = rects["live"]
-                rects["indicator"] = QRectF(
-                    pill.x() - un.px(0.8) - width, cy - un.px(1.1), width, un.px(2.2)
-                )
+                right_edge = pill.x() - un.px(0.8)
+                # A narrow transport shortens the tail (painted elided), else leaves it out.
+                room = right_edge - rects["play"].right() - un.px(1.5)
+                if width > room:
+                    width = room if room >= bare + fm.horizontalAdvance("…") else 0.0
+                if width > 0:
+                    rects["indicator"] = QRectF(
+                        right_edge - width, cy - un.px(1.1), width, un.px(2.2)
+                    )
         else:
             skip = icon + un.px(1.6)
             if shifted:
@@ -511,7 +518,7 @@ class Transport(Overlay):
     def _right_buttons(self, *rest: str) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards."""
         pip = ("pip",) if self._pip_available and self._live else ()
-        return ("fullscreen", "mini", *pip, *rest)
+        return ("fullscreen", "mini", *pip, "external", *rest)
 
     def seek_rect(self) -> QRectF:
         return self._layout()["seek"]
@@ -573,7 +580,7 @@ class Transport(Overlay):
             self._paint_timeshift(p, un, rects, text)
         else:
             self._paint_vod(p, un, rects, text)
-        for name in ("subtitles", "audio", "pip", "mini", "fullscreen"):
+        for name in ("subtitles", "audio", "external", "pip", "mini", "fullscreen"):
             if name in rects:
                 lit = name == "pip" and self._pip_open
                 draw_icon(
@@ -784,6 +791,7 @@ class Transport(Overlay):
         dot = qcolor(PALETTE.warn if self._catching_up or self._stalled else PALETTE.ok)
         fill_round(p, QRectF(x, box.center().y() - d / 2, d, d), dot, d / 2)
         x += d + un.px(0.6)
+        tail = fm.elidedText(tail, Qt.ElideRight, max(0, round(box.right() - un.px(1.1) - x)))
         p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, tail)
 
     # ---- input --------------------------------------------------------------------------------
@@ -897,6 +905,8 @@ class Transport(Overlay):
                 self.pipRequested.emit()
             elif name == "mini":
                 self.miniPlayerRequested.emit()
+            elif name == "external":
+                self.externalRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
             return
 
     def _nearest_speed(self) -> int:

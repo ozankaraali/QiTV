@@ -353,6 +353,17 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             arrow.lineTo(0.46, 0.56)
             line(arrow)
             fill(_poly([(0.5, 0.6), (0.34, 0.58), (0.48, 0.44)]))
+        elif name == "external":  # open in another player: a box with an arrow out of it
+            box = QPainterPath(QPointF(0.44, 0.2))
+            box.lineTo(0.2, 0.2)
+            box.lineTo(0.2, 0.8)
+            box.lineTo(0.8, 0.8)
+            box.lineTo(0.8, 0.56)
+            line(box)
+            shaft = QPainterPath(QPointF(0.46, 0.54))
+            shaft.lineTo(0.76, 0.24)
+            line(shaft)
+            fill(_poly([(0.86, 0.14), (0.86, 0.44), (0.56, 0.14)]))
         elif name == "live_dot":
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))

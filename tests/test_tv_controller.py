@@ -301,6 +301,7 @@ class FakeTransport(FakeOverlay):
     nextRequested = Signal()
     pipRequested = Signal()
     miniPlayerRequested = Signal()
+    externalRequested = Signal(QPoint)
 
     def set_next_available(self, available):
         self.record("set_next_available", available)
@@ -3043,6 +3044,83 @@ class ContextMenuTests(ControllerTestCase):
         )
         self.nav.reset_to("series")
         self.assertIsNone(self.menu_for(NavNode("item", "s9", "Harbour Lights", SERIES)))
+
+
+class ExternalButtonTests(ControllerTestCase):
+    """Owner (2026-10-15): the player controls send what plays now to VLC or MPV, the way the
+    channel list's right-click does: the in-app stream is released first."""
+
+    BUTTON = QPoint(300, 600)  # the button's top-left, as the transport says it
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+
+    def open_menu(self):
+        shown = []
+        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append((menu, pos))):
+            self.transport.externalRequested.emit(self.BUTTON)
+        if not shown:
+            return None
+        menu, pos = shown[0]
+        self.addCleanup(menu.deleteLater)
+        self.assertEqual(pos.x(), self.BUTTON.x())
+        self.assertLess(pos.y(), self.BUTTON.y())  # it opens upwards, over the video
+        return menu
+
+    def choose(self, text):
+        menu = self.open_menu()
+        self.assertEqual(ContextMenuTests.texts(menu), ["Play in VLC", "Play in MPV"])
+        ContextMenuTests.choose(menu, text)
+
+    def test_a_live_channel_goes_to_vlc_once_the_in_app_stream_is_released(self):
+        self.play(0)
+        stops = self.session.stops
+        self.choose("Play in VLC")
+        self.assertEqual(self.catalog.links[-1][1:], (CHANNELS[0], "live", False))
+        self.assertEqual(self.session.stops, stops)  # nothing stops before the link is there
+        self.ready("http://stream/1?fresh")
+        self.assertEqual(self.session.stops, stops + 1)
+        self.assertEqual(self.external.calls, [("vlc", "http://stream/1?fresh")])
+        self.controller.handle(Action.INFO)
+        self.assertEqual(self.banner.info.name, "One")
+
+    def test_a_movie_goes_to_mpv(self):
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+        self.choose("Play in MPV")
+        self.assertEqual(self.catalog.links[-1][1:], (VodTests.MOVIE, "movies", False))
+        self.ready("http://vod/heat.mkv?fresh")
+        self.assertEqual(self.external.calls, [("mpv", "http://vod/heat.mkv?fresh")])
+
+    def test_an_episode_asks_for_an_episode_link(self):
+        episode = {"id": "s", "cmd": "x", "series": 2, "name": "Pilot"}
+        self.controller.play_vod(episode, "episode", play_context())
+        self.ready("http://vod/pilot.mkv")
+        self.choose("Play in VLC")
+        self.assertEqual(self.catalog.links[-1][1:], (episode, "series", True))
+        self.ready("http://vod/pilot.mkv?fresh")
+        self.assertEqual(self.external.calls, [("vlc", "http://vod/pilot.mkv?fresh")])
+
+    def test_a_missing_player_toasts_and_keeps_playing(self):
+        self.play(0)
+        stops = self.session.stops
+        self.external.missing = {"vlc"}
+        self.choose("Play in VLC")
+        self.assertEqual(self.requested(), ["One"])  # no link was even asked for
+        self.assertEqual(self.session.stops, stops)
+        self.assertEqual(self.toast.messages()[-1], ("VLC Media Player is not installed.", "error"))
+
+    def test_a_local_file_goes_out_as_it_is(self):
+        path = Path("clip.mkv")
+        self.controller.play_file(str(path))
+        self.choose("Play in VLC")
+        self.assertEqual(self.catalog.links, [])  # a file is no provider's: no link to ask for
+        self.assertEqual(self.external.calls, [("vlc", path.absolute().as_uri())])
+
+    def test_with_nothing_played_there_is_no_menu(self):
+        self.assertIsNone(self.open_menu())
+        self.assertEqual(self.catalog.links, [])
 
 
 class CardRoutingTests(AutoplayCase):

@@ -46,6 +46,7 @@ ICONS = [
     "live_dot",
     "gear",
     "plus",
+    "external",
 ]
 
 

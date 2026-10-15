@@ -1,10 +1,14 @@
 """The drawer's context menu: a right-click on a channel, title or episode.
 
+The player controls' "Open in external player" offers the two players for what plays now
+(`show_players`): the same plays as the menu's, opening upwards from the button.
+
 - "Add to favorites" / "Remove from favorites" (channels only);
 - "Open in picture-in-picture" (channels, when the shell offers picture in picture): the
   channel plays small beside the one playing (Ctrl/⌘+P on the highlighted row does the same);
 - "Play in VLC" / "Play in MPV": the shell plays the link externally once the in-app stream is
-  released. A player that is not installed is said at once, and nothing stops;
+  released. A player that is not installed is said at once, and nothing stops. A local file
+  (File → Open File…) is no provider's: it goes out as it is, with no link to ask for;
 - "Copy stream link": the link goes to the clipboard.
 Links are asked for on LinkLanes' side lane (one at a time, beside the tune's); a newer
 choice supersedes an external play still waiting for its link, never a copy.
@@ -29,6 +33,7 @@ logger = logging.getLogger(__name__)
 Launcher = Callable[[str], tuple[bool, str]]
 LINK_COPIED_TEXT = "Link copied"
 OPEN_PIP_TEXT = "Open in picture-in-picture"
+PLAYERS = (("Play in VLC", "vlc"), ("Play in MPV", "mpv"))
 
 
 def is_channel(nav: NavModel, node: Optional[NavNode]) -> bool:
@@ -39,6 +44,12 @@ def is_channel(nav: NavModel, node: Optional[NavNode]) -> bool:
         and isinstance(node.payload, dict)
         and nav.section_of(node) == "live"
     )
+
+
+def _local_file(target: Target) -> str:
+    """A local file's address (file:), else ""."""
+    cmd = str(target.item.get("cmd") or "")
+    return cmd if cmd.startswith("file:") else ""
 
 
 def _css(value: str, alpha: Optional[float] = None) -> str:
@@ -94,6 +105,17 @@ class ContextActions(QObject):
             menu.aboutToHide.connect(menu.deleteLater)
             menu.popup(global_pos)
 
+    def show_players(
+        self, target: Target, anchor: QPoint, parent: Optional[QObject] = None
+    ) -> None:
+        """The two players for `target` (what plays now), opening upwards from `anchor`: the
+        player controls' button top-left, in global coordinates."""
+        menu = QMenu(parent if isinstance(parent, QWidget) else None)
+        menu.setStyleSheet(menu_style())
+        self._add_players(menu, target)
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(QPoint(anchor.x(), anchor.y() - menu.sizeHint().height()))
+
     def menu(self, node: NavNode, parent: Optional[QWidget] = None) -> Optional[QMenu]:
         """`node`'s menu; None when it has nothing to offer (a series)."""
         channel = is_channel(self.nav, node)
@@ -114,10 +136,7 @@ class ContextActions(QObject):
             if channel:
                 menu.addSeparator()
             target = self._target(node)
-            for text, player in (("Play in VLC", "vlc"), ("Play in MPV", "mpv")):
-                menu.addAction(text).triggered.connect(
-                    lambda _=False, name=player: self._external_play(target, name)
-                )
+            self._add_players(menu, target)
             menu.addSeparator()
             menu.addAction("Copy stream link").triggered.connect(
                 lambda _=False: self.lanes.request_side(target, self._copy_link, play=False)
@@ -129,6 +148,12 @@ class ContextActions(QObject):
         group = next((n.key for n in reversed(self.nav.path) if n.layer == "group"), "")
         section = self.nav.section_of(node) or "live"
         return Target(node.payload, section, node.title, group_key=group)
+
+    def _add_players(self, menu: QMenu, target: Target) -> None:
+        for text, player in PLAYERS:
+            menu.addAction(text).triggered.connect(
+                lambda _=False, name=player: self._external_play(target, name)
+            )
 
     def _external_play(self, target: Target, player: str) -> None:
         if player == "vlc":
@@ -146,6 +171,11 @@ class ContextActions(QObject):
         if not found:
             logger.info("Not playing %s externally: %s is not installed", target.title, player)
             self._notify(missing.partition("\n")[0], "error")
+            return
+        local = _local_file(target)
+        if local:
+            self.lanes.supersede()  # a newer choice than a side play waiting for its link
+            self._play_external(target, local, launch)
             return
         self.lanes.request_side(
             target, lambda url: self._play_external(target, url, launch), play=True

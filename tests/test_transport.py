@@ -109,6 +109,45 @@ class TransportCase(unittest.TestCase):
         self.assertIn("seek", t._layout())
         self.assertLess(t.button_rect("pip").right(), t.button_rect("mini").left())
 
+    def test_the_external_player_button_sits_with_the_picture_buttons(self):
+        # Owner (2026-10-15): what plays now goes to VLC or MPV from the player controls.
+        t = self.make()
+        t.show_live("One", "")
+        t.set_pip_state(True, False)
+        external = t.button_rect("external")
+        self.assertLess(external.right(), t.button_rect("pip").left())
+        self.assertLess(t.button_rect("subtitles").right(), external.left())
+        self.assertEqual(t.tooltip_at(external.center()), "Open in external player")
+        spy = QSignalSpy(t.externalRequested)
+        self.click(t, external.center().toPoint())
+        self.assertEqual(spy.count(), 1)
+        # The shell's menu opens from the button (global coordinates).
+        self.assertEqual(spy.at(0)[0], t.mapToGlobal(external.topLeft().toPoint()))
+
+    def test_movies_and_time_shift_have_the_external_player_button_too(self):
+        t = self.make()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        external = t.button_rect("external")
+        self.assertLess(external.right(), t.button_rect("mini").left())
+        self.assertLess(t.button_rect("audio").right(), external.left())
+        t.show_timeshift("One", "")
+        t.update_timeline(
+            {
+                "start": 0.0,
+                "end": 60.0,
+                "position": 30.0,
+                "live_edge": 60.0,
+                "lag": 30.0,
+                "mode": "shifted",
+                "rate": 1.0,
+                "paused": False,
+            },
+            [],
+        )
+        self.assertIn("seek", t._layout())
+        self.assertLess(t.button_rect("golive").right(), t.button_rect("external").left())
+
     def test_the_second_channel_is_live_tv_only(self):
         t = self.make()
         t.set_pip_state(True, False)
@@ -134,7 +173,7 @@ class TransportCase(unittest.TestCase):
         t.show_live("One", "")
         t.set_pip_state(True, False)
         claims = t.hole_claims()
-        for name in ("play", "fullscreen", "mini", "pip", "audio", "subtitles"):
+        for name in ("play", "fullscreen", "mini", "pip", "external", "audio", "subtitles"):
             self.assertTrue(claims.contains(t.button_rect(name).center().toPoint()), name)
         self.assertFalse(claims.contains(QPoint(640, 300)))  # the scrim
         self.assertFalse(claims.contains(t.button_rect("live").center().toPoint()))  # a label
@@ -458,6 +497,77 @@ class MiniPlayerLayoutTests(unittest.TestCase):
         t.update_position(60_000, 600_000)
         times = t._layout()["times"]
         self.assertEqual(round(times.height()), Units(1280).px(1.6))
+
+
+class SmallWidthLayoutTests(unittest.TestCase):
+    """The controls never overlap, down to a mini player's width (the external button made
+    the right side longer; the Stay live indicator gives way)."""
+
+    WIDTHS = (300, 360, 480, 640, 960, 1280)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    @staticmethod
+    def state(mode, lag, rate):
+        return {
+            "start": 0.0,
+            "end": 600.0,
+            "position": 600.0 - lag,
+            "live_edge": 600.0,
+            "lag": lag,
+            "mode": mode,
+            "rate": rate,
+            "paused": False,
+        }
+
+    def modes(self, t):
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        t.set_next_available(True)
+        yield "movie with Next"
+        t.set_next_available(False)
+        t.show_live("One", "")
+        yield "live"
+        t.show_timeshift("One", "")
+        t.update_timeline(self.state("live", 12.5, 1.05), [])
+        yield "stay live, catching up"
+        t.update_timeline(self.state("shifted", 300.0, 1.0), [])
+        yield "shifted, Go live"
+
+    def test_no_two_controls_overlap_at_any_width(self):
+        for width in self.WIDTHS:
+            t = Transport(idle_ms=3000)
+            self.addCleanup(t.close)
+            t.setGeometry(0, 0, width, round(width * 9 / 16))
+            t.set_pip_state(True, False)
+            for mode in self.modes(t):
+                with self.subTest(width=width, mode=mode):
+                    rects = {
+                        name: rect
+                        for name, rect in t._layout().items()
+                        if name not in ("seek", "times")  # the rows above the buttons
+                    }
+                    names = list(rects)
+                    for i, a in enumerate(names):
+                        self.assertGreaterEqual(rects[a].left(), 0, a)
+                        self.assertLessEqual(rects[a].right(), width, a)
+                        for b in names[i + 1 :]:
+                            self.assertFalse(rects[a].intersects(rects[b]), f"{a} overlaps {b}")
+                    self.assertFalse(t.grab().isNull())
+
+    def test_a_wide_transport_shows_the_whole_indicator(self):
+        t = Transport(idle_ms=3000)
+        self.addCleanup(t.close)
+        t.setGeometry(0, 0, 1280, 720)
+        t.set_pip_state(True, False)
+        t.show_timeshift("One", "")
+        t.update_timeline(self.state("live", 12.5, 1.05), [])
+        head, tail = t._indicator_parts()
+        fm = QFontMetricsF(t._indicator_font(Units(1280)))
+        box = t._layout()["indicator"]
+        self.assertGreater(box.width(), fm.horizontalAdvance(head) + fm.horizontalAdvance(tail))
 
 
 class HostSizingTests(unittest.TestCase):
