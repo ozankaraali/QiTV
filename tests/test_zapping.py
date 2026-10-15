@@ -169,6 +169,27 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.step(1)
         self.assertEqual(self.tunes[-1]["name"], "B")
 
+    def test_reset_forgets_the_previous_provider(self):
+        # Finding I9: Backspace after a provider switch asked for the old provider's channel.
+        self.zap.tuned(CHANNELS[2])  # previous: CHANNELS[0]
+        self.clock.now += 0.1
+        self.zap.step(1)
+        self.zap.step(1)  # burst: the column is open and the rest timer runs
+        self.zap.digit("7")
+        self.zap.reset()
+        self.assertEqual(self.columns[-1], False)
+        self.assertEqual(self.digits[-1], "")
+        self.assertEqual((self.zap.context.group_key, self.zap.context.channels), ("", []))
+        before = list(self.tunes)
+        self.zap.previous()
+        QTest.qWait(150)  # neither the rest timer nor the digit timer fires
+        self.assertEqual(self.tunes, before)
+        other = [{"id": "b1", "name": "B1", "cmd": "b1"}, {"id": "b2", "name": "B2", "cmd": "b2"}]
+        self.zap.set_context(ZapContext("h", other))
+        self.clock.now += 5
+        self.zap.step(1)  # nothing tuned on the new provider: starts at the first channel
+        self.assertEqual(self.tunes[-1], other[0])
+
     def test_number_zero_and_duplicates(self):
         ctx = ZapContext(
             "g", [{"id": 1, "number": "00"}, {"id": 2, "number": "5"}, {"id": 3, "number": "5"}]

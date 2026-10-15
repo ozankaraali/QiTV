@@ -121,6 +121,24 @@ class ZapController(QObject):
         if self._tuned is not None:
             context.set_current(self._tuned)
 
+    def reset(self) -> None:
+        """Forget everything about the current provider (call when another one is ready).
+
+        Clears the tuned, previous, target and pending channels and any digits, stops the
+        timers, closes the column and leaves an empty context.
+        """
+        self._rest.stop()
+        self._digit_timer.stop()
+        self.close_column()
+        self._highlight = None
+        self._tuned = self._previous = self._target = None
+        self._pending = []
+        self._last_step = float("-inf")
+        self.context = ZapContext()
+        if self._digits:
+            self._digits = ""
+            self.digitsChanged.emit("")
+
     def tuned(self, channel: dict) -> None:
         if self._tuned is not None and not ZapContext.same(self._tuned, channel):
             self._previous = self._tuned
