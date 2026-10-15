@@ -51,8 +51,8 @@ band; else the nearest above it ("behind live" for a moment while stay-live catc
 Interruptions while playing from the pipeline:
 - VLC ended or failed: reopen at the position, or 5 s past the oldest buffered point with
   "Rewound past the buffer" (once until VLC plays again) when the ring evicted it (after a
-  long pause, say). Resuming from a pause checks for that eviction first. Nothing is reopened once the session ended: playback runs
-  to the end of the buffer. Interruptions that do not reach playing again within
+  long pause, say). Resuming from a pause checks for that eviction first. Nothing is reopened
+  once the session ended: playback runs to the end of the buffer. Interruptions that do not reach playing again within
   `ready_timeout_ms` fall back.
 - `sessionFailed("disk")`: the helper went on in RAM without the history: a notice, then go
   live on the RAM ring's first state (`sessionUpdated`), not on the old ring's spans. A

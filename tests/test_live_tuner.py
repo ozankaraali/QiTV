@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import elapse
 
 from services.connection_budget import ConnectionBudget
 from ui.live_tuner import LiveStart, LiveTuner
@@ -106,7 +107,7 @@ class DirectSlotTests(unittest.TestCase):
         self.tuner._input_cap.setInterval(20)
         with self.assertLogs("ui.live_tuner", "WARNING"):
             self.tuner.stop()
-            QTest.qWait(80)
+            elapse(40)  # runs due timers in order: a stalled runner can't skip the cap
         self.assertEqual(self.holders(), [])
 
     def test_one_direct_play_after_another_never_holds_two_slots(self):

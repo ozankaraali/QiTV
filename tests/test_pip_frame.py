@@ -463,10 +463,11 @@ class PipLabelTests(LabelCase):
             self.assertLessEqual(pill.right(), mixer.left(), state)
             name, shown = label.shown_text()
             self.assertTrue(name == "" or name.endswith("…"), name)  # never the whole name
-            if state in ("LIVE", "−03:20"):
+            if state == "LIVE":
                 self.assertEqual(shown, state)
-            else:
-                self.assertTrue(len(shown) < len(state) and shown.endswith("…"), shown)
+            else:  # fonts differ per platform: whole, or a prefix elided with "…"
+                elided = shown.endswith("…") and state.startswith(shown[:-1])
+                self.assertTrue(shown == state or elided, shown)
 
     def test_a_narrow_pip_elides_the_name_before_the_buttons(self):
         host = QWidget()

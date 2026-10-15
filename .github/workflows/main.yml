@@ -27,6 +27,7 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Run tests
+        timeout-minutes: 20
         id: tests
         run: uv run python -m unittest discover -s tests -v
         env:
@@ -127,6 +128,7 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Run tests
+        timeout-minutes: 20
         id: tests
         # Qt's offscreen plugin on Windows reads fonts only from QT_QPA_FONTDIR (the PySide6
         # wheel ships none), so without it every glyph is a box as wide as the pixel size.
@@ -210,6 +212,7 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Run tests
+        timeout-minutes: 20
         id: tests
         run: uv run python -m unittest discover -s tests -v
         env:
@@ -293,6 +296,7 @@ jobs:
         id: sync
         run: uv sync --frozen --dev
       - name: Run tests
+        timeout-minutes: 20
         id: tests
         run: uv run python -m unittest discover -s tests -v
         env:

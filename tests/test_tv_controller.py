@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import logging
 import os
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -3206,7 +3207,9 @@ class LibraryTests(AutoplayCase):
         plays = len(self.watch.plays)
         self.controller.play_file("/videos/Holiday clip.mp4")
         url, kwargs = self.session.plays[-1]
-        self.assertEqual(url, "file:///videos/Holiday%20clip.mp4")
+        self.assertEqual(
+            url, Path("/videos/Holiday clip.mp4").absolute().as_uri()
+        )  # a drive letter on Windows
         self.assertEqual(kwargs["kind"], PlayKind.VOD_FILE)
         self.assertEqual(len(self.catalog.links), 1)  # only the channel's
         self.assertEqual(len(self.watch.plays), plays)  # not in any provider's history
@@ -3232,7 +3235,7 @@ class LibraryTests(AutoplayCase):
         budget = self.controller.budget
         self.assertEqual(budget.holders("Home"), ["main"])
         self.controller.play_file("/videos/clip.mp4")
-        self.assertEqual(self.played_urls()[-1], "file:///videos/clip.mp4")
+        self.assertEqual(self.played_urls()[-1], Path("/videos/clip.mp4").absolute().as_uri())
         self.assertEqual(budget.holders("Home"), [])  # no provider stream: a PiP may use it
         self.play(1)  # the next channel takes it again
         self.assertEqual(budget.holders("Home"), ["main"])
