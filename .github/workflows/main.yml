@@ -236,6 +236,15 @@ jobs:
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
           codesign --force --deep --sign - dist/qitv.app
+          # PyInstaller and the signature above rewrote every plugin, so the plugins.dat copied
+          # from VLC.app no longer matches them and libVLC would load all ~340 plugins at every
+          # start (macOS checks each one on a fresh download's first start). Write the cache
+          # again with the bundle's own libVLC (VLC 3's vlc-cache-gen is libvlc_new with
+          # --reset-plugins-cache), sign that file again, and re-seal the bundle without
+          # touching its binaries (a --deep re-sign would make the cache stale again).
+          uv run python -c "from services.vlc_bundle import use_bundled_vlc; assert use_bundled_vlc(top='dist/QiTV.app/Contents/Frameworks', system='Darwin'); import vlc; vlc.Instance(['--reset-plugins-cache', '--quiet']).release()"
+          codesign --force --sign - dist/QiTV.app/Contents/Frameworks/vlc/plugins/plugins.dat
+          codesign --force --sign - dist/qitv.app
           codesign --verify --deep --strict dist/qitv.app
       - name: Hide the system VLC from the packaged app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
@@ -250,6 +259,13 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: The packaged app's plugin cache is current
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: |
+          grep -q "loading plugins cache file .*/Contents/Frameworks/vlc/plugins/plugins.dat" smoke-frozen/libvlc.log
+          if grep -m5 "stale plugins cache" smoke-frozen/libvlc.log; then
+            echo "::error::libVLC found the bundle's plugins.dat stale"; exit 1
+          fi
       - name: Restore the system VLC
         if: always()
         run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
@@ -320,6 +336,15 @@ jobs:
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
         run: |
           codesign --force --deep --sign - dist/qitv.app
+          # PyInstaller and the signature above rewrote every plugin, so the plugins.dat copied
+          # from VLC.app no longer matches them and libVLC would load all ~340 plugins at every
+          # start (macOS checks each one on a fresh download's first start). Write the cache
+          # again with the bundle's own libVLC (VLC 3's vlc-cache-gen is libvlc_new with
+          # --reset-plugins-cache), sign that file again, and re-seal the bundle without
+          # touching its binaries (a --deep re-sign would make the cache stale again).
+          uv run python -c "from services.vlc_bundle import use_bundled_vlc; assert use_bundled_vlc(top='dist/QiTV.app/Contents/Frameworks', system='Darwin'); import vlc; vlc.Instance(['--reset-plugins-cache', '--quiet']).release()"
+          codesign --force --sign - dist/QiTV.app/Contents/Frameworks/vlc/plugins/plugins.dat
+          codesign --force --sign - dist/qitv.app
           codesign --verify --deep --strict dist/qitv.app
       - name: Hide the system VLC from the packaged app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
@@ -334,6 +359,13 @@ jobs:
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
+      - name: The packaged app's plugin cache is current
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: |
+          grep -q "loading plugins cache file .*/Contents/Frameworks/vlc/plugins/plugins.dat" smoke-frozen/libvlc.log
+          if grep -m5 "stale plugins cache" smoke-frozen/libvlc.log; then
+            echo "::error::libVLC found the bundle's plugins.dat stale"; exit 1
+          fi
       - name: Restore the system VLC
         if: always()
         run: if [ -d "$RUNNER_TEMP/VLC.app" ]; then sudo mv "$RUNNER_TEMP/VLC.app" /Applications/VLC.app; fi
