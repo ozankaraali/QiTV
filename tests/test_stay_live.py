@@ -152,5 +152,63 @@ class StayLiveTests(unittest.TestCase):
             sl.set_latency("bogus")
 
 
+class RoomTests(unittest.TestCase):
+    """A bursty source (2.0.1, the owner's ruling): below half a burst of room when a burst
+    lands, play at 0.95x until it is built. The lag is the sawtooth's mean (LiveSession's),
+    which is the room at a landing plus half a burst: half a burst of room is a mean lag of
+    one burst."""
+
+    def live(self, *, burst=10.0, target=10.0):
+        stay = StayLive("normal")
+        stay.target, stay.burst = target, burst
+        return stay
+
+    def rates(self, stay, lags, buffering=False):
+        return [stay.update(lag, buffering).rate for lag in lags]
+
+    def test_under_half_a_burst_of_room_slows_until_it_is_built(self):
+        stay = self.live()
+        lags = (9.4, 9.6, 9.99, 10.0, 9.6, 9.51, 9.49)
+        self.assertEqual(self.rates(stay, lags), [0.95, 0.95, 0.95, 1.0, 1.0, 1.0, 0.95])
+        self.assertIs(stay.mode, Mode.LIVE)
+
+    def test_never_below_0_95(self):
+        stay = self.live()
+        self.assertEqual(set(self.rates(stay, (0.0, 2.0, 5.0, 9.0))), {0.95})
+
+    def test_a_steady_source_never_slows(self):
+        stay = self.live(burst=0.0, target=T)
+        self.assertEqual(set(self.rates(stay, (0.0, 0.5, 1.0, 2.0))), {1.0})
+
+    def test_a_latency_target_above_the_burst(self):
+        stay = self.live(burst=4.0, target=TARGETS["stable"])
+        self.assertEqual(self.rates(stay, (3.4, 3.9, 4.0, 6.0)), [0.95, 0.95, 1.0, 1.0])
+
+    def test_buffering_keeps_the_rate(self):
+        stay = self.live()
+        self.assertEqual(self.rates(stay, (0.0,), buffering=True), [1.0])
+        self.assertEqual(self.rates(stay, (5.0, 0.0), buffering=True), [1.0, 1.0])
+        self.assertEqual(self.rates(stay, (5.0,)), [0.95])
+        self.assertEqual(self.rates(stay, (12.0,), buffering=True), [0.95])
+
+    def test_never_while_time_shifted_or_at_a_chosen_speed(self):
+        stay = self.live()
+        stay.user_paused()
+        self.assertEqual(self.rates(stay, (0.0, 5.0)), [1.0, 1.0])
+        stay.user_speed(1.5)
+        self.assertEqual(self.rates(stay, (12.0,)), [1.5])
+
+    def test_go_live_starts_at_normal_speed(self):
+        stay = self.live()
+        self.rates(stay, (5.0,))
+        stay.user_go_live()  # Go live lands at the target less a quarter second at most
+        self.assertEqual(self.rates(stay, (9.75, 9.9)), [1.0, 1.0])
+
+    def test_a_catch_up_settles_above_the_room_and_never_slows(self):
+        stay = self.live()
+        lags = (14.0, 12.0, 10.2, 10.1, 10.0)
+        self.assertEqual(self.rates(stay, lags), [1.10, 1.05, 1.0, 1.0, 1.0])
+
+
 if __name__ == "__main__":
     unittest.main()

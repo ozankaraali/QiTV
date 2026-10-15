@@ -48,12 +48,16 @@ sends nothing for a burst plus 2 s (a steady one: 2 s) has stalled: the timeline
 (`stalled`; the transport reads "Reconnecting…"), the time since the edge moved counts up
 to there only, and StayLive takes it as buffering, as it does a VLC whose clock stood still
 for 0.5 s while it reports Playing (libVLC 3 does when starved): no rate change, no reopen,
-and the easing starts afresh once the edge moves again. Go live picks
-among every segment start, the open one included, by the lag it would give once VLC plays
-it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 s; for a bursty
-source the mean; see `_live_seq`): never below the target less a quarter second, since
-stay-live cannot slow down to win buffer back; the nearest the target within stay-live's
-band; else the nearest above it ("behind live" for a moment while stay-live catches up).
+and the easing starts afresh once the edge moves again. Stay-live slows down only to build a
+bursty source's room: at 0.95x while the mean lag is under a burst, which is under half a
+burst left when a burst lands (the player would meet the edge just before each one), until
+it is a burst (`StayLive`; not while paused, time-shifted or at a chosen speed). Go live
+picks among every segment start, the open one included, by the lag it would give once VLC
+plays it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 s; for a
+bursty source the mean; see `_live_seq`): never below the target less a quarter second,
+since stay-live wins buffer back only that slowly, and only for a bursty source; the nearest
+the target within stay-live's band; else the nearest above it ("behind live" for a moment
+while stay-live catches up).
 
 Interruptions while playing from the pipeline:
 - VLC ended or failed: reopen at the position, or 5 s past the oldest buffered point with
@@ -772,6 +776,7 @@ class LiveSession(QObject):
         # change and no reopen while nothing arrives.
         if not self._ended and not self._paused:
             self._stay.target = self._target(snapshot)
+            self._stay.burst = _number(snapshot.get("burst_s"))
             buffering = (
                 stalled or self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
             )
@@ -939,9 +944,10 @@ class LiveSession(QObject):
             starts.append((_number(snapshot.get("end")), open_seq))
         shift = self._burst_shift(snapshot) + self._open_s
         means = sorted((edge - start + shift, seq) for start, seq in starts)
-        # Stay-live never slows down, so a landing below the target would keep its smaller
-        # buffer for good: none below a quarter second short of it. Then the nearest the
-        # target (ties: the newer start) within stay-live's band, else the nearest above.
+        # Stay-live slows down only to build a bursty source's room (0.95x), so a landing
+        # below the target would keep its smaller buffer for good, or for a long while: none
+        # below a quarter second short of it. Then the nearest the target (ties: the newer
+        # start) within stay-live's band, else the nearest above.
         safe = [mean for mean in means if mean[0] >= target - _BELOW_TARGET_S]
         if not safe:
             return None if cushion else means[-1][1]  # a short buffer: all of it

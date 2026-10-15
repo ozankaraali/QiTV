@@ -1003,8 +1003,9 @@ class StayLiveTests(LiveSessionCase):
         self.ready(segments(0, 2), live_edge=4.0, burst=6.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(0.25)  # lag 3.75 is under the 6 s burst: no nudge
-        self.assertEqual(self.playback.rates, [])
         self.assertEqual(self.timelines[-1]["target"], 6.0)
+        # A mean lag of 1 s is under half a burst of room: it is built at 0.95x (2.0.1).
+        self.assertEqual(self.playback.rates, [0.95])
 
     def test_hls_bursts_settle_without_rate_flapping(self):
         sid = self.start()
@@ -1229,6 +1230,42 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual({state["target"] for state in self.timelines}, {TARGETS["normal"]})
         self.assertEqual(feed.meter.burst_s, 0.0)
 
+    def test_a_bursty_source_slows_a_little_to_build_its_room(self):
+        """The owner's channel re-measured (2.0.1): 3.84 s at connect (in the helper's view),
+        the first 10 s burst 8.5 s later, then 10 s every 10 s. Once the bursts are measured
+        the position met the edge just before each burst; now it plays at 0.95x until half a
+        burst of room is built, then at 1x, without flapping, and nothing starves after."""
+        sid = self.start()
+        feed = Feed(self, sid, burst=10.0, edge=3.84, first=8.5, metered=True).ready()
+        feed.run(28.5)  # the third burst landed: two alike 10 s bursts
+        self.assertEqual(self.timelines[-1]["target"], 10.0)
+        timelines = len(self.timelines) - 1
+        feed.run(150.0)
+        after = self.timelines[timelines:]
+        self.assertEqual({state["rate"] for state in after}, {0.95, 1.0})
+        # Slowed once, then normal speed for good: no flapping.
+        rates = self.playback.rates
+        self.assertEqual(rates[rates.index(0.95) :], [0.95, 1.0])
+        self.assertFalse(any(state["stalled"] for state in after))
+        built = feed.before[-3:]  # the room when each of the last bursts landed
+        self.assertGreaterEqual(min(built), 10.0 / 2 - 0.5)
+        starved, arrivals = feed.starved_s, len(feed.before)
+        feed.run(60.0)
+        self.assertEqual(feed.starved_s, starved)  # the edge is never met again
+        self.assertGreater(min(feed.before[arrivals:]), 4.0)
+        self.assertEqual(self.timelines[-1]["rate"], 1.0)
+        self.assertEqual(len(self.playback.plays), 1)
+
+    def test_a_steady_source_never_slows(self):
+        for edge in (3.0, 30.0):  # at its target, and behind it
+            with self.subTest(edge=edge):
+                self.live = self.make()
+                sid = self.start()
+                feed = Feed(self, sid, burst=0.0, edge=edge, metered=True).ready()
+                feed.run(120.0)
+                self.assertTrue(all(rate >= 1.0 for rate in self.playback.rates))
+                self.assertTrue(all(state["rate"] >= 1.0 for state in self.timelines))
+
     def test_a_source_bursty_again_after_steady_eases_afresh(self):
         """A raw TS source's measured bursts may stop and come back (2.0.1, L1)."""
         sid = self.ready(segments(0, 3), live_edge=6.0, burst=6.0)
@@ -1308,7 +1345,8 @@ class StallTests(LiveSessionCase):
                 self.assertEqual(len(self.playback.plays), plays)
                 after = self.playback.rates[rates:]
                 self.assertTrue(all(rate <= 1.0 for rate in after), after)  # no catch-up
-                self.assertEqual(self.timelines[-1]["rate"], 1.0)
+                # The stall drained the room before each burst: built again at 0.95x.
+                self.assertEqual(self.timelines[-1]["rate"], 0.95)
                 self.assertLess(feed.starved_s - starved, 0.5)  # no underrun at every burst
                 reported = [state["lag"] for state in self.timelines[timelines + 4 * 7 :]]
                 self.assertLess(max(reported), 7.0)  # not "59 s behind source" at the edge
