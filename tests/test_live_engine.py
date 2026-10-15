@@ -553,15 +553,18 @@ class LiveEngineTests(unittest.TestCase):
             self.assertEqual(source.counts[paths[name]], requests[paths[name]], name)
             self.assertEqual(signals.of("ready", sids[name], start=mark), [], name)
         self.assertEqual(source.counts[paths["live"]], requests[paths["live"]] + 1)
-        # A source that failed got no new failure; the ended buffer is gone with the helper.
+        # Only the live session gets a failure: after `ended` or a final failure only
+        # `sessionClosed` follows, even though the buffer is gone with the helper.
         self.assertEqual(
-            sorted(signals.of("failed", start=mark)),
-            sorted(
-                [
-                    ("failed", sids["live"], "internal", INTERNAL),
-                    ("failed", sids["ended"], "internal", INTERNAL),
-                ]
-            ),
+            signals.of("failed", start=mark), [("failed", sids["live"], "internal", INTERNAL)]
+        )
+        # A second death gives up; the sessions whose input is over hear nothing more.
+        mark = len(signals.events)
+        with self.assertLogs("services.live.engine", "WARNING"):
+            kill(helpers()[0])
+            signals.wait_for(lambda event: event == ("available", False), start=mark)
+        self.assertEqual(
+            signals.of("failed", start=mark), [("failed", sids["live"], "internal", INTERNAL)]
         )
         for sid in sids.values():  # every session is still answered by close
             engine.close_session(sid)

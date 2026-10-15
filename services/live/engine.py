@@ -12,21 +12,25 @@ argv, the receive loop that treats `EOFError` or `BrokenPipeError` from either `
 `recv()` as the helper's exit, the failed flag that keeps a failure the helper reported from
 being reported again, and the join -> terminate -> kill escalation with 0.5 s graces.
 
-Helper death (spec: restart once, then fall back): every session it held gets one
-`sessionFailed(sid, "internal", ...)` (none when that session had already reported a final
-error), its spans are dropped, every buffer directory handed out is removed, and the helper
-is restarted. A helper that sends no `hello` within 30 s counts as dead too, and so does one
-that cannot be started at all. On the new helper's `hello`, the sessions the GUI has not
-closed are reopened with the same arguments: a fresh directory if the old one could not be
-removed, RAM if the disk already failed. Then `available(True)` follows. `is_available()` is
+Helper death (spec: restart once, then fall back): every session it held whose input was
+still running gets one `sessionFailed(sid, "internal", ...)` (none when that session had
+already ended or reported a final error), its spans are dropped, every buffer directory
+handed out is removed, and the helper is restarted. A helper that sends no `hello` within
+30 s counts as dead too, and so does one that cannot be started at all. On the new helper's
+`hello`, the sessions the GUI has not closed are reopened with the same arguments: a fresh
+directory if the old one could not be removed, RAM if the disk already failed. Then `available(True)` follows. `is_available()` is
 False in between, without a signal. A second death emits `available(False)` for the rest of
 the run, and every later open fails at once.
 
 A session whose input is over (it ended, or its source failed for good) is not reopened, so
 a restart never opens a second provider connection behind the GUI's back. It stays known
-until `close_session`; after a death, an ended one still gets the "internal" failure, since
-its buffer is gone. Only the helper's own "internal" failure leaves a session reopenable.
-`sessionFailed(sid, "disk", ...)` is the one non-final failure: the session goes on in RAM.
+until `close_session`; its buffer is gone after a death, but it hears nothing about it.
+
+Contract per sid: after `sessionEnded`, or after a final `sessionFailed` (any kind except
+"disk" and "internal"), only `sessionClosed` follows. "internal" always means a reopen
+follows on `available(True)`, unless `available(False)` comes instead.
+`sessionFailed(sid, "disk", ...)` is the one other non-final failure: the session goes on
+in RAM.
 
 Known limits:
 - Commands are sent with a blocking write, one small command at a time between reads. Only
@@ -152,8 +156,9 @@ class _Supervisor(QThread):
         conn, process = self._conn, self._process
         assert conn is not None and process is not None
         try:
-            # One command at a time, then read: the helper's sends share a lock with its
-            # command loop, so this side must keep reading between its own sends.
+            # One command at a time, then read. The helper's sends go through its outbox
+            # thread and never block its command loop, but keeping up with them bounds the
+            # pipe's backlog.
             self._send_next(conn)
             if conn.poll(0 if not self._commands.empty() else _POLL):
                 self._receive(conn.recv())
@@ -318,7 +323,9 @@ class _Supervisor(QThread):
             elif record.sent:
                 record.sent = False
                 self._relay(("reset", sid))
-                if not record.failed:  # the helper may have reported it already
+                # Not when the helper reported it already or the input is over: an ended
+                # session hears only `sessionClosed`, though its buffer is gone too.
+                if not record.failed and not record.over:
                     record.failed = True
                     self._relay(("error", sid, "internal", _INTERNAL))
 
@@ -335,7 +342,8 @@ class _Supervisor(QThread):
     def _give_up(self) -> None:
         self._dead = True
         for sid, record in self._records.items():
-            if not record.failed:  # it never reached a helper: nothing was reported yet
+            # Nothing was reported yet (it never reached a helper), and its input is not over.
+            if not record.failed and not record.over:
                 self._relay(("error", sid, "internal", _UNAVAILABLE))
         self._records.clear()
         self._relay(("unavailable",))
@@ -414,8 +422,10 @@ class LiveEngine(QObject):
     """Live sessions in the helper process, driven from the GUI thread.
 
     Signals are delivered on the GUI thread. `sessionFailed(sid, kind, message)` carries a
-    fixed message; kind "disk" is a notice (the session continues in RAM), every other
-    kind ends the session's input. `sessionClosed` answers `close_session`.
+    fixed message; kind "disk" is a notice (the session continues in RAM) and
+    "internal" (a helper death) is followed by a reopen on `available(True)`, or by
+    `available(False)`; every other kind ends the session's input. After that or
+    `sessionEnded`, only `sessionClosed` follows. `sessionClosed` answers `close_session`.
     """
 
     available = Signal(bool)
