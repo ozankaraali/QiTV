@@ -371,9 +371,12 @@ class EpgManager:
         return programs
 
     def reindex_programs(self):
-        # Reindex existing epg
-        # Move the stored values to their new keys as they are: a PackedGuide's channels
-        # stay pickled, so this reads none of them (it runs on the GUI thread).
+        """Re-key the guide shown after the XMLTV mapping changed (Settings, GUI thread).
+
+        The stored values move to their new keys as they are: a PackedGuide's channels stay
+        pickled, so this reads none of them. The new guide is swapped in through _publish,
+        as every guide change is.
+        """
         old_epg = self.epg
         if isinstance(old_epg, PackedGuide):
             new_epg: MultiKeyDict = PackedGuide()
@@ -387,7 +390,7 @@ class EpgManager:
                 if new_keys:
                     new_epg[new_keys] = programs
                     break
-        self.epg = new_epg
+        self._publish(self._epg_source, new_epg)
 
     def save_index(self):
         index_file = self._index_file()

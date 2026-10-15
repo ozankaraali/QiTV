@@ -335,6 +335,19 @@ class SavedGuideTests(_GuideCase):
         self.assertEqual([p["title"]["__text"] for p in extra], ["Old"])  # under its new keys
         self.assertEqual(self.titles(manager), ["Old"])
 
+    def test_reindexing_publishes_the_new_guide_like_every_other_change(self):
+        # Every guide change is one swap through _publish (it records the guide's source).
+        self.load(self.manager())
+        manager = self.manager()
+        manager.set_current_epg()
+        source, old = manager._epg_source, manager.epg
+        self.config.xmltv_channel_map[("news.test", "extra.id")] = None
+        with patch.object(manager, "_publish", wraps=manager._publish) as publish:
+            manager.reindex_programs()
+        publish.assert_called_once_with(source, manager.epg)
+        self.assertIsNot(manager.epg, old)
+        self.assertEqual(manager._epg_source, source)
+
     def test_a_guide_saved_by_an_earlier_version_is_read_and_replaced(self):
         guide = MultiKeyDict()
         guide[("news.test", "News")] = [
