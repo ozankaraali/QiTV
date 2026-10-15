@@ -185,9 +185,8 @@ class OpenKeymapTests(unittest.TestCase):
         self.assertEqual(opened(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))
         self.assertEqual(opened(K.Key_MediaNext), (Action.MEDIA_NEXT, ""))
 
-    def test_space_and_f_need_ctrl(self):
+    def test_space_needs_ctrl_and_f_types(self):
         self.assertEqual(opened(K.Key_Space, " ", CTRL), (Action.PLAY_PAUSE, ""))
-        self.assertEqual(opened(K.Key_F, "f", CTRL), (Action.FULLSCREEN, ""))
         self.assertEqual(opened(K.Key_F, "f"), (Action.NAV_TEXT, "f"))
 
 
@@ -292,7 +291,19 @@ class ContextTests(unittest.TestCase):
     def test_library_keys_stay_in_the_library(self):
         self.assertIsNone(closed(K.Key_Slash, "/"))
         self.assertEqual(opened(K.Key_Slash, "/"), (Action.NAV_TEXT, "/"))
-        self.assertEqual(opened(K.Key_F, "f", CTRL), (Action.FULLSCREEN, ""))
+
+    def test_ctrl_f_searches_and_f11_or_ctrl_meta_f_toggle_fullscreen_everywhere(self):
+        # Owner's ruling: Ctrl/⌘+F is the quick search in every context; plain F stays the
+        # player's fullscreen, and F11 and ⌃⌘F (Ctrl+Meta+F) toggle it from anywhere.
+        for context in ("player", "drawer", "guide", "library"):
+            with self.subTest(context=context):
+                search = resolve(K.Key_F.value, CTRL, "f", context=context)
+                self.assertEqual(search, (Action.SEARCH, ""))
+                for key, mods in ((K.Key_F11, NONE), (K.Key_F, CTRL | META)):
+                    self.assertEqual(
+                        resolve(key.value, mods, "", context=context), (Action.FULLSCREEN, "")
+                    )
+        self.assertEqual(closed(K.Key_F, "f"), (Action.FULLSCREEN, ""))
 
     def test_ctrl_d_is_favorite_everywhere(self):
         for context in ("player", "drawer", "guide", "library"):
@@ -340,3 +351,22 @@ class ShortcutTableTests(unittest.TestCase):
                 for key in shortcut_keys(keys):
                     with self.subTest(context=context, key=key, what=what):
                         self.assertIsNotNone(resolve_text(key, context))
+
+    def test_menu_keys_are_never_claimed_by_a_screen(self):
+        # resolve() claims a key before any menu shortcut (ShortcutOverride): a menu row the
+        # keymap also resolves would never reach its menu entry (the Ctrl+F clash).
+        for keys, what in SHORTCUTS["menu"]:
+            for key in shortcut_keys(keys):
+                for context in CONTEXTS:
+                    with self.subTest(key=key, what=what, context=context):
+                        self.assertIsNone(resolve_text(key, context))
+
+    def test_search_and_fullscreen_rows_follow_the_ruling(self):
+        rows = {
+            (context, what): keys
+            for context, entries in SHORTCUTS.items()
+            for keys, what in entries
+        }
+        for context in ("player", "drawer", "guide", "library"):
+            self.assertEqual(rows[(context, "Search")], "Ctrl+F", context)
+        self.assertEqual(rows[("player", "Fullscreen")], "F, F11, Ctrl+Meta+F")

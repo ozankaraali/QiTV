@@ -44,9 +44,10 @@ from tests.fixtures.local_provider import (
 )
 from tests.fixtures.local_xtream import XtreamFixture
 from tests.http_fixtures import LocalSource
+from tests.test_keymap import resolve_text
 from tests.ts_fixtures import make_stream
 from ui.brand import logo_path
-from ui.keymap import SHORTCUTS, resolve, shortcut_keys
+from ui.keymap import SHORTCUTS, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.shortcuts_dialog import ShortcutsDialog, table_rows
@@ -451,6 +452,36 @@ class TVWindowTests(WindowCase):
         self.assertTrue(wait_until(self.window.isFullScreen))
         actions["Channel List"].trigger()
         self.assertTrue(drawer.isVisible())
+
+    def test_ctrl_f_opens_the_search_from_the_player_the_drawer_and_the_guide(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        window, ctrl = self.window, Qt.KeyboardModifier.ControlModifier
+        for setup in (lambda: None, lambda: QTest.keyClick(window, Qt.Key.Key_Escape)):
+            window.back_to_tv()
+            if not drawer.isVisible():
+                drawer.open_drawer()
+            setup()  # the drawer open, then closed (the player)
+            QTest.keyClick(window, Qt.Key.Key_F, ctrl)
+            self.assertTrue(window.library_shown())
+            self.assertEqual(window.library_controller.mode, "search")
+            self.assertFalse(window.isFullScreen())
+        window.back_to_tv()
+        drawer.close_drawer()
+        window.controller.tune_live(window.catalog.items("live", "*")[0])
+        QTest.keyClick(window, Qt.Key.Key_G)
+        self.assertTrue(window.overlays.guide.isVisible())
+        QTest.keyClick(window, Qt.Key.Key_F, ctrl)
+        self.assertTrue(window.library_shown())
+        self.assertFalse(window.overlays.guide.isVisible())
+
+    def test_f11_toggles_fullscreen_in_the_library(self):
+        self.show()
+        self.wait_for_drawer()
+        self.window.open_library("movies")
+        QTest.keyClick(self.window, Qt.Key.Key_F11)
+        self.assertTrue(wait_until(self.window.isFullScreen))
+        self.assertTrue(self.window.library_shown())
 
     # ---- mini player --------------------------------------------------------------------------
 
@@ -1365,11 +1396,7 @@ class HelpAndAboutTests(WindowCase):
                         if context == "menu":
                             self.assertIn(QKeySequence(key).toString(), menu_keys)
                             continue
-                        combo = QKeySequence(key)[0]
-                        code, mods = combo.key().value, combo.keyboardModifiers()
-                        held = mods & _SHORTCUT_HELD
-                        text = chr(code).lower() if not held and 0x20 <= code < 0x7F else ""
-                        self.assertIsNotNone(resolve(code, mods, text, context=context))
+                        self.assertIsNotNone(resolve_text(key, context))
 
     def test_help_lists_the_table(self):
         with mock.patch("ui.tv_window.ShortcutsDialog") as dialog:
@@ -1403,13 +1430,6 @@ class HelpAndAboutTests(WindowCase):
             actions["Report an Issue…"].trigger()
         check.assert_called_once_with(self.config, manual=True)
         self.assertEqual(open_url.call_args[0][0].toString(), ISSUES_URL)
-
-
-_SHORTCUT_HELD = (
-    Qt.KeyboardModifier.ControlModifier
-    | Qt.KeyboardModifier.AltModifier
-    | Qt.KeyboardModifier.MetaModifier
-)
 
 
 class NoProviderTests(WindowCase):

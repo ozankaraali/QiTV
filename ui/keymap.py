@@ -106,10 +106,11 @@ _MEDIA_KEYS = {
     _K.Key_MediaNext.value: Action.MEDIA_NEXT,
     _K.Key_MediaPrevious.value: Action.MEDIA_PREV,
 }
-# Shortcuts that work with the drawer open or closed (and in the guide).
+# Shortcuts that work in every context: Ctrl/⌘+F is the quick search (the owner's ruling),
+# and fullscreen is F11 or ⌃⌘F (Ctrl+Meta+F) anywhere, plain F on the player and in the guide.
 _CTRL_KEYS = {
     _K.Key_Space.value: Action.PLAY_PAUSE,
-    _K.Key_F.value: Action.FULLSCREEN,
+    _K.Key_F.value: Action.SEARCH,
     _K.Key_D.value: Action.FAVORITE,
 }
 # The guide (spec §5.1): the drawer's keys but Backspace, digits (a channel number to jump
@@ -128,15 +129,12 @@ _GUIDE_CHARS = {
     )
 }
 # The Library (spec §5.4): the drawer's keys plus Home/End. It types like the drawer, so "/"
-# and Ctrl+F search and Ctrl+D toggles My list; fullscreen moves to Ctrl+Meta+F (macOS ⌃⌘F)
-# and F11 because Ctrl+F searches here.
+# searches too, and Ctrl+D toggles My list.
 _LIBRARY_KEYS = {
     **_DRAWER_KEYS,
     _K.Key_Home.value: Action.NAV_HOME,
     _K.Key_End.value: Action.NAV_END,
-    _K.Key_F11.value: Action.FULLSCREEN,
 }
-_LIBRARY_CTRL_KEYS = {_K.Key_F.value: Action.SEARCH, _K.Key_D.value: Action.FAVORITE}
 _DIGITS = "0123456789"
 
 
@@ -170,11 +168,8 @@ def resolve(
         return _MEDIA_KEYS[key], ""
     if held == _ALT and key == _K.Key_P.value:
         return Action.MINI_PLAYER, ""
-    if context == "library":
-        if held == _CTRL and key in _LIBRARY_CTRL_KEYS:
-            return _LIBRARY_CTRL_KEYS[key], ""
-        if held == _CTRL | _META and key == _K.Key_F.value:
-            return Action.FULLSCREEN, ""
+    if key == _K.Key_F11.value or (held == _CTRL | _META and key == _K.Key_F.value):
+        return Action.FULLSCREEN, ""
     if held == _CTRL and key in _CTRL_KEYS:
         return _CTRL_KEYS[key], ""
     if context == "library":
@@ -246,7 +241,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("I", "Channel info"),
         ("+, -", "Volume up / down"),
         ("M", "Mute"),
-        ("F", "Fullscreen"),
+        ("F, F11, Ctrl+Meta+F", "Fullscreen"),
+        ("Ctrl+F", "Search"),
         ("Ctrl+D", "Add or remove a favorite channel"),
         ("Alt+P", "Mini player"),
         ("Esc", "Close what is open, leave fullscreen; after a movie, back to the Library"),
@@ -259,6 +255,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("A…Z", "Type to filter"),
         ("Backspace", "Delete a letter of the filter"),
         ("Ctrl+D", "Add or remove a favorite channel"),
+        ("Ctrl+F", "Search"),
+        ("F11, Ctrl+Meta+F", "Fullscreen"),
         ("Esc", "Clear the filter, then close"),
     ],
     "guide": [
@@ -266,6 +264,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Left, Right", "Earlier / later"),
         ("0…9", "Jump to a channel number"),
         ("Return", "Watch the channel"),
+        ("Ctrl+F", "Search"),
+        ("F, F11, Ctrl+Meta+F", "Fullscreen"),
         ("G, Esc", "Close the guide"),
     ],
     "library": [
@@ -273,7 +273,8 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Return", "Play or open"),
         ("Home, End", "First / last title"),
         ("A…Z", "Jump to a letter, or filter the genres"),
-        ("/, Ctrl+F", "Search"),
+        ("Ctrl+F", "Search"),
+        ("/", "Search, or type it in the search"),
         ("Ctrl+D", "Add to or remove from My list"),
         ("F11, Ctrl+Meta+F", "Fullscreen"),
         ("Esc", "Back; from the genres, back to live TV"),

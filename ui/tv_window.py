@@ -715,6 +715,9 @@ class TVWindow(QMainWindow):
             if not handled and action is Action.FULLSCREEN:
                 self.toggle_fullscreen()  # F11, ⌃⌘F: the Library's other keys are its own
             return
+        if action is Action.SEARCH:
+            self.open_search()  # Ctrl/⌘+F: the quick search, from every screen
+            return
         if action is Action.ESCAPE and self._escape_to_library():
             return
         self.controller.handle(action, payload)
