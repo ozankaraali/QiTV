@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional, TypeVar, cast
 from PySide6.QtCore import QObject, Signal
 
 from services import favorites
+from services.catalog import ALL_GROUP_ID
 from services.navigation import item_key
 from services.text_fold import fold
 from services.watch_state import WatchState
@@ -29,6 +30,9 @@ T = TypeVar("T")
 
 CONTINUE, NEW, MY_LIST = "@continue", "@new", "@mylist"
 PINNED_TITLES = {CONTINUE: "Continue", NEW: "New", MY_LIST: "My list"}
+# Provider groups that are no genre: every title ("All"), and the loaders' group for titles
+# without a category ("Unknown Category").
+_NOT_GENRES = frozenset({ALL_GROUP_ID, "None"})
 NEW_LIMIT = 48
 MIN_YEAR = 1800
 MEMO_SIZE = 64
@@ -612,8 +616,11 @@ class LibraryModel(QObject):
         year = _year(item)
         rating = _rating(item)
         genre = str(item.get("genre") or item.get("genres_str") or "")
-        if not genre and self._genre is not None:
-            genre = next((g.title for g in self.genres() if g.id == self._genre), "")
+        current = self._genre
+        # Else the genre the title is listed under; a shelf (Continue, New, My list) or a
+        # group such as "All" names none.
+        if not genre and current not in PINNED_TITLES and current not in _NOT_GENRES:
+            genre = next((g.title for g in self.genres() if g.id == current), "")
         return Details(
             title=_title(item),
             year="" if year is None else str(year),

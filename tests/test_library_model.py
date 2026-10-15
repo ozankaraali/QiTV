@@ -272,6 +272,26 @@ class LibraryModelTests(unittest.TestCase):
         self.assertEqual(model.details(movie(2)).rating, "")
         self.assertIsNone(model.details(movie(2)).resume_ms)
 
+    def test_a_title_without_a_genre_never_takes_a_shelfs_or_all_s_name(self):
+        # "Continue", "New", "My list" and the provider's "All" are no genres (H18).
+        m = movie(1)
+        cfg = make_config()
+        history(cfg, m, "movie")
+        resume(cfg, m, "movie")
+        cat = FakeCatalog(
+            {"movies": [("*", "All", 1), ("1", "Drama", 1), ("None", "Unknown Category", 1)]},
+            {("movies", "*"): [m], ("movies", "1"): [m], ("movies", "None"): [m]},
+        )
+        model, _ = build(cat, cfg)
+        self.assertEqual(model.genre_id, CONTINUE)
+        self.assertEqual(model.details(m).genre, "")
+        for genre_id in ("*", "None"):
+            model.select_genre(genre_id)
+            self.assertEqual(model.details(m).genre, "", genre_id)
+        model.select_genre("1")
+        self.assertEqual(model.details(m).genre, "Drama")  # a real genre still names it
+        self.assertEqual(model.details(movie(2, genre="Crime")).genre, "Crime")
+
     def test_select_genre_requests_and_failures(self):
         cat = FakeCatalog(
             {"movies": [("1", "A", None), ("2", "B", None)]},
