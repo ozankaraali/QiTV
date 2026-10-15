@@ -62,6 +62,48 @@ class TvConfigTests(unittest.TestCase):
             {"x": 50, "y": 60, "width": 1200, "height": 700},
         )
 
+    def test_a_1_14_channel_list_alone_does_not_size_the_tv(self):
+        # 1.14 (MPV beta) removed window_positions.video_player: only its tall list is left.
+        saved = {
+            "window_positions": {"channel_list": {"x": 900, "y": 50, "width": 420, "height": 900}}
+        }
+        config, _ = self._load(saved)
+        self.assertEqual(
+            config.config["window_positions"]["tv_window"], ConfigManager.DEFAULT_TV_WINDOW
+        )
+
+    def test_only_a_large_landscape_old_window_is_reused(self):
+        cases = {
+            "too small": ({"x": 5, "y": 5, "width": 600, "height": 340}, None),
+            "too short": ({"x": 5, "y": 5, "width": 1200, "height": 300}, None),
+            "square": ({"x": 5, "y": 5, "width": 800, "height": 800}, None),
+            "smallest": ({"x": 5, "y": 5, "width": 640, "height": 360}, "same"),
+        }
+        for name, (player, expected) in cases.items():
+            with self.subTest(name):
+                saved = {
+                    "window_positions": {
+                        "channel_list": {"x": 1, "y": 2, "width": 400, "height": 800},
+                        "video_player": player,
+                    }
+                }
+                config, _ = self._load(saved)
+                want = player if expected == "same" else ConfigManager.DEFAULT_TV_WINDOW
+                self.assertEqual(config.config["window_positions"]["tv_window"], want)
+
+    def test_a_landscape_player_wins_over_a_larger_portrait_list(self):
+        saved = {
+            "window_positions": {
+                "channel_list": {"x": 1, "y": 2, "width": 500, "height": 1000},
+                "video_player": {"x": 50, "y": 60, "width": 800, "height": 450},
+            }
+        }
+        config, _ = self._load(saved)
+        self.assertEqual(
+            config.config["window_positions"]["tv_window"],
+            {"x": 50, "y": 60, "width": 800, "height": 450},
+        )
+
     def test_existing_tv_window_is_kept(self):
         tv = {"x": 9, "y": 9, "width": 900, "height": 500}
         config, _ = self._load({"window_positions": {"tv_window": tv}})

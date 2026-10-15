@@ -138,6 +138,8 @@ class ConfigManager:
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
     TV_DEFAULTS_VERSION = 1
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
+    # A 1.x window smaller than this, or not landscape, does not size the TV window.
+    MIN_REUSED_WINDOW = (640, 360)
     DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
     DEFAULT_OPTION_EPG_STB_PERIOD_HOURS = 5
     DEFAULT_OPTION_PLAY_IN_VLC = False
@@ -384,15 +386,24 @@ class ConfigManager:
 
     @staticmethod
     def _initial_tv_window(window_positions):
-        """Place the single TV window where the larger of the two old windows was."""
+        """Place the single TV window where the larger of the two old windows was.
+
+        Only a landscape window of at least MIN_REUSED_WINDOW counts: 1.14 kept just the tall
+        channel list, which would make a portrait TV.
+        """
         keys = ("x", "y", "width", "height")
+        min_width, min_height = ConfigManager.MIN_REUSED_WINDOW
         sized = [
             geometry
             for geometry in (
                 window_positions.get("video_player"),
                 window_positions.get("channel_list"),
             )
-            if isinstance(geometry, dict) and all(isinstance(geometry.get(k), int) for k in keys)
+            if isinstance(geometry, dict)
+            and all(isinstance(geometry.get(k), int) for k in keys)
+            and geometry["width"] >= min_width
+            and geometry["height"] >= min_height
+            and geometry["width"] > geometry["height"]
         ]
         if not sized:
             return dict(ConfigManager.DEFAULT_TV_WINDOW)
