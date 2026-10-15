@@ -1,77 +1,136 @@
+"""Next-season autoplay over the episodes CatalogService builds.
+
+These cases guarded the old player mixin's next-season lookup. Autoplay now follows the
+play context with services.next_episode, over the seasons and episodes CatalogService
+loads and caches, so they run against that pair.
+"""
+
 import os
-from types import SimpleNamespace
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from mixins.playback_mixin import PlaybackMixin
+from PySide6.QtWidgets import QApplication
+
+from services.navigation import episode_key, item_key
+from services.next_episode import NeedEpisodes, NextUp, following
+from tests.test_catalog_service import make_service
+
+SERIES = {"id": "S1", "name": "Show", "category_id": "3"}
 
 
-def _host(provider_type, seasons, current_season, content=None):
-    host = PlaybackMixin.__new__(PlaybackMixin)
-    host.provider_manager = SimpleNamespace(
-        current_provider={
-            "type": provider_type,
-            "username": "u",
-            "password": "p",
-            "url": "http://x",
-        },
-        current_provider_content=content or {},
+def stb_service(*seasons):
+    """An STB catalog that lists `seasons` (each with its episode numbers in "series")."""
+    service, _, factory, _ = make_service(
+        {"name": "S", "type": "STB", "url": "http://portal.test/c/"}
     )
-    host.current_series = {"id": "S1", "name": "Show"}
-    host.current_season = current_season
-    host._current_seasons_list = seasons
-    host._current_episode_list = []
-    host._current_episode_index = -1
-    return host
+    factory.results["stb_list"] = {"result": {"items": list(seasons)}}
+    service.request_seasons(SERIES)
+    return service
+
+
+def load(service, season):
+    service.request_episodes(SERIES, season)
+    return service.episodes(SERIES, season)
+
+
+def after(service, season, episode):
+    return following(
+        "episode",
+        {"series": SERIES, "season": season},
+        episode,
+        seasons=service.seasons,
+        episodes=service.episodes,
+        key=item_key,
+        episode_key=episode_key,
+    )
 
 
 class NextSeasonAutoplayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
     def test_stb_next_season_starts_at_its_first_episode(self):
-        s1 = {"id": "1", "series": [1, 2], "cmd": "CMD1"}
-        s2 = {"id": "2", "series": [1, 2, 3], "cmd": "CMD2"}
-        host = _host("STB", [s1, s2], s1)
+        service = stb_service(
+            {"id": "S1:1", "name": "Season 1", "series": [1, 2], "cmd": "CMD1"},
+            {"id": "S1:2", "name": "Season 2", "series": [1, 2, 3], "cmd": "CMD2"},
+        )
+        s1, s2 = service.seasons(SERIES)
+        last = load(service, s1)[-1]
+        # The next season is not loaded yet: autoplay asks for its episodes first.
+        self.assertEqual(after(service, s1, last), NeedEpisodes(s2))
+        self.assertEqual(len(load(service, s2)), 3)
 
-        episode = host._get_first_episode_of_next_season()
+        result = after(service, s1, last)
 
-        self.assertIsNotNone(episode)
-        self.assertEqual(episode["series"], 1)
-        self.assertEqual(episode["cmd"], "CMD2")
-        self.assertEqual(episode["number"], "1")
-        self.assertIs(host.current_season, s2)
-        self.assertEqual(len(host._current_episode_list), 3)
-        self.assertEqual(host._current_episode_index, 0)
+        self.assertIsInstance(result, NextUp)
+        self.assertIs(result.season, s2)
+        self.assertEqual(result.item["series"], 1)
+        self.assertEqual(result.item["cmd"], "CMD2")
+        self.assertEqual(result.item["number"], "1")
 
     def test_stb_episode_numbers_as_strings(self):
-        s1 = {"id": "1", "series": ["1"], "cmd": "CMD1"}
-        s2 = {"id": "2", "series": ["4", "5"], "cmd": "CMD2"}
-        host = _host("STB", [s1, s2], s1)
+        service = stb_service(
+            {"id": "S1:1", "series": ["1"], "cmd": "CMD1"},
+            {"id": "S1:4", "series": ["4", "5"], "cmd": "CMD2"},
+        )
+        s1, s2 = service.seasons(SERIES)
+        first = load(service, s1)[0]
+        self.assertEqual(len(load(service, s2)), 2)
 
-        episode = host._get_first_episode_of_next_season()
+        result = after(service, s1, first)
 
-        self.assertEqual(episode["series"], 4)
-        self.assertEqual(len(host._current_episode_list), 2)
+        self.assertEqual(result.item["series"], "4")
+        self.assertEqual(result.item["number"], "4")
+
+    def test_odd_episode_numbers_never_crash(self):
+        # The old list builder converted numbers with int() ("²" is a digit but not a
+        # decimal). The catalog keeps the portal's values, so nothing is converted.
+        service = stb_service({"id": "S1:1", "series": ["1", " 2 ", "²", 3], "cmd": "C"})
+        [season] = service.seasons(SERIES)
+        episodes = load(service, season)
+        self.assertEqual([e["series"] for e in episodes], ["1", " 2 ", "²", 3])
+        self.assertEqual(after(service, season, episodes[2]), NextUp(season, episodes[3]))
+        self.assertIsNone(after(service, season, episodes[3]))
 
     def test_last_season_has_no_next_episode(self):
-        s1 = {"id": "1", "series": [1], "cmd": "CMD1"}
-        host = _host("STB", [s1], s1)
-        self.assertIsNone(host._get_first_episode_of_next_season())
+        service = stb_service({"id": "S1:1", "series": [1], "cmd": "CMD1"})
+        [season] = service.seasons(SERIES)
+        self.assertIsNone(after(service, season, load(service, season)[-1]))
 
     def test_xtream_next_season_still_works(self):
-        s1 = {"id": "1", "episodes": [{"id": "e0", "episode_num": 1}]}
-        s2 = {
-            "id": "2",
-            "episodes": [
-                {"id": "e1", "episode_num": 1, "title": "Pilot", "container_extension": "mkv"}
-            ],
+        service, _, factory, _ = make_service(
+            {"name": "X", "type": "XTREAM", "url": "h:1", "username": "u", "password": "p"}
+        )
+        factory.results["xtream_series"] = {
+            "result": {
+                "resolved_base": "http://x",
+                "seasons": [
+                    {"id": "1", "name": "Season 1", "episodes": [{"id": "e0", "episode_num": 1}]},
+                    {
+                        "id": "2",
+                        "name": "Season 2",
+                        "episodes": [
+                            {
+                                "id": "e1",
+                                "episode_num": 1,
+                                "title": "Pilot",
+                                "container_extension": "mkv",
+                            }
+                        ],
+                    },
+                ],
+            }
         }
-        content = {"series": {"resolved_base": "http://x"}}
-        host = _host("XTREAM", [s1, s2], s1, content)
+        service.request_seasons(SERIES)
+        s1, s2 = service.seasons(SERIES)
 
-        episode = host._get_first_episode_of_next_season()
+        result = after(service, s1, service.episodes(SERIES, s1)[0])
 
-        self.assertEqual(episode["cmd"], "http://x/series/u/p/e1.mkv")
-        self.assertEqual(episode["name"], "Pilot")
+        self.assertIs(result.season, s2)
+        self.assertEqual(result.item["cmd"], "http://x/series/u/p/e1.mkv")
+        self.assertEqual(result.item["name"], "Pilot")
 
 
 if __name__ == "__main__":

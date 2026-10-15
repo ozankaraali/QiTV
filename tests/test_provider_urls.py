@@ -1,17 +1,28 @@
+"""Provider HTTPS preferences and export URL shapes.
+
+These cases guarded the old UI mixins. The behaviour now lives in the services the TV
+window uses: CatalogService (links, episode listings), the link worker, the exporter.
+"""
+
 import os
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from mixins.content_loading_mixin import ContentLoadingMixin
-from mixins.export_mixin import ExportMixin
-from mixins.playback_mixin import PlaybackMixin
+from PySide6.QtWidgets import QApplication
+
 from services.export import save_stb_content
+from services.exporter import ExportKind, ExportWorker
 from services.provider_api import provider_prefers_https, stb_portal_base
+from tests.test_catalog_service import make_service
+from workers import LinkCreatorWorker
+
+ITEMS = [{"name": "One", "cmd": "ffmpeg http://localhost/ch/123_"}]
 
 
 class _Response:
@@ -24,16 +35,14 @@ class _Response:
     def json(self):
         return self._body
 
+    def raise_for_status(self):
+        pass
 
-def _host(cls, provider, global_https):
-    host = cls.__new__(cls)
-    host.provider_manager = SimpleNamespace(
-        current_provider=provider, headers={}, current_provider_content={}
-    )
-    host.config_manager = SimpleNamespace(prefer_https=global_https, ssl_verify=True)
-    host.content_type = "itv"
-    host.sanitize_url = lambda url: url
-    return host
+
+def _stb_service(provider, global_https):
+    service, _, factory, _ = make_service({"name": "S", "type": "STB", **provider})
+    service.config.prefer_https = global_https
+    return service, factory
 
 
 class ProviderPrefersHttpsTests(unittest.TestCase):
@@ -47,17 +56,28 @@ class ProviderPrefersHttpsTests(unittest.TestCase):
 
 
 class CreateLinkHttpsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
     def _created_url(self, provider, global_https):
-        host = _host(PlaybackMixin, provider, global_https)
-        calls = []
+        """The create_link request of an STB channel, as CatalogService asks for it."""
+        service, factory = _stb_service(provider, global_https)
+        factory.results["link"] = {"result": {"link": "http://stream.test/1.ts"}}
+        service.request_link({"cmd": "ffmpeg http://localhost/ch/1_"}, section="live")
+        name, _, kwargs = factory.calls[-1]
+        self.assertEqual(name, "link")
+        worker = LinkCreatorWorker(**kwargs)
+        calls, links = [], []
+        worker.finished.connect(links.append)
 
         def fake_get(url, **kwargs):
             calls.append(url)
             return _Response({"js": {"cmd": "ffmpeg http://stream.test/1.ts"}})
 
-        with patch("mixins.playback_mixin.requests.get", side_effect=fake_get):
-            link = host.create_link({"cmd": "ffmpeg http://localhost/ch/1_"})
-        self.assertEqual(link, "http://stream.test/1.ts")
+        with patch("workers.requests.get", side_effect=fake_get):
+            worker.run()
+        self.assertEqual(links, [{"link": "http://stream.test/1.ts"}])
         return calls[0]
 
     def test_provider_https_preference_is_used(self):
@@ -70,46 +90,50 @@ class CreateLinkHttpsTests(unittest.TestCase):
 
 
 class StbSeriesFetchHttpsTests(unittest.TestCase):
-    def test_sync_series_listing_uses_provider_preference(self):
-        provider = {"url": "http://portal.test/c/", "prefer_https": True}
-        host = _host(ExportMixin, provider, False)
+    def test_complete_series_listing_uses_provider_preference(self):
+        provider = {"type": "STB", "url": "http://portal.test/c/", "prefer_https": True}
+        worker = ExportWorker(
+            ExportKind.COMPLETE_SERIES,
+            provider,
+            {},
+            "series",
+            os.devnull,
+            verify_ssl=True,
+            prefer_https=False,
+            headers={},
+            cancel=threading.Event(),
+        )
         calls = []
 
         def fake_get(url, **kwargs):
             calls.append(url)
             return _Response({"js": {"data": []}})
 
-        with patch("mixins.export_mixin.requests.get", side_effect=fake_get):
-            host._fetch_series_list_sync({"category_id": "1", "id": "9"}, 0, "added", "seasons")
+        session = SimpleNamespace(get=fake_get, close=lambda: None)
+        worker._fetch(session, {"category_id": "1", "id": "9"}, 0, "name")
         self.assertTrue(calls[0].startswith("https://portal.test/server/load.php"), calls[0])
 
 
 class StbEpisodeLoadingHttpsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
     def test_stb_episodes_use_provider_preference(self):
-        provider = {"type": "STB", "url": "http://portal.test/c/", "prefer_https": True}
-        host = _host(ContentLoadingMixin, provider, False)
-        host.current_category = {"id": "1"}
-        host.current_series = {"id": "9"}
-        host.cancel_content_loading = lambda: None
-        host._start_content_worker = lambda *args, **kwargs: None
-        host.cancel_button = SimpleNamespace(setText=lambda text: None)
-        captured = {}
-
-        def fake_loader(**kwargs):
-            captured.update(kwargs)
-            return object()
-
-        with patch("mixins.content_loading_mixin.ContentLoader", side_effect=fake_loader):
-            host.load_season_episodes({"id": "2"})
-        self.assertEqual(captured["url"], "https://portal.test/server/load.php")
+        provider = {"url": "http://portal.test/c/", "prefer_https": True}
+        service, factory = _stb_service(provider, False)
+        factory.results["stb_list"] = {"result": {"items": []}}
+        service.request_episodes({"id": "9", "category_id": "1"}, {"id": "2"})
+        name, _, kwargs = factory.calls[-1]
+        self.assertEqual(name, "stb_list")
+        self.assertEqual(kwargs["url"], "https://portal.test/server/load.php")
 
 
 class StbExportBaseTests(unittest.TestCase):
     def test_raw_portal_url_is_reduced_to_scheme_and_host(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "out.m3u"
-            items = [{"name": "One", "cmd": "ffmpeg http://localhost/ch/123_"}]
-            save_stb_content("http://portal.test/c/", items, "00:1A:79:00:00:01", str(path))
+            save_stb_content("http://portal.test/c/", ITEMS, "00:1A:79:00:00:01", str(path))
             text = path.read_text(encoding="utf-8")
         self.assertIn(
             "http://portal.test/play/live.php?mac=00:1A:79:00:00:01&stream=123&extension=m3u8",
@@ -140,29 +164,30 @@ class ProviderCacheIdentityTests(unittest.TestCase):
 
 class ExportLinkSchemeTests(unittest.TestCase):
     def test_exported_links_keep_provider_scheme_despite_prefer_https(self):
-        host = _host(ExportMixin, {"url": "http://portal.test/c/", "mac": "m"}, True)
-        base = host._export_link_base(host.provider_manager.current_provider)
-        self.assertEqual(base, "http://portal.test")
+        provider = {"type": "STB", "url": "http://portal.test/c/", "mac": "m", "prefer_https": True}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "out.m3u"
-            items = [{"name": "One", "cmd": "ffmpeg http://localhost/ch/123_"}]
-            save_stb_content(base, items, "m", str(path))
+            worker = ExportWorker(
+                ExportKind.CACHED,
+                provider,
+                {"itv": list(ITEMS)},
+                "live",
+                str(path),
+                verify_ssl=True,
+                prefer_https=True,
+                headers={},
+                cancel=threading.Event(),
+            )
+            written = []
+            worker.finished.connect(written.append)
+            worker.run()
             text = path.read_text(encoding="utf-8")
+        self.assertEqual(written, [1])
         self.assertIn("http://portal.test/play/live.php", text)
         self.assertNotIn("https://", text)
 
     def test_fetch_base_still_honours_prefer_https(self):
         self.assertEqual(stb_portal_base("http://portal.test/c/", True), "https://portal.test")
-
-
-class StbEpisodeStringTests(unittest.TestCase):
-    def test_non_decimal_digit_strings_are_skipped_not_crashing(self):
-        host = _host(PlaybackMixin, {"type": "STB"}, False)
-        built = []
-        host._build_stb_episode_item = lambda num, season: built.append(num) or {"n": num}
-        items = host._build_episode_list_from_season({"series": ["1", " 2 ", "\u00b2", 3]})
-        self.assertEqual(built, [1, 2, 3])
-        self.assertEqual(len(items), 3)
 
 
 if __name__ == "__main__":

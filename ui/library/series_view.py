@@ -587,7 +587,9 @@ class SeriesView(QWidget):
 
     # ---- painting ------------------------------------------------------------------------
     def season_label(self, season: dict, idx: int) -> str:
-        name = str(season.get("name") or season.get("title") or "").strip()
+        # o_name: the provider's own name; normalize_seasons prefixes `name` with the series.
+        name = str(season.get("o_name") or season.get("name") or season.get("title") or "")
+        name = name.strip()
         return name or f"Season {season.get('season_number') or idx + 1}"
 
     def _wrap(self, text: str, fm: QFontMetrics, width: int, lines: int) -> list[str]:

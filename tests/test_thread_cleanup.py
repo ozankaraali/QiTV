@@ -78,7 +78,7 @@ class ThreadCleanupTests(unittest.TestCase):
 
 def run_child(scenario, playlist):
     # Keep QApplication, production imports, and crash-prone threads out of the
-    # unittest runner. No ChannelList, playback backend, or user config is needed.
+    # unittest runner. No window, playback backend, or user config is needed.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from PySide6.QtCore import QEventLoop, QObject, Qt, QThread, QTimer, Slot
     from PySide6.QtWidgets import QApplication
@@ -198,56 +198,26 @@ def run_child(scenario, playlist):
         wait_until(lambda: worker_ref() is None, "worker was not released after the join")
         case.assertEqual(worker_destroyed_on, [threading.get_ident()])
     elif scenario == "content-loading":
-        from mixins.content_loading_mixin import ContentLoadingMixin
+        from services.catalog import ALL_GROUP_ID, CatalogService, WorkerFactory
         from workers import M3ULoaderWorker
 
-        class Consumer(QObject, ContentLoadingMixin):
-            def __init__(self):
-                super().__init__()
-                self._bg_jobs = []
-                self.content_loader = None
-                self.config_manager = SimpleNamespace(ssl_verify=True, prefer_https=False)
-                self.provider_manager = SimpleNamespace(current_provider={})
-                self.loads = 0
-                self.names = ()
-                self.results_on_gui = True
-                self.errors = []
+        class Providers:
+            """The ProviderManager surface CatalogService reads; the playlist is never fresh."""
 
-            # Only view/render hooks are replaced; worker creation, signal
-            # delivery, cancellation, and job retirement are production code.
-            def cancel_content_render(self):
+            def __init__(self):
+                self.providers = [{"name": "Local", "type": "M3UPLAYLIST", "url": playlist}]
+                self.current_provider = self.providers[0]
+                self.current_provider_content = {}
+                self.headers = {}
+
+            def is_content_stale(self, content_type):
+                return True
+
+            def mark_content_fresh(self, content_type):
                 pass
 
-            def update_ui_on_loading(self, loading):
-                self.loading = loading
-
-            def statusBar(self):
-                return SimpleNamespace(
-                    showMessage=lambda message, duration: self.errors.append(message)
-                )
-
-            def _on_catalog_loaded(self, payload):
-                self.loads += 1
-                self.names = tuple(item["name"] for item in payload["contents"])
-                self.results_on_gui &= QThread.currentThread() == app.thread()
-
-        consumer = Consumer()
-        for number in range(512):
-            consumer.load_m3u_playlist(playlist)
-            wait_until(
-                lambda: consumer.loads == number + 1 and not has_pending_threads(),
-                f"local playlist load {number + 1} did not complete",
-            )
-        case.assertEqual(consumer.names, ("First channel", "Second channel"))
-        case.assertTrue(consumer.results_on_gui)
-        case.assertFalse(consumer.loading)
-        case.assertEqual(consumer.errors, [])
-
-        # Close the consumer after its real result arrives but before native
-        # cleanup can finish. The consumer's job list must not be the sole owner.
-        gate = TeardownGate()
-        destroyed = threading.Event()
-        consumer_destroyed = threading.Event()
+            def save_provider(self):
+                pass
 
         class GatedM3ULoaderWorker(M3ULoaderWorker):
             def run(self):
@@ -255,15 +225,62 @@ def run_child(scenario, playlist):
                 QThread.currentThread().finished.connect(gate.block, Qt.DirectConnection)
                 super().run()
 
-        worker = GatedM3ULoaderWorker(playlist)
+        class Factory(WorkerFactory):
+            """The production factory; the last load's worker holds its thread's teardown."""
+
+            gated = False
+            last = None
+
+            def m3u(self, url, verify_ssl, prefer_https):
+                if not self.gated:
+                    return super().m3u(url, verify_ssl, prefer_https)
+                self.last = GatedM3ULoaderWorker(url, verify_ssl=verify_ssl)
+                return self.last
+
+        config = SimpleNamespace(
+            selected_provider_name="Local", prefer_https=False, ssl_verify=True, channel_epg=False
+        )
+        epg = SimpleNamespace(get_programs_for_channel=lambda channel, start, limit: [])
+        factory = Factory()
+        # Only the provider and EPG stand-ins are fakes: the worker factory, the JobRunner
+        # threads, signal delivery and job retirement are production code.
+        consumer = CatalogService(config, Providers(), epg, factory=factory)
+        loads, names, errors, on_gui = [], [()], [], []
+
+        def loaded(section):
+            loads.append(section)
+            names[0] = tuple(item["name"] for item in consumer.items(section, ALL_GROUP_ID))
+            on_gui.append(QThread.currentThread() == app.thread())
+
+        consumer.sectionReady.connect(loaded)
+        consumer.sectionFailed.connect(lambda section, message: errors.append(message))
+        for number in range(512):
+            consumer.request_section("live")
+            wait_until(
+                lambda: len(loads) == number + 1 and not has_pending_threads(),
+                f"local playlist load {number + 1} did not complete",
+            )
+        case.assertEqual(names[0], ("First channel", "Second channel"))
+        case.assertTrue(all(on_gui))
+        case.assertFalse(consumer.is_loading())
+        case.assertEqual(errors, [])
+
+        # Destroy the consumer (and its JobRunner) after its real result arrives but before
+        # native cleanup can finish. Its job list must not be the sole owner.
+        gate = TeardownGate()
+        destroyed = threading.Event()
+        consumer_destroyed = threading.Event()
+        factory.gated = True
         consumer.destroyed.connect(lambda *_: consumer_destroyed.set())
-        consumer._start_content_worker(worker, consumer._on_catalog_loaded)
+        consumer.request_section("live")
+        worker = factory.last
+        factory.last = None
         thread = worker.thread()
         thread.destroyed.connect(lambda *_: destroyed.set())
         thread_ref, worker_ref = weakref.ref(thread), weakref.ref(worker)
         try:
             wait_until(
-                lambda: gate.entered.is_set() and consumer.loads == 513,
+                lambda: gate.entered.is_set() and len(loads) == 513,
                 "last playlist result did not reach deferred worker deletion",
             )
             consumer.deleteLater()

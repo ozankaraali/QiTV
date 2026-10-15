@@ -17,8 +17,9 @@ class WindowConfigMigrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_returning_from_mpv_restores_player_without_resetting_saved_state(self):
-        # The MPV build removes only the retired embedded player's geometry.
+    def test_a_1x_config_gains_the_tv_window_without_resetting_saved_state(self):
+        # A 1.x config names only the old windows. A missing window entry once kept the
+        # player from starting (KeyError in 1.13.7); the TV window's entry is added instead.
         channel_geometry = {
             "x": 120,
             "y": 140,
@@ -42,23 +43,23 @@ class WindowConfigMigrationTests(unittest.TestCase):
                 patch.object(ConfigManager, "_migrate_old_config"),
             ):
                 config = ConfigManager()
-                player = QMainWindow()
+                window = QMainWindow()
                 restored = QMainWindow()
                 try:
-                    # This is the call that prevented VideoPlayer from starting.
-                    config.apply_window_settings("video_player", player)
-                    player.setGeometry(80, 100, 640, 360)
-                    config.save_window_settings(player, "video_player")
+                    config.apply_window_settings("tv_window", window)
+                    window.setGeometry(80, 100, 640, 360)
+                    config.save_window_settings(window, "tv_window")
                     reloaded = ConfigManager()
-                    reloaded.apply_window_settings("video_player", restored)
-                    self.assertEqual(restored.geometry(), player.geometry())
+                    reloaded.apply_window_settings("tv_window", restored)
+                    self.assertEqual(restored.geometry(), window.geometry())
+                    # Kept as it was: going back to 1.x finds its windows where they were.
                     self.assertEqual(
                         reloaded.config["window_positions"]["channel_list"], channel_geometry
                     )
                     for key in ("selected_provider_name", "favorites", "playback_positions"):
                         self.assertEqual(reloaded.config[key], saved_state[key])
                 finally:
-                    player.deleteLater()
+                    window.deleteLater()
                     restored.deleteLater()
                     self.app.processEvents()
 
