@@ -1097,40 +1097,43 @@ high.m3u8
         self.assertEqual(parts[-1], self.video)
         self.assertEqual(server.counts["/live.ts"], drops + 1)
 
-    def test_close_delimited_eof_is_a_disconnect_but_delimited_bodies_are_finite(self):
+    def test_only_a_declared_length_ends_a_raw_ts_body(self):
+        # A live body that ends without reaching a Content-Length is a disconnect, also when
+        # it ends cleanly: with a FIN, or with a chunked body's terminating chunk (nginx when
+        # the channel's upstream restarts). Both reconnect; only a sized body is finite.
         half = len(self.video) // 2 // 188 * 188
 
-        def close_delimited(_request, count):
-            if count == 1:
+        def first_half(request):
+            request.wfile.write(self.video[:half])  # then a clean FIN
 
-                def first(request):
-                    request.wfile.write(self.video[:half])  # then a clean FIN
+        def chunked_half(request):
+            for start in range(0, half, 4096):
+                block = self.video[start : min(start + 4096, half)]
+                request.wfile.write(b"%x\r\n%s\r\n" % (len(block), block))
+            request.wfile.write(b"0\r\n\r\n")
 
-                return 200, {}, first
-            return 200, {}, self.video[half:]
+        def ends(body, headers):
+            def route(_request, count):
+                if count == 1:
+                    return 200, headers, body
+                return 200, {}, self.video[half:]  # sized: the end of the input
 
-        def chunked(_request, _count):
-            def body(request):
-                for start in range(0, len(self.video), 4096):
-                    block = self.video[start : start + 4096]
-                    request.wfile.write(b"%x\r\n%s\r\n" % (len(block), block))
-                request.wfile.write(b"0\r\n\r\n")
-
-            return 200, {"Transfer-Encoding": "chunked"}, body
+            return route
 
         server = self.server(
             {
-                "/fin.ts": close_delimited,
-                "/chunked.ts": chunked,
+                "/fin.ts": ends(first_half, {}),
+                "/chunked.ts": ends(chunked_half, {"Transfer-Encoding": "chunked"}),
                 "/sized.ts": (200, {}, self.video),
             }
         )
         with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
-            parts = media(server.url + "/fin.ts")
-            self.assertEqual(parts, [self.video[:half], Discontinuity(), self.video[half:]])
-            self.assertEqual(media(server.url + "/chunked.ts"), [self.video])
+            for path in ("/fin.ts", "/chunked.ts"):
+                with self.subTest(path):
+                    parts = media(server.url + path)
+                    self.assertEqual(parts, [self.video[:half], Discontinuity(), self.video[half:]])
             self.assertEqual(media(server.url + "/sized.ts"), [self.video])
-        self.assertEqual(server.counts, {"/fin.ts": 2, "/chunked.ts": 1, "/sized.ts": 1})
+        self.assertEqual(server.counts, {"/fin.ts": 2, "/chunked.ts": 2, "/sized.ts": 1})
 
     def test_http_errors_carry_their_status_and_429_is_never_retried(self):
         def limited(_request, _count):

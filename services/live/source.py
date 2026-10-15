@@ -202,11 +202,11 @@ def _status(error: requests.exceptions.HTTPError) -> int | None:
     return error.response.status_code if error.response is not None else None
 
 
-def _delimited(response: Any) -> bool:
-    """Whether the body has a declared end (a Content-Length or chunked framing)."""
+def _sized(response: Any) -> bool:
+    """Whether the body declared its length: only then is its end the end of the input."""
     headers = response.headers  # case-insensitive names
     framing = str(headers.get("Transfer-Encoding", "")).lower()
-    return "Content-Length" in headers or "chunked" in framing
+    return "Content-Length" in headers and "chunked" not in framing  # chunked overrides it
 
 
 def _close_redirect_body(response, **_kwargs):
@@ -737,7 +737,11 @@ def _guarded(
 
 
 class TsSource:
-    """Raw MPEG-TS from one HTTP(S) response; reconnects after the connection breaks."""
+    """Raw MPEG-TS from one HTTP(S) response; reconnects after the connection breaks.
+
+    Only a body with a Content-Length ends the input when complete; every other end
+    reconnects while the backoff schedule allows.
+    """
 
     def __init__(self, http: _Http, url: str, response: Any, prefix: bytes) -> None:
         self.user_agent = http.user_agent
@@ -778,9 +782,10 @@ class TsSource:
                     ):
                         backoff.reset()
                     yield block
-                if _delimited(response):
+                if _sized(response):
                     return  # a finite body reached its declared end
-                # A close-delimited body has no declared end: its EOF is a disconnect.
+                # Any other end of a live body is a disconnect, also a clean one: a FIN, or
+                # a chunked body's last chunk (nginx when the channel's upstream restarts).
                 log.info("The channel closed its stream; reconnecting.")
             except _ReadError as error:
                 log.info("The channel connection broke off (%s); reconnecting.", error.kind)
