@@ -295,7 +295,8 @@ class CatalogService(QObject):
     Provider setups and EPG loads mutate the shared ProviderManager/EpgManager, so they
     run one at a time in a small serial queue. While a setup is running or queued, catalog
     and link requests fail fast instead of reading half-switched provider state. Catalog
-    network jobs run at most MAX_CATALOG_JOBS at a time; the rest wait newest-first.
+    network jobs run at most MAX_CATALOG_JOBS at a time for the current provider; the rest
+    wait newest-first.
     """
 
     providerReady = Signal(str)
@@ -336,7 +337,6 @@ class CatalogService(QObject):
         self._pending_setup: Optional[tuple[Optional[str], bool]] = None
         self._pending_epg: Optional[bool] = None  # a queued EPG load (its force flag)
         # Catalog network jobs: keys are (generation, kind, ...) for queued and running jobs.
-        self._catalog_running = 0
         self._catalog_queue: list[_CatalogRequest] = []
         self._catalog_inflight: set[tuple] = set()
         self._catalog_handlers: dict[str, tuple[Callable, Callable]] = {
@@ -919,11 +919,10 @@ class CatalogService(QObject):
         while (
             not self._closed
             and self._catalog_queue
-            and self._catalog_running < MAX_CATALOG_JOBS
+            and self._running_catalog_jobs() < MAX_CATALOG_JOBS
             and not self._setup_active()
         ):
             request = self._catalog_queue.pop()  # newest first: the user's latest focus
-            self._catalog_running += 1
             self._catalog_inflight.add(request.key)
             job = _Job(
                 request.kind,
@@ -936,9 +935,16 @@ class CatalogService(QObject):
                 request.build(), self._on_catalog_loaded, self._on_catalog_error, context=job
             )
 
+    def _running_catalog_jobs(self) -> int:
+        """Catalog jobs in flight for the current generation.
+
+        Jobs of an earlier generation (the previous provider, or before this one's setup)
+        finish on their own and hold none of the current provider's slots.
+        """
+        return sum(1 for key in self._catalog_inflight if key[0] == self._generation)
+
     def _finish_catalog_job(self, job: _Job) -> bool:
         """Free the job's slot; True when its result still belongs to the current provider."""
-        self._catalog_running -= 1
         self._catalog_inflight.discard(job.key)
         return self._current(job)
 

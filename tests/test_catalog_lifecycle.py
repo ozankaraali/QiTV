@@ -348,6 +348,27 @@ class CatalogQueueTests(unittest.TestCase):
         self.assertEqual(groups, ["1", "2"])
         self.assertEqual(providers.current_provider_content["vod"]["contents"], {})
 
+    def test_previous_provider_jobs_hold_no_slots_of_the_new_provider(self):
+        runner = ManualRunner()
+        service, _, factory = self._stb_movies(runner)
+        factory.results["provider_setup"] = {"result": {"name": "S"}}
+        service.request_group("movies", "1")
+        service.request_group("movies", "2")  # the previous provider's crawls fill the cap
+        service.select_provider()
+        runner.complete(2)  # setup: ready (its EPG load starts)
+        for group in "345":
+            service.request_group("movies", group)
+
+        def started():
+            return [c[2]["category_id"] for c in factory.calls if c[0] == "stb_list"]
+
+        self.assertEqual(started(), ["1", "2", "3", "4"])  # the new provider's first two
+        runner.complete(0)  # an old job finishing frees no slot of the new provider
+        runner.complete(1)
+        self.assertEqual(started(), ["1", "2", "3", "4"])
+        runner.complete(job_indexes(runner, "group")[2])  # group 3 finishes: 5 runs
+        self.assertEqual(started(), ["1", "2", "3", "4", "5"])
+
     def test_is_loading_while_a_setup_runs_or_waits(self):
         runner = ManualRunner()
         service, _, factory = self._stb_movies(runner)
