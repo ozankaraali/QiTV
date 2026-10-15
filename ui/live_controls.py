@@ -5,7 +5,10 @@ transport's time-shift controls (seek, speed, Go live, ⏮ to the programme star
 programme ticks); and LiveSession's reports: its mode and timeline, its notices (time-shift
 unavailable, once per channel and run) and its failures. An STB channel that fails gets a
 fresh link once per tune (its play token may have expired) before the error shows; a
-refusal for the provider's connection limit is never retried and says so.
+refusal for the provider's connection limit is never retried and says so. A live channel
+played directly whose stream ends (an on-demand restream may show a placeholder and end)
+opens again in the same player, so in the same budget slot, twice per tune at most, after
+RECONNECT_MS: "Reconnecting…", and only then "The stream ended".
 
 TVController owns the target and the LiveTuner and hands this unit what it needs. With
 picture in picture it is the large picture's: a swap hands it the other player's tuner, live
@@ -20,7 +23,7 @@ import logging
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QObject, SignalInstance
+from PySide6.QtCore import QObject, QTimer, SignalInstance
 from PySide6.QtGui import QPixmap
 
 from services.epg_view import Programme
@@ -38,7 +41,11 @@ TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
 LIMITED_TEXT = "Your provider limits concurrent streams"  # when its limit is not known
 REFUSED_TEXT = "The provider refused the stream — it may"  # a plain 403: maybe the limit
 ERROR_MS = 6000
+RECONNECT_MS = (1000, 3000)  # the back-off before each reopen of a live stream that ended
+RECONNECTING_TEXT = "Reconnecting…"
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
+# Never opened again: on-demand content, and a file listed as a channel ends for good.
+_NOT_LIVE = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
 
 
 def _streams(count: int) -> str:
@@ -92,6 +99,10 @@ class LiveControls(QObject):
         self._unavailable_noticed: set[tuple[str, str]] = set()  # (provider, channel) this run
         self._held_notice: Optional[tuple[str, str]] = None  # shown once the channel plays
         self._wired = False
+        self._reconnects = 0  # reopens of the current tune's ended stream so far
+        self._reopen_due: Optional[tuple[Target, str, PlayKind]] = None  # after the back-off
+        self._reopen_timer = QTimer(self, singleShot=True)
+        self._reopen_timer.timeout.connect(self._reopen)
 
     def wire(self) -> None:
         transport = self._transport
@@ -133,9 +144,11 @@ class LiveControls(QObject):
     # ---- tuning -------------------------------------------------------------------------------
 
     def new_target(self) -> None:
-        """A new target plays: the old channel's ticks and held notice are gone."""
+        """A new target plays: the old channel's ticks, held notice and reopen are gone."""
         self._held_notice = None
         self._ticks = []
+        self._reconnects = 0
+        self._cancel_reopen()
 
     def through_pipeline(self, url: str, kind: PlayKind) -> bool:
         """Whether a live link plays through the time-shift pipeline.
@@ -184,6 +197,7 @@ class LiveControls(QObject):
         return current is not None and current.live and self._tuner.pipeline()
 
     def stop_tune(self) -> None:
+        self._cancel_reopen()
         self._tuner.stop()
         self._ticks = []
 
@@ -196,6 +210,47 @@ class LiveControls(QObject):
             and self.catalog.provider_type() == "STB"
             and not self._lanes.busy()
         )
+
+    def reconnect(self, current: Target) -> bool:
+        """`current`'s live stream, played directly, ended: open it again after a back-off.
+
+        The same player opens the same stream (its ended input ends before the new one
+        opens), so it keeps its budget slot and the provider never sees two connections.
+        False when nothing more is tried: twice per tune, never on-demand content or a file
+        listed as a channel; the caller says "The stream ended" then.
+        """
+        if self._reopen_due is not None:
+            return True  # already on its way
+        url, kind = self.session.url, self.session.kind
+        if not url or kind is None or kind in _NOT_LIVE:
+            return False
+        if self._reconnects >= len(RECONNECT_MS):
+            return False
+        self._reopen_due = (current, url, kind)
+        self._reopen_timer.start(RECONNECT_MS[self._reconnects])
+        self._reconnects += 1
+        self._toast(RECONNECTING_TEXT)
+        return True
+
+    def _reopen(self) -> None:
+        due, self._reopen_due = self._reopen_due, None
+        if due is None or self._closed():
+            return
+        target, url, kind = due
+        session = self.session
+        if self._current() is not target or session.url != url:
+            return  # something else plays now
+        logger.info("Opening %s again after its stream ended", target.title)
+        session.play(
+            url,
+            kind=kind,
+            latency=self.config.live_latency,
+            user_agent=target.item.get("user_agent"),
+        )
+
+    def _cancel_reopen(self) -> None:
+        self._reopen_due = None
+        self._reopen_timer.stop()
 
     def retry(self, current: Target) -> None:
         logger.info("Making the link of %s again after a playback failure", current.title)

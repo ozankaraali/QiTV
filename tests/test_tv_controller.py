@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import os
 from pathlib import Path
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -10,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QPixmap, QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QWidget
 from timer_fixtures import elapse, wait_until
 
@@ -121,9 +123,11 @@ class FakeSession(QObject):
         self.audio = [(-1, "Disable"), (1, "English"), (2, "Deutsch")]
         self.subtitles = [(-1, "Disable"), (3, "Français")]
         self.audio_set, self.subtitle_set = [], []
+        self.url, self.kind = None, None  # what plays, as PlaybackSession.url and .kind
 
     def play(self, url, **kwargs):
         self.plays.append((url, kwargs))
+        self.url, self.kind = url, kwargs.get("kind")
         self.stateChanged.emit("opening")
 
     def stop(self):
@@ -485,6 +489,7 @@ class FakeLiveSession(QObject):
     def start(self, url, **kwargs):
         self.calls.append(("start", url, kwargs))
         self.running, self.mode = True, ""
+        self.url = url
 
     def stop(self):
         if not self.running:
@@ -504,6 +509,7 @@ class FakeLiveSession(QObject):
 
     def play_direct(self):
         """It fell back to playing the provider's stream."""
+        self.playback.play(self.url, kind=PlayKind.LIVE, latency="low", user_agent=None)
         self.mode = "direct"
         self.modeChanged.emit("direct")
 
@@ -2516,9 +2522,9 @@ class PipelineErrorTests(PipelineCase):
         self.live.play_direct()
         self.session.errorOccurred.emit("Broken")  # LiveSession forwards it as failed
         self.live.failed.emit("Broken")
-        self.session.ended.emit()
+        self.session.ended.emit()  # first opened again (2.0.1), see ReconnectTests
         self.assertEqual(
-            self.toast.messages(), [("One: Broken", "error"), ("The stream ended", "info")]
+            self.toast.messages(), [("One: Broken", "error"), ("Reconnecting…", "info")]
         )
 
     def test_an_stb_failure_makes_the_link_again_once_per_tune(self):
@@ -2547,8 +2553,9 @@ class PipelineErrorTests(PipelineCase):
         self.ready("http://stream/1?token=new")
         self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
         self.live.play_direct()
-        self.session.ended.emit()  # once per tune
-        self.assertEqual(self.toast.messages(), [("The stream ended", "info")])
+        self.session.ended.emit()  # once per tune: then the same link opens again
+        self.assertEqual(self.toast.messages(), [("Reconnecting…", "info")])
+        self.assertEqual(self.requested(), ["One", "One"])
 
     def test_a_failure_before_the_retry_does_not_use_up_the_notice(self):
         self.start_channel(0)
@@ -2577,6 +2584,111 @@ class PipelineErrorTests(PipelineCase):
         self.live.failed.emit("The stream could not be opened")
         self.assertEqual(self.requested(), ["One", "Two"])
         self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+
+
+class ReconnectTests(PipelineCase):
+    """A live channel played directly whose stream ends (2.0.1, L2b): an on-demand restream
+    may show its placeholder and end. It opens again in the same player, so in the same
+    budget slot, twice at most, before "The stream ended"."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.catalog.ptype = "XTREAM"  # no link to make again
+
+    def fall_back(self, index=0):
+        self.start_channel(index)
+        self.live.play_direct()  # it plays the provider's stream itself
+        return len(self.session.plays)
+
+    def end_and_reopen(self, plays):
+        started = time.monotonic()
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+        self.assertEqual(len(self.session.plays), plays)  # after a back-off
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        return time.monotonic() - started
+
+    def test_an_ended_fallback_opens_again_twice_then_says_it_ended(self):
+        plays = self.fall_back()
+        url, kwargs = self.session.plays[-1]
+        stops = self.session.stops
+        first = self.end_and_reopen(plays)
+        self.assertEqual(self.session.plays[-1], (url, kwargs))  # the same stream
+        second = self.end_and_reopen(plays + 1)
+        self.assertEqual(self.session.plays[-1], (url, kwargs))
+        self.assertGreater(second, first)  # a longer back-off the second time
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
+        self.assertEqual([text for text, _ in self.toast.messages()].count("Reconnecting…"), 2)
+        QTest.qWait(200)
+        self.assertEqual(len(self.session.plays), plays + 2)
+        # One slot, the same one, all along: nothing was stopped or given back.
+        self.assertEqual(self.session.stops, stops)
+        self.assertEqual(self.live.named("stop"), [])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_each_tune_may_reconnect_twice(self):
+        plays = self.fall_back(0)
+        self.end_and_reopen(plays)
+        plays = self.fall_back(1)
+        self.end_and_reopen(plays)
+        self.end_and_reopen(plays + 1)
+
+    def test_a_zap_during_the_back_off_opens_nothing_old(self):
+        self.fall_back(0)
+        self.session.ended.emit()
+        self.start_channel(1)
+        QTest.qWait(200)
+        self.assertNotIn("http://stream/1", self.played_urls()[1:])
+
+    def test_the_time_shift_buffer_is_never_reconnected_here(self):
+        self.start_pipeline(0)
+        plays = len(self.session.plays)
+        self.session.ended.emit()  # LiveSession reopens its buffer itself
+        QTest.qWait(200)
+        self.assertEqual((len(self.session.plays), self.toast.messages()), (plays, []))
+
+
+class DirectReconnectTests(ControllerTestCase):
+    """The same for a channel the pipeline cannot read, which the player opens itself."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.catalog.ptype = "XTREAM"
+        self.controller.start()
+
+    def test_an_ended_direct_channel_opens_again_in_the_same_slot(self):
+        self.play(0)
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual(kwargs["kind"], PlayKind.LIVE)
+        self.session.holding = True  # libVLC holds the ended input until the reopen
+        for count in (2, 3):
+            self.session.ended.emit()
+            self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+            self.assertTrue(wait_until(lambda: len(self.session.plays) == count))
+            self.assertEqual(self.session.plays[-1], (url, kwargs))
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
+        self.assertEqual(self.session.stops, 0)  # the slot was never given back
+
+    def test_a_file_listed_as_a_channel_is_not_reconnected(self):
+        self.tune(0)
+        self.ready("http://stream/1.mp4")
+        self.assertEqual(self.session.plays[-1][1]["kind"], PlayKind.VOD_FILE)
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages(), [("The stream ended", "info")])
+        QTest.qWait(200)
+        self.assertEqual(len(self.session.plays), 1)
+
+    def test_a_movie_is_never_reconnected(self):
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
+        self.session.ended.emit()
+        QTest.qWait(200)
+        self.assertEqual(len(self.session.plays), 1)
+        self.assertNotIn(("Reconnecting…", "info"), self.toast.messages())
 
 
 class ExternalZapTests(ControllerTestCase):

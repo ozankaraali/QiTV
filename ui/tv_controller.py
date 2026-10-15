@@ -1266,6 +1266,8 @@ class TVController(QObject):
             if self._live_controls.may_retry(current):
                 self._live_controls.retry(current)  # an expired STB token can end it at once
                 return
+            if self._live_controls.reconnect(current):
+                return  # "Reconnecting…": the same stream opens again, in the same slot
             self._toast("The stream ended")
             return
         try:
