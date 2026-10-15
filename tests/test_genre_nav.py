@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from timer_fixtures import elapse
 
 from services.library import Genre
 from ui.library.genre_list import PREVIEW_DEBOUNCE_MS, GenreList
@@ -43,7 +44,7 @@ class GenreListTests(unittest.TestCase):
         self.selected, self.activated = [], []
         self.list.genreSelected.connect(self.selected.append)
         self.list.genreActivated.connect(self.activated.append)
-        QTest.qWait(PREVIEW_DEBOUNCE_MS + 150)
+        elapse(PREVIEW_DEBOUNCE_MS + 150)
         self.selected.clear()
 
     def test_sections(self):
@@ -70,7 +71,7 @@ class GenreListTests(unittest.TestCase):
         self.list.move_by(1)
         self.list.move_by(1)
         self.assertEqual(self.selected, [])
-        QTest.qWait(PREVIEW_DEBOUNCE_MS + 150)
+        elapse(PREVIEW_DEBOUNCE_MS + 150)
         self.assertEqual(self.selected, ["comedy"])
 
     def test_escape_clears_filter(self):
@@ -95,12 +96,12 @@ class GenreListTests(unittest.TestCase):
         self.list.move_by(2)
         self.list.activate()
         self.assertEqual(order, [("sel", "action"), ("act", "action")])
-        QTest.qWait(PREVIEW_DEBOUNCE_MS + 150)
+        elapse(PREVIEW_DEBOUNCE_MS + 150)
         self.assertEqual(len(order), 2)
 
     def test_activate_without_pending_preview_emits_only_activated(self):
         self.list.move_by(1)
-        QTest.qWait(PREVIEW_DEBOUNCE_MS + 150)
+        elapse(PREVIEW_DEBOUNCE_MS + 150)
         self.assertEqual(self.selected, ["new"])
         self.list.activate()
         self.assertEqual(self.selected, ["new"])
@@ -139,11 +140,11 @@ class GenreListTests(unittest.TestCase):
         self.list.set_current("doc")
         self.list.set_genres([g for g in GENRES if g.id in ("doc", "drama")])
         self.assertEqual(self.list.current_id(), "doc")
-        QTest.qWait(PREVIEW_DEBOUNCE_MS + 150)
+        elapse(PREVIEW_DEBOUNCE_MS + 150)
         self.assertEqual(self.selected, [])
         self.list.set_genres([GENRES[3]])
         self.assertEqual(self.list.current_id(), "comedy")
-        QTest.qWait(PREVIEW_DEBOUNCE_MS + 150)
+        elapse(PREVIEW_DEBOUNCE_MS + 150)
         self.assertEqual(self.selected, ["comedy"])
 
     def test_empty_list_has_no_current(self):

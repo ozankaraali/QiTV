@@ -430,10 +430,12 @@ class PosterGridTests(unittest.TestCase):
         self.settle_requests()
         self.posters.requested.clear()
         many = titles(20_000)
-        start = time.perf_counter()
+        # The GUI thread's CPU time: the work itself, not the time a loaded runner keeps the
+        # thread waiting for a core.
+        start = time.thread_time()
         self.grid.set_sections([("", many)])
         image = self.grid.grab()
-        elapsed = time.perf_counter() - start
+        elapsed = time.thread_time() - start
         self.assertFalse(image.isNull())
         self.assertLess(elapsed, 0.150)
         self.assertEqual(self.posters.requested, [])  # requests wait for the view to settle

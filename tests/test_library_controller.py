@@ -7,8 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QRectF, Signal
 from PySide6.QtGui import QColor, QPixmap
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import elapse
 
 from services.jobs import ImmediateRunner
 from services.library import LibraryModel
@@ -445,7 +445,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertFalse(self.screen.genres.isVisible())
         self.type_text("sal")
         self.assertEqual(self.jobs.workers, [])
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         self.assertEqual(len(self.jobs.workers), 1)
         self.assertEqual(self.grid_names(), ["Salt TV", "Salt Roads", "Salt Lake"])
         self.assertEqual(
@@ -454,7 +454,7 @@ class LibraryControllerTests(unittest.TestCase):
         )
         ctl.handle(Action.NAV_BACKSPACE)
         self.type_text("l")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         self.assertEqual(len(self.jobs.workers), 2)
         self.assertEqual(self.pm.loads, 1)  # the second search reused the caches and index
 
@@ -463,7 +463,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build(jobs=runner)
         ctl.open_search()
         self.type_text("sand")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         ctl.handle(Action.ESCAPE)  # cleared while the search runs
         runner.finish(0)  # its result arrives late
         self.assertEqual(self.grid_names(), [])
@@ -475,7 +475,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.open_search()
         for text in ("sa", "l", "t", " r"):
             self.type_text(text)
-            QTest.qWait(WAIT_MS)
+            elapse(WAIT_MS)
         self.assertEqual(len(runner.jobs), 1)
         runner.finish(0)
         self.assertEqual(len(runner.jobs), 2)
@@ -487,7 +487,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("s")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         self.assertEqual(self.jobs.workers, [])
         self.assertEqual(self.screen.grid._message, SEARCH_PROMPT)
         self.assertEqual(self.screen.search_field.count_text, "")
@@ -496,7 +496,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("salt")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         self.catalog.providerReady.emit("P")
         self.assertEqual(len(self.jobs.workers), 2)
         self.assertEqual(self.pm.loads, 2)
@@ -505,13 +505,13 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("salt")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         self.catalog.providerReady.emit("P")
         self.type_text(" r")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         self.assertEqual(self.pm.loads, 2)
         ctl.refresh()
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         self.assertEqual(self.pm.loads, 3)
         self.assertEqual(self.grid_names(), ["Salt Roads"])
 
@@ -530,7 +530,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("salt")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         ctl.handle(Action.NAV_DOWN)  # the results
         self.assertEqual(ctl.zone, "grid")
         ctl.handle(Action.NAV_ACTIVATE)
@@ -543,7 +543,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build(logos=FakePosters())
         ctl.open_search()
         self.type_text("salt")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         grid = self.screen.grid
         self.assertEqual(grid._poster_url(grid.item(0)), LIVE_TILE + "http://logos.invalid/1")
         self.assertEqual(grid._poster_url(grid.item(1)), "http://posters.invalid/1.jpg")
@@ -557,7 +557,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("salt")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         grid = self.screen.grid
         self.assertEqual(grid._poster_url(grid.item(0)), "http://logos.invalid/1")
 
@@ -566,7 +566,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("salt lake")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         self.assertEqual(self.grid_names(), ["Salt Lake"])
         ctl.handle(Action.NAV_DOWN)
         ctl.handle(Action.NAV_ACTIVATE)
@@ -582,7 +582,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("salt lake")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         ctl.handle(Action.NAV_DOWN)
         ctl.handle(Action.NAV_ACTIVATE)
         self.catalog.providerReady.emit("P")
@@ -596,7 +596,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.notice.connect(notices.append)
         ctl.open_search()
         self.type_text("salt lake")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         ctl.handle(Action.NAV_DOWN)
         ctl.handle(Action.NAV_ACTIVATE)
         self.catalog.providerFailed.emit("Q", "Couldn't reach the provider")
@@ -611,7 +611,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("salt")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         ctl.handle(Action.NAV_DOWN)  # the results
         return ctl
 
@@ -645,7 +645,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("salt lake")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         ctl.handle(Action.NAV_DOWN)
         ctl.handle(Action.NAV_ACTIVATE)
         ctl.handle(Action.ESCAPE)  # grid -> search
@@ -751,7 +751,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl = self.build()
         ctl.open_search()
         self.type_text("harbour")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         self.assertEqual(self.grid_names(), ["Harbour Lights", "Harbour Lights"])
         ctl.handle(Action.NAV_DOWN)  # the results
         ctl.handle(Action.NAV_DOWN)  # R's copy, in the next section
@@ -776,7 +776,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.notice.connect(notices.append)
         ctl.open_search()
         self.type_text("harbour")
-        QTest.qWait(WAIT_MS)
+        elapse(WAIT_MS)
         ctl.handle(Action.NAV_DOWN)
         ctl.handle(Action.NAV_DOWN)
         ctl.handle(Action.NAV_ACTIVATE)

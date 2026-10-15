@@ -7,9 +7,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from timer_fixtures import elapse
 
 from services.library import Details
-from ui.library.series_view import SeriesView, episode_duration
+from ui.library.series_view import SEASON_DEBOUNCE_MS, SeriesView, episode_duration
 
 app = QApplication.instance() or QApplication([])
 
@@ -67,7 +68,7 @@ class SeriesViewTests(unittest.TestCase):
         view.move_by(1, 0)
         view.move_by(1, 0)
         self.assertEqual(got, [])
-        QTest.qWait(400)
+        elapse(SEASON_DEBOUNCE_MS + 150)
         self.assertEqual(got, [ss[2]])
 
     def test_set_seasons_opens_at_the_given_season_once(self):
@@ -270,10 +271,10 @@ class SeriesViewTests(unittest.TestCase):
         view.set_progress_provider(lambda ep: 0.5)
         view.show()
         QTest.qWait(50)
-        start = time.perf_counter()
+        start = time.thread_time()  # CPU time: the work, not a loaded runner's waits
         view.set_episodes(ss[0], episodes(2000))
         view.grab()
-        self.assertLess(time.perf_counter() - start, 0.1)
+        self.assertLess(time.thread_time() - start, 0.1)
 
 
 if __name__ == "__main__":
