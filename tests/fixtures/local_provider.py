@@ -6,7 +6,8 @@ and call seed_channels(provider_manager, provider) before the window starts.
 
 `fixture_dir` is where smoke.mp4 is (the packaged app has no fixtures of its own: the smoke
 test passes the checkout's). With `live_url`, a third channel plays that live stream (the
-smoke test's `tests/fixtures/live_source.LiveSource`); pass the same values to both calls.
+smoke test's `tests/fixtures/live_source.LiveSource`), and each of `live_urls` one more
+channel after it; pass the same values to both calls.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 FIXTURE_DIR = Path(__file__).resolve().parent
 SMOKE_MP4 = FIXTURE_DIR / "smoke.mp4"
@@ -29,10 +30,12 @@ def channel_urls(fixture_dir: str | os.PathLike = FIXTURE_DIR) -> list[str]:
 
 
 def channels(
-    fixture_dir: str | os.PathLike = FIXTURE_DIR, live_url: Optional[str] = None
+    fixture_dir: str | os.PathLike = FIXTURE_DIR,
+    live_url: Optional[str] = None,
+    live_urls: Sequence[str] = (),
 ) -> list[dict]:
     """The playlist's entries as the M3U parser would store them."""
-    urls = channel_urls(fixture_dir) + ([live_url] if live_url else [])
+    urls = channel_urls(fixture_dir) + ([live_url] if live_url else []) + list(live_urls)
     return [
         {
             "id": number,
@@ -55,6 +58,7 @@ def write_local_provider(
     *,
     fixture_dir: str | os.PathLike = FIXTURE_DIR,
     live_url: Optional[str] = None,
+    live_urls: Sequence[str] = (),
 ) -> dict:
     """Write the playlist, config.json and cache/provider/index.json under `config_dir`.
 
@@ -65,7 +69,7 @@ def write_local_provider(
     root.mkdir(parents=True, exist_ok=True)
     playlist = root / "fixture.m3u"
     lines = ["#EXTM3U"]
-    for channel in channels(fixture_dir, live_url):
+    for channel in channels(fixture_dir, live_url, live_urls):
         lines += [f'#EXTINF:-1 group-title="{GROUP}",{channel["name"]}', channel["cmd"]]
     playlist.write_text("\n".join(lines) + "\n", encoding="utf-8")
     provider = {"type": "M3UPLAYLIST", "name": PROVIDER_NAME, "url": str(playlist)}
@@ -84,6 +88,7 @@ def seed_channels(
     *,
     fixture_dir: str | os.PathLike = FIXTURE_DIR,
     live_url: Optional[str] = None,
+    live_urls: Sequence[str] = (),
 ) -> None:
     """Store channels() as the provider's fresh live content (written by the cache writer).
 
@@ -91,7 +96,7 @@ def seed_channels(
     channels. The cached content stands in for the parsed playlist; it stays fresh for
     ProviderManager.CONTENT_CACHE_TTL.
     """
-    contents = channels(fixture_dir, live_url)
+    contents = channels(fixture_dir, live_url, live_urls)
     provider_manager.current_provider = provider
     provider_manager.current_provider_content = {
         "itv": {

@@ -2,11 +2,12 @@
 
 from collections import defaultdict
 import itertools
+import time
 import unittest
 import urllib.error
 import urllib.request
 
-from tests.fixtures.live_source import LIVE_TS, LiveSource, LoopedStream
+from tests.fixtures.live_source import LIVE_TS, LiveSource, LoopedStream, peak_of
 
 PACKET = 188
 CLOCK = 90_000
@@ -104,6 +105,39 @@ class LiveSourceTests(unittest.TestCase):
         self.assertEqual(head, LIVE_TS.read_bytes()[: len(head)])
         self.assertEqual(self.source.connections, 1)
         self.assertTrue(self.source.url.startswith("http://127.0.0.1:"))
+
+    def wait_for(self, predicate, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline, "timed out")
+            time.sleep(0.01)
+
+    def test_it_counts_the_connections_open_at_once(self):
+        first = urllib.request.urlopen(self.source.url, timeout=5)
+        second = urllib.request.urlopen(self.source.url, timeout=5)
+        first.read(188)
+        second.read(188)
+        self.assertEqual(self.source.peak, 2)
+        first.close()
+        second.close()
+        self.wait_for(lambda: len(self.source.events) == 4)
+        self.assertEqual(self.source.connections, 2)
+        self.assertEqual(self.source.peak, 2)
+
+    def test_a_client_that_went_away_is_seen_at_once(self):
+        with urllib.request.urlopen(self.source.url, timeout=5) as response:
+            response.read(188)
+        closed = time.monotonic()
+        self.wait_for(lambda: len(self.source.events) == 2)
+        self.assertLess(self.source.events[-1][0] - closed, 0.2)  # not at the next chunk
+        with urllib.request.urlopen(self.source.url, timeout=5) as response:
+            response.read(188)
+        self.assertEqual(self.source.peak, 1)  # one after the other
+
+    def test_the_peak_of_events_counts_a_close_before_an_open_at_the_same_moment(self):
+        self.assertEqual(peak_of([(1.0, 1), (2.0, 1), (2.0, -1), (3.0, -1)]), 1)
+        self.assertEqual(peak_of([(2.0, 1), (1.0, 1), (3.0, -1), (4.0, -1)]), 2)
+        self.assertEqual(peak_of([]), 0)
 
     def test_other_paths_are_not_found(self):
         with self.assertRaises(urllib.error.HTTPError) as caught:

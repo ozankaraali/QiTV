@@ -18,7 +18,10 @@ L (Go live) is live within 6 s, at most target + 0.75 s (stay-live's band) + the
 segment's length (the starts it can land on are a segment apart) + 0.5 s (VLC's open) behind,
 and at the end of the 6 s stay-live is closing in (rate above 1x) or inside the band; ← moves
 the position back 8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live;
-after the close no helper process and nothing in the timeshift directory remain. Lags and
+then Down zaps to Channel 4 (a second such source) and Up back to Channel 3 as soon as
+Channel 4's upstream delivers: each source, and both together, never had more than one
+connection open at once (spec §11; the sources see a client's close at once); after the
+close no helper process and nothing in the timeshift directory remain. Lags and
 positions are the LiveSession timeline's (`timelineChanged`), not VLC's. A run killed for a
 hang has its live helper killed too.
 
@@ -31,6 +34,9 @@ over black (OS capture needs permissions), plus libVLC snapshots of the video. N
 touches the network: Python-level lookups and connections beyond this machine are refused and
 recorded as a failure. Logs go to <out>/runner.log and <out>/app.log as well (the Windows app
 has no console).
+
+QITV_SMOKE_MUTE=1 gives libVLC a dummy audio output, so a local run on a desktop someone
+uses stays silent (the fixtures play a tone). CI leaves it unset: some checks need real audio.
 """
 
 from __future__ import annotations
@@ -74,13 +80,14 @@ from provider_manager import ProviderManager  # noqa: E402
 from services import playback, thread_cleanup  # noqa: E402
 from services.playback import VLC_LOG_ENV, PlaybackSession, PlaybackState  # noqa: E402
 from services.vlc_profile import PlayKind  # noqa: E402
-from tests.fixtures.live_source import LIVE_TS, LiveSource  # noqa: E402
+from tests.fixtures.live_source import LIVE_TS, LiveSource, peak_of  # noqa: E402
 from tests.fixtures.local_provider import (  # noqa: E402
     FIXTURE_DIR,
     channel_urls,
     seed_channels,
     write_local_provider,
 )
+from ui import tv_window  # noqa: E402
 from ui.tv_window import TVWindow, fit_to_area, frame_margins  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -130,6 +137,8 @@ WINDOW_CHANGES = (
 )
 SCENARIO_CHECK = "the smoke scenario runs to the end"
 
+MUTE_ENV = "QITV_SMOKE_MUTE"  # "1": libVLC plays audio to a dummy output (local runs)
+
 RUNNER_LOG = "runner.log"
 APP_LOG = "app.log"
 FAULTS = "faults.txt"  # Python stacks of a hang or crash when there is no stderr (Windows app)
@@ -156,6 +165,8 @@ SPEED = 1.5
 SPEED_TIMEOUT_MS = 3_000
 CATCH_UP_TIMEOUT_MS = 60_000  # at 1.5x the lag shrinks by only 0.5 s a second
 RATE_TOLERANCE = 0.01
+ZAP_CHANNEL = "Channel 4"  # the second paced source: Down from Channel 3, then Up back
+ZAP_OPEN_TIMEOUT_MS = 15_000  # Channel 3's release, then Channel 4's upstream delivering
 
 TUNED_CHECK = f"{PIPELINE_PREFIX}{LIVE_CHANNEL} plays from the loopback time-shift stream"
 ON_DISK_CHECK = f"{PIPELINE_PREFIX}its buffer is on disk in the timeshift directory"
@@ -168,6 +179,10 @@ SPEED_CHECK = f"{PIPELINE_PREFIX}1.5x is applied while time-shifted"
 LIVE_AGAIN_CHECK = f"{PIPELINE_PREFIX}the speed returns to 1x once back at live"
 NO_HELPER_CHECK = f"{PIPELINE_PREFIX}no live helper process remains after the close"
 EMPTY_DIR_CHECK = f"{PIPELINE_PREFIX}the timeshift directory is empty after the close"
+ZAP_CHECK = (
+    f"{PIPELINE_PREFIX}zapping {LIVE_CHANNEL} → {ZAP_CHANNEL} → {LIVE_CHANNEL} never has more "
+    "than one source connection open"
+)
 PIPELINE_CHECKS = (
     TUNED_CHECK,
     ON_DISK_CHECK,
@@ -176,6 +191,7 @@ PIPELINE_CHECKS = (
     SEEK_CHECK,
     SPEED_CHECK,
     LIVE_AGAIN_CHECK,
+    ZAP_CHECK,
     NO_HELPER_CHECK,
     EMPTY_DIR_CHECK,
 )
@@ -298,7 +314,9 @@ def _native_stack(pid: int, out: Path) -> Optional[str]:
 def _kill_helper(report: Report) -> None:
     """After a hung app was killed: kill its live helper too, if it still runs (best effort)."""
     facts = report.data.get("pipeline")
-    pid = facts.get("helper_pid") if isinstance(facts, dict) else None
+    if not isinstance(facts, dict):
+        return
+    pid = facts.get("helper_pid")
     if not isinstance(pid, int) or not _process_alive(pid):
         return
     try:
@@ -332,8 +350,9 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
         (out / name).unlink(missing_ok=True)
     limit = _hang_budget(seconds, pipeline) + KILL_GRACE_S
     args = ["--child", "--out", str(out), "--seconds", str(seconds), "--fixtures", str(fixtures)]
-    source = LiveSource(fixtures / LIVE_TS.name) if pipeline else None
-    if source is not None:
+    # Channel 3 and, for the zap, Channel 4: two paced sources of the same clip.
+    sources = [LiveSource(fixtures / LIVE_TS.name) for _ in range(2)] if pipeline else []
+    for source in sources:
         args += ["--live-url", source.url]
         logger.info("Serving %s at %s", LIVE_TS.name, source.url)
     hang_stack = None
@@ -355,7 +374,7 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
                 code = None
             exited_at = time.time()
     finally:
-        if source is not None:
+        for source in sources:
             source.close()
 
     report = Report(out / REPORT)
@@ -380,8 +399,8 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
     else:
         elapsed = exited_at - close_at
         report.check(within, elapsed <= EXIT_LIMIT_S, f"{elapsed:.1f} s")
-    if source is not None:
-        report.data.setdefault("pipeline", {})["source_connections"] = source.connections
+    if sources:
+        _judge_sources(report, sources)
     report.data["frozen"] = _frozen()
     _summarize(report.data, pipeline)
     report.save()
@@ -402,6 +421,31 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
         out / REPORT,
     )
     return 0 if report.data["ok"] else 1
+
+
+def _judge_sources(report: Report, sources: list[LiveSource]) -> None:
+    """The zap check, from what the sources saw: one connection open at most, at any moment."""
+    facts = report.data.setdefault("pipeline", {})
+    first, second = sources
+    facts["source_connections"] = first.connections
+    channels = {LIVE_CHANNEL: first, ZAP_CHANNEL: second}
+    facts["sources"] = {
+        name: {"connections": source.connections, "peak_concurrent": source.peak}
+        for name, source in channels.items()
+    }
+    together = peak_of(first.events + second.events)
+    facts["sources_peak_concurrent"] = together
+    zap = facts.get("zap") or {}
+    zapped = bool(zap.get("opened")) and bool(zap.get("back"))
+    peaks = [source.peak for source in sources]
+    report.check(
+        ZAP_CHECK,
+        zapped and peaks == [1, 1] and together == 1,
+        f"peak concurrent connections: {LIVE_CHANNEL} {peaks[0]}, {ZAP_CHANNEL} {peaks[1]}, "
+        f"both {together}; connections {first.connections} and {second.connections}; "
+        f"{ZAP_CHANNEL} delivered before Up: {zap.get('opened')}, back on {LIVE_CHANNEL}: "
+        f"{zap.get('back')}",
+    )
 
 
 # ---- the child: the app and its driver --------------------------------------------------------
@@ -578,26 +622,26 @@ class Resyncs:
         return [f"{at - moment:+.2f}s {shown}" for at, shown in self.calls if at >= moment]
 
 
-def run_app(out: Path, seconds: float, fixtures: Path, live_url: Optional[str]) -> int:
+def run_app(out: Path, seconds: float, fixtures: Path, live_urls: list[str]) -> int:
     """Start the TV window over the fixture provider and drive it; returns app.exec()'s code."""
     # The packaged app has no -X faulthandler, and the Windows one no stderr.
     faults = sys.stderr if sys.stderr is not None else open(out / FAULTS, "w", encoding="utf-8")
     faulthandler.enable(file=faults)
-    budget = _hang_budget(seconds, live_url is not None)
+    budget = _hang_budget(seconds, bool(live_urls))
     faulthandler.dump_traceback_later(budget, file=faults)  # a hang shows where; keeps going
     attempts: list[str] = []
     _refuse_network(attempts)
     report = Report(out / REPORT)
     report.data.update(seconds=seconds, screenshots={}, video={})
-    if live_url is not None:
-        report.data["pipeline"] = {"source_url": live_url}  # a local fixture: no credentials
+    if live_urls:  # local fixtures: no credentials
+        report.data["pipeline"] = {"source_url": live_urls[0], "source_urls": live_urls}
     report.step("start the app")
 
     config_dir = os.environ["QITV_CONFIG_DIR"]
-    provider = write_local_provider(config_dir, fixture_dir=fixtures, live_url=live_url)
+    provider = write_local_provider(config_dir, fixture_dir=fixtures, live_urls=live_urls)
     app = QApplication([sys.argv[0]])
     config = ConfigManager()
-    if live_url is not None:
+    if live_urls:
         # Time-shift consent: the buffer goes to disk, so the empty directory at the end
         # shows that it was cleaned up (the smallest size the setting allows).
         config.timeshift_enabled = True
@@ -605,7 +649,7 @@ def run_app(out: Path, seconds: float, fixtures: Path, live_url: Optional[str]) 
     images = ImageManager(config, config.max_cache_image_size * 1024 * 1024)
     providers = ProviderManager(config)
     epg = EpgManager(config, providers)
-    seed_channels(providers, provider, fixture_dir=fixtures, live_url=live_url)
+    seed_channels(providers, provider, fixture_dir=fixtures, live_urls=live_urls)
     qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})  # as main.py does
 
     screen = QGuiApplication.primaryScreen()
@@ -625,8 +669,17 @@ def run_app(out: Path, seconds: float, fixtures: Path, live_url: Optional[str]) 
     report.save()
     logger.info("Environment: %s", report.data["environment"])
 
+    if os.environ.get(MUTE_ENV) == "1":
+        report.data["muted"] = True
+
+        def muted(extra_args: Optional[list[str]] = None) -> Any:
+            return playback.create_instance(
+                [*(extra_args or playback.default_args()), "--aout=dummy"]
+            )
+
+        tv_window.create_instance = muted  # the window's player and its PiP play to nothing
     window = TVWindow(app, config, providers, images, epg)
-    driver = Driver(window, report, out, seconds, fixtures, live_url)
+    driver = Driver(window, report, out, seconds, fixtures, live_urls)
     window.show()
     QTimer.singleShot(0, driver.start)
     code = app.exec()
@@ -645,14 +698,14 @@ class Driver:
         out: Path,
         seconds: float,
         fixtures: Path,
-        live_url: Optional[str],
+        live_urls: list[str],
     ) -> None:
         self.window = window
         self.report = report
         self.out = out
         self.seconds = seconds
         self.fixtures = fixtures
-        self.live_url = live_url
+        self.live_urls = live_urls
         self.cocoa = QGuiApplication.platformName() == "cocoa"
         self.resyncs = Resyncs(window.host)
         self.timeline: list[tuple[float, dict[str, Any]]] = []  # (when, LiveSession state)
@@ -995,7 +1048,7 @@ class Driver:
         report.check(WINDOW_CHANGES[4], restored, self._states())
         self._check_glued(GLUE_STEPS[4], changed_at, quiet)
 
-        if self.live_url is not None:
+        if self.live_urls:
             yield from self._pipeline()
 
         # 6. Close; the parent judges the exit code and time, after_exit the helper and buffer.
@@ -1110,6 +1163,19 @@ class Driver:
             f"after {took:.1f} s: VLC rate {vlc_rate}; {self._describe(state)}",
         )
 
+        # 7. Down to Channel 4, and Up back as soon as its upstream delivers: each opens only
+        # once the other's upstream is closed. The parent judges it by what the sources saw.
+        report.step("pipeline 7. zap to Channel 4 and back")
+        first, second = self.live_urls[0], self.live_urls[1]
+        self._key(Qt.Key.Key_Down)
+        opened = yield from self._wait(lambda: self._delivering(second), ZAP_OPEN_TIMEOUT_MS)
+        self._key(Qt.Key.Key_Up)
+        back = yield from self._wait(
+            lambda: self._tuned(first) and self._pipeline_playing(), LIVE_PLAY_TIMEOUT_MS
+        )
+        facts["zap"] = {"opened": opened, "back": back}
+        report.save()
+
     def _on_timeline(self, state: dict) -> None:
         self.timeline.append((time.monotonic(), dict(state)))
 
@@ -1211,6 +1277,17 @@ class Driver:
             and session.state() is PlaybackState.PLAYING
         )
 
+    def _tuned(self, url: str) -> bool:
+        """The live session's channel is `url` (LiveSession keeps it private)."""
+        return getattr(self.window.live_session, "_url", None) == url
+
+    def _delivering(self, url: str) -> bool:
+        """The live session tuned `url`, and its buffer holds bytes from that upstream."""
+        engine, sid = self.window.engine, getattr(self.window.live_session, "_sid", None)
+        if not self._tuned(url) or engine is None or sid is None:
+            return False
+        return bool(engine.snapshot(sid).get("bytes"))
+
     def _stream_facts(self) -> str:
         live, session = self.window.live_session, self.window.session
         return (
@@ -1259,10 +1336,10 @@ class Driver:
         report.check(
             "no background threads are pending", not thread_cleanup.has_pending_threads(), pending
         )
-        if self.live_url is not None:
+        if self.live_urls:
             self._after_pipeline()
         shots = report.data["screenshots"]
-        expected = SCREENSHOTS + (PIPELINE_SCREENSHOTS if self.live_url is not None else ())
+        expected = SCREENSHOTS + (PIPELINE_SCREENSHOTS if self.live_urls else ())
         report.check("the screenshots are saved", all(shots.get(name) for name in expected), shots)
         report.check("nothing touches the network", not attempts, attempts)
         report.data["overlay_shows_and_hides"] = len(self.resyncs.calls)
@@ -1310,7 +1387,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "has none; default: the checkout's tests/fixtures)",
     )
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--live-url", help=argparse.SUPPRESS)
+    parser.add_argument("--live-url", action="append", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.fixtures is None and _frozen():
         parser.error("--fixtures is required in the packaged app")
@@ -1329,7 +1406,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     fixtures = Path(args.fixtures or FIXTURE_DIR).resolve()
     seconds = max(MIN_SECONDS, args.seconds)
     if args.child:
-        return run_app(out, seconds, fixtures, args.live_url)
+        return run_app(out, seconds, fixtures, args.live_url or [])
     try:
         return run_smoke(out, seconds, fixtures, args.pipeline)
     except Exception:

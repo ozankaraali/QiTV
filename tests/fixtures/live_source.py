@@ -13,6 +13,10 @@ content, made once with ffmpeg as a developer tool:
         -c:v libx264 -profile:v baseline -g 25 -keyint_min 25 -sc_threshold 0 -b:v 400k \
         -c:a aac -b:a 64k -f mpegts tests/fixtures/live.ts
 
+`connections` counts the requests; `events` records when each connection opened (+1) and
+closed (-1), and `peak` is the most open at once. A client going away is seen at once (the
+server watches its socket between chunks), so the counts follow the client's own closes.
+
 No credentials, no network: the server binds 127.0.0.1 only.
 """
 
@@ -24,6 +28,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 import itertools
 from pathlib import Path
+import select
 import statistics
 import threading
 import time
@@ -167,12 +172,22 @@ class LoopedStream:
         return bytes(out)
 
 
+def peak_of(events: list[tuple[float, int]]) -> int:
+    """The most connections open at once in `events` ((when, +1 or -1), any order)."""
+    peak = current = 0
+    for _, change in sorted(events):  # at the same moment, a close counts before an open
+        current += change
+        peak = max(peak, current)
+    return peak
+
+
 class LiveSource:
     """Serves `LoopedStream(path)` at `url` to every client until `close()`."""
 
     def __init__(self, path: Path = LIVE_TS) -> None:
         self.stream = LoopedStream(Path(path).read_bytes())
         self.connections = 0
+        self.events: list[tuple[float, int]] = []  # (time.monotonic(), +1 open / -1 close)
         self._stop = threading.Event()
         lock = threading.Lock()
         owner = self
@@ -187,18 +202,42 @@ class LiveSource:
                     return
                 with lock:
                     owner.connections += 1
+                    owner.events.append((time.monotonic(), 1))
+                try:
+                    self._serve()
+                finally:
+                    with lock:
+                        owner.events.append((time.monotonic(), -1))
+
+            def _serve(self) -> None:
                 self.send_response(200)
                 self.send_header("Content-Type", "video/mp2t")
                 self.send_header("Connection", "close")
                 self.end_headers()
                 started = time.monotonic()
                 for due, chunk in owner.stream.chunks():
-                    if owner._stop.wait(max(0.0, started + due - time.monotonic())):
+                    if not self._wait(started + due):
                         return
                     try:
                         self.wfile.write(chunk)
                     except OSError:  # the client went away
                         return
+
+            def _wait(self, until: float) -> bool:
+                """Wait until `until`; False once the source closes or the client went away."""
+                while not owner._stop.is_set():
+                    left = until - time.monotonic()
+                    if left <= 0:
+                        return True
+                    readable, _, _ = select.select([self.connection], [], [], min(left, 0.05))
+                    if not readable:
+                        continue
+                    try:  # the client sends nothing after its request: this is its close
+                        if not self.connection.recv(4096):
+                            return False
+                    except OSError:
+                        return False
+                return False
 
         self._server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self._server.server_port}{PATH}"
@@ -206,6 +245,11 @@ class LiveSource:
             target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
         )
         self._thread.start()
+
+    @property
+    def peak(self) -> int:
+        """The most connections that were open at once."""
+        return peak_of(list(self.events))
 
     def close(self) -> None:
         self._stop.set()
