@@ -718,105 +718,120 @@ high.m3u8
     def test_close_from_another_thread_aborts_a_stalled_body_read(self):
         # Close-delimited bodies are woken by the response's socket shutdown; keep-alive
         # bodies (sized, connection still pooled) by the connection's duplicate descriptor.
-        # On Windows both are woken by closing the owning socket object.
+        # On Windows plain sockets are closed and TLS sockets wait in slices.
         head = self.video[: 188 * 50]
+        with self.tls_context() as context, insecure():
+            for tls, keep_alive in ((False, False), (False, True), (True, False), (True, True)):
+                release = threading.Event()  # per subtest: every server must stall
 
-        for keep_alive in (False, True):
-            release = threading.Event()  # per subtest: the keep-alive server must stall too
+                def stalled(request, release=release):
+                    request.wfile.write(head)
+                    request.wfile.flush()
+                    release.wait(10)
 
-            def stalled(request, release=release):
-                request.wfile.write(head)
-                request.wfile.flush()
-                release.wait(10)
+                with self.subTest(tls=tls, keep_alive=keep_alive):
+                    headers = {"Content-Length": str(1 << 30)} if keep_alive else {}
+                    server = self.server(
+                        {"/user/secret/live.ts": (200, headers, stalled)},
+                        tls=context if tls else None,
+                        keep_alive=keep_alive,
+                    )
+                    source = open_source(
+                        server.url + "/user/secret/live.ts",
+                        headers={},
+                        verify_ssl=not tls,
+                        stop=threading.Event(),
+                    )
+                    items, errors = [], []
+                    received, finished = threading.Event(), threading.Event()
 
-            with self.subTest(keep_alive=keep_alive):
-                headers = {"Content-Length": str(1 << 30)} if keep_alive else {}
-                server = self.server(
-                    {"/user/secret/live.ts": (200, headers, stalled)}, keep_alive=keep_alive
-                )
-                source = open_source(
-                    server.url + "/user/secret/live.ts",
-                    headers={},
-                    verify_ssl=True,
-                    stop=threading.Event(),
-                )
-                items, errors = [], []
-                received, finished = threading.Event(), threading.Event()
+                    def consume(source=source, items=items, errors=errors):
+                        try:
+                            for item in source.chunks():
+                                items.append(item)
+                                received.set()
+                        except Exception as error:
+                            errors.append(error)
+                        finally:
+                            finished.set()
 
-                def consume():
+                    close = requests.Response.close
+
+                    def slow_close(response):
+                        time.sleep(0.5)  # like a close waiting for the reader's buffer lock
+                        close(response)
+
                     try:
-                        for item in source.chunks():
-                            items.append(item)
-                            received.set()
-                    except Exception as error:
-                        errors.append(error)
+                        threading.Thread(target=consume, daemon=True).start()
+                        self.assertTrue(received.wait(5))
+                        time.sleep(0.2)  # the consumer is now blocked waiting for more bytes
+                        started = time.monotonic()
+                        with patch.object(requests.Response, "close", slow_close):
+                            source.close()
+                        self.assertLess(
+                            time.monotonic() - started, 0.2, "close() blocked its caller"
+                        )
+                        self.assertTrue(
+                            finished.wait(1.0), "close() did not abort the blocked read"
+                        )
+                        self.assertLess(time.monotonic() - started, 1.0)
+                        self.assertEqual(errors, [])
+                        self.assertEqual(b"".join(items), head)
+                        self.assertEqual(server.counts["/user/secret/live.ts"], 1)
                     finally:
-                        finished.set()
-
-                close = requests.Response.close
-
-                def slow_close(response):
-                    time.sleep(0.5)  # like a close waiting for the reader's buffer lock
-                    close(response)
-
-                try:
-                    threading.Thread(target=consume, daemon=True).start()
-                    self.assertTrue(received.wait(5))
-                    time.sleep(0.2)  # the consumer is now blocked waiting for more body bytes
-                    started = time.monotonic()
-                    with patch.object(requests.Response, "close", slow_close):
-                        source.close()
-                    self.assertLess(time.monotonic() - started, 0.2, "close() blocked its caller")
-                    self.assertTrue(finished.wait(1.0), "close() did not abort the blocked read")
-                    self.assertLess(time.monotonic() - started, 1.0)
-                    self.assertEqual(errors, [])
-                    self.assertEqual(b"".join(items), head)
-                    self.assertEqual(server.counts["/user/secret/live.ts"], 1)
-                finally:
-                    release.set()
+                        release.set()
 
     def test_close_aborts_an_hls_segment_stalled_before_its_headers(self):
-        release = threading.Event()
+        with self.tls_context() as context, insecure():
+            for tls in (False, True):
+                release = threading.Event()
 
-        def stalled(_request, _count):
-            release.wait(10)
-            return 200, {}, self.next_video
+                def stalled(_request, _count, release=release):
+                    release.wait(10)
+                    return 200, {}, self.next_video
 
-        server = self.server(
-            {
-                "/channel.m3u8": (200, {}, leaf("a.ts", "b.ts")),
-                "/a.ts": (200, {}, self.video),
-                "/b.ts": stalled,
-            }
-        )
-        try:
-            source = open_source(
-                server.url + "/channel.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
-            )
-            items, errors = [], []
-            finished = threading.Event()
+                with self.subTest(tls=tls):
+                    server = self.server(
+                        {
+                            "/channel.m3u8": (200, {}, leaf("a.ts", "b.ts")),
+                            "/a.ts": (200, {}, self.video),
+                            "/b.ts": stalled,
+                        },
+                        tls=context if tls else None,
+                    )
+                    try:
+                        source = open_source(
+                            server.url + "/channel.m3u8",
+                            headers={},
+                            verify_ssl=not tls,
+                            stop=threading.Event(),
+                        )
+                        items, errors = [], []
+                        finished = threading.Event()
 
-            def consume():
-                try:
-                    items.extend(source.chunks())
-                except Exception as error:
-                    errors.append(error)
-                finally:
-                    finished.set()
+                        def consume(source=source, items=items, errors=errors):
+                            try:
+                                items.extend(source.chunks())
+                            except Exception as error:
+                                errors.append(error)
+                            finally:
+                                finished.set()
 
-            threading.Thread(target=consume, daemon=True).start()
-            deadline = time.monotonic() + 5
-            while server.counts["/b.ts"] == 0 and time.monotonic() < deadline:
-                time.sleep(0.01)
-            time.sleep(0.2)
-            started = time.monotonic()
-            source.close()
-            self.assertTrue(finished.wait(1.0), "close() did not abort the stalled request")
-            self.assertLess(time.monotonic() - started, 1.0)
-            self.assertEqual(errors, [])
-            self.assertEqual(b"".join(items), self.video)
-        finally:
-            release.set()
+                        threading.Thread(target=consume, daemon=True).start()
+                        deadline = time.monotonic() + 5
+                        while server.counts["/b.ts"] == 0 and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        time.sleep(0.2)
+                        started = time.monotonic()
+                        source.close()
+                        self.assertTrue(
+                            finished.wait(1.0), "close() did not abort the stalled request"
+                        )
+                        self.assertLess(time.monotonic() - started, 1.0)
+                        self.assertEqual(errors, [])
+                        self.assertEqual(b"".join(items), self.video)
+                    finally:
+                        release.set()
 
     def test_stop_aborts_an_open_stalled_mid_header_or_mid_handshake(self):
         release = threading.Event()
@@ -825,32 +840,94 @@ high.m3u8
             release.wait(10)
             return 200, {}, self.video
 
-        server = self.server({"/user/secret/live.ts": stalled})
         # A listener that accepts TCP but never answers the TLS handshake.
         silent = socket.create_server(("127.0.0.1", 0))
         held = []
         threading.Thread(target=lambda: held.append(silent.accept()), daemon=True).start()
-        urls = (
-            server.url + "/user/secret/live.ts",
-            f"https://127.0.0.1:{silent.getsockname()[1]}/user/secret/live.ts",
-        )
         try:
-            for url in urls:
-                with self.subTest(url=url.split(":")[0]):
-                    stop = threading.Event()
-                    timer = threading.Timer(0.3, stop.set)
-                    timer.start()
-                    started = time.monotonic()
-                    with self.assertRaises(SourceError) as raised:
-                        open_source(url, headers={}, verify_ssl=True, stop=stop)
-                    timer.join()
-                    self.assertLess(time.monotonic() - started, 1.3)
-                    self.assertNotIn("secret", str(raised.exception))
+            with self.tls_context() as context, insecure():
+                plain = self.server({"/user/secret/live.ts": stalled})
+                secure = self.server({"/user/secret/live.ts": stalled}, tls=context)
+                cases = (
+                    ("http header", plain.url + "/user/secret/live.ts", True),
+                    ("https header", secure.url + "/user/secret/live.ts", False),
+                    (
+                        "https handshake",
+                        f"https://127.0.0.1:{silent.getsockname()[1]}/user/secret/live.ts",
+                        True,
+                    ),
+                )
+                for name, url, verify_ssl in cases:
+                    with self.subTest(name):
+                        stop = threading.Event()
+                        timer = threading.Timer(0.3, stop.set)
+                        timer.start()
+                        started = time.monotonic()
+                        with self.assertRaises(SourceError) as raised:
+                            open_source(url, headers={}, verify_ssl=verify_ssl, stop=stop)
+                        timer.join()
+                        self.assertLess(time.monotonic() - started, 1.3)
+                        self.assertNotIn("secret", str(raised.exception))
         finally:
             release.set()
             for connection, _address in held:
                 connection.close()
             silent.close()
+
+    def test_tls_waits_longer_than_a_slice_keep_the_overall_timeout(self):
+        # Windows TLS sockets wait in 0.25 s slices: late bytes must still arrive, and the
+        # caller's whole timeout must still apply.
+        half = len(self.video) // 2
+        release = threading.Event()
+
+        def slow(_request, _count):
+            time.sleep(0.6)  # late headers
+
+            def body(request):
+                request.wfile.write(self.video[:half])
+                request.wfile.flush()
+                time.sleep(0.6)  # a pause mid-body
+                request.wfile.write(self.video[half:])
+
+            return 200, {"Content-Length": str(len(self.video))}, body
+
+        def stalled(_request, _count):
+            release.wait(10)
+            return 200, {}, b""
+
+        try:
+            with self.tls_context() as context, insecure():
+                server = self.server({"/slow.ts": slow, "/stalled.ts": stalled}, tls=context)
+                self.assertEqual(media(server.url + "/slow.ts", verify_ssl=False), [self.video])
+                with patch.object(source_module, "_TIMEOUT", 1.0):
+                    started = time.monotonic()
+                    with self.assertRaises(SourceError) as raised:
+                        open_source(
+                            server.url + "/stalled.ts",
+                            headers={},
+                            verify_ssl=False,
+                            stop=threading.Event(),
+                        )
+                    elapsed = time.monotonic() - started
+        finally:
+            release.set()
+        self.assertEqual(raised.exception.kind, "timeout")
+        self.assertGreaterEqual(elapsed, 0.9)
+        self.assertLess(elapsed, 2.0)
+
+    def test_requests_does_not_pass_its_own_ssl_context_to_urllib3(self):
+        # The Windows interrupt mode installs its sliced TLS socket class only into a TLS
+        # context it builds itself; a requests upgrade that passed its own would lose it.
+        adapter = requests.adapters.HTTPAdapter()
+        request = requests.Request("GET", "https://example.invalid/live.ts").prepare()
+        try:
+            for verify in (True, False):
+                with self.subTest(verify=verify):
+                    _host, pool = adapter.build_connection_pool_key_attributes(request, verify)
+                    self.assertNotIn("ssl_context", pool)
+            self.assertNotIn("ssl_context", adapter.poolmanager.connection_pool_kw)
+        finally:
+            adapter.close()
 
     def test_raw_ts_reconnects_after_the_server_drops_mid_stream(self):
         half = len(self.video) // 2 // 188 * 188
@@ -1496,14 +1573,17 @@ high.m3u8
 
 
 class WindowsInterruptModeTests(SourceTestCase):
-    """The Windows interrupt mode (owning socket objects, no duplicates), forced here.
+    """The Windows interrupt mode (no duplicate descriptors), forced here.
 
-    Off Windows the mode only shuts the owning sockets down (a close right after can lose
-    the wakeup on macOS), which wakes the reader on POSIX. These tests therefore prove that
-    every phase hands its owning socket to the interrupter: plain sockets, TLS sockets
-    before their handshake and sockets behind a close-delimited body. They also prove
-    that TLS verification is unchanged by the TLS context this mode supplies. Waking by
-    closing the handle is Winsock behaviour, which only the Windows CI run can check.
+    Plain sockets: the owning objects are interrupted (off Windows by a shutdown only; a
+    close right after can lose the wakeup on macOS). These tests prove that every plain
+    phase hands its owning socket to the interrupter, including a close-delimited body.
+
+    TLS sockets: never touched from another thread (asserted in ``tearDown``). They wait
+    in slices and stop on their own, exactly as on Windows, so the https subtests run
+    the real mechanism here. The TLS tests also prove that verification is unchanged by
+    the TLS context this mode supplies. Waking a plain socket by closing its handle is
+    Winsock behaviour, which only the Windows CI run can check.
     """
 
     def setUp(self):
@@ -1511,6 +1591,62 @@ class WindowsInterruptModeTests(SourceTestCase):
         patcher = patch.object(source_module, "_INTERRUPT_OWNERS", True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Nothing outside the reader may touch a TLS socket: on Windows OpenSSL keeps
+        # using its raw handle value, which a new socket may already own.
+        self.aborted = []
+        abort = source_module._abort
+
+        def spy(sock):
+            self.aborted.append(type(sock))
+            abort(sock)
+
+        spier = patch.object(source_module, "_abort", spy)
+        spier.start()
+        self.addCleanup(spier.stop)
+        self.tls_shutdowns = []
+        shutdown = ssl.SSLSocket.shutdown
+
+        def record(sock, how):
+            if not sock.server_side:  # the test servers shut their own sockets down
+                self.tls_shutdowns.append(how)
+            shutdown(sock, how)
+
+        shutdowns = patch.object(ssl.SSLSocket, "shutdown", record)
+        shutdowns.start()
+        self.addCleanup(shutdowns.stop)
+
+    def tearDown(self):
+        super().tearDown()
+        touched = [kind.__name__ for kind in self.aborted if issubclass(kind, ssl.SSLSocket)]
+        self.assertEqual(touched, [], "a TLS socket was interrupted from another thread")
+        self.assertEqual(self.tls_shutdowns, [], "a source's TLS socket was shut down")
+
+    def test_only_plain_connections_hand_over_their_socket(self):
+        # An HTTPS connection's raw socket becomes its TLS socket's handle; closing it from
+        # another thread, even before the handshake, would close a TLS handle.
+        adopted = []
+        adopt = source_module._Interrupter.adopt
+
+        def record(interrupter, sock):
+            adopted.append(sock)  # a strong reference: the owner set itself is weak
+            adopt(interrupter, sock)
+
+        with self.tls_context() as context, insecure():
+            with patch.object(source_module._Interrupter, "adopt", record):
+                for tls in (False, True):
+                    with self.subTest(tls=tls):
+                        adopted.clear()
+                        server = self.server(
+                            {"/live.ts": (200, {}, self.video)}, tls=context if tls else None
+                        )
+                        source = open_source(
+                            server.url + "/live.ts",
+                            headers={},
+                            verify_ssl=not tls,
+                            stop=threading.Event(),
+                        )
+                        source.close()
+                        self.assertEqual(len(adopted), 0 if tls else 1)
 
     test_close_from_another_thread_aborts_a_stalled_body_read = (
         LiveSourceTests.test_close_from_another_thread_aborts_a_stalled_body_read
@@ -1535,6 +1671,9 @@ class WindowsInterruptModeTests(SourceTestCase):
     )
     test_keep_alive_connections_are_reused_for_reloads_and_segments = (
         LiveSourceTests.test_keep_alive_connections_are_reused_for_reloads_and_segments
+    )
+    test_tls_waits_longer_than_a_slice_keep_the_overall_timeout = (
+        LiveSourceTests.test_tls_waits_longer_than_a_slice_keep_the_overall_timeout
     )
 
 

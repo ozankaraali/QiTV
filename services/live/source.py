@@ -18,8 +18,10 @@ Platforms: on macOS and Linux, ``close()`` shuts down a duplicate descriptor of 
 connection, which wakes any call blocked on it, and never closes a descriptor from another
 thread. On Windows a ``shutdown()`` wakes nothing blocked in Winsock (on a duplicate or on
 the original handle); only closing the handle the call waits on does. There ``close()``
-closes the owning socket objects themselves (plain sockets from creation, TLS sockets
-before their handshake), so the reader's own later close is a no-op.
+closes the owning plain socket objects, so the reader's own later close is a no-op. TLS
+sockets are never touched from another thread (OpenSSL keeps using the raw handle value,
+which a new socket may already own): they wait in slices of at most 0.25 s and stop on
+their own once the source is closed.
 """
 
 from __future__ import annotations
@@ -78,8 +80,10 @@ _SKIPPABLE_STATUS = (404, 410)
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _IDENTITY = {"Accept-Encoding": "identity"}
 _WINDOWS = sys.platform == "win32"
-# Interrupt through the owning socket objects instead of duplicates (see the docstring).
+# Interrupt plain sockets through their owning objects and let TLS sockets wait in slices,
+# instead of shutting down duplicates (see the module docstring).
 _INTERRUPT_OWNERS = _WINDOWS
+_TLS_SLICE = 0.25
 
 _OPEN_FAILED = "The channel could not be opened for time-shift."
 _HTTP_FAILED = "The channel could not be reached over HTTP."
@@ -224,9 +228,8 @@ def _shutdown(sock: socket.socket) -> None:
 
 
 def _abort(sock: socket.socket) -> None:
-    """Interrupt a call blocked on ``sock`` (an owning socket object) from another thread.
+    """Interrupt a call blocked on ``sock`` (an owning plain socket) from another thread.
 
-    The shutdown bypasses ``SSLSocket.shutdown``, which would drop the reader's TLS state.
     On Windows only, the handle is then closed: nothing else wakes a blocked Winsock call.
     The C-level close marks the object's descriptor invalid under the GIL before releasing
     the handle, so the reader's later calls fail and its own close does nothing. POSIX
@@ -252,9 +255,9 @@ class _Interrupter:
     original descriptor. Duplicates are only closed under the lock, so a recycled
     descriptor number is never touched.
 
-    Windows: the owning socket objects (held weakly). Only closing a handle wakes a call
-    blocked on it there; see ``_abort``. (Tests force this mode elsewhere, where the
-    shutdown alone wakes the reader.)
+    Windows: the owning plain socket objects (held weakly). Only closing a handle wakes a
+    call blocked on it there; see ``_abort``. TLS sockets are left to ``_sliced_tls_socket``.
+    (Tests force this mode elsewhere, where the shutdown alone wakes a plain reader.)
     """
 
     def __init__(self) -> None:
@@ -263,8 +266,12 @@ class _Interrupter:
         self._owners: weakref.WeakSet[socket.socket] = weakref.WeakSet()
         self._interrupted = False
 
+    @property
+    def interrupted(self) -> bool:
+        return self._interrupted
+
     def adopt(self, sock: socket.socket) -> None:
-        """Windows: a socket object that owns its handle (plain, or TLS before its handshake)."""
+        """Windows: a plain socket object that owns its handle."""
         with self._lock:
             if not self._interrupted:
                 self._owners.add(sock)
@@ -273,7 +280,10 @@ class _Interrupter:
 
     def track(self, connection: object, sock: socket.socket) -> None:
         if _INTERRUPT_OWNERS:
-            self.adopt(sock)
+            # An HTTPS connection's socket is about to become a TLS socket's handle, which
+            # must not be closed from another thread; its TLS socket waits in slices.
+            if not isinstance(connection, HTTPSConnection):
+                self.adopt(sock)
             return
         with self._lock:
             if not self._interrupted:
@@ -321,14 +331,65 @@ def _tls_context(connection: Any, socket_class: type[ssl.SSLSocket]) -> ssl.SSLC
     return context
 
 
-def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnectionPool]]:
-    def do_handshake(self: ssl.SSLSocket, block: bool = False) -> None:
-        interrupter.adopt(self)  # before the handshake can block
-        ssl.SSLSocket.do_handshake(self, block)
+def _sliced_tls_socket(interrupter: _Interrupter) -> type[ssl.SSLSocket]:
+    """Windows TLS sockets that wait in slices and stop by themselves once interrupted.
 
-    tls_socket = cast(
-        "type[ssl.SSLSocket]", type("SSLSocket", (ssl.SSLSocket,), {"do_handshake": do_handshake})
-    )
+    The real socket timeout is at most ``_TLS_SLICE``; the caller's timeout is kept as a
+    deadline over the retries. Retrying after an ``_ssl`` timeout is safe: it is raised
+    only while OpenSSL waits for the network (WANT_READ or WANT_WRITE), and CPython
+    allows a write to be retried from a moved buffer.
+    """
+
+    def waiting(self: Any, operation: Callable[[], _T]) -> _T:
+        timeout = self.gettimeout()
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if interrupter.interrupted:
+                raise _Closed()
+            try:
+                return operation()
+            except TimeoutError:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise
+
+    def settimeout(self: Any, value: float | None) -> None:
+        self._logical_timeout = value
+        if value is None:
+            ssl.SSLSocket.settimeout(self, _TLS_SLICE)
+        else:
+            ssl.SSLSocket.settimeout(self, min(float(value), _TLS_SLICE))
+
+    def gettimeout(self: Any) -> float | None:
+        if "_logical_timeout" not in self.__dict__:
+            return ssl.SSLSocket.gettimeout(self)
+        timeout: float | None = self._logical_timeout
+        return timeout
+
+    def setblocking(self: Any, flag: bool) -> None:
+        self.settimeout(None if flag else 0.0)
+
+    def read(self: Any, len: int = 1024, buffer: Any = None) -> Any:  # also recv, recv_into
+        return waiting(self, lambda: ssl.SSLSocket.read(self, len, buffer))
+
+    def send(self: Any, data: Any, flags: int = 0) -> int:  # also sendall
+        return waiting(self, lambda: ssl.SSLSocket.send(self, data, flags))
+
+    def do_handshake(self: Any, block: bool = False) -> None:
+        waiting(self, lambda: ssl.SSLSocket.do_handshake(self, block))
+
+    namespace = {
+        "settimeout": settimeout,
+        "gettimeout": gettimeout,
+        "setblocking": setblocking,
+        "read": read,
+        "send": send,
+        "do_handshake": do_handshake,
+    }
+    return cast("type[ssl.SSLSocket]", type("SSLSocket", (ssl.SSLSocket,), namespace))
+
+
+def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnectionPool]]:
+    tls_socket = _sliced_tls_socket(interrupter)
 
     def connection_class(base: type[HTTPConnection]) -> type[HTTPConnection]:
         def new_conn(self: HTTPConnection) -> socket.socket:
@@ -343,8 +404,8 @@ def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnec
                 interrupter.forget(self)
 
         def connect(self: Any) -> None:
-            # Windows needs the TLS socket object itself, which exists only inside
-            # urllib3's wrap_socket: hand urllib3 its usual context with a tracked class.
+            # Windows TLS sockets must wait in slices; the TLS socket exists only inside
+            # urllib3's wrap_socket: hand urllib3 its usual context with a sliced class.
             if not (_INTERRUPT_OWNERS and isinstance(self, HTTPSConnection)):
                 base.connect(self)
                 return
@@ -596,7 +657,10 @@ class _Http:
             owner = self._owner
         self._closed_event.set()
         self._interrupter.interrupt()
-        if response is not None:
+        if response is not None and not _INTERRUPT_OWNERS:
+            # A close-delimited body's socket has no live duplicate (http.client closed its
+            # connection after the headers). Never used with owners: TLS sockets are not
+            # touched from here, and plain owners were already interrupted above.
             _quietly(response.raw.shutdown, "response socket")
         if owner in (None, threading.get_ident()):
             self._release_all(response)
