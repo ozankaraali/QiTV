@@ -20,7 +20,9 @@ A direct play (`open(direct=True)`: a channel the pipeline cannot read, a movie,
 episode) holds a "main" slot too (a `HeldSlot`, under the provider the caller names: the
 catalog's, as for pipeline tunes), from its start until libVLC let go of its stream, so a
 PiP sees the slot taken. It never waits for one: this gate already orders the main player's
-streams. A local file (`local=True`) is no provider's stream: it is stopped and waited for
+streams. It waits for the other picture's tuner, though (`wait_for_each_other`): a closing
+PiP's stream may still hold the provider's last slot, so the open runs at that tuner's
+`released`. A local file (`local=True`) is no provider's stream: it is stopped and waited for
 like a direct play, but holds no slot.
 
 Picture in picture (Phase 4) gives each player a tuner of its own. Its slots carry its role
@@ -92,6 +94,13 @@ def one_disk_ring(first: "LiveTuner", second: "LiveTuner") -> None:
     second.set_disk_allowed(lambda: not first.on_disk())
 
 
+def wait_for_each_other(first: "LiveTuner", second: "LiveTuner") -> None:
+    """The two pictures' tuners: a direct open on one that takes a provider slot (a movie, an
+    episode, a direct channel) waits while the other's stopped stream may still hold one."""
+    first.set_peer(second)
+    second.set_peer(first)
+
+
 class LiveTuner(QObject):
     startFailed = Signal(str)  # LiveSession.start() raised: its message (scrub before showing)
     released = Signal()  # after a stop, nothing of the player is open any more
@@ -127,6 +136,7 @@ class LiveTuner(QObject):
         self._action_direct = False
         self._action_slot = False  # that open plays a provider stream: it holds a slot
         self._action_provider: Optional[str] = None  # whose slot it holds
+        self._peer: Optional[LiveTuner] = None  # the other picture's (wait_for_each_other)
         self._input_cap = QTimer(self, singleShot=True, interval=RELEASE_CAP_MS)
         self._input_cap.timeout.connect(self._on_input_cap)
         session.inputEnded.connect(self._on_input_ended)
@@ -154,6 +164,11 @@ class LiveTuner(QObject):
         """Whether a tune may keep its time-shift on disk now (False: the other picture
         does: the user's disk cap is the total, so this one stays in memory)."""
         self._disk_allowed = allowed
+
+    def set_peer(self, peer: "LiveTuner") -> None:
+        """The other picture's tuner: a slot-taking direct open waits for its `released`."""
+        self._peer = peer
+        peer.released.connect(self._on_peer_released)
 
     def on_disk(self) -> bool:
         """The running stream keeps its time-shift on disk."""
@@ -227,6 +242,9 @@ class LiveTuner(QObject):
         if self._input_wait or (stream is not None and stream.waiting()):
             return
         if self._action is not None:
+            peer = self._peer
+            if self._action_slot and peer is not None and peer.releasing():
+                return  # its closing stream may hold the provider's last slot (a PiP's)
             action, self._action = self._action, None
             self._direct = self._action_direct
             if self._action_slot:
@@ -273,6 +291,10 @@ class LiveTuner(QObject):
             self._held.give_back()
             self._proceed()
             self._report_released()
+
+    def _on_peer_released(self) -> None:
+        if self._action is not None and self._action_slot:
+            self._proceed()
 
     def _report_released(self) -> None:
         if not self.releasing():

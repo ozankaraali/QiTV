@@ -71,7 +71,7 @@ from ui.bottom_band import BottomBand
 from ui.export_flow import ExportFlow
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
-from ui.live_tuner import LiveTuner, one_disk_ring
+from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
@@ -369,6 +369,7 @@ class TVWindow(QMainWindow):
             main_tuner, pip_tuner = self.sessions.large().tuner, self.sessions.other().tuner
             assert isinstance(main_tuner, LiveTuner) and isinstance(pip_tuner, LiveTuner)
             one_disk_ring(main_tuner, pip_tuner)  # the user's disk cap is the total
+            wait_for_each_other(main_tuner, pip_tuner)  # a closing PiP may hold the last slot
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
 
         # The drawer and column ask the controller for "now" titles, and the controller

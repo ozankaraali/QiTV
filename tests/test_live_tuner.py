@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
 
 from services.connection_budget import ConnectionBudget
-from ui.live_tuner import LiveStart, LiveTuner, start_kwargs
+from ui.live_tuner import LiveStart, LiveTuner, start_kwargs, wait_for_each_other
 
 app = QApplication.instance() or QApplication([])
 
@@ -86,6 +86,22 @@ class DirectSlotTests(unittest.TestCase):
 
     def holders(self):
         return self.budget.holders(PROVIDER)
+
+    def test_a_direct_play_waits_while_the_other_pictures_stream_closes(self):
+        # M3: a closing PiP may still hold the provider's last slot.
+        peer_session = FakeSession()
+        peer = LiveTuner(peer_session, self.tuner.config, FakeLive(), self.budget, purpose="pip")
+        wait_for_each_other(self.tuner, peer)
+        peer.open(lambda: None, direct=True, provider=PROVIDER)
+        peer_session.holding = True
+        peer.stop()
+        self.assertTrue(peer.releasing())
+        self.tuner.open(self.play("file"), local=True)  # no provider's stream: no wait
+        self.assertEqual(self.played, ["file"])
+        self.tuner.open(self.play("movie"), direct=True, provider=PROVIDER)
+        self.assertEqual((self.played, self.holders()), (["file"], ["pip"]))
+        peer_session.let_go()
+        self.assertEqual((self.played, self.holders()), (["file", "movie"], ["main"]))
 
     def test_a_direct_play_holds_the_main_slot_until_vlc_let_go(self):
         self.tuner.open(self.play("movie"), direct=True)

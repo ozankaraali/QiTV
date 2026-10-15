@@ -28,7 +28,7 @@ from tests.test_tv_controller import (
     wait_until,
 )
 from ui.keymap import Action
-from ui.live_tuner import LiveTuner, one_disk_ring
+from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.pip_controls import (
     ALREADY_LARGE,
     NO_PREVIOUS,
@@ -155,6 +155,7 @@ class PipCase(ControllerTestCase):
         )
         self.sessions = SessionManager(self.main_slot, self.pip_slot, self.budget)
         one_disk_ring(self.main_slot.tuner, self.pip_slot.tuner)  # as the window does
+        wait_for_each_other(self.main_slot.tuner, self.pip_slot.tuner)
         self.frame = FakeFrame()
         self.label = FakePipLabel()
         self.controller = self.make_controller(
@@ -591,6 +592,38 @@ class PipTests(PipCase):
         self.assertTrue(wait_until(lambda: self.live.named("start")[-1][0] == "http://stream/3"))
         self.controller.handle(Action.SWAP)
         self.assertIs(self.sessions.large(), self.pip_slot)
+
+
+class OneStreamPipTests(PipCase):
+    """A provider allowing one stream: the small picture holds it while the large one is idle
+    (its channel failed). What the large picture opens next waits for the PiP's release."""
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+
+    def test_a_movie_opens_only_once_the_closing_pip_gave_back_the_only_slot(self):
+        self.open_small(CHANNELS[1])
+        self.assertEqual(self.budget.holders("Home"), ["pip"])
+        self.controller.play_vod(MOVIE, "movie", play_context())  # closes the PiP first
+        self.ready("http://vod/heat.mkv")
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.budget.holders("Home"), ["pip"])  # its upstream is still open
+        self.assertEqual(self.session.plays, [])
+        self.pip_live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual([url for url, _ in self.session.plays], ["http://vod/heat.mkv"])
+
+    def test_a_direct_channel_waits_for_the_closing_pip_too(self):
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.PIP)  # P closes it
+        self.tune(2)
+        self.ready("rtmp://tv/3")  # the pipeline reads http(s) only: VLC plays it direct
+        self.assertEqual(self.budget.holders("Home"), ["pip"])
+        self.assertEqual(self.session.plays, [])
+        self.pip_live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.assertEqual([url for url, _ in self.session.plays], ["rtmp://tv/3"])
 
 
 class MixerTests(PipCase):
