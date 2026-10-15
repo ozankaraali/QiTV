@@ -1,4 +1,4 @@
-"""Transient top-centre message pill."""
+"""Top-centre message pill: transient messages over an optional persistent hint."""
 
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPaintEvent
@@ -19,21 +19,50 @@ class Toast(Overlay):
         self._text = ""
         self._shown = ""
         self._kind = "info"
+        self._hint: str | None = None
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self.hide)
+        self._timer.timeout.connect(self._message_ended)
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
 
     def show_message(self, text: str, kind: str = "info", ms: int = 3000) -> None:
+        self._show(text, kind)
+        self._timer.start(ms)
+
+    def set_hint(self, text: str | None) -> None:
+        """A message that stays up until it is cleared (None), e.g. "Loading Home…".
+
+        Messages show over it and give it back when they end. A new hint shows at once,
+        cutting a message short (it is about what came before); the same hint again, or
+        None, leaves a message to end on its own.
+        """
+        text = text or None
+        changed, self._hint = text != self._hint, text
+        if text is not None and (changed or not self._timer.isActive()):
+            self._timer.stop()
+            self._show(text, "info")
+        elif text is None and not self._timer.isActive() and not self.isHidden():
+            self.hide()
+
+    def text(self) -> str:
+        """The message or hint shown last."""
+        return self._text
+
+    def _message_ended(self) -> None:
+        if self._hint is not None:
+            self._show(self._hint, "info")
+        else:
+            self.hide()
+
+    def _show(self, text: str, kind: str) -> None:
         self._text = text
         self._kind = kind
         self._layout()
         self.show()
         self.raise_()
         self.update()
-        self._timer.start(ms)
 
     def _units(self) -> Units:
         parent = self.parentWidget()

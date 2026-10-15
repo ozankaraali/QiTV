@@ -72,6 +72,8 @@ class NavModel(QObject):
     # A message for the shell to toast, e.g. that a saved catalog is shown because its
     # refresh failed.
     notice = Signal(str)
+    # A source opened here started a provider setup (the shell shows that it loads).
+    providerRequested = Signal(str)
 
     def __init__(self, catalog, config, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -80,6 +82,8 @@ class NavModel(QObject):
         self._path: list[NavNode] = []
         self._pending: set[tuple] = set()
         self._errors: dict[tuple, str] = {}
+        self._provider_errors: dict[str, str] = {}  # providers whose last setup failed
+        self._requested_sections: set[str] = set()  # asked for, neither ready nor failed yet
         self._ready_sections: set[str] = set()
         self._pending_group: Optional[tuple[str, str]] = None
         # children() results, keyed by parent and stamped with what they depend on.
@@ -94,6 +98,7 @@ class NavModel(QObject):
         catalog.seasonsFailed.connect(self._on_seasons_failed)
         catalog.episodesFailed.connect(self._on_episodes_failed)
         catalog.providerReady.connect(self._on_provider_ready)
+        catalog.providerFailed.connect(self._on_provider_failed)
 
     @property
     def path(self) -> list[NavNode]:
@@ -245,8 +250,33 @@ class NavModel(QObject):
         return None
 
     def load_error(self, node: NavNode) -> Optional[str]:
+        """Why `node`'s children failed to load; None while they may still come."""
         key = self._node_key(node)
-        return self._errors.get(key) if key else None
+        message = self._errors.get(key) if key else None
+        return None if message == PROVIDER_LOADING_MESSAGE else message
+
+    def is_loading(self, node: NavNode) -> bool:
+        """True while `node`'s children are on their way, or while a provider sets up."""
+        if self.catalog.is_loading():
+            return True
+        key = self._node_key(node)
+        if key is None:
+            return False
+        if key[0] == "section" and key[1] in self._requested_sections:
+            return True
+        return key in self._pending or self._errors.get(key) == PROVIDER_LOADING_MESSAGE
+
+    def provider_error(self, node: NavNode) -> Optional[str]:
+        """Why the setup of a source's provider failed, until it is set up again."""
+        return self._provider_errors.get(node.key) if node.layer == "source" else None
+
+    def needs_setup(self, node: NavNode) -> bool:
+        """Opening this source starts a provider setup: another provider, or a failed one."""
+        if node.layer != "source":
+            return False
+        if node.key != self.catalog.current_provider_name():
+            return True
+        return node.key in self._provider_errors and not self.catalog.is_loading()
 
     def retry(self, node: NavNode) -> None:
         key = self._node_key(node)
@@ -257,6 +287,7 @@ class NavModel(QObject):
         if key[0] == "section":
             self._ready_sections.discard(key[1])
             self._pending.add(key)
+            self._requested_sections.add(key[1])
             self.catalog.request_section(key[1])
         self._events += 1
         self.changed.emit()
@@ -321,14 +352,22 @@ class NavModel(QObject):
 
     def open(self, node: NavNode) -> None:
         if node.layer == "source":
-            if node.key != self.catalog.current_provider_name():
+            # The current provider is set up again when its last setup failed.
+            if self.needs_setup(node):
+                self._provider_errors.pop(node.key, None)
                 self.catalog.select_provider(node.key)
+                self.providerRequested.emit(node.key)
             self._path = [node]
         else:
             depth = {"section": 1, "group": 2, "item": 3, "season": 4, "episode": 5}[node.layer]
             self._path = self._path[:depth] + [node]
             if node.layer == "section":
-                self.catalog.request_section(node.key)
+                self._request_section(node.key)
+        self.changed.emit()
+
+    def focus_source(self, name: str) -> None:
+        """Show the sources with `name` at the end of the path (e.g. after its setup failed)."""
+        self._path = [NavNode("source", name, name, name)]
         self.changed.emit()
 
     def up(self) -> bool:
@@ -343,10 +382,15 @@ class NavModel(QObject):
         section_node = NavNode("section", section, SECTION_TITLES.get(section, section), section)
         self._path = [source, section_node]
         self._pending_group = None
-        self.catalog.request_section(section)
+        self._request_section(section)
         if group_id is not None and not self._resolve_group(section, group_id):
             self._pending_group = (section, group_id)
         self.changed.emit()
+
+    def _request_section(self, section: str) -> None:
+        """Ask for a section; it is loading until sectionReady or sectionFailed."""
+        self._requested_sections.add(section)
+        self.catalog.request_section(section)
 
     def _resolve_group(self, section: str, group_id: str) -> bool:
         if len(self._path) != 2 or self._path[1].key != section:
@@ -382,6 +426,7 @@ class NavModel(QObject):
     def _on_section_ready(self, section: str) -> None:
         self._events += 1
         self._ready_sections.add(section)
+        self._requested_sections.discard(section)
         self._pending.discard(("section", section))
         self._errors.pop(("section", section), None)
         if self._pending_group and self._pending_group[0] == section:
@@ -420,6 +465,7 @@ class NavModel(QObject):
         self._events += 1
         if key[0] == "section":
             self._ready_sections.discard(key[1])
+            self._requested_sections.discard(key[1])
         self._pending.discard(key)
         self._errors[key] = message or "Load failed"
         self.changed.emit()
@@ -433,11 +479,21 @@ class NavModel(QObject):
     def _on_episodes_failed(self, series_id: str, season_id: str, message: str) -> None:
         self._fail(("episodes", series_id, season_id), message)
 
+    def _on_provider_failed(self, name: str, message: str) -> None:
+        # Requests made for the setup's provider will never settle: none is loading now.
+        self._events += 1
+        self._pending.clear()
+        self._requested_sections.clear()
+        self._provider_errors[name] = message or "Couldn't connect"
+        self.changed.emit()
+
     def _on_provider_ready(self, name: str) -> None:
         self._memo.clear()
         self._events += 1
         self._pending.clear()
+        self._requested_sections.clear()
         self._errors.clear()
+        self._provider_errors.clear()
         self._ready_sections.clear()
         self._pending_group = None
         if not self._path or self._path[0].key != name:

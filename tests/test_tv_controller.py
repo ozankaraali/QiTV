@@ -19,7 +19,7 @@ from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
 from ui.keymap import Action
 from ui.overlays.channel_column import ChannelColumn
-from ui.overlays.drawer import Drawer
+from ui.overlays.drawer import LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.zap_banner import ZapBanner
@@ -219,8 +219,11 @@ class FakeDrawer(FakeOverlay):
     playRequested = Signal(object, object, object)
     closed = Signal()
 
-    def open_drawer(self, focus_key=None):
-        self.record("open_drawer", focus_key)
+    def open_drawer(self, focus_key=None, focus_side="right"):
+        if focus_side == "right":
+            self.record("open_drawer", focus_key)
+        else:
+            self.record("open_drawer", focus_key, focus_side)
         self.visible = True
 
     def close_drawer(self):
@@ -290,8 +293,14 @@ class FakeTransport(FakeOverlay):
 
 
 class FakeToast(FakeOverlay):
+    hint = None
+
     def show_message(self, text, kind="info", ms=3000):
         self.record("show_message", text, kind, ms)
+
+    def set_hint(self, text):
+        self.record("set_hint", text)
+        self.hint = text
 
     def messages(self):
         return [(text, kind) for text, kind, _ms in self.named("show_message")]
@@ -525,20 +534,60 @@ class LinkPipelineTests(ControllerTestCase):
 
 
 class StartupTests(ControllerTestCase):
-    def test_no_providers_shows_the_welcome_toast(self):
+    def test_no_providers_shows_the_welcome_hint_until_one_exists(self):
         self.catalog.names = []
         self.controller.start()
-        self.assertEqual(
-            self.toast.named("show_message"),
-            [("Add a provider in Settings to start watching", "info", 8000)],
-        )
+        self.assertEqual(self.toast.hint, "Add a provider in Settings to start watching")
+        self.assertEqual(self.toast.messages(), [])  # a hint: no message that times out
         self.assertEqual(self.catalog.selected, [])
         self.assertEqual(self.drawer.calls, [])
         self.controller.handle(Action.OPEN_DRAWER)
         self.controller.select_provider(force_refresh=True)
         self.assertEqual(self.drawer.calls, [])
         self.assertEqual(self.catalog.selected, [])
-        self.assertEqual(len(self.toast.messages()), 3)
+        self.assertEqual(self.toast.hint, "Add a provider in Settings to start watching")
+        self.catalog.names = ["Home"]  # saved in Settings
+        self.controller.select_provider(force_refresh=True)
+        self.assertEqual(self.toast.hint, "Loading Home…")
+
+    def test_the_loading_hint_shows_until_the_first_live_section(self):
+        self.controller.start()
+        self.assertEqual(self.toast.hint, "Loading Home…")
+        self.catalog.providerReady.emit("Home")
+        self.assertEqual(self.toast.hint, "Loading Home…")  # the channels are still on their way
+        self.catalog.sectionReady.emit("live")
+        self.assertIsNone(self.toast.hint)
+
+    def test_the_loading_hint_names_the_selected_provider(self):
+        self.config.selected_provider_name = "Backup"
+        self.controller.start()
+        self.assertEqual(self.toast.hint, "Loading Backup…")
+
+    def test_the_loading_hint_ends_when_the_live_section_fails(self):
+        self.controller.start()
+        self.catalog.loaded = False
+        self.catalog.providerReady.emit("Home")
+        self.catalog.sectionFailed.emit("live", PROVIDER_LOADING_MESSAGE)
+        self.assertEqual(self.toast.hint, "Loading Home…")  # a setup is still running
+        self.catalog.sectionFailed.emit("live", "Timed out")
+        self.assertIsNone(self.toast.hint)
+
+    def test_a_provider_chosen_in_the_drawer_shows_the_loading_hint(self):
+        self.controller.start()
+        self.catalog.providerReady.emit("Home")
+        self.catalog.sectionReady.emit("live")
+        self.nav.open(NavNode("source", "Backup", "Backup", "Backup"))
+        self.assertEqual(self.catalog.selected, [None, "Backup"])
+        self.assertEqual(self.toast.hint, "Loading Backup…")
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")
+        self.catalog.sectionReady.emit("live")
+        self.assertIsNone(self.toast.hint)
+
+    def test_shutdown_clears_the_hint(self):
+        self.controller.start()
+        self.controller.shutdown()
+        self.assertIsNone(self.toast.hint)
 
     def test_autotunes_the_last_channel(self):
         self.config.last_live_channel = {
@@ -572,11 +621,13 @@ class StartupTests(ControllerTestCase):
         self.catalog.sectionReady.emit("live")  # later section loads do not reopen it
         self.assertEqual(len(self.drawer.named("open_drawer")), 1)
 
-    def test_provider_failure_toasts(self):
+    def test_provider_failure_toasts_and_opens_the_drawer_on_the_sources(self):
         self.controller.start()
         self.catalog.providerFailed.emit("Home", "Handshake failed")
         self.assertEqual(self.toast.messages(), [("Home: Handshake failed", "error")])
-        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])  # sources stay reachable
+        self.assertIsNone(self.toast.hint)
+        self.assertEqual(self.drawer.named("open_drawer"), [(None, "left")])
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
 
     def test_live_section_failure_opens_the_drawer_with_a_hint(self):
         self.controller.start()
@@ -806,6 +857,18 @@ class TransportAndWheelTests(ControllerTestCase):
             ],
         )
 
+    def test_mouse_back_and_forward_open_the_drawer_then_change_its_layer(self):
+        self.controller.mouse_back()
+        self.assertEqual(len(self.drawer.named("open_drawer")), 1)  # closed: it opens
+        self.controller.mouse_back()
+        self.controller.mouse_forward()
+        self.assertEqual(self.drawer.named("left"), [()])
+        self.assertEqual(self.drawer.named("right"), [()])
+        self.drawer.close_drawer()
+        self.controller.mouse_forward()
+        self.assertEqual(len(self.drawer.named("open_drawer")), 2)
+        self.assertEqual(self.drawer.named("right"), [()])
+
     def test_wheel_with_the_volume_setting_changes_volume(self):
         self.play(0)
         self.config.mouse_wheel_action = "volume"
@@ -857,18 +920,6 @@ class ColumnWheelTests(ControllerTestCase):
 
 class RealOverlayTests(ControllerTestCase):
     """The controller against the real overlays: catches API drift the fakes would hide."""
-    def test_mouse_back_and_forward_open_the_drawer_then_change_its_layer(self):
-        self.controller.mouse_back()
-        self.assertEqual(len(self.drawer.named("open_drawer")), 1)  # closed: it opens
-        self.controller.mouse_back()
-        self.controller.mouse_forward()
-        self.assertEqual(self.drawer.named("left"), [()])
-        self.assertEqual(self.drawer.named("right"), [()])
-        self.drawer.close_drawer()
-        self.controller.mouse_forward()
-        self.assertEqual(len(self.drawer.named("open_drawer")), 2)
-        self.assertEqual(self.drawer.named("right"), [()])
-
 
     def test_start_browse_tune_and_escape(self):
         host = QWidget()
@@ -926,6 +977,59 @@ class RealOverlayTests(ControllerTestCase):
         self.assertTrue(overlays.drawer.isVisible())
         controller.handle(Action.ESCAPE)
         self.assertFalse(overlays.drawer.isVisible())
+
+
+class ProviderRetryTests(ControllerTestCase):
+    """A provider that fails to set up can be retried from the drawer (real overlays)."""
+
+    def setUp(self):
+        super().setUp()
+        self.host = QWidget()
+        self.addCleanup(self.host.close)
+        self.host.resize(1280, 720)
+        self.real_drawer = Drawer(self.nav, None, lambda channel: None, parent=self.host)
+        self.real_toast = Toast(self.host)
+        self.drawer, self.toast = self.real_drawer, self.real_toast
+        self.controller = self.make_controller(self.column)
+        self.host.show()
+
+        def select(name=None, **kwargs):
+            self.catalog.selected.append(name)
+            self.catalog.loading = True  # as CatalogService: the setup runs until it settles
+
+        self.catalog.select_provider = select
+        self.controller.start()
+
+    def fail_setup(self):
+        self.catalog.loading = False
+        self.catalog.providerFailed.emit("Home", "Couldn't reach the provider")
+
+    def test_the_drawer_opens_on_the_failed_source_with_a_retry_row(self):
+        self.fail_setup()
+        drawer = self.real_drawer
+        self.assertTrue(drawer.isVisible())
+        self.assertEqual(drawer.focus_side, "left")
+        self.assertEqual((drawer.highlighted().layer, drawer.highlighted().key), ("source", "Home"))
+        self.assertEqual(drawer.message_for("right"), PROVIDER_ERROR_TEXT)
+        self.assertEqual(self.real_toast.text(), "Home: Couldn't reach the provider")
+
+    def test_enter_on_the_failed_source_sets_it_up_again(self):
+        self.fail_setup()
+        self.controller.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.catalog.selected, [None, "Home"])
+        self.assertEqual(self.real_drawer.message_for("right"), LOADING_TEXT)
+        self.assertEqual(self.real_toast.text(), "Loading Home…")
+        self.catalog.loading = False
+        self.catalog.providerReady.emit("Home")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.real_drawer.highlighted().title, "News")
+
+    def test_enter_on_the_retry_row_sets_it_up_again(self):
+        self.fail_setup()
+        self.controller.handle(Action.NAV_RIGHT)  # onto the row
+        self.assertEqual(self.real_drawer.focus_side, "right")
+        self.controller.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.catalog.selected, [None, "Home"])
 
 
 class BottomOverlayTests(ControllerTestCase):
@@ -1175,6 +1279,7 @@ class ReviewFixTests(ControllerTestCase):
 
     def test_closed_controller_ignores_catalog_signals(self):
         self.controller.shutdown()
+        self.toast.calls.clear()  # the startup hint, cleared by the shutdown
         self.catalog.providerReady.emit("Home")
         self.catalog.sectionReady.emit("live")
         self.catalog.sectionFailed.emit("live", UNREACHABLE_MESSAGE)

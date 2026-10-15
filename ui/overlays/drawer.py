@@ -27,6 +27,7 @@ PREVIEW_DEBOUNCE_MS = 200
 LOADING_TEXT = "Loading…"
 EMPTY_TEXT = "Nothing here"
 ERROR_TEXT = "Couldn't load — press Enter to retry"
+PROVIDER_ERROR_TEXT = "Couldn't connect — press Enter to retry"
 
 NodeRole = Qt.UserRole + 10
 CountRole = Qt.UserRole + 11
@@ -175,10 +176,12 @@ class Drawer(Overlay):
 
     # ---- public API -------------------------------------------------------------------------
 
-    def open_drawer(self, focus_key: str | None = None) -> None:
-        self.focus_side = "right"
+    def open_drawer(self, focus_key: str | None = None, focus_side: str = "right") -> None:
+        """Open on the NavModel's path, focusing the right column (or the left one)."""
+        self.focus_side = focus_side
         self.filter_text = ""
         self._filter_key = None
+        self._left_choice = None  # the left highlight starts at the end of the path
         self._pending_key = focus_key
         self._cancel_preview()
         self._columns["right"].parent = None  # force the highlight to be re-chosen
@@ -274,7 +277,12 @@ class Drawer(Overlay):
     # ---- state ------------------------------------------------------------------------------
 
     def _retry(self, col: _Column) -> bool:
-        if col.message != ERROR_TEXT or col.parent is None:
+        if col.parent is None:
+            return False
+        if col.message == PROVIDER_ERROR_TEXT:
+            self._nav.open(col.parent)  # sets the failed provider up again
+            return True
+        if col.message != ERROR_TEXT:
             return False
         self._nav.retry(col.parent)
         return True
@@ -307,12 +315,20 @@ class Drawer(Overlay):
             self._nav.open(node)
 
     def _commit_left(self) -> None:
-        """Open the left highlight (flushing a pending preview) before focus moves right."""
+        """Open the left highlight (flushing a pending preview) before focus moves right.
+
+        The end of the path opens again only when it is a source whose provider needs a
+        setup (its last one failed): that is the retry.
+        """
         self._flush_preview()
         node = self._left_choice
         self._left_choice = None
         path = self._nav.path
-        if node is not None and not (path and node == path[-1]):
+        if node is None:
+            node = self._columns["left"].current
+            if node is None or not self._nav.needs_setup(node):
+                return
+        if not (path and node == path[-1]) or self._nav.needs_setup(node):
             self._nav.open(node)
 
     def _show_current(self, col: _Column) -> None:
@@ -363,7 +379,16 @@ class Drawer(Overlay):
     ) -> None:
         parent_changed = parent != col.parent
         col.parent = parent
-        if not children and parent is not None and self._nav.load_error(parent):
+        loading = parent is not None and self._nav.is_loading(parent)
+        if parent is not None and not loading and self._nav.provider_error(parent):
+            col.message = PROVIDER_ERROR_TEXT
+            children = None  # the failed provider's sections are not shown
+        elif loading and (not children or parent is not None and parent.layer == "source"):
+            # Still on its way (or a provider setup runs: a source's sections are not
+            # known yet). Never the retry row: retrying now would fail the same way.
+            col.message = LOADING_TEXT
+            children = None
+        elif not children and parent is not None and self._nav.load_error(parent):
             col.message = ERROR_TEXT
         elif children is None:
             col.message = LOADING_TEXT
@@ -523,7 +548,7 @@ class Drawer(Overlay):
             inner = box.adjusted(1.0 * u, 0, -1.0 * u, 0)
             p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         if col.message:
-            error = col.message == ERROR_TEXT
+            error = col.message in (ERROR_TEXT, PROVIDER_ERROR_TEXT)
             p.setFont(units.font(1.35))
             p.setPen(qcolor(PALETTE.text, 0.75 if error else 0.5))
             view = col.view.geometry()

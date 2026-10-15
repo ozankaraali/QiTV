@@ -13,6 +13,7 @@ from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
 
 class FakeCatalog(QObject):
     providerReady = Signal(str)
+    providerFailed = Signal(str, str)
     sectionReady = Signal(str)
     groupReady = Signal(str, str)
     seasonsReady = Signal(str)
@@ -380,7 +381,9 @@ class NavModelTests(unittest.TestCase):
         self.catalog.loading = True
         self.catalog.sectionFailed.emit("live", PROVIDER_LOADING_MESSAGE)
         self.assertEqual(notices, [])
-        self.assertEqual(self.nav.load_error(section), PROVIDER_LOADING_MESSAGE)
+        # Still loading, not a failure: no retry row for it.
+        self.assertIsNone(self.nav.load_error(section))
+        self.assertTrue(self.nav.is_loading(section))
         self.assertEqual(self.nav.children(section), [])
         # providerReady clears it, and the shell's reset_to asks for the section again.
         self.catalog.loading = False
@@ -404,6 +407,62 @@ class NavModelTests(unittest.TestCase):
         self.catalog.sectionFailed.emit("live", "Couldn't reach the provider")
         self.assertEqual(notices, [])
         self.assertEqual(self.nav.children(section), [])
+
+    def test_a_requested_section_is_loading_until_it_settles(self):
+        self.nav.reset_to("live")
+        section = self.nav.path[-1]
+        self.assertTrue(self.nav.is_loading(section))
+        self.catalog.sectionReady.emit("live")
+        self.assertFalse(self.nav.is_loading(section))
+        movies = NavNode("section", "movies", "Movies", "movies")
+        self.nav.open(movies)
+        self.assertTrue(self.nav.is_loading(movies))
+        self.catalog.loaded = False  # nothing saved to fall back on
+        self.catalog.sectionFailed.emit("movies", "Timed out")
+        self.assertFalse(self.nav.is_loading(movies))
+        self.assertEqual(self.nav.load_error(movies), "Timed out")
+
+    def test_everything_is_loading_while_a_provider_sets_up(self):
+        self.nav.reset_to("live")
+        self.catalog.sectionReady.emit("live")
+        self.catalog.loading = True
+        self.assertTrue(self.nav.is_loading(self.nav.path[-1]))
+        self.assertTrue(self.nav.is_loading(self.nav.path[0]))
+
+    def test_a_failed_provider_is_set_up_again_when_its_source_is_opened(self):
+        requested = []
+        self.nav.providerRequested.connect(requested.append)
+        home = self.nav.children(None)[0]
+        self.catalog.providerFailed.emit("Home", "Couldn't reach the provider")
+        self.assertEqual(self.nav.provider_error(home), "Couldn't reach the provider")
+        self.nav.open(home)  # the current provider, but not ready: set it up again
+        self.assertEqual(self.catalog.selected, ["Home"])
+        self.assertEqual(requested, ["Home"])
+        self.assertIsNone(self.nav.provider_error(home))
+        self.assertEqual(self.nav.path, [home])
+
+    def test_the_ready_current_provider_is_not_set_up_again(self):
+        self.catalog.providerReady.emit("Home")
+        self.nav.open(self.nav.children(None)[0])
+        self.assertEqual(self.catalog.selected, [])
+
+    def test_a_running_setup_is_not_started_again(self):
+        home = self.nav.children(None)[0]
+        self.catalog.providerFailed.emit("Home", "down")
+        self.catalog.loading = True  # e.g. Settings started a refresh meanwhile
+        self.nav.open(home)
+        self.assertEqual(self.catalog.selected, [])
+
+    def test_provider_ready_clears_a_provider_error(self):
+        home = self.nav.children(None)[0]
+        self.catalog.providerFailed.emit("Home", "down")
+        self.catalog.providerReady.emit("Home")
+        self.assertIsNone(self.nav.provider_error(home))
+
+    def test_focus_source_shows_the_sources_with_it_at_the_end_of_the_path(self):
+        self.nav.reset_to("live")
+        self.nav.focus_source("Backup")
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Backup")])
 
     def test_failed_refresh_resolves_a_pending_group_from_the_saved_catalog(self):
         self.catalog.loaded = False

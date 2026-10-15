@@ -199,6 +199,21 @@ class TVWindowTests(WindowCase):
             )
         )
 
+    def test_a_loading_hint_shows_from_startup_until_the_channels_arrive(self):
+        toast, hints = self.window.overlays.toast, []
+        set_hint = toast.set_hint
+
+        def spy(text):
+            hints.append(text)
+            set_hint(text)
+
+        toast.set_hint = spy
+        self.show()
+        self.wait_for_drawer()
+        self.assertTrue(wait_until(lambda: hints[-1:] == [None]))
+        name = self.provider_manager.providers[0]["name"]
+        self.assertEqual(hints, [f"Loading {name}…", None])
+
     def test_notices_are_toasted_once_by_the_started_controller(self):
         self.show()
         self.wait_for_drawer()
@@ -779,15 +794,23 @@ class NoProviderTests(WindowCase):
     def provider_list(self):
         return []
 
-    def test_first_launch_without_providers_shows_the_welcome_toast(self):
+    def test_first_launch_without_providers_shows_the_welcome_hint(self):
         self.show()
-        self.assertTrue(wait_until(lambda: (WELCOME_TEXT, "info") in self.toasts))
         toast, host = self.window.overlays.toast, self.window.host
-        self.assertTrue(toast.isVisible())
+        self.assertTrue(wait_until(lambda: toast.text() == WELCOME_TEXT and toast.isVisible()))
         self.assertTrue(host.isVisible())
         # Laid out for the host's real size, though the host was hidden when it showed.
         self.assertEqual(host.size(), self.window.surface.size())
         self.assertAlmostEqual(toast.geometry().center().x(), host.width() / 2, delta=2)
+
+    def test_the_welcome_hint_stays_until_a_provider_exists(self):
+        self.show()
+        toast = self.window.overlays.toast
+        self.assertTrue(wait_until(lambda: toast.text() == WELCOME_TEXT))
+        toast.show_message("Volume 50%", "info", 50)  # any message shows over it…
+        self.assertTrue(wait_until(lambda: toast.text() == WELCOME_TEXT))  # …and gives it back
+        QTest.qWait(150)
+        self.assertTrue(toast.isVisible())
 
 
 class FailingProviderTests(WindowCase):

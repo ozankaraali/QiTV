@@ -8,11 +8,11 @@ from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
-from services.catalog import Group
+from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import NavModel
 from tests.test_navigation import FakeCatalog
 from ui.overlay_host import OverlayHost
-from ui.overlays.drawer import Drawer
+from ui.overlays.drawer import EMPTY_TEXT, LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
 
 
 def make(live=None):
@@ -124,6 +124,55 @@ class DrawerTests(unittest.TestCase):
         self.drawer.activate()
         self.assertEqual(self.catalog.requests.count(("group", "live", "10")), before + 1)
         self.assertIsNone(self.nav.load_error(self.nav.path[-1]))
+
+    def test_a_pending_section_shows_loading_until_it_settles(self):
+        self.catalog.loaded = False  # no groups yet
+        self.nav.reset_to("live")
+        self.drawer.open_drawer()
+        self.assertEqual(self.drawer.message_for("right"), LOADING_TEXT)  # not "Nothing here"
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.drawer.message_for("right"), EMPTY_TEXT)
+
+    def test_a_provider_that_is_still_loading_shows_loading_not_the_retry_row(self):
+        self.catalog.loaded = False
+        self.nav.reset_to("live")
+        self.drawer.open_drawer()
+        self.catalog.loading = True
+        self.catalog.sectionFailed.emit("live", PROVIDER_LOADING_MESSAGE)
+        self.assertEqual(self.drawer.message_for("right"), LOADING_TEXT)
+        self.catalog.sectionFailed.emit("live", "Couldn't reach the provider")
+        self.assertEqual(self.drawer.message_for("right"), LOADING_TEXT)
+        before = list(self.catalog.requests)
+        self.drawer.activate()  # Enter while loading: no retry into the same failure
+        self.assertEqual(self.catalog.requests, before)
+
+    def test_a_source_switch_shows_loading_instead_of_the_old_sections(self):
+        self.drawer.open_drawer()
+        backup = self.nav.children(None)[1]
+        self.catalog.select_provider = lambda name=None, **kw: setattr(
+            self.catalog, "loading", True
+        )
+        self.nav.open(backup)
+        self.assertEqual(self.drawer.message_for("right"), LOADING_TEXT)
+        self.assertIsNone(self.drawer._columns["right"].current)
+
+    def test_a_failed_source_offers_to_connect_again(self):
+        self.catalog.providerFailed.emit("Home", "Couldn't reach the provider")
+        self.nav.focus_source("Home")
+        self.drawer.open_drawer(focus_side="left")
+        self.assertEqual(self.drawer.focus_side, "left")
+        self.assertEqual(self.drawer.highlighted().key, "Home")
+        self.assertEqual(self.drawer.message_for("right"), PROVIDER_ERROR_TEXT)
+        self.drawer.activate()
+        self.assertEqual(self.catalog.selected, ["Home"])
+
+    def test_enter_on_the_connect_row_retries(self):
+        self.catalog.providerFailed.emit("Home", "Couldn't reach the provider")
+        self.nav.focus_source("Home")
+        self.drawer.open_drawer()
+        self.assertEqual(self.drawer.focus_side, "right")
+        self.drawer.activate()
+        self.assertEqual(self.catalog.selected, ["Home"])
 
     def many_groups(self, count=8):
         self.catalog.groups = lambda section: [

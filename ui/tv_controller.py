@@ -35,7 +35,6 @@ from ui.pointer import PointerInput
 logger = logging.getLogger(__name__)
 
 WELCOME_TEXT = "Add a provider in Settings to start watching"
-WELCOME_MS = 8000
 INFO_MS = 3000
 ERROR_MS = 6000
 VOLUME_STEP = 5
@@ -129,6 +128,7 @@ class TVController(QObject):
         self._state = "idle"
         self._provider: Optional[str] = None
         self._await_live = False  # after providerReady: the first live section decides
+        self._loading = False  # the "Loading <provider>…" hint is up
         self._autotune: Optional[tuple[dict, str]] = None
         self._audio_id: Optional[int] = None
         self._subtitle_id: Optional[int] = None
@@ -144,6 +144,7 @@ class TVController(QObject):
             # ProviderManager cannot set up without providers; the setup would only fail.
             self._welcome()
             return
+        self._show_loading(self._setup_name(None))
         self.catalog.select_provider()
 
     def _wire(self) -> None:
@@ -158,6 +159,7 @@ class TVController(QObject):
         catalog.linkFailed.connect(self._on_link_failed)
         catalog.epgReady.connect(self._on_epg_ready)
         self.nav.notice.connect(self._on_notice)
+        self.nav.providerRequested.connect(self._on_provider_requested)
         zap.tuneRequested.connect(self._on_zap_tune)
         zap.columnRequested.connect(self._on_column_requested)
         zap.highlightChanged.connect(self._on_highlight)
@@ -192,6 +194,8 @@ class TVController(QObject):
         self._closed = True
         self._drop_links()
         self._autotune = None
+        self._loading = False
+        self.overlays.toast.set_hint(None)  # e.g. the closing notice needs the toast
         try:
             self.watch.flush()
         except Exception as e:
@@ -205,6 +209,7 @@ class TVController(QObject):
         if not self.catalog.provider_names():
             self._welcome()
             return
+        self._show_loading(self._setup_name(name))
         # Pending links are settled when the provider is ready (see _on_provider_ready).
         self.catalog.select_provider(name, force_refresh=force_refresh)
 
@@ -585,13 +590,24 @@ class TVController(QObject):
         if self._closed:
             return
         self._drop_links()
+        self._end_loading()
         self._error(f"{name}: {message}" if name else message)
-        self._open_drawer_if_idle()  # the sources stay reachable instead of a black screen
+        # The sources, on the failed one, with a row to connect again: never a black screen.
+        if self._has_media() and not self.overlays.drawer.isVisible():
+            return  # the saved catalog still plays; the drawer offers the retry when opened
+        self.nav.focus_source(name or self.catalog.current_provider_name())
+        self.overlays.drawer.open_drawer(focus_side="left")
+
+    def _on_provider_requested(self, name: str) -> None:
+        """A source chosen in the drawer started a setup."""
+        if not self._closed:
+            self._show_loading(name)
 
     def _on_section_ready(self, section: str) -> None:
         if self._closed or section != "live" or not self._await_live:
             return
         self._await_live = False
+        self._end_loading()
         autotune, self._autotune = self._autotune, None
         if autotune is not None and self._tune_last(*autotune):
             return
@@ -608,6 +624,7 @@ class TVController(QObject):
             return
         self._await_live = False
         self._autotune = None
+        self._end_loading()
         self._error(f"Live TV: {message}")
         self._open_drawer_if_idle()  # it shows the retry row
 
@@ -906,4 +923,24 @@ class TVController(QObject):
         logger.debug("Could not %s", what, exc_info=True)
 
     def _welcome(self) -> None:
-        self._toast(WELCOME_TEXT, "info", WELCOME_MS)
+        """Until a provider exists (Phase 3 brings the welcome card)."""
+        self._loading = False
+        self.overlays.toast.set_hint(WELCOME_TEXT)
+
+    def _setup_name(self, name: Optional[str]) -> str:
+        """The provider a setup for `name` loads, as ProviderManager picks it."""
+        names = self.catalog.provider_names()
+        wanted = name if name is not None else getattr(self.config, "selected_provider_name", None)
+        if wanted in names:
+            return str(wanted)
+        return names[0] if names else ""
+
+    def _show_loading(self, name: str) -> None:
+        """From a setup's start until the first live section or a failure (Review Focus 5)."""
+        self._loading = True
+        self.overlays.toast.set_hint(f"Loading {name}…" if name else "Loading…")
+
+    def _end_loading(self) -> None:
+        if self._loading:
+            self._loading = False
+            self.overlays.toast.set_hint(None)
