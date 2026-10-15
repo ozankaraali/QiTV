@@ -348,6 +348,9 @@ class TVWindow(QMainWindow):
         self.setWindowState(Qt.WindowState.WindowNoState)
         self.setGeometry(self._mini_rect())
         self._show_again()
+        if maximized:
+            # macOS applies the end of the zoomed state on show, over the geometry set above.
+            self.setGeometry(self._mini_rect())
 
     def _leave_mini(self) -> None:
         if self._mini_restore is None:
