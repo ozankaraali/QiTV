@@ -51,6 +51,7 @@ CHANNELS = [
     for i, name in ((1, "One"), (2, "Two"), (3, "Three"), (4, "Four"))
 ]
 NO_MODS = Qt.KeyboardModifier.NoModifier
+UP, DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value  # the mixer's arrows
 
 
 def wait_until(predicate, timeout_ms=2000):
@@ -3852,13 +3853,13 @@ class MixerTests(PipCase):
         self.controller.handle(Action.SEEK_FWD)  # → the PiP's row (not a seek)
         self.assertEqual(self.mixer.selected, 1)
         self.assertEqual(self.live.named("seek_relative"), [])
-        self.controller.handle(Action.CH_PREV)  # ↑: louder, and audible now
+        self.controller.handle(Action.CH_PREV, key=UP)  # ↑: louder, and audible now
         self.assertEqual(self.mixer.shown()[0][1], ("PiP", "Two", 35, False))
         self.assertFalse(self.pip_session.muted)
         self.assertEqual(self.pip_session.level, 35)
         self.assertTrue(self.label.audible)
-        self.controller.handle(Action.CH_NEXT)  # ↓ (not a zap)
-        self.controller.handle(Action.CH_NEXT)
+        self.controller.handle(Action.CH_NEXT, key=DOWN)  # ↓ (not a zap)
+        self.controller.handle(Action.CH_NEXT, key=DOWN)
         self.assertEqual(self.sessions.level("pip"), 25)
         self.assertEqual(self.requested(), ["One", "Two"])
         self.controller.handle(Action.TAB)  # back to Main
@@ -3885,15 +3886,17 @@ class MixerTests(PipCase):
         self.open_small(CHANNELS[1])
         self.controller.handle(Action.VOL_DOWN)
         self.mixer.levelRequested.emit(0, 80)
-        self.mixer.levelRequested.emit(1, 20)
+        self.mixer.levelRequested.emit(1, 20)  # lower: the PiP stays muted (review M3)
         self.assertEqual(
-            self.mixer.shown(), ([("Main", "One", 80, False), ("PiP", "Two", 20, False)], 1)
+            self.mixer.shown(), ([("Main", "One", 80, False), ("PiP", "Two", 20, True)], 1)
         )
+        self.mixer.levelRequested.emit(1, 40)  # raised: audible
+        self.assertEqual(self.mixer.shown()[0][1], ("PiP", "Two", 40, False))
         self.controller.handle(Action.SWAP)
         self.assertEqual(
-            self.mixer.shown()[0], [("Main", "Two", 20, False), ("PiP", "One", 80, False)]
+            self.mixer.shown()[0], [("Main", "Two", 40, False), ("PiP", "One", 80, False)]
         )
-        self.assertEqual((self.session.level, self.pip_session.level), (80, 20))
+        self.assertEqual((self.session.level, self.pip_session.level), (80, 40))
 
     def test_raising_the_pip_row_from_zero_unmutes_the_small_picture(self):
         self.start_large(0)
@@ -3902,7 +3905,7 @@ class MixerTests(PipCase):
         self.assertEqual(self.mixer.selected, 1)
         self.mixer.levelRequested.emit(1, 0)
         self.assertTrue(self.sessions.muted("pip"))
-        self.controller.handle(Action.CH_PREV)
+        self.controller.handle(Action.CH_PREV, key=UP)
         self.assertEqual(self.sessions.level("pip"), 5)
         self.assertFalse(self.sessions.muted("pip"))
         self.assertFalse(self.pip_session.muted)
@@ -3922,7 +3925,7 @@ class MixerTests(PipCase):
         self.start_large(0)
         self.open_small(CHANNELS[1])
         self.label.mixerRequested.emit()
-        self.controller.handle(Action.CH_PREV)
+        self.controller.handle(Action.CH_PREV, key=UP)
         self.assertEqual(self.config.saves, 0)
         self.mixer.dismiss()  # 3 s after the last change
         self.assertEqual((self.config.pip_volume, self.config.saves), (35, 1))
@@ -3934,3 +3937,37 @@ class MixerTests(PipCase):
         self.ready("http://vod/heat.mkv")
         self.controller.wheel(1, NO_MODS)
         self.assertEqual(self.mixer.shown(), ([("Main", "Heat", 95, False)], 0))
+
+    def test_with_one_row_left_and_right_still_seek(self):
+        # Review M2: ←/→ switch rows only when there are two.
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+        self.session.seekable = True
+        self.controller.handle(Action.CH_PREV, key=UP)  # ↑ in a movie: louder, the mixer
+        self.assertTrue(self.mixer.visible)
+        self.controller.handle(Action.SEEK_FWD)
+        self.assertEqual(self.session.relative, [10_000])
+
+    def test_channel_keys_zap_while_the_mixer_shows(self):
+        # Review M2: PageUp/PageDown and the remote's Ch± are never the mixer's arrows.
+        self.start_large(0)
+        self.controller.handle(Action.VOL_DOWN)
+        self.assertTrue(self.mixer.visible)
+        self.controller.handle(Action.CH_NEXT, key=Qt.Key.Key_PageDown.value)
+        self.assertEqual(self.requested()[-1], "Two")
+        self.assertEqual(self.sessions.level("main"), 95)
+
+    def test_the_pip_level_is_remembered_only_while_the_pip_player_is_small(self):
+        # Review M4 (ruling): pip_volume is the small picture's level.
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.SWAP)  # the "pip" player is large now
+        self.controller.handle(Action.VOL_DOWN)  # Main: the "pip" player's level
+        self.mixer.dismiss()
+        self.assertEqual((self.config.pip_volume, self.config.saves), (30, 0))
+        self.controller.handle(Action.SWAP)
+        self.label.mixerRequested.emit()
+        self.controller.handle(Action.CH_PREV, key=UP)
+        self.mixer.dismiss()
+        self.assertEqual(self.config.saves, 1)
+        self.assertEqual(self.config.pip_volume, self.sessions.level("pip"))

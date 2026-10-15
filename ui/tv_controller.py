@@ -521,13 +521,14 @@ class TVController(QObject):
         current = self._current
         return current is None or not current.live
 
-    def handle(self, action: Action, payload: str = "") -> None:
+    def handle(self, action: Action, payload: str = "", key: Optional[int] = None) -> None:
+        """`key` is the Qt key pressed, when it matters (the mixer takes the arrow keys)."""
         if self._closed:
             return
         if self._guide.is_open() and self._guide.handle(action, payload):
             return
         drawer = self.overlays.drawer
-        if not drawer.isVisible() and self._mixer.handle(action):
+        if not drawer.isVisible() and self._mixer.handle(action, key):
             return  # the mixer shows: the arrows, M, Tab and Esc are its own
         if action in (Action.CH_NEXT, Action.CH_PREV):
             delta = 1 if action is Action.CH_NEXT else -1

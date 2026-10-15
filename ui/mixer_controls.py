@@ -5,12 +5,14 @@ the large picture and shows the mixer (`ui/overlays/mixer.py`): one row ("Main")
 picture in picture, two with it ("Main", the large picture, and "PiP", the small one). While
 it shows, the keys act on its selected row: ↑/↓ (and +/-) change it by 5, ←/→ or Tab select
 the other row, M mutes it and Esc hides the mixer. The PiP label's speaker opens it on the
-PiP's row.
+PiP's row. The arrows are the arrow keys only (a remote's Ch± and PageUp/PageDown still
+zap), and ←/→ and Tab are the mixer's only with two rows (else they still seek).
 
 Levels and mutes belong to the streams (SessionManager): a swap moves each with its stream,
-so the rows trade values. Raising the small picture's level above 0 makes it audible. The
-"pip" player's level is remembered in config `pip_volume` (saved once the mixer hides) and
-given back at startup.
+so the rows trade values. Raising the small picture's level makes it audible; lowering a
+muted one keeps it muted. Config `pip_volume` is the small picture's level: the "pip"
+player's, saved (once the mixer hides) only from changes made while it is the small one,
+and given back to it at startup.
 
 Without a mixer (tests) or without picture in picture, a toast says the volume instead, and
 without a SessionManager the player's own volume and mute are used.
@@ -21,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Qt
 
 from services.sessions import PIP_LEVEL, SessionManager, Slot
 from ui.keymap import Action
@@ -32,8 +34,7 @@ logger = logging.getLogger(__name__)
 VOLUME_STEP = 5
 MAIN_ROW, PIP_ROW = 0, 1
 MAIN_TITLE, PIP_TITLE = "Main", "PiP"
-_LOUDER = (Action.CH_PREV, Action.VOL_UP)  # ↑ is louder
-_QUIETER = (Action.CH_NEXT, Action.VOL_DOWN)
+_UP, _DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value
 _OTHER_ROW = (Action.SEEK_BACK, Action.SEEK_FWD, Action.TAB)
 
 
@@ -105,15 +106,18 @@ class MixerControls(QObject):
             self._toast("Muted" if muted else f"Volume {self._level(row)}%")
         self._show(row)
 
-    def handle(self, action: Action) -> bool:
-        """The keys while the mixer shows (False: not the mixer's, or it is hidden)."""
+    def handle(self, action: Action, key: Optional[int] = None) -> bool:
+        """The keys while the mixer shows (False: not the mixer's, or it is hidden).
+
+        `key` is the Qt key pressed: ↑/↓ are the arrow keys' CH_PREV/CH_NEXT only.
+        """
         if not self.visible():
             return False
-        if action in _LOUDER:
+        if action is Action.VOL_UP or (action is Action.CH_PREV and key == _UP):  # ↑ louder
             self.change(VOLUME_STEP)
-        elif action in _QUIETER:
+        elif action is Action.VOL_DOWN or (action is Action.CH_NEXT and key == _DOWN):
             self.change(-VOLUME_STEP)
-        elif action in _OTHER_ROW:
+        elif action in _OTHER_ROW and len(self._slots()) > 1:
             self._show((self._row + 1) % len(self._slots()))
         elif action is Action.MUTE:
             self.mute()
@@ -205,8 +209,8 @@ class MixerControls(QObject):
             self._session().set_volume(level)
             return
         self.sessions.set_level(slot.name, level)
-        if slot.name == "pip":
-            self._pip_level_changed = True
+        if slot.name == "pip" and slot is self.sessions.small():
+            self._pip_level_changed = True  # pip_volume: the small picture's level
 
     def _muted(self, row: int) -> bool:
         slot = self._slot(row)

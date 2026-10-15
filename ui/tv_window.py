@@ -65,7 +65,7 @@ from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui.bottom_band import BottomBand
 from ui.export_flow import ExportFlow
-from ui.keymap import Action, resolve
+from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
 from ui.live_tuner import LiveTuner
 from ui.logos import LogoCache, PosterCache
@@ -510,7 +510,7 @@ class TVWindow(QMainWindow):
             return
         if action is Action.ESCAPE and self.screens.escape_to_library():
             return
-        self.controller.handle(action, payload)
+        self.controller.handle(action, payload, key=as_int(event.key()))
 
     def _on_video_clicked(self) -> None:
         if self._dragged:  # the press moved the mini player
