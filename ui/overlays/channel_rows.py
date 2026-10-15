@@ -12,10 +12,11 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QFont, QPainter, QPixmap
+from PySide6.QtGui import QFont, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate
 
 from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round
+from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -206,3 +207,9 @@ class ChannelListView(QListView):
         self.setStyleSheet("QListView { background: transparent; border: none; }")
         self.viewport().setAutoFillBackground(False)
         self.clicked.connect(lambda idx: self.rowClicked.emit(idx.row()))
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() in NAV_BUTTONS:
+            event.ignore()  # Back/Forward are the shell's: not a row selection
+            return
+        super().mousePressEvent(event)

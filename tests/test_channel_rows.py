@@ -5,11 +5,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import time
 import unittest
 
-from PySide6.QtCore import QModelIndex, QObject, Qt, Signal
+from PySide6.QtCore import QModelIndex, QObject, QPoint, QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem, QWidget
 
+from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import (
     ChannelListView,
@@ -169,6 +170,47 @@ class ColumnTests(unittest.TestCase):
         col.rowClicked.connect(got.append)
         col._view.rowClicked.emit(4)
         self.assertEqual(got, [4])
+
+
+class HostedColumnInputTests(unittest.TestCase):
+    """Clicks and wheel over the column stay in it (a real OverlayHost behind it)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.window = QWidget()
+        self.window.resize(1280, 720)
+        surface = QWidget(self.window)
+        surface.setGeometry(0, 0, 1280, 720)
+        self.addCleanup(self.window.deleteLater)
+        self.addCleanup(self.window.close)
+        self.host = OverlayHost(self.window, surface)
+        self.column = ChannelColumn(FakeLogos(), now_provider, parent=self.host)
+        self.host.add_overlay(self.column)
+        self.window.show()
+        self.assertTrue(QTest.qWaitForWindowExposed(self.window))
+        self.column.open("Docs", items(40), 0)
+        self.assertTrue(QTest.qWaitForWindowExposed(self.host))
+        self.events = []
+        for name in ("clicked", "doubleClicked", "wheelSteps"):
+            getattr(self.host, name).connect(lambda *a, n=name: self.events.append(n))
+
+    def test_clicks_on_the_header_and_padding_do_not_reach_the_host(self):
+        for point in (QPoint(200, 30), QPoint(8, 400), QPoint(480, 400)):
+            QTest.mouseClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+        QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=QPoint(200, 30))
+        QTest.qWait(QApplication.doubleClickInterval() + 80)
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.column.isVisible())
+
+    def test_wheel_over_the_header_and_at_the_end_does_not_reach_the_host(self):
+        view = self.column._view
+        view.scrollToBottom()
+        for point in (QPoint(200, 30), view.geometry().center()):
+            QTest.wheelEvent(self.host.windowHandle(), QPointF(point), QPoint(0, -120))
+        self.assertEqual(self.events, [])
 
 
 if __name__ == "__main__":

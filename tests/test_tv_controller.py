@@ -857,6 +857,18 @@ class ColumnWheelTests(ControllerTestCase):
 
 class RealOverlayTests(ControllerTestCase):
     """The controller against the real overlays: catches API drift the fakes would hide."""
+    def test_mouse_back_and_forward_open_the_drawer_then_change_its_layer(self):
+        self.controller.mouse_back()
+        self.assertEqual(len(self.drawer.named("open_drawer")), 1)  # closed: it opens
+        self.controller.mouse_back()
+        self.controller.mouse_forward()
+        self.assertEqual(self.drawer.named("left"), [()])
+        self.assertEqual(self.drawer.named("right"), [()])
+        self.drawer.close_drawer()
+        self.controller.mouse_forward()
+        self.assertEqual(len(self.drawer.named("open_drawer")), 2)
+        self.assertEqual(self.drawer.named("right"), [()])
+
 
     def test_start_browse_tune_and_escape(self):
         host = QWidget()

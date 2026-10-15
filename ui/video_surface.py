@@ -12,6 +12,8 @@ class VideoSurface(QWidget):
     doubleClicked = Signal()
     mouseMoved = Signal()
     wheelSteps = Signal(int, object)  # steps, Qt.KeyboardModifier
+    backPressed = Signal()  # the mouse's Back and Forward buttons
+    forwardPressed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -27,6 +29,8 @@ class VideoSurface(QWidget):
         self._pointer.clicked.connect(self.clicked)
         self._pointer.doubleClicked.connect(self.doubleClicked)
         self._pointer.wheelSteps.connect(self.wheelSteps)
+        self._pointer.backPressed.connect(self.backPressed)
+        self._pointer.forwardPressed.connect(self.forwardPressed)
 
     def native_handle(self) -> int:
         return int(self.winId())
@@ -36,7 +40,7 @@ class VideoSurface(QWidget):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        self._pointer.double_click()
+        self._pointer.double_click(event.button())
 
     def mouseMoveEvent(self, event):
         self.mouseMoved.emit()

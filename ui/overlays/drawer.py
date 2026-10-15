@@ -3,7 +3,7 @@
 import logging
 
 from PySide6.QtCore import QEvent, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QLinearGradient, QPainter
+from PySide6.QtGui import QFont, QLinearGradient, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate
 
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
@@ -11,6 +11,7 @@ from services.text_fold import fold
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import ChannelListView, ChannelRowDelegate, ChannelRowsModel
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
+from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,29 @@ class Drawer(Overlay):
             self._schedule_preview(nodes[0])
         else:
             col.current = None
+
+    # ---- mouse: consumed here, so it never reaches the video behind -------------------------
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() in NAV_BUTTONS:
+            event.ignore()  # Back/Forward go on to the host: the shell's layer up/down
+            return
+        event.accept()
+        in_fade = event.position().x() > self._columns["right"].rect.right()
+        if event.button() == Qt.LeftButton and in_fade:
+            self.close_drawer()  # the fade shows the video: a click there is a click on it
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() in NAV_BUTTONS:
+            event.ignore()
+            return
+        event.accept()  # never the video's fullscreen toggle
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        event.accept()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.accept()  # a list at its end, the header or the fade: never a zap behind
 
     # ---- layout and painting ----------------------------------------------------------------
 

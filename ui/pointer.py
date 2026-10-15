@@ -3,11 +3,15 @@
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
+NAV_BUTTONS = (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton)
+
 
 class PointerInput(QObject):
     clicked = Signal()
     doubleClicked = Signal()
     wheelSteps = Signal(int, object)  # steps, Qt.KeyboardModifier; +1 means next / down
+    backPressed = Signal()  # the mouse's Back button
+    forwardPressed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -18,8 +22,15 @@ class PointerInput(QObject):
     def press(self, button) -> None:
         if button == Qt.MouseButton.LeftButton:
             self._click.start(QApplication.doubleClickInterval())
+        elif button == Qt.MouseButton.BackButton:
+            self.backPressed.emit()
+        elif button == Qt.MouseButton.ForwardButton:
+            self.forwardPressed.emit()
 
-    def double_click(self) -> None:
+    def double_click(self, button=Qt.MouseButton.LeftButton) -> None:
+        if button != Qt.MouseButton.LeftButton:
+            self.press(button)  # a quick second Back or Forward is one more press
+            return
         self._click.stop()
         self.doubleClicked.emit()
 

@@ -3,12 +3,13 @@
 import logging
 
 from PySide6.QtCore import QEvent, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QLinearGradient, QPainter
+from PySide6.QtGui import QFont, QLinearGradient, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QAbstractItemView
 
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import ChannelListView, ChannelRowDelegate, ChannelRowsModel
 from ui.overlays.painting import Units, elided
+from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,26 @@ class ChannelColumn(Overlay):
         if obj is self.parentWidget() and event.type() == QEvent.Resize:
             self._relayout()
         return False
+
+    # ---- mouse: consumed here, so it never reaches the video behind -------------------------
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() in NAV_BUTTONS:
+            event.ignore()  # Back/Forward go on to the host
+            return
+        event.accept()  # the header and padding: not a click on the video
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() in NAV_BUTTONS:
+            event.ignore()
+            return
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        event.accept()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.accept()  # the shell turns wheel over the column into zap steps (its filter)
 
     def _relayout(self) -> None:
         parent = self.parentWidget()

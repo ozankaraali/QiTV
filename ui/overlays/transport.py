@@ -35,6 +35,7 @@ from ui.overlays.painting import (
     fmt_clock,
     fmt_duration,
 )
+from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
 SPEEDS = (1.0, 1.25, 1.5, 2.0)
@@ -671,6 +672,9 @@ class Transport(Overlay):
         return min(1.0, max(0.0, (x - seek.x()) / seek.width()))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() in NAV_BUTTONS:
+            event.ignore()  # Back/Forward go on to the host: the shell's drawer layers
+            return
         event.accept()  # the overlay host behind would open the drawer
         self.poke()
         if event.button() != Qt.LeftButton:

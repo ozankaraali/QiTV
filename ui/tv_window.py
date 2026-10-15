@@ -252,6 +252,8 @@ class TVWindow(QMainWindow):
             source.doubleClicked.connect(controller.video_double_clicked)
             source.mouseMoved.connect(controller.mouse_moved)
             source.wheelSteps.connect(controller.wheel)
+            source.backPressed.connect(controller.mouse_back)
+            source.forwardPressed.connect(controller.mouse_forward)
         self.epg_refresh = QTimer(self, interval=EPG_REFRESH_MS)  # the guide keeps moving
         self.epg_refresh.timeout.connect(lambda: self.catalog.refresh_epg())
 

@@ -4,12 +4,14 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services.catalog import Group
 from services.navigation import NavModel
 from tests.test_navigation import FakeCatalog
+from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import Drawer
 
 
@@ -240,3 +242,76 @@ class DrawerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostedDrawerInputTests(unittest.TestCase):
+    """Wheel and clicks over the drawer stay in it: the overlay host behind would zap or
+    toggle the drawer (real widgets in a real OverlayHost; QTest's window events propagate
+    like the platform's)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.catalog = FakeCatalog()
+        self.catalog.live = {"10": [{"id": i, "name": f"Chan {i}"} for i in range(80)]}
+        self.nav = NavModel(self.catalog, SimpleNamespace(favorites=[], watch_history=[]))
+        self.window = QWidget()
+        self.window.resize(1280, 720)
+        surface = QWidget(self.window)
+        surface.setGeometry(0, 0, 1280, 720)
+        self.addCleanup(self.window.deleteLater)
+        self.addCleanup(self.window.close)
+        self.host = OverlayHost(self.window, surface)
+        self.drawer = Drawer(self.nav, None, lambda item: None, self.host)
+        self.host.add_overlay(self.drawer)
+        self.window.show()
+        self.assertTrue(QTest.qWaitForWindowExposed(self.window))
+        self.nav.reset_to("live", "10")
+        self.catalog.sectionReady.emit("live")
+        self.drawer.open_drawer()
+        self.assertTrue(QTest.qWaitForWindowExposed(self.host))
+        self.events = []
+        for name in ("clicked", "doubleClicked", "wheelSteps"):
+            getattr(self.host, name).connect(lambda *a, n=name: self.events.append(n))
+        self.closed = []
+        self.drawer.closed.connect(lambda: self.closed.append(True))
+
+    def wheel(self, point, steps=1):
+        for _ in range(steps):
+            QTest.wheelEvent(self.host.windowHandle(), QPointF(point), QPoint(0, -120))
+
+    def click(self, point):
+        QTest.mouseClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+        QTest.qWait(QApplication.doubleClickInterval() + 80)  # a click is reported late
+
+    def test_wheel_at_the_end_of_a_list_does_not_reach_the_host(self):
+        view = self.drawer._columns["right"].view
+        view.scrollToBottom()
+        inside = view.geometry().center()
+        self.wheel(inside, 3)
+        self.assertEqual(self.events, [])
+
+    def test_wheel_over_the_header_padding_and_fade_does_not_reach_the_host(self):
+        for point in (QPoint(100, 30), QPoint(500, 30), QPoint(330, 400), QPoint(780, 360)):
+            self.wheel(point)
+        self.assertEqual(self.events, [])
+
+    def test_clicks_on_the_breadcrumb_filter_and_padding_keep_the_drawer(self):
+        for point in (QPoint(100, 30), QPoint(500, 30), QPoint(330, 400)):
+            self.click(point)
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.drawer.isVisible())
+
+    def test_a_double_click_on_the_drawer_does_not_toggle_fullscreen(self):
+        QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.LeftButton, pos=QPoint(500, 30))
+        QTest.qWait(QApplication.doubleClickInterval() + 80)
+        self.assertNotIn("doubleClicked", self.events)
+        self.assertTrue(self.drawer.isVisible())
+
+    def test_a_click_on_the_fade_closes_the_drawer_like_a_click_on_the_video(self):
+        self.click(QPoint(780, 360))
+        self.assertFalse(self.drawer.isVisible())
+        self.assertEqual(self.closed, [True])
+        self.assertEqual(self.events, [])  # closed once, not toggled open again

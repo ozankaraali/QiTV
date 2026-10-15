@@ -231,6 +231,23 @@ class TVWindowTests(WindowCase):
         self.assertTrue(wait_until(lambda: host.size() == self.window.surface.size()))
         self.assertEqual(transport.geometry(), host.rect())
 
+    def test_mouse_back_and_forward_step_through_the_drawer_layers(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertFalse(drawer.isVisible())
+        back, forward = Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton
+        QTest.mouseClick(self.window.surface, back, pos=QPoint(40, 40))
+        self.assertTrue(drawer.isVisible())  # closed, Back opens it (as v1.13.8 showed the list)
+        self.assertEqual(drawer.focus_side, "right")
+        over_rows = drawer._columns["right"].view.geometry().center()
+        handle = self.window.host.windowHandle()
+        QTest.mouseClick(handle, back, pos=over_rows)  # over the drawer: a layer up
+        self.assertEqual(drawer.focus_side, "left")
+        QTest.mouseClick(handle, forward, pos=over_rows)  # and down again
+        self.assertEqual(drawer.focus_side, "right")
+        self.assertTrue(drawer.isVisible())
+
     def test_video_is_not_bound_without_native_window_ids(self):
         # libVLC crashes drawing into the offscreen platform's fake window ids.
         with mock.patch.object(self.window.session, "set_window") as set_window:

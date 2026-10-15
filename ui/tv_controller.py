@@ -296,6 +296,22 @@ class TVController(QObject):
     def video_double_clicked(self) -> None:
         self.window_actions.toggle_fullscreen()
 
+    def mouse_back(self) -> None:
+        """The mouse's Back button: a drawer layer up (spec §5.3); closed, it opens."""
+        self._mouse_layer(Action.NAV_LEFT)
+
+    def mouse_forward(self) -> None:
+        """The mouse's Forward button: a drawer layer down; closed, it opens."""
+        self._mouse_layer(Action.NAV_RIGHT)
+
+    def _mouse_layer(self, action: Action) -> None:
+        if self._closed:
+            return
+        if self.overlays.drawer.isVisible():
+            self.handle(action)
+        else:
+            self.handle(Action.OPEN_DRAWER)
+
     def mouse_moved(self) -> None:
         self._show_transport()
 

@@ -26,6 +26,8 @@ class OverlayHost(QWidget):
     doubleClicked = Signal()
     mouseMoved = Signal()
     wheelSteps = Signal(int, object)  # steps, Qt.KeyboardModifier
+    backPressed = Signal()  # the mouse's Back and Forward buttons, over the video or overlays
+    forwardPressed = Signal()
 
     def __init__(self, window: QWidget, surface: QWidget):
         flags = (
@@ -47,6 +49,8 @@ class OverlayHost(QWidget):
         self._pointer.clicked.connect(self.clicked)
         self._pointer.doubleClicked.connect(self.doubleClicked)
         self._pointer.wheelSteps.connect(self.wheelSteps)
+        self._pointer.backPressed.connect(self.backPressed)
+        self._pointer.forwardPressed.connect(self.forwardPressed)
         window.installEventFilter(self)
         surface.installEventFilter(self)
 
@@ -137,12 +141,13 @@ class OverlayHost(QWidget):
             self._raise_on_top()  # an overlay raised itself over the toast
         return False
 
-    # Clicks that reach the host itself (on transparent parts of overlays that let them through).
+    # Clicks that reach the host itself (on transparent parts of overlays that let them through,
+    # and the Back/Forward buttons, which the overlays pass on).
     def mousePressEvent(self, event):
         self._pointer.press(event.button())
 
     def mouseDoubleClickEvent(self, event):
-        self._pointer.double_click()
+        self._pointer.double_click(event.button())
 
     def mouseMoveEvent(self, event):
         self.mouseMoved.emit()
