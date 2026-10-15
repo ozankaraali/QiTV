@@ -6,10 +6,11 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from services.catalog import ALL_GROUP_ID, CatalogService, Group
-from services.jobs import ImmediateRunner
+from services.jobs import ImmediateRunner, JobRunner
 
 
 class FakeWorker(QObject):
@@ -64,7 +65,27 @@ class FakeProviders:
         self.saved += 1
 
 
-def make_service(provider, factory=None):
+class ManualRunner:
+    """Holds jobs until the test completes them, to model slow workers."""
+
+    def __init__(self):
+        self.jobs = []
+
+    def run_worker(self, worker, on_finished, on_error=None, context=None):
+        self.jobs.append((worker, on_finished, on_error, context))
+        return worker
+
+    def complete(self, index):
+        worker, on_finished, on_error, context = self.jobs[index]
+        outcome = []
+        worker.finished.connect(lambda payload: outcome.append(("ok", payload)))
+        worker.error.connect(lambda message: outcome.append(("err", message)))
+        worker.run()
+        kind, value = outcome[0]
+        (on_finished if kind == "ok" else on_error)(context, value)
+
+
+def make_service(provider, factory=None, runner=None):
     config = SimpleNamespace(
         selected_provider_name=provider["name"],
         prefer_https=False,
@@ -75,7 +96,9 @@ def make_service(provider, factory=None):
     providers = FakeProviders(provider)
     epg = SimpleNamespace(get_programs_for_channel=lambda channel, start, limit: [])
     factory = factory or FakeFactory()
-    service = CatalogService(config, providers, epg, runner=ImmediateRunner(), factory=factory)
+    service = CatalogService(
+        config, providers, epg, runner=runner or ImmediateRunner(), factory=factory
+    )
     return service, providers, factory, epg
 
 
@@ -241,6 +264,101 @@ class CatalogServiceTests(unittest.TestCase):
         self.assertFalse(service.is_live("movies"))
         service, *_ = make_service({"name": "M", "type": "M3UPLAYLIST", "url": "/a"})
         self.assertIsNone(service.is_live("live"))
+
+    def test_real_runner_delivers_provider_epg_and_section(self):
+        for _ in range(20):
+            provider = {"name": "X", "type": "XTREAM", "url": "h:1"}
+            factory = FakeFactory()
+            factory.results["provider_setup"] = {"result": {"name": "X"}}
+            factory.results["epg"] = {"result": {}}
+            factory.results["xtream"] = {"result": XTREAM_PAYLOAD}
+            service, *_ = make_service(provider, factory, runner=JobRunner())
+            ready, epg, sections = (
+                collect(service.providerReady),
+                collect(service.epgReady),
+                collect(service.sectionReady),
+            )
+            service.select_provider()
+            service.request_section("live")
+            for _ in range(300):
+                if ready and epg and sections:
+                    break
+                QTest.qWait(10)
+            self.assertEqual((ready, len(epg), sections), ([("X",)], 1, [("live",)]))
+
+    def test_overlapping_setups_are_serialized_and_only_latest_reports(self):
+        runner = ManualRunner()
+        provider = {"name": "X", "type": "XTREAM", "url": "h:1"}
+        service, _, factory, _ = make_service(provider, runner=runner)
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        factory.results["epg"] = {"result": {}}
+        ready = collect(service.providerReady)
+        service.select_provider("A")
+        service.select_provider("B")
+        service.select_provider("C", force_refresh=True)
+        self.assertEqual(len(runner.jobs), 1)  # later requests wait for the running setup
+        runner.complete(0)
+        self.assertEqual(ready, [])  # superseded
+        self.assertEqual(len(runner.jobs), 2)  # only the latest request started
+        self.assertEqual(
+            factory.calls[-1], ("provider_setup", (service.provider_manager, True), {})
+        )
+        self.assertEqual(service.config.selected_provider_name, "C")
+        runner.complete(1)
+        self.assertEqual(ready, [("X",)])
+
+    def test_setup_failure_names_the_requested_provider(self):
+        service, _, factory, _ = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})
+        factory.results["provider_setup"] = {"fail": "nope"}
+        failed = collect(service.providerFailed)
+        service.select_provider("Other")
+        self.assertEqual(failed, [("Other", "nope")])
+
+    def test_group_result_after_switch_is_dropped(self):
+        runner = ManualRunner()
+        provider = {"name": "S", "type": "STB", "url": "http://portal/c/"}
+        service, providers, factory, _ = make_service(provider, runner=runner)
+        content = {"categories": [{"id": "5", "title": "Films"}], "contents": {}}
+        providers.current_provider_content["vod"] = content
+        factory.results["stb_list"] = {"result": {"items": [{"id": 9}]}}
+        ready = collect(service.groupReady)
+        service.request_group("movies", "5")
+        service.select_provider()
+        runner.complete(0)
+        self.assertEqual(ready, [])
+        self.assertEqual(content["contents"], {})
+
+    def test_deferred_cached_emit_is_dropped_after_switch(self):
+        service, providers, _, _ = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})
+        providers.current_provider_content["itv"] = XTREAM_PAYLOAD
+        ready = collect(service.sectionReady)
+        service.request_section("live")
+        service.select_provider()
+        self.pump()
+        self.assertEqual(ready, [])
+
+    def test_identical_group_request_is_not_duplicated(self):
+        runner = ManualRunner()
+        provider = {"name": "S", "type": "STB", "url": "http://portal/c/"}
+        service, providers, factory, _ = make_service(provider, runner=runner)
+        providers.current_provider_content["vod"] = {"categories": [], "contents": {}}
+        factory.results["stb_list"] = {"result": {"items": [{"id": 1}]}}
+        service.request_group("movies", "5")
+        service.request_group("movies", "5")
+        self.assertEqual(len(runner.jobs), 1)
+        runner.complete(0)
+        self.assertEqual(service.items("movies", "5"), [{"id": 1}])
+
+    def test_group_result_with_unloaded_section_is_dropped(self):
+        runner = ManualRunner()
+        provider = {"name": "S", "type": "STB", "url": "http://portal/c/"}
+        service, providers, factory, _ = make_service(provider, runner=runner)
+        factory.results["stb_list"] = {"result": {"items": []}}
+        ready = collect(service.groupReady)
+        service.request_group("movies", "5")
+        with self.assertLogs("services.catalog", "WARNING"):
+            runner.complete(0)
+        self.assertEqual(ready, [])
 
 
 if __name__ == "__main__":

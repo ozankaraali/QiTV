@@ -38,11 +38,11 @@ class _Receiver(QObject):
         super().__init__()
         self.results, self.errors, self.threads = [], [], []
 
-    def on_result(self, payload):
+    def on_result(self, context, payload):
         self.results.append(payload)
         self.threads.append(threading.get_ident())
 
-    def on_error(self, message):
+    def on_error(self, context, message):
         self.errors.append(message)
 
 
@@ -89,6 +89,32 @@ class JobRunnerTests(unittest.TestCase):
         self.assertEqual(receiver.errors, [NO_RESULT])
         self.assertEqual(receiver.results, [])
         self.assertEqual(runner.pending(), 0)
+
+
+class JobRunnerStressTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_fast_workers_each_deliver_exactly_once_with_their_context(self):
+        runner = JobRunner()
+        delivered = []
+
+        def on_result(context, payload):
+            delivered.append(("ok", context))
+
+        def on_error(context, message):
+            delivered.append(("err", context))
+
+        for i in range(50):
+            runner.run_worker(_Worker("fail" if i % 5 == 0 else "ok"), on_result, on_error, i)
+        for _ in range(300):
+            if len(delivered) >= 50 and runner.pending() == 0:
+                break
+            QTest.qWait(10)
+        self.assertEqual(sorted(c for _, c in delivered), list(range(50)))
+        self.assertEqual(runner.pending(), 0)
+        self.assertEqual(len(runner._relays), 0)
 
 
 class ImmediateRunnerTests(unittest.TestCase):

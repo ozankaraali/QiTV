@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -110,7 +110,9 @@ class CatalogService(QObject):
         self.factory = factory or WorkerFactory()
         self._generation = 0
         self._epg_ready = False
-        self._jobs: dict[QObject, tuple[str, int, Any]] = {}
+        self._setup_running = False
+        self._pending_setup: Optional[tuple[Optional[str], bool]] = None
+        self._pending_groups: set[tuple[int, str, str]] = set()
 
     # --- providers -------------------------------------------------------------------
     def provider_names(self) -> list[str]:
@@ -126,36 +128,59 @@ class CatalogService(QObject):
         return str(self.current_provider().get("type", "")).upper()
 
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
+        # Setups mutate the shared ProviderManager, so only one runs at a time; the
+        # generation bumps now so a superseded setup's results are ignored.
+        self._generation += 1
+        self._epg_ready = False
+        self._pending_groups.clear()
+        if self._setup_running:
+            self._pending_setup = (name, force_refresh)
+            return
+        self._start_setup(name, force_refresh)
+
+    def _start_setup(self, name: Optional[str], force_refresh: bool) -> None:
         if name is not None and name != self.config.selected_provider_name:
             self.config.selected_provider_name = name
             self.config.save_config()
-        self._generation += 1
-        self._epg_ready = False
+        target = name if name is not None else self.config.selected_provider_name
         worker = self.factory.provider_setup(self.provider_manager, force_refresh)
+        self._setup_running = True
         self._start(
-            worker, "provider", force_refresh, self._on_provider_ready, self._on_provider_error
+            worker,
+            "provider",
+            (target, force_refresh),
+            self._on_provider_ready,
+            self._on_provider_error,
         )
 
-    def _on_provider_ready(self, payload) -> None:
-        job = self._take_job()
-        if job is None:
+    def _finish_setup(self) -> bool:
+        """Mark the running setup done; True when a queued request took over."""
+        self._setup_running = False
+        pending, self._pending_setup = self._pending_setup, None
+        if pending is None:
+            return False
+        self._start_setup(*pending)
+        return True
+
+    def _on_provider_ready(self, job, payload) -> None:
+        if self._finish_setup() or not self._current(job):
             return
-        force_refresh = job[2]
         self.providerReady.emit(self.current_provider_name())
-        worker = self.factory.epg(self.epg_manager, force_refresh)
+        worker = self.factory.epg(self.epg_manager, job[2][1])
         self._start(worker, "epg", None, self._on_epg_ready, self._on_epg_error)
 
-    def _on_provider_error(self, message: str) -> None:
-        if self._take_job() is not None:
-            self.providerFailed.emit(self.current_provider_name(), message)
+    def _on_provider_error(self, job, message: str) -> None:
+        if self._finish_setup() or not self._current(job):
+            return
+        self.providerFailed.emit(job[2][0] or self.current_provider_name(), message)
 
-    def _on_epg_ready(self, payload) -> None:
-        if self._take_job() is not None:
+    def _on_epg_ready(self, job, payload) -> None:
+        if self._current(job):
             self._epg_ready = True
             self.epgReady.emit()
 
-    def _on_epg_error(self, message: str) -> None:
-        if self._take_job() is not None:
+    def _on_epg_error(self, job, message: str) -> None:
+        if self._current(job):
             logger.info("EPG unavailable: %s", message)
 
     def epg_ready(self) -> bool:
@@ -188,7 +213,7 @@ class CatalogService(QObject):
         ct = SECTION_CONTENT_TYPES[section]
         content = self.provider_manager.current_provider_content.get(ct)
         if not force and self._usable(content) and not self.provider_manager.is_content_stale(ct):
-            QTimer.singleShot(0, lambda: self.sectionReady.emit(section))
+            self._emit_later(self.sectionReady, section)
             return
         provider, ptype = self.current_provider(), self.provider_type()
         verify = provider.get("ssl_verify", self.config.ssl_verify)
@@ -207,7 +232,7 @@ class CatalogService(QObject):
                     "sorted_channels": {ALL_GROUP_ID: [0]},
                 },
             )
-            QTimer.singleShot(0, lambda: self.sectionReady.emit(section))
+            self._emit_later(self.sectionReady, section)
             return
         if ptype == "M3UPLAYLIST":
             worker = self.factory.m3u(provider.get("url", ""), verify, https)
@@ -225,23 +250,19 @@ class CatalogService(QObject):
                 provider.get("url", ""), self.provider_manager.headers, ct, verify, https
             )
         else:
-            QTimer.singleShot(
-                0, lambda: self.sectionFailed.emit(section, f"Unsupported provider: {ptype}")
-            )
+            self._emit_later(self.sectionFailed, section, f"Unsupported provider: {ptype}")
             return
         self._start(worker, "section", section, self._on_section_loaded, self._on_section_error)
 
-    def _on_section_loaded(self, payload) -> None:
-        job = self._take_job()
-        if job is None:
+    def _on_section_loaded(self, job, payload) -> None:
+        if not self._current(job):
             return
         section = job[2]
         self._store_section(SECTION_CONTENT_TYPES[section], payload)
         self.sectionReady.emit(section)
 
-    def _on_section_error(self, message: str) -> None:
-        job = self._take_job()
-        if job is not None:
+    def _on_section_error(self, job, message: str) -> None:
+        if self._current(job):
             self.sectionFailed.emit(job[2], message)
 
     def _store_section(self, ct: str, payload) -> None:
@@ -308,8 +329,12 @@ class CatalogService(QObject):
 
     def request_group(self, section: str, group_id: str) -> None:
         if self.items(section, group_id) is not None:
-            QTimer.singleShot(0, lambda: self.groupReady.emit(section, group_id))
+            self._emit_later(self.groupReady, section, group_id)
             return
+        key = (self._generation, section, group_id)
+        if key in self._pending_groups:
+            return
+        self._pending_groups.add(key)
         provider = self.current_provider()
         worker = self.factory.stb_list(
             url=stb_endpoint(
@@ -327,32 +352,39 @@ class CatalogService(QObject):
             worker, "group", (section, group_id), self._on_group_loaded, self._on_group_error
         )
 
-    def _on_group_loaded(self, payload) -> None:
-        job = self._take_job()
-        if job is None:
-            return
+    def _on_group_loaded(self, job, payload) -> None:
         section, group_id = job[2]
-        content = self.provider_manager.current_provider_content.setdefault(
-            SECTION_CONTENT_TYPES[section], {}
-        )
+        self._pending_groups.discard((job[1], section, group_id))
+        if not self._current(job):
+            return
+        content = self.provider_manager.current_provider_content.get(SECTION_CONTENT_TYPES[section])
+        if not isinstance(content, dict):
+            logger.warning("Dropping %s group %s: section content is not loaded", section, group_id)
+            return
         content.setdefault("contents", {})[group_id] = list(payload.get("items") or [])
         self.provider_manager.save_provider()
         self.groupReady.emit(section, group_id)
 
-    def _on_group_error(self, message: str) -> None:
-        job = self._take_job()
-        if job is not None:
-            section, group_id = job[2]
+    def _on_group_error(self, job, message: str) -> None:
+        section, group_id = job[2]
+        self._pending_groups.discard((job[1], section, group_id))
+        if self._current(job):
             self.groupFailed.emit(section, group_id, message)
 
     # --- job bookkeeping -------------------------------------------------------------
     def _start(self, worker, kind: str, data, on_finished, on_error) -> None:
-        self._jobs[worker] = (kind, self._generation, data)
-        self.runner.run_worker(worker, on_finished, on_error)
+        self.runner.run_worker(
+            worker, on_finished, on_error, context=(kind, self._generation, data)
+        )
 
-    def _take_job(self):
-        """Pop the sending worker's job; None when it is unknown or from an older provider."""
-        job = self._jobs.pop(self.sender(), None)
-        if job is None or job[1] != self._generation:
-            return None
-        return job
+    def _current(self, job) -> bool:
+        """True while the job belongs to the current provider generation."""
+        return bool(job[1] == self._generation)
+
+    def _emit_later(self, signal, *args) -> None:
+        generation = self._generation
+        QTimer.singleShot(0, lambda: self._emit_if_current(generation, signal, *args))
+
+    def _emit_if_current(self, generation: int, signal, *args) -> None:
+        if generation == self._generation:
+            signal.emit(*args)
