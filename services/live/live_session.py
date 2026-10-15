@@ -33,9 +33,9 @@ as tall as a burst, so the lag used (and reported) is its mean, in closed form: 
 lag plus the time since the edge last moved, less half a burst (see `_lag`); the step a
 landing burst adds is eased in over a few bursts, since it holds the jitter of when a
 burst lands (see `_smooth`). Held against the instantaneous peak, the rate would change at
-every burst and settle only once the lag before each burst is under 0.75 s. Go live on a
-bursty source picks among every segment start, the open one included, by the mean lag it
-would give (see `_live_seq`): never below the target less a quarter second, since
+every burst and settle only once the lag before each burst is under 0.75 s. Go live picks
+among every segment start, the open one included, by the lag it would give (for a bursty
+source its mean; see `_live_seq`): never below the target less a quarter second, since
 stay-live cannot slow down to win buffer back; the nearest the target within stay-live's
 band; else the nearest above it ("behind live" for a moment while stay-live catches up).
 
@@ -820,16 +820,14 @@ class LiveSession(QObject):
         snapshot = self._snapshot()
         edge, target = self._live_edge(snapshot), self._target(snapshot)
         burst = _number(snapshot.get("burst_s"))
-        if burst <= 0:
-            latest = edge - target
-            return ([span for span in spans if span.start <= latest] or spans)[-1].seq
-        # Every start, the open segment's too (where the closed ones end; the newest GOP of
-        # a burst stays open until the next one), by the mean lag it would give (`_lag`).
+        # Every start, the open segment's too (where the closed ones end; on a bursty source
+        # the newest GOP stays open until the next burst), by the lag it would give: for a
+        # bursty source the mean over a burst (`_lag`), for raw TS the lag itself.
         starts = [(span.start, span.seq) for span in spans]
         open_seq = snapshot.get("open")
         if isinstance(open_seq, int):
             starts.append((_number(snapshot.get("end")), open_seq))
-        shift = self._since_edge_moved(snapshot) - burst / 2
+        shift = self._since_edge_moved(snapshot) - burst / 2 if burst > 0 else 0.0
         means = sorted((edge - start + shift, seq) for start, seq in starts)
         # Stay-live never slows down, so a landing below the target would keep its smaller
         # buffer for good: none below a quarter second short of it. Then the nearest the

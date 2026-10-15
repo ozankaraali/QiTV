@@ -675,10 +675,20 @@ class SeekTests(LiveSessionCase):
         self.live.go_live()  # neither start reaches the 5.75 s floor: the most buffer
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 5))
 
-    def test_go_live_takes_the_newest_segment_when_none_is_far_enough_behind(self):
+    def test_go_live_takes_the_most_buffer_when_none_is_far_enough_behind(self):
         sid = self.ready(segments(5, 2, start=10.0), live_edge=14.0, latency="stable")
+        self.live.go_live()  # 4 s and 2 s behind, both under the 5.75 s floor: the oldest
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 5))
+
+    def test_raw_ts_go_live_lands_within_stay_lives_band(self):
+        # Normal: 2.25-3.25 s behind. 0.3 s short of the target still counts as at it.
+        sid = self.ready(segments(0, 10), live_edge=20.3)
         self.live.go_live()
-        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 6))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 9))  # 2.3 s behind
+        # The open segment is a start too: from 20.0, 2.5 s behind 22.5.
+        self.engine.buffer(sid, segments(0, 10), live_edge=22.5, open_seq=10)
+        self.live.go_live()
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 10))
 
     def test_a_seek_near_live_keeps_the_pause(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
