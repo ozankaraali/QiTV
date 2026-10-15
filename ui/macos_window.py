@@ -29,6 +29,17 @@ def _send(receiver: int, selector: bytes, restype: Any = ctypes.c_void_p, *args:
     return function(receiver, objc.sel_registerName(selector), *(v for _, v in args))
 
 
+def animates_restore() -> bool:
+    """macOS: a restored window flies out of the Dock, and the platform reports it landed.
+
+    AppKit sends windowDidDeminiaturize (Qt: a spontaneous WindowStateChange on the QWindow)
+    after the genie animation, whoever restores the window. Qt reports a restore it asked
+    for itself (showNormal()) at once, and isMiniaturized is already NO during the animation
+    then (checked on macOS 13): only the platform's report marks the end.
+    """
+    return QGuiApplication.platformName() == "cocoa"
+
+
 def attach_child_window(parent, child) -> bool:
     # Only the cocoa platform plugin hands out NSView pointers as winId()
     if QGuiApplication.platformName() != "cocoa":

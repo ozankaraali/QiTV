@@ -1,5 +1,9 @@
 import ctypes
+import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -107,6 +111,59 @@ class HostShowTests(unittest.TestCase):
 
     def test_elsewhere_the_host_is_raised_over_the_window(self):
         self.show_host(attached=False).assert_called()
+
+
+@unittest.skipUnless(sys.platform == "darwin", "macOS animates a restore out of the Dock")
+class DockRestoreTests(unittest.TestCase):
+    """A real minimize and restore on the cocoa platform (tests/dock_fixtures.py).
+
+    Restored by Qt (showNormal()), the overlay window was on screen in its final place for the
+    whole genie animation of the TV window out of the Dock: "the UI renders first, then the
+    Mac animation". It must appear only once the window has landed, from the Dock too.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        child = Path(__file__).resolve().with_name("dock_fixtures.py")
+        env = {**os.environ, "QT_QPA_PLATFORM": "cocoa"}
+        run = subprocess.run(
+            [sys.executable, "-X", "faulthandler", str(child)],
+            env=env,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=90,
+        )
+        if run.returncode != 0 or not run.stdout.strip():
+            raise AssertionError(f"dock_fixtures failed ({run.returncode}):\n{run.stderr[-3000:]}")
+        cls.result = json.loads(run.stdout.strip().splitlines()[-1])
+
+    def restore(self, how):
+        entry = next(e for e in self.result["restores"] if e["restore"] == how)
+        self.assertTrue(self.result["shown"], "the overlay never showed")
+        self.assertTrue(entry["docked"], f"the window never went to the Dock: {entry}")
+        self.assertTrue(entry["host_hidden_in_dock"], entry)
+        self.assertTrue(entry["restored"], f"the window or the overlays never came back: {entry}")
+        return entry
+
+    def check_landed_first(self, entry):
+        self.assertTrue(entry["host_shows"], entry)
+        early = [show for show in entry["host_shows"] if show["parent_miniaturized"]]
+        self.assertEqual(early, [], f"the overlay window showed while still in the Dock: {entry}")
+        if not entry["active"]:
+            self.skipTest("QiTV could not become the active app: an early overlay stays hidden")
+        if entry["animated"]:
+            self.assertEqual(entry["host_on_screen_while_animating"], 0, entry)
+            # On the platform's report, not after RESTORE_REPORT_MS without it.
+            self.assertIsNotNone(entry["shown_after_landing_s"], f"never landed: {entry}")
+            self.assertLess(entry["shown_after_landing_s"], 1.0, entry)
+        self.assertTrue(entry["host_on_screen_at_end"], entry)
+
+    def test_restored_by_qt_the_overlays_appear_once_the_window_has_landed(self):
+        self.check_landed_first(self.restore("showNormal"))
+
+    def test_restored_from_the_dock_the_overlays_appear_once_the_window_has_landed(self):
+        self.check_landed_first(self.restore("deminiaturize:"))
 
 
 if __name__ == "__main__":

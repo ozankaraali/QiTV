@@ -5,14 +5,14 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow
 from shiboken6 import isValid
-from timer_fixtures import elapse
+from timer_fixtures import elapse, wait_until
 
-from ui.overlay_host import OverlayHost
+from ui.overlay_host import RESTORE_REPORT_MS, OverlayHost
 from ui.overlays.base import Overlay
 from ui.video_surface import VideoSurface
 
@@ -78,6 +78,56 @@ class OverlayHostTests(HostCase):
 
     def test_video_surface_is_native(self):
         self.assertGreater(self.surface.native_handle(), 0)
+
+
+class PlatformReports(QObject):
+    """Swallows the platform's reports of window state changes (spontaneous events)."""
+
+    def eventFilter(self, obj, event):
+        return event.type() == QEvent.Type.WindowStateChange and event.spontaneous()
+
+
+class RestoreFromDockTests(HostCase):
+    """macOS animates a restore out of the Dock and reports it once the window has landed,
+    while Qt reports a restore it asked for itself (showNormal()) at once. A host shown on
+    Qt's word sat in its final place before the window had flown in (the owner's report)."""
+
+    def setUp(self):
+        super().setUp()
+        animated = patch("ui.overlay_host.animates_restore", return_value=True)
+        animated.start()
+        self.addCleanup(animated.stop)
+        self.panel.show()
+        QTest.qWait(20)
+
+    def minimize(self):
+        self.window.showMinimized()
+        self.assertTrue(wait_until(lambda: not self.host.isVisible()))
+        QTest.qWait(20)  # and the platform's report of it
+
+    def test_overlays_wait_for_the_platform_to_report_the_restore(self):
+        self.minimize()
+        self.window.showNormal()  # the offscreen platform reports it on the next event loop pass
+        self.assertFalse(self.window.isMinimized())
+        self.assertFalse(self.host.isVisible())
+        self.assertTrue(wait_until(self.host.isVisible, RESTORE_REPORT_MS // 2))  # not the fallback
+        self.assertEqual(self.host.geometry(), surface_rect(self.surface))
+
+    def test_overlays_return_after_a_while_without_the_platform_report(self):
+        self.minimize()
+        reports = PlatformReports()
+        self.window.windowHandle().installEventFilter(reports)  # runs before the host's filter
+        self.window.showNormal()
+        elapse(RESTORE_REPORT_MS // 2)
+        self.assertFalse(self.host.isVisible())
+        elapse(RESTORE_REPORT_MS // 2 + 200)
+        self.assertTrue(self.host.isVisible())
+
+    def test_elsewhere_overlays_return_with_the_window(self):
+        with patch("ui.overlay_host.animates_restore", return_value=False):
+            self.minimize()
+            self.window.showNormal()
+            self.assertTrue(self.host.isVisible())
 
 
 def wheel(widget, dy, modifiers=Qt.KeyboardModifier.NoModifier):
