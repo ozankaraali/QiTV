@@ -1,3 +1,10 @@
+"""QiTV's entry point.
+
+Only the standard library is imported at module level: helper processes started with
+multiprocessing's "spawn" import this module again (as __mp_main__), and frozen builds must
+reach freeze_support() before anything heavy. Qt, the UI and the services load in main().
+"""
+
 import ctypes
 import logging
 import multiprocessing
@@ -8,19 +15,6 @@ import sys
 import time
 from typing import Mapping, Optional
 import warnings
-
-from PySide6 import QtGui
-from PySide6.QtCore import QLoggingCategory, qInstallMessageHandler
-from PySide6.QtWidgets import QApplication
-import qdarktheme
-
-from config_manager import ConfigManager, get_app_version
-from epg_manager import EpgManager
-from image_manager import ImageManager
-from provider_manager import ProviderManager
-from sleep_manager import allow_sleep, prevent_sleep
-from ui.tv_window import TVWindow
-from update_checker import check_for_updates
 
 
 def qt_platform_override(system: str, environ: Mapping[str, str]) -> Optional[str]:
@@ -68,8 +62,18 @@ def handle_replace_flag():
 
 
 def main() -> int:
-    # Frozen builds re-run this entry point in worker processes (Phase 2's live worker).
-    multiprocessing.freeze_support()
+    from PySide6 import QtGui
+    from PySide6.QtCore import QLoggingCategory, qInstallMessageHandler
+    from PySide6.QtWidgets import QApplication
+    import qdarktheme
+
+    from config_manager import ConfigManager, get_app_version
+    from epg_manager import EpgManager
+    from image_manager import ImageManager
+    from provider_manager import ProviderManager
+    from sleep_manager import allow_sleep, prevent_sleep
+    from ui.tv_window import TVWindow
+    from update_checker import check_for_updates
 
     # Basic logging configuration (tweak level as needed)
     logging.basicConfig(
@@ -138,4 +142,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # First: a frozen build's helper process stops here instead of starting the app.
+    multiprocessing.freeze_support()
     sys.exit(main())
