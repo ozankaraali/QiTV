@@ -661,7 +661,7 @@ class SeekTests(LiveSessionCase):
 
     def test_go_live_with_bursts_keeps_headroom_before_the_next_burst(self):
         sid = self.ready(segments(5, 2, start=10.0), live_edge=14.0, burst=6.0)
-        self.live.go_live()  # neither start leaves 0.5 s before the next burst: the oldest
+        self.live.go_live()  # neither start reaches the 5.75 s floor: the most buffer
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 5))
 
     def test_go_live_takes_the_newest_segment_when_none_is_far_enough_behind(self):
@@ -739,6 +739,22 @@ class SeekTests(LiveSessionCase):
         self.engine.sessionReady.emit(sid)
         self.playback.set_state(PlaybackState.PLAYING)
         self.assertEqual(self.playback.paused, [])
+        self.step(0.25)
+        self.assertEqual(self.timelines[-1]["mode"], "live")  # nothing was time-shifted
+
+    def test_a_pause_while_a_zap_waits_for_the_old_close_applies(self):
+        self.start()
+        sid = self.start()  # the old session is still closing: the new one waits
+        self.assertEqual(len(self.engine.opened), 1)
+        self.live.toggle_pause()
+        self.engine.answer()
+        sid = self.engine.last_sid
+        self.engine.buffer(sid, segments(0, 3), live_edge=6.0)
+        self.engine.sessionReady.emit(sid)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertIs(self.playback.current, PlaybackState.PAUSED)
+        self.step(0.25, media=0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
 
     def test_speed_at_live_is_ignored(self):
         self.ready(segments(0, 2), live_edge=4.0, latency="stable")
@@ -1335,6 +1351,30 @@ class HelperDeathTests(LiveSessionCase):
         self.engine.sessionReady.emit(sid)
         self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
         self.assertEqual(self.notices, [])
+
+    def test_go_live_during_recovery_applies_after_the_reopen(self):
+        for paused_before_death in (True, False):
+            with self.subTest(paused_before_death=paused_before_death):
+                self.live = self.make()
+                sid = self.ready(segments(0, 10), live_edge=20.0)
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.live.seek_to(2.0)
+                self.playback.set_state(PlaybackState.PLAYING)
+                if paused_before_death:
+                    self.live.toggle_pause()
+                self.die(sid)
+                if not paused_before_death:
+                    self.live.toggle_pause()  # remembered
+                self.live.go_live()  # remembered too: playing, at live
+                self.engine.up = True
+                self.engine.available.emit(True)
+                self.engine.buffer(sid, segments(0, 12), live_edge=24.0)
+                self.engine.sessionReady.emit(sid)
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.assertIs(self.playback.current, PlaybackState.PLAYING)
+                self.step(0.25)
+                self.assertEqual(self.timelines[-1]["mode"], "live")
+                self.assertFalse(self.timelines[-1]["paused"])
 
     def test_a_pause_during_recovery_is_kept_after_the_reopen(self):
         sid = self.ready(segments(0, 3), live_edge=6.0)

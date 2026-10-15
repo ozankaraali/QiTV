@@ -21,8 +21,10 @@ target of the live edge goes live instead, still keeping the pause; only `go_liv
 Go live button) unpauses. A pause, from any mode (a catch-up included), sets 1x and makes
 the session time-shifted (StayLive SHIFTED), whatever reopens it later, and stay-live
 leaves it alone: no rate changes, no reopen at live. After the pause it plays on from
-there at 1x, without catching up, until Go live. A pause or resume pressed before ready or
-while recovering is remembered: the stream that opens next follows it.
+there at 1x, without catching up, until Go live; only a speed the user chooses while
+paused applies on resume (CATCHING_UP). A pause, resume or Go live pressed before the
+stream plays (a zap waiting for the old close, before ready, while recovering) is
+remembered: the stream that opens next follows it.
 
 Every `tick_ms` the lag behind the live edge feeds `StayLive`, whose target is the latency
 setting's or the HLS burst (`burst_s`), whichever is larger: segments that arrive whole
@@ -111,6 +113,10 @@ class _Phase(Enum):
     RECOVERING = "recovering"  # the helper died: waiting for the engine's reopen
     FALLING_BACK = "falling_back"  # direct play waits for the session to close
     DIRECT = "direct"  # VLC plays the provider URL
+
+
+# Phases with a stream still to open: a pause, resume or Go live is remembered for it.
+_BEFORE_PLAY = (_Phase.STARTING, _Phase.WAITING, _Phase.RECOVERING)
 
 
 class _Retry(Enum):
@@ -265,7 +271,7 @@ class LiveSession(QObject):
             self._playback.toggle_pause()
             return
         playing = self._phase is _Phase.PIPELINE
-        if not playing and self._phase not in (_Phase.WAITING, _Phase.RECOVERING):
+        if not playing and self._phase not in _BEFORE_PLAY:
             return
         if not self._paused:
             # From any mode, a catch-up included: paused at 1x, time-shifted. Before ready
@@ -277,6 +283,8 @@ class LiveSession(QObject):
                 self._playback.set_paused(True)
             return
         self._paused = False
+        if self._phase in (_Phase.STARTING, _Phase.WAITING):
+            self._stay.user_go_live()  # nothing played yet, so nothing was time-shifted
         if not playing or self._deferred is not None:
             return  # the stream that opens next plays
         position = self._advance()
@@ -311,6 +319,8 @@ class LiveSession(QObject):
     def _go_live(self, *, unpause: bool) -> None:
         """Reopen at the live target behind the edge, at 1x; a paused one stays paused."""
         try:
+            if unpause and self._phase in _BEFORE_PLAY:
+                self._paused = False  # remembered: the stream that opens next plays, live
             if self._phase is _Phase.PIPELINE:
                 if unpause:
                     self._paused = False
@@ -597,7 +607,8 @@ class LiveSession(QObject):
         position = self._advance()
         lag = max(0.0, self._smooth(snapshot, position, self._lag(snapshot, position)))
         # An ended source has no live edge left to stay near, and a paused player stays
-        # where the pause leaves it (StayLive is SHIFTED then).
+        # where the pause leaves it (StayLive is SHIFTED then, or CATCHING_UP at a speed
+        # the user chose while paused, which applies on resume).
         if not self._ended and not self._paused:
             self._stay.target = self._target(snapshot)
             decision = self._stay.update(lag, self._playback.state() is PlaybackState.BUFFERING)
