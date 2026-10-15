@@ -445,11 +445,22 @@ class NavModel(QObject):
         self.changed.emit()
 
     def _on_section_ready(self, section: str) -> None:
-        self._events += 1
+        key = ("section", section)
+        # Asked again (the drawer opening) and fresh: when this changes nothing children()
+        # reads, its memoized nodes stay (the catalog's content version covers new content).
+        unchanged = (
+            callable(getattr(self.catalog, "content_version", None))
+            and section in self._ready_sections
+            and key not in self._pending
+            and key not in self._errors
+            and not (self._pending_group and self._pending_group[0] == section)
+        )
+        if not unchanged:
+            self._events += 1
         self._ready_sections.add(section)
         self._requested_sections.discard(section)
-        self._pending.discard(("section", section))
-        self._errors.pop(("section", section), None)
+        self._pending.discard(key)
+        self._errors.pop(key, None)
         if self._pending_group and self._pending_group[0] == section:
             if not self._resolve_group(*self._pending_group):
                 logger.debug("Group %s not found in section %s", self._pending_group[1], section)

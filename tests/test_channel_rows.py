@@ -241,6 +241,21 @@ class ColumnTests(unittest.TestCase):
         self.assertFalse(col.isVisible())
         self.assertEqual(closed, [1])
 
+    def test_opening_again_lays_the_list_out_only_after_a_resize(self):
+        from unittest import mock
+
+        host, col = self.make()
+        host.show()
+        col.open("Docs", items(8), 2)
+        col.close()
+        with mock.patch.object(ChannelListView, "doItemsLayout", autospec=True) as layout:
+            col.open("Docs", items(9), 3)
+            self.assertEqual(layout.call_count, 0)
+            self.assertEqual(col.current_index(), 3)
+            host.resize(960, 540)
+            self.assertEqual(layout.call_count, 1)
+        self.assertEqual(col.geometry().width(), 384)
+
     def test_highlight_restarts_timer(self):
         host, col = self.make(idle_ms=200)
         host.show()

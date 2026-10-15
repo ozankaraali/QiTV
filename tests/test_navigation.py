@@ -341,6 +341,24 @@ class NavModelTests(unittest.TestCase):
         self.assertIs(self.nav.children(group)[0], nodes[0])
         self.assertEqual(self.catalog.items_calls, calls)
 
+    def test_a_section_ready_again_keeps_the_memoized_nodes(self):
+        # Opening the drawer asks for its section again: a fresh one answers at once, and its
+        # channels were rebuilt for nothing.
+        self.nav.reset_to("live", "10")
+        self.catalog.sectionReady.emit("live")
+        group = self.nav.path[-1]
+        nodes = self.nav.children(group)
+        groups = self.nav.children(self.nav.path[1])
+        calls = self.catalog.items_calls
+        changes = []
+        self.nav.changed.connect(lambda: changes.append(True))
+        self.nav.reset_to("live", "10")
+        self.catalog.sectionReady.emit("live")
+        self.assertTrue(changes)  # the section is no longer loading
+        self.assertIs(self.nav.children(group)[0], nodes[0])
+        self.assertIs(self.nav.children(self.nav.path[1])[-1], groups[-1])
+        self.assertEqual(self.catalog.items_calls, calls)
+
     def test_without_a_content_version_catalog_events_invalidate(self):
         class VersionlessCatalog(FakeCatalog):
             content_version = None

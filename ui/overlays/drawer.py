@@ -85,6 +85,16 @@ def _numbers(group: list[NavNode], shown: list[NavNode]) -> list[str | None]:
     return [position.get(node) for node in shown]
 
 
+def _shown_rows(nodes: list[NavNode], live: bool, numbers: list[str | None] | None) -> tuple:
+    """What a column's list shows for `nodes`: equal values show the same rows.
+
+    A row shows its node's title, count and icon, and a live channel its item (by identity:
+    a refreshed catalog brings new item dicts) and number.
+    """
+    rows = tuple((n.layer, n.key, n.title, n.count, id(n.payload)) for n in nodes)
+    return (live, rows, tuple(numbers) if numbers is not None else None)
+
+
 class _NodeModel(ChannelRowsModel):
     """Channel rows for live items; titles, counts and icons for everything else."""
 
@@ -195,6 +205,7 @@ class _Column:
         self.current: NavNode | None = None
         self.message: str | None = None
         self.rect = QRect()
+        self.shown: tuple = ()  # what the list shows (_shown_rows), to skip refilling it
 
 
 class Drawer(Overlay):
@@ -224,6 +235,7 @@ class Drawer(Overlay):
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(PREVIEW_DEBOUNCE_MS)
         self._preview_timer.timeout.connect(self._flush_preview)
+        self._laid_out_for: tuple[int, int] | None = None  # the host size _relayout last fitted
         nav.changed.connect(self._on_nav_changed)
         if parent is not None:
             parent.installEventFilter(self)
@@ -475,11 +487,19 @@ class Drawer(Overlay):
             nodes = [n for n in nodes if needle in fold(n.title)]
         if col.message is None and not nodes:
             col.message = EMPTY_TEXT
-        col.nodes = nodes
-        col.rows = {n: i for i, n in enumerate(nodes)}
         live = bool(nodes) and _is_live_item(self._nav, nodes[0])
-        col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
-        col.model.set_nodes(nodes, live, _numbers(children or [], nodes) if live else None)
+        numbers = _numbers(children or [], nodes) if live else None
+        # The same rows again (e.g. the section reported ready once more): the list keeps its
+        # model, so it is neither laid out nor repainted from scratch.
+        shown = _shown_rows(nodes, live, numbers)
+        if shown != col.shown:
+            col.shown = shown
+            col.nodes = nodes
+            col.rows = {n: i for i, n in enumerate(nodes)}
+            col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
+            col.model.set_nodes(nodes, live, numbers)
+        else:
+            col.model.refresh_now()  # a refresh still looks "now" up again (the EPG loaded)
         if col.side == "left":
             if parent_changed:
                 self._cancel_preview()  # a preview of the old layer must not open
@@ -557,6 +577,9 @@ class Drawer(Overlay):
         if parent is None:
             return
         host_w, host_h = parent.width(), parent.height()
+        if (host_w, host_h) == self._laid_out_for:
+            return  # opened again at the same size: forcing a layout of the lists would be waste
+        self._laid_out_for = (host_w, host_h)
         units = Units(host_w)
         self._units = units
         left_w = round(host_w * LEFT_FRACTION)

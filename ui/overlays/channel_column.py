@@ -27,6 +27,7 @@ class ChannelColumn(Overlay):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self._title = ""
         self._units = Units(100)
+        self._laid_out_for: tuple[int, int] | None = None  # the host size _relayout last fitted
         self._model = ChannelRowsModel(logos, now_provider, self)
         self._view = ChannelListView(self)
         self._view.setModel(self._model)
@@ -140,6 +141,9 @@ class ChannelColumn(Overlay):
         if parent is None:
             return
         host_w, host_h = parent.width(), parent.height()
+        if (host_w, host_h) == self._laid_out_for:
+            return  # opened again at the same size: forcing a layout of the list would be waste
+        self._laid_out_for = (host_w, host_h)
         self.setGeometry(QRect(0, 0, round(host_w * COLUMN_FRACTION), host_h))
         units = Units(host_w)
         self._units = units

@@ -108,6 +108,50 @@ class DrawerTests(unittest.TestCase):
         self.assertFalse(self.drawer.isVisible())
         self.assertEqual(self.closed, [True])
 
+    def test_a_refresh_with_the_same_rows_keeps_the_lists(self):
+        self.drawer.open_drawer("1")
+        resets = []
+        for side in ("left", "right"):
+            self.drawer._columns[side].model.modelReset.connect(lambda s=side: resets.append(s))
+        self.nav.changed.emit()  # e.g. the section reported ready again
+        self.assertEqual(resets, [])
+        self.assertEqual(self.drawer.highlighted().title, "One")
+        self.catalog.live["10"] = [{"id": 1, "name": "One"}, {"id": 2, "name": "Twain"}]
+        self.nav.changed.emit()  # new content: the groups (Favorites went) and the channels
+        self.assertEqual(sorted(resets), ["left", "right"])
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer.highlighted().title, "Twain")
+
+    def test_a_refresh_with_the_same_rows_looks_now_up_again(self):
+        guide = {}
+        catalog, nav, host, drawer = make()
+        drawer._columns["right"].model._now_provider = lambda item: guide.get(item.get("name"))
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        nav.reset_to("live", "10")
+        drawer.open_drawer("1")
+        model = drawer._columns["right"].model
+        self.assertEqual(model.data(model.index(0), model.NowRole), "")
+        guide["One"] = ("Evening News", 0.5)  # the EPG became ready
+        nav.changed.emit()
+        self.assertEqual(model.data(model.index(0), model.NowRole), "Evening News")
+
+    def test_opening_again_lays_the_lists_out_only_after_a_resize(self):
+        # A forced layout of a 2,500-channel list cost tens of ms at every opening.
+        from unittest import mock
+
+        from ui.overlays.channel_rows import ChannelListView
+
+        self.drawer.open_drawer("1")
+        self.drawer.close_drawer()
+        with mock.patch.object(ChannelListView, "doItemsLayout", autospec=True) as layout:
+            self.drawer.open_drawer("1")
+            self.assertEqual(layout.call_count, 0)
+            self.host.resize(960, 540)
+            self.assertEqual(layout.call_count, 2)  # both columns, once
+        self.assertEqual(self.drawer._columns["right"].view.units_width, 960)
+        self.assertEqual(self.drawer.highlighted().title, "One")
+
     def test_backspace(self):
         self.drawer.open_drawer()
         self.drawer.type_text("tw")
