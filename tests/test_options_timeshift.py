@@ -51,6 +51,23 @@ class TimeshiftSettingsTests(base.WindowCase):
         self.assertTrue(saved.timeshift_enabled)
         self.assertEqual(saved.timeshift_max_mib, 4096)
 
+    def test_cancel_discards_changes(self):
+        dialog = self.dialog()
+        dialog.timeshift_checkbox.setChecked(True)
+        dialog.timeshift_size_slider.setValue(8192)
+        dialog.reject()
+        saved = ConfigManager()
+        self.assertFalse(saved.timeshift_enabled)
+        self.assertEqual(saved.timeshift_max_mib, 2048)
+
+    def test_fresh_install_gets_the_defaults(self):
+        defaults = ConfigManager.default_config()
+        self.assertIs(defaults["timeshift_enabled"], False)
+        self.assertEqual(defaults["timeshift_max_mib"], 2048)
+        dialog = self.dialog()
+        self.assertFalse(dialog.timeshift_checkbox.isChecked())
+        self.assertEqual(dialog.timeshift_size_slider.value(), 2048)
+
     def test_the_slider_loads_the_saved_size(self):
         self.config.timeshift_enabled = True
         self.config.timeshift_max_mib = 8192
@@ -58,6 +75,7 @@ class TimeshiftSettingsTests(base.WindowCase):
         self.assertTrue(dialog.timeshift_checkbox.isChecked())
         self.assertEqual(dialog.timeshift_size_slider.value(), 8192)
         self.assertEqual(dialog.timeshift_1080p_estimate.text(), "About 2 h 23 min")
+        self.assertEqual(dialog.timeshift_4k_estimate.text(), "About 46 min")
 
 
 class MaxStreamsTests(base.WindowCase):
@@ -76,6 +94,15 @@ class MaxStreamsTests(base.WindowCase):
         again = OptionsDialog(self.window)
         self.addCleanup(again.deleteLater)
         self.assertEqual(again.max_streams_input.value(), 3)
+
+    def test_a_hand_edited_bad_value_opens_as_automatic(self):
+        for bad in ("many", [], {}, float("inf"), float("nan"), None, -3, 99):
+            with self.subTest(bad=bad):
+                self.provider_manager.providers[0]["max_streams"] = bad
+                dialog = OptionsDialog(self.window)
+                self.addCleanup(dialog.deleteLater)
+                expected = 10 if bad == 99 else 0
+                self.assertEqual(dialog.max_streams_input.value(), expected)
 
     def test_automatic_is_stored_as_zero(self):
         dialog = OptionsDialog(self.window)

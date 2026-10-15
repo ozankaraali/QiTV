@@ -179,6 +179,19 @@ class TimeshiftConfigTests(unittest.TestCase):
         config.timeshift_enabled = False
         self.assertFalse(config.timeshift_enabled)
 
+    def test_odd_sizes_are_coerced_then_clamped(self):
+        config, _ = self._load(None)
+        for value, expected in (
+            (4096.7, 4096),
+            ("4096", 4096),
+            (True, 256),
+            (float("nan"), 2048),
+            (float("inf"), 2048),
+        ):
+            with self.subTest(value=value):
+                config.config["timeshift_max_mib"] = value
+                self.assertEqual(config.timeshift_max_mib, expected)
+
     def test_size_is_clamped(self):
         config, _ = self._load(None)
         for value, expected in ((1, 256), (99999, 16384), (4096, 4096), ("junk", 2048)):

@@ -693,7 +693,11 @@ class OptionsDialog(QDialog):
         self.provider_ssl_verify_checkbox.setChecked(
             self.edited_provider.get("ssl_verify", self.ssl_verify_checkbox.isChecked())
         )
-        self.max_streams_input.setValue(int(self.edited_provider.get("max_streams", 0) or 0))
+        try:
+            max_streams = int(self.edited_provider.get("max_streams") or 0)
+        except TypeError, ValueError, OverflowError:
+            max_streams = 0  # a hand-edited bad value means Automatic
+        self.max_streams_input.setValue(max(0, min(10, max_streams)))
         self._loaded_max_streams = self.max_streams_input.value()
         self._loaded_provider_network = {
             "prefer_https": self.provider_prefer_https_checkbox.isChecked(),
