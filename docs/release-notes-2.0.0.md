@@ -67,8 +67,13 @@ filter.
 
 ## Good to know
 
-- **2.0 replaces the 1.14 line.** QiTV 1.14 played with MPV; 2.0 plays with VLC again, which now
-  comes inside the app. 2.0 uses the same settings folder as 1.13 and 1.14.
+- **2.0 replaces the 1.14 line.** QiTV 1.14 played with MPV, which it bundled (GPLv3); 2.0 plays
+  with VLC again, which now comes inside the app, and bundles no MPV. 2.0 uses the same settings
+  folder as 1.13 and 1.14.
+- **Channel logos and the guide are on.** 2.0 turns both on once, also if you had turned them off
+  in 1.x, because the banner and the channel list show them. To stop loading logos, untick
+  **Enable Channel Logos** in Settings; to stop the guide downloads, set **EPG Source** to
+  **No Source** in Settings → EPG.
 - **Resume points of episodes do not carry over.** 2.0 tells episodes apart in a new way, so an
   episode you were in the middle of in 1.x starts from the beginning once.
 - **The minimum system is unchanged from 1.13.8** (on a Mac, macOS 13 or newer).
@@ -93,12 +98,15 @@ filter.
   (as in 1.13). Turn it off for that provider.
 - On Windows, an HTTPS stream through an HTTP proxy that stops answering can take up to a minute
   to let go.
+- On Linux and Windows, libVLC checks all its plugins each time QiTV starts, which adds about a
+  second to startup.
 
 ## Licensing
 
 QiTV is MIT-licensed. The downloads contain VLC (libVLC, LGPL-2.1-or-later; some plugins
-GPL-2.0-or-later), Qt and PySide6 (LGPLv3) and Python libraries under their own licenses: see
-[THIRD-PARTY-NOTICES.md](https://github.com/ozankaraali/QiTV/blob/main/THIRD-PARTY-NOTICES.md), which ships inside every download with the
-license texts. QiTV 1.14.x bundled MPV (GPLv3); 2.0 does not.
+GPL-2.0-or-later), Qt and PySide6 (LGPLv3), the Python runtime and Python libraries under their
+own licenses: see
+[THIRD-PARTY-NOTICES.md](https://github.com/ozankaraali/QiTV/blob/main/THIRD-PARTY-NOTICES.md),
+which ships inside every download with the license texts.
 
 *The screenshots in the README show made-up demo content (`scripts/make_demo_content.py`).*
