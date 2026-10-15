@@ -1,4 +1,14 @@
-"""One libVLC media player, polled on the GUI thread (no VLC callbacks cross threads)."""
+"""One libVLC media player, polled on the GUI thread (no VLC callbacks cross threads).
+
+Ending an input (set_media while one plays, stop, release) joins libVLC's input thread,
+and on macOS that join can wait for the main thread: until a stream's first picture is
+shown, its decoder waits for the video output, whose Open dispatch_syncs onto the main
+queue (caopengllayer). Joined from the GUI thread, that is a deadlock: the first zap of
+CI run 38675064690 hung in libvlc_media_player_set_media. So the session ends inputs on a
+worker (_PlayerJob), never touches the player's input lock from the GUI thread while one
+runs, and opens the newest media once it has finished. Every platform takes this path:
+the GUI thread also no longer waits up to ~100 ms for a join on each zap.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +19,7 @@ from typing import Any, Optional, Protocol
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
+from services.jobs import JobRunner
 from services.vlc_profile import PlayKind, media_options
 
 logger = logging.getLogger(__name__)
@@ -60,6 +71,29 @@ def _map_state(state) -> PlaybackState:
     return mapping.get(state, PlaybackState.IDLE)
 
 
+class _Job(Enum):
+    DETACH = "detach"  # set_media(None): end the input; libVLC keeps the video output for reuse
+    STOP = "stop"  # stop() and set_media(None): end the input, close the outputs
+
+
+class _PlayerJob(QObject):
+    """Ends the player's input on a worker thread (see the module docstring)."""
+
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, player: Any, job: _Job) -> None:
+        super().__init__()
+        self._player = player
+        self._job = job
+
+    def run(self) -> None:
+        if self._job is _Job.STOP:
+            self._player.stop()
+        self._player.set_media(None)
+        self.finished.emit(None)
+
+
 class PlaybackSession(QObject):
     stateChanged = Signal(str)
     positionChanged = Signal(int, int)
@@ -75,8 +109,10 @@ class PlaybackSession(QObject):
         poll_ms: int = 250,
         open_timeout_ms: int = 20000,
         stall_ms: int = 6000,
+        runner: Optional[Any] = None,
     ):
         super().__init__(parent)
+        self._runner = runner if runner is not None else JobRunner(self)
         self._instance = instance
         self._player = instance.media_player_new()
         self._player.video_set_mouse_input(False)
@@ -106,6 +142,23 @@ class PlaybackSession(QObject):
         self._restore_timer.timeout.connect(self._restore_audio)
         self._restart_timer = QTimer(self, singleShot=True, interval=_RESTART_DELAY_MS)
         self._restart_timer.timeout.connect(self._restart_stream)
+        # Ending inputs off the GUI thread (module docstring):
+        self._job: Optional[_Job] = None  # running: the GUI thread leaves the player alone
+        self._job_token = 0  # the running job's; a completion with another one is stale
+        self._has_input = False  # libVLC holds an input that set_media/stop would join
+        self._engaged = False  # an input or a kept video output may remain: a stop is due
+        self._start_wanted = False  # open self._url once the job has finished
+        self._stop_owed = False  # stop() came during a DETACH: stop once it has finished
+        self._rate: Optional[float] = None  # asked for during a job: set before the next play
+
+    def _player_free(self) -> bool:
+        """The GUI thread may call into libVLC: not released, and no job holds its input lock.
+
+        libvlc_media_player_set_media and _stop hold the player's input lock while they join;
+        get_time, is_seekable, set_rate and most other calls take that lock too, so one
+        made meanwhile would wait for a join that may itself be waiting for this thread.
+        """
+        return not self._released and self._job is None
 
     # --- properties -------------------------------------------------------------------
     @property
@@ -120,22 +173,23 @@ class PlaybackSession(QObject):
         return self._state
 
     def time_ms(self) -> int:
-        if self._released:
+        if not self._player_free():
             return 0
         return max(0, int(self._player.get_time() or 0))
 
     def length_ms(self) -> int:
-        if self._released:
+        if not self._player_free():
             return 0
         return max(0, int(self._player.get_length() or 0))
 
     def is_seekable(self) -> bool:
-        if self._released:
+        if not self._player_free():
             return False
         return bool(self._player.is_seekable())
 
     # --- output -----------------------------------------------------------------------
     def set_window(self, win_id: int) -> None:
+        # Sets a variable on the player, without its input lock: allowed during a job.
         if self._released:
             return
         system = platform.system()
@@ -166,21 +220,78 @@ class PlaybackSession(QObject):
         self._start_media()
 
     def _start_media(self) -> None:
+        """Open self._url now, or once a worker has ended the old input."""
+        self._poll.stop()
+        self._set_seekable(False)
+        self._ever_played = False
+        self._last_time = -1
+        self._set_state(PlaybackState.OPENING)
+        self._stop_owed = False
+        if self._job is not None:
+            self._start_wanted = True  # a burst of zaps opens only the newest
+        elif self._has_input:
+            self._start_wanted = True
+            self._run_job(_Job.DETACH)
+        else:
+            self._open()
+
+    def _open(self) -> None:
+        """set_media and play on the GUI thread: only while libVLC holds no input to join."""
         media = self._instance.media_new(self._url)
         for option in self._options:
             media.add_option(option)
         self._player.set_media(media)
         media.release()
-        self._set_seekable(False)
-        self._ever_played = False
-        self._last_time = -1
+        if self._rate is not None:
+            self._player.set_rate(self._rate)
+            self._rate = None
+        self._engaged = True
         self._opened.start()
         self._stall_clock.start()
-        self._set_state(PlaybackState.OPENING)
         if self._player.play() == -1:
             self._fail("VLC could not start playback")
             return
+        self._has_input = True
         self._poll.start()
+
+    def _end_input(self) -> None:
+        """Stop libVLC's input and outputs on a worker; nothing to do if none is open."""
+        self._start_wanted = False
+        if self._job is not None:
+            self._stop_owed = self._job is _Job.DETACH
+        elif self._engaged:
+            self._run_job(_Job.STOP)
+
+    def _run_job(self, job: _Job) -> None:
+        self._job = job
+        self._job_token += 1
+        self._runner.run_worker(
+            _PlayerJob(self._player, job),
+            self._job_done,
+            self._job_failed,
+            context=self._job_token,
+        )
+
+    def _job_failed(self, token: int, message: str) -> None:
+        logger.warning("Ending the stream in libVLC failed: %s", message)
+        self._job_done(token)
+
+    def _job_done(self, token: int, _payload: object = None) -> None:
+        """On the GUI thread, after the worker has let go of the player."""
+        if self._job is None or token != self._job_token:
+            return
+        job, self._job = self._job, None
+        self._has_input = False
+        if job is _Job.STOP:
+            self._engaged = False
+        if self._released:
+            self._release_player()
+        elif self._start_wanted:
+            self._start_wanted = False
+            self._open()
+        elif self._stop_owed:
+            self._stop_owed = False
+            self._run_job(_Job.STOP)
 
     def _cancel_pending(self) -> None:
         """Invalidate delayed work (audio restore, restart) belonging to the old media."""
@@ -200,16 +311,16 @@ class PlaybackSession(QObject):
         self._poll.stop()
         self._cancel_pending()
         self._start_ms = None
-        self._player.stop()
+        self._end_input()
         self._set_seekable(False)
         self._set_state(PlaybackState.IDLE)
 
     def toggle_pause(self) -> None:
-        if not self._released:
+        if self._player_free():
             self._player.pause()
 
     def set_paused(self, paused: bool) -> None:
-        if not self._released:
+        if self._player_free():
             self._player.set_pause(1 if paused else 0)
 
     def seek(self, ms: int) -> None:
@@ -220,9 +331,15 @@ class PlaybackSession(QObject):
         self.seek(self.time_ms() + ms)
 
     def set_rate(self, rate: float) -> None:
-        if not self._released:
-            self._player.set_rate(float(rate))
+        if self._released:
+            return
+        if self._job is not None:
+            self._rate = float(rate)  # for the media that opens next
+            return
+        self._player.set_rate(float(rate))
 
+    # Volume and mute take only the audio output's locks, never the input lock: libVLC lets
+    # interfaces call them from any thread, so they stay live while a job runs.
     def volume(self) -> int:
         if self._released:
             return 0
@@ -240,23 +357,23 @@ class PlaybackSession(QObject):
         return muted
 
     def audio_tracks(self) -> list[tuple[int, str]]:
-        if self._released:
+        if not self._player_free():
             return []
         descriptions = self._player.audio_get_track_description() or []
         return [(int(i), self._decode(n)) for i, n in descriptions]
 
     def set_audio_track(self, track_id: int) -> None:
-        if not self._released:
+        if self._player_free():
             self._player.audio_set_track(int(track_id))
 
     def subtitle_tracks(self) -> list[tuple[int, str]]:
-        if self._released:
+        if not self._player_free():
             return []
         descriptions = self._player.video_get_spu_description() or []
         return [(int(i), self._decode(n)) for i, n in descriptions]
 
     def set_subtitle_track(self, track_id: int) -> None:
-        if not self._released:
+        if self._player_free():
             self._player.video_set_spu(int(track_id))
 
     @staticmethod
@@ -264,13 +381,26 @@ class PlaybackSession(QObject):
         return name.decode("utf-8", "replace") if isinstance(name, bytes) else str(name)
 
     def release(self) -> None:
+        """Release the player; with an input still open, after a worker has stopped it.
+
+        The TV window stops first and waits for background threads, so its release finds
+        the player stopped and frees it here and now.
+        """
         if self._released:
             return
         self._released = True
         self._poll.stop()
         self._cancel_pending()
+        self._start_wanted = self._stop_owed = False
+        if self._job is not None:
+            return  # _job_done releases it
+        if self._engaged:
+            self._run_job(_Job.STOP)  # _job_done releases it
+            return
+        self._release_player()
+
+    def _release_player(self) -> None:
         try:
-            self._player.stop()
             self._player.release()
         except Exception as e:
             logger.debug("Releasing the media player failed: %s", e)
@@ -286,17 +416,13 @@ class PlaybackSession(QObject):
         # play behind the error and hold one of the provider's connections.
         self._poll.stop()
         self._cancel_pending()
-        try:
-            self._player.stop()
-            self._player.set_media(None)
-        except Exception as e:
-            logger.debug("Stopping the failed media failed: %s", e)
+        self._end_input()
         self._set_seekable(False)
         self._set_state(PlaybackState.ERROR)
         self.errorOccurred.emit(message)
 
     def _tick(self) -> None:
-        if self._released:
+        if not self._player_free():
             return
         state = _map_state(self._player.get_state())
         if state is PlaybackState.ERROR:
@@ -376,11 +502,11 @@ class PlaybackSession(QObject):
             logger.warning("Playback stalled again; restarting the stream")
             self._restarted = True
             self._poll.stop()
-            self._player.stop()
-            self._restart_timer.start()
+            self._end_input()
+            self._restart_timer.start()  # _start_media waits for the stop if it is still running
 
     def _restore_audio(self) -> None:
-        if self._released or self._pending_track is None:
+        if not self._player_free() or self._pending_track is None:
             return
         track, self._pending_track = self._pending_track, None
         self._player.audio_set_track(track)
