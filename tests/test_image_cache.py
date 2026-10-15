@@ -3,17 +3,13 @@ import base64
 import json
 import os
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
-
 from image_manager import ImageManager
-
-# The pre-fix ImageManager builds QPixmaps while indexing; keep that from aborting the run.
-APP = QApplication.instance() or QApplication([])
 
 
 def _data_url(payload: bytes) -> str:
@@ -89,6 +85,47 @@ class ImageCacheTests(unittest.TestCase):
         self.assertEqual(entry["ext"], "png")
         self.assertEqual(entry["size"], 10)
         self.assertNotIn("qicon", entry)
+
+    def test_concurrent_stores_and_eviction_keep_accounting_consistent(self):
+        manager = ImageManager(self.config, max_cache_size=2_000)
+        errors = []
+
+        def work(worker):
+            try:
+                for i in range(200):
+                    # Some payloads are shared between threads to force same-key touches.
+                    payload = f"{worker if i % 3 else 0}-{i}".encode() * 20
+                    asyncio.run(manager.cache_image_from_base64(_data_url(payload), True))
+                    manager.save_index()
+            except Exception as exc:  # noqa: BLE001 - surfaced below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=work, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(manager.current_cache_size, sum(e["size"] for e in manager.cache.values()))
+        self.assertLessEqual(manager.current_cache_size, 2_000 + 400)
+
+    def test_touching_an_evicted_entry_does_not_raise(self):
+        manager = ImageManager(self.config, max_cache_size=10_000)
+        path = self._store(manager, b"a" * 100, True)
+        key = os.path.splitext(os.path.basename(path))[0]
+        manager.cache.pop(key)
+        manager.current_cache_size = 0
+        os.remove(path)
+        self.assertFalse(manager._touch_cache_entry(key, path))
+        self.assertEqual(manager.current_cache_size, 0)
+
+    def test_the_entry_just_stored_is_never_evicted(self):
+        manager = ImageManager(self.config, max_cache_size=50)
+        self._store(manager, b"a" * 100, True)
+        path = self._store(manager, b"b" * 100, True)
+        self.assertTrue(os.path.exists(path))
+        self.assertEqual(len(manager.cache), 1)
 
 
 if __name__ == "__main__":

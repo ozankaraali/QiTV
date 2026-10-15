@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import random
+import threading
 
 import aiohttp
 import orjson as json
@@ -25,6 +26,8 @@ class ImageManager:
         )  # cache is an ordered dict where last accessed items are at the end
         self.max_cache_size = max_cache_size
         self.current_cache_size = 0
+        # ImageLoader threads share this manager; guard every cache mutation/iteration.
+        self._lock = threading.RLock()
         self._load_index()
 
     async def cache_image_from_url(self, session, url, iconified, max_retries=2, timeout=5):
@@ -37,8 +40,7 @@ class ImageManager:
         cache_path = os.path.join(self.cache_dir, f"{url_hash}.{ext}")
 
         # If already cached on disk, update metadata and return
-        if os.path.exists(cache_path):
-            self._touch_cache_entry(url_hash, cache_path)
+        if os.path.exists(cache_path) and self._touch_cache_entry(url_hash, cache_path):
             return cache_path
 
         # Download and write to disk
@@ -61,7 +63,7 @@ class ImageManager:
                         with open(cache_path, "wb") as f:
                             f.write(content)
                         self._touch_cache_entry(url_hash, cache_path)
-                        self._manage_cache_size()
+                        self._manage_cache_size(protect=url_hash)
                         return cache_path
                     except OSError as e:
                         logger.warning(f"Error writing image to cache: {e}")
@@ -81,8 +83,7 @@ class ImageManager:
         image_hash = self._hash_string(image_str + ext)
         cache_path = os.path.join(self.cache_dir, f"{image_hash}.{ext}")
 
-        if os.path.exists(cache_path):
-            self._touch_cache_entry(image_hash, cache_path)
+        if os.path.exists(cache_path) and self._touch_cache_entry(image_hash, cache_path):
             return cache_path
 
         try:
@@ -91,31 +92,39 @@ class ImageManager:
             with open(cache_path, "wb") as f:
                 f.write(image_data)
             self._touch_cache_entry(image_hash, cache_path)
-            self._manage_cache_size()
+            self._manage_cache_size(protect=image_hash)
             return cache_path
         except Exception as e:
             logger.warning(f"Error decoding/saving base64 image: {e}")
             return None
 
-    def _touch_cache_entry(self, key_hash, cache_path):
-        # Update cache metadata without creating GUI objects
-        size = os.path.getsize(cache_path)
-        entry = self.cache.get(key_hash) or {}
-        self.current_cache_size += size - entry.get("size", 0)
-        entry["size"] = size
-        entry["ext"] = os.path.splitext(cache_path)[1].lstrip(".")
-        entry["last_access"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.cache[key_hash] = entry
-        # maintain LRU order
-        self.cache.move_to_end(key_hash)
+    def _touch_cache_entry(self, key_hash, cache_path) -> bool:
+        """Record an access; False if the file vanished (e.g. evicted by another thread)."""
+        try:
+            size = os.path.getsize(cache_path)
+        except OSError:
+            with self._lock:
+                entry = self.cache.pop(key_hash, None)
+                self.current_cache_size -= (entry or {}).get("size", 0)
+            return False
+        with self._lock:
+            entry = self.cache.get(key_hash) or {}
+            self.current_cache_size += size - entry.get("size", 0)
+            entry["size"] = size
+            entry["ext"] = os.path.splitext(cache_path)[1].lstrip(".")
+            entry["last_access"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.cache[key_hash] = entry
+            self.cache.move_to_end(key_hash)  # maintain LRU order
+        return True
 
     def clear_cache(self):
-        for filename in os.listdir(self.cache_dir):
-            file_path = os.path.join(self.cache_dir, filename)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-        self.cache.clear()
-        self.current_cache_size = 0
+        with self._lock:
+            for filename in os.listdir(self.cache_dir):
+                file_path = os.path.join(self.cache_dir, filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+            self.cache.clear()
+            self.current_cache_size = 0
         # Save empty cache index
         self.save_index()
 
@@ -126,51 +135,63 @@ class ImageManager:
 
     def remove_icon_from_cache(self, url):
         url_hash = self._hash_string(url + "png")
-        entry = self.cache.pop(url_hash, None)
-        self.current_cache_size -= (entry or {}).get("size", 0)
+        with self._lock:
+            entry = self.cache.pop(url_hash, None)
+            self.current_cache_size -= (entry or {}).get("size", 0)
         path = os.path.join(self.cache_dir, f"{url_hash}.png")
-        if os.path.exists(path):
+        try:
             os.remove(path)
+        except FileNotFoundError:
+            pass
 
     def _hash_string(self, url):
         return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
     def _load_index(self):
-        self.cache.clear()
-        if os.path.exists(self.index_file):
-            with open(self.index_file, "r", encoding="utf-8") as f:
-                try:
-                    data = json.loads(f.read())
-                    self.cache = OrderedDict(data) if data else OrderedDict()
-                except (json.JSONDecodeError, IOError) as e:
-                    logger.warning(f"Error loading index file: {e}")
+        with self._lock:
+            self.cache.clear()
+            if os.path.exists(self.index_file):
+                with open(self.index_file, "r", encoding="utf-8") as f:
+                    try:
+                        data = json.loads(f.read())
+                        self.cache = OrderedDict(data) if data else OrderedDict()
+                    except (json.JSONDecodeError, IOError) as e:
+                        logger.warning(f"Error loading index file: {e}")
 
-        # Index files that exist on disk but not in the index (metadata only)
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for filename in os.listdir(self.cache_dir):
-            image_hash, ext = os.path.splitext(filename)
-            if ext in (".png", ".jpg") and not self.cache.get(image_hash):
-                self.cache[image_hash] = {
-                    "size": os.path.getsize(os.path.join(self.cache_dir, filename)),
-                    "ext": ext.lstrip("."),
-                    "last_access": now,
-                }
+            # Index files that exist on disk but not in the index (metadata only)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for filename in os.listdir(self.cache_dir):
+                image_hash, ext = os.path.splitext(filename)
+                if ext in (".png", ".jpg") and not self.cache.get(image_hash):
+                    self.cache[image_hash] = {
+                        "size": os.path.getsize(os.path.join(self.cache_dir, filename)),
+                        "ext": ext.lstrip("."),
+                        "last_access": now,
+                    }
 
-        self.current_cache_size = sum(
-            entry.get("size", 0) for entry in self.cache.values() if entry
-        )
+            self.current_cache_size = sum(
+                entry.get("size", 0) for entry in self.cache.values() if entry
+            )
 
     def save_index(self):
+        with self._lock:
+            snapshot = json.dumps(dict(self.cache), option=json.OPT_INDENT_2).decode("utf-8")
         with open(self.index_file, "w", encoding="utf-8") as f:
-            f.write(json.dumps(dict(self.cache), option=json.OPT_INDENT_2).decode("utf-8"))
+            f.write(snapshot)
 
-    def _manage_cache_size(self):
-        # Evict least recently used entries; always keep the entry just touched.
-        while self.current_cache_size > self.max_cache_size and len(self.cache) > 1:
-            oldest_hash, oldest_data = self.cache.popitem(last=False)
-            self.current_cache_size -= (oldest_data or {}).get("size", 0)
-            for path in self._entry_paths(oldest_hash, oldest_data):
-                try:
-                    os.remove(path)
-                except FileNotFoundError:
-                    pass
+    def _manage_cache_size(self, protect=None):
+        # Evict least recently used entries; never the one (`protect`) being returned.
+        doomed = []
+        with self._lock:
+            while self.current_cache_size > self.max_cache_size:
+                victim = next((k for k in self.cache if k != protect), None)
+                if victim is None:
+                    break
+                data = self.cache.pop(victim)
+                self.current_cache_size -= (data or {}).get("size", 0)
+                doomed.extend(self._entry_paths(victim, data))
+        for path in doomed:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
