@@ -1,30 +1,20 @@
 """Local HTTP(S) fixture servers for the live pipeline tests (not a test module).
 
-``LoopbackHTTPServer`` and ``ThreadingLoopbackHTTPServer`` are an early copy of main's
-``services/timeshift_source.py`` (numeric bind, no reverse DNS); the stream server task
-replaces them with an import from ``services/live/server.py``. ``leaf`` and ``LocalSource``
-are ported from main's ``tests/test_timeshift_source.py``; ``LocalSource`` gained a
-keep-alive mode (no ``Connection: close``) and counts the TCP connections it accepted.
+The servers are the product's ``LoopbackHTTPServer`` and ``ThreadingLoopbackHTTPServer``
+from ``services/live/server.py`` (numeric bind, no reverse DNS). ``leaf`` and
+``LocalSource`` are ported from main's ``tests/test_timeshift_source.py``; ``LocalSource``
+gained a keep-alive mode (no ``Connection: close``) and counts the TCP connections it
+accepted.
 """
 
 from collections import Counter
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from socketserver import TCPServer, ThreadingMixIn
+from http.server import BaseHTTPRequestHandler
 import ssl
 import threading
 
+from services.live.server import LoopbackHTTPServer, ThreadingLoopbackHTTPServer
 
-class LoopbackHTTPServer(HTTPServer):
-    """Internal HTTP listener whose startup never needs reverse DNS."""
-
-    def server_bind(self) -> None:
-        TCPServer.server_bind(self)
-        self.server_name = str(self.server_address[0])
-        self.server_port = self.server_address[1]
-
-
-class ThreadingLoopbackHTTPServer(ThreadingMixIn, LoopbackHTTPServer):
-    daemon_threads = True
+__all__ = ["LocalSource", "LoopbackHTTPServer", "ThreadingLoopbackHTTPServer", "leaf"]
 
 
 def leaf(*segments, ended=True, extra=""):
