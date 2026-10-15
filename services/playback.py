@@ -135,7 +135,6 @@ class PlaybackSession(QObject):
         self._poll = QTimer(self, interval=poll_ms)
         self._poll.timeout.connect(self._tick)
         self._released = False
-        self._generation = 0
         self._playing_clock = QElapsedTimer()
         self._pending_track: Optional[int] = None
         self._restore_timer = QTimer(self, singleShot=True, interval=_AUDIO_RESTORE_MS)
@@ -285,7 +284,10 @@ class PlaybackSession(QObject):
         if job is _Job.STOP:
             self._engaged = False
         if self._released:
-            self._release_player()
+            if self._engaged:  # a DETACH: close the kept outputs on a worker too, then release
+                self._run_job(_Job.STOP)
+            else:
+                self._release_player()
         elif self._start_wanted:
             self._start_wanted = False
             self._open()
@@ -294,8 +296,7 @@ class PlaybackSession(QObject):
             self._run_job(_Job.STOP)
 
     def _cancel_pending(self) -> None:
-        """Invalidate delayed work (audio restore, restart) belonging to the old media."""
-        self._generation += 1
+        """Cancel delayed work (audio restore, restart) belonging to the old media."""
         self._restore_timer.stop()
         self._restart_timer.stop()
         self._pending_track = None
@@ -393,7 +394,7 @@ class PlaybackSession(QObject):
         self._cancel_pending()
         self._start_wanted = self._stop_owed = False
         if self._job is not None:
-            return  # _job_done releases it
+            return  # _job_done stops (after a DETACH) and releases it
         if self._engaged:
             self._run_job(_Job.STOP)  # _job_done releases it
             return

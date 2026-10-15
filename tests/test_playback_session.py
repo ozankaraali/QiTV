@@ -35,10 +35,10 @@ def wait_for(predicate, timeout_ms=8000):
     return predicate()
 
 
-def release_and_wait(session):
+def release_and_wait(test, session):
     """Release, then let the worker that stops libVLC finish before the next test."""
     session.release()
-    wait_for(lambda: not has_pending_threads(), 5000)
+    test.assertTrue(wait_for(lambda: not has_pending_threads(), 5000), "a libVLC job outlived it")
 
 
 @unittest.skipIf(INSTANCE is None, "libVLC is not available")
@@ -51,7 +51,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.session = PlaybackSession(INSTANCE, poll_ms=50, open_timeout_ms=3000)
         self.states = []
         self.session.stateChanged.connect(self.states.append)
-        self.addCleanup(release_and_wait, self.session)
+        self.addCleanup(release_and_wait, self, self.session)
 
     def test_stop_is_safe_before_play(self):
         self.session.stop()
@@ -113,7 +113,7 @@ class PlaybackSessionTests(unittest.TestCase):
 
     def _stalling_session(self):
         session = PlaybackSession(INSTANCE, poll_ms=50, stall_ms=0)
-        self.addCleanup(release_and_wait, session)
+        self.addCleanup(release_and_wait, self, session)
         session._kind = PlayKind.LIVE
         session._stall_clock.start()
         return session
@@ -127,7 +127,10 @@ class PlaybackSessionTests(unittest.TestCase):
 
     def test_stall_counted_when_time_stops_advancing(self):
         session = self._stalling_session()
-        with mock.patch.object(session, "time_ms", return_value=500):
+        with (
+            mock.patch.object(session, "time_ms", return_value=500),
+            self.assertLogs("services.playback", "WARNING"),
+        ):
             for _ in range(3):
                 session._watch_stall(PlaybackState.PLAYING)
         self.assertGreaterEqual(session._stalls, 1)
@@ -136,7 +139,10 @@ class PlaybackSessionTests(unittest.TestCase):
         # Finding m3: after a recovery the budget never refilled, so a later stall went
         # straight to the last resort.
         session = self._stalling_session()
-        with mock.patch.object(session, "time_ms", return_value=500):
+        with (
+            mock.patch.object(session, "time_ms", return_value=500),
+            self.assertLogs("services.playback", "WARNING"),
+        ):
             for _ in range(3):
                 session._watch_stall(PlaybackState.PLAYING)
         self.assertEqual(session._stalls, 2)
@@ -159,7 +165,10 @@ class PlaybackSessionTests(unittest.TestCase):
             mock.patch.object(player, "audio_get_track", return_value=7),
             mock.patch.object(player, "audio_set_track") as set_track,
         ):
-            with mock.patch.object(session, "time_ms", return_value=500):
+            with (
+                mock.patch.object(session, "time_ms", return_value=500),
+                self.assertLogs("services.playback", "WARNING"),
+            ):
                 for _ in range(2):
                     session._watch_stall(PlaybackState.PLAYING)
             self.assertEqual(set_track.call_args_list, [mock.call(-1)])
@@ -171,7 +180,10 @@ class PlaybackSessionTests(unittest.TestCase):
     def test_audio_restore_after_release_is_harmless(self):
         session = self._stalling_session()
         session.play(FIXTURE.as_uri(), kind=PlayKind.LIVE)
-        with mock.patch.object(session, "time_ms", return_value=500):
+        with (
+            mock.patch.object(session, "time_ms", return_value=500),
+            self.assertLogs("services.playback", "WARNING"),
+        ):
             for _ in range(3):
                 session._watch_stall(PlaybackState.PLAYING)
         session.release()
@@ -181,7 +193,10 @@ class PlaybackSessionTests(unittest.TestCase):
         session = self._stalling_session()
         session.play(FIXTURE.as_uri(), kind=PlayKind.LIVE)
         session._stalls = 2
-        with mock.patch.object(session, "time_ms", return_value=500):
+        with (
+            mock.patch.object(session, "time_ms", return_value=500),
+            self.assertLogs("services.playback", "WARNING"),
+        ):
             for _ in range(3):
                 session._watch_stall(PlaybackState.PLAYING)
         other = (FIXTURE.parent / "other.mp4").as_uri()
@@ -223,7 +238,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         session = PlaybackSession(INSTANCE, poll_ms=50, open_timeout_ms=500)
-        self.addCleanup(release_and_wait, session)
+        self.addCleanup(release_and_wait, self, session)
         errors = []
         session.errorOccurred.connect(errors.append)
         session.play(f"http://127.0.0.1:{server.server_address[1]}/live.ts", kind=PlayKind.LIVE)
@@ -514,14 +529,17 @@ class PlayerJobTests(unittest.TestCase):
         self.assertEqual(self.opened(), [A])
         self.assertIs(self.session.state(), PlaybackState.IDLE)
 
-    def test_release_during_a_pending_join_releases_once_it_has_finished(self):
+    def test_release_during_a_pending_join_stops_then_releases_off_the_gui_thread(self):
         self.play(A)
         self.play(B)
         self.session.release()
         self.assertNotIn(("release",), self.player.calls)  # the worker still uses the player
         states = list(self.states)
+        self.runner.finish()  # the zap's DETACH kept the outputs: a STOP closes them first
+        self.assertNotIn(("release",), self.player.calls)
+        self.assertEqual(len(self.runner.jobs), 1)
         self.runner.finish()
-        self.assertEqual(self.player.calls[-1], ("release",))
+        self.assertEqual(self.player.calls[-3:], [("stop",), ("set_media", None), ("release",)])
         self.assertEqual(self.opened(), [A])
         self.assertEqual(self.states, states)  # nothing is reported after a release
         self.play(C)
@@ -587,7 +605,10 @@ class PlayerJobTests(unittest.TestCase):
         self.session._kind = PlayKind.LIVE
         self.session._stalls = 2
         self.session._stall_clock.start()
-        with mock.patch.object(self.session, "time_ms", return_value=500):
+        with (
+            mock.patch.object(self.session, "time_ms", return_value=500),
+            self.assertLogs("services.playback", "WARNING"),
+        ):
             self.session._last_time = 500
             self.session._stall_ms = 0
             self.session._watch_stall(PlaybackState.PLAYING)
@@ -651,7 +672,7 @@ class MainThreadJoinTests(unittest.TestCase):
     def test_zap_and_stop_finish_when_the_join_needs_the_gui_thread(self):
         player = _MacPlayer()
         session = PlaybackSession(_FakeInstance(player), poll_ms=60_000)  # a real JobRunner
-        self.addCleanup(release_and_wait, session)
+        self.addCleanup(release_and_wait, self, session)
         session.play(A, kind=PlayKind.LIVE)
         session.play(B, kind=PlayKind.LIVE)
         self.assertTrue(wait_for(lambda: ("set_media", B) in player.calls, 4000))
