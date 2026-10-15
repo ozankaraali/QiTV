@@ -617,31 +617,18 @@ class TVController(QObject):
         self._tuning.start(TUNING_KEEP_MS)
 
     def play_item(self, node: NavNode, siblings: list[NavNode], parent: NavNode) -> None:
+        """A drawer row was chosen. Only channels play from the drawer: Movies and Series
+        open the Library, whose titles and episodes play through play_vod()."""
         if self._closed:
             return
-        section = self.nav.section_of(node)
-        drawer = self.overlays.drawer
-        if node.layer == "item" and section == "live":
-            # The whole group, not just the rows the drawer's filter shows: ↑/↓ walk the group.
-            nodes = self.nav.children(parent) or siblings
-            channels = [n.payload for n in nodes if isinstance(n.payload, dict)]
-            self.tune(node.payload, group_key=parent.key, channels=channels)
-            drawer.close_drawer()
-        elif node.layer == "episode" or (node.layer == "item" and section == "movies"):
-            drawer.close_drawer()
-            # The whole season or group, not the filtered rows: Next follows them.
-            nodes = self.nav.children(parent) or siblings
-            items = [n.payload for n in nodes if isinstance(n.payload, dict)]
-            if node.layer == "episode":
-                path = reversed(self.nav.path)
-                series = next((n.payload for n in path if n.layer == "item"), None)
-                season = parent.payload if parent.layer == "season" else None
-                context = {"series": series, "season": season, "episodes": items}
-                self.play_vod(node.payload, "episode", context)
-            else:
-                self.play_vod(node.payload, "movie", {"genre_items": items})
-        else:
-            logger.debug("Not playable: %s", node)
+        if node.layer != "item" or self.nav.section_of(node) != "live":
+            logger.debug("Not playable from the drawer: %s", node)
+            return
+        # The whole group, not just the rows the drawer's filter shows: ↑/↓ walk the group.
+        nodes = self.nav.children(parent) or siblings
+        channels = [n.payload for n in nodes if isinstance(n.payload, dict)]
+        self.tune(node.payload, group_key=parent.key, channels=channels)
+        self.overlays.drawer.close_drawer()
 
     def play_vod(self, item: dict, kind: str, context: Optional[dict] = None) -> None:
         """Play a movie or an episode where it stopped (the drawer and the Library).

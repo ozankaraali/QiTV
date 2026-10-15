@@ -1012,16 +1012,14 @@ class VodTests(ControllerTestCase):
     def setUp(self):
         super().setUp()
         self.controller.start()
-        self.nav.reset_to("movies")
-        self.node = NavNode("item", "m7", "Heat", self.MOVIE)
-        self.group = NavNode("group", "5", "Films")
+
+    def play_movie(self):
+        self.controller.play_vod(self.MOVIE, "movie", play_context(genre_items=[self.MOVIE]))
 
     def test_resumes_and_tracks_position(self):
         self.watch.resume["Home:movie:m7"] = 125_000
-        self.drawer.visible = True
-        self.controller.play_item(self.node, [self.node], self.group)
+        self.play_movie()
         self.assertEqual(self.catalog.links[0][2:], ("movies", False))
-        self.assertFalse(self.drawer.visible)
         self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
         url, kwargs = self.session.plays[0]
         self.assertEqual(kwargs, {"kind": PlayKind.VOD_FILE, "start_ms": 125_000})
@@ -1036,12 +1034,12 @@ class VodTests(ControllerTestCase):
         self.assertEqual(self.watch.flushes, 1)
 
     def test_episode_requests_a_series_link(self):
-        episode = NavNode("episode", "s:1:2", "Pilot", {"id": "s", "cmd": "x", "series": 2})
-        self.controller.play_item(episode, [episode], NavNode("season", "1", "Season 1"))
+        episode = {"id": "s", "cmd": "x", "series": 2}
+        self.controller.play_vod(episode, "episode", play_context())
         self.assertEqual(self.catalog.links[0][2:], ("series", True))
 
     def test_channel_keys_change_the_volume_during_vod(self):
-        self.controller.play_item(self.node, [self.node], self.group)
+        self.play_movie()
         self.catalog.linkReady.emit(1, "http://vod/heat.mkv")
         self.controller.handle(Action.CH_PREV)
         self.assertEqual(self.session.level, 55)
@@ -1060,6 +1058,19 @@ class DrawerPlayTests(ControllerTestCase):
         self.assertEqual(self.requested(), ["Three"])
         self.assertEqual(self.zap.context.channels, CHANNELS)
         self.assertEqual(self.drawer.calls[-1], ("close_drawer",))
+
+    def test_the_drawer_plays_only_channels(self):
+        # Movies and Series open the Library from the drawer: their titles and episodes
+        # play from there (play_vod), never from a drawer row.
+        self.controller.start()
+        self.drawer.visible = True
+        movie_row = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+        episode_row = NavNode("episode", "s:1:2", "Pilot", {"id": "s", "cmd": "x", "series": 2})
+        self.nav.reset_to("movies")
+        self.controller.play_item(movie_row, [movie_row], NavNode("group", "5", "Films"))
+        self.controller.play_item(episode_row, [episode_row], NavNode("season", "1", "S1"))
+        self.assertEqual(self.catalog.links, [])
+        self.assertTrue(self.drawer.visible)
 
 
 class TransportAndWheelTests(ControllerTestCase):
@@ -1391,9 +1402,7 @@ class BottomOverlayTests(ControllerTestCase):
     def test_a_vod_start_replaces_the_banner_with_the_transport(self):
         self.play(0)
         self.assertTrue(self.banner.isVisible())  # the live tune's banner
-        self.nav.reset_to("movies")
-        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
-        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.ready("http://vod/heat.mkv")
         self.assertTrue(self.transport.isVisible())
         self.assertFalse(self.banner.isVisible())
@@ -1583,9 +1592,7 @@ class ReviewFixTests(ControllerTestCase):
         self.assertEqual(self.requested(), ["One", "Two"])
         self.assertEqual(self.transport.named("show_live"), [("One", "")])
         self.ready("http://stream/2")
-        self.nav.reset_to("movies")
-        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
-        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.ready("http://vod/heat.mkv")
         self.session.seekable = True
         self.controller.handle(Action.MEDIA_PREV)
@@ -1595,9 +1602,7 @@ class ReviewFixTests(ControllerTestCase):
 
     def test_live_link_in_flight_then_vod_plays_only_the_vod(self):
         self.tune(0)
-        self.nav.reset_to("movies")
-        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
-        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.catalog.linkReady.emit(1, "http://stream/1")
         self.assertEqual(self.requested(), ["One", "Heat"])
         self.catalog.linkReady.emit(2, "http://vod/heat.mkv")
@@ -1606,9 +1611,7 @@ class ReviewFixTests(ControllerTestCase):
     def test_external_vod_stops_the_in_app_session(self):
         self.play(0)
         self.config.play_in_vlc = True
-        self.nav.reset_to("movies")
-        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
-        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.ready("http://vod/heat.mkv")
         self.assertEqual(self.external.calls, [("vlc", "http://vod/heat.mkv")])
         self.assertEqual(self.session.stops, 1)
@@ -1944,9 +1947,7 @@ class PipelineTuneTests(PipelineCase):
 
     def test_a_movie_stops_the_live_channel_and_gives_its_slot_back(self):
         self.start_pipeline(0)
-        self.nav.reset_to("movies")
-        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
-        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.ready("http://vod/heat.mkv")
         self.assertIn(("stop",), self.live.calls)
         self.live.released.emit()
@@ -1956,9 +1957,7 @@ class PipelineTuneTests(PipelineCase):
         self.assertEqual(self.live.named("seek_relative"), [])
 
     def test_a_channel_after_a_movie_stops_the_movie(self):
-        self.nav.reset_to("movies")
-        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
-        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.ready("http://vod/heat.mkv")
         stops = self.session.stops
         self.start_channel(0)
@@ -1982,11 +1981,8 @@ class PipelineTuneTests(PipelineCase):
 class ReleaseOrderTests(PipelineCase):
     """Nothing opens the provider again before the previous stream is released (spec §6.9)."""
 
-    MOVIE_NODE = NavNode("item", "m7", "Heat", VodTests.MOVIE)
-
     def play_movie(self):
-        self.nav.reset_to("movies")
-        self.controller.play_item(self.MOVIE_NODE, [self.MOVIE_NODE], NavNode("group", "5", "F"))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.ready("http://vod/heat.mkv")
 
     def test_pipeline_to_movie(self):
@@ -2171,9 +2167,7 @@ class ResumeTests(PipelineCase):
         self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
 
     def test_a_movie_reopens_at_its_last_position(self):
-        self.nav.reset_to("movies")
-        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
-        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.ready("http://vod/heat.mkv")
         self.watch.resume["Home:movie:m7"] = 600_000  # the watch state's last position
         self.controller.stop_live()
@@ -2265,9 +2259,7 @@ class PipelineControlTests(PipelineCase):
     def test_go_live_without_a_live_channel_does_nothing(self):
         self.controller.handle(Action.GO_LIVE)
         self.start_channel(0)
-        self.nav.reset_to("movies")
-        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
-        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.controller.play_vod(VodTests.MOVIE, "movie", play_context())
         self.ready("http://vod/heat.mkv")
         self.controller.handle(Action.GO_LIVE)
         self.assertEqual(self.live.named("go_live"), [])
@@ -2704,20 +2696,6 @@ class EpisodeAutoplayTests(AutoplayCase):
         self.assertEqual(self.next_card.named("show_next"), [])
         self.assertEqual(self.link_items(), ["e11"])
 
-    def test_a_drawer_episode_plays_with_its_season_for_autoplay(self):
-        self.nav.reset_to("series")
-        series = NavNode("item", "s9", "Harbour Lights", SERIES)
-        season = NavNode("season", "1", "Season 1", SEASON_1)
-        self.nav.open(NavNode("group", "5", "Drama"))
-        self.nav.open(series)
-        self.nav.open(season)
-        node = NavNode("episode", "e11:1:1", "Episode 1", episode(SEASON_1, 1))
-        self.controller.play_item(node, [node], season)
-        self.ready("http://vod/e11.mkv")
-        self.assertEqual(self.transport.named("show_vod"), [("Episode 1", "Harbour Lights")])
-        self.end()
-        self.assertEqual(self.next_card.named("show_next"), [("Episode 2", "S1 · E2", "episode")])
-
 
 class MovieAutoplayTests(AutoplayCase):
     def test_a_movie_ends_and_the_card_names_the_next_in_its_genre(self):
@@ -2739,17 +2717,6 @@ class MovieAutoplayTests(AutoplayCase):
         self.end()
         self.assertEqual(self.next_card.named("show_next"), [])
         self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
-
-    def test_a_drawer_movie_offers_the_next_title_of_its_group(self):
-        films = [movie(1), movie(2)]
-        self.catalog.movies["5"] = films
-        self.nav.reset_to("movies", "5")
-        group = self.nav.path[-1]
-        nodes = self.nav.children(group)
-        self.controller.play_item(nodes[0], [nodes[0]], group)
-        self.ready("http://vod/m1.mkv")
-        self.end()
-        self.assertEqual(self.next_card.named("show_next"), [("Film 2", "Films", "movie")])
 
     def test_play_vod_stops_the_live_channel_through_the_release_gate(self):
         self.play(0)
