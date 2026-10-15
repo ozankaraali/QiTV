@@ -211,6 +211,32 @@ class DrawerTests(unittest.TestCase):
         self.drawer.page(-1)
         self.assertEqual(self.drawer.highlighted().title, "Chan 0")
 
+    def test_focus_key_highlights_loaded_row(self):
+        self.drawer.open_drawer("2")
+        self.assertEqual(self.drawer.highlighted().title, "Two")
+
+    def test_focus_key_applies_after_loading(self):
+        self.catalog.live = {}
+        self.nav.changed.emit()
+        self.drawer.open_drawer("2")
+        self.assertEqual(self.drawer.message_for("right"), "Loading…")
+        self.catalog.live = {"10": [{"id": 1, "name": "One"}, {"id": 2, "name": "Two"}]}
+        self.catalog.groupReady.emit("live", "10")
+        self.assertEqual(self.drawer.highlighted().title, "Two")
+
+    def test_unknown_focus_key_falls_back_to_first_row(self):
+        self.drawer.open_drawer("nope")
+        self.assertEqual(self.drawer.highlighted().title, "One")
+
+    def test_stale_preview_is_dropped(self):
+        self.many_groups()
+        self.drawer.open_drawer()
+        self.drawer.left()
+        self.drawer.move_by(1)
+        self.nav.reset_to("live")
+        QTest.qWait(320)
+        self.assertEqual(self.opened, [])
+
 
 if __name__ == "__main__":
     unittest.main()

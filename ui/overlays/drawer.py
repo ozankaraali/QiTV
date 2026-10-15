@@ -301,7 +301,7 @@ class Drawer(Overlay):
     def _flush_preview(self) -> None:
         node = self._preview_node
         self._cancel_preview()
-        if node is not None:
+        if node is not None and self.isVisible() and node in self._columns["left"].rows:
             self._left_choice = None
             self._nav.open(node)
 
@@ -379,14 +379,17 @@ class Drawer(Overlay):
         col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
         col.model.set_nodes(nodes, live)
         if col.side == "left":
+            if parent_changed:
+                self._cancel_preview()  # a preview of the old layer must not open
             self._choose_left(col, nodes)
         else:
+            matched = False
             if self._pending_key is not None:
                 match = next((n for n in nodes if n.key == self._pending_key), None)
                 if match is not None:
                     col.current = match
-                    self._pending_key = None
-            if parent_changed or col.current not in col.rows:
+                    matched = True
+            if not matched and (parent_changed or col.current not in col.rows):
                 col.current = nodes[0] if nodes else None
             if children is not None:
                 self._pending_key = None  # a stale focus key must not outlive the first fill
