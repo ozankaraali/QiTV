@@ -514,7 +514,7 @@ class TransportBadgeCase(TransportCase):
         self.assertLess(self.centre(t).green(), 60)
         un = Units(t.width())
         self.assertAlmostEqual(
-            r.height(), QFontMetricsF(un.font(1.8, QFont.Weight.Bold)).capHeight() * 1.6, 1
+            r.height(), QFontMetricsF(un.font(1.8, QFont.Weight.Bold)).height() * 1.9, 1
         )
         self.assertGreater(r.right(), un.px(3))
         # the name is painted right of the badge, none of it under it

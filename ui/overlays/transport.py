@@ -201,7 +201,7 @@ class Transport(Overlay):
         if not self._live:
             return QRectF()
         un = Units(self.width())
-        size = QFontMetricsF(un.font(1.8, QFont.Weight.Bold)).capHeight() * 1.6
+        size = QFontMetricsF(un.font(1.8, QFont.Weight.Bold)).height() * 1.9
         y = un.px(2.4) + (un.px(2.6) - size) / 2
         return QRectF(un.px(3), y, size, size)
 
