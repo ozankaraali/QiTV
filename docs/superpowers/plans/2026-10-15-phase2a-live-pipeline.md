@@ -15,13 +15,13 @@ Everything is tested headless.
 
 **Architecture:** `services/live/` holds pure modules (`ts`, `timeline`, `stay_live`), storage (`ring`), I/O (`source`, `server`), the helper process (`worker`) and the parent supervisor (`engine`). Wherever main's MPV-branch recorder already solved a problem, it is ported (see `.superpowers/sdd/phase2-port-map.md`, the binding reference for ported code and for the 21 requirements in its §8). PyAV/FFmpeg is **never** used.
 
-**Tech Stack:** Python 3.14 stdlib (`multiprocessing` spawn, `http.server`, `threading`), `requests` (present), **new pure-Python and prebuilt-wheel dependencies `m3u8==6.0.0` and `cryptography`** (allowed by spec D2), PySide6 QtCore (`QLockFile`, `QThread`, signals), `unittest`.
+**Tech Stack:** Python 3.14 stdlib (`multiprocessing` spawn, `http.server`, `threading`), `requests` (present), **new pure-Python and prebuilt-wheel dependencies `m3u8==6.0.0` and `pycryptodomex`** (allowed by spec D2), PySide6 QtCore (`QLockFile`, `QThread`, signals), `unittest`.
 
 **Spec:** `docs/superpowers/specs/2026-10-15-tv-on-vlc-design.md` §4.3, §6.1–6.5, §6.8, §9, §11. Port map: `.superpowers/sdd/phase2-port-map.md` (main line numbers, exact constants, protocol and requirements). Read `main` code with `git show main:<path>`, never by checking `main` out.
 
 ## Global Constraints
 
-- **No PyAV, no FFmpeg, no native builds.** New dependencies are exactly `m3u8==6.0.0` and `cryptography` (the latest version available in `uv`). Add them to `pyproject.toml` and regenerate `uv.lock` and `requirements.txt` the way the repo does: `uv lock` then `uv export --format requirements-txt --no-dev --no-emit-project > requirements.txt` (check the header of `requirements.txt` for the exact command used and reuse it).
+- **No PyAV, no FFmpeg, no native builds.** New dependencies are exactly `m3u8==6.0.0` and `pycryptodomex` (the latest version available in `uv`; import namespace `Cryptodome`). `cryptography` is **not** used: from v49 it ships no Intel macOS wheels, so it would build from source there. Add them to `pyproject.toml` and regenerate `uv.lock` and `requirements.txt` the way the repo does: `uv lock` then `uv export --format requirements-txt --no-dev --no-emit-project > requirements.txt` (check the header of `requirements.txt` for the exact command used and reuse it).
 - **Spec values (exact):**
   - segments cut at a keyframe once at least 2.0 s long; forced cut at 10 s;
   - RAI fallback to NAL scanning after 6 s without RAI;
@@ -99,11 +99,11 @@ Everything is tested headless.
     - at each time in `resets`, PTS jumps back to `pts_start`;
     - `packet_size` 192 prefixes a 4-byte timecode, 204 appends 16 bytes of padding;
     - `scrambled` sets the transport scrambling bits on video packets.
-- Dependencies: `m3u8==6.0.0` and `cryptography` added.
+- Dependencies: `m3u8==6.0.0` and `pycryptodomex` added.
 
 - [ ] **Step 1:** Add the dependencies:
-  1. `uv add "m3u8==6.0.0" cryptography`, then regenerate `requirements.txt` with the command recorded in its header.
-  2. Run `uv run python -c "import m3u8, cryptography; print('ok')"`.
+  1. `uv add "m3u8==6.0.0" pycryptodomex`, then regenerate `requirements.txt` with the command recorded in its header.
+  2. Run `uv run python -c "import m3u8, Cryptodome; print('ok')"`.
 - [ ] **Step 2:** Write `tests/test_ts_fixtures.py`, which asserts that `make_stream(3)`:
   - has a length divisible by 188;
   - has every packet starting with `0x47`;
@@ -115,7 +115,7 @@ Everything is tested headless.
   - PES header: `00 00 01`, stream id (`0xE0` video, `0xC0` audio), length (0 for video), flags `0x80`/`0x80` with a 5-byte PTS;
   - PTS encoding: `0010 + pts[32..30] + 1`, `pts[29..15] + 1`, `pts[14..0] + 1`;
   - adaptation-field stuffing to fill the last packet of each PES.
-- [ ] **Step 4:** Run the tests until they are green, then the suite. **Step 5:** Commit (`build: add m3u8 and cryptography; add a TS fixture synthesizer`).
+- [ ] **Step 4:** Run the tests until they are green, then the suite. **Step 5:** Commit (`build: add m3u8 and pycryptodomex; add a TS fixture synthesizer`).
 
 ---
 
@@ -330,7 +330,7 @@ Everything is tested headless.
   - **AES-128:**
     - keys are cached by URI and fetched through the same Session;
     - the IV is the explicit IV or the big-endian 16-byte media sequence;
-    - decryption uses `cryptography` CBC as a stream, with PKCS7 unpadding at the segment end.
+    - decryption uses `Cryptodome.Cipher.AES` in CBC mode as a stream, with PKCS7 unpadding at the segment end.
   - **Segment check:** reject a segment whose first decrypted bytes are not TS (`0x47` at offsets 0 and 188) as `unsupported`.
   - **URIs:** every URI is resolved against the **final redirected** playlist URL, and must be http(s) (anything else raises `unsupported`).
   - `close()` closes the active response.
@@ -347,7 +347,7 @@ Everything is tested headless.
   - a live leaf reloads the redirected URL and tolerates a 2.2 s segment gap;
   - TLS verification: rejection by default, opt-out works, and the setting is obeyed on redirect hops and nested playlists;
   - a remote playlist cannot read local media;
-  - an encrypted leaf with an explicit IV and a relative key, using `cryptography` to encrypt the fixture;
+  - an encrypted leaf with an explicit IV and a relative key, using `Cryptodome.Cipher.AES` to encrypt the fixture;
   - failed opens redact credentials.
 
   Add new tests:

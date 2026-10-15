@@ -214,7 +214,7 @@ Other tokens: radius 10 px (cards) and 14 px (panels); system UI font. Focus is 
   - 188-byte packets only. 192/204-byte packets and non-TS content are reported as *unsupported*, which triggers direct play.
 - **HLS:**
   - Playlists are parsed with `m3u8`. The highest-bandwidth compatible variant is chosen (ported from main), and media playlists are reloaded live.
-  - Segments are fetched in order; AES-128 is decrypted with `cryptography`. Only TS segments are supported; fMP4/byte-range segments mean *unsupported*.
+  - Segments are fetched in order; AES-128 is decrypted with `pycryptodomex` (prebuilt wheels on all four targets; `cryptography` ≥ 49 has no Intel macOS wheel). Only TS segments are supported; fMP4/byte-range segments mean *unsupported*.
 - **Reconnects:** exponential backoff (0.5 s → 8 s, up to 6 tries) while VLC plays from the ring. If they all fail, the session reports an error.
 
 ### 6.2 TS segmentation (`ts.py`): no remuxing

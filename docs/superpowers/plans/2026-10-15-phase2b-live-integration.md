@@ -233,7 +233,7 @@
   - `speedRequested`: `live_session.set_speed`;
   - `timelineChanged`: update the transport (time-shift or live-edge mode) with ticks from `catalog.programmes(channel, now, 6)` mapped to timeline seconds.
 - **Settings:** a changed `live_latency` calls `live_session.set_latency`.
-- **PyInstaller specs:** add `services.live.worker`, `m3u8` and `cryptography` to `hiddenimports`. Make sure `main.py` calls `multiprocessing.freeze_support()` first (Phase 1B Task 8 added it; verify).
+- **PyInstaller specs:** add `services.live.worker`, `m3u8` and `Cryptodome.Cipher.AES` to `hiddenimports`. Make sure `main.py` calls `multiprocessing.freeze_support()` first (Phase 1B Task 8 added it; verify).
 - [ ] **Tests:**
   - controller (fakes):
     - a tune requests the budget and starts the live session on grant;
