@@ -5,7 +5,7 @@ import logging
 import os
 import pickle
 import shutil
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -130,7 +130,10 @@ class EpgManager:
         self.provider_manager = provider_manager
 
         self.index: Dict[str, Any] = {}
+        # The guide is replaced, never emptied and refilled: a loader thread builds the new
+        # one and swaps it in (see _publish), while the GUI thread keeps reading.
         self.epg: MultiKeyDict = MultiKeyDict()
+        self._epg_source: Optional[str] = None  # the cache key self.epg was loaded from
         self._load_index()
 
     def _cache_dir(self):
@@ -149,29 +152,75 @@ class EpgManager:
         age = datetime.now() - epg_date
         return age.total_seconds() > self.config_manager.epg_expiration
 
+    def _publish(self, cache_key, guide):
+        """Swap in a fully built guide with one assignment.
+
+        GUI-thread readers take one reference to ``self.epg`` per lookup, so a swap made by
+        the loader thread never changes a guide under them.
+        """
+        self._epg_source = cache_key
+        self.epg = guide
+
     def _load_cached_epg(self, cache_key):
         """Load a previously indexed EPG from disk; return False if it is missing."""
         epg_file = self._pickle_path(cache_key)
         if not os.path.exists(epg_file):
             return False
         with open(epg_file, "rb") as f:
-            self.epg = pickle.load(f)
+            self._publish(cache_key, pickle.load(f))
         self.index[cache_key]["last_access"] = datetime.now().strftime(_INDEX_TIME_FORMAT)
         return True
 
-    def _cache_epg(self, cache_key, source_date=None):
-        """Persist the current EPG and record when its source was last updated."""
+    def _store_guide(self, cache_key, guide, source_date=None):
+        """Show a freshly loaded guide, save it and record when its source was updated."""
+        self._publish(cache_key, guide)
         with open(self._pickle_path(cache_key), "wb") as f:
-            pickle.dump(self.epg, f)
+            pickle.dump(guide, f)
         now = datetime.now()
         self.index[cache_key] = {
             "date": (source_date or now).strftime(_INDEX_TIME_FORMAT),
             "last_access": now.strftime(_INDEX_TIME_FORMAT),
         }
 
-    def _mark_epg_unavailable(self, cache_key):
+    def _source_failed(self, cache_key):
+        """Loading this source failed or found no guide.
+
+        A refresh keeps the guide it has (in memory, else the one saved on disk) and leaves
+        the index entry alone, so the next refresh tries again. Only a source without any
+        guide is marked unavailable.
+        """
+        if self._epg_source == cache_key and len(self.epg):
+            logger.info("Couldn't refresh the EPG; keeping the current guide")
+            return
+        if self.index.get(cache_key) and self._load_cached_epg(cache_key):
+            logger.info("Couldn't refresh the EPG; showing the saved guide")
+            return
         self.index[cache_key] = None
-        self.epg = MultiKeyDict()
+        self._publish(cache_key, MultiKeyDict())
+
+    def _source_key(self):
+        """The cache key of the configured guide source, or None when there is none."""
+        epg_source = self.config_manager.epg_source
+        provider = self.provider_manager.current_provider
+        if epg_source == "STB":
+            provider_type = provider.get("type", "").upper()
+            if provider_type == "STB":
+                return _cache_key(provider.get("url", ""))
+            if provider_type == "XTREAM":
+                return _xtream_cache_key(provider.get("url", ""), provider.get("username", ""))
+        elif epg_source == "Local File":
+            return _cache_key(self.config_manager.epg_file)
+        elif epg_source == "URL":
+            return _cache_key(self.config_manager.epg_url)
+        return None
+
+    def _forget_other_source(self):
+        """Drop a guide loaded from another source (a provider switch or a settings change).
+
+        A reload of the same source keeps its guide visible until the new one is swapped in.
+        """
+        if self._epg_source != self._source_key():
+            self._publish(None, MultiKeyDict())
 
     def _load_index(self):
         index_file = self._index_file()
@@ -324,10 +373,10 @@ class EpgManager:
         return False
 
     def set_current_epg(self):
-        # Initialize with MultiKeyDict for compatibility with both STB and XMLTV formats
-        self.epg = MultiKeyDict()
         if not self.config_manager.channel_epg:
+            self._publish(None, MultiKeyDict())
             return
+        self._forget_other_source()
 
         epg_source = self.config_manager.epg_source
         if epg_source == "STB":
@@ -349,7 +398,7 @@ class EpgManager:
             self._set_epg_from_url(self.config_manager.epg_url)
 
     # Each _set_epg_from_* loader follows the same steps (set_current_epg has already
-    # reset self.epg to an empty MultiKeyDict): a source indexed as None has no EPG; an
+    # dropped a guide of another source): a source indexed as None has no EPG; an
     # outdated one is refetched; otherwise its cached pickle is used. Sources that were
     # never indexed, or whose pickle is gone, are fetched.
 
@@ -398,11 +447,12 @@ class EpgManager:
         self._fetch_epg_from_url(url)
 
     def _fetch_epg_from_file(self, xmltv_filehash, xmltv_file):
-        self.epg = self._index_programs(xmltv_file)
-        if self.epg:
-            self._cache_epg(xmltv_filehash, datetime.fromtimestamp(os.path.getmtime(xmltv_file)))
+        guide = self._index_programs(xmltv_file)
+        if guide:
+            modified = datetime.fromtimestamp(os.path.getmtime(xmltv_file))
+            self._store_guide(xmltv_filehash, guide, modified)
         else:
-            self._mark_epg_unavailable(xmltv_filehash)
+            self._source_failed(xmltv_filehash)
         self.save_index()
 
     def _fetch_epg_from_stb(self, provider_url, headers):
@@ -435,10 +485,9 @@ class EpgManager:
             if items:
                 break
         if items:
-            self.epg = items[0]
-            self._cache_epg(provider_hash)
+            self._store_guide(provider_hash, items[0])
         else:
-            self._mark_epg_unavailable(provider_hash)
+            self._source_failed(provider_hash)
         self.save_index()
 
     def _fetch_epg_from_xtream(self, provider_url, username, password):
@@ -472,21 +521,21 @@ class EpgManager:
                     r.status_code,
                     redact_url(xmltv_url),
                 )
-                self._mark_epg_unavailable(provider_hash)
+                self._source_failed(provider_hash)
             else:
                 xmltv_file_path = os.path.join(self._cache_dir(), f"{provider_hash}_xtream.xml")
                 write_xmltv_body(r, xmltv_file_path)
 
                 # Parse and index the XMLTV file
-                self.epg = self._index_programs(xmltv_file_path)
+                guide = self._index_programs(xmltv_file_path)
                 os.remove(xmltv_file_path)
-                if self.epg:
-                    self._cache_epg(provider_hash)
+                if guide:
+                    self._store_guide(provider_hash, guide)
                 else:
-                    self._mark_epg_unavailable(provider_hash)
+                    self._source_failed(provider_hash)
         except Exception as e:
             logger.error("Error fetching Xtream EPG: %s", safe_exc(e))
-            self._mark_epg_unavailable(provider_hash)
+            self._source_failed(provider_hash)
 
         self.save_index()
 
@@ -503,9 +552,9 @@ class EpgManager:
                 logger.warning("Error fetching XMLTV from %s: %s", redact_url(url), safe_exc(e))
 
             if os.path.exists(xmltv_file_path):
-                self.epg = self._index_programs(xmltv_file_path)
+                guide = self._index_programs(xmltv_file_path)
                 os.remove(xmltv_file_path)
-                if self.epg:
+                if guide:
                     last_modified = datetime.strptime(
                         r.headers.get(
                             "Last-Modified",
@@ -513,17 +562,19 @@ class EpgManager:
                         ),
                         "%a, %d %b %Y %H:%M:%S %Z",
                     )
-                    self._cache_epg(url_hash, last_modified)
+                    self._store_guide(url_hash, guide, last_modified)
                 else:
-                    self._mark_epg_unavailable(url_hash)
+                    self._source_failed(url_hash)
         self.save_index()
 
     def force_refresh_current_epg(self):
         """Force refresh EPG cache for the active EPG source/provider.
 
         Ignores expiration and overwrites the existing cache/index so that
-        subsequent lookups use freshly indexed data.
+        subsequent lookups use freshly indexed data. The current guide stays visible until
+        the new one is swapped in, and stays when the refresh fails.
         """
+        self._forget_other_source()
         epg_source = self.config_manager.epg_source
         provider_type = self.provider_manager.current_provider.get("type", "").upper()
 
@@ -557,7 +608,8 @@ class EpgManager:
             return self._get_programs_for_channel_from_xmltv(channel_data, start_time, max_programs)
 
     def _get_programs_for_channel_from_stb(self, channel_id, start_time, max_programs):
-        programs = self.epg.get(channel_id, [])
+        epg = self.epg  # one reference: a refresh may swap in a new guide meanwhile
+        programs = epg.get(channel_id, [])
         # If unlimited requested and no windowing, return all entries sorted
         if (not max_programs or max_programs <= 0) and start_time is None:
             return sorted(
@@ -582,6 +634,7 @@ class EpgManager:
         return filtered
 
     def _get_programs_for_channel_from_xmltv(self, channel_info, start_time, max_programs):
+        epg = self.epg  # one reference: a refresh may swap in a new guide meanwhile
         if start_time is None:
             # Use local timezone-aware datetime to avoid naive/aware mismatches
             try:
@@ -604,14 +657,14 @@ class EpgManager:
 
         chosen_key = None
         for key in candidates:
-            if key in self.epg:
+            if key in epg:
                 chosen_key = key
                 break
             # Also consider user-provided mapping keys
             mapped = self.config_manager.xmltv_channel_map.get_keys(key)
             if mapped:
                 for mk in mapped:
-                    if mk in self.epg:
+                    if mk in epg:
                         chosen_key = mk
                         break
             if chosen_key:
@@ -621,11 +674,11 @@ class EpgManager:
             return []
 
         # search the timezone used by programs by looking at the first/last program
-        ref_time_str = self.epg[chosen_key][0]["@start"]
+        ref_time_str = epg[chosen_key][0]["@start"]
         ref_time = datetime.strptime(ref_time_str, "%Y%m%d%H%M%S %z")
         ref_timezone = ref_time.tzinfo
 
-        ref_time_str1 = self.epg[chosen_key][-1]["@start"]
+        ref_time_str1 = epg[chosen_key][-1]["@start"]
         ref_time1 = datetime.strptime(ref_time_str1, "%Y%m%d%H%M%S %z")
         ref_timezone1 = ref_time1.tzinfo
         need_check_tz = ref_timezone1 != ref_timezone
@@ -633,7 +686,7 @@ class EpgManager:
         # If unlimited requested and no windowing (window_hours <= 0), return all entries sorted
         window_hours = self.config_manager.epg_list_window_hours
         if (not max_programs or max_programs <= 0) and window_hours <= 0:
-            programs = list(self.epg[chosen_key])
+            programs = list(epg[chosen_key])
             programs.sort(key=lambda program: program["@start"])
             return programs
 
@@ -643,7 +696,7 @@ class EpgManager:
         programs = []
         # Compute end-of-window cutoff if configured
         end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
-        for entry in self.epg[chosen_key]:
+        for entry in epg[chosen_key]:
             if need_check_tz:
                 tz = datetime.strptime(entry["@start"], "%Y%m%d%H%M%S %z").tzinfo
                 start_time_str = start_time.astimezone(tz).strftime("%Y%m%d%H%M%S %z")
