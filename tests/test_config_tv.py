@@ -54,6 +54,30 @@ class TvConfigTests(unittest.TestCase):
         config, _ = self._load({"window_positions": {"tv_window": tv}})
         self.assertEqual(config.config["window_positions"]["tv_window"], tv)
 
+    def test_save_replaces_the_file_atomically(self):
+        # Finding m4: save_config truncated config.json before writing it, so a failure
+        # mid-write (full disk, crash) lost every setting.
+        config, path = self._load({"favorites": ["Kept"]})
+        config.save_config()
+        before = path.read_text(encoding="utf-8")
+
+        class Exploding:
+            def decode(self, *args):
+                raise OSError("disk full")
+
+        config.favorites = ["Lost"]
+        with patch("config_manager.json.dumps", return_value=Exploding()):
+            with self.assertRaises((OSError, TypeError)):
+                config.save_config()
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["config.json"])
+        from multikeydict import MultiKeyDict
+
+        self.assertIsInstance(config.xmltv_channel_map, MultiKeyDict)
+        config.save_config()
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["favorites"], ["Lost"])
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["config.json"])
+
     def test_one_time_migration_turns_on_logos_and_epg(self):
         config, path = self._load({"channel_logos": False, "channel_epg": False})
         self.assertTrue(config.channel_logos)

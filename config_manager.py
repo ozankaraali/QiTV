@@ -6,6 +6,7 @@ from pathlib import Path
 import platform
 import shutil
 import sys
+import tempfile
 import tomllib
 
 import orjson as json
@@ -426,12 +427,27 @@ class ConfigManager:
 
     def save_config(self):
         self.xmltv_channel_map = self.xmltv_channel_map.serialize()
+        try:
+            serialized_config = json.dumps(self.config, option=json.OPT_INDENT_2)
+        finally:
+            self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
 
-        serialized_config = json.dumps(self.config, option=json.OPT_INDENT_2)
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            f.write(serialized_config.decode("utf-8"))
-
-        self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
+        # Write a sibling file and swap it in: a failed or interrupted write never
+        # truncates the saved settings.
+        directory = os.path.dirname(self.config_path) or "."
+        fd, temporary = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(serialized_config)
+            if os.path.exists(self.config_path):
+                shutil.copymode(self.config_path, temporary)
+            os.replace(temporary, self.config_path)
+        except BaseException:
+            try:
+                os.remove(temporary)
+            except OSError as e:
+                logger.debug("Could not remove %s: %s", temporary, e)
+            raise
 
     # Integer config properties using factory with coercion
     epg_list_window_hours = _config_property(
