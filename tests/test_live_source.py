@@ -31,6 +31,7 @@ from urllib3.exceptions import InsecureRequestWarning
 from services.live import source as source_module
 from services.live.source import (
     STREAM_LIMIT,
+    STREAM_REFUSED,
     Discontinuity,
     SourceError,
     _scheme,
@@ -1160,7 +1161,8 @@ high.m3u8
             return lambda _request, _count: (status, {}, body)
 
         cases = {
-            "/403.ts": (answer(403), True),
+            "/403.ts": (answer(403), STREAM_REFUSED),  # also a forbidden channel: said softer
+            "/403-text.ts": (answer(403, b"Too many connections"), True),
             "/429.ts": (answer(429), True),
             "/458.ts": (answer(458), True),
             "/509.ts": (answer(509), True),
@@ -1177,7 +1179,10 @@ high.m3u8
                         media(server.url + path)
                     error = raised.exception
                     self.assertEqual((error.kind, error.status), ("http", int(path[1:4])))
-                    self.assertEqual(str(error) == STREAM_LIMIT, limited)
+                    if isinstance(limited, str):
+                        self.assertEqual(str(error), limited)
+                    else:
+                        self.assertEqual(str(error) == STREAM_LIMIT, limited)
                     self.assertNotIn("127.0.0.1", str(error))
         self.assertEqual(server.counts["/509.ts"], 1)  # a limit is never retried
 

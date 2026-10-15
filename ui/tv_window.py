@@ -809,7 +809,11 @@ class TVWindow(QMainWindow):
                     self.live_session.engine_shut_down()  # it signals nothing from now on
 
     def restart_live(self) -> None:
-        """Start a new time-shift helper: a self-update stopped the old one, then failed."""
+        """A self-update stopped the time-shift helper and could not launch: start a new one.
+
+        What played before plays again: a channel tunes afresh, a movie or episode reopens
+        at its saved position.
+        """
         if self._closing or self.engine is None or self.live_session is None:
             return
         old, self.engine = self.engine, LiveEngine(str(self.engine.root_dir), self)
@@ -818,6 +822,7 @@ class TVWindow(QMainWindow):
         old.deleteLater()
         call_before_update(self.stop_live, self.restart_live)  # each hook runs once
         logger.info("The update did not launch; time-shift is back on.")
+        self.controller.resume_live()  # what played before plays again
 
     def _shut_down(self) -> None:
         self.epg_refresh.stop()

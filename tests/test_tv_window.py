@@ -981,8 +981,9 @@ class LivePipelineWindowTests(WindowCase):
         self.assertTrue(wait_until(window.engine.is_available))
         hooks = [stop() for stop, _undo in update_checker._before_update]
         self.assertIn(window.stop_live, hooks)  # a later update stops it again
-        QTest.keyClick(window, Qt.Key.Key_Down)  # the next channel plays time-shifted again
+        # The channel plays again, time-shifted, on the new helper.
         self.assertTrue(wait_until(lambda: modes[-1:] == ["pipeline"] and len(modes) == 2, 5000))
+        self.assertEqual(window.zap.context.current()["name"], "Channel 1")
 
 
 class NoProviderTests(WindowCase):

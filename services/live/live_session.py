@@ -58,9 +58,10 @@ Interruptions while playing from the pipeline:
   connection; playing what's buffered", timeline `ended`), and fall back when it runs out
   or on Go live. Before ready, fall back with "Time-shift isn't available…".
 
-A source that the provider refused for its connection limit (`STREAM_LIMIT`, spec §6.9) is
-not played directly, which would be refused too: once the buffer (if time-shifted) has
-played, the session closes and `failed(STREAM_LIMIT)` reports it.
+A source that the provider refused for its connection limit (`STREAM_LIMIT`, spec §6.9), or
+with a plain 403 that may mean the same (`STREAM_REFUSED`), is not played directly, which
+would be refused too: once the buffer (if time-shifted) has played, the session closes,
+`modeChanged("")` follows if it played, and `failed(<that message>)` reports it.
 
 Engine signals for any session but the current one are ignored, and so are failures after
 `sessionEnded` (only `sessionClosed` follows those). `released()` follows `stop()` once no
@@ -84,7 +85,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.live.source import STREAM_LIMIT
+from services.live.source import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import TARGETS, Mode, StayLive
 from services.live.timeline import Span
 from services.playback import PlaybackState, Session
@@ -148,7 +149,7 @@ def _locate(spans: Sequence[Span], t: float) -> Optional[Span]:
 
 
 class LiveSession(QObject):
-    modeChanged = Signal(str)  # "pipeline" or "direct"
+    modeChanged = Signal(str)  # "pipeline" or "direct"; "" once a refusal stopped it
     timelineChanged = Signal(dict)
     notice = Signal(str)
     failed = Signal(str)
@@ -179,7 +180,7 @@ class LiveSession(QObject):
         self._input_timer = QTimer(self, singleShot=True)
         self._input_timer.timeout.connect(self._on_input_cap)
         self._input_open = False  # stopped direct play: libVLC may still hold the stream
-        self._limited = False  # the provider refused for its connection limit
+        self._limited: Optional[str] = None  # the provider's refusal (one of REFUSALS)
         self._phase = _Phase.IDLE
         self._mode = ""
         self._dead = False  # available(False): direct play for the rest of the run
@@ -278,7 +279,8 @@ class LiveSession(QObject):
         }
         self._stay = StayLive(self._latency)
         self._snapshot_cache = {}
-        self._ended = self._source_lost = self._paused = self._limited = False
+        self._ended = self._source_lost = self._paused = False
+        self._limited = None
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
         self._edge_seen = self._smoothed = None
@@ -466,14 +468,16 @@ class LiveSession(QObject):
         self._stop_timers()
         sid, self._sid = self._sid, None
         self._phase = _Phase.REFUSED
-        self._mode = ""
+        played, self._mode = self._mode, ""
         self._paused = self._source_lost = False
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
         self._playback.stop()
         if sid is not None:
             self._close(sid)
-        self.failed.emit(STREAM_LIMIT)
+        if played:
+            self.modeChanged.emit(self._mode)
+        self.failed.emit(self._limited or STREAM_LIMIT)
 
     def _play_direct(self) -> None:
         self._phase = _Phase.DIRECT
@@ -558,8 +562,8 @@ class LiveSession(QObject):
     def _on_failed(self, sid: str, kind: str, message: str) -> None:
         if sid != self._sid or self._ended:
             return
-        if message == STREAM_LIMIT:
-            self._limited = True  # final like any "http" failure, but nothing plays directly
+        if message in REFUSALS:
+            self._limited = message  # final like any "http" failure, but nothing plays directly
         if kind == "disk":  # not final: the helper went on in RAM
             self.notice.emit(DISK)
             if self._phase is _Phase.PIPELINE:

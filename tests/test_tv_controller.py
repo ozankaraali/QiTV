@@ -16,7 +16,7 @@ from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE
-from services.live.source import STREAM_LIMIT
+from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.navigation import NavModel, NavNode
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.zapping import ZapController
@@ -1619,8 +1619,12 @@ class FixRound2Tests(ControllerTestCase):
         )
         self.assertEqual(self.toast.messages()[-1], ("Three: cannot open …", "error"))
         self.assertEqual([p[1]["name"] for p in self.watch.plays], ["One"])  # not recorded
+        # One was stopped to open Three: nothing is current, nothing claims to play.
+        self.assertIsNone(self.controller._current)
+        self.controller.mouse_moved()
+        self.assertEqual(self.transport.named("show_live"), [])
         self.banner.dismiss()
-        self.controller.handle(Action.INFO)
+        self.controller.handle(Action.INFO)  # the zap still starts from One
         self.assertEqual(self.banner.info.name, "One")
 
 
@@ -1957,6 +1961,82 @@ class StreamLimitTests(PipelineCase):
             self.toast.messages(), [("Your provider limits concurrent streams", "error")]
         )
 
+    def refuse(self, message):
+        """As LiveSession: the refused session closes, nothing plays, then failed()."""
+        self.live.mode = ""
+        self.live.modeChanged.emit("")
+        self.live.failed.emit(message)
+
+    def test_a_plain_403_says_the_provider_may_limit_streams(self):
+        self.start_pipeline(0)
+        self.refuse(STREAM_REFUSED)  # an STB token first
+        self.ready("http://stream/1?token=new")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        self.refuse(STREAM_REFUSED)
+        self.live.released.emit()  # the refused session closed
+        self.catalog.ptype = "M3UPLAYLIST"
+        self.start_channel(1)
+        self.refuse(STREAM_REFUSED)
+        self.assertEqual(
+            self.toast.messages(),
+            [
+                (
+                    "The provider refused the stream — it may allow only 1 streams at a time",
+                    "error",
+                ),
+                ("The provider refused the stream — it may limit concurrent streams", "error"),
+            ],
+        )
+
+    def test_a_refusal_whose_new_link_fails_ends_the_tune(self):
+        self.start_pipeline(0)
+        self.refuse(STREAM_LIMIT)
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.assertEqual(self.live.calls[-1], ("stop",))  # ended before the new link
+        self.live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), [])  # its slot went back
+        self.catalog.linkFailed.emit(2, "Portal down")
+        self.assertFalse(self.controller._has_media())
+        self.controller.handle(Action.SEEK_BACK)  # not silent: nothing is opening
+        self.assertEqual(
+            self.toast.messages(), [("One: Portal down", "error"), (UNAVAILABLE, "info")]
+        )
+
+
+class ResumeTests(PipelineCase):
+    """A Windows self-update stops what plays; when it cannot launch, it plays again."""
+
+    def test_a_live_channel_is_tuned_again(self):
+        self.start_pipeline(0)
+        self.controller.stop_live()
+        self.live.released.emit()
+        self.controller.resume_live()
+        self.assertEqual(self.requested(), ["One", "One"])  # a fresh link (STB tokens)
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+
+    def test_a_movie_reopens_at_its_last_position(self):
+        self.nav.reset_to("movies")
+        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.ready("http://vod/heat.mkv")
+        self.watch.resume["Home:movie:m7"] = 600_000  # the watch state's last position
+        self.controller.stop_live()
+        self.controller.resume_live()
+        self.ready("http://vod/heat.mkv")
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 600_000)
+        self.assertEqual(self.requested(), ["Heat", "Heat"])
+
+    def test_nothing_resumes_when_nothing_played(self):
+        self.controller.stop_live()
+        self.controller.resume_live()
+        self.config.play_in_vlc = True  # an external player: the app played nothing
+        self.play(0)
+        self.controller.stop_live()
+        self.controller.resume_live()
+        self.assertEqual(self.requested(), ["One"])
+
 
 class PipelineControlTests(PipelineCase):
     STATE = {
@@ -2060,6 +2140,20 @@ class PipelineControlTests(PipelineCase):
         self.assertEqual(self.transport.named("show_timeshift"), [("One", "")])
         self.live.play_direct()
         self.assertEqual(self.transport.named("show_live")[-1], ("One", ""))
+
+    def test_a_hidden_transport_never_gets_the_last_channels_ticks(self):
+        self.catalog.epg[1] = [
+            Programme("News", NOW - timedelta(minutes=30), NOW + timedelta(minutes=30))
+        ]
+        self.start_pipeline(0)
+        self.controller.mouse_moved()
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.assertEqual(self.transport.named("update_timeline")[-1][1], [(1800.0, "News")])
+        self.transport.dismiss()
+        self.start_channel(1)
+        self.live.play_pipeline()
+        self.live.timelineChanged.emit(dict(self.STATE))
+        self.assertEqual(self.transport.named("update_timeline")[-1][1], [])
 
     def test_programme_start_seeks_to_the_buffered_start_else_the_oldest_point(self):
         self.catalog.epg[1] = [

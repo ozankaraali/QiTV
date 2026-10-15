@@ -83,8 +83,9 @@ _RECENT_SEGMENTS = 10
 _SEGMENT_FAILURES = 3
 _SKIPPABLE_STATUS = (404, 410)
 # Answers that mean the provider's stream limit is reached (spec 6.9), never retried; any other
-# 4xx counts when its body says so (the first _LIMIT_BODY_BYTES of it are read).
-_LIMIT_STATUS = (403, 429, 458, 509)
+# 4xx counts when its body says so (the first _LIMIT_BODY_BYTES of it are read). A plain 403
+# may be one too, or a channel this account may not watch: STREAM_REFUSED says it softer.
+_LIMIT_STATUS = (429, 458, 509)
 _LIMIT_BODY_BYTES = 4096
 _LIMIT_WORDS = re.compile(
     rb"connections?[\s_-]*limit|limit[\s_-]*of[\s_-]*connections|max(?:imum)?[\s_-]*connections"
@@ -117,6 +118,8 @@ _NOT_TS = "The HLS channel's segments are not MPEG-TS."
 _FROZEN = "The channel's HLS playlist stopped advancing."
 # Shown in place of an "http" failure's message when the provider refused for its limit.
 STREAM_LIMIT = "The provider refused the stream: its connection limit is reached."
+STREAM_REFUSED = "The provider refused the stream: it may limit connections."  # a plain 403
+REFUSALS = (STREAM_LIMIT, STREAM_REFUSED)
 
 _DEFAULT_MESSAGES = {
     "unsupported": _OPEN_FAILED,
@@ -219,21 +222,23 @@ def _status(error: requests.exceptions.HTTPError) -> int | None:
     return error.response.status_code if error.response is not None else None
 
 
-def _refused_for_limit(response: Any) -> bool:
-    """Whether an error answer says the provider's connection limit is reached.
+def _refusal(response: Any) -> str | None:
+    """The refusal an error answer means (one of REFUSALS), if it is one.
 
-    A 4xx body is read (bounded) only to look for those words: it never reaches a log.
+    A 4xx body is read (bounded) only to look for limit words: it never reaches a log.
     """
     status = int(getattr(response, "status_code", 0) or 0)
     if status in _LIMIT_STATUS:
-        return True
+        return STREAM_LIMIT
     if not 400 <= status < 500:
-        return False
+        return None
     try:
         body = response.raw.read1(_LIMIT_BODY_BYTES, decode_content=True) or b""
     except Exception:
-        return False
-    return bool(_LIMIT_WORDS.search(body))
+        body = b""
+    if _LIMIT_WORDS.search(body):
+        return STREAM_LIMIT
+    return STREAM_REFUSED if status == 403 else None
 
 
 def _sized(response: Any) -> bool:
@@ -617,10 +622,10 @@ class _Http:
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as error:
-            limited = _refused_for_limit(response)
+            refusal = _refusal(response)
             self.release(response)
-            if limited:
-                raise SourceError("http", STREAM_LIMIT, _status(error)) from None
+            if refusal:
+                raise SourceError("http", refusal, _status(error)) from None
             raise
         except BaseException:
             self.release(response)

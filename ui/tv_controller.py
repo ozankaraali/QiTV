@@ -33,7 +33,7 @@ from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
 from services.live.live_session import UNAVAILABLE, LiveSession
-from services.live.source import STREAM_LIMIT
+from services.live.source import REFUSALS, STREAM_REFUSED
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, episode_key, item_key
 from services.redact import safe_traceback
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind, classify
@@ -59,6 +59,7 @@ LIVE_SEEK_S = 10.0  # ←/→ while time-shifting (spec §6.7)
 TUNING_KEEP_MS = 3000  # under the banner's 4 s: it is shown again while a link resolves
 EXTERNAL_SETTLE_MS = 1000  # the zap burst window: an external player opens once zapping stops
 LIMITED_TEXT = "Your provider limits concurrent streams"  # when its limit is not known
+REFUSED_TEXT = "The provider refused the stream — it may"  # a plain 403: maybe the limit
 TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 _ACTIVE_STATES = frozenset({"opening", "buffering", "playing", "paused"})
@@ -151,6 +152,7 @@ class TVController(QObject):
         self._ticks: list[tuple[float, str]] = []
         self._unavailable_noticed: set[tuple[str, str]] = set()  # (provider, channel) this run
         self._held_notice: Optional[tuple[str, str]] = None  # shown once the channel plays
+        self._resume: Optional[_Target] = None  # what stop_live() stopped, for resume_live()
         self._external_pending: Optional[tuple[_Target, str]] = None
         self._external_settle = QTimer(self, singleShot=True)
         self._external_settle.timeout.connect(self._launch_settled)
@@ -272,7 +274,18 @@ class TVController(QObject):
 
     def stop_live(self) -> None:
         """Stop what plays (window close, self-update): its slot goes back once released."""
-        self._tuner.stop()
+        self._resume = self._current if self._has_media() else None
+        self._stop_tune()
+
+    def resume_live(self) -> None:
+        """Play again what stop_live() stopped (a self-update that could not launch).
+
+        With a fresh link: a channel tunes again, a movie or episode reopens at the position
+        the watch state saved.
+        """
+        target, self._resume = self._resume, None
+        if not self._closed and target is not None and target is self._current:
+            self._request(replace(target, zapped=False, retried=False))
 
     def settings_saved(self) -> None:
         """Settings were saved: a new live latency reaches the running channel at once.
@@ -586,7 +599,7 @@ class TVController(QObject):
         launcher = self._external_launcher()
         self._audio_id = self._subtitle_id = None
         self._held_notice = None
-        previous = self._current
+        self._ticks = []  # the old channel's programme ticks
         if launcher is not None:
             if target.live and target.zapped:
                 # Each zap step would start a player: only the one zapping settles on does.
@@ -594,7 +607,7 @@ class TVController(QObject):
                 self._external_settle.start(EXTERNAL_SETTLE_MS)
                 return
             # The in-app stream is released first: the player opens the provider again.
-            self._tuner.open(self._guarded(target, previous, lambda: self._launch(target, url)))
+            self._tuner.open(self._guarded(target, lambda: self._launch(target, url)))
             return
         if target.live:
             kind = classify(url, self.catalog.is_live("live"))
@@ -615,7 +628,7 @@ class TVController(QObject):
                     )
                     self._reset_speed()
 
-                self._tuner.open(self._guarded(target, previous, play_direct), direct=True)
+                self._tuner.open(self._guarded(target, play_direct), direct=True)
             if self.overlays.transport.isVisible():
                 self._show_live_transport(target)
         else:
@@ -628,7 +641,7 @@ class TVController(QObject):
                 self.session.play(url, kind=classify(url, False), start_ms=start)
                 self._reset_speed()
 
-            self._tuner.open(self._guarded(target, previous, play_vod), direct=True)
+            self._tuner.open(self._guarded(target, play_vod), direct=True)
             if start:
                 self._toast(f"Resumed at {fmt_duration(start)}")
             self.overlays.banner.dismiss()  # the transport takes the bottom of the video
@@ -636,16 +649,15 @@ class TVController(QObject):
         if self._current is target:  # else opening it failed at once (see _guarded)
             self._delivered(target, url)
 
-    def _guarded(
-        self, target: _Target, previous: Optional[_Target], open_: Callable[[], None]
-    ) -> Callable[[], None]:
+    def _guarded(self, target: _Target, open_: Callable[[], None]) -> Callable[[], None]:
         """`open_` as an open once the old stream is released: now, or from a signal later."""
 
         def run() -> None:
             try:
                 open_()
             except Exception as e:
-                self._current = previous  # whatever was current before is still the current one
+                # What played before was stopped to open this: nothing is current now.
+                self._current, self._cid = None, None
                 self._log_failure(f"play {target.title}", e)
                 self._restore_channel()
                 self._error(f"{target.title}: {e}")
@@ -808,7 +820,12 @@ class TVController(QObject):
     def _retry(self, current: _Target) -> None:
         logger.info("Making the link of %s again after a playback failure", current.title)
         self._held_notice = None
+        self._stop_tune()  # it failed: its slot goes back, also if the new link does not come
         self._request(replace(current, retried=True))
+
+    def _stop_tune(self) -> None:
+        self._tuner.stop()
+        self._ticks = []
 
     def _on_live_failed(self, message: str) -> None:
         """Playback of the live channel failed for good (LiveSession recovered what it could)."""
@@ -819,11 +836,19 @@ class TVController(QObject):
             self._retry(current)  # STB play tokens expire: a fresh link before the error
             return
         title = current.title if current is not None else ""
-        if message == STREAM_LIMIT:
-            self._tuner.stop()  # nothing plays: its slot goes back
-            self._toast(self._limit_text(self._limit()), "error", ERROR_MS)
+        if message in REFUSALS:
+            self._stop_tune()  # nothing plays: its slot goes back
+            self._toast(self._refusal_text(message), "error", ERROR_MS)
             return
         self._error(f"{title}: {message}" if title else message)
+
+    def _refusal_text(self, message: str) -> str:
+        limit = self._limit()
+        if message != STREAM_REFUSED:
+            return self._limit_text(limit)
+        if limit:
+            return f"{REFUSED_TEXT} allow only {limit} streams at a time"
+        return f"{REFUSED_TEXT} limit concurrent streams"
 
     def _seek_relative_ms(self, delta_ms: int) -> None:
         if self._pipeline_live() and self.live is not None:

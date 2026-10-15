@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 import services.live.live_session as live_session
 from services.live.live_session import LiveSession
-from services.live.source import STREAM_LIMIT
+from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import TARGETS
 from services.live.timeline import Span
 from services.playback import PlaybackState
@@ -1380,11 +1380,11 @@ class EngineShutdownTests(LiveSessionCase):
 class StreamLimitTests(LiveSessionCase):
     """The provider refused for its connection limit: playing directly would be refused too."""
 
-    def assert_refused(self, sid, plays):
+    def assert_refused(self, sid, plays, message=STREAM_LIMIT):
         self.assertIn(sid, self.engine.closed)
         self.engine.answer()
         self.assertEqual(len(self.playback.plays), plays)  # nothing direct
-        self.assertEqual(self.failures, [STREAM_LIMIT])
+        self.assertEqual(self.failures, [message])
         self.assertNotIn("direct", self.modes)
         self.assertFalse(self.live.is_pipeline())
         self.assertEqual(self.active_timers(), [])
@@ -1403,7 +1403,14 @@ class StreamLimitTests(LiveSessionCase):
         stops = self.playback.stops
         self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
         self.assertEqual(self.playback.stops, stops + 1)
+        self.assertEqual(self.modes, ["pipeline", ""])  # nothing plays any more
         self.assert_refused(sid, 1)
+
+    def test_a_plain_403_is_reported_as_such(self):
+        sid = self.start()
+        self.engine.sessionFailed.emit(sid, "http", STREAM_REFUSED)
+        self.assertEqual(self.modes, [])  # it never played
+        self.assert_refused(sid, 0, STREAM_REFUSED)
 
     def test_while_shifted_the_buffer_plays_to_its_end_first(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
