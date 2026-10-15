@@ -391,6 +391,8 @@ class Drawer(Overlay):
             node = self._columns["left"].current
             if node is None or not self._nav.needs_setup(node):
                 return
+        if _leaves_drawer(node):
+            return  # never opened here: right() hands it off when it is the highlight
         if not (path and node == path[-1]) or self._nav.needs_setup(node):
             self._nav.open(node)
 
@@ -494,6 +496,10 @@ class Drawer(Overlay):
     def _choose_left(self, col: _Column, nodes: list[NavNode]) -> None:
         path = self._nav.path
         end = path[-1] if path else None
+        if self._left_choice is not None and self._left_choice not in col.rows:
+            # The filter hid it: Enter must choose what is highlighted now, not the hidden row.
+            self._left_choice = None
+            self._cancel_preview()
         if self._left_choice in col.rows:
             col.current = self._left_choice
         elif end in col.rows:

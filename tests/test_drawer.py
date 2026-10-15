@@ -306,6 +306,42 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.library, ["movies"])
         self.assertEqual(self.nav.path[-1].key, "live")
 
+    # ---- a highlight the filter hid is not chosen by Enter (review finding) -------------
+
+    def test_enter_after_the_filter_hid_settings_chooses_what_is_highlighted(self):
+        self.open_on_the_sources()
+        self.drawer.move_by(2)
+        self.assertEqual(self.drawer.highlighted().key, SETTINGS_ROW)
+        self.drawer.type_text("h")  # only Home matches: the highlight falls back to it
+        self.assertEqual(self.drawer.highlighted().key, "Home")
+        self.drawer.activate()  # raised KeyError: 'action' (NavModel.open of the hidden row)
+        self.assertEqual((self.actions, self.catalog.selected, self.library), ([], [], []))
+        self.assertEqual([n.key for n in self.nav.path], ["Home"])
+
+    def test_enter_after_the_filter_hid_a_provider_selects_nothing(self):
+        self.open_on_the_sources()
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer.highlighted().key, "Backup")
+        self.drawer.type_text("h")
+        self.assertEqual(self.drawer.highlighted().key, "Home")
+        self.drawer.activate()
+        self.assertEqual(self.catalog.selected, [])  # Backup was hidden: never set up
+        self.assertEqual([n.key for n in self.nav.path], ["Home"])
+
+    def test_enter_after_the_filter_hid_movies_does_not_browse_them(self):
+        self.drawer.open_drawer()
+        self.record_hand_offs()
+        self.drawer.left()
+        self.drawer.left()  # the sections on the left, on Live TV
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer.highlighted().title, "Movies")
+        self.drawer.type_text("l")  # only Live TV matches
+        self.assertEqual(self.drawer.highlighted().title, "Live TV")
+        self.drawer.activate()
+        self.assertEqual(self.nav.path[-1].key, "live")  # not opened in the drawer
+        self.assertNotIn(("section", "movies"), self.catalog.requests)
+        self.assertEqual(self.library, [])
+
     def test_left_typing_highlights_and_opens_first_match(self):
         self.many_groups()
         self.drawer.open_drawer()
