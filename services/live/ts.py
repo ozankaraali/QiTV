@@ -89,7 +89,8 @@ class Closed:
     """A segment ends.
 
     `next_first_pts` is the PTS where the next segment starts, or the latest PTS at the end of
-    the input.
+    the input. It is None across a discontinuity with a PTS jump or without PTS, so that the
+    segment is sized by wall time.
     """
 
     seq: int
@@ -140,8 +141,8 @@ class Segmenter:
         self._last_pts: int | None = None
         self._latest_pts: int | None = None
         self._pusi_wall = 0.0  # wall time of the last cut-PID PES start (or cut)
-        # One other PID's (PID, first PTS, last PTS) since then: media time while it is quiet.
-        self._quiet: tuple[int, int, int] | None = None
+        # Other PIDs' (first PTS, last PTS) since then: media time while the cut PID is quiet.
+        self._quiet: dict[int, tuple[int, int]] = {}
         self._scrambled_total = 0
         self._scrambled_run = 0
         # The open segment.
@@ -150,6 +151,8 @@ class Segmenter:
         self._seg_pts: int | None = None
         self._seg_wall = 0.0
         self._pending = False
+        self._jumped = False  # the pending discontinuity came with a PTS jump
+        self._media_ref: int | None = None  # first cut-PID PTS of the segment (or since a jump)
 
     @property
     def video_pid(self) -> int | None:
@@ -161,7 +164,8 @@ class Segmenter:
 
     def discontinuity(self) -> None:
         """Mark the next cut as a discontinuity (the source restarted its timestamps)."""
-        self._pending = True
+        self._latch()
+        self._media_ref = None  # measure the new content's age from its first PTS
 
     def feed(self, chunk: bytes) -> list[Event]:
         """Consume input bytes; raises `Unsupported` for input that cannot be segmented."""
@@ -291,25 +295,25 @@ class Segmenter:
         self._scrambled_run = scrambled
 
     def _media_quiet(self, pid: int, pkt: bytes) -> bool:
-        """Whether one other PID's PTS advanced `forced_s` since the cut PID's last PES start.
+        """Whether another PID's PTS advanced `forced_s` since the cut PID's last PES start.
 
-        Media time also notices a silent cut PID when the input arrives in bursts.
+        Media time also notices a silent cut PID when the input arrives in bursts. Each PID is
+        measured on its own clock, which may be offset, sparse or jump (then it starts over).
         """
         pts = _pes_start(pkt)[1]
         if pts is None:
             return False
-        if self._quiet is None:
-            self._quiet = (pid, pts, pts)
+        span = self._quiet.get(pid)
+        if span is None:
+            self._quiet[pid] = (pts, pts)
             return False
-        ref_pid, ref, last = self._quiet
-        if pid != ref_pid:  # other PIDs may run on offset clocks
-            return False
+        first, last = span
         step = pts_delta(last, pts)
-        if step < -_REORDER_TICKS or step > _JUMP_TICKS:  # that clock jumped: measure from here
-            self._quiet = (pid, pts, pts)
+        if step < -_REORDER_TICKS or step > _JUMP_TICKS:
+            self._quiet[pid] = (pts, pts)
             return False
-        self._quiet = (pid, ref, pts)
-        return pts_delta(ref, pts) >= self._forced
+        self._quiet[pid] = (first, pts)
+        return pts_delta(first, pts) >= self._forced
 
     def _check_scrambled(self, run: int, wall: float) -> None:
         """Isolated scrambling bits are corruption; many mean the stream is encrypted."""
@@ -325,18 +329,22 @@ class Segmenter:
         if es >= PACKET:
             logger.debug("PES header not readable from its first packet")
         self._pusi_wall = wall
-        self._quiet = None
-        if rai:
-            self._rai_seen = True
+        self._quiet.clear()
         if pts is not None:
             last = self._last_pts
             if last is not None:
                 step = pts_delta(last, pts)
                 if step < -_REORDER_TICKS or step > _JUMP_TICKS:
                     logger.debug("PTS jumped by %.2f s", step / _CLOCK)
-                    self._pending = True
+                    self._latch()
+                    self._jumped = True
+                    self._media_ref = pts
             self._last_pts = pts
             self._latest_pts = pts
+            if self._media_ref is None:
+                self._media_ref = pts
+        if rai:
+            self._rai_seen = True
         if not self._open:  # the first segment, or the first after finish(), which left a gap
             if self._is_key(rai, pts, pkt, es):
                 return self._cut(pts, wall, self._seq > 0)
@@ -350,12 +358,23 @@ class Segmenter:
                 if delta >= self._forced:
                     return self._cut(pts, wall, False)
                 return None
-        # A pending discontinuity, no PTS, or PTS drifted backwards: use the wall clock only.
+        # A pending discontinuity, no PTS, or PTS drifted backwards: time the segment by the
+        # wall clock, and bound it by media time where PTS exist (feed stalls do not age it).
         elapsed = wall - self._seg_wall
         due = self._pending or elapsed >= self._target_s
-        if (due and self._is_key(rai, pts, pkt, es)) or elapsed >= self._forced_s:
+        ref = self._media_ref
+        aged = elapsed >= self._forced_s or (
+            pts is not None and ref is not None and pts_delta(ref, pts) >= self._forced
+        )
+        if (due and self._is_key(rai, pts, pkt, es)) or aged:
             return self._cut(pts, wall, True)
         return None
+
+    def _latch(self) -> None:
+        """Make the next cut a discontinuity. The new content may lack RAI: until it shows
+        one, its keyframes are found by their NAL units."""
+        self._pending = True
+        self._rai_seen = False
 
     def _is_key(self, rai: bool, pts: int | None, pkt: bytes, es: int) -> bool:
         if self._video_pid is None:  # audio only: every audio PES with a PTS is a cut point
@@ -367,16 +386,28 @@ class Segmenter:
 
     def _cut(self, pts: int | None, wall: float, discontinuity: bool) -> list[Event]:
         events: list[Event] = []
-        if self._open:  # across a discontinuity the next PTS says nothing about this segment
-            events.append(Closed(self._seq, None if discontinuity else pts, wall))
+        if self._open:
+            # Across a PTS jump, or without PTS, the next PTS says nothing about this segment.
+            first = self._seg_pts
+            exact = not discontinuity or (
+                not self._jumped
+                and pts is not None
+                and first is not None
+                and 0 < pts_delta(first, pts) <= self._forced
+            )
+            events.append(Closed(self._seq, pts if exact else None, wall))
             self._seq += 1
         events.append(Opened(self._seq, pts, self._pat + self._pmt, wall, discontinuity))
         self._open = True
         self._seg_pts = pts
         self._seg_wall = wall
         self._pusi_wall = wall
-        self._quiet = None
+        self._quiet.clear()
         self._pending = False
+        self._jumped = False
+        self._media_ref = pts
+        if discontinuity:  # the content may change here: learn again whether it uses RAI
+            self._rai_seen = False
         return events
 
     # -- program tables --------------------------------------------------------------------

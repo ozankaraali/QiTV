@@ -333,12 +333,13 @@ class PtsDeltaTests(unittest.TestCase):
 
 class SegmenterTests(unittest.TestCase):
     def assert_closed_pts(self, events):
-        """A Closed carries the next first PTS, or None when the next segment is a
-        discontinuity (the jump must not be credited to the closing segment)."""
+        """A Closed carries the next first PTS; before a discontinuity it may be None (a jump
+        must not be credited to the closing segment)."""
         nxt = {e.seq: e for e in opens(events)}
         for c in closes(events)[:-1]:
             o = nxt[c.seq + 1]
-            self.assertEqual(c.next_first_pts, None if o.discontinuity else o.first_pts)
+            allowed = (None, o.first_pts) if o.discontinuity else (o.first_pts,)
+            self.assertIn(c.next_first_pts, allowed)
 
     # 1
     def test_ten_second_stream_cuts_every_two_seconds_from_the_first_keyframe(self):
@@ -515,6 +516,33 @@ class SegmenterTests(unittest.TestCase):
                 need = (len(exp_golomb(first_mb)) + len(exp_golomb(slice_type)) + 7) // 8
                 self.assertIsNone(_h264_intra(header[: need - 1], 0), (first_mb, slice_type))
         self.assertIsNone(_h264_intra(b"", 0))
+        for slice_type in (10, 11, 12, 30):  # not a slice type: undecided
+            bits = "1" + exp_golomb(slice_type) + "1"
+            bits += "0" * (-len(bits) % 8)
+            self.assertIsNone(_h264_intra(int(bits, 2).to_bytes(len(bits) // 8, "big"), 0))
+
+    def test_content_without_rai_after_a_discontinuity_is_cut_at_its_idr_frames(self):
+        # A RAI stream, then content without RAI (an ad from another packager): after a PTS
+        # jump, or after an external marker with continuous PTS.
+        for name, start, marker in (("PTS jump", 66, False), ("marker", 6, True)):
+            with self.subTest(name):
+                seg = Segmenter(clock=lambda: 0.0)
+                events = seg.feed(fx.make_stream(6))
+                if marker:
+                    seg.discontinuity()
+                after = fx.make_stream(10, rai=False, pts_start=900000 + start * CLOCK)
+                events += seg.feed(after) + seg.finish()
+                o = opens(events)
+                expected = [0, 2, 4] + [start + 2 * k for k in range(5)]
+                self.assertEqual([e.first_pts - 900000 for e in o], [t * CLOCK for t in expected])
+                self.assertEqual([e.discontinuity for e in o], [k == 3 for k in range(8)])
+                for opened, body in segments(events):
+                    self.assertTrue(starts_with_idr(body))
+                # A marker with continuous PTS keeps the exact end; a jump does not.
+                self.assertEqual(
+                    closes(events)[2].next_first_pts, o[3].first_pts if marker else None
+                )
+                self.assert_closed_pts(events)
 
     def test_rai_on_every_pes_with_b_frame_reordering_is_not_a_discontinuity(self):
         # Decode order I0 P3 B1 B2 P6 B4 B5 ...: B-frames step back by one or two frames, and
@@ -577,6 +605,27 @@ class SegmenterTests(unittest.TestCase):
         for opened, body in segments(events):
             self.assertTrue(starts_with_idr(body))
         self.assert_closed_pts(events)
+
+    def test_rai_is_relearned_after_every_discontinuity_cut(self):
+        # Video without PTS (every cut is a discontinuity): 5 s with RAI on its IDR frames,
+        # then 5 s from a packager without RAI. Its IDR frames are still cut points.
+        frames = [
+            (None, fx.h264_access_unit(i % 25 == 0), i % 25 == 0 and i < 125) for i in range(250)
+        ]
+        data = video_only(frames)
+        _, events = run_at(data, by_frame(data))
+        self.assertEqual([e.wall for e in opens(events)], [0.0, 2.0, 4.0, 6.0, 8.0])
+
+    def test_a_pending_segment_is_bounded_in_media_time_under_bursty_feeding(self):
+        # One keyframe only; PTS jumps +60 s at frame 112. HLS-like 6 s bursts pause the
+        # feeds, which do not age the segment; 10 s of post-jump media still cut it.
+        data = shift_pts(fx.make_stream(40, gop_s=30.0), 112, 60 * CLOCK)
+        points = [(off, (int(t // 6) + 1) * 6.0) for off, t in by_frame(data)]
+        _, events = run_at(data, points)
+        o = opens(events)
+        self.assertTrue(o[1].discontinuity)
+        self.assertEqual(o[1].first_pts, 900000 + 362 * FRAME + 60 * CLOCK)
+        self.assertIsNone(closes(events)[0].next_first_pts)
 
     def test_a_pending_discontinuity_is_force_cut_by_wall_time_only(self):
         # One keyframe only; PTS jumps +60 s at frame 112. The PTS delta must not cut there;
@@ -695,11 +744,19 @@ class SegmenterTests(unittest.TestCase):
         stop = pusi_offset(whole, fx.VIDEO_PID, 900000 + 150 * FRAME)
         kept = [p for p in split_packets(whole[stop:]) if pid_of(p) != fx.VIDEO_PID]
         plain = whole[:stop] + b"".join(kept)
-        # Also with a subtitle PID on a clock 12 s ahead: silence is measured on one PID.
-        for name, data in (
-            ("plain", plain),
-            ("offset subtitles", with_subtitles(plain, 12 * CLOCK)),
-        ):
+        # Each other PID is measured on its own clock: one 12 s ahead, or a single subtitle
+        # PES right after the last video PES start, must not hide the audio's progress.
+        packets = split_packets(plain)
+        last = pusi_offset(plain, fx.VIDEO_PID, 900000 + 149 * FRAME) // PACKET
+        sub, _ = fx.pes_packets(0x102, 0xBD, b"\x20" * 40, 900000 + 149 * FRAME + 1)
+        cases = {
+            "plain": plain,
+            "offset subtitles": with_subtitles(plain, 12 * CLOCK),
+            "one sparse subtitle PES first": b"".join(
+                packets[: last + 1] + sub + packets[last + 1 :]
+            ),
+        }
+        for name, data in cases.items():
             with self.subTest(name):
                 points = [(off, (int(t // 6) + 1) * 6.0) for off, t in by_pts(data)]
                 _, events = run_at(data, points)
@@ -731,6 +788,22 @@ class SegmenterTests(unittest.TestCase):
                 _, events = run(data)
                 o = opens(events)
                 self.assertEqual([e.first_pts - 900000 for e in o], [k * TARGET for k in range(5)])
+
+    def test_a_silent_video_pid_is_noticed_by_wall_clock_when_no_other_pid_has_pts(self):
+        whole = fx.make_stream(20)
+        stop = pusi_offset(whole, fx.VIDEO_PID, 900000 + 150 * FRAME)
+        kept = [p for p in split_packets(whole[stop:]) if pid_of(p) != fx.VIDEO_PID]
+        data = whole[:stop] + b"".join(kept)
+        points = by_pts(data)  # live pacing, taken before the audio PTS are removed
+        stripped = bytearray(data)
+        for i, p in enumerate(split_packets(data)):
+            if pid_of(p) == fx.AUDIO_PID and p[1] & 0x40:
+                stripped[i * PACKET + 4 + (1 + p[4] if p[3] & 0x20 else 0) + 7] &= 0x3F
+        _, events = run_at(bytes(stripped), points)
+        silent = [e for e in opens(events) if e.first_pts is None]
+        self.assertEqual(len(silent), 1)
+        self.assertGreaterEqual(silent[0].wall, 149 * FRAME / CLOCK + 10)
+        self.assertLess(silent[0].wall, 149 * FRAME / CLOCK + 10.05)
 
     def test_a_stalled_source_is_not_a_silent_video_pid(self):
         # The source stalls for 12 s right after the keyframe at 4 s; audio arrives first after.
@@ -841,6 +914,8 @@ class SegmenterTests(unittest.TestCase):
         o = opens(events)
         self.assertEqual([e.first_pts - 900000 for e in o], [0, 2 * CLOCK, 3 * CLOCK, 5 * CLOCK])
         self.assertEqual([e.discontinuity for e in o], [False, False, True, False])
+        # The PTS stayed continuous: the segment before the marker keeps its exact end.
+        self.assertEqual(closes(events)[1].next_first_pts, 900000 + 3 * CLOCK)
 
     def test_no_program_tables_within_3_mib_is_unsupported(self):
         null = bytes([0x47, 0x1F, 0xFF, 0x10]) + b"\xff" * 184
