@@ -80,12 +80,14 @@ class MixerTests(MixerCase):
         # any timer due later; the change at 100 ms restarts the 200 ms wait (due at 300+).
         # The first show is a step too: shown before the probes start, a runner stalled for
         # 100 ms between the two found the mixer's wait due before the change at 100 ms.
+        # The count is read in the probe too: the wait is due only ~50 ms after it, so a late
+        # runner can let it fire before timeline() returns.
         _host, mixer = self.make(idle_ms=200)
         closed = QSignalSpy(mixer.closed)
         show = lambda: mixer.show_rows([MAIN], 0)  # noqa: E731
-        _, _, shown = timeline((0, show), (100, show), (250, mixer.isVisible))
-        self.assertTrue(shown)
-        self.assertEqual(closed.count(), 0)
+        probe = lambda: (mixer.isVisible(), closed.count())  # noqa: E731
+        _, _, at_250 = timeline((0, show), (100, show), (250, probe))
+        self.assertEqual(at_250, (True, 0))
         elapse(250)  # past the restarted wait however late it started
         self.assertFalse(mixer.isVisible())
         self.assertEqual(closed.count(), 1)

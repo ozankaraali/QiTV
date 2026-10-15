@@ -30,6 +30,9 @@ def timeline(*steps: tuple[int, Callable[[], Any]]) -> list[Any]:
     An action runs as its timer fires, before any timer due after it (a stalled process can
     find several due at once): use one to act before a product timer runs out, or to read a
     state that a later product timer would change.
+
+    Read a "not yet" state in a step, not after this returns: by then a product timer due
+    just after the last step may have fired (a late runner, or the final processEvents()).
     """
     results: dict[int, Any] = {}
     timers = []
