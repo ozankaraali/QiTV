@@ -1,0 +1,168 @@
+"""The TV window's two pages, the player and the Library (spec §5.4, R5), and the moves between.
+
+Opening the Library (View → Movies, Series or Search, Ctrl/⌘+F, Movies or Series chosen in
+the drawer) stops what plays and shows the Library page. A title played from the Library
+switches to the player; Esc on it, with nothing open on the player, shows the Library again as
+it was (its genre, title and scroll). Live TV (the menu, the Library's tab, Esc at its top
+level) tunes the last channel again. The Library's LibraryController is made here, after the
+TVController was wired (see TVWindow.__init__). Messages show on both pages' toasts: the
+overlay host, and its toast, hide with the player page.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from PySide6.QtCore import QObject
+from PySide6.QtWidgets import QFileDialog, QWidget
+
+from services.exporter import ExportKind
+from services.library import LibraryModel
+from ui.library_controller import LibraryController
+from ui.tv_controller import ERROR_MS, INFO_MS, scrub
+
+logger = logging.getLogger(__name__)
+
+MEDIA_FILTER = (
+    "Media files (*.mp4 *.m4v *.mkv *.avi *.mov *.webm *.ts *.m2ts *.mts *.mpg *.mpeg *.flv"
+    " *.wmv *.ogv *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wav *.m3u8);;All files (*)"
+)
+
+
+class TVPages(QObject):
+    """`window` is the TVWindow: its pages, controller, exports, menus and window state."""
+
+    def __init__(self, window, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._window = window
+        self._return_to_library = False  # the movie playing came from the Library
+        self.library_model = LibraryModel(window.catalog, window.config_manager, window.watch, self)
+        self.library_controller = LibraryController(
+            config=window.config_manager,
+            catalog=window.catalog,
+            model=self.library_model,
+            watch=window.watch,
+            screen=window.library_page,
+            provider_manager=window.provider_manager,
+            jobs=window.jobs,
+            play=self.play,
+            tune_live=self.tune_live,
+            back_to_tv=self.back_to_tv,
+            parent=self,
+        )
+        self.library_controller.notice.connect(self.notify)
+        window.catalog.providerFailed.connect(self._on_provider_failed)
+        window.overlays.drawer.libraryRequested.connect(self.open_library)
+
+    # ---- pages --------------------------------------------------------------------------------
+
+    def library_shown(self) -> bool:
+        return self._window.pages.currentWidget() is self._window.library_page
+
+    def _show_page(self, page: QWidget) -> None:
+        window = self._window
+        if page is window.pages.currentWidget():
+            return
+        if self.library_shown():
+            self.library_controller.leave()  # a play waiting for its provider is dropped
+        window.pages.setCurrentWidget(page)
+        window.menus.set_player_enabled(page is not window.library_page)
+
+    def open_library(self, section: str) -> None:
+        """Movies or Series: live playback stops first (R5)."""
+        if self._window.closing():
+            return
+        self._enter_library()
+        self.library_controller.open(section)
+
+    def open_search(self) -> None:
+        if self._window.closing():
+            return
+        self._enter_library()
+        self.library_controller.open_search()
+
+    def _enter_library(self) -> None:
+        self._return_to_library = False
+        self._window.controller.stop_for_library()
+        self._show_page(self._window.library_page)
+
+    def play(self, item: dict, kind: str, context: dict) -> None:
+        """A movie or an episode from the Library: Esc brings the Library back."""
+        window = self._window
+        if window.closing():
+            return
+        self._show_page(window.player_page)
+        self._return_to_library = True
+        window.controller.play_vod(item, kind, context)
+
+    def tune_live(self, channel: dict) -> None:
+        """A live channel from the Library's search."""
+        window = self._window
+        if window.closing():
+            return
+        self._show_page(window.player_page)
+        self._return_to_library = False
+        window.controller.tune_live(channel)
+
+    def back_to_tv(self) -> None:
+        """Live TV: the last channel again (R5), or the drawer."""
+        window = self._window
+        if window.closing():
+            return
+        self._show_page(window.player_page)
+        self._return_to_library = False
+        window.controller.resume_live()
+
+    def escape_to_library(self) -> bool:
+        """Esc on a movie from the Library, with nothing open on the player: back to it.
+
+        Not in fullscreen (Esc leaves it first) nor in the mini player. The Library keeps its
+        genre, title and scroll: it is shown again, not opened again.
+        """
+        window = self._window
+        controller = window.controller
+        if (
+            not self._return_to_library
+            or self.library_shown()
+            or window.mini_player_active()
+            or window.fullscreen_heading()
+            or not controller.vod_current()
+            or controller.overlay_open()
+        ):
+            return False
+        self._enter_library()
+        return True
+
+    def open_file(self) -> None:
+        """File → Open File…: a local media file plays as a movie."""
+        window = self._window
+        if window.closing():
+            return
+        path, _filter = QFileDialog.getOpenFileName(window, "Open File", "", MEDIA_FILTER)
+        if not path or window.closing():
+            return
+        self._show_page(window.player_page)
+        self._return_to_library = False
+        window.controller.play_file(path)
+
+    def export(self, kind: ExportKind) -> None:
+        window = self._window
+        if window.closing():
+            return
+        section = self.library_controller.section if self.library_shown() else None
+        window.exports.export(kind, section or "live")
+
+    # ---- messages -----------------------------------------------------------------------------
+
+    def notify(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
+        """A message on whichever page shows (each page has its toast)."""
+        window = self._window
+        for toast in (window.overlays.toast, window.library_toast):
+            toast.show_message(text, kind, ms)
+
+    def _on_provider_failed(self, name: str, message: str) -> None:
+        if self.library_shown():  # the player's toast says it too, but its page is hidden
+            self._window.library_toast.show_message(
+                scrub(f"{name}: {message}" if name else message), "error", ERROR_MS
+            )

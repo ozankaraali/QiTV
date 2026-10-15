@@ -51,11 +51,11 @@ from ui.keymap import SHORTCUTS, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.shortcuts_dialog import ShortcutsDialog, table_rows
+from ui.tv_menus import ISSUES_URL
 from ui.tv_window import (
     ABANDONED_EXIT_CODE,
     CLOSE_RETRY_MS,
     CLOSING_TEXT,
-    ISSUES_URL,
     WATCH_SAVE_DELAY_MS,
     TVWindow,
     _exit_now,
@@ -229,8 +229,8 @@ class TVWindowTests(WindowCase):
         self.assertFalse(surface.autoFillBackground())
         self.assertTrue(surface.testAttribute(Qt.WidgetAttribute.WA_NativeWindow))
         self.show()
-        window.open_library("movies")
-        window.back_to_tv()
+        window.screens.open_library("movies")
+        window.screens.back_to_tv()
         QTest.qWait(50)
         middle = surface.mapTo(window, surface.rect().center())
         self.assertEqual(window.grab().toImage().pixelColor(middle).name(), "#000000")
@@ -458,30 +458,30 @@ class TVWindowTests(WindowCase):
         drawer = self.wait_for_drawer()
         window, ctrl = self.window, Qt.KeyboardModifier.ControlModifier
         for setup in (lambda: None, lambda: QTest.keyClick(window, Qt.Key.Key_Escape)):
-            window.back_to_tv()
+            window.screens.back_to_tv()
             if not drawer.isVisible():
                 drawer.open_drawer()
             setup()  # the drawer open, then closed (the player)
             QTest.keyClick(window, Qt.Key.Key_F, ctrl)
-            self.assertTrue(window.library_shown())
+            self.assertTrue(window.screens.library_shown())
             self.assertEqual(window.library_controller.mode, "search")
             self.assertFalse(window.isFullScreen())
-        window.back_to_tv()
+        window.screens.back_to_tv()
         drawer.close_drawer()
         window.controller.tune_live(window.catalog.items("live", "*")[0])
         QTest.keyClick(window, Qt.Key.Key_G)
         self.assertTrue(window.overlays.guide.isVisible())
         QTest.keyClick(window, Qt.Key.Key_F, ctrl)
-        self.assertTrue(window.library_shown())
+        self.assertTrue(window.screens.library_shown())
         self.assertFalse(window.overlays.guide.isVisible())
 
     def test_f11_toggles_fullscreen_in_the_library(self):
         self.show()
         self.wait_for_drawer()
-        self.window.open_library("movies")
+        self.window.screens.open_library("movies")
         QTest.keyClick(self.window, Qt.Key.Key_F11)
         self.assertTrue(wait_until(self.window.isFullScreen))
-        self.assertTrue(self.window.library_shown())
+        self.assertTrue(self.window.screens.library_shown())
 
     # ---- mini player --------------------------------------------------------------------------
 
@@ -1200,7 +1200,7 @@ class LibraryWindowTests(TwoProviderCase):
         if INSTANCE is not None:
             playing = (PlaybackState.OPENING, PlaybackState.PLAYING)
             self.assertTrue(wait_until(lambda: window.session.state() in playing))
-        window.notify("Keeps the overlay host up")
+        window.screens.notify("Keeps the overlay host up")
         self.assertTrue(wait_until(window.host.isVisible))
         actions = self.menu_actions()
         actions["Movies"].trigger()
@@ -1256,7 +1256,7 @@ class LibraryWindowTests(TwoProviderCase):
     def test_the_providers_menu_lists_both_and_switches(self):
         self.show()
         self.wait_for_drawer()
-        menu = self.window.providers_menu
+        menu = self.window.menus.providers_menu
 
         def entries():
             return [(a.text(), a.isChecked()) for a in menu.actions()]
@@ -1328,7 +1328,7 @@ class XtreamLibraryTests(TwoProviderCase):
         actions["Movies"].trigger()
         self.wait_for_titles()  # cached: the search reads every provider's saved catalog
         self.provider_manager._cache_writer.submit(lambda: None).result(timeout=5)
-        window.providers_menu.actions()[0].trigger()
+        window.menus.providers_menu.actions()[0].trigger()
         self.wait_ready(PROVIDER_NAME)
         actions["Search"].trigger()
         self.assertEqual(window.library_controller.mode, "search")
@@ -1399,7 +1399,7 @@ class HelpAndAboutTests(WindowCase):
                         self.assertIsNotNone(resolve_text(key, context))
 
     def test_help_lists_the_table(self):
-        with mock.patch("ui.tv_window.ShortcutsDialog") as dialog:
+        with mock.patch("ui.tv_menus.ShortcutsDialog") as dialog:
             self.menu_actions()["Keyboard Shortcuts…"].trigger()
         dialog.assert_called_once_with(self.window)
         dialog.return_value.exec.assert_called_once_with()
@@ -1411,7 +1411,7 @@ class HelpAndAboutTests(WindowCase):
         self.assertEqual(shown.table.item(0, 0).text(), "Watching TV")
 
     def test_about_names_the_version_and_the_links(self):
-        with mock.patch("ui.tv_window.QMessageBox") as box:
+        with mock.patch("ui.tv_menus.QMessageBox") as box:
             self.menu_actions()["About QiTV"].trigger()
         text = box.return_value.setText.call_args[0][0]
         self.assertIn(f"QiTV {get_app_version()}", text)
@@ -1422,8 +1422,8 @@ class HelpAndAboutTests(WindowCase):
 
     def test_check_for_updates_and_report_an_issue(self):
         with (
-            mock.patch("ui.tv_window.check_for_updates") as check,
-            mock.patch("ui.tv_window.QDesktopServices.openUrl") as open_url,
+            mock.patch("ui.tv_menus.check_for_updates") as check,
+            mock.patch("ui.tv_menus.QDesktopServices.openUrl") as open_url,
         ):
             actions = self.menu_actions()
             actions["Check for Updates…"].trigger()

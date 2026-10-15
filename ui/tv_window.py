@@ -1,9 +1,9 @@
-"""The single TV window: the player and Library pages, the glued overlays and the menus (spec §5, §8).
+"""The single TV window: the player and Library pages, the overlays and the menus (spec §5, §8).
 
 Two pages share the window (a QStackedWidget): the player (the native video surface, with the
-overlay host glued over it) and the Library (Movies and Series, spec §5.4). Opening the Library
-stops what plays (R5); a title played from it returns there on Esc, with its genre, title and
-scroll as they were; Live TV tunes the last channel again.
+overlay host glued over it) and the Library (Movies and Series, spec §5.4). The moves between
+them are ui/tv_pages.py's, the menu bar ui/tv_menus.py's; this window lays them out, owns the
+services, routes the keys, and handles fullscreen, the mini player and closing.
 
 Every key goes through ui.keymap: on the Library page to the LibraryController, else to the
 TVController, so the open drawer receives typed text. Single-key menu entries only show their
@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import atexit
 from datetime import datetime
-from functools import partial
 import logging
 import os
 import platform
 import sys
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -31,52 +30,39 @@ from PySide6.QtCore import (
     QRect,
     Qt,
     QTimer,
-    QUrl,
 )
 from PySide6.QtGui import (
-    QAction,
-    QActionGroup,
     QCloseEvent,
     QColor,
-    QDesktopServices,
     QGuiApplication,
     QKeyEvent,
-    QKeySequence,
     QMouseEvent,
     QPalette,
     QWindowStateChangeEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QFileDialog,
     QMainWindow,
-    QMenu,
-    QMessageBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from config_manager import get_app_version
 from options import OptionsDialog
 from services import thread_cleanup
 from services.catalog import CatalogService
 from services.connection_budget import ConnectionBudget
-from services.exporter import ExportKind
 from services.jobs import JobRunner
-from services.library import LibraryModel
 from services.live.engine import LiveEngine
 from services.live.live_session import LiveSession
-from services.navigation import ADD_PROVIDER_ROW, SETTINGS_ROW, NavModel
+from services.navigation import NavModel
 from services.playback import NullSession, PlaybackSession, Session, create_instance
 from services.thread_cleanup import has_pending_threads
 from services.watch_state import WatchState
 from services.zapping import ZapController
-from ui.brand import logo_path
 from ui.export_flow import ExportFlow
 from ui.keymap import Action, resolve
 from ui.library.library_screen import LibraryScreen
-from ui.library_controller import LibraryController
 from ui.logos import LogoCache, PosterCache
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
@@ -87,10 +73,11 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
-from ui.shortcuts_dialog import ShortcutsDialog
-from ui.tv_controller import ERROR_MS, INFO_MS, Overlays, TVController, scrub
+from ui.tv_controller import Overlays, TVController
+from ui.tv_menus import TVMenus
+from ui.tv_pages import TVPages
 from ui.video_surface import VideoSurface
-from update_checker import call_before_update, check_for_updates
+from update_checker import call_before_update
 
 logger = logging.getLogger(__name__)
 
@@ -108,25 +95,6 @@ MINI_MARGIN = 10
 FULLSCREEN_EXIT_MS = 1500  # the longest wait for the platform to finish leaving fullscreen
 FULLSCREEN_SETTLE_MS = 5000  # the longest wait for macOS to report a fullscreen change
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
-HOME_URL = "https://github.com/ozankaraali/QiTV"
-ISSUES_URL = f"{HOME_URL}/issues"
-ABOUT_LOGO_PX = 64
-ABOUT_STYLE = "QLabel#qt_msgbox_label { min-width: 340px; }"
-ABOUT_TEXT = (
-    "{logo}<p><b>QiTV {version}</b></p>"
-    "<p>A TV-first IPTV player for STB portals, Xtream and M3U playlists.</p>"
-    '<p><a href="{home}">{home}</a><br><a href="{issues}">Report an issue</a></p>'
-)
-MEDIA_FILTER = (
-    "Media files (*.mp4 *.m4v *.mkv *.avi *.mov *.webm *.ts *.m2ts *.mts *.mpg *.mpeg *.flv"
-    " *.wmv *.ogv *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wav *.m3u8);;All files (*)"
-)
-NO_PROVIDERS_TEXT = "No providers"
-_SHORTCUT_MODIFIERS = (
-    Qt.KeyboardModifier.ControlModifier
-    | Qt.KeyboardModifier.AltModifier
-    | Qt.KeyboardModifier.MetaModifier
-)
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
 _MOUSE_EVENTS = (
@@ -138,17 +106,6 @@ _MOUSE_EVENTS = (
 
 def _local_now() -> datetime:
     return datetime.now().astimezone()
-
-
-def about_text() -> str:
-    """The About box: the logo above the version (pyproject.toml, as packaged) and the links."""
-    path = logo_path()
-    logo = (
-        f'<p><img src="{path.as_uri()}" width="{ABOUT_LOGO_PX}" height="{ABOUT_LOGO_PX}"></p>'
-        if path.is_file()
-        else ""
-    )
-    return ABOUT_TEXT.format(logo=logo, version=get_app_version(), home=HOME_URL, issues=ISSUES_URL)
 
 
 def _native_video_handles() -> bool:
@@ -293,13 +250,10 @@ class TVWindow(QMainWindow):
         self._fs_settle.timeout.connect(self._fullscreen_settled)
         self._fit_fallback = QTimer(self, singleShot=True, interval=FULLSCREEN_EXIT_MS)
         self._fit_fallback.timeout.connect(self._fit_to_screen)
-        self._player_actions: list[QAction] = []  # menu entries of the player's keys
-        self._provider_group: Optional[QActionGroup] = None  # the Providers menu's entries
         self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
         self._dragged = False  # the last press on the video moved the mini player
         self._pressed = False  # the left button is down on the video
         self._click_on_release = False  # a click that came while the button was still down
-        self._return_to_library = False  # the movie playing came from the Library: Esc goes back
 
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -399,34 +353,19 @@ class TVWindow(QMainWindow):
         # settles the provider change before a Library play waiting for it runs.
         controller.wire()
         self.jobs = JobRunner(self)  # the Library's searches and the exports
-        self.library_model = LibraryModel(self.catalog, config_manager, self.watch, self)
-        self.library_controller = LibraryController(
-            config=config_manager,
-            catalog=self.catalog,
-            model=self.library_model,
-            watch=self.watch,
-            screen=self.library_page,
-            provider_manager=provider_manager,
-            jobs=self.jobs,
-            play=self.play,
-            tune_live=self.tune_live,
-            back_to_tv=self.back_to_tv,
-            parent=self,
-        )
-        self.library_controller.notice.connect(self.notify)
+        self.screens = TVPages(self, self)  # the Library's controller and the page moves
+        self.library_controller = self.screens.library_controller
         self.exports = ExportFlow(
             provider_manager=provider_manager,
             config=config_manager,
             runner=self.jobs,
-            notify=self.notify,
+            notify=self.screens.notify,
             dialog_parent=self,
             parent=self,
         )
+        self.menus = TVMenus(self, self)
         self.overlays.welcome.addRequested.connect(self.add_provider)
-        self.overlays.drawer.libraryRequested.connect(self.open_library)
-        self.overlays.drawer.actionRequested.connect(self._on_drawer_action)
-        self.catalog.providerReady.connect(self._on_provider_ready)
-        self.catalog.providerFailed.connect(self._on_provider_failed)
+        self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
         # A Windows self-update waits for background threads: the engine's must stop first,
         # and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
@@ -440,252 +379,23 @@ class TVWindow(QMainWindow):
         self.epg_refresh = QTimer(self, interval=EPG_REFRESH_MS)  # the guide keeps moving
         self.epg_refresh.timeout.connect(lambda: self.catalog.refresh_epg())
 
-        self._build_menus()
+        self.menus.build()
         config_manager.apply_window_settings(WINDOW_NAME, self)
 
-    # ---- menus --------------------------------------------------------------------------------
+    # ---- state the menus and pages read -------------------------------------------------------
 
-    def _build_menus(self) -> None:
-        bar, add, role = self.menuBar(), self._add_action, QAction.MenuRole
-        app_menu = bar.addMenu("QiTV")
-        add(app_menu, "About QiTV", "", self.show_about, role.AboutRole)
-        add(app_menu, "Check for Updates…", "", self.check_updates, role.ApplicationSpecificRole)
-        add(app_menu, "Settings…", "Ctrl+,", self.options_dialog, role.PreferencesRole)
-        add(app_menu, "Quit", "Ctrl+Q", self.close, role.QuitRole)
-        file_menu = bar.addMenu("File")
-        add(file_menu, "Open File…", "Ctrl+O", self.open_file)
-        export = file_menu.addMenu("Export")
-        for text, kind in (
-            ("Cached Content…", ExportKind.CACHED),
-            ("All Live Channels…", ExportKind.ALL_LIVE),
-            ("Complete Series (Fetch All)…", ExportKind.COMPLETE_SERIES),
-        ):
-            add(export, text, "", partial(self.export, kind))
-        view = bar.addMenu("View")
-        add(view, "Live TV", "Ctrl+1", self.back_to_tv)
-        add(view, "Movies", "Ctrl+2", lambda: self.open_library("movies"))
-        add(view, "Series", "Ctrl+3", lambda: self.open_library("series"))
-        add(view, "Search", "Ctrl+F", self.open_search)
-        player = self._player_actions  # the player's keys: off while the Library shows
-        player.append(add(view, "Guide", "G", self._handler(Action.GUIDE)))
-        player.append(add(view, "Channel List", "Return", self._handler(Action.OPEN_DRAWER)))
-        add(view, "Fullscreen", "F", self.toggle_fullscreen)
-        player.append(add(view, "Mini Player", "Alt+P", self._handler(Action.MINI_PLAYER)))
-        playback = bar.addMenu("Playback")
-        player.append(add(playback, "Play/Pause", "Space", self._handler(Action.PLAY_PAUSE)))
-        player.append(add(playback, "Mute", "M", self._handler(Action.MUTE)))
-        player.append(
-            add(playback, "Previous Channel", "Backspace", self._handler(Action.PREVIOUS))
-        )
-        player.append(add(playback, "Go Live", "L", self._handler(Action.GO_LIVE)))
-        self.providers_menu = bar.addMenu("Providers")
-        self._rebuild_providers_menu()
-        help_menu = bar.addMenu("Help")
-        add(help_menu, "Keyboard Shortcuts…", "", self.show_shortcuts)
-        add(help_menu, "Report an Issue…", "", self.report_issue)
+    def closing(self) -> bool:
+        """The window is closing: menus and pages start nothing new."""
+        return self._closing
 
-    def _add_action(
-        self,
-        menu: QMenu,
-        text: str,
-        shortcut: str,
-        slot: Callable[[], Any],
-        role: QAction.MenuRole = QAction.MenuRole.NoRole,
-    ) -> QAction:
-        action = QAction(text, self)
-        action.setMenuRole(role)
-        action.triggered.connect(lambda _checked=False: slot())
-        menu.addAction(action)
-        if not shortcut:
-            return action
-        sequence = QKeySequence(shortcut)
-        action.setShortcut(sequence)
-        first = sequence[0]  # type: ignore[index]  # QKeyCombination; missing from the stubs
-        if first.keyboardModifiers() & _SHORTCUT_MODIFIERS:
-            action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
-            self.addAction(action)  # stays active while a non-native menu bar is hidden
-        else:
-            # A hint only: active solely inside the open menu, so the key reaches
-            # keyPressEvent (the drawer types "f", "m" and " ", and Return activates).
-            action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
-        return action
-
-    def _handler(self, action: Action) -> Callable[[], None]:
-        return lambda: self.controller.handle(action)
-
-    def _rebuild_providers_menu(self) -> None:
-        """One checkable entry per provider, the current one (or the one loading) checked."""
-        menu = self.providers_menu
-        menu.clear()
-        catalog = self.catalog
-        names = catalog.provider_names()
-        if not names:
-            menu.addAction(NO_PROVIDERS_TEXT).setEnabled(False)
-            return
-        current = catalog.loading_provider() or catalog.current_provider_name()
-        if self._provider_group is not None:
-            self._provider_group.deleteLater()
-        self._provider_group = group = QActionGroup(self)
-        group.setExclusive(True)
-        for name in names:
-            action = QAction(name, menu)
-            action.setCheckable(True)
-            action.setChecked(name == current)
-            action.triggered.connect(lambda _checked=False, n=name: self._choose_provider(n))
-            group.addAction(action)
-            menu.addAction(action)
-
-    def _choose_provider(self, name: str) -> None:
-        """The exclusive group moved the check; providerReady rebuilds the menu (never here:
-        that would delete the action whose signal runs)."""
-        catalog = self.catalog
-        heading_to = catalog.loading_provider() or catalog.current_provider_name()
-        if not self._closing and name != heading_to:
-            self.controller.select_provider(name)
-
-    # ---- pages --------------------------------------------------------------------------------
-
-    def library_shown(self) -> bool:
-        return self.pages.currentWidget() is self.library_page
-
-    def _show_page(self, page: QWidget) -> None:
-        if page is self.pages.currentWidget():
-            return
-        if self.library_shown():
-            self.library_controller.leave()  # a play waiting for its provider is dropped
-        self.pages.setCurrentWidget(page)
-        library = page is self.library_page
-        for action in self._player_actions:
-            action.setEnabled(not library)
-
-    def open_library(self, section: str) -> None:
-        """Movies or Series: live playback stops first (R5)."""
-        if self._closing:
-            return
-        self._enter_library()
-        self.library_controller.open(section)
-
-    def open_search(self) -> None:
-        if self._closing:
-            return
-        self._enter_library()
-        self.library_controller.open_search()
-
-    def _enter_library(self) -> None:
-        self._return_to_library = False
-        self.controller.stop_for_library()
-        self._show_page(self.library_page)
-
-    def play(self, item: dict, kind: str, context: dict) -> None:
-        """A movie or an episode from the Library: Esc brings the Library back."""
-        if self._closing:
-            return
-        self._show_page(self.player_page)
-        self._return_to_library = True
-        self.controller.play_vod(item, kind, context)
-
-    def tune_live(self, channel: dict) -> None:
-        """A live channel from the Library's search."""
-        if self._closing:
-            return
-        self._show_page(self.player_page)
-        self._return_to_library = False
-        self.controller.tune_live(channel)
-
-    def back_to_tv(self) -> None:
-        """Live TV: the last channel again (R5), or the drawer."""
-        if self._closing:
-            return
-        self._show_page(self.player_page)
-        self._return_to_library = False
-        self.controller.resume_live()
-
-    def _escape_to_library(self) -> bool:
-        """Esc on a movie from the Library, with nothing open on the player: back to it.
-
-        Not in fullscreen (Esc leaves it first) nor in the mini player. The Library keeps its
-        genre, title and scroll: it is shown again, not opened again.
-        """
-        if (
-            not self._return_to_library
-            or self.library_shown()
-            or self._mini_restore is not None
-            or self._fullscreen_heading()
-            or not self.controller.vod_current()
-            or self.controller.overlay_open()
-        ):
-            return False
-        self._enter_library()
-        return True
-
-    def open_file(self) -> None:
-        """File → Open File…: a local media file plays as a movie."""
-        if self._closing:
-            return
-        path, _filter = QFileDialog.getOpenFileName(self, "Open File", "", MEDIA_FILTER)
-        if not path or self._closing:
-            return
-        self._show_page(self.player_page)
-        self._return_to_library = False
-        self.controller.play_file(path)
-
-    def export(self, kind: ExportKind) -> None:
-        if self._closing:
-            return
-        section = self.library_controller.section if self.library_shown() else None
-        self.exports.export(kind, section or "live")
-
-    def notify(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
-        """A message on whichever page shows (each page has its toast)."""
-        for toast in (self.overlays.toast, self.library_toast):
-            toast.show_message(text, kind, ms)
-
-    def _on_provider_ready(self, _name: str) -> None:
-        self._rebuild_providers_menu()
-
-    def _on_provider_failed(self, name: str, message: str) -> None:
-        self._rebuild_providers_menu()
-        if self.library_shown():  # the player's toast says it too, but its page is hidden
-            self.library_toast.show_message(
-                scrub(f"{name}: {message}" if name else message), "error", ERROR_MS
-            )
-
-    # ---- dialogs ------------------------------------------------------------------------------
-
-    def show_about(self) -> None:
-        if self._closing:
-            return
-        box = QMessageBox(self)
-        box.setWindowTitle("About QiTV")
-        box.setTextFormat(Qt.TextFormat.RichText)
-        box.setText(about_text())
-        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        box.setStyleSheet(ABOUT_STYLE)  # wide enough for the links on one line each
-        box.exec()
-
-    def check_updates(self) -> None:
-        if not self._closing:
-            check_for_updates(self.config_manager, manual=True)
-
-    def show_shortcuts(self) -> None:
-        if not self._closing:
-            ShortcutsDialog(self).exec()
-
-    def report_issue(self) -> None:
-        QDesktopServices.openUrl(QUrl(ISSUES_URL))
-
-    def _on_drawer_action(self, row: str) -> None:
-        """The drawer's ⚙ Settings and ＋ Add provider rows."""
-        if row == SETTINGS_ROW:
-            self.options_dialog()
-        elif row == ADD_PROVIDER_ROW:
-            self.add_provider()
+    def mini_player_active(self) -> bool:
+        return self._mini_restore is not None
 
     # ---- input --------------------------------------------------------------------------------
 
     def _key_context(self) -> str:
         """The Library's page takes the keys; else the open guide or drawer, else the player."""
-        return "library" if self.library_shown() else self.controller.key_context()
+        return "library" if self.screens.library_shown() else self.controller.key_context()
 
     def _resolve(self, event: QKeyEvent):
         return resolve(event.key(), event.modifiers(), event.text(), context=self._key_context())
@@ -710,15 +420,15 @@ class TVWindow(QMainWindow):
         event.accept()
         if action is Action.ESCAPE and self.exports.cancel():
             return  # Esc while exporting cancels the export
-        if self.library_shown():
+        if self.screens.library_shown():
             handled = self.library_controller.handle(action, payload)
             if not handled and action is Action.FULLSCREEN:
                 self.toggle_fullscreen()  # F11, ⌃⌘F: the Library's other keys are its own
             return
         if action is Action.SEARCH:
-            self.open_search()  # Ctrl/⌘+F: the quick search, from every screen
+            self.screens.open_search()  # Ctrl/⌘+F: the quick search, from every screen
             return
-        if action is Action.ESCAPE and self._escape_to_library():
+        if action is Action.ESCAPE and self.screens.escape_to_library():
             return
         self.controller.handle(action, payload)
 
@@ -781,7 +491,7 @@ class TVWindow(QMainWindow):
             return
         if self._mini_restore is not None:
             self._leave_mini()
-        self._request_fullscreen(not self._fullscreen_heading())
+        self._request_fullscreen(not self.fullscreen_heading())
 
     @staticmethod
     def _animates_fullscreen() -> bool:
@@ -789,10 +499,10 @@ class TVWindow(QMainWindow):
         return QGuiApplication.platformName() == "cocoa"
 
     def leave_fullscreen(self) -> None:
-        if not self._closing and self._fullscreen_heading():
+        if not self._closing and self.fullscreen_heading():
             self._request_fullscreen(False)
 
-    def _fullscreen_heading(self) -> bool:
+    def fullscreen_heading(self) -> bool:
         """The fullscreen state the window is on its way to, reported or not."""
         for wanted in (self._fs_queued, self._fs_target):
             if wanted is not None:
@@ -987,7 +697,7 @@ class TVWindow(QMainWindow):
     def options_dialog(self) -> None:
         if not self._closing:
             OptionsDialog(self).exec()
-            self._rebuild_providers_menu()
+            self.menus.rebuild_providers()
 
     def add_provider(self) -> None:
         """Settings on the Providers tab, with a new provider to fill in (spec §8)."""
@@ -996,7 +706,7 @@ class TVWindow(QMainWindow):
         dialog = OptionsDialog(self)
         dialog.start_new_provider()
         dialog.exec()
-        self._rebuild_providers_menu()
+        self.menus.rebuild_providers()
 
     def save_config(self) -> None:
         self.config_manager.save_config()
