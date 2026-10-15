@@ -47,12 +47,6 @@ plugins = []
 # Only disable error codes that are directly caused by broken stubs.
 disable_error_code = ["attr-defined", "call-overload", "union-attr"]
 
-# Mixin classes use stub method bodies (``def foo(self): ...``) to declare
-# the interface that the concrete host class provides at runtime.
-[[tool.mypy.overrides]]
-module = "mixins.*"
-disable_error_code = ["empty-body"]
-
 [tool.flake8]
 max-line-length = 100
 extend-ignore = ["E203"]

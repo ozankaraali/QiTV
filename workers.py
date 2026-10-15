@@ -1,11 +1,10 @@
-"""Worker classes, tree widget items, and helper functions for channel_list."""
+"""Provider workers: catalog loads, provider setup, EPG and STB links, for CatalogService."""
 
 import logging
 import re
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
-from PySide6.QtWidgets import QTreeWidgetItem
+from PySide6.QtCore import QObject, Qt, Signal
 import requests
 from urlobject import URLObject
 
@@ -110,50 +109,6 @@ class M3ULoaderWorker(QObject):
             # If we got here, all attempts failed
             raise last_exc or Exception("Failed to load M3U")
         except (requests.RequestException, OSError, ValueError) as e:
-            self.error.emit(str(e))
-
-
-class XtreamAuthWorker(QObject):
-    finished = Signal(object)
-    error = Signal(str)
-
-    def __init__(
-        self,
-        base_url: str,
-        username: str,
-        password: str,
-        verify_ssl: bool = True,
-        prefer_https: bool = False,
-    ):
-        super().__init__()
-        self.base_url = base_url
-        self.username = username
-        self.password = password
-        self.verify_ssl = verify_ssl
-        self.prefer_https = prefer_https
-
-    def run(self):
-        try:
-            # First authenticate to resolve the correct domain/ports
-            auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
-            resp = requests.get(auth_url, timeout=10, verify=self.verify_ssl)
-            resp.raise_for_status()
-            body = resp.json()
-            server_info = body.get("server_info", {}) if isinstance(body, dict) else {}
-            user_info = body.get("user_info", {}) if isinstance(body, dict) else {}
-            allowed: List[str] = []
-            if isinstance(user_info, dict):
-                allowed = user_info.get("allowed_output_formats", []) or []
-            resolved_base = _resolve_xtream_base(server_info, self.base_url, self.prefer_https)
-
-            self.finished.emit(
-                {
-                    "resolved_base": resolved_base,
-                    "allowed_output_formats": allowed,
-                    "server_info": server_info,
-                }
-            )
-        except Exception as e:
             self.error.emit(str(e))
 
 
@@ -561,84 +516,6 @@ class LinkCreatorWorker(QObject):
             self.finished.emit({"link": link})
         except Exception as e:
             self.error.emit(str(e))
-
-
-class CategoryTreeWidgetItem(QTreeWidgetItem):
-    # sort to always have value "All" first and "Unknown Category" last
-    def __lt__(self, other):
-        if not isinstance(other, CategoryTreeWidgetItem):
-            return super(CategoryTreeWidgetItem, self).__lt__(other)
-
-        sort_column = self.treeWidget().sortColumn()
-        t1 = self.text(sort_column)
-        t2 = other.text(sort_column)
-        if t1 == "All":
-            return True
-        if t2 == "All":
-            return False
-        if t1 == "Unknown Category":
-            return False
-        if t2 == "Unknown Category":
-            return True
-        return t1 < t2
-
-
-class NumberedTreeWidgetItem(QTreeWidgetItem):
-    """Keep numeric sort values in Python instead of parsing Qt text per comparison."""
-
-    _number_key: tuple[int, int | str] = (1, "")
-    _epg_columns = False
-
-    def __init__(self, texts):
-        super().__init__(texts)
-        try:
-            self._number_key = (0, int(texts[0]))
-        except ValueError:
-            self._number_key = (1, texts[0])
-
-    def __lt__(self, other):
-        widget = self.treeWidget()
-        if widget is None or not isinstance(other, NumberedTreeWidgetItem):
-            return self.text(0) < other.text(0)
-        column = widget.sortColumn()
-        if column == 0:
-            return self._number_key < other._number_key
-        if self._epg_columns and other._epg_columns:
-            if column == 2:
-                left = self.data(column, Qt.UserRole)
-                right = other.data(column, Qt.UserRole)
-                return (left is None, left or 0) < (right is None, right or 0)
-            if column == 3:
-                return (self.data(column, Qt.UserRole) or "") < (
-                    other.data(column, Qt.UserRole) or ""
-                )
-        return self.text(column) < other.text(column)
-
-
-class ChannelTreeWidgetItem(NumberedTreeWidgetItem):
-    _epg_columns = True
-
-
-class SetProviderThread(QThread):
-    progress = Signal(str)
-
-    def __init__(self, provider_manager, epg_manager, force_epg_refresh: bool = False):
-        super().__init__()
-        self.provider_manager = provider_manager
-        self.epg_manager = epg_manager
-        self.force_epg_refresh = force_epg_refresh
-
-    def run(self):
-        try:
-            self.provider_manager.set_current_provider(self.progress)
-            if self.force_epg_refresh:
-                self.provider_manager.clear_current_provider_cache()
-                self.progress.emit("Refreshing EPG…")
-                self.epg_manager.force_refresh_current_epg()
-            else:
-                self.epg_manager.set_current_epg()
-        except Exception as e:
-            logger.warning("Error in initializing provider: %s", safe_exc(e))
 
 
 def _handshake_failure_message(failure: Optional[str]) -> str:
