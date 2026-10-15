@@ -6,8 +6,9 @@ picture, "PiP" for the small one, each with its channel's name). Each row has a 
 The selected row is outlined; the keys act on it (the shell routes them while the mixer
 shows). It hides itself 3 s after the last change, and says so (`closed`).
 
-It sits above the transport's controls, so both can show at once, and never over the PiP
-(`avoid`): over it, it moves up above the PiP, or beside it when there is no room above.
+Bottom-centre: 4u from the bottom, or just above the transport's controls while the
+transport shows (`set_floor`), so both can show at once. Never over the PiP (`avoid`): over
+it, it moves up above the PiP, or beside it when there is no room above.
 """
 
 from __future__ import annotations
@@ -25,7 +26,8 @@ from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 HIDE_MS = 3000  # after the last change
-TRANSPORT_BAND_U = 19.0  # the transport's controls: buttons, seek bar, ticks and the time bubble
+BOTTOM_U = 4.0  # from the bottom, with the transport hidden
+FLOOR_GAP_U = 1.0  # above the transport's controls while it shows
 _FALLBACK_HOST_WIDTH = 1280
 _PAD_U = 1.0
 _ROW_U = 3.4
@@ -68,6 +70,7 @@ class Mixer(Overlay):
         self._selected = 0
         self._drag: int | None = None  # the row whose slider the left button holds
         self._avoid = QRect()
+        self._floor: int | None = None  # the transport's controls' top while it shows
         self._idle = QTimer(self, singleShot=True, interval=idle_ms)
         self._idle.timeout.connect(self.dismiss)
         if parent is not None:
@@ -106,6 +109,14 @@ class Mixer(Overlay):
         self._avoid = QRect(rect)
         if not self.isHidden():
             self._layout()
+
+    def set_floor(self, top: int | None) -> None:
+        """Sit just above `top` (host coordinates; the transport's controls), or, with None,
+        4u from the bottom."""
+        if top != self._floor:
+            self._floor = top
+            if not self.isHidden():
+                self._layout()
 
     def speaker_rect(self, row: int) -> QRectF:
         return self._rects()[row].speaker
@@ -167,7 +178,12 @@ class Mixer(Overlay):
         width, height = self._size()
         width = min(width, parent.width())
         x = (parent.width() - width) // 2
-        y = max(0, parent.height() - un.px(TRANSPORT_BAND_U) - height)
+        bottom = (
+            parent.height() - un.px(BOTTOM_U)
+            if self._floor is None
+            else self._floor - un.px(FLOOR_GAP_U)
+        )
+        y = max(0, bottom - height)
         rect = QRect(x, y, width, height)
         avoid = self._avoid
         if not avoid.isEmpty() and rect.intersects(avoid):

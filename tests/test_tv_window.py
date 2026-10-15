@@ -1154,6 +1154,17 @@ class LivePipelineWindowTests(WindowCase):
         self.assertEqual(label.geometry(), small)  # host coordinates: the host covers the page
         self.assertTrue(label.isVisible())
         self.assertEqual(label.info()[0], "Channel 1")
+        transport = window.overlays.transport
+        window.controller.mouse_moved()  # the transport shows: the PiP rises above it
+        self.assertTrue(transport.isVisible())
+        self.assertTrue(
+            wait_until(lambda: frame.small_rect().bottom() < transport.controls_top(), 2000)
+        )
+        raised = frame.small_rect()
+        self.assertEqual(label.geometry(), raised)
+        self.assertFalse(window.host.mask().contains(raised.center()))  # clicks reach it
+        transport.dismiss()
+        self.assertTrue(wait_until(lambda: frame.small_rect() == small, 2000))
         mixer = window.mixer
         QTest.keyClick(self.window, Qt.Key.Key_Minus)  # the mixer: a row per picture
         self.assertTrue(mixer.isVisible())
@@ -1164,6 +1175,7 @@ class LivePipelineWindowTests(WindowCase):
         self.assertEqual(mixer.selected(), 1)
         QTest.keyClick(self.window, Qt.Key.Key_Escape)
         self.assertFalse(mixer.isVisible())
+        self.assertTrue(wait_until(lambda: frame.small_rect() == small, 2000))
         counts = (plays["main"].call_count, plays["pip"].call_count)
 
         QTest.keyClick(self.window, Qt.Key.Key_S)

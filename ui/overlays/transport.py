@@ -128,6 +128,7 @@ class Transport(Overlay):
     seekToRequested = Signal(float)
     pipRequested = Signal()  # the second channel: open picture in picture, or close it
     miniPlayerRequested = Signal()
+    bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
     def __init__(
         self,
@@ -253,6 +254,22 @@ class Transport(Overlay):
             region = region.united(QRegion(rect.toAlignedRect()))
         return region.translated(self.geometry().topLeft())
 
+    def controls_top(self) -> int:
+        """Where its controls start (host coordinates): the bar's time bubble, else the row.
+
+        The PiP rises above it and the mixer sits on it while the transport shows.
+        """
+        rects = self._layout()
+        top = min(rect.top() for rect in rects.values())
+        seek = rects.get("seek")
+        if seek is not None:  # the wall-clock bubble over the knob, and the ticks' labels
+            un = Units(self.width())
+            bubble = max(
+                float(un.px(2.1)), QFontMetricsF(un.font(1.05, QFont.Weight.Bold)).height()
+            )
+            top = min(top, seek.center().y() - un.px(2.7) - bubble)
+        return self.geometry().top() + math.floor(top)
+
     def _controls_changed(self) -> None:
         """The host masks the PiP anew when this shows other controls (a mode, the bar)."""
         claimed = (self.size(), tuple(sorted(n for n in self._layout() if n not in _LABELS)))
@@ -262,6 +279,7 @@ class Transport(Overlay):
         host = self.parentWidget()
         if not self.isHidden() and host is not None and hasattr(host, "overlay_changed"):
             host.overlay_changed()
+        self.bandChanged.emit()
 
     def tooltip_at(self, pos: QPointF) -> str:
         """What hovering `pos` says: a button's name and key, or nothing."""

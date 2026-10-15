@@ -195,6 +195,32 @@ class TransportCase(unittest.TestCase):
         )  # a tick: the same controls
         self.assertEqual(host.changes, changes)
 
+    def test_its_controls_top_is_the_top_of_its_band(self):
+        # The PiP rises above it and the mixer sits on it (review I2, I3).
+        t = self.make()
+        t.show_live("One", "")
+        top = t.geometry().top()  # host coordinates: a test window sits where the WM put it
+        self.assertEqual(t.controls_top(), top + round(t.button_rect("play").top()))
+        changes = QSignalSpy(t.bandChanged)
+        t.show_timeshift("One", "")
+        t.update_timeline(
+            {
+                "start": 0.0,
+                "end": 60.0,
+                "position": 30.0,
+                "live_edge": 60.0,
+                "lag": 30.0,
+                "mode": "shifted",
+                "rate": 1.0,
+                "paused": False,
+            },
+            [],
+        )
+        self.assertGreaterEqual(changes.count(), 1)
+        seek = t.seek_rect()
+        self.assertLess(t.controls_top(), top + seek.top() - Units(1280).px(2))  # the bubble
+        self.assertGreater(t.controls_top(), top + 720 * 0.6)  # still the picture's bottom
+
     def test_next_button_only_when_available(self):
         t = self.make()
         t.show_vod("A", "b")

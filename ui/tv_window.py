@@ -63,6 +63,7 @@ from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update
 from services.watch_state import WatchState
 from services.zapping import ZapController
+from ui.bottom_band import BottomBand
 from ui.export_flow import ExportFlow
 from ui.keymap import Action, resolve
 from ui.library.library_screen import LibraryScreen
@@ -392,6 +393,9 @@ class TVWindow(QMainWindow):
         self.pip_frame.smallRectChanged.connect(self.mixer.avoid)
         # Clicks on the small picture reach it through the overlays (but their buttons).
         self.pip_frame.smallRectChanged.connect(self.host.set_hole)
+        # While the transport or the mixer shows, a bottom corner's PiP rises above the
+        # transport's controls; the mixer sits on them, or 4u from the bottom.
+        self.bottom_band = BottomBand(self.overlays.transport, self.mixer, self.pip_frame, self)
         self.pip_label.pillPressed.connect(self.pip_frame.pill_press)
         self.pip_label.pillMoved.connect(self.pip_frame.pill_move)
         self.pip_label.pillReleased.connect(self.pip_frame.pill_release)

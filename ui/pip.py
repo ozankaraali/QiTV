@@ -9,12 +9,28 @@ are the Qt mouse events the shell reads on the main surface (libVLC's own mouse 
 off, so they reach Qt on macOS too). Other buttons, the wheel and moves go on to the shell.
 The PiP label's pill, drawn over the small surface, forwards its own presses the same way
 (pill_press, pill_move, pill_release).
+
+While the transport (or the mixer) shows, a bottom corner's PiP rises above the transport's
+controls (`set_lift`, animated over LIFT_MS) and settles back once they hide; a top corner's
+never moves. A drag in progress keeps the surface under the cursor: the lift applies when
+it ends.
 """
 
 from dataclasses import dataclass
 import logging
 
-from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QElapsedTimer,
+    QEvent,
+    QObject,
+    QPoint,
+    QRect,
+    QSize,
+    Qt,
+    QVariantAnimation,
+    Signal,
+)
 from PySide6.QtGui import QGuiApplication, QMouseEvent
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
@@ -30,6 +46,7 @@ WIDTH_FRACTION = 0.25
 HEIGHT_PER_WIDTH = 9 / 16
 MARGIN_UNITS = 2.0  # from the nearest edges; u = 1% of the player width
 DRAG_START_PX = 8
+LIFT_MS = 150  # a bottom corner's PiP rises over the transport band, or settles, this fast
 _LAYOUT_EVENTS = (QEvent.Type.Resize, QEvent.Type.Show)
 _MOUSE_EVENTS = (
     QEvent.Type.MouseButtonPress,
@@ -47,6 +64,15 @@ def corner_rect(size: QSize, corner: str) -> QRect:
     x = margin if corner.endswith("l") else size.width() - margin - width
     y = margin if corner.startswith("t") else size.height() - margin - height
     return QRect(x, y, width, height)
+
+
+def lifted_rect(size: QSize, corner: str, lift: int) -> QRect:
+    """`corner_rect`, raised by `lift` pixels for a bottom corner (never above the margin)."""
+    rect = corner_rect(size, corner)
+    if corner.startswith("b") and lift > 0:
+        margin = Units(size.width()).px(MARGIN_UNITS)
+        rect.moveTop(max(margin, rect.top() - lift))
+    return rect
 
 
 def nearest_corner(rect: QRect, size: QSize) -> str:
@@ -96,6 +122,12 @@ class PipFrame(QObject):
         self._swap_clock = QElapsedTimer()
         self._reported = QRect()
         self._closed = False
+        self._lift = 0  # pixels a bottom corner's PiP rises (the transport shows)
+        self._lifting = QVariantAnimation(self)
+        self._lifting.setDuration(LIFT_MS)
+        self._lifting.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._lifting.valueChanged.connect(self._on_lift_step)
+        self._lifting.finished.connect(self._on_lifted)
         # Removed by close(), or by Qt once this frame is deleted with the container.
         for watched in (container, main_surface, pip_surface):
             watched.installEventFilter(self)
@@ -131,6 +163,23 @@ class PipFrame(QObject):
     def corner(self) -> str:
         return self._corner
 
+    def set_lift(self, lift: int) -> None:
+        """Raise a bottom corner's PiP by `lift` pixels (0: back in its corner), animated."""
+        lift = max(0, int(lift))
+        if lift == self._lift:
+            return
+        self._lift = lift
+        if not self._shown or self._press is not None or self._closed:
+            return  # shown, or once the drag ends, it lays out with the new lift
+        small = self._small()
+        target = self._small_target()
+        self._lifting.stop()  # a lift on its way the other way ends where it is
+        if small.geometry() == target:
+            return
+        self._lifting.setStartValue(small.geometry())
+        self._lifting.setEndValue(target)
+        self._lifting.start()
+
     def close(self) -> None:
         """Stop watching the player page and the surfaces (the window's shutdown)."""
         if self._closed:
@@ -164,7 +213,20 @@ class PipFrame(QObject):
     def _saved_corner(self) -> str:
         return _valid_corner(getattr(self._config, "pip_corner", DEFAULT_CORNER))
 
+    def _small_target(self) -> QRect:
+        return lifted_rect(self._container.size(), self._corner, self._lift)
+
+    def _on_lift_step(self, rect) -> None:
+        if isinstance(rect, QRect) and self._shown and self._press is None:
+            self._small().setGeometry(rect)
+            self._report()
+
+    def _on_lifted(self) -> None:
+        if self._shown:
+            self._small().raise_()  # macOS: kept above the large one after the moves
+
     def _layout(self) -> None:
+        self._lifting.stop()
         if self._press is not None:
             self._press.void = True  # its release neither swaps nor snaps
         large = self._surfaces[self._large]
@@ -172,7 +234,7 @@ class PipFrame(QObject):
         large.show()  # it may have been the small one, hidden with PiP closed
         small = self._small()
         if self._shown:
-            small.setGeometry(corner_rect(self._container.size(), self._corner))
+            small.setGeometry(self._small_target())
             small.show()
             # macOS can stack a native view under its sibling after a geometry change.
             small.raise_()
@@ -187,7 +249,11 @@ class PipFrame(QObject):
             self.smallRectChanged.emit(rect)
 
     def _snap(self) -> None:
-        corner = nearest_corner(self._small().geometry(), self._container.size())
+        # Raised over the transport, the bottom half starts that much higher.
+        area = self._container.size()
+        corner = nearest_corner(
+            self._small().geometry(), QSize(area.width(), max(1, area.height() - self._lift))
+        )
         changed, self._corner = corner != self._corner, corner
         self._layout()
         if changed:
@@ -244,6 +310,7 @@ class PipFrame(QObject):
         void = self._second_press(position)
         if not void and (not self._shown or surface is not self._small()):
             return False
+        self._lifting.stop()  # the surface stays where the press found it
         self._press = _Press(
             surface, position, surface.pos(), void=void, surface_events=surface_events
         )
@@ -278,6 +345,7 @@ class PipFrame(QObject):
         """The button came up at `position` (None: the release was lost)."""
         self._press = None
         if press.void:
+            self._settle()
             return
         if press.dragging:
             self._snap()
@@ -285,3 +353,9 @@ class PipFrame(QObject):
             self._swap_at = QPoint(position)
             self._swap_clock.start()
             self.swapRequested.emit()
+        self._settle()
+
+    def _settle(self) -> None:
+        """A lift asked for during the press applies now (the swap may have laid it out)."""
+        if self._shown and not self._closed and self._small().geometry() != self._small_target():
+            self._layout()

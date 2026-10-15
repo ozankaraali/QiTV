@@ -13,7 +13,7 @@ from timer_fixtures import elapse
 
 from ui.overlay_host import OverlayHost
 from ui.overlays.pip_label import PipLabel
-from ui.pip import PipFrame, corner_rect
+from ui.pip import LIFT_MS, PipFrame, corner_rect
 from ui.video_surface import VideoSurface
 
 # The offscreen platform has no window stacking or window masks; it says so on every raise_()
@@ -174,6 +174,61 @@ class PipFrameTests(FrameCase):
         frame.hide_pip()
         self.assertTrue(self.main.isVisible())
         self.assertTrue(self.pip.isHidden())
+
+    def test_a_lift_raises_a_bottom_corner_pip_and_settles_back(self):
+        # Ruling (review I2): over the transport band, a bottom-corner PiP rises, animated.
+        frame = self.make()
+        frame.show_pip()
+        rects = []
+        frame.smallRectChanged.connect(rects.append)
+        frame.set_lift(100)
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT)  # it moves over ~150 ms
+        elapse(LIFT_MS + 100)
+        raised = BOTTOM_RIGHT.translated(0, -100)
+        self.assertEqual(frame.small_rect(), raised)
+        self.assertEqual(rects[-1], raised)
+        self.assertGreater(len(rects), 2)  # the label and the host's hole follow every step
+        self.assertIs(self.on_top_at_small_centre(), self.pip)
+        frame.set_lift(0)
+        elapse(LIFT_MS + 100)
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT)
+
+    def test_a_lift_taken_back_at_once_does_not_move_it(self):
+        frame = self.make()
+        frame.show_pip()
+        frame.set_lift(100)  # the transport shows and hides again at once (a swap's banner)
+        frame.set_lift(0)
+        elapse(LIFT_MS + 100)
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT)
+
+    def test_a_top_corner_pip_never_moves_for_a_lift(self):
+        frame = self.make(corner="tl")
+        frame.show_pip()
+        frame.set_lift(100)
+        elapse(LIFT_MS + 100)
+        self.assertEqual(frame.small_rect(), TOP_LEFT)
+
+    def test_a_lift_keeps_through_a_swap_a_resize_and_a_reopen(self):
+        frame = self.make()
+        frame.set_lift(100)  # while hidden: it applies once shown
+        frame.show_pip()
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT.translated(0, -100))
+        frame.set_large("pip")
+        self.assertEqual(self.main.geometry(), BOTTOM_RIGHT.translated(0, -100))
+        self.container.resize(1280, 720)
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT.translated(0, -100))
+
+    def test_a_lift_waits_while_the_pip_is_dragged(self):
+        frame = self.make()
+        frame.show_pip()
+        start = centre(self.pip)
+        send(self.pip, QEvent.Type.MouseButtonPress, start)
+        send(self.pip, QEvent.Type.MouseMove, start + QPoint(-20, 0))
+        frame.set_lift(100)
+        elapse(LIFT_MS + 100)
+        self.assertEqual(frame.small_rect().top(), BOTTOM_RIGHT.top())  # under the cursor
+        send(self.pip, QEvent.Type.MouseButtonRelease, start + QPoint(-20, 0), LEFT, NONE)
+        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT.translated(0, -100))  # snapped, raised
 
     def test_drag_to_the_top_left_quadrant_snaps_to_tl_and_saves_it(self):
         frame = self.make()

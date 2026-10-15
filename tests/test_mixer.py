@@ -10,7 +10,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
-from ui.overlays.mixer import TRANSPORT_BAND_U, Mixer, MixerRow
+from ui.overlays.mixer import BOTTOM_U, FLOOR_GAP_U, Mixer, MixerRow
 from ui.overlays.painting import Units
 
 MAIN = MixerRow("Main", "Nature One HD", 80, False)
@@ -47,16 +47,23 @@ class MixerTests(MixerCase):
         mixer.show_rows([MAIN], 1)  # PiP closed: the selection stays on a row there is
         self.assertEqual(mixer.selected(), 0)
 
-    def test_two_rows_bottom_centre_above_the_transport(self):
+    def test_bottom_centre_4u_from_the_bottom(self):
         host, mixer = self.make()
         mixer.show_rows([MAIN, PIP], 0)
         geometry = mixer.geometry()
         self.assertLessEqual(abs(geometry.center().x() - host.width() // 2), 1)
-        band = Units(host.width()).px(TRANSPORT_BAND_U)
-        self.assertEqual(geometry.bottom() + 1, host.height() - band)
+        self.assertEqual(geometry.bottom() + 1, host.height() - Units(1280).px(BOTTOM_U))
         self.assertTrue(host.rect().contains(geometry))
         self.assertLess(mixer.slider_rect(0).right(), mixer.width())
         self.assertLess(mixer.speaker_rect(1).bottom(), mixer.height())
+
+    def test_just_above_the_transport_while_it_shows(self):
+        host, mixer = self.make()
+        mixer.show_rows([MAIN, PIP], 0)
+        mixer.set_floor(600)  # the transport's controls start there
+        self.assertEqual(mixer.geometry().bottom() + 1, 600 - Units(1280).px(FLOOR_GAP_U))
+        mixer.set_floor(None)
+        self.assertEqual(mixer.geometry().bottom() + 1, host.height() - Units(1280).px(BOTTOM_U))
 
     def test_it_never_covers_the_pip(self):
         host, mixer = self.make()
@@ -66,7 +73,7 @@ class MixerTests(MixerCase):
         self.assertFalse(mixer.geometry().intersects(over))
         self.assertLess(mixer.geometry().bottom(), over.top())  # above it
         mixer.avoid(QRect())
-        self.assertEqual(mixer.geometry().bottom() + 1, host.height() - Units(1280).px(19))
+        self.assertEqual(mixer.geometry().bottom() + 1, host.height() - Units(1280).px(BOTTOM_U))
 
     def test_it_hides_three_seconds_after_the_last_change(self):
         _host, mixer = self.make(idle_ms=60)
