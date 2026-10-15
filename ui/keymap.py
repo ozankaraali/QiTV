@@ -26,6 +26,8 @@ class Action(str, Enum):
     VOL_DOWN = "vol_down"
     ESCAPE = "escape"
     MINI_PLAYER = "mini_player"
+    MEDIA_NEXT = "media_next"  # next channel when live, +10 s on demand
+    MEDIA_PREV = "media_prev"  # previous channel when live, -10 s on demand
     NAV_UP = "nav_up"
     NAV_DOWN = "nav_down"
     NAV_PAGE_UP = "nav_page_up"
@@ -80,21 +82,37 @@ _PLAYER_CHARS = {
     _K.Key_Equal.value: Action.VOL_UP,  # the unshifted "+" key on US layouts
     _K.Key_Minus.value: Action.VOL_DOWN,
 }
+# Remote channel keys (drawer closed, like the arrows they stand in for).
+_CHANNEL_KEYS = {
+    _K.Key_ChannelUp.value: Action.CH_NEXT,
+    _K.Key_ChannelDown.value: Action.CH_PREV,
+}
+# Media keys never type, so they work with the drawer open or closed.
+_MEDIA_KEYS = {
+    _K.Key_MediaTogglePlayPause.value: Action.PLAY_PAUSE,
+    _K.Key_MediaPlay.value: Action.PLAY_PAUSE,
+    _K.Key_MediaPause.value: Action.PLAY_PAUSE,
+    _K.Key_MediaNext.value: Action.MEDIA_NEXT,
+    _K.Key_MediaPrevious.value: Action.MEDIA_PREV,
+}
 # Shortcuts that work with the drawer open or closed.
 _CTRL_KEYS = {_K.Key_Space.value: Action.PLAY_PAUSE, _K.Key_F.value: Action.FULLSCREEN}
 _DIGITS = "0123456789"
 
 
-def _value(flag: Any) -> int:
-    return int(flag.value) if hasattr(flag, "value") else int(flag or 0)
+def as_int(value: Any) -> int:
+    """A Qt key or modifier flag (enum or int, None for none) as a plain int."""
+    return int(value.value) if hasattr(value, "value") else int(value or 0)
 
 
 def resolve(
     key: int, modifiers: Qt.KeyboardModifier, text: str, *, drawer_open: bool
 ) -> tuple[Action, str] | None:
     """Map a key press to (action, payload); the payload is the digit or the typed text."""
-    key, mods = _value(key), _value(modifiers)
+    key, mods = as_int(key), as_int(modifiers)
     held = mods & (_CTRL | _ALT | _META)
+    if key in _MEDIA_KEYS:
+        return _MEDIA_KEYS[key], ""
     if held == _ALT and key == _K.Key_P.value:
         return Action.MINI_PLAYER, ""
     if held == _CTRL and key in _CTRL_KEYS:
@@ -105,6 +123,8 @@ def resolve(
         return _text(text, mods)
     if key in _PLAYER_KEYS:
         return _PLAYER_KEYS[key], ""
+    if key in _CHANNEL_KEYS:
+        return _CHANNEL_KEYS[key], ""
     if held:
         return None
     if _K.Key_0.value <= key <= _K.Key_9.value:
@@ -119,10 +139,14 @@ def resolve(
 def _text(text: str, mods: int) -> tuple[Action, str] | None:
     """Printable text for the drawer filter.
 
-    Ctrl/⌘ and Meta never type. Alt (macOS Option) composes letters such as ç, so it may
-    type, but not digits, which it only modifies on other platforms.
+    Ctrl/⌘ and Meta never type, except Ctrl+Alt, which is how Windows reports AltGr (ł, @,
+    €). Alt (macOS Option) composes letters such as ç, so it may type, but not digits,
+    which it only modifies on other platforms.
     """
-    if not text or not text.isprintable() or mods & (_CTRL | _META):
+    if not text or not text.isprintable():
+        return None
+    altgr = mods & _CTRL and mods & _ALT and not mods & _META
+    if mods & (_CTRL | _META) and not altgr:
         return None
     if mods & _ALT and all(c in _DIGITS for c in text):
         return None

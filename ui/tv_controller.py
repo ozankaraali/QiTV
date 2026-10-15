@@ -10,19 +10,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import logging
-from typing import Any, Callable, Optional
+import re
+from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players
-from services.catalog import ALL_GROUP_ID
+from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.epg_view import Programme, now_next
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, _item_key
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, episode_key, item_key
 from services.vlc_profile import classify
 from services.zapping import ZapContext
-from ui.keymap import Action
+from ui.keymap import Action, as_int
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.drawer import Drawer
 from ui.overlays.painting import fmt_duration
@@ -44,6 +45,14 @@ _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
 _PINNED_TITLES = {FAVORITES_GROUP: "Favorites", RECENT_GROUP: "Recent"}
+_ADDRESS = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S*", re.IGNORECASE)
+_QUERY = re.compile(r"\S*\?\S+")
+
+
+def scrub(text: object) -> str:
+    """Drop addresses and query strings from a message: they can carry credentials."""
+    cleaned = _QUERY.sub("…", _ADDRESS.sub("…", str(text)))
+    return " ".join(cleaned.split())
 
 
 @dataclass
@@ -73,9 +82,11 @@ class _Target:
     def item_type(self) -> str:
         return {"live": "channel", "series": "episode"}.get(self.section, "movie")
 
-
-def _modifier_bits(modifiers: Any) -> int:
-    return int(modifiers.value) if hasattr(modifiers, "value") else int(modifiers or 0)
+    def same_as(self, other: _Target) -> bool:
+        if self.section != other.section or not ZapContext.same(self.item, other.item):
+            return False
+        # STB episodes share the season's cmd and id; the episode number tells them apart.
+        return self.section != "series" or episode_key(self.item) == episode_key(other.item)
 
 
 class TVController(QObject):
@@ -114,6 +125,7 @@ class TVController(QObject):
         self._current: Optional[_Target] = None  # handed to the player
         self._cid: Optional[str] = None  # resume key of the VOD being played
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
+        self._digits = ""  # number entry under way
         self._state = "idle"
         self._provider: Optional[str] = None
         self._await_live = False  # after providerReady: the first live section decides
@@ -136,19 +148,20 @@ class TVController(QObject):
 
     def _wire(self) -> None:
         catalog, zap, session = self.catalog, self.zap, self.session
-        banner, column = self.overlays.banner, self.overlays.column
-        drawer, transport = self.overlays.drawer, self.overlays.transport
+        column, drawer = self.overlays.column, self.overlays.drawer
+        transport = self.overlays.transport
         catalog.providerReady.connect(self._on_provider_ready)
         catalog.providerFailed.connect(self._on_provider_failed)
         catalog.sectionReady.connect(self._on_section_ready)
         catalog.sectionFailed.connect(self._on_section_failed)
         catalog.linkReady.connect(self._on_link_ready)
         catalog.linkFailed.connect(self._on_link_failed)
-        catalog.epgReady.connect(self.refresh_overlays)
+        catalog.epgReady.connect(self._on_epg_ready)
+        self.nav.notice.connect(self._on_notice)
         zap.tuneRequested.connect(self._on_zap_tune)
         zap.columnRequested.connect(self._on_column_requested)
         zap.highlightChanged.connect(self._on_highlight)
-        zap.digitsChanged.connect(banner.show_digits)
+        zap.digitsChanged.connect(self._on_digits)
         zap.numberNotFound.connect(self._on_number_not_found)
         session.stateChanged.connect(self._on_state)
         session.positionChanged.connect(self._on_position)
@@ -164,6 +177,8 @@ class TVController(QObject):
         transport.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
         transport.audioRequested.connect(self._cycle_audio)
         transport.subtitleRequested.connect(self._cycle_subtitles)
+        if self._logos is not None:
+            self._logos.logoReady.connect(self._on_logo_ready)
         # The column's list would scroll on its own; wheel over it zaps instead.
         self._column_wheel.wheelSteps.connect(self._on_column_wheel)
         column.installEventFilter(self)
@@ -179,12 +194,12 @@ class TVController(QObject):
         self._autotune = None
         try:
             self.watch.flush()
-        except Exception:
-            logger.exception("Could not save the watch state")
+        except Exception as e:
+            self._log_failure("save the watch state", e)
         try:
             self.session.stop()
-        except Exception:
-            logger.exception("Could not stop playback")
+        except Exception as e:
+            self._log_failure("stop playback", e)
 
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
         if not self.catalog.provider_names():
@@ -194,6 +209,11 @@ class TVController(QObject):
         self.catalog.select_provider(name, force_refresh=force_refresh)
 
     def refresh_overlays(self) -> None:
+        """After a settings change: repaint the rows and reload the guide."""
+        self._repaint()
+        self.catalog.refresh_epg()
+
+    def _repaint(self) -> None:
         """Repaint what depends on settings or EPG: column rows and the open drawer."""
         self.overlays.column.refresh_now()
         self.nav.changed.emit()
@@ -210,13 +230,23 @@ class TVController(QObject):
                 self._change_volume(-VOLUME_STEP * delta)  # ↑ is louder
             else:
                 self.zap.step(delta)
+        elif action in (Action.MEDIA_NEXT, Action.MEDIA_PREV):
+            delta = 1 if action is Action.MEDIA_NEXT else -1
+            if self._playing_vod():
+                self._seek(delta * SEEK_STEP_MS)
+            else:
+                self.zap.step(delta)
+                self._show_transport()
         elif action is Action.DIGIT:
             if not self._playing_vod():
                 self.zap.digit(payload)
         elif action is Action.PREVIOUS:
             self.zap.previous()
         elif action is Action.OPEN_DRAWER:
-            self._open_drawer()
+            if self.overlays.column.isVisible():
+                self._on_column_row(self.overlays.column.current_index())  # tune it now
+            else:
+                self._open_drawer()
         elif action in (Action.SEEK_BACK, Action.SEEK_FWD):
             self._seek(-SEEK_STEP_MS if action is Action.SEEK_BACK else SEEK_STEP_MS)
         elif action is Action.PLAY_PAUSE:
@@ -268,7 +298,7 @@ class TVController(QObject):
         """`steps` follows PointerInput: +1 is one notch down (the next channel)."""
         if not steps or self._closed:
             return
-        volume = _modifier_bits(modifiers) & _VOLUME_MODIFIERS
+        volume = as_int(modifiers) & _VOLUME_MODIFIERS
         if volume or self.config.mouse_wheel_action == "volume" or self._playing_vod():
             self._change_volume(-VOLUME_STEP * steps)
         else:
@@ -284,7 +314,7 @@ class TVController(QObject):
     def _on_column_wheel(self, steps: int, modifiers) -> None:
         if self._closed:
             return
-        if _modifier_bits(modifiers) & _VOLUME_MODIFIERS:
+        if as_int(modifiers) & _VOLUME_MODIFIERS:
             self._change_volume(-VOLUME_STEP * steps)
         else:
             self._zap_steps(steps)  # zap.step re-highlights, which keeps the column open
@@ -296,11 +326,18 @@ class TVController(QObject):
     # ---- tuning and playing -------------------------------------------------------------------
 
     def tune(self, channel: dict, *, group_key: str, channels: list[dict]) -> None:
+        """Tune a channel the shell chose (drawer, autotune, column click)."""
+        self._tune(channel, group_key, channels, from_zap=False)
+
+    def _tune(self, channel: dict, group_key: str, channels: list[dict], *, from_zap: bool) -> None:
         if self._closed:
             return
         context = self.zap.context
         if group_key != context.group_key or context.index_of(channel) < 0:
-            self.zap.set_context(ZapContext(group_key, channels))
+            # Numbers reach every live channel, not only the group's (TV numbers are global).
+            self.zap.set_context(ZapContext(group_key, channels, fallback=self._all_live()))
+        if not from_zap:
+            self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
         self.overlays.column.close()
         self._channel = channel
         self.overlays.banner.show_info(self.banner_info(channel))
@@ -332,6 +369,9 @@ class TVController(QObject):
         else:
             logger.debug("Not playable: %s", node)
 
+    def _all_live(self) -> list[dict]:
+        return list(self.catalog.items("live", ALL_GROUP_ID) or [])
+
     def _request(self, target: _Target) -> None:
         if self._inflight is not None:
             self._queued = target  # replaces any older queued target
@@ -345,36 +385,50 @@ class TVController(QObject):
         self._inflight = None
         self._queued = None
 
-    def _settle(self, request_id: int) -> Optional[_Target]:
-        """The in-flight target when `request_id` is still wanted; requests the queued one."""
+    def _take(self, request_id: int) -> Optional[_Target]:
+        """The in-flight target when `request_id` is the request we are waiting for."""
         if self._closed or self._inflight is None or self._inflight[0] != request_id:
             logger.debug("Ignoring the result of link request %s", request_id)
             return None
         target = self._inflight[1]
         self._inflight = None
-        if self._queued is not None:
-            queued, self._queued = self._queued, None
-            logger.debug(
-                "Dropping the link for %s: %s was chosen since", target.title, queued.title
-            )
-            self._request(queued)
-            return None
         return target
 
     def _on_link_ready(self, request_id: int, url: str) -> None:
-        target = self._settle(request_id)
+        target = self._take(request_id)
         if target is None:
             return
+        queued, self._queued = self._queued, None
+        if queued is not None:
+            if not queued.same_as(target):
+                logger.debug(
+                    "Dropping the link for %s: %s was chosen since", target.title, queued.title
+                )
+                self._request(queued)
+                return
+            target = queued  # chosen again meanwhile: this link serves the newest choice
         try:
             self._deliver(target, url)
         except Exception as e:
-            logger.exception("Could not play %s", target.title)
+            self._log_failure(f"play {target.title}", e)
             self._error(f"{target.title}: {e}")
 
     def _on_link_failed(self, request_id: int, message: str) -> None:
-        target = self._settle(request_id)
-        if target is not None:
-            self._error(f"{target.title}: {message}")
+        target = self._take(request_id)
+        if target is None:
+            return
+        if message == PROVIDER_LOADING_MESSAGE:
+            # A provider setup is running; providerReady asks again for the newest target.
+            if self._queued is None:
+                self._queued = target
+            return
+        queued, self._queued = self._queued, None
+        if queued is not None:
+            self._request(queued)  # the failed target was superseded: no error for it
+            return
+        current = self._current
+        self._channel = current.item if current is not None and current.live else None
+        self._error(f"{target.title}: {message}")
 
     def _deliver(self, target: _Target, url: str) -> None:
         provider = self.catalog.current_provider_name()
@@ -384,7 +438,10 @@ class TVController(QObject):
         if launcher is not None:
             ok, message = launcher(url)
             if not ok:
-                self._error(message or "The external player could not start")
+                first, _, rest = (message or "").strip().partition("\n")
+                if rest.strip():
+                    logger.info("External player: %s", scrub(rest))
+                self._error(first.strip() or "The external player could not start")
                 return
             self._current, self._cid = target, None
             if self._has_media():
@@ -397,6 +454,7 @@ class TVController(QObject):
                 latency=self.config.live_latency,
                 user_agent=item.get("user_agent"),
             )
+            self._reset_speed()
             if self.overlays.transport.isVisible():
                 self._show_live_transport(target)
         else:
@@ -404,6 +462,7 @@ class TVController(QObject):
             start = self.watch.resume_position(cid)
             self._current, self._cid = target, cid
             self.session.play(url, kind=classify(url, False), start_ms=start)
+            self._reset_speed()
             if start:
                 self._toast(f"Resumed at {fmt_duration(start)}")
             self.overlays.transport.show_vod(target.title, target.subtitle)
@@ -417,8 +476,12 @@ class TVController(QObject):
                 link=url,
                 group_id=target.group_key if target.live else None,
             )
-        except Exception:
-            logger.exception("Could not record %s in the watch history", target.title)
+        except Exception as e:
+            self._log_failure(f"record {target.title} in the watch history", e)
+
+    def _reset_speed(self) -> None:
+        self.session.set_rate(1.0)
+        self.overlays.transport.set_speed(1.0)
 
     def _external_launcher(self) -> Optional[Callable[[str], tuple[bool, str]]]:
         launcher: Optional[Callable[[str], tuple[bool, str]]] = None
@@ -431,13 +494,15 @@ class TVController(QObject):
     # ---- catalog events -----------------------------------------------------------------------
 
     def _on_provider_ready(self, name: str) -> None:
+        if self._closed:
+            return
         # A provider setup makes the catalog drop link results requested before it, so a
         # request still in flight may never settle: ask again for the newest target, unless
         # the provider changed and its channels belong to the old one.
         pending = self._queued or (self._inflight[1] if self._inflight is not None else None)
         self._drop_links()
         if self._provider is not None and name != self._provider:
-            self.zap.set_context(ZapContext())
+            self.zap.reset()
             self._channel = None
             pending = None
         self._provider = name
@@ -462,11 +527,14 @@ class TVController(QObject):
             self.nav.reset_to("live")
 
     def _on_provider_failed(self, name: str, message: str) -> None:
+        if self._closed:
+            return
         self._drop_links()
         self._error(f"{name}: {message}" if name else message)
+        self._open_drawer_if_idle()  # the sources stay reachable instead of a black screen
 
     def _on_section_ready(self, section: str) -> None:
-        if section != "live" or not self._await_live:
+        if self._closed or section != "live" or not self._await_live:
             return
         self._await_live = False
         autotune, self._autotune = self._autotune, None
@@ -475,16 +543,31 @@ class TVController(QObject):
         self._open_drawer_if_idle()
 
     def _on_section_failed(self, section: str, message: str) -> None:
-        if section != "live" or not self._await_live:
+        if self._closed or section != "live" or not self._await_live:
+            return
+        if message == PROVIDER_LOADING_MESSAGE:
+            return  # a setup is running; its providerReady arms this again
+        if self.catalog.groups("live"):
+            # NavModel keeps showing the saved catalog and posts a notice (toasted).
+            self._on_section_ready(section)
             return
         self._await_live = False
         self._autotune = None
         self._error(f"Live TV: {message}")
         self._open_drawer_if_idle()  # it shows the retry row
 
+    def _on_epg_ready(self) -> None:
+        if not self._closed:
+            self._repaint()
+
+    def _on_notice(self, text: str) -> None:
+        if not self._closed:
+            self._toast(text)
+
     def _open_drawer_if_idle(self) -> None:
         drawer = self.overlays.drawer
-        if not self._has_media() and self._inflight is None and not drawer.isVisible():
+        busy = self._has_media() or self._inflight is not None or self._queued is not None
+        if not busy and not drawer.isVisible():
             drawer.open_drawer()
 
     def _tune_last(self, item: dict, group: str) -> bool:
@@ -515,9 +598,11 @@ class TVController(QObject):
 
     def _on_zap_tune(self, channel: dict) -> None:
         context = self.zap.context
-        self.tune(channel, group_key=context.group_key, channels=context.channels)
+        self._tune(channel, context.group_key, context.channels, from_zap=True)
 
     def _on_column_requested(self, open_: bool) -> None:
+        if self._closed:
+            return  # zap timers may fire while the window is torn down
         column = self.overlays.column
         if open_:
             context = self.zap.context
@@ -528,38 +613,51 @@ class TVController(QObject):
             column.close()
 
     def _on_highlight(self, channel: dict, index: int) -> None:
-        self.overlays.column.highlight(index)
+        if not self._closed:
+            self.overlays.column.highlight(index)
+
+    def _on_digits(self, text: str) -> None:
+        self._digits = text
+        if not self._closed:
+            self.overlays.banner.show_digits(text)
 
     def _on_number_not_found(self, number: str) -> None:
-        self._toast(f"No channel {number}")
+        if not self._closed:
+            self._toast(f"No channel {number}")
 
     def _on_column_row(self, row: int) -> None:
         context = self.zap.context
         if 0 <= row < len(context.channels):
             self.tune(context.channels[row], group_key=context.group_key, channels=context.channels)
+        else:
+            self.overlays.column.close()
 
     # ---- session events -----------------------------------------------------------------------
 
     def _on_state(self, state: str) -> None:
+        if self._closed:
+            return
         self._state = state
         if state in ("paused", "playing"):
             self.overlays.transport.set_paused(state == "paused")
 
     def _on_position(self, position_ms: int, length_ms: int) -> None:
-        if self._cid is None or self._current is None or self._current.live:
+        if self._closed or self._cid is None or self._current is None or self._current.live:
             return
         try:
             self.watch.update_position(self._cid, position_ms, length_ms)
-        except Exception:
-            logger.exception("Could not save the playback position")
+        except Exception as e:
+            self._log_failure("save the playback position", e)
         self.overlays.transport.update_position(position_ms, length_ms)
 
     def _on_error(self, message: str) -> None:
+        if self._closed:
+            return
         title = self._current.title if self._current is not None else ""
         self._error(f"{title}: {message}" if title else message)
 
     def _on_ended(self) -> None:
-        if self._current is None:
+        if self._closed or self._current is None:
             return
         if self._current.live:
             self._toast("The stream ended")
@@ -567,8 +665,8 @@ class TVController(QObject):
         self._toast("Finished")
         try:
             self.watch.flush()
-        except Exception:
-            logger.exception("Could not save the watch state")
+        except Exception as e:
+            self._log_failure("save the watch state", e)
 
     # ---- tracks -------------------------------------------------------------------------------
 
@@ -628,23 +726,18 @@ class TVController(QObject):
     def _programmes(self, channel: dict, now: datetime, limit: int) -> list[Programme]:
         try:
             return list(self.catalog.programmes(channel, now, limit=limit))
-        except Exception:
-            logger.exception("EPG lookup failed for %r", channel.get("name"))
+        except Exception as e:
+            self._log_failure(f"look up the guide for {channel.get('name')!r}", e)
             return []
 
-    @staticmethod
-    def _number_text(channel: dict) -> str:
-        value = channel.get("number")
-        return "" if value is None else str(value).strip()
-
     def _number(self, channel: dict) -> str:
-        number = self._number_text(channel)
+        number = ZapContext.number_of(channel)
         if number:
             return number
         context = self.zap.context
         index = context.index_of(channel)
         # As ZapContext.by_number: list positions stand in only when nothing is numbered.
-        if index >= 0 and not any(self._number_text(c) for c in context.channels):
+        if index >= 0 and not any(ZapContext.number_of(c) for c in context.channels):
             return str(index + 1)
         return ""
 
@@ -657,20 +750,31 @@ class TVController(QObject):
             self._logos.request([url])
         return pixmap
 
+    def _on_logo_ready(self, url: str) -> None:
+        """Refresh a visible banner when its channel's logo arrives."""
+        banner, channel = self.overlays.banner, self._channel
+        if self._closed or channel is None or channel.get("logo") != url:
+            return
+        if banner.isVisible() and banner.info is not None and banner.info.logo is None:
+            banner.show_info(self.banner_info(channel))
+
     def _open_drawer(self) -> None:
         if not self.catalog.provider_names():
             self._welcome()
             return
         self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
         channel = self._channel or self.zap.context.current()
-        self.overlays.drawer.open_drawer(focus_key=_item_key(channel) if channel else None)
+        self.overlays.drawer.open_drawer(focus_key=item_key(channel) if channel else None)
 
     def _escape(self) -> None:
         overlays = self.overlays
         if overlays.drawer.isVisible():
             overlays.drawer.escape()  # clears the filter first, then closes
+        elif self._digits:
+            self.zap.cancel_digits()
+            overlays.banner.dismiss()
         elif overlays.column.isVisible():
-            overlays.column.close()
+            overlays.column.close()  # the zap forgets its highlight, so no rest tune follows
         elif overlays.banner.isVisible():
             overlays.banner.dismiss()
         else:
@@ -721,8 +825,16 @@ class TVController(QObject):
         self.overlays.toast.show_message(text, kind, ms)
 
     def _error(self, text: str) -> None:
-        logger.info("Error shown: %s", text)
-        self._toast(text, "error", ERROR_MS)
+        """Toast an error; addresses and query strings never reach the toast or INFO logs."""
+        clean = scrub(text)
+        logger.debug("Error (raw): %s", text)
+        logger.info("Error shown: %s", clean)
+        self._toast(clean, "error", ERROR_MS)
+
+    @staticmethod
+    def _log_failure(what: str, error: Exception) -> None:
+        logger.warning("Could not %s: %s (%s)", what, scrub(error), type(error).__name__)
+        logger.debug("Could not %s", what, exc_info=True)
 
     def _welcome(self) -> None:
         self._toast(WELCOME_TEXT, "info", WELCOME_MS)

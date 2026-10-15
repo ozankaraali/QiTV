@@ -2,7 +2,7 @@ import unittest
 
 from PySide6.QtCore import Qt
 
-from ui.keymap import Action, resolve
+from ui.keymap import Action, as_int, resolve
 
 NONE = Qt.KeyboardModifier.NoModifier
 SHIFT = Qt.KeyboardModifier.ShiftModifier
@@ -84,6 +84,24 @@ class ClosedKeymapTests(unittest.TestCase):
     def test_unmapped_key(self):
         self.assertIsNone(closed(K.Key_Q, "q"))
 
+    def test_remote_channel_keys(self):
+        self.assertEqual(closed(K.Key_ChannelUp), (Action.CH_NEXT, ""))
+        self.assertEqual(closed(K.Key_ChannelDown), (Action.CH_PREV, ""))
+
+    def test_media_keys(self):
+        for key in (K.Key_MediaTogglePlayPause, K.Key_MediaPlay, K.Key_MediaPause):
+            self.assertEqual(closed(key), (Action.PLAY_PAUSE, ""))
+        self.assertEqual(closed(K.Key_MediaNext), (Action.MEDIA_NEXT, ""))
+        self.assertEqual(closed(K.Key_MediaPrevious), (Action.MEDIA_PREV, ""))
+
+
+class AsIntTests(unittest.TestCase):
+    def test_accepts_enums_ints_and_none(self):
+        self.assertEqual(as_int(K.Key_A), 0x41)
+        self.assertEqual(as_int(CTRL | SHIFT), (CTRL | SHIFT).value)
+        self.assertEqual(as_int(7), 7)
+        self.assertEqual(as_int(None), 0)
+
 
 class OpenKeymapTests(unittest.TestCase):
     def test_arrows_page_enter_backspace(self):
@@ -117,6 +135,16 @@ class OpenKeymapTests(unittest.TestCase):
         self.assertIsNone(opened(K.Key_A, "a", CTRL))
         self.assertIsNone(opened(K.Key_7, "7", ALT))
         self.assertIsNone(opened(K.Key_Tab, "\t"))
+
+    def test_windows_altgr_types(self):
+        altgr = CTRL | ALT  # Windows reports AltGr as Ctrl+Alt
+        for key, text in ((K.Key_L, "ł"), (K.Key_Q, "@"), (K.Key_E, "€")):
+            self.assertEqual(opened(key, text, altgr), (Action.NAV_TEXT, text))
+        self.assertIsNone(opened(K.Key_A, "\x01", CTRL))  # Ctrl+A is a control character
+
+    def test_media_keys_work_with_the_drawer_open(self):
+        self.assertEqual(opened(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))
+        self.assertEqual(opened(K.Key_MediaNext), (Action.MEDIA_NEXT, ""))
 
     def test_space_and_f_need_ctrl(self):
         self.assertEqual(opened(K.Key_Space, " ", CTRL), (Action.PLAY_PAUSE, ""))

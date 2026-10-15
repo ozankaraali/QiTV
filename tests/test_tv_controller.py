@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import logging
 import os
 from types import SimpleNamespace
 import unittest
@@ -6,10 +7,11 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QPixmap, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QWidget
 
+from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.epg_view import Programme
 from services.navigation import NavModel, NavNode
 from services.vlc_profile import PlayKind
@@ -60,9 +62,22 @@ class FakeCatalog(NavCatalog):
         self.names = ["Home", "Backup"]
         self.links = []  # (request_id, item, section, is_episode)
         self.epg = {}
+        self.loading = False
+        self.epg_refreshes = 0
 
     def provider_names(self):
         return list(self.names)
+
+    def items(self, section, group_id):
+        if section == "live" and group_id == "*":
+            return [c for channels in self.live.values() for c in channels]
+        return super().items(section, group_id)
+
+    def is_loading(self):
+        return self.loading
+
+    def refresh_epg(self, *, force=False):
+        self.epg_refreshes += 1
 
     def request_link(self, item, *, section, is_episode=False):
         request_id = len(self.links) + 1
@@ -159,8 +174,11 @@ class FakeOverlay(QObject):
 
 
 class FakeBanner(FakeOverlay):
+    info = None
+
     def show_info(self, info):
         self.record("show_info", info)
+        self.info = info
         self.visible = True
 
     def show_digits(self, text):
@@ -181,6 +199,10 @@ class FakeColumn(FakeOverlay):
 
     def highlight(self, index):
         self.record("highlight", index)
+
+    def current_index(self):
+        moves = [c[-1] for c in self.calls if c[0] in ("open", "highlight")]
+        return moves[-1] if moves else -1
 
     def close(self):
         was_visible, self.visible = self.visible, False
@@ -273,6 +295,21 @@ class FakeToast(FakeOverlay):
 
     def messages(self):
         return [(text, kind) for text, kind, _ms in self.named("show_message")]
+
+
+class FakeLogos(QObject):
+    logoReady = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.pixmaps = {}
+        self.requested = []
+
+    def pixmap(self, url):
+        return self.pixmaps.get(url)
+
+    def request(self, urls):
+        self.requested.extend(urls)
 
 
 class FakeWindow:
@@ -448,7 +485,10 @@ class LinkPipelineTests(ControllerTestCase):
 
     def test_external_failure_toasts(self):
         self.config.play_in_mpv = True
-        self.external.result = (False, "MPV Media Player is not installed.")
+        self.external.result = (
+            False,
+            "MPV Media Player is not installed.\n\nPlease install MPV:\n• macOS: brew install mpv",
+        )
         self.play(0)
         self.assertEqual(self.external.calls, [("mpv", "http://stream/1")])
         self.assertEqual(self.toast.messages(), [("MPV Media Player is not installed.", "error")])
@@ -536,9 +576,11 @@ class StartupTests(ControllerTestCase):
         self.controller.start()
         self.catalog.providerFailed.emit("Home", "Handshake failed")
         self.assertEqual(self.toast.messages(), [("Home: Handshake failed", "error")])
+        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])  # sources stay reachable
 
     def test_live_section_failure_opens_the_drawer_with_a_hint(self):
         self.controller.start()
+        self.catalog.loaded = False  # nothing saved to fall back on
         self.catalog.providerReady.emit("Home")
         self.catalog.sectionFailed.emit("live", "Timed out")
         self.assertEqual(self.toast.messages(), [("Live TV: Timed out", "error")])
@@ -740,7 +782,7 @@ class TransportAndWheelTests(ControllerTestCase):
         self.assertEqual(self.session.toggles, 1)
         self.assertEqual(self.session.seeks, [42_000])
         self.assertEqual(self.session.relative, [-10_000])
-        self.assertEqual(self.session.rates, [1.5])
+        self.assertEqual(self.session.rates, [1.0, 1.5])  # each play starts at 1x
         self.assertEqual(self.window.calls, ["toggle_fullscreen"])
         self.session.stateChanged.emit("paused")
         self.session.stateChanged.emit("playing")
@@ -863,14 +905,261 @@ class RealOverlayTests(ControllerTestCase):
         self.assertTrue(overlays.transport.isVisible())
         controller.handle(Action.ESCAPE)
         self.assertFalse(overlays.banner.isVisible())
-        controller.handle(Action.OPEN_DRAWER)  # at Group | Item of the tuned channel
+        controller.handle(Action.OPEN_DRAWER)  # at Group | Item, on the tuned channel
         self.assertTrue(overlays.drawer.isVisible())
         self.assertEqual([n.key for n in self.nav.path], ["Home", "live", "10"])
+        self.assertEqual(overlays.drawer.highlighted().title, "Two")
         controller.handle(Action.NAV_TEXT, "x")
         controller.handle(Action.ESCAPE)  # clears the filter first
         self.assertTrue(overlays.drawer.isVisible())
         controller.handle(Action.ESCAPE)
         self.assertFalse(overlays.drawer.isVisible())
+
+
+class ReviewFixTests(ControllerTestCase):
+    """Fix round 1: findings from the review of the first controller."""
+
+    LEAK = "Error: http://h/player_api.php?username=u&password=p failed"
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+
+    def assert_no_leak(self, logs):
+        for text, _kind in self.toast.messages():
+            for secret in ("player_api", "password", "http://"):
+                self.assertNotIn(secret, text)
+        for record in logs.records:
+            if record.levelno >= logging.INFO:
+                self.assertNotIn("password", record.getMessage())
+                self.assertNotIn("player_api", record.getMessage())
+
+    def test_failure_text_never_leaks_addresses(self):
+        with self.assertLogs(level="DEBUG") as logs:
+            self.tune(0)
+            self.catalog.linkFailed.emit(1, self.LEAK)
+            self.catalog.loaded = False  # no saved groups: the live failure is an error
+            self.catalog.providerReady.emit("Home")
+            self.catalog.sectionFailed.emit("live", self.LEAK)
+        self.assertEqual(
+            self.toast.messages(),
+            [("One: Error: … failed", "error"), ("Live TV: Error: … failed", "error")],
+        )
+        self.assert_no_leak(logs)
+        debug = [r.getMessage() for r in logs.records if r.levelno == logging.DEBUG]
+        self.assertTrue(any("password=p" in m for m in debug))  # the raw text, at DEBUG only
+
+    def test_drawer_pick_in_flight_then_down_moves_on_from_it(self):
+        self.play(0)
+        self.tune(2)  # a drawer pick of Three, its link in flight
+        self.controller.handle(Action.CH_NEXT)
+        self.catalog.linkReady.emit(2, "http://stream/3")
+        self.assertEqual(self.requested(), ["One", "Three", "Four"])
+
+    def test_autotune_in_flight_then_down_moves_on_from_it(self):
+        self.config.last_live_channel = {
+            "provider_name": "Home",
+            "group_id": "10",
+            "item": CHANNELS[2],
+        }
+        self.catalog.providerReady.emit("Home")
+        self.catalog.sectionReady.emit("live")  # autotunes Three
+        self.controller.handle(Action.CH_NEXT)
+        self.catalog.linkReady.emit(1, "http://stream/3")
+        self.assertEqual(self.requested(), ["Three", "Four"])
+
+    def test_another_provider_resets_zapping(self):
+        self.catalog.providerReady.emit("Home")
+        self.play(0)
+        self.play(1)  # previous channel: One
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")
+        self.controller.handle(Action.PREVIOUS)
+        self.controller.handle(Action.CH_NEXT)
+        self.assertEqual(self.requested(), ["One", "Two"])  # nothing of Home's is tuned
+
+    def test_link_failure_while_loading_waits_for_the_provider(self):
+        self.catalog.providerReady.emit("Home")
+        self.tune(0)
+        self.catalog.loading = True
+        self.catalog.linkFailed.emit(1, PROVIDER_LOADING_MESSAGE)
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.requested(), ["One"])
+        self.catalog.loading = False
+        self.catalog.providerReady.emit("Home")
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.ready("http://stream/1")
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+
+    def test_live_section_still_loading_is_ignored(self):
+        self.catalog.loaded = False
+        self.catalog.providerReady.emit("Home")
+        self.catalog.sectionFailed.emit("live", PROVIDER_LOADING_MESSAGE)
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        self.catalog.loaded = True
+        self.catalog.sectionReady.emit("live")  # still waiting for the live section
+        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
+
+    def test_saved_catalog_failure_still_autotunes_and_notices(self):
+        self.config.last_live_channel = {
+            "provider_name": "Home",
+            "group_id": "10",
+            "item": CHANNELS[2],
+        }
+        self.catalog.providerReady.emit("Home")
+        self.catalog.sectionFailed.emit("live", UNREACHABLE_MESSAGE)
+        self.assertEqual(self.requested(), ["Three"])
+        self.assertEqual(
+            self.toast.messages(), [("Couldn't refresh Live TV; showing saved channels", "info")]
+        )
+
+    def test_refresh_overlays_reloads_the_guide_but_epg_ready_does_not(self):
+        self.controller.refresh_overlays()
+        self.assertEqual(self.catalog.epg_refreshes, 1)
+        self.catalog.epgReady.emit()  # a loaded guide repaints; asking again would loop
+        self.assertEqual(self.catalog.epg_refreshes, 1)
+        self.assertEqual(self.column.named("refresh_now"), [(), ()])
+
+    def test_numbers_reach_channels_outside_the_group(self):
+        self.catalog.live = {"10": CHANNELS[:2], "20": CHANNELS[2:]}
+        self.controller.tune(CHANNELS[0], group_key="10", channels=CHANNELS[:2])
+        self.ready("http://stream/1")
+        self.controller.handle(Action.DIGIT, "4")
+        self.assertTrue(wait_until(lambda: len(self.catalog.links) == 2))
+        self.assertEqual(self.requested(), ["One", "Four"])
+
+    def test_same_item_queued_keeps_the_link_in_flight(self):
+        self.tune(0)
+        self.tune(1)
+        self.tune(0)  # back to One before its link resolved
+        self.catalog.linkReady.emit(1, "http://stream/1")
+        self.assertEqual(self.requested(), ["One"])
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+
+    def test_failed_tune_restores_the_playing_channel(self):
+        self.play(0)
+        self.tune(2)
+        self.catalog.linkFailed.emit(2, UNREACHABLE_MESSAGE)
+        self.banner.dismiss()
+        self.controller.handle(Action.INFO)
+        self.assertEqual(self.banner.info.name, "One")
+
+    def test_escape_cancels_number_entry(self):
+        self.play(0)
+        self.controller.handle(Action.DIGIT, "4")
+        self.controller.handle(Action.ESCAPE)
+        self.assertEqual(self.banner.named("show_digits")[-1], ("",))
+        self.assertEqual(self.banner.calls[-1], ("dismiss",))
+        QTest.qWait(80)  # past the digit commit
+        self.assertEqual(self.requested(), ["One"])
+        self.assertEqual(self.window.calls, [])
+
+    def test_escape_with_the_column_open_cancels_the_rest_tune(self):
+        self.play(0)
+        self.controller.handle(Action.CH_NEXT)
+        self.controller.handle(Action.CH_NEXT)  # burst: column on Three
+        self.controller.handle(Action.ESCAPE)
+        self.assertFalse(self.column.visible)
+        self.ready("http://stream/2")
+        QTest.qWait(80)  # past the zap rest
+        self.assertEqual(self.requested(), ["One", "Two"])
+
+    def test_enter_with_the_column_open_tunes_the_highlight(self):
+        self.play(0)
+        self.controller.handle(Action.CH_NEXT)
+        self.controller.handle(Action.CH_NEXT)  # burst: column on Three
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertFalse(self.column.visible)
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        self.ready("http://stream/2")  # Two settles; the queued Three is requested
+        QTest.qWait(80)
+        self.assertEqual(self.requested(), ["One", "Two", "Three"])
+
+    def test_media_keys(self):
+        self.play(0)
+        self.controller.handle(Action.MEDIA_NEXT)
+        self.assertEqual(self.requested(), ["One", "Two"])
+        self.assertEqual(self.transport.named("show_live"), [("One", "")])
+        self.ready("http://stream/2")
+        self.nav.reset_to("movies")
+        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.ready("http://vod/heat.mkv")
+        self.session.seekable = True
+        self.controller.handle(Action.MEDIA_PREV)
+        self.controller.handle(Action.MEDIA_NEXT)
+        self.assertEqual(self.session.relative, [-10_000, 10_000])
+        self.assertEqual(len(self.catalog.links), 3)
+
+    def test_live_link_in_flight_then_vod_plays_only_the_vod(self):
+        self.tune(0)
+        self.nav.reset_to("movies")
+        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.catalog.linkReady.emit(1, "http://stream/1")
+        self.assertEqual(self.requested(), ["One", "Heat"])
+        self.catalog.linkReady.emit(2, "http://vod/heat.mkv")
+        self.assertEqual(self.played_urls(), ["http://vod/heat.mkv"])
+
+    def test_external_vod_stops_the_in_app_session(self):
+        self.play(0)
+        self.config.play_in_vlc = True
+        self.nav.reset_to("movies")
+        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.ready("http://vod/heat.mkv")
+        self.assertEqual(self.external.calls, [("vlc", "http://vod/heat.mkv")])
+        self.assertEqual(self.session.stops, 1)
+
+    def test_every_play_starts_at_normal_speed(self):
+        self.play(0)
+        self.assertEqual(self.session.rates, [1.0])
+        self.assertEqual(self.transport.named("set_speed"), [(1.0,)])
+
+    def test_closed_controller_ignores_catalog_signals(self):
+        self.controller.shutdown()
+        self.catalog.providerReady.emit("Home")
+        self.catalog.sectionReady.emit("live")
+        self.catalog.sectionFailed.emit("live", UNREACHABLE_MESSAGE)
+        self.catalog.providerFailed.emit("Home", UNREACHABLE_MESSAGE)
+        self.catalog.epgReady.emit()
+        self.zap.digit("9")  # zap timers may still fire while the window is torn down
+        QTest.qWait(80)  # past the digit commit: "No channel 9" must not be toasted
+        self.assertEqual(self.catalog.requests, [])
+        self.assertEqual(self.toast.calls, [])
+        self.assertEqual(self.banner.calls, [])
+        self.assertEqual(self.drawer.calls, [])
+        self.assertEqual(self.column.calls, [])
+
+
+class LogoTests(ControllerTestCase):
+    def test_banner_refreshes_when_its_logo_arrives(self):
+        logos = FakeLogos()
+        self.controller = TVController(
+            config=self.config,
+            catalog=self.catalog,
+            nav=self.nav,
+            zap=self.zap,
+            session=self.session,
+            watch=self.watch,
+            overlays=Overlays(self.banner, self.column, self.drawer, self.transport, self.toast),
+            window_actions=self.window,
+            external=self.external,
+            now=lambda: NOW,
+            logos=logos,
+        )
+        self.addCleanup(self.controller.shutdown)
+        self.controller.start()
+        channel = dict(CHANNELS[0], logo="http://logo/1.png")
+        self.controller.tune(channel, group_key="10", channels=[channel])
+        self.assertIsNone(self.banner.info.logo)
+        self.assertEqual(logos.requested, ["http://logo/1.png"])
+        logos.logoReady.emit("http://logo/other.png")
+        self.assertEqual(len(self.banner.named("show_info")), 1)
+        logos.pixmaps["http://logo/1.png"] = QPixmap(4, 4)
+        logos.logoReady.emit("http://logo/1.png")
+        self.assertIsNotNone(self.banner.info.logo)
 
 
 class ShutdownTests(ControllerTestCase):
