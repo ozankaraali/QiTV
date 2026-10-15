@@ -16,6 +16,7 @@ from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE
+from services.live.source import STREAM_LIMIT
 from services.navigation import NavModel, NavNode
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.zapping import ZapController
@@ -107,9 +108,11 @@ class FakeSession(QObject):
     positionChanged = Signal(int, int)
     errorOccurred = Signal(str)
     ended = Signal()
+    inputEnded = Signal()
 
     def __init__(self):
         super().__init__()
+        self.holding = False  # a stop leaves libVLC's input open until let_go()
         self.plays, self.seeks, self.relative, self.rates = [], [], [], []
         self.stops = self.toggles = 0
         self.seekable = False
@@ -129,6 +132,14 @@ class FakeSession(QObject):
 
     def is_seekable(self):
         return self.seekable
+
+    def holds_input(self):
+        return self.holding
+
+    def let_go(self):
+        """The worker ended libVLC's input: the provider connection is closed."""
+        self.holding = False
+        self.inputEnded.emit()
 
     def seek(self, ms):
         self.seeks.append(ms)
@@ -372,8 +383,11 @@ class FakeLiveSession(QObject):
         if not self.running:
             return
         self.calls.append(("stop",))
+        direct = self.mode == "direct"
         self.running, self.mode = False, ""
         self.playback.stop()
+        if direct and not self.playback.holds_input():
+            self.released.emit()  # as LiveSession: at once when nothing is left open
 
     def play_pipeline(self):
         """The session is ready: VLC opens the loopback stream."""
@@ -1604,6 +1618,7 @@ class FixRound2Tests(ControllerTestCase):
             ["WARNING:ui.tv_controller:Could not play Three: cannot open … (RuntimeError)"],
         )
         self.assertEqual(self.toast.messages()[-1], ("Three: cannot open …", "error"))
+        self.assertEqual([p[1]["name"] for p in self.watch.plays], ["One"])  # not recorded
         self.banner.dismiss()
         self.controller.handle(Action.INFO)
         self.assertEqual(self.banner.info.name, "One")
@@ -1668,9 +1683,9 @@ class PipelineCase(ControllerTestCase):
 
     def start_channel(self, index):
         """Tune a channel and wait for its live session to start (the grant is deferred)."""
-        count, running = len(self.starts()), self.live.running
+        count, pipeline = len(self.starts()), self.live.running and self.live.mode != "direct"
         self.play(index)
-        if running:  # the old channel's upstream closes first
+        if pipeline:  # the old channel's upstream closes first
             self.assertEqual(self.live.calls[-1], ("stop",))
             self.live.released.emit()
         self.assertTrue(wait_until(lambda: len(self.starts()) == count + 1))
@@ -1766,13 +1781,13 @@ class PipelineTuneTests(PipelineCase):
         self.tune(1)
         self.ready("file:///media/clip.mp4")
         self.assertEqual(self.live.calls[-1], ("stop",))
+        self.live.released.emit()
         self.assertEqual(self.session.plays[-1][0], "file:///media/clip.mp4")
         self.assertEqual(self.session.plays[-1][1]["kind"], PlayKind.VOD_FILE)
         self.tune(2)
         self.ready("udp://239.0.0.1:1234")
         self.assertEqual(self.session.plays[-1][0], "udp://239.0.0.1:1234")
         self.assertEqual(len(self.starts()), 1)
-        self.live.released.emit()
         self.assertEqual(self.budget.holders("Home"), [])
 
     def test_a_movie_stops_the_live_channel_and_gives_its_slot_back(self):
@@ -1782,8 +1797,8 @@ class PipelineTuneTests(PipelineCase):
         self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
         self.ready("http://vod/heat.mkv")
         self.assertIn(("stop",), self.live.calls)
-        self.assertEqual(self.played_urls()[-1], "http://vod/heat.mkv")
         self.live.released.emit()
+        self.assertEqual(self.played_urls()[-1], "http://vod/heat.mkv")
         self.assertEqual(self.budget.holders("Home"), [])
         self.controller.handle(Action.SEEK_BACK)  # the movie's keys reach the player again
         self.assertEqual(self.live.named("seek_relative"), [])
@@ -1810,6 +1825,137 @@ class PipelineTuneTests(PipelineCase):
         QTest.qWait(30)
         self.assertEqual(len(self.starts()), 1)
         self.assertEqual(self.requested(), ["One"])
+
+
+class ReleaseOrderTests(PipelineCase):
+    """Nothing opens the provider again before the previous stream is released (spec §6.9)."""
+
+    MOVIE_NODE = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+
+    def play_movie(self):
+        self.nav.reset_to("movies")
+        self.controller.play_item(self.MOVIE_NODE, [self.MOVIE_NODE], NavNode("group", "5", "F"))
+        self.ready("http://vod/heat.mkv")
+
+    def test_pipeline_to_movie(self):
+        self.start_pipeline(0)
+        self.play_movie()
+        self.assertEqual(self.played_urls(), ["http://127.0.0.1:9/t/s1/stream/0.ts"])
+        self.assertEqual(self.transport.named("show_vod"), [("Heat", "")])  # shown at once
+        self.live.released.emit()
+        self.assertEqual(self.played_urls()[-1], "http://vod/heat.mkv")
+
+    def test_movie_to_pipeline(self):
+        self.play_movie()
+        self.session.holding = True  # VLC still holds the movie's connection
+        self.play(0)
+        QTest.qWait(30)  # the slot is granted…
+        self.assertEqual(self.starts(), [])  # …but VLC has not let go of the movie
+        self.session.let_go()
+        self.assertEqual(len(self.starts()), 1)
+
+    def test_direct_channel_to_pipeline(self):
+        self.tune(0)
+        self.ready("udp://239.0.0.1:1234")
+        self.session.holding = True
+        self.play(1)
+        QTest.qWait(30)
+        self.assertEqual(self.starts(), [])
+        self.session.let_go()
+        self.assertEqual(self.starts()[0][0], "http://stream/2")
+
+    def test_pipeline_to_external_player(self):
+        self.start_pipeline(0)
+        self.config.play_in_vlc = True
+        self.play(1)
+        self.assertEqual(self.external.calls, [])
+        self.live.released.emit()
+        self.assertEqual(self.external.calls, [("vlc", "http://stream/2")])
+        self.assertEqual(self.budget.holders("Home"), [])
+
+    def test_direct_fallback_to_pipeline_needs_no_second_release(self):
+        self.start_channel(0)
+        self.live.play_direct()
+        self.play(1)  # its stop releases at once (re-entrant): nothing more to wait for
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        self.assertEqual(self.starts()[1][0], "http://stream/2")
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_the_wait_for_vlc_is_capped(self):
+        self.enterContext(mock.patch("ui.live_tuner.RELEASE_CAP_MS", 40))
+        controller = self.make_controller(self.column, live=FakeLiveSession(self.session))
+        controller.start()
+        self.controller.shutdown()
+        self.controller = controller
+        self.play_movie()
+        self.session.holding = True
+        with self.assertLogs("ui.live_tuner", "WARNING"):
+            self.play_movie()
+            self.assertTrue(wait_until(lambda: len(self.played_urls()) == 2, 1000))
+
+    def test_a_movie_after_a_movie_waits_for_the_first_to_end(self):
+        self.play_movie()
+        self.session.holding = True
+        self.play_movie()
+        self.assertEqual(len(self.played_urls()), 1)
+        self.session.let_go()
+        self.assertEqual(len(self.played_urls()), 2)
+
+
+class SlotWaitTests(PipelineCase):
+    def test_pause_pressed_while_the_tune_waits_applies_at_its_start(self):
+        self.play(0)
+        self.controller.handle(Action.PLAY_PAUSE)
+        self.assertEqual(self.session.toggles, 0)
+        self.assertTrue(wait_until(lambda: self.starts()))
+        self.assertEqual(self.live.calls[1:], [("toggle_pause",)])
+
+    def test_go_live_while_the_tune_waits_undoes_the_pause(self):
+        self.play(0)
+        self.controller.handle(Action.PLAY_PAUSE)
+        self.controller.handle(Action.GO_LIVE)
+        self.assertTrue(wait_until(lambda: self.starts()))
+        QTest.qWait(10)
+        self.assertEqual(self.live.calls[1:], [])
+
+    def test_a_start_that_raises_gives_its_slot_back_and_says_so(self):
+        def broken(url, **kwargs):
+            raise RuntimeError(f"cannot open {url}")
+
+        self.live.start = broken
+        with self.assertLogs("ui.live_tuner", "WARNING"):
+            self.play(0)
+            self.assertTrue(wait_until(lambda: self.toast.messages()))
+        self.assertEqual(self.toast.messages(), [("One: cannot open …", "error")])
+        self.assertEqual(self.budget.holders("Home"), [])
+        del self.live.start
+        self.start_channel(1)  # the next tune works
+        self.assertEqual(self.starts()[0][0], "http://stream/2")
+
+
+class StreamLimitTests(PipelineCase):
+    def test_a_refusal_names_the_limit_once_the_stb_link_was_made_again(self):
+        self.start_pipeline(0)
+        self.live.failed.emit(STREAM_LIMIT)
+        self.assertEqual(self.requested(), ["One", "One"])  # an STB token first
+        self.ready("http://stream/1?token=new")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        self.live.failed.emit(STREAM_LIMIT)
+        self.assertEqual(
+            self.toast.messages(), [("Your provider allows 1 streams at a time", "error")]
+        )
+        self.assertEqual(self.live.calls[-1], ("stop",))  # its slot goes back
+        self.live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), [])
+
+    def test_an_unknown_limit_is_said_plainly(self):
+        self.catalog.ptype = "M3UPLAYLIST"
+        self.start_pipeline(0)
+        self.live.failed.emit(STREAM_LIMIT)
+        self.assertEqual(
+            self.toast.messages(), [("Your provider limits concurrent streams", "error")]
+        )
 
 
 class PipelineControlTests(PipelineCase):
@@ -1866,7 +2012,15 @@ class PipelineControlTests(PipelineCase):
         self.controller.handle(Action.SEEK_BACK)
         self.controller.handle(Action.PLAY_PAUSE)
         self.assertEqual(self.live.calls[1:], [("toggle_pause",)])
-        self.assertEqual(self.toast.messages(), [("Rewind arrives with time-shift", "info")])
+        self.assertEqual(self.toast.messages(), [(UNAVAILABLE, "info")])
+
+    def test_seeking_while_the_pipeline_still_opens_says_nothing(self):
+        self.play(0)
+        self.controller.handle(Action.SEEK_BACK)  # waiting for its slot
+        self.assertTrue(wait_until(lambda: self.starts()))
+        self.controller.handle(Action.SEEK_BACK)  # the pipeline is not ready yet
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.live.named("seek_relative"), [])
 
     def test_pause_and_go_live_before_the_stream_opens_reach_the_live_session(self):
         self.start_channel(0)  # the pipeline is still opening: LiveSession remembers them
@@ -1931,6 +2085,7 @@ class PipelineControlTests(PipelineCase):
 
 class PipelineErrorTests(PipelineCase):
     def test_the_unavailable_notice_shows_once_per_channel(self):
+        self.catalog.ptype = "M3UPLAYLIST"  # no link to make again
         self.start_channel(0)
         self.live.notice.emit(UNAVAILABLE)
         self.live.notice.emit("Rewound past the buffer")
@@ -1985,6 +2140,39 @@ class PipelineErrorTests(PipelineCase):
         self.start_channel(1)  # a new tune may try again
         self.live.failed.emit("The stream could not be opened")
         self.assertEqual(self.requested(), ["One", "One", "Two", "Two"])
+
+    def test_an_stb_stream_that_ends_at_once_in_direct_play_is_made_again(self):
+        self.start_channel(0)
+        self.live.play_direct()
+        self.session.ended.emit()  # VLC reports some refusals (403) as an end
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.ready("http://stream/1?token=new")
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        self.live.play_direct()
+        self.session.ended.emit()  # once per tune
+        self.assertEqual(self.toast.messages(), [("The stream ended", "info")])
+
+    def test_a_failure_before_the_retry_does_not_use_up_the_notice(self):
+        self.start_channel(0)
+        self.live.notice.emit(UNAVAILABLE)  # an expired token also fails the pipeline
+        self.live.play_direct()
+        self.live.failed.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [])
+        self.ready("http://stream/1?token=new")
+        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
+        self.live.notice.emit(UNAVAILABLE)  # it really cannot time-shift
+        self.live.play_direct()
+        self.assertEqual(self.toast.messages(), [(UNAVAILABLE, "info")])
+
+    def test_a_held_notice_shows_once_the_direct_play_works(self):
+        self.start_channel(0)
+        self.live.notice.emit(UNAVAILABLE)
+        self.live.play_direct()
+        self.assertEqual(self.toast.messages(), [])
+        self.session.stateChanged.emit("playing")
+        self.session.stateChanged.emit("playing")
+        self.assertEqual(self.toast.messages(), [(UNAVAILABLE, "info")])
 
     def test_a_failure_after_the_user_moved_on_is_not_retried(self):
         self.start_pipeline(0)

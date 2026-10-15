@@ -293,8 +293,9 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         self.controller = controller
-        # A Windows self-update waits for background threads: the engine's must stop first.
-        call_before_update(self.stop_live)
+        # A Windows self-update waits for background threads: the engine's must stop first,
+        # and start again if the update cannot launch.
+        call_before_update(self.stop_live, self.restart_live)
         for source in (self.surface, self.host):
             source.clicked.connect(self._on_video_clicked)
             source.doubleClicked.connect(controller.video_double_clicked)
@@ -793,14 +794,30 @@ class TVWindow(QMainWindow):
         atexit.register(_exit_now)
 
     def stop_live(self) -> None:
-        """Close the live channel's stream, then the time-shift helper (bounded, ~0.1 s).
+        """Close the live channel's stream, then the time-shift helper.
 
         Before anything waits for background threads: the engine's supervisor thread runs
-        until its shutdown (window close, Windows self-update). Safe to call again.
+        until its shutdown (window close, Windows self-update). The shutdown blocks for at
+        most the engine's _SHUTDOWN_WAIT_MS (1.8 s; about 0.1 s normally). Safe to call again.
         """
-        self.controller.stop_live()  # live_session.stop(), keeping the budget in step
-        if self.engine is not None:
-            self.engine.shutdown()
+        try:
+            self.controller.stop_live()  # live_session.stop(), keeping the budget in step
+        finally:
+            if self.engine is not None:
+                self.engine.shutdown()
+                if self.live_session is not None:
+                    self.live_session.engine_shut_down()  # it signals nothing from now on
+
+    def restart_live(self) -> None:
+        """Start a new time-shift helper: a self-update stopped the old one, then failed."""
+        if self._closing or self.engine is None or self.live_session is None:
+            return
+        old, self.engine = self.engine, LiveEngine(str(self.engine.root_dir), self)
+        self.live_session.use_engine(self.engine)  # connected before it starts
+        self.engine.start()
+        old.deleteLater()
+        call_before_update(self.stop_live, self.restart_live)  # each hook runs once
+        logger.info("The update did not launch; time-shift is back on.")
 
     def _shut_down(self) -> None:
         self.epg_refresh.stop()

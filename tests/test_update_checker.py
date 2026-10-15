@@ -27,6 +27,9 @@ class Holder(QObject):
         self.calls.append("stop_live")
         self.pending[0] = False
 
+    def restart_live(self):
+        self.calls.append("restart_live")
+
 
 class WindowsUpdateTests(unittest.TestCase):
     @classmethod
@@ -34,9 +37,10 @@ class WindowsUpdateTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        hooks = mock.patch.object(update_checker, "_before_update", [])
-        hooks.start()
-        self.addCleanup(hooks.stop)
+        for name in ("_before_update", "_undo_update"):
+            hooks = mock.patch.object(update_checker, name, [])
+            hooks.start()
+            self.addCleanup(hooks.stop)
         self.calls, self.pending = [], [True]
 
     def update(self, *, threads_finish_later=False):
@@ -69,6 +73,27 @@ class WindowsUpdateTests(unittest.TestCase):
             process.Popen.call_args[0][0], ["C:/Downloads/qitv.exe", "--replace", sys.executable]
         )
         close_all.assert_called_once_with()
+
+    def test_a_launch_that_fails_runs_the_undo_hooks_before_the_error_dialog(self):
+        holder = Holder(self.calls, self.pending)
+        update_checker.call_before_update(holder.stop_live, holder.restart_live)
+
+        def dialog(*_args):
+            self.calls.append("dialog")
+            return mock.MagicMock()
+
+        with (
+            mock.patch.object(update_checker, "has_pending_threads", return_value=False),
+            mock.patch.object(update_checker, "subprocess") as process,
+            mock.patch.object(update_checker, "QMessageBox", side_effect=dialog),
+            mock.patch.object(update_checker, "_polish_msgbox"),
+            mock.patch.object(self.app, "closeAllWindows") as close_all,
+        ):
+            process.Popen.side_effect = OSError("not a valid application")
+            update_checker._perform_windows_update("C:/Downloads/qitv.exe", "https://release")
+        self.assertEqual(self.calls, ["stop_live", "restart_live", "dialog"])
+        close_all.assert_not_called()
+        self.assertEqual(update_checker._undo_update, [])  # once
 
     def test_without_hooks_the_update_still_waits_for_pending_threads(self):
         self.update(threads_finish_later=True)

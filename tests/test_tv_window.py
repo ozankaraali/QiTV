@@ -917,7 +917,7 @@ class LivePipelineWindowTests(WindowCase):
         self.assertRegex(urlsplit(url).path, r"^/[0-9a-f]+/[0-9a-f]+/stream/\d+\.ts$")
         self.assertEqual(kind, PlayKind.LIVE_PIPELINE)
         self.assertEqual(window.budget.holders(PROVIDER_NAME), ["main"])
-        self.assertEqual(window.engine._root, Path(self.config_dir) / "timeshift")
+        self.assertEqual(window.engine.root_dir, Path(self.config_dir) / "timeshift")
 
     def test_close_stops_the_live_session_then_the_engine_then_the_rest(self):
         window, order = self.window, []
@@ -939,7 +939,8 @@ class LivePipelineWindowTests(WindowCase):
         self.open_first_channel()
         self.assertTrue(wait_until(lambda: live.is_pipeline()))
         order.clear()  # LiveSession.start() stops first too
-        self.close_window()  # it also checks that no background thread is left
+        with self.assertNoLogs("services.live.live_session", "WARNING"):  # no close-cap warning
+            self.close_window()  # it also checks that no background thread is left
         self.assertEqual(
             order[:3], ["LiveSession.stop", "LiveEngine.shutdown", "CatalogService.shutdown"]
         )
@@ -956,6 +957,32 @@ class LivePipelineWindowTests(WindowCase):
         self.assertFalse(self.window.engine.is_available())
         self.assertEqual(process.Popen.call_args[0][0][:2], ["C:/Downloads/qitv.exe", "--replace"])
         close_all.assert_called_once_with()
+
+    def test_a_self_update_that_cannot_launch_brings_time_shift_back(self):
+        window = self.window
+        modes = []
+        window.live_session.modeChanged.connect(modes.append)
+        self.open_first_channel()
+        self.assertTrue(wait_until(lambda: modes == ["pipeline"]))
+        first = window.engine
+        with (
+            mock.patch("update_checker.subprocess") as process,
+            mock.patch("update_checker.QMessageBox"),
+            mock.patch("update_checker._polish_msgbox"),
+            mock.patch.object(self.app, "closeAllWindows") as close_all,
+        ):
+            process.Popen.side_effect = OSError("not a valid application")
+            update_checker._perform_windows_update("C:/Downloads/qitv.exe", "https://release")
+            # Retried every 25 ms while VLC's stop job runs: wait inside the patches.
+            self.assertTrue(wait_until(lambda: process.Popen.called and window.engine is not first))
+        close_all.assert_not_called()
+        self.assertIsNot(window.engine, first)
+        self.assertFalse(first.is_available())
+        self.assertTrue(wait_until(window.engine.is_available))
+        hooks = [stop() for stop, _undo in update_checker._before_update]
+        self.assertIn(window.stop_live, hooks)  # a later update stops it again
+        QTest.keyClick(window, Qt.Key.Key_Down)  # the next channel plays time-shifted again
+        self.assertTrue(wait_until(lambda: modes[-1:] == ["pipeline"] and len(modes) == 2, 5000))
 
 
 class NoProviderTests(WindowCase):

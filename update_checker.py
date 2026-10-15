@@ -4,7 +4,7 @@ import platform
 import re
 import subprocess
 import sys
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, TypeAlias
 import weakref
 import webbrowser
 
@@ -33,30 +33,49 @@ ASSET_PATTERNS = {
 
 # Keep references to background threads/workers to avoid premature GC
 _update_jobs: List[Tuple[QThread, "UpdateWorker"]] = []
-# Run before a self-update waits for background threads (weak: a closed window may go).
-_before_update: List["weakref.WeakMethod[Callable[[], None]]"] = []
+# Run before a self-update waits for background threads, and undone when its launch fails
+# (weak: a closed window may go).
+_Hook: TypeAlias = "weakref.WeakMethod[Callable[[], None]]"
+_before_update: List[Tuple[_Hook, Optional[_Hook]]] = []
+_undo_update: List[_Hook] = []
 
 
-def call_before_update(method: Callable[[], None]) -> None:
+def call_before_update(
+    method: Callable[[], None], undo: Optional[Callable[[], None]] = None
+) -> None:
     """Run the bound `method` before a Windows self-update waits for background threads.
 
     For work whose thread stays up for the whole run until told to stop: the live
     time-shift engine's supervisor (services/live/engine.py) would make the wait endless.
+    `undo` runs if the update then fails to launch and QiTV goes on. Each runs once: an
+    owner that goes on registers again.
     """
-    _before_update[:] = [ref for ref in _before_update if ref() is not None]
-    _before_update.append(weakref.WeakMethod(method))
+    _before_update[:] = [hook for hook in _before_update if hook[0]() is not None]
+    _before_update.append(
+        (weakref.WeakMethod(method), weakref.WeakMethod(undo) if undo is not None else None)
+    )
 
 
-def _run_before_update() -> None:
-    hooks, _before_update[:] = list(_before_update), []
-    for ref in hooks:
+def _call(refs: List[_Hook], what: str) -> None:
+    for ref in refs:
         method = ref()
         if method is None:
             continue
         try:
             method()
         except Exception:
-            logger.exception("Could not prepare for the update")
+            logger.exception("Could not %s", what)
+
+
+def _run_before_update() -> None:
+    hooks, _before_update[:] = list(_before_update), []
+    _call([stop for stop, _undo in hooks], "prepare for the update")
+    _undo_update.extend(undo for stop, undo in hooks if undo is not None and stop() is not None)
+
+
+def _undo_before_update() -> None:
+    hooks, _undo_update[:] = list(_undo_update), []
+    _call(hooks, "go on after the failed update")
 
 
 class UpdateWorker(QObject):
@@ -546,6 +565,7 @@ def _perform_windows_update(downloaded_path: str, release_url: str):
 
     except OSError as e:
         logger.error(f"Failed to launch update: {e}")
+        _undo_before_update()  # QiTV goes on: restart what the update stopped
         error_dialog = QMessageBox()
         error_dialog.setIcon(QMessageBox.Warning)
         error_dialog.setWindowTitle("Update Failed")
