@@ -1651,6 +1651,26 @@ high.m3u8
                         source.close()
 
 
+class SlicedTlsSocketTests(unittest.TestCase):
+    def test_only_a_slice_timeout_is_retried(self):
+        # The 0.25 s slice's own timeout has no errno and is retried until the deadline. A
+        # Winsock WSAETIMEDOUT (errno 10060) is sticky: retrying it would spin until then.
+        sliced = source_module._sliced_tls_socket(source_module._Interrupter())
+        sock = sliced.__new__(sliced)  # never connected: only the retry logic runs
+        sock._logical_timeout = 5.0
+        slice_timeout = TimeoutError("The read operation timed out")
+        with patch.object(ssl.SSLSocket, "read", side_effect=[slice_timeout] * 2 + [b"x"]):
+            self.assertEqual(sock.read(1), b"x")
+        sticky = TimeoutError(10060, "A connection attempt failed")
+        with patch.object(ssl.SSLSocket, "read", side_effect=[sticky, b"x"]) as read:
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError) as raised:
+                sock.read(1)
+        self.assertIs(raised.exception, sticky)
+        self.assertEqual(read.call_count, 1)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+
 class WindowsInterruptModeTests(SourceTestCase):
     """The Windows interrupt mode (no duplicate descriptors), forced here.
 

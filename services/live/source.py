@@ -341,7 +341,8 @@ def _sliced_tls_socket(interrupter: _Interrupter) -> type[ssl.SSLSocket]:
     The real socket timeout is at most ``_TLS_SLICE``; the caller's timeout is kept as a
     deadline over the retries. Retrying after an ``_ssl`` timeout is safe: it is raised
     only while OpenSSL waits for the network (WANT_READ or WANT_WRITE), and CPython
-    allows a write to be retried from a moved buffer.
+    allows a write to be retried from a moved buffer. Only that timeout, which has no
+    errno, is retried: a Winsock WSAETIMEDOUT is sticky and raised at once.
     """
 
     def waiting(self: Any, operation: Callable[[], _T]) -> _T:
@@ -352,7 +353,9 @@ def _sliced_tls_socket(interrupter: _Interrupter) -> type[ssl.SSLSocket]:
                 raise _Closed()
             try:
                 return operation()
-            except TimeoutError:
+            except TimeoutError as error:
+                if error.errno is not None:
+                    raise
                 if deadline is not None and time.monotonic() >= deadline:
                     raise
 
