@@ -1,0 +1,124 @@
+"""The fast-zap channel column (A2): a left-side list over the video."""
+
+import logging
+
+from PySide6.QtCore import QEvent, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QLinearGradient, QPainter
+from PySide6.QtWidgets import QAbstractItemView
+
+from ui.overlays.base import Overlay
+from ui.overlays.channel_rows import ChannelListView, ChannelRowDelegate, ChannelRowsModel
+from ui.overlays.painting import Units, elided
+from ui.theme import PALETTE, qcolor
+
+logger = logging.getLogger(__name__)
+
+COLUMN_FRACTION = 0.4
+
+
+class ChannelColumn(Overlay):
+    closed = Signal()
+    rowClicked = Signal(int)
+
+    def __init__(self, logos, now_provider, parent=None, idle_ms: int = 2500) -> None:
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self._title = ""
+        self._units = Units(100)
+        self._model = ChannelRowsModel(logos, now_provider, self)
+        self._view = ChannelListView(self)
+        self._view.setModel(self._model)
+        self._delegate = ChannelRowDelegate(1.0, self._view)
+        self._view.setItemDelegate(self._delegate)
+        self._view.rowClicked.connect(self._on_row_clicked)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.setInterval(idle_ms)
+        self._idle.timeout.connect(self.close)
+        if parent is not None:
+            parent.installEventFilter(self)
+        self.hide()
+
+    # ---- public API -------------------------------------------------------------------------
+
+    def open(self, title: str, channels: list[dict], index: int) -> None:
+        self._title = title
+        self._model.set_channels(channels)
+        self._relayout()
+        self.show()
+        self.raise_()
+        self.highlight(index)
+
+    def current_index(self) -> int:
+        return self._view.currentIndex().row()
+
+    def highlight(self, index: int) -> None:
+        if 0 <= index < self._model.rowCount():
+            idx = self._model.index(index)
+            self._view.setCurrentIndex(idx)
+            self._view.scrollTo(idx, QAbstractItemView.PositionAtCenter)
+        self._idle.start()
+
+    def refresh_now(self) -> None:
+        self._model.refresh_now()
+
+    def close(self) -> bool:
+        self._idle.stop()
+        was_visible = self.isVisible()
+        self.hide()
+        if was_visible:
+            self.closed.emit()
+        return True
+
+    # ---- internals --------------------------------------------------------------------------
+
+    def _on_row_clicked(self, row: int) -> None:
+        self._idle.start()
+        self.rowClicked.emit(row)
+
+    def eventFilter(self, obj, event):
+        if obj is self.parentWidget() and event.type() == QEvent.Resize:
+            self._relayout()
+        return False
+
+    def _relayout(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        host_w, host_h = parent.width(), parent.height()
+        self.setGeometry(QRect(0, 0, round(host_w * COLUMN_FRACTION), host_h))
+        units = Units(host_w)
+        self._units = units
+        self._view.units_width = host_w
+        top = units.px(2.6) + units.px(2.4) + units.px(1.0)
+        side = units.px(2.4)
+        self._view.setGeometry(side, top, self.width() - 2 * side, max(0, host_h - top))
+        self._view.doItemsLayout()
+        self._view.viewport().update()
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        grad = QLinearGradient(0, 0, self.width(), 0)
+        grad.setColorAt(0.0, qcolor("rgba(6,9,13,0.94)"))
+        grad.setColorAt(0.7, qcolor("rgba(6,9,13,0.94)"))
+        grad.setColorAt(1.0, qcolor("rgba(6,9,13,0)"))
+        p.setCompositionMode(QPainter.CompositionMode_Source)
+        p.fillRect(self.rect(), grad)
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        units = self._units
+        side = units.px(2.4)
+        top = units.px(2.6)
+        head = QRectF(side, top, self.width() - 2 * side, units.px(2.4))
+        p.setFont(units.font(1.7, QFont.Weight.Bold))
+        arrows = qcolor(PALETTE.text, 0.55)
+        p.setPen(arrows)
+        p.drawText(head, Qt.AlignLeft | Qt.AlignVCenter, "‹")
+        p.drawText(head, Qt.AlignRight | Qt.AlignVCenter, "›")
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(
+            head.adjusted(units.px(2.5), 0, -units.px(2.5), 0),
+            Qt.AlignCenter,
+            elided(p, self._title, head.width() - 2 * units.px(2.5)),
+        )
