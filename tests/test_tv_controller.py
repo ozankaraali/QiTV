@@ -785,9 +785,40 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.drawer.named("open_drawer"), [])
 
     def test_session_error_toasts(self):
+        self.catalog.ptype = "M3UPLAYLIST"  # no link to make again
         self.play(0)
         self.session.errorOccurred.emit("The stream could not be opened")
         self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+
+    def test_an_stb_channel_failing_in_direct_play_makes_its_link_again_once(self):
+        # STB play tokens expire: a fresh link before the error toast (H11), as the
+        # pipeline's final failure does.
+        self.play(0)  # the controller plays it itself (no time-shift pipeline)
+        self.session.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.ready("http://stream/1?play_token=new")
+        self.assertTrue(
+            wait_until(lambda: self.played_urls()[-1:] == ["http://stream/1?play_token=new"])
+        )
+        self.session.errorOccurred.emit("The stream could not be opened")  # once per play
+        self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.play(1)  # a new play may try again
+        self.session.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.requested(), ["One", "One", "Two", "Two"])
+
+    def test_xtream_and_m3u_channels_failing_in_direct_play_are_not_made_again(self):
+        for index, ptype in enumerate(("XTREAM", "M3UPLAYLIST")):
+            with self.subTest(ptype=ptype):
+                self.catalog.ptype = ptype
+                self.play(index)
+                self.session.errorOccurred.emit("Broken")
+                self.assertEqual(self.requested()[-1], CHANNELS[index]["name"])
+                self.assertEqual(len(self.catalog.links), index + 1)
+                self.assertEqual(
+                    self.toast.messages()[-1], (f"{CHANNELS[index]['name']}: Broken", "error")
+                )
 
 
 class StartupTests(ControllerTestCase):

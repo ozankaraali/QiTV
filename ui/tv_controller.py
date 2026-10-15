@@ -1236,6 +1236,10 @@ class TVController(QObject):
     def _on_error(self, message: str) -> None:
         if self._closed or self._tuner.running():
             return  # LiveSession recovers pipeline errors and reports the rest (failed)
+        current = self._current
+        if current is not None and self._live_controls.may_retry(current):
+            self._live_controls.retry(current)  # STB play tokens expire: a fresh link first
+            return
         title = self._current.title if self._current is not None else ""
         self._error(f"{title}: {message}" if title else message)
 
