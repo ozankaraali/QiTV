@@ -1,5 +1,5 @@
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 
@@ -73,6 +73,20 @@ def parse_m3u(data: str, categorize: bool = False):
     return _build_categorized_structure(items)
 
 
+def split_group_title(title: Optional[str]) -> List[str]:
+    """The groups an M3U group-title names, in order.
+
+    iptv-org writes a channel of several categories as one title, "Animation;Kids;Music": its
+    parts are stripped, empty ones dropped and a repeated one kept once. A title without ";"
+    is one group, as it is. No title: no group.
+    """
+    if not title:
+        return []
+    if ";" not in title:
+        return [title]
+    return list(dict.fromkeys(part.strip() for part in title.split(";") if part.strip()))
+
+
 def _build_categorized_structure(items: List[Dict]) -> Dict:
     """Build categorized structure from M3U items with group-title support.
 
@@ -84,13 +98,15 @@ def _build_categorized_structure(items: List[Dict]) -> Dict:
     sorted_channels: Dict[str, List[int]] = {}
 
     # Group items by category. The group title is also the category id: it is stable
-    # across refreshes/processes and cannot collide.
+    # across refreshes/processes and cannot collide. A channel of several groups is listed
+    # in each, as one item: "All" (the contents) has it once.
     for idx, item in enumerate(items):
-        category_id = item.get("group") or "Uncategorized"
+        category_ids = split_group_title(item.get("group")) or ["Uncategorized"]
         # Add tv_genre_id for compatibility with STB/Xtream structure
-        item["tv_genre_id"] = category_id
+        item["tv_genre_id"] = category_ids[0]
         item["number"] = str(idx + 1)
-        sorted_channels.setdefault(category_id, []).append(idx)
+        for category_id in category_ids:
+            sorted_channels.setdefault(category_id, []).append(idx)
 
     # Build categories list
     categories = [{"id": "*", "title": "All"}]

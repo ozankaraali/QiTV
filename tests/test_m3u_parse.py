@@ -1,6 +1,16 @@
+import os
+from types import SimpleNamespace
 import unittest
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtWidgets import QApplication
+
+from services.catalog import ALL_GROUP_ID, Group
 from services.m3u import decode_playlist, parse_m3u
+from services.navigation import FAVORITES_GROUP, NavModel
+from services.zapping import ZapContext
+from tests.test_catalog_service import make_service
 
 ENTRY = [
     "#EXTM3U",
@@ -74,3 +84,112 @@ class DecodePlaylistTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# iptv-org writes channels of several categories as one group-title: "Animation;Kids;Music".
+MULTI_GROUP = "\n".join(
+    [
+        "#EXTM3U",
+        '#EXTINF:-1 tvg-id="toons.test" group-title="Animation;Kids;Music",Toons',
+        "http://stream.test/toons.ts",
+        '#EXTINF:-1 group-title="Kids",Blocks',
+        "http://stream.test/blocks.ts",
+        '#EXTINF:-1 group-title="Music",Beats',
+        "http://stream.test/beats.ts",
+        '#EXTINF:-1 group-title="Animation; ;Animation;Kids",Doodles',
+        "http://stream.test/doodles.ts",
+        '#EXTINF:-1 group-title="News & Weather",Daily',
+        "http://stream.test/daily.ts",
+    ]
+)
+
+
+def names(items):
+    return [item["name"] for item in items]
+
+
+class GroupTitleSplitTests(unittest.TestCase):
+    """Owner (2026-10-15): a group title with ";" names several groups (M3U only)."""
+
+    def setUp(self):
+        self.playlist = parse_m3u(MULTI_GROUP, categorize=True)
+
+    def members(self, group):
+        contents = self.playlist["contents"]
+        return names(contents[i] for i in self.playlist["sorted_channels"][group])
+
+    def test_a_channel_of_two_groups_is_in_both(self):
+        self.assertEqual(self.members("Animation"), ["Toons", "Doodles"])
+        self.assertEqual(self.members("Kids"), ["Toons", "Blocks", "Doodles"])
+        self.assertEqual(self.members("Music"), ["Toons", "Beats"])
+
+    def test_parts_are_stripped_and_empty_or_repeated_ones_dropped(self):
+        # "Animation; ;Animation;Kids": Animation and Kids, Doodles once in each.
+        groups = [g for g, members in self.playlist["sorted_channels"].items() if 3 in members]
+        self.assertEqual(groups, ["Animation", "Kids"])
+
+    def test_the_groups_keep_their_order_and_one_channel_stays_one_item(self):
+        titles = [c["title"] for c in self.playlist["categories"]]
+        self.assertEqual(titles, ["All", "Animation", "Kids", "Music", "News & Weather"])
+        self.assertEqual(
+            names(self.playlist["contents"]), ["Toons", "Blocks", "Beats", "Doodles", "Daily"]
+        )
+        toons = self.playlist["contents"][0]
+        self.assertEqual(toons["group"], "Animation;Kids;Music")  # exports write it back as is
+        self.assertEqual(toons["tv_genre_id"], "Animation")
+
+    def test_a_title_without_a_semicolon_is_unchanged(self):
+        playlist = parse_m3u(
+            '#EXTM3U\n#EXTINF:-1 group-title=" Kids ",A\nhttp://s.test/a.ts\n'
+            "#EXTINF:-1,B\nhttp://s.test/b.ts\n",
+            categorize=True,
+        )
+        self.assertEqual(playlist["sorted_channels"], {" Kids ": [0], "Uncategorized": [1]})
+
+
+class MultiGroupChannelTests(unittest.TestCase):
+    """One channel in several groups stays one channel: All, zapping and Favorites."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        provider = {"name": "Home", "type": "M3UPLAYLIST", "url": "http://playlist.test/a.m3u"}
+        self.catalog, _providers, factory, _epg = make_service(provider)
+        factory.results["m3u"] = {"result": parse_m3u(MULTI_GROUP, categorize=True)}
+        self.catalog.request_section("live")
+        self.config = SimpleNamespace(favorites=[], watch_history=[])
+        self.nav = NavModel(self.catalog, self.config)
+
+    def test_all_lists_and_counts_each_channel_once(self):
+        all_items = self.catalog.items("live", ALL_GROUP_ID)
+        self.assertEqual(names(all_items), ["Toons", "Blocks", "Beats", "Doodles", "Daily"])
+        self.assertEqual(self.catalog.groups("live")[0], Group("live", ALL_GROUP_ID, "All", 5))
+
+    def test_the_same_channel_in_each_group(self):
+        toons = [
+            next(i for i in self.catalog.items("live", g) if i["name"] == "Toons")
+            for g in ("Animation", "Kids", "Music")
+        ]
+        self.assertTrue(all(item is toons[0] for item in toons))  # one identity everywhere
+
+    def test_zapping_in_a_group_walks_that_groups_channels_only(self):
+        self.nav.reset_to("live", "Kids")
+        channels = [node.payload for node in self.nav.children(self.nav.path[-1])]
+        self.assertEqual(names(channels), ["Toons", "Blocks", "Doodles"])
+        zap = ZapContext("Kids", channels)
+        zap.set_current(channels[0])
+        walked = []
+        for _ in range(3):
+            index, channel = zap.peek(1)
+            zap.current_index = index
+            walked.append(channel["name"])
+        self.assertEqual(walked, ["Blocks", "Doodles", "Toons"])
+
+    def test_a_favorite_in_several_groups_shows_once(self):
+        self.config.favorites = ["Toons"]
+        self.nav.reset_to("live")
+        pinned = self.nav.children(self.nav.path[1])[0]
+        self.assertEqual((pinned.key, pinned.count), (FAVORITES_GROUP, 1))
+        self.assertEqual([n.title for n in self.nav.children(pinned)], ["Toons"])
