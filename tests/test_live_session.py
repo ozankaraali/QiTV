@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 import services.live.live_session as live_session
 from services.live.live_session import LiveSession
+from services.live.source import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.live.timeline import Span
 from services.playback import PlaybackState
@@ -133,9 +134,11 @@ class FakePlayback(QObject):
     positionChanged = Signal(int, int)
     errorOccurred = Signal(str)
     ended = Signal()
+    inputEnded = Signal()
 
     def __init__(self):
         super().__init__()
+        self.holding = False  # a stop leaves libVLC's input open until the test ends it
         self.plays = []  # (url, kind, latency)
         self.stops = 0
         self.paused = []
@@ -163,6 +166,14 @@ class FakePlayback(QObject):
 
     def state(self):
         return self.current
+
+    def holds_input(self):
+        return self.holding
+
+    def let_go(self):
+        """The worker ended libVLC's input."""
+        self.holding = False
+        self.inputEnded.emit()
 
     def time_ms(self):
         return self.ms
@@ -1288,6 +1299,127 @@ class InterruptionTests(LiveSessionCase):
         self.playback.errorOccurred.emit("The stream could not be played")
         self.assertEqual(self.failures, ["The stream could not be played"])
         self.assertEqual(len(self.playback.plays), plays)
+
+
+class InputReleaseTests(LiveSessionCase):
+    """A provider stream VLC played directly counts as released once libVLC let go of it."""
+
+    def direct(self):
+        self.engine.lose()
+        self.start()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.playback.holding = True
+
+    def test_a_direct_channel_is_released_once_vlc_let_go_of_it(self):
+        self.direct()
+        self.live.stop()
+        self.assertEqual(self.releases, [])  # VLC may still hold the provider connection
+        self.playback.let_go()
+        self.assertEqual(self.releases, [True])
+        self.playback.let_go()
+        self.assertEqual(self.releases, [True])
+        self.assertEqual(self.active_timers(), [])
+
+    def test_the_wait_for_vlc_is_capped(self):
+        self.patch("_CLOSE_CAP_MS", 50)
+        self.direct()
+        with self.assertLogs("services.live.live_session", "WARNING"):
+            self.live.stop()
+            self.wait_until(lambda: self.releases)
+        self.assertEqual(self.active_timers(), [])
+
+    def test_a_start_after_a_direct_channel_waits_for_vlc_to_let_go(self):
+        self.direct()
+        self.engine.up = True
+        self.live.use_engine(self.engine)  # time-shift is back (a restarted engine)
+        self.live.stop()
+        self.start()
+        self.assertEqual(self.engine.opened, [])  # the old provider stream is still open
+        self.playback.let_go()
+        self.assertEqual(len(self.engine.opened), 1)
+        self.assertEqual(self.releases, [True])
+
+    def test_a_pipeline_stop_does_not_wait_for_vlc(self):
+        self.ready(segments(0, 2))  # VLC plays the loopback stream, not the provider
+        self.playback.holding = True
+        self.live.stop()
+        self.engine.answer()
+        self.assertEqual(self.releases, [True])
+
+
+class EngineShutdownTests(LiveSessionCase):
+    def test_after_the_engine_shut_down_nothing_waits_for_its_close(self):
+        self.ready(segments(0, 2))
+        self.live.stop()
+        self.assertEqual(self.releases, [])
+        with self.assertNoLogs("services.live.live_session", "WARNING"):
+            self.live.engine_shut_down()
+            QTest.qWait(10)
+        self.assertEqual(self.releases, [True])  # at once, not after the close cap
+        self.assertEqual(self.active_timers(), [])
+
+    def test_starts_play_directly_until_another_engine_is_used(self):
+        old = self.engine
+        self.live.engine_shut_down()
+        self.start()
+        self.assertEqual(old.opened, [])
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.live.stop()
+        self.engine = FakeEngine()
+        self.live.use_engine(self.engine)
+        sid = self.ready(segments(0, 2))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 0))
+        old.available.emit(False)  # the old engine is no longer heard
+        old.sessionFailed.emit(sid, "network", "The stream could not be reached.")
+        self.assertTrue(self.live.is_pipeline())
+
+
+class StreamLimitTests(LiveSessionCase):
+    """The provider refused for its connection limit: playing directly would be refused too."""
+
+    def assert_refused(self, sid, plays):
+        self.assertIn(sid, self.engine.closed)
+        self.engine.answer()
+        self.assertEqual(len(self.playback.plays), plays)  # nothing direct
+        self.assertEqual(self.failures, [STREAM_LIMIT])
+        self.assertNotIn("direct", self.modes)
+        self.assertFalse(self.live.is_pipeline())
+        self.assertEqual(self.active_timers(), [])
+        self.live.stop()
+        self.assertEqual(self.releases, [True])
+
+    def test_before_ready(self):
+        sid = self.start()
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+        self.assertEqual(self.notices, [])  # not "Time-shift isn't available"
+        self.assert_refused(sid, 0)
+
+    def test_at_the_live_edge(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        stops = self.playback.stops
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+        self.assertEqual(self.playback.stops, stops + 1)
+        self.assert_refused(sid, 1)
+
+    def test_while_shifted_the_buffer_plays_to_its_end_first(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(4.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        plays = len(self.playback.plays)
+        self.engine.sessionFailed.emit(sid, "http", STREAM_LIMIT)
+        self.assertEqual(self.notices, [BUFFERED])
+        self.assertEqual(self.failures, [])
+        self.playback.set_state(PlaybackState.ENDED)
+        self.playback.ended.emit()
+        self.assertEqual(self.notices, [BUFFERED])
+        self.assert_refused(sid, plays)
+
+    def test_another_http_failure_still_plays_directly(self):
+        sid = self.start()
+        self.engine.sessionFailed.emit(sid, "http", "The channel could not be reached over HTTP.")
+        self.assert_falls_back(sid, UNAVAILABLE, 0)
 
 
 class HelperDeathTests(LiveSessionCase):

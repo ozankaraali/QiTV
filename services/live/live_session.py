@@ -58,12 +58,19 @@ Interruptions while playing from the pipeline:
   connection; playing what's buffered", timeline `ended`), and fall back when it runs out
   or on Go live. Before ready, fall back with "Time-shift isn't available…".
 
+A source that the provider refused for its connection limit (`STREAM_LIMIT`, spec §6.9) is
+not played directly, which would be refused too: once the buffer (if time-shifted) has
+played, the session closes and `failed(STREAM_LIMIT)` reports it.
+
 Engine signals for any session but the current one are ignored, and so are failures after
 `sessionEnded` (only `sessionClosed` follows those). `released()` follows `stop()` once no
-session this object opened is still open (or after `_CLOSE_CAP_MS`): at once in direct
-mode. A `start()` during that wait opens its session only after `released()`.
-`failed(message)` reports a playback error in direct mode; pipeline playback errors are
-recovered here and never reported.
+session this object opened is still open (or after `_CLOSE_CAP_MS`) and, after direct play,
+once libVLC let go of the provider's stream (`inputEnded`, or after `_CLOSE_CAP_MS`). A
+`start()` during that wait opens its session only after `released()`. After
+`engine_shut_down()` nothing the engine held counts as open, and starts play directly until
+`use_engine()` hands over a restarted engine.
+`failed(message)` reports a playback error in direct mode, or the provider's refusal for its
+connection limit; pipeline playback errors are recovered here and never reported.
 """
 
 from __future__ import annotations
@@ -77,6 +84,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.live.source import STREAM_LIMIT
 from services.live.stay_live import TARGETS, Mode, StayLive
 from services.live.timeline import Span
 from services.playback import PlaybackState, Session
@@ -113,6 +121,7 @@ class _Phase(Enum):
     RECOVERING = "recovering"  # the helper died: waiting for the engine's reopen
     FALLING_BACK = "falling_back"  # direct play waits for the session to close
     DIRECT = "direct"  # VLC plays the provider URL
+    REFUSED = "refused"  # the provider refused for its connection limit: nothing plays
 
 
 # Phases with a stream still to open: a pause, resume or Go live is remembered for it.
@@ -167,6 +176,10 @@ class LiveSession(QObject):
         self._recovery_timer.timeout.connect(self._on_recovery_timeout)
         self._close_timer = QTimer(self, singleShot=True)
         self._close_timer.timeout.connect(self._on_close_cap)
+        self._input_timer = QTimer(self, singleShot=True)
+        self._input_timer.timeout.connect(self._on_input_cap)
+        self._input_open = False  # stopped direct play: libVLC may still hold the stream
+        self._limited = False  # the provider refused for its connection limit
         self._phase = _Phase.IDLE
         self._mode = ""
         self._dead = False  # available(False): direct play for the rest of the run
@@ -198,15 +211,25 @@ class LiveSession(QObject):
         self._edge_moved = 0.0  # when it last moved (for bursts: when the last one landed)
         # Bursty sources: (estimate, correction, when, position) at the last tick.
         self._smoothed: Optional[tuple[float, float, float, float]] = None
-        engine.available.connect(self._on_available)
-        engine.sessionReady.connect(self._on_ready)
-        engine.sessionUpdated.connect(self._on_updated)
-        engine.sessionFailed.connect(self._on_failed)
-        engine.sessionEnded.connect(self._on_ended)
-        engine.sessionClosed.connect(self._on_closed)
+        self._wire_engine(engine, connect=True)
         playback.stateChanged.connect(self._on_state)
         playback.ended.connect(self._on_interrupted)
         playback.errorOccurred.connect(self._on_error)
+        playback.inputEnded.connect(self._on_input_ended)
+
+    def _wire_engine(self, engine: LiveEngine, *, connect: bool) -> None:
+        for signal, slot in (
+            (engine.available, self._on_available),
+            (engine.sessionReady, self._on_ready),
+            (engine.sessionUpdated, self._on_updated),
+            (engine.sessionFailed, self._on_failed),
+            (engine.sessionEnded, self._on_ended),
+            (engine.sessionClosed, self._on_closed),
+        ):
+            if connect:
+                signal.connect(slot)
+            else:
+                signal.disconnect(slot)
 
     # ---- public ------------------------------------------------------------------------
     @property
@@ -216,6 +239,22 @@ class LiveSession(QObject):
 
     def is_pipeline(self) -> bool:
         return self._mode == "pipeline"
+
+    def engine_shut_down(self) -> None:
+        """The engine was shut down, which no signal tells: count it gone for this run.
+
+        Nothing it held is open any more, so a stop's wait for its close ends now (without
+        the close-cap warning); later starts play directly until `use_engine()`.
+        """
+        self._on_available(False)
+
+    def use_engine(self, engine: LiveEngine) -> None:
+        """Drive `engine` (a restart after a shutdown) from the next start; before its start()."""
+        if engine is not self._engine:
+            self._wire_engine(self._engine, connect=False)
+            self._engine = engine
+            self._wire_engine(engine, connect=True)
+        self._dead = False
 
     def start(
         self,
@@ -239,14 +278,14 @@ class LiveSession(QObject):
         }
         self._stay = StayLive(self._latency)
         self._snapshot_cache = {}
-        self._ended = self._source_lost = self._paused = False
+        self._ended = self._source_lost = self._paused = self._limited = False
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
         self._edge_seen = self._smoothed = None
         self._base = self._elapsed = 0.0
         self._last_ms, self._last_wall = 0, self._clock()
         self._set_rate(1.0)  # every channel starts at normal speed
-        if self._unclosed:
+        if self._unclosed or self._input_open:
             self._phase = _Phase.STARTING  # after the earlier upstream closed (released)
             return
         self._begin()
@@ -255,6 +294,7 @@ class LiveSession(QObject):
         """Stop playback and close the session; `released()` follows (see the docstring)."""
         if self._phase is _Phase.IDLE:
             return
+        direct = self._phase is _Phase.DIRECT
         self._stop_timers()
         self._phase = _Phase.IDLE
         self._mode = ""
@@ -262,6 +302,10 @@ class LiveSession(QObject):
         self._playback.stop()
         if sid is not None:
             self._close(sid)
+        if direct and self._playback.holds_input():
+            # libVLC ends its input on a worker: the provider connection may outlive stop().
+            self._input_open = True
+            self._input_timer.start(_CLOSE_CAP_MS)
         self._release_owed = True
         if not self._unclosed:
             self._all_closed()
@@ -388,6 +432,8 @@ class LiveSession(QObject):
 
     def _all_closed(self) -> None:
         """No session this object opened is open: run what waited for that."""
+        if self._input_open:
+            return  # libVLC still ends the provider stream it played directly
         if self._release_owed:
             self._release_owed = False
             self.released.emit()
@@ -400,6 +446,9 @@ class LiveSession(QObject):
 
     def _fall_back(self, message: str) -> None:
         """Close the session, then play directly once its upstream is closed (spec §9)."""
+        if self._limited:
+            self._refuse()
+            return
         self._stop_timers()
         sid, self._sid = self._sid, None
         self._phase = _Phase.FALLING_BACK
@@ -411,6 +460,20 @@ class LiveSession(QObject):
             self._close(sid)
         if not self._unclosed:
             self._play_direct()
+
+    def _refuse(self) -> None:
+        """The provider refused for its connection limit: close it all, play nothing."""
+        self._stop_timers()
+        sid, self._sid = self._sid, None
+        self._phase = _Phase.REFUSED
+        self._mode = ""
+        self._paused = self._source_lost = False
+        self._deferred = None
+        self._after_update = self._retry = self._failing_since = None
+        self._playback.stop()
+        if sid is not None:
+            self._close(sid)
+        self.failed.emit(STREAM_LIMIT)
 
     def _play_direct(self) -> None:
         self._phase = _Phase.DIRECT
@@ -492,9 +555,11 @@ class LiveSession(QObject):
         if self._phase is _Phase.RECOVERING:
             self._fall_back(LOST)
 
-    def _on_failed(self, sid: str, kind: str, _message: str) -> None:
+    def _on_failed(self, sid: str, kind: str, message: str) -> None:
         if sid != self._sid or self._ended:
             return
+        if message == STREAM_LIMIT:
+            self._limited = True  # final like any "http" failure, but nothing plays directly
         if kind == "disk":  # not final: the helper went on in RAM
             self.notice.emit(DISK)
             if self._phase is _Phase.PIPELINE:
@@ -541,6 +606,18 @@ class LiveSession(QObject):
         _LOG.warning("The live buffer did not confirm a close in time; going on without it.")
         self._unclosed.clear()
         self._all_closed()
+
+    def _on_input_ended(self) -> None:
+        if self._input_open:
+            self._input_open = False
+            self._input_timer.stop()
+            if not self._unclosed:
+                self._all_closed()
+
+    def _on_input_cap(self) -> None:
+        if self._input_open:
+            _LOG.warning("VLC did not let go of the channel in time; going on without it.")
+            self._on_input_ended()
 
     # ---- playback ----------------------------------------------------------------------
     def _on_state(self, state: str) -> None:
