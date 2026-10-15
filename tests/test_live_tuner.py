@@ -227,6 +227,8 @@ class SlotRoleTests(unittest.TestCase):
                 "user_agent": "QiTV",
                 "disk": True,
                 "max_bytes": 4096 * 1024 * 1024,
+                # What the helper falls back to if the disk fails: the memory per stream (H12).
+                "ram_bytes": 256 * 1024 * 1024,
             },
         )
         self.config.timeshift_enabled = False
@@ -242,6 +244,9 @@ class SlotRoleTests(unittest.TestCase):
         self.config.timeshift_enabled = True
         forced = start_kwargs(LiveStart(URL, "QiTV", False), self.config, disk=False)
         self.assertEqual((forced["disk"], forced["max_bytes"]), (False, 512 * 1024 * 1024))
+        self.assertNotIn("ram_bytes", forced)  # in memory already
+        on_disk = start_kwargs(LiveStart(URL, "QiTV", False), self.config)
+        self.assertEqual(on_disk["ram_bytes"], 512 * 1024 * 1024)
 
     def test_one_disk_ring_at_most_the_other_player_keeps_it(self):
         # Ruling (M5): the user's disk cap is the total: a second stream goes to RAM.

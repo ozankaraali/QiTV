@@ -84,7 +84,7 @@ _STOP_GRACE = 0.5
 _TERMINATE_GRACE = 0.5
 _RESTARTS = 1
 _HELLO_TIMEOUT = 30.0  # a helper that never says hello counts as dead
-_RAM_BYTES = 128 * 1024 * 1024  # what the helper itself falls back to when the disk fails
+_RAM_BYTES = 128 * 1024 * 1024  # a disk ring's memory fallback when it names none
 _SHUTDOWN_WAIT_MS = 1800  # the escalation takes at most 1.5 s
 _SESSION_PREFIX = ".qitv-timeshift-"
 _INTERNAL = "The live buffer stopped unexpectedly."
@@ -96,6 +96,12 @@ _Command = tuple[Any, ...]
 
 def _session_dir() -> str:
     return _SESSION_PREFIX + secrets.token_hex(16)
+
+
+def _fallback_bytes(ring: dict[str, Any]) -> int:
+    """The memory a disk ring goes on in when its disk fails (as the helper sizes it)."""
+    size = ring.get("ram_bytes")
+    return size if isinstance(size, int) and size > 0 else _RAM_BYTES
 
 
 @dataclass
@@ -254,7 +260,7 @@ class _Supervisor(QThread):
                 return
             if message[2] == "disk":
                 # The only non-final error: the helper went on in RAM, and so does a reopen.
-                ram = {"kind": "ram", "max_bytes": _RAM_BYTES}
+                ram = {"kind": "ram", "max_bytes": _fallback_bytes(record.command[5])}
                 record.command = (*record.command[:5], ram, *record.command[6:])
             else:
                 # Final, "crashed" included: a reopen would only retry what failed.
@@ -503,13 +509,17 @@ class LiveEngine(QObject):
         disk: bool,
         max_bytes: int,
         live_delay: float = 6.0,
+        ram_bytes: int | None = None,
     ) -> str:
+        """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None)."""
         sid = secrets.token_hex(8)
         if self._shut:
             return sid
         ring: dict[str, Any] = {"kind": "ram", "max_bytes": int(max_bytes)}
         if disk:
             ring = {"kind": "disk", "dir": _session_dir(), "max_bytes": int(max_bytes)}
+            if ram_bytes is not None:
+                ring["ram_bytes"] = int(ram_bytes)
         self._sessions[sid] = _View()
         command = ("open", sid, url, dict(headers), bool(verify_ssl), ring, float(live_delay))
         self._commands.put(command)

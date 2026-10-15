@@ -339,9 +339,19 @@ class _Session:
             self._check()
             # An OSError's text names the path; ring errors are fixed strings.
             self._disk_failed(str(error) if isinstance(error, RingError) else _DISK_FAILED)
-            return RamRing()
+            return RamRing(self._fallback_bytes())
         self._disk = True
         return ring
+
+    def _fallback_bytes(self) -> int:
+        """The memory a failed disk ring goes on in: the spec's ram_bytes (the user's memory
+        per stream), else RamRing's default."""
+        from services.live.ring import RamRing
+
+        size = self._ring_spec.get("ram_bytes")
+        if isinstance(size, int) and size > 0:
+            return size
+        return RamRing.DEFAULT_MAX_BYTES
 
     def _adopt(self, ring: Ring) -> None:
         """Serve `ring` from now on; the previous ring (if any) is closed."""
@@ -404,7 +414,7 @@ class _Session:
             message = str(error)
         self._check()
         self._disk_failed(message)
-        fallback = RamRing()
+        fallback = RamRing(self._fallback_bytes())
         self._adopt(fallback)  # readers of the disk ring are cut off; it is removed
         if new_segment:
             action(fallback)  # the segment starts afresh in RAM

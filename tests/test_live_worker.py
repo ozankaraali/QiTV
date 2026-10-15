@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import types
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -30,6 +31,7 @@ from ts_fixtures import PMT_PID, make_stream
 from urllib3.exceptions import InsecureRequestWarning
 
 from services.live import source as source_module, worker
+from services.live.ring import RamRing
 from services.live.worker import helper_main
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1075,6 +1077,46 @@ class StuckSessionTests(unittest.TestCase):
         self.assertFalse(loop.is_alive())
         helper.shutdown()
         child.close()
+
+
+class RamFallbackSizeTests(unittest.TestCase):
+    """The helper's own disk-failure fallback is sized by the ring spec's ram_bytes (H12)."""
+
+    def session(self, root, directory):
+        from services.live.worker import _Session
+
+        adopted = []
+        helper = SimpleNamespace(
+            root=str(root),
+            send=lambda message, session=None: None,
+            server=SimpleNamespace(add_session=lambda sid, ring, ended: adopted.append(ring)),
+        )
+        ring = {"kind": "disk", "dir": directory, "max_bytes": 1 << 30, "ram_bytes": 3 * 1024**2}
+        return _Session(helper, "s1", "http://provider.test/1.ts", {}, True, ring, 6.0), adopted
+
+    def test_a_disk_ring_that_cannot_start_falls_back_to_that_size(self):
+        with tempfile.TemporaryDirectory() as root:
+            session, _ = self.session(root, "not-a-session")  # an unusable directory
+            ring = session._make_ring()
+        self.assertIsInstance(ring, RamRing)
+        self.assertEqual(ring._max_bytes, 3 * 1024**2)
+
+    def test_a_disk_ring_failing_midway_falls_back_to_that_size(self):
+        from services.live.ring import RingError
+
+        with tempfile.TemporaryDirectory() as root:
+            session, adopted = self.session(root, ".qitv-timeshift-" + secrets.token_hex(16))
+            failing = SimpleNamespace(close=lambda: None)
+            session._ring, session._disk = failing, True
+
+            def write(ring):
+                if ring is failing:
+                    raise RingError("The disk buffer failed.")
+
+            session._write(write, new_segment=True)
+        self.assertEqual(len(adopted), 1)
+        self.assertIsInstance(adopted[0], RamRing)
+        self.assertEqual(adopted[0]._max_bytes, 3 * 1024**2)
 
 
 if __name__ == "__main__":

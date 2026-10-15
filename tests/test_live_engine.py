@@ -44,6 +44,7 @@ STATE_KEYS = {"oldest", "newest", "open", "start", "end", "live_edge", "bytes", 
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
 PAYLOAD = make_stream(120)
+URL_FOR_RING = "http://provider.test/live/1.ts"
 # The owner opens a session against a raw listener and is then killed by the test.
 OWNER = """
 import multiprocessing, sys, time
@@ -123,6 +124,44 @@ def paced_body(payload, stop, hung_up):
 def paced_route(payload, stop, hung_up):
     """Answers every request (reconnects included) with a fresh paced body."""
     return lambda _request, _count: (200, {}, paced_body(payload, stop, hung_up))
+
+
+class RamFallbackSizeTests(unittest.TestCase):
+    """After a disk failure a session goes on in memory of timeshift_ram_mib (H12)."""
+
+    def test_a_disk_session_names_its_memory_fallback_size(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        engine.open_session(
+            URL_FOR_RING,
+            headers={},
+            verify_ssl=True,
+            disk=True,
+            max_bytes=4096 * MIB,
+            ram_bytes=512 * MIB,
+        )
+        ring = commands.get_nowait()[5]
+        self.assertEqual((ring["kind"], ring["ram_bytes"]), ("disk", 512 * MIB))
+
+    def test_a_reopen_after_a_disk_failure_uses_that_size(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        supervisor._relay = lambda message: None
+        ring = {"kind": "disk", "dir": "d", "max_bytes": 4096 * MIB, "ram_bytes": 512 * MIB}
+        command = ("open", "s1", URL_FOR_RING, {}, True, ring, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        supervisor._receive(("error", "s1", "disk", "The disk buffer failed."))
+        self.assertEqual(
+            supervisor._records["s1"].command[5], {"kind": "ram", "max_bytes": 512 * MIB}
+        )
 
 
 class StalledUpstream:

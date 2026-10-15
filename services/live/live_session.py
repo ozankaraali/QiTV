@@ -289,7 +289,10 @@ class LiveSession(QObject):
         user_agent: Optional[str],
         disk: bool,
         max_bytes: int,
+        ram_bytes: Optional[int] = None,
     ) -> None:
+        """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
+        when None)."""
         self.stop()
         self._url, self._user_agent = url, user_agent
         self._latency = latency if latency in TARGETS else "normal"
@@ -299,6 +302,8 @@ class LiveSession(QObject):
             "disk": disk,
             "max_bytes": max_bytes,
         }
+        if ram_bytes is not None:
+            self._open_args["ram_bytes"] = ram_bytes
         self._stay = StayLive(self._latency)
         self._snapshot_cache = {}
         self._ended = self._source_lost = self._paused = False

@@ -64,13 +64,14 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
     """`LiveSession.start()`'s arguments for `start` with the settings in `config`.
 
     The time-shift buffer is on disk with the user's consent (`disk=False`: in memory all
-    the same), else the memory per stream (`timeshift_ram_mib`).
+    the same), else the memory per stream (`timeshift_ram_mib`). A disk buffer that fails
+    goes on in that memory (`ram_bytes`).
     """
     consent = bool(config.timeshift_enabled)
     disk = consent if disk is None else disk and consent
     ram = getattr(config, "timeshift_ram_mib", DEFAULT_RAM_MIB)
     mib = config.timeshift_max_mib if disk else ram
-    return {
+    kwargs = {
         "url": start.url,
         "headers": {"User-Agent": start.user_agent},
         "verify_ssl": start.verify_ssl,
@@ -79,6 +80,9 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
         "disk": disk,
         "max_bytes": mib * 1024 * 1024,
     }
+    if disk:
+        kwargs["ram_bytes"] = ram * 1024 * 1024
+    return kwargs
 
 
 def one_disk_ring(first: "LiveTuner", second: "LiveTuner") -> None:

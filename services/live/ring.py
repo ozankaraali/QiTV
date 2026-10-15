@@ -302,8 +302,9 @@ class Ring(ABC):
 
 class RamRing(Ring):
     _LIMIT_TEXT = "The memory buffer cannot fit one keyframe interval."
+    DEFAULT_MAX_BYTES = 128 * 1024 * 1024
 
-    def __init__(self, max_bytes: int = 128 * 1024 * 1024) -> None:
+    def __init__(self, max_bytes: int = DEFAULT_MAX_BYTES) -> None:
         super().__init__(max_bytes)
         self._buffers: dict[int, bytearray] = {}
 

@@ -381,6 +381,20 @@ class LiveSessionCase(unittest.TestCase):
 
 
 class StartTests(LiveSessionCase):
+    def test_a_disk_buffer_carries_its_memory_fallback_size(self):
+        # The helper's disk-failure fallback follows timeshift_ram_mib, not 128 MiB (H12).
+        self.live.start(
+            URL,
+            headers={},
+            verify_ssl=True,
+            latency="normal",
+            user_agent="QiTV-Test",
+            disk=True,
+            max_bytes=2048 * MiB,
+            ram_bytes=512 * MiB,
+        )
+        self.assertEqual(self.engine.opened[0][2]["ram_bytes"], 512 * MiB)
+
     def test_ready_plays_the_oldest_segment_through_the_pipeline(self):
         sid = self.start(disk=True, max_bytes=2048 * MiB)
         _, url, kwargs = self.engine.opened[0]
