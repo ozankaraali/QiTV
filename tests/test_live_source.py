@@ -5,7 +5,7 @@ sources yield raw TS bytes, so every decode assertion became a byte assertion. F
 synthetic (tests/ts_fixtures.py) and every server is local.
 """
 
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 import gzip
 import logging
 import ntpath
@@ -163,6 +163,20 @@ class SourceTestCase(unittest.TestCase):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(certificate, key)
             yield context
+
+    @contextmanager
+    def optional_tls_context(self):
+        """The local TLS context, or None without an openssl binary: then only the TLS
+        subtests skip (`skip_without_tls`) and the plain ones still run."""
+        if not shutil.which("openssl"):
+            yield None
+            return
+        with self.tls_context() as context:
+            yield context
+
+    def skip_without_tls(self, context):
+        if context is None:
+            self.skipTest("openssl is required to generate a local test certificate")
 
 
 class LiveSourceTests(SourceTestCase):
@@ -720,7 +734,7 @@ high.m3u8
         # bodies (sized, connection still pooled) by the connection's duplicate descriptor.
         # On Windows plain sockets are closed and TLS sockets wait in slices.
         head = self.video[: 188 * 50]
-        with self.tls_context() as context, insecure():
+        with self.optional_tls_context() as context, insecure():
             for tls, keep_alive in ((False, False), (False, True), (True, False), (True, True)):
                 release = threading.Event()  # per subtest: every server must stall
 
@@ -730,6 +744,8 @@ high.m3u8
                     release.wait(10)
 
                 with self.subTest(tls=tls, keep_alive=keep_alive):
+                    if tls:
+                        self.skip_without_tls(context)
                     headers = {"Content-Length": str(1 << 30)} if keep_alive else {}
                     server = self.server(
                         {"/user/secret/live.ts": (200, headers, stalled)},
@@ -782,7 +798,7 @@ high.m3u8
                         release.set()
 
     def test_close_aborts_an_hls_segment_stalled_before_its_headers(self):
-        with self.tls_context() as context, insecure():
+        with self.optional_tls_context() as context, insecure():
             for tls in (False, True):
                 release = threading.Event()
 
@@ -791,6 +807,8 @@ high.m3u8
                     return 200, {}, self.next_video
 
                 with self.subTest(tls=tls):
+                    if tls:
+                        self.skip_without_tls(context)
                     server = self.server(
                         {
                             "/channel.m3u8": (200, {}, leaf("a.ts", "b.ts")),
@@ -845,20 +863,24 @@ high.m3u8
         held = []
         threading.Thread(target=lambda: held.append(silent.accept()), daemon=True).start()
         try:
-            with self.tls_context() as context, insecure():
+            with self.optional_tls_context() as context, insecure():
                 plain = self.server({"/user/secret/live.ts": stalled})
-                secure = self.server({"/user/secret/live.ts": stalled}, tls=context)
+                secure = None
+                if context is not None:
+                    secure = self.server({"/user/secret/live.ts": stalled}, tls=context)
                 cases = (
                     ("http header", plain.url + "/user/secret/live.ts", True),
-                    ("https header", secure.url + "/user/secret/live.ts", False),
+                    ("https header", secure and secure.url + "/user/secret/live.ts", False),
                     (
-                        "https handshake",
+                        "https handshake",  # a raw listener: no certificate needed
                         f"https://127.0.0.1:{silent.getsockname()[1]}/user/secret/live.ts",
                         True,
                     ),
                 )
                 for name, url, verify_ssl in cases:
                     with self.subTest(name):
+                        if url is None:
+                            self.skip_without_tls(context)
                         stop = threading.Event()
                         timer = threading.Timer(0.3, stop.set)
                         timer.start()
@@ -956,12 +978,9 @@ high.m3u8
         # production) instead of the 60 s read timeout. The first byte keeps the full timeout.
         head = self.video[: 188 * 50]
         rest = self.video[188 * 50 :]
-        cases = [(False, False), (False, True)]
-        if shutil.which("openssl"):
-            cases += [(True, False), (True, True)]
-        else:  # the plain cases still run
-            warnings.warn("openssl is missing: the TLS stall cases were skipped", stacklevel=1)
-        for tls, keep_alive in cases:
+        tls_context = self.enterContext(self.optional_tls_context())
+        self.enterContext(insecure())
+        for tls, keep_alive in ((False, False), (False, True), (True, False), (True, True)):
             release = threading.Event()
             marks = {}
 
@@ -980,10 +999,11 @@ high.m3u8
                 headers = {"Content-Length": str(1 << 30)} if keep_alive else {}
                 return 200, headers, stalled
 
-            with self.subTest(tls=tls, keep_alive=keep_alive), ExitStack() as stack:
-                context = stack.enter_context(self.tls_context()) if tls else None
-                stack.enter_context(insecure())
-                stack.callback(release.set)
+            with self.subTest(tls=tls, keep_alive=keep_alive):
+                if tls:
+                    self.skip_without_tls(tls_context)
+                self.addCleanup(release.set)
+                context = tls_context if tls else None
                 server = self.server({"/live.ts": live}, tls=context, keep_alive=keep_alive)
                 fast = {"_STALL_TIMEOUT": 0.3, "_RECONNECT_DELAYS": FAST_RETRIES}
                 with patch.multiple(source_module, **fast):
