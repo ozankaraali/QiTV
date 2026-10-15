@@ -15,6 +15,15 @@ from multikeydict import MultiKeyDict
 logger = logging.getLogger(__name__)
 
 
+def _one_of(choices, default):
+    """Coerce a stored value to one of `choices`, falling back to `default`."""
+
+    def coerce(value):
+        return value if value in choices else default
+
+    return coerce
+
+
 def _config_property(key: str, default, *, coerce=None, clamp=None):
     """
     Factory to generate config property getter/setter pairs.
@@ -96,8 +105,8 @@ def get_app_version() -> str:
 class ConfigManager:
     DEFAULT_OPTION_CHECKUPDATE = True
     DEFAULT_OPTION_STB_CONTENT_INFO = True
-    DEFAULT_OPTION_CHANNEL_EPG = False
-    DEFAULT_OPTION_CHANNEL_LOGO = False
+    DEFAULT_OPTION_CHANNEL_EPG = True
+    DEFAULT_OPTION_CHANNEL_LOGO = True
     DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE = 100
     DEFAULT_OPTION_EPG_SOURCE = "STB"  # Default EPG source
     DEFAULT_OPTION_EPG_URL = ""
@@ -107,6 +116,13 @@ class ConfigManager:
     DEFAULT_OPTION_PREFER_HTTPS = False
     DEFAULT_OPTION_SSL_VERIFY = True
     DEFAULT_OPTION_KEYBOARD_REMOTE_MODE = False
+    DEFAULT_OPTION_LIVE_LATENCY = "normal"
+    LIVE_LATENCY_CHOICES = ("low", "normal", "stable")
+    DEFAULT_OPTION_MOUSE_WHEEL = "channel"
+    MOUSE_WHEEL_CHOICES = ("channel", "volume")
+    DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
+    TV_DEFAULTS_VERSION = 1
+    DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
     DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
     DEFAULT_OPTION_EPG_STB_PERIOD_HOURS = 5
     DEFAULT_OPTION_SHOW_INFO_PANEL = True
@@ -192,6 +208,9 @@ class ConfigManager:
 
         # Other player versions may remove windows that this build still uses.
         window_positions = self.config.setdefault("window_positions", {})
+        if "tv_window" not in window_positions:
+            window_positions["tv_window"] = self._initial_tv_window(window_positions)
+            need_update = True
         for window_name, settings in self.default_config()["window_positions"].items():
             if window_name not in window_positions:
                 window_positions[window_name] = settings
@@ -218,11 +237,22 @@ class ConfigManager:
             "smooth_paused_seek": ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK,
             "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
             "epg_stb_period_hours": ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
+            "live_latency": ConfigManager.DEFAULT_OPTION_LIVE_LATENCY,
+            "mouse_wheel_action": ConfigManager.DEFAULT_OPTION_MOUSE_WHEEL,
+            "start_with_last_channel": ConfigManager.DEFAULT_OPTION_START_WITH_LAST_CHANNEL,
+            "last_live_channel": None,
         }
         for key, value in missing_defaults.items():
             if key not in self.config:
                 self.config[key] = value
                 need_update = True
+
+        if self.config.get("tv_defaults_version", 0) < ConfigManager.TV_DEFAULTS_VERSION:
+            # 2.0 is a TV: the zap banner and channel list need logos and now/next.
+            self.config["channel_logos"] = True
+            self.config["channel_epg"] = True
+            self.config["tv_defaults_version"] = ConfigManager.TV_DEFAULTS_VERSION
+            need_update = True
 
         if need_update:
             self.save_config()
@@ -287,8 +317,39 @@ class ConfigManager:
     auto_play_movies = _config_property(
         "auto_play_movies", DEFAULT_OPTION_AUTO_PLAY_MOVIES, coerce=bool
     )
+    live_latency = _config_property(
+        "live_latency",
+        DEFAULT_OPTION_LIVE_LATENCY,
+        coerce=_one_of(LIVE_LATENCY_CHOICES, DEFAULT_OPTION_LIVE_LATENCY),
+    )
+    mouse_wheel_action = _config_property(
+        "mouse_wheel_action",
+        DEFAULT_OPTION_MOUSE_WHEEL,
+        coerce=_one_of(MOUSE_WHEEL_CHOICES, DEFAULT_OPTION_MOUSE_WHEEL),
+    )
+    start_with_last_channel = _config_property(
+        "start_with_last_channel", DEFAULT_OPTION_START_WITH_LAST_CHANNEL, coerce=bool
+    )
+    last_live_channel = _config_property("last_live_channel", None)
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})
+
+    @staticmethod
+    def _initial_tv_window(window_positions):
+        """Place the single TV window where the larger of the two old windows was."""
+        keys = ("x", "y", "width", "height")
+        sized = [
+            geometry
+            for geometry in (
+                window_positions.get("video_player"),
+                window_positions.get("channel_list"),
+            )
+            if isinstance(geometry, dict) and all(isinstance(geometry.get(k), int) for k in keys)
+        ]
+        if not sized:
+            return dict(ConfigManager.DEFAULT_TV_WINDOW)
+        best = max(sized, key=lambda geometry: geometry["width"] * geometry["height"])
+        return {key: best[key] for key in keys}
 
     @staticmethod
     def default_config():
@@ -314,6 +375,7 @@ class ConfigManager:
                     "splitter_content_info_ratio": 0.33,
                 },
                 "video_player": {"x": 50, "y": 100, "width": 1200, "height": 800},
+                "tv_window": dict(ConfigManager.DEFAULT_TV_WINDOW),
             },
             "favorites": [],
             "show_stb_content_info": ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO,
@@ -326,6 +388,11 @@ class ConfigManager:
             "smooth_paused_seek": ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK,
             "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
             "epg_stb_period_hours": ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
+            "live_latency": ConfigManager.DEFAULT_OPTION_LIVE_LATENCY,
+            "mouse_wheel_action": ConfigManager.DEFAULT_OPTION_MOUSE_WHEEL,
+            "start_with_last_channel": ConfigManager.DEFAULT_OPTION_START_WITH_LAST_CHANNEL,
+            "last_live_channel": None,
+            "tv_defaults_version": ConfigManager.TV_DEFAULTS_VERSION,
         }
 
     def save_window_settings(self, window, window_name):
