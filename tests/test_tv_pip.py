@@ -83,7 +83,8 @@ class FakeFrame(QObject):
 
 class FakePipLabel(FakeOverlay):
     closeRequested = Signal()
-    mixerRequested = Signal()
+    muteRequested = Signal()  # the speaker
+    swapRequested = Signal()  # the ⇄ button
     info = None
     audible = False
 
@@ -367,6 +368,17 @@ class PipTests(PipCase):
         self.open_small(CHANNELS[1])
         self.frame.swapRequested.emit()
         self.assertIs(self.sessions.large(), self.pip_slot)
+
+    def test_the_labels_swap_button_swaps_as_a_click_on_the_small_picture_does(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.label.swapRequested.emit()
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.assertEqual(self.label.info[0], "One")  # the label names the new small picture
+        self.play(2)  # Three, large: waits for Two's release
+        self.label.swapRequested.emit()  # refused meanwhile: it says so
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.assertEqual(self.toast.named("show_message")[-1], (SWITCHING, "info", SWITCHING_MS))
 
     def test_denied_toasts_the_providers_limit(self):
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB"}  # one stream
@@ -728,10 +740,42 @@ class MixerTests(PipCase):
         )
         self.assertEqual((self.session.level, self.pip_session.level), (80, 40))
 
+    def open_pip_row(self):
+        """Show the mixer on the PiP's row (+ at full volume changes nothing, then Tab)."""
+        self.controller.handle(Action.VOL_UP)
+        self.controller.handle(Action.TAB)
+
+    def test_the_labels_speaker_mutes_and_unmutes_the_small_picture(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.assertFalse(self.label.audible)  # it opens muted
+        self.label.muteRequested.emit()
+        self.assertFalse(self.sessions.muted("pip"))
+        self.assertFalse(self.pip_session.muted)
+        self.assertTrue(self.label.audible)
+        self.assertFalse(self.mixer.visible)  # a click on the speaker opens nothing
+        self.assertFalse(self.sessions.muted("main"))
+        self.open_pip_row()
+        self.label.muteRequested.emit()  # the mixer, showing, follows
+        self.assertTrue(self.sessions.muted("pip"))
+        self.assertTrue(self.pip_session.muted)
+        self.assertFalse(self.label.audible)
+        self.assertEqual(self.mixer.shown()[0][1], ("PiP", "Two", 30, True))
+        self.assertEqual((self.sessions.level("pip"), self.config.saves), (30, 0))
+
+    def test_after_a_swap_the_speaker_still_mutes_the_small_picture(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.SWAP)  # the "main" player is small now
+        self.label.muteRequested.emit()
+        self.assertFalse(self.sessions.muted("main"))
+        self.assertTrue(self.label.audible)
+        self.assertFalse(self.sessions.muted("pip"))  # the large picture is heard too
+
     def test_raising_the_pip_row_from_zero_unmutes_the_small_picture(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])
-        self.label.mixerRequested.emit()  # the PiP label's speaker: the PiP's row
+        self.open_pip_row()
         self.assertEqual(self.mixer.selected, 1)
         self.mixer.levelRequested.emit(1, 0)
         self.assertTrue(self.sessions.muted("pip"))
@@ -754,7 +798,7 @@ class MixerTests(PipCase):
     def test_the_pips_level_is_remembered_once_the_mixer_hides(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])
-        self.label.mixerRequested.emit()
+        self.open_pip_row()
         self.controller.handle(Action.CH_PREV, key=UP)
         self.assertEqual(self.config.saves, 0)
         self.mixer.dismiss()  # 3 s after the last change
@@ -794,7 +838,7 @@ class MixerTests(PipCase):
         # could be large and changed from the Main row.
         self.start_large(0)
         self.open_small(CHANNELS[1])
-        self.label.mixerRequested.emit()
+        self.open_pip_row()
         self.controller.handle(Action.CH_PREV, key=UP)  # the small picture: 30 -> 35
         self.controller.handle(Action.SWAP)  # S: the "pip" player is large
         self.mixer.levelRequested.emit(0, 30)  # the Main row: that same player, 35 -> 30
@@ -811,7 +855,7 @@ class MixerTests(PipCase):
         self.mixer.dismiss()
         self.assertEqual((self.config.pip_volume, self.config.saves), (30, 0))
         self.controller.handle(Action.SWAP)
-        self.label.mixerRequested.emit()
+        self.open_pip_row()
         self.controller.handle(Action.CH_PREV, key=UP)
         self.mixer.dismiss()
         self.assertEqual(self.config.saves, 1)

@@ -285,7 +285,7 @@ class TVController(QObject):
                 closed=lambda: self._closed,
                 toast=self._toast,
                 swap=self.swap,
-                mixer=self._mixer.open_small,
+                toggle_mute=self._mixer.toggle_small_mute,
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)

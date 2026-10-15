@@ -1,9 +1,15 @@
-"""PiP label: the small surface's channel and state, a speaker for the mixer and a close button.
+"""PiP label: the small surface's channel and state, then a swap button (⇄), a speaker that
+mutes or unmutes the small picture and a close button (×).
 
 It covers the small surface (follow()), but only its pill and buttons take the mouse and the
 host's mask: a click anywhere else on the small video reaches the surface below. The pill
 stands for that video: its press, moves and release go to the PiP frame (pillPressed …), which
 swaps on a click and moves the PiP on a drag, as it does for the surface itself.
+
+Each button takes clicks over a square MIN_HIT_PX wide (or the button drawn and its spacing,
+when larger), and the pill keeps room for LIVE or a time behind live at their normal size. A PiP
+too small for that leaves the swap button out (the pill swaps too), then gives the other two
+less room, down to the drawn size and its spacing.
 
 The state is what the pill is for, so it is never cut: the channel name gives way first, down
 to nothing, then the state's font shrinks. Only "Connecting…" may still be cut once its font
@@ -33,16 +39,21 @@ from ui.theme import PALETTE, qcolor
 
 LIVE = "LIVE"
 CONNECTING = "Connecting…"
+BUTTONS = ("swap", "speaker", "close")  # after the pill, left to right
+MIN_HIT_PX = 28  # each button takes clicks over this square at least, room permitting
 TOOLTIPS = {
     "pill": "Swap (S) · drag to move",
-    "mixer": "Volume",
+    "swap": "Swap (S)",
     "close": "Close picture-in-picture (P)",
 }
+MUTE_TOOLTIP = "Mute the small picture"
+UNMUTE_TOOLTIP = "Unmute the small picture"
 _SHIFTED_PREFIXES = ("−", "-")  # "−MM:SS" behind live
 _BEHIND = re.compile(r"^[−-]\d+(:\d\d){1,2}$")  # "−MM:SS" or "−H:MM:SS"
 _FALLBACK_HOST_WIDTH = 1280
 _SHRINK = 0.8  # the smallest state font a cut state gets, of its normal size
 _SMALLEST_STATE_PX = 6  # LIVE and the time behind live shrink down to this, never cut
+_TYPICAL_BEHIND = "−00:00"  # the pill keeps room for this, or LIVE, before the buttons grow
 
 
 @dataclass(frozen=True)
@@ -50,8 +61,8 @@ class _Layout:
     """Label coordinates."""
 
     pill: QRectF
-    close: QRectF
-    mixer: QRectF
+    hits: dict[str, QRectF]  # the buttons shown (BUTTONS) and where each takes clicks
+    glyphs: dict[str, QRectF]  # where each is drawn, centred in its hit area
     name: str  # elided to fit
     state: str  # elided to fit, unless "LIVE"
     name_font: QFont
@@ -64,7 +75,8 @@ class _Layout:
 
 class PipLabel(Overlay):
     closeRequested = Signal()
-    mixerRequested = Signal()  # the speaker: the mixer opens with the PiP row selected
+    muteRequested = Signal()  # the speaker: mute or unmute the small picture
+    swapRequested = Signal()  # ⇄: as a click on the small picture
     # The left button on the pill, in global coordinates: for PipFrame.pill_press/_move/_release.
     pillPressed = Signal(QPoint)
     pillMoved = Signal(QPoint)
@@ -126,20 +138,35 @@ class PipLabel(Overlay):
         return self._layout().state_font.pixelSize()
 
     def button_rect(self, name: str) -> QRectF:
-        """The "close" or "mixer" (speaker) button, in label coordinates."""
-        layout = self._layout()
-        return {"close": layout.close, "mixer": layout.mixer}[name]
+        """Where the "swap", "speaker" or "close" button takes clicks (label coordinates);
+        empty when it is left out."""
+        if name not in BUTTONS:
+            raise KeyError(name)
+        return QRectF(self._layout().hits.get(name, QRectF()))
+
+    def glyph_rect(self, name: str) -> QRectF:
+        """Where that button is drawn, within its hit area; empty when it is left out."""
+        if name not in BUTTONS:
+            raise KeyError(name)
+        return QRectF(self._layout().glyphs.get(name, QRectF()))
 
     def mask_region(self) -> QRegion:
         return self._region().translated(self.geometry().topLeft())
 
     def tooltip_at(self, pos: QPointF) -> str:
         """What hovering `pos` says (label coordinates): the part and its key, or nothing."""
+        name = self._part_at(pos)
+        if name == "speaker":
+            return MUTE_TOOLTIP if self._audible else UNMUTE_TOOLTIP
+        return TOOLTIPS.get(name or "", "")
+
+    def _part_at(self, pos: QPointF) -> str | None:
+        """The button or the pill at `pos` (label coordinates), else None."""
         layout = self._layout()
-        for name, rect in (("close", layout.close), ("mixer", layout.mixer), ("pill", layout.pill)):
+        for name, rect in layout.hits.items():
             if rect.contains(pos):
-                return TOOLTIPS[name]
-        return ""
+                return name
+        return "pill" if layout.pill.contains(pos) else None
 
     # ---- layout -------------------------------------------------------------------------
 
@@ -154,10 +181,13 @@ class PipLabel(Overlay):
         names, states = QFontMetrics(name_font), QFontMetrics(state_font)
         inset, pad, gap = un.px(1), un.px(0.8), un.px(0.6)
         height = max(names.height(), states.height()) + 2 * un.px(0.35)
-        close = QRectF(self.width() - inset - height, inset, height, height)
-        mixer = close.translated(-(height + un.px(0.4)), 0)
         dot_gap = un.px(0.4)
-        room = max(0.0, mixer.left() - un.px(0.6) - inset)  # the pill ends before the speaker
+        least_state = max(
+            self._live_width(state_font, dot_gap), states.horizontalAdvance(_TYPICAL_BEHIND)
+        )
+        hits, glyphs = self._buttons(un, height, 2 * pad + least_state)
+        # The pill ends before the first button's hit area.
+        room = max(0.0, min(r.left() for r in hits.values()) - un.px(0.6) - inset)
         # The name gives way first, then the state's font shrinks (the module docstring).
         state_room = room - 2 * pad
         whole = self._state == LIVE or bool(_BEHIND.match(self._state))
@@ -180,16 +210,45 @@ class PipLabel(Overlay):
         width = 2 * pad + state_w + (gap + names.horizontalAdvance(name) if name else 0)
         pill = QRectF(inset, inset, min(width, room), height)
         return _Layout(
-            pill, close, mixer, name, state, name_font, state_font, pad, gap, dot, dot_gap
+            pill, hits, glyphs, name, state, name_font, state_font, pad, gap, dot, dot_gap
         )
 
-    def _state_width(self, font: QFont, dot_gap: float, text: str | None = None) -> float:
+    def _buttons(
+        self, un: Units, glyph: float, pill: float
+    ) -> tuple[dict[str, QRectF], dict[str, QRectF]]:
+        """The buttons' hit areas and drawn squares (`glyph` wide), close at the right inset.
+
+        Each hit area is a square `slot` wide with the drawn button at its centre: MIN_HIT_PX,
+        or the drawn button and its spacing when larger, while the pill keeps `pill` (the
+        module docstring). The swap button is left out first, then the other two get less.
+        """
+        inset, least = un.px(1), glyph + un.px(0.4)
+        # Room for the hit areas, from the close button's centre leftwards, the pill's aside.
+        free = self.width() - 2 * inset - un.px(0.6) - glyph / 2 - pill
+        three = free / (len(BUTTONS) - 0.5) >= max(least, MIN_HIT_PX)
+        names = BUTTONS if three else BUTTONS[1:]
+        slot = int(max(least, min(MIN_HIT_PX, free / (len(names) - 0.5))))  # whole pixels
+        cy = inset + glyph / 2
+        cx = self.width() - inset - glyph / 2
+        bounds = QRectF(self.rect())
+        hits: dict[str, QRectF] = {}
+        glyphs: dict[str, QRectF] = {}
+        for name in reversed(names):  # from the right
+            hits[name] = QRectF(cx - slot / 2, cy - slot / 2, slot, slot).intersected(bounds)
+            glyphs[name] = QRectF(cx - glyph / 2, cy - glyph / 2, glyph, glyph)
+            cx -= slot
+        order = [name for name in BUTTONS if name in hits]
+        return {n: hits[n] for n in order}, {n: glyphs[n] for n in order}
+
+    def _live_width(self, font: QFont, dot_gap: float) -> float:
+        """LIVE and its dot in `font`, as the pill paints them."""
         metrics = QFontMetrics(font)
+        return max(6, round(metrics.height() * 0.42)) + dot_gap + metrics.horizontalAdvance(LIVE)
+
+    def _state_width(self, font: QFont, dot_gap: float, text: str | None = None) -> float:
         if self._state == LIVE:
-            return (
-                max(6, round(metrics.height() * 0.42)) + dot_gap + metrics.horizontalAdvance(LIVE)
-            )
-        return metrics.horizontalAdvance(self._state if text is None else text)
+            return self._live_width(font, dot_gap)
+        return QFontMetrics(font).horizontalAdvance(self._state if text is None else text)
 
     def _region(self) -> QRegion:
         """The pill and buttons, in label coordinates (empty with nothing to cover)."""
@@ -197,7 +256,7 @@ class PipLabel(Overlay):
             return QRegion()
         layout = self._layout()
         region = QRegion()
-        for part in (layout.pill, layout.mixer, layout.close):
+        for part in (layout.pill, *layout.hits.values()):
             region = region.united(QRegion(part.toAlignedRect()))
         return region.intersected(QRegion(self.rect()))
 
@@ -229,15 +288,18 @@ class PipLabel(Overlay):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         self._paint_pill(p, layout)
-        self._paint_backdrop(p, layout.mixer)
-        inset = layout.mixer.width() * 0.13
-        icon = layout.mixer.adjusted(inset, inset, -inset, -inset)
-        if self._audible:
-            draw_icon(p, "volume", icon, qcolor(PALETTE.accent))
-        else:
-            draw_icon(p, "mute", icon, qcolor(PALETTE.text, 0.85))
-        self._paint_backdrop(p, layout.close)
-        self._paint_cross(p, layout.close)
+        for name, rect in layout.glyphs.items():
+            self._paint_backdrop(p, rect)
+            inset = rect.width() * 0.13
+            icon = rect.adjusted(inset, inset, -inset, -inset)
+            if name == "close":
+                self._paint_cross(p, rect)
+            elif name == "swap":
+                draw_icon(p, "swap", icon, qcolor(PALETTE.text, 0.85))
+            elif self._audible:
+                draw_icon(p, "volume", icon, qcolor(PALETTE.accent))
+            else:
+                draw_icon(p, "mute", icon, qcolor(PALETTE.text, 0.85))
         p.end()
 
     def _paint_backdrop(self, p: QPainter, rect: QRectF) -> None:
@@ -304,13 +366,14 @@ class PipLabel(Overlay):
         event.accept()
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        pos = event.position()
-        layout = self._layout()
-        if layout.close.contains(pos):
+        part = self._part_at(event.position())
+        if part == "close":
             self.closeRequested.emit()
-        elif layout.mixer.contains(pos):
-            self.mixerRequested.emit()
-        elif layout.pill.contains(pos):
+        elif part == "speaker":
+            self.muteRequested.emit()
+        elif part == "swap":
+            self.swapRequested.emit()
+        elif part == "pill":
             self._pill_held = True
             self.pillPressed.emit(event.globalPosition().toPoint())
 
@@ -333,7 +396,7 @@ class PipLabel(Overlay):
             event.ignore()  # the host counts a quick second Back as another press
             return
         event.accept()
-        on_pill = self._layout().pill.contains(event.position())
+        on_pill = self._part_at(event.position()) == "pill"
         if event.button() == Qt.MouseButton.LeftButton and on_pill:
             # A press like any other: the frame knows whether it ends a swapping click.
             self._pill_held = True

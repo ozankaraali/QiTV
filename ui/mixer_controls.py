@@ -4,9 +4,10 @@ Every volume action (+/-, the media volume keys, M, ↑/↓ and the wheel during
 the large picture and shows the mixer (`ui/overlays/mixer.py`): one row ("Main") without
 picture in picture, two with it ("Main", the large picture, and "PiP", the small one). While
 it shows, the keys act on its selected row: ↑/↓ (and +/-) change it by 5, ←/→ or Tab select
-the other row, M mutes it and Esc hides the mixer. The PiP label's speaker opens it on the
-PiP's row. The arrows are the arrow keys only (a remote's Ch± and PageUp/PageDown still
-zap), and ←/→ and Tab are the mixer's only with two rows (else they still seek).
+the other row, M mutes it and Esc hides the mixer. The PiP label's speaker mutes or unmutes
+the small picture without showing the mixer (one that shows follows). The arrows are the arrow
+keys only (a remote's Ch± and PageUp/PageDown still zap), and ←/→ and Tab are the mixer's only
+with two rows (else they still seek).
 
 Levels and mutes belong to the streams (SessionManager): a swap moves each with its stream,
 so the rows trade values. Raising the small picture's level makes it audible; lowering a
@@ -128,11 +129,16 @@ class MixerControls(QObject):
             return False
         return True
 
-    def open_small(self) -> None:
-        """The PiP label's speaker: the mixer on the PiP's row."""
+    def toggle_small_mute(self) -> None:
+        """The PiP label's speaker: mute or unmute the small picture (its label follows, and
+        the mixer while it shows)."""
         sessions = self.sessions
-        if sessions is not None and sessions.small() is not None:
-            self._show(PIP_ROW)
+        small = sessions.small() if sessions is not None else None
+        if sessions is None or small is None:
+            return
+        sessions.set_muted(small.name, not sessions.muted(small.name))
+        self._audio_changed()
+        self.refresh()
 
     def refresh(self) -> None:
         """PiP opened, closed or swapped: the rows follow while the mixer shows."""

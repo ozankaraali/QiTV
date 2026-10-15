@@ -406,9 +406,9 @@ class TVWindow(QMainWindow):
             library_toast=self.library_toast,
         )
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
-        # bottom corner's PiP: its pill, speaker and × stay within reach; elsewhere on the PiP
-        # the transport keeps only its own buttons and bar, and other clicks reach the small
-        # picture (OverlayHost.set_hole). The mixer shows over both (it sits above the
+        # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
+        # PiP the transport keeps only its own buttons and bar, and other clicks reach the
+        # small picture (OverlayHost.set_hole). The mixer shows over both (it sits above the
         # transport's controls and beside the PiP). The drawer and the guide cover them all.
         for overlay in (
             self.overlays.banner,

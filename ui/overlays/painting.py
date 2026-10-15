@@ -346,6 +346,14 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
         elif name == "pip":  # a second channel: a screen with a picture inset
             line(_rrect(0.08, 0.2, 0.84, 0.6, 0.08))
             fill(_rrect(0.5, 0.48, 0.32, 0.24, 0.04))
+        elif name == "swap":  # ⇄: the small and the large picture trade places
+            shafts = QPainterPath(QPointF(0.16, 0.34))
+            shafts.lineTo(0.72, 0.34)
+            shafts.moveTo(0.84, 0.66)
+            shafts.lineTo(0.28, 0.66)
+            line(shafts)
+            fill(_poly([(0.88, 0.34), (0.66, 0.2), (0.66, 0.48)]))
+            fill(_poly([(0.12, 0.66), (0.34, 0.52), (0.34, 0.8)]))
         elif name == "mini_player":  # the window small in a corner: a frame, an arrow to it
             line(_rrect(0.08, 0.2, 0.84, 0.6, 0.08))
             fill(_rrect(0.56, 0.52, 0.28, 0.2, 0.04))

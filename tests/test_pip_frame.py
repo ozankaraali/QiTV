@@ -13,6 +13,7 @@ from shiboken6 import delete, isValid
 from timer_fixtures import elapse, wait_until
 
 from ui.overlay_host import OverlayHost
+from ui.overlays.painting import MIN_FONT_PX
 from ui.overlays.pip_label import PipLabel
 from ui.pip import LIFT_MS, PipFrame, corner_rect
 from ui.video_surface import VideoSurface
@@ -470,24 +471,58 @@ class PipLabelTests(LabelCase):
         label.follow(TOP_LEFT)
         self.assertEqual(label.geometry(), TOP_LEFT)
 
+    def clicks(self, label, button):
+        """Click `button`; how many times each of the label's requests came."""
+        spies = {
+            name: QSignalSpy(getattr(label, f"{name}Requested"))
+            for name in ("close", "mute", "swap")
+        }
+        pill = QSignalSpy(label.pillPressed)
+        QTest.mouseClick(label, LEFT, Qt.NoModifier, label.button_rect(button).center().toPoint())
+        return {name: spy.count() for name, spy in spies.items()}, pill.count()
+
     def test_close_emits_close_requested(self):
         _, label = self.make()
-        closes = QSignalSpy(label.closeRequested)
-        mixers = QSignalSpy(label.mixerRequested)
-        QTest.mouseClick(label, LEFT, Qt.NoModifier, label.button_rect("close").center().toPoint())
-        self.assertEqual(closes.count(), 1)
-        self.assertEqual(mixers.count(), 0)
+        self.assertEqual(self.clicks(label, "close"), ({"close": 1, "mute": 0, "swap": 0}, 0))
 
-    def test_the_speaker_asks_for_the_mixer(self):
+    def test_the_speaker_asks_to_mute_or_unmute_the_small_picture(self):
         _, label = self.make()
-        closes = QSignalSpy(label.closeRequested)
-        mixers = QSignalSpy(label.mixerRequested)
-        QTest.mouseClick(label, LEFT, Qt.NoModifier, label.button_rect("mixer").center().toPoint())
-        self.assertEqual(mixers.count(), 1)
-        self.assertEqual(closes.count(), 0)
-        close, mixer = label.button_rect("close"), label.button_rect("mixer")
-        self.assertLess(mixer.right(), close.left())  # next to the close button
-        self.assertLess(close.right(), label.width())
+        self.assertEqual(self.clicks(label, "speaker"), ({"close": 0, "mute": 1, "swap": 0}, 0))
+
+    def test_the_swap_button_asks_for_a_swap(self):
+        _, label = self.make()
+        self.assertEqual(self.clicks(label, "swap"), ({"close": 0, "mute": 0, "swap": 1}, 0))
+
+    def test_the_pill_then_swap_speaker_and_close_from_left_to_right(self):
+        _, label = self.make()
+        pill = label.pill_rect()
+        swap, speaker, close = (label.button_rect(n) for n in ("swap", "speaker", "close"))
+        self.assertLess(pill.right(), swap.left())
+        self.assertLessEqual(swap.right(), speaker.left())
+        self.assertLessEqual(speaker.right(), close.left())
+        self.assertLessEqual(close.right(), label.width())
+
+    def test_the_buttons_are_easy_to_hit_at_a_960_px_window(self):
+        # Measured on macOS at 960 x 540: each button took clicks over 19 x 19 px only.
+        host = QWidget()
+        host.resize(960, 540)
+        label = PipLabel(host)
+        label.follow(corner_rect(QSize(960, 540), "br"))
+        for name in ("swap", "speaker", "close"):
+            hit, glyph = label.button_rect(name), label.glyph_rect(name)
+            self.assertGreaterEqual(min(hit.width(), hit.height()), 28, name)
+            self.assertTrue(hit.contains(glyph), name)  # the drawn button may be smaller
+            self.assertTrue(QRectF(label.rect()).contains(hit), name)
+        self.assertLess(label.pill_rect().right(), label.button_rect("swap").left())
+
+    def test_the_speaker_shows_whether_the_small_picture_is_heard(self):
+        _, label = self.make()
+        speaker = label.button_rect("speaker")
+        muted = label.grab().toImage().copy(speaker.toAlignedRect())
+        self.assertEqual(label.tooltip_at(speaker.center()), "Unmute the small picture")
+        label.set_audible(True)
+        self.assertNotEqual(label.grab().toImage().copy(speaker.toAlignedRect()), muted)
+        self.assertEqual(label.tooltip_at(speaker.center()), "Mute the small picture")
 
     def test_the_pill_reports_press_moves_and_release_on_screen(self):
         _, label = self.make()
@@ -508,8 +543,14 @@ class PipLabelTests(LabelCase):
     def test_the_mask_covers_the_pill_and_buttons_only(self):
         host, label = self.make()
         region = label.mask_region()
-        for part in (label.pill_rect(), label.button_rect("close"), label.button_rect("mixer")):
+        buttons = [label.button_rect(name) for name in ("swap", "speaker", "close")]
+        for part in (label.pill_rect(), *buttons):
             self.assertTrue(region.contains(self.host_point(label, part.center())))
+        for button in buttons:  # the whole hit area, not only the drawn button
+            corners = (button.topLeft(), button.bottomRight() - QPointF(1, 1))
+            for corner in corners:
+                self.assertTrue(region.contains(self.host_point(label, corner)), corner)
+                self.assertTrue(host.mask().contains(self.host_point(label, corner)), corner)
         pill = label.pill_rect()
         self.assertEqual(pill.topLeft().toPoint(), QPoint(13, 13))  # 1u inset
         for outside in (
@@ -529,7 +570,7 @@ class PipLabelTests(LabelCase):
         label.set_info("A considerably longer channel name that cannot fit", "−03:20")
         wide = label.pill_rect()
         self.assertGreater(wide.width(), short.width())
-        self.assertLess(wide.right(), label.button_rect("mixer").left())  # elided before it
+        self.assertLess(wide.right(), label.button_rect("swap").left())  # elided before it
         far_end = wide.topRight() + QPointF(-2, 2)
         self.assertFalse(short.contains(far_end))
         self.assertTrue(host.mask().contains(self.host_point(label, far_end)))
@@ -544,9 +585,9 @@ class PipLabelTests(LabelCase):
         label.follow(corner_rect(QSize(360, 203), "br"))
         for state in ("LIVE", "−03:20", "−1:02:15", "Connecting…"):
             label.set_info("Nature One HD", state)
-            pill, mixer = label.pill_rect(), label.button_rect("mixer")
+            pill, speaker = label.pill_rect(), label.button_rect("speaker")
             self.assertTrue(QRectF(label.rect()).contains(pill), state)
-            self.assertLessEqual(pill.right(), mixer.left(), state)
+            self.assertLessEqual(pill.right(), speaker.left(), state)
             name, shown = label.shown_text()
             self.assertTrue(name == "" or name.endswith("…"), name)  # never the whole name
             if state == "Connecting…":  # 90 px wide: whole, or cut once the font shrank
@@ -565,20 +606,36 @@ class PipLabelTests(LabelCase):
         label.set_info("Nature One HD", "−12:34:56")  # wider than the pill's room
         self.assertEqual(label.shown_text(), ("", "−12:34:56"))
         self.assertLess(label.state_pixel_size(), normal)
-        self.assertLessEqual(label.pill_rect().right(), label.button_rect("mixer").left())
+        self.assertLessEqual(label.pill_rect().right(), label.button_rect("speaker").left())
         label.set_info("Nature One HD", "−03:20")
         self.assertEqual(label.shown_text()[1], "−03:20")
 
     def test_a_narrow_pip_elides_the_name_before_the_buttons(self):
         host = QWidget()
-        host.resize(640, 360)
+        host.resize(800, 450)
         label = PipLabel(host)
-        label.follow(corner_rect(QSize(640, 360), "br"))
+        label.follow(corner_rect(QSize(800, 450), "br"))
         label.set_info("Nature One HD", "LIVE")
         name, shown = label.shown_text()
         self.assertTrue(name.endswith("…") and len(name) > 1, name)
         self.assertEqual(shown, "LIVE")
-        self.assertLessEqual(label.pill_rect().right(), label.button_rect("mixer").left())
+        self.assertLessEqual(label.pill_rect().right(), label.button_rect("swap").left())
+
+    def test_a_small_pip_leaves_the_swap_button_out_before_live_shrinks(self):
+        # Under 160 px wide (a 640 px window): the pill (which swaps too) keeps LIVE whole.
+        for width, swap in ((360, False), (480, False), (640, True)):
+            host = QWidget()
+            host.resize(width, round(width * 9 / 16))
+            label = PipLabel(host)
+            label.follow(corner_rect(host.size(), "br"))
+            label.set_info("Nature One HD", "LIVE")
+            self.assertEqual(label.state_pixel_size(), MIN_FONT_PX, width)  # not shrunk
+            self.assertEqual(not label.button_rect("swap").isEmpty(), swap, width)
+            self.assertEqual(label.tooltip_at(label.button_rect("swap").center()) != "", swap)
+            speaker, close = label.button_rect("speaker"), label.button_rect("close")
+            self.assertLessEqual(label.pill_rect().right(), speaker.left(), width)
+            self.assertLessEqual(speaker.right(), close.left(), width)
+            self.assertTrue(QRectF(label.rect()).contains(close), width)
 
     def test_its_parts_name_their_keys(self):
         _, label = self.make()
@@ -586,7 +643,9 @@ class PipLabelTests(LabelCase):
         self.assertEqual(
             label.tooltip_at(label.button_rect("close").center()), "Close picture-in-picture (P)"
         )
-        self.assertEqual(label.tooltip_at(label.button_rect("mixer").center()), "Volume")
+        speaker = label.button_rect("speaker").center()
+        self.assertEqual(label.tooltip_at(speaker), "Unmute the small picture")
+        self.assertEqual(label.tooltip_at(label.button_rect("swap").center()), "Swap (S)")
         self.assertEqual(label.tooltip_at(QPointF(label.rect().center())), "")
 
     def test_audible_state(self):

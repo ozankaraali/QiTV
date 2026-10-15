@@ -12,8 +12,8 @@ and failures are toasted here.
 The PiP frame and label follow the manager: the second surface shows at its corner while
 PiP is open, and the label names the small picture's channel and state ("Connecting…" until
 it plays; "−MM:SS" once time-shifted beyond its target, else "LIVE"). The label's × closes
-the small picture, its speaker asks for the mixer, and a click on the small picture swaps
-(the shell's `swap`).
+the small picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small
+picture, swaps (the shell's `swap`).
 
 What each slot shows (its target and the zap group it came from) is kept here, so a swap
 can give the shell the new large picture's (`take_large`).
@@ -84,7 +84,7 @@ class PipControls(QObject):
         closed: Callable[[], bool],
         toast: Callable[..., None],
         swap: Callable[[], bool],
-        mixer: Callable[[], None],
+        toggle_mute: Callable[[], None],
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
@@ -94,7 +94,7 @@ class PipControls(QObject):
         channel); `all_live()` every live channel; `large_channel()` what the large picture
         plays; `vod()` whether a movie or an episode is current; `external()` whether channels
         play in an external player (it holds the provider's stream); `swap()` the shell's swap
-        (False when it has to wait); `mixer()` opens the mixer on the PiP's row.
+        (False when it has to wait); `toggle_mute()` mutes or unmutes the small picture.
         """
         super().__init__(parent)
         self.sessions = sessions
@@ -116,7 +116,7 @@ class PipControls(QObject):
         self._closed = closed
         self._toast = toast
         self._swap = swap
-        self._mixer = mixer
+        self._toggle_mute = toggle_mute
         self._views: dict[str, SlotView] = {}
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
@@ -138,7 +138,8 @@ class PipControls(QObject):
         label = self._label
         if label is not None:
             label.closeRequested.connect(self.close)
-            label.mixerRequested.connect(self._mixer)
+            label.muteRequested.connect(self._toggle_mute)
+            label.swapRequested.connect(self.user_swap)
 
     # ---- state --------------------------------------------------------------------------------
 
@@ -193,7 +194,7 @@ class PipControls(QObject):
             self.user_swap()
 
     def user_swap(self) -> bool:
-        """S or a click on the PiP: a swap that has to wait says so."""
+        """S, a click on the PiP or its ⇄: a swap that has to wait says so."""
         swapped = self._swap()
         if not swapped and self.sessions.pip_open():
             self._toast(SWITCHING, "info", SWITCHING_MS)

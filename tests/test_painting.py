@@ -47,6 +47,7 @@ ICONS = [
     "gear",
     "plus",
     "external",
+    "swap",
 ]
 
 
