@@ -46,7 +46,13 @@ class WatchState:
     def record_play(
         self, provider_name: str, item: dict, *, item_type: str, link: str, group_id=None
     ) -> None:
-        self.config.add_to_watch_history(item, item_type, link, provider_name)
+        self.config.add_to_watch_history(
+            item,
+            item_type,
+            link,
+            provider_name,
+            content_id=self.content_id(provider_name, item, item_type=item_type),
+        )
         self.config.last_watched = {
             "item_data": item,
             "item_type": item_type,

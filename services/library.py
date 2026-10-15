@@ -27,6 +27,8 @@ T = TypeVar("T")
 CONTINUE, NEW, MY_LIST = "@continue", "@new", "@mylist"
 PINNED_TITLES = {CONTINUE: "⟲ Continue", NEW: "✦ New", MY_LIST: "★ My list"}
 NEW_LIMIT = 48
+MIN_YEAR = 1800
+SAVE_FAILED_NOTICE = "Couldn't save your list; it will be lost when QiTV closes"
 
 
 @dataclass(frozen=True)
@@ -91,16 +93,16 @@ def _added(item: dict) -> Optional[float]:
         return parsed.timestamp()
     if not math.isfinite(value) or value <= 0:
         return None
-    return value
+    return value / 1000 if value > 1e11 else value
 
 
 def _year(item: dict) -> Optional[int]:
     for key in ("year", "releasedate", "releaseDate", "release_date"):
         match = re.search(r"\d{4}", str(item.get(key) or ""))
-        if match:
+        if match and int(match.group()) >= MIN_YEAR:
             return int(match.group())
     match = re.search(r"\((\d{4})\)\s*$", _title(item))
-    return int(match.group(1)) if match else None
+    return int(match.group(1)) if match and int(match.group(1)) >= MIN_YEAR else None
 
 
 def _rating(item: dict) -> Optional[float]:
@@ -118,7 +120,7 @@ def _minutes(item: dict) -> Optional[int]:
     """The running time in whole minutes, else None."""
     secs = item.get("duration_secs")
     try:
-        if secs not in (None, ""):
+        if secs not in (None, "") and float(secs) > 0:
             return int(float(secs) // 60)
     except TypeError, ValueError:
         pass
@@ -188,6 +190,7 @@ def _letter(item: dict) -> str:
 class LibraryModel(QObject):
     changed = Signal()
     failed = Signal(str)
+    notice = Signal(str)
 
     def __init__(self, catalog, config, watch: WatchState, parent=None):
         super().__init__(parent)
@@ -199,6 +202,7 @@ class LibraryModel(QObject):
         self._requested = False
         self._ready = False
         self._genre: Optional[str] = None
+        self._pinned_sig: tuple = ()
         self._chosen_sort: Optional[Sort] = None
         self._memo: dict[tuple, Any] = {}
         catalog.sectionReady.connect(self._on_section_ready)
@@ -260,7 +264,8 @@ class LibraryModel(QObject):
         if pinned:
             self._genre = pinned[0].id
         elif groups:
-            self.select_genre(str(groups[0].id))
+            self._select(str(groups[0].id))
+        self._pinned_sig = self._pinned_signature()
         self.changed.emit()
 
     def _on_section_failed(self, section: str, message: str) -> None:
@@ -268,10 +273,28 @@ class LibraryModel(QObject):
             self.failed.emit(message)
 
     def _on_group_ready(self, section: str, group_id: str) -> None:
-        if self._current(section) and group_id == self._genre:
+        if not self._current(section):
+            return
+        signature = self._pinned_signature()
+        grew = signature != self._pinned_sig  # New grows as genres load
+        self._pinned_sig = signature
+        moved = self._ensure_selection()
+        if grew or moved or group_id == self._genre:
             self.changed.emit()
-        elif self._current(section) and self._genre in PINNED_TITLES:
-            self.changed.emit()  # New grows as genres load
+
+    def _pinned_signature(self) -> tuple:
+        return tuple((g.id, g.count) for g in self._pinned_genres())
+
+    def _ensure_selection(self) -> bool:
+        """Leave a pinned genre that has emptied for the first available one."""
+        if self._genre not in PINNED_TITLES or self._pinned_items(self._genre):
+            return False
+        available = self.genres()
+        if available:
+            self._select(available[0].id)
+        else:
+            self._genre = None
+        return True
 
     def _on_group_failed(self, section: str, group_id: str, message: str) -> None:
         if self._current(section) and group_id == self._genre:
@@ -403,10 +426,13 @@ class LibraryModel(QObject):
         return list(self._memoized(("genres", self._section, needle, self._fingerprint()), build))
 
     def select_genre(self, genre_id: str) -> None:
+        self._select(genre_id)
+        self.changed.emit()
+
+    def _select(self, genre_id: str) -> None:
         self._genre = genre_id
         if genre_id not in PINNED_TITLES and self._catalog.items(self._section, genre_id) is None:
             self._catalog.request_group(self._section, genre_id)
-        self.changed.emit()
 
     # --- items / sorting --------------------------------------------------------------
     def _genre_items(self) -> Optional[list[dict]]:
@@ -456,10 +482,15 @@ class LibraryModel(QObject):
         if self._genre in PINNED_TITLES or self.sort != Sort.AZ:
             return {}
         items = self.items() or []
-        index: dict[str, int] = {}
-        for pos, item in enumerate(items):
-            index.setdefault(_letter(item), pos)
-        return index
+        key = ("letters", self._section, self._genre, self.sort, self._catalog.content_version())
+
+        def build() -> dict[str, int]:
+            index: dict[str, int] = {}
+            for pos, item in enumerate(items):
+                index.setdefault(_letter(item), pos)
+            return index
+
+        return dict(self._memoized(key, build))
 
     # --- details / favorites ----------------------------------------------------------
     def progress(self, item: dict) -> Optional[float]:
@@ -505,5 +536,7 @@ class LibraryModel(QObject):
             self._config.save_config()
         except Exception as e:
             logger.warning("Couldn't save the favorites (%s)", type(e).__name__)
+            self.notice.emit(SAVE_FAILED_NOTICE)
+        self._ensure_selection()
         self.changed.emit()
         return now

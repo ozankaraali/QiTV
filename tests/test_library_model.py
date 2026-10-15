@@ -324,5 +324,84 @@ class LibraryModelTests(unittest.TestCase):
             self.assertEqual(spy.call_count, 2000)
 
 
+class FixRoundTests(unittest.TestCase):
+    def test_continue_keeps_stb_episodes_of_one_series_id(self):
+        cfg = make_config()
+        eps = [{"id": "7", "name": "Show", "season": "1", "series": str(n)} for n in (1, 2)]
+        for ep in eps:
+            history(cfg, ep, "episode")
+            resume(cfg, ep, "episode")
+        cat = FakeCatalog({"series": [("1", "S", 1)]}, {("series", "1"): [movie(7)]})
+        model, _ = build(cat, cfg, "series")
+        self.assertEqual([i["series"] for i in model.items()], ["1", "2"])
+
+    def test_letter_index_memoized(self):
+        items = [movie(i, f"T{i}") for i in range(500)]
+        cat = FakeCatalog({"movies": [("1", "G", 500)]}, {("movies", "1"): items})
+        model, _ = build(cat)
+        model.select_genre("1")
+        model.letter_index()
+        with mock.patch.object(library, "fold", wraps=library.fold) as spy:
+            model.letter_index()
+            self.assertEqual(spy.call_count, 0)
+
+    def test_parsing_edge_cases(self):
+        self.assertEqual(library._minutes({"duration_secs": 0, "duration": "42"}), 42)
+        self.assertIsNone(library._year({"year": "0000", "name": "X (1700)"}))
+        self.assertEqual(library._year({"year": "0000", "name": "X (1999)"}), 1999)
+        self.assertEqual(library._added({"added": "1700000000000"}), 1700000000.0)
+
+    def test_emptied_pinned_genre_moves_selection(self):
+        cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})
+        cfg = make_config(favorites=["Movie 1"])
+        model, _ = build(cat, cfg)
+        self.assertEqual(model.genre_id, MY_LIST)
+        model.toggle_favorite(movie(1))
+        self.assertEqual(model.genre_id, "1")
+
+    def test_group_ready_for_other_genre_updates_new(self):
+        cat = FakeCatalog(
+            {"movies": [("1", "A", 1), ("2", "B", None)]},
+            {("movies", "1"): [movie(1, added="1700000000")], ("movies", "2"): None},
+        )
+        model, _ = build(cat)
+        self.assertEqual(model.genre_id, NEW)
+        self.assertEqual(model.genres()[0].count, 1)
+        changed = []
+        model.changed.connect(lambda: changed.append(1))
+        cat.groupReady.emit("movies", "2")
+        self.assertEqual(changed, [])
+        cat.item_map[("movies", "2")] = [movie(2, added="1700000500")]
+        cat.group_list["movies"][1] = ("2", "B", 1)
+        cat.version += 1
+        cat.groupReady.emit("movies", "2")
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(model.genres()[0].count, 2)
+
+    def test_section_ready_emits_changed_once(self):
+        cat = FakeCatalog({"movies": [("1", "A", 1)]}, {("movies", "1"): [movie(1)]})
+        cfg = make_config()
+        model = LibraryModel(cat, cfg, WatchState(cfg))
+        model.set_section("movies")
+        changed = []
+        model.changed.connect(lambda: changed.append(1))
+        cat.sectionReady.emit("movies")
+        self.assertEqual(len(changed), 1)
+
+    def test_save_failure_emits_notice(self):
+        cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})
+        model, cfg = build(cat)
+        notices = []
+        model.notice.connect(notices.append)
+
+        def boom():
+            raise PermissionError("locked")
+
+        cfg.save_config = boom
+        with self.assertLogs("services.library", level="WARNING"):
+            model.toggle_favorite(movie(1))
+        self.assertEqual(notices, ["Couldn't save your list; it will be lost when QiTV closes"])
+
+
 if __name__ == "__main__":
     unittest.main()

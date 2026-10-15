@@ -63,5 +63,34 @@ class WindowConfigMigrationTests(unittest.TestCase):
                     self.app.processEvents()
 
 
+class WatchHistoryIdentityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_stb_episodes_sharing_a_series_id_are_kept_apart(self):
+        from services.watch_state import WatchState
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            with (
+                patch.object(ConfigManager, "_get_config_path", return_value=str(config_path)),
+                patch.object(ConfigManager, "_migrate_old_config"),
+            ):
+                config = ConfigManager()
+                watch = WatchState(config)
+                ep1 = {"id": "7", "name": "Show", "season": "1", "series": "1"}
+                ep2 = {"id": "7", "name": "Show", "season": "1", "series": "2"}
+                movie = {"id": "9", "name": "Film"}
+                watch.record_play("P", ep1, item_type="episode", link="a")
+                watch.record_play("P", ep2, item_type="episode", link="b")
+                watch.record_play("P", movie, item_type="movie", link="c")
+                watch.record_play("P", movie, item_type="movie", link="d")
+                history = config.watch_history
+                self.assertEqual([h["link"] for h in history], ["d", "b", "a"])
+                self.assertEqual(history[1]["content_id"], "P:7:s1:e2")
+                self.assertEqual(history[0]["content_id"], "P:9")
+
+
 if __name__ == "__main__":
     unittest.main()

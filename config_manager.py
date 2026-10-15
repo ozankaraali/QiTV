@@ -501,7 +501,12 @@ class ConfigManager:
         return f"{provider_name}:{item_id}"
 
     def add_to_watch_history(
-        self, item_data: dict, item_type: str, link: str, provider_name: str
+        self,
+        item_data: dict,
+        item_type: str,
+        link: str,
+        provider_name: str,
+        content_id: str | None = None,
     ) -> None:
         """Add an item to watch history.
 
@@ -510,8 +515,10 @@ class ConfigManager:
             item_type: Type of content (channel, movie, episode, etc.)
             link: The playback URL
             provider_name: Current provider name
+            content_id: Identity used to de-duplicate and store (default: derived from the item)
         """
-        content_id = self._generate_content_id(item_data, provider_name)
+        if content_id is None:
+            content_id = self._generate_content_id(item_data, provider_name)
 
         history_entry = {
             "content_id": content_id,

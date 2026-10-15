@@ -13,7 +13,9 @@ def make_config():
         saves=0,
         cleared=[],
     )
-    cfg.add_to_watch_history = lambda item, t, link, p: cfg.history.append((item, t, link, p))
+    cfg.add_to_watch_history = lambda item, t, link, p, content_id=None: cfg.history.append(
+        (item, t, link, p)
+    )
     cfg.save_config = lambda: setattr(cfg, "saves", cfg.saves + 1)
     cfg.save_playback_position = lambda cid, pos, dur: cfg.playback_positions.__setitem__(
         cid, {"position": pos, "duration": dur}
