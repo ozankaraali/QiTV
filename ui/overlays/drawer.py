@@ -2,6 +2,10 @@
 
 A right-click on an item, episode or channel row asks for its context menu
 (`contextRequested`); it leaves the highlight where the keys put it.
+
+Some rows leave the drawer when chosen (Enter, →, a click), and only then: the sources
+column's Settings and Add provider rows (`actionRequested`), and the Movies and Series
+sections, which the Library shows (`libraryRequested`). Highlighting them previews nothing.
 """
 
 import logging
@@ -10,7 +14,13 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, QT
 from PySide6.QtGui import QFont, QLinearGradient, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate
 
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
+from services.navigation import (
+    FAVORITES_GROUP,
+    LIBRARY_SECTIONS,
+    RECENT_GROUP,
+    NavModel,
+    NavNode,
+)
 from services.text_fold import fold
 from services.zapping import ZapContext
 from ui.overlays.base import Overlay
@@ -45,6 +55,11 @@ NodeRole = Qt.UserRole + 10
 CountRole = Qt.UserRole + 11
 IconRole = Qt.UserRole + 12
 _PINNED_ICONS = {FAVORITES_GROUP: "star", RECENT_GROUP: "recent"}
+
+
+def _leaves_drawer(node: NavNode) -> bool:
+    """An action row, or a section the Library shows: chosen, it is handed to the shell."""
+    return node.layer == "action" or (node.layer == "section" and node.key in LIBRARY_SECTIONS)
 
 
 def _is_live_item(nav: NavModel, node: NavNode) -> bool:
@@ -181,6 +196,8 @@ class _Column:
 class Drawer(Overlay):
     playRequested = Signal(object, object, object)
     contextRequested = Signal(object, QPoint)  # node, global position
+    actionRequested = Signal(str)  # an action row: SETTINGS_ROW or ADD_PROVIDER_ROW
+    libraryRequested = Signal(str)  # "movies" or "series", for the Library
     closed = Signal()
 
     def __init__(self, nav: NavModel, logos, now_provider, parent=None) -> None:
@@ -264,6 +281,8 @@ class Drawer(Overlay):
 
     def right(self) -> None:
         if self.focus_side == "left":
+            if self._hand_off(self.highlighted()):
+                return
             self._commit_left()
             self.focus_side = "right"
             self._refresh()
@@ -272,7 +291,7 @@ class Drawer(Overlay):
         if self._retry(col):
             return
         node = self.highlighted()
-        if node is None:
+        if node is None or self._hand_off(node):
             return
         if self._nav.is_playable(node):
             self.activate()
@@ -310,6 +329,16 @@ class Drawer(Overlay):
 
     # ---- state ------------------------------------------------------------------------------
 
+    def _hand_off(self, node: NavNode | None) -> bool:
+        """Hand a row that leaves the drawer to the shell; False for every other row."""
+        if node is None or not _leaves_drawer(node):
+            return False
+        if node.layer == "action":
+            self.actionRequested.emit(node.key)
+        else:
+            self.libraryRequested.emit(node.key)
+        return True
+
     def _retry(self, col: _Column) -> bool:
         if col.parent is None:
             return False
@@ -331,8 +360,8 @@ class Drawer(Overlay):
 
     def _schedule_preview(self, node: NavNode) -> None:
         path = self._nav.path
-        if node.layer == "source" or (path and node == path[-1]):
-            self._cancel_preview()  # sources only highlight; Right/Enter opens them
+        if node.layer == "source" or _leaves_drawer(node) or (path and node == path[-1]):
+            self._cancel_preview()  # these only highlight; Right/Enter opens or chooses them
             return
         self._preview_node = node
         self._preview_timer.start()

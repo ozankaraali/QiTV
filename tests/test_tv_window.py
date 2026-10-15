@@ -22,10 +22,11 @@ from PySide6.QtCore import (
     QTimer,
     qInstallMessageHandler,
 )
+from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from config_manager import ConfigManager
+from config_manager import ConfigManager, get_app_version
 from epg_manager import EpgManager
 from image_manager import ImageManager
 import main as qitv_main
@@ -34,21 +35,25 @@ from provider_manager import ProviderManager
 from services.playback import NO_VLC_MESSAGE, PlaybackState, create_instance
 from services.thread_cleanup import has_pending_threads
 from services.vlc_profile import PlayKind
+from tests.fixtures import local_xtream
 from tests.fixtures.local_provider import (
     PROVIDER_NAME,
     channel_urls,
     seed_channels,
     write_local_provider,
 )
+from tests.fixtures.local_xtream import XtreamFixture
 from tests.http_fixtures import LocalSource
 from tests.ts_fixtures import make_stream
+from ui.keymap import SHORTCUTS, resolve, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
-from ui.tv_controller import WELCOME_TEXT
+from ui.shortcuts_dialog import ShortcutsDialog, table_rows
 from ui.tv_window import (
     ABANDONED_EXIT_CODE,
     CLOSE_RETRY_MS,
     CLOSING_TEXT,
+    ISSUES_URL,
     WATCH_SAVE_DELAY_MS,
     TVWindow,
     _exit_now,
@@ -78,6 +83,7 @@ class WindowCase(unittest.TestCase):
     """
 
     vlc_instance = None
+    seed_fixture = False  # seed the local fixture's channels for a custom provider list
 
     @classmethod
     def setUpClass(cls):
@@ -122,7 +128,7 @@ class WindowCase(unittest.TestCase):
         self.prepare_config()
         self.provider_manager = ProviderManager(self.config)
         self.addCleanup(self.provider_manager._cache_writer.shutdown, wait=True)
-        if providers is None:
+        if providers is None or self.seed_fixture:
             seed_channels(self.provider_manager, provider)
         self.image_manager = ImageManager(self.config, 10 * 1024 * 1024)
         self.epg_manager = EpgManager(self.config, self.provider_manager)
@@ -177,7 +183,19 @@ class WindowCase(unittest.TestCase):
         QTest.keyClick(self.window, Qt.Key.Key_Return)
 
     def menu_actions(self):
-        return {a.text(): a for m in self.window.menuBar().actions() for a in m.menu().actions()}
+        """Every menu entry by its text, submenus' entries included."""
+        found = {}
+
+        def walk(menu):
+            for action in menu.actions():
+                if action.menu() is not None:
+                    walk(action.menu())
+                elif action.text():
+                    found[action.text()] = action
+
+        for top in self.window.menuBar().actions():
+            walk(top.menu())
+        return found
 
     def mini(self):
         QTest.keyClick(self.window, Qt.Key.Key_P, Qt.KeyboardModifier.AltModifier)
@@ -186,8 +204,17 @@ class WindowCase(unittest.TestCase):
 class TVWindowTests(WindowCase):
     def test_constructs_and_shows_with_the_overlay_host(self):
         self.show()
-        self.assertIsInstance(self.window.host, OverlayHost)
-        self.assertIs(self.window.centralWidget(), self.window.surface)
+        window = self.window
+        self.assertIsInstance(window.host, OverlayHost)
+        self.assertIs(window.centralWidget(), window.pages)
+        self.assertEqual(
+            [window.pages.widget(i) for i in range(window.pages.count())],
+            [window.player_page, window.library_page],
+        )
+        self.assertIs(window.pages.currentWidget(), window.player_page)
+        # The video container a second (PiP) surface can join: the surface fills it.
+        self.assertIs(window.surface.parentWidget(), window.player_page)
+        self.assertEqual(window.surface.geometry(), window.player_page.rect())
 
     def test_hosts_the_options_dialog(self):
         for name in HOST_METHODS + HOST_ATTRIBUTES:
@@ -290,30 +317,72 @@ class TVWindowTests(WindowCase):
 
     def test_menus_list_the_tv_actions_with_their_shortcuts(self):
         menus = {action.text(): action.menu() for action in self.window.menuBar().actions()}
-        self.assertEqual(list(menus), ["QiTV", "View", "Playback"])
+        self.assertEqual(list(menus), ["QiTV", "File", "View", "Playback", "Providers", "Help"])
 
         def shortcuts(menu):
-            return {a.text(): a.shortcut().toString() for a in menu.actions()}
+            return [(a.text(), a.shortcut().toString()) for a in menu.actions()]
 
-        self.assertEqual(shortcuts(menus["QiTV"]), {"Settings…": "Ctrl+,", "Quit": "Ctrl+Q"})
+        self.assertEqual(
+            shortcuts(menus["QiTV"]),
+            [
+                ("About QiTV", ""),
+                ("Check for Updates…", ""),
+                ("Settings…", "Ctrl+,"),
+                ("Quit", "Ctrl+Q"),
+            ],
+        )
+        self.assertEqual(shortcuts(menus["File"]), [("Open File…", "Ctrl+O"), ("Export", "")])
+        export = menus["File"].actions()[1].menu()
+        self.assertEqual(
+            [a.text() for a in export.actions()],
+            ["Cached Content…", "All Live Channels…", "Complete Series (Fetch All)…"],
+        )
         self.assertEqual(
             shortcuts(menus["View"]),
-            {"Fullscreen": "F", "Channel list": "Return", "Mini player": "Alt+P"},
+            [
+                ("Live TV", "Ctrl+1"),
+                ("Movies", "Ctrl+2"),
+                ("Series", "Ctrl+3"),
+                ("Search", "Ctrl+F"),
+                ("Guide", "G"),
+                ("Channel List", "Return"),
+                ("Fullscreen", "F"),
+                ("Mini Player", "Alt+P"),
+            ],
         )
         self.assertEqual(
             shortcuts(menus["Playback"]),
-            {"Play/Pause": "Space", "Mute": "M", "Previous channel": "Backspace"},
+            [
+                ("Play/Pause", "Space"),
+                ("Mute", "M"),
+                ("Previous Channel", "Backspace"),
+                ("Go Live", "L"),
+            ],
+        )
+        self.assertEqual(
+            shortcuts(menus["Help"]), [("Keyboard Shortcuts…", ""), ("Report an Issue…", "")]
         )
         # Only modifier combinations are live shortcuts; single keys are hints in the menu.
-        contexts = {a.text(): a.shortcutContext() for m in menus.values() for a in m.actions()}
-        live = {"Settings…", "Quit", "Mini player"}
-        for text, context in contexts.items():
+        actions = self.menu_actions()
+        live = {
+            "Settings…",
+            "Quit",
+            "Open File…",
+            "Live TV",
+            "Movies",
+            "Series",
+            "Search",
+            "Mini Player",
+        }
+        for text, action in actions.items():
+            if action.shortcut().isEmpty():
+                continue
             expected = (
                 Qt.ShortcutContext.ApplicationShortcut
                 if text in live
                 else Qt.ShortcutContext.WidgetShortcut
             )
-            self.assertEqual(context, expected, text)
+            self.assertEqual(action.shortcutContext(), expected, text)
 
     def test_keys_reach_the_open_drawer_and_never_trigger_menu_actions(self):
         triggered = []
@@ -362,7 +431,7 @@ class TVWindowTests(WindowCase):
         actions = self.menu_actions()
         actions["Fullscreen"].trigger()
         self.assertTrue(wait_until(self.window.isFullScreen))
-        actions["Channel list"].trigger()
+        actions["Channel List"].trigger()
         self.assertTrue(drawer.isVisible())
 
     # ---- mini player --------------------------------------------------------------------------
@@ -1002,27 +1071,370 @@ class LivePipelineWindowTests(WindowCase):
         self.assertEqual(window.zap.context.current()["name"], "Channel 1")
 
 
+# ---- the Library, menus, exports (Phase 3 Task 12) -------------------------------------------
+
+XTREAM = local_xtream.PROVIDER_NAME
+LIBRARY_WAIT_MS = 15000  # a provider setup and a section over the local HTTP fixture
+
+
+class TwoProviderCase(WindowCase):
+    """The local M3U fixture and a fake Xtream provider served on 127.0.0.1 (no network).
+
+    With libVLC when it is available: playback is checked through the session's play calls,
+    which both sessions receive, and through its state when it really plays.
+    """
+
+    vlc_instance = INSTANCE
+    seed_fixture = True
+    selected = PROVIDER_NAME  # the provider QiTV starts on
+
+    def setUp(self):
+        self.xtream = XtreamFixture()
+        self.addCleanup(self.xtream.close)  # after the window closed (cleanups run last first)
+        super().setUp()
+
+    def provider_list(self):
+        fixture = {
+            "type": "M3UPLAYLIST",
+            "name": PROVIDER_NAME,
+            "url": str(Path(self.config_dir) / "fixture.m3u"),
+        }
+        return [fixture, self.xtream.provider()]
+
+    def prepare_config(self):
+        self.config.selected_provider_name = self.selected
+
+    def wait_ready(self, name):
+        catalog = self.window.catalog
+        self.assertTrue(
+            wait_until(
+                lambda: catalog.current_provider_name() == name and not catalog.is_loading(),
+                LIBRARY_WAIT_MS,
+            ),
+            catalog.current_provider_name(),
+        )
+
+    def play_spy(self):
+        """The URLs the player is asked to play, in order."""
+        urls, session = [], self.window.session
+        play = session.play
+
+        def spy(url, **kwargs):
+            urls.append(url)
+            return play(url, **kwargs)
+
+        patcher = mock.patch.object(session, "play", side_effect=spy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return urls
+
+    def grid(self):
+        return self.window.library_page.grid
+
+    def wait_for_titles(self):
+        grid = self.grid()
+        self.assertTrue(wait_until(lambda: grid.current_index() >= 0, LIBRARY_WAIT_MS))
+        return grid
+
+    def wait_idle(self):
+        """libVLC stops on a worker: the state follows (NullSession is always idle)."""
+        session = self.window.session
+        self.assertTrue(wait_until(lambda: session.state() == PlaybackState.IDLE))
+
+
+class LibraryWindowTests(TwoProviderCase):
+    def test_view_movies_opens_the_library_stops_live_and_hides_the_overlays(self):
+        plays = self.play_spy()
+        self.open_first_channel()
+        window = self.window
+        self.assertTrue(wait_until(lambda: plays[-1:] == [channel_urls()[0]]))
+        if INSTANCE is not None:
+            playing = (PlaybackState.OPENING, PlaybackState.PLAYING)
+            self.assertTrue(wait_until(lambda: window.session.state() in playing))
+        window.notify("Keeps the overlay host up")
+        self.assertTrue(wait_until(window.host.isVisible))
+        actions = self.menu_actions()
+        actions["Movies"].trigger()
+        self.assertIs(window.pages.currentWidget(), window.library_page)
+        self.wait_idle()
+        self.assertFalse(window.host.isVisible())
+        self.assertEqual(window.budget.holders(PROVIDER_NAME), [])
+        self.assertTrue(window.library_toast.isVisible())  # messages show on the Library
+        for text in ("Guide", "Channel List", "Play/Pause", "Mute", "Previous Channel"):
+            self.assertFalse(actions[text].isEnabled(), text)  # the player's keys
+        self.assertTrue(actions["Fullscreen"].isEnabled())
+
+    def test_live_tv_tunes_the_last_channel_again(self):
+        plays = self.play_spy()
+        self.open_first_channel()
+        first = channel_urls()[0]
+        self.assertTrue(wait_until(lambda: plays == [first]))
+        actions = self.menu_actions()
+        actions["Movies"].trigger()
+        self.wait_idle()
+        actions["Live TV"].trigger()
+        self.assertIs(self.window.pages.currentWidget(), self.window.player_page)
+        self.assertTrue(wait_until(lambda: plays == [first, first]))
+        self.assertEqual(self.window.zap.context.current()["name"], "Channel 1")
+        self.assertTrue(self.window.host.isVisible())  # the banner names it
+        self.assertTrue(actions["Play/Pause"].isEnabled())
+
+    def test_export_cached_content_writes_the_file_and_says_so(self):
+        self.show()
+        self.wait_for_drawer()
+        target = Path(self.config_dir) / "exports" / "channels.m3u"
+        target.parent.mkdir()
+        answer = (str(target), "M3U files (*.m3u)")
+        with mock.patch("ui.export_flow.QFileDialog.getSaveFileName", return_value=answer) as ask:
+            self.menu_actions()["Cached Content…"].trigger()
+        default = Path.home() / "Downloads" / f"{PROVIDER_NAME}-cached.m3u"
+        self.assertEqual(ask.call_args[0][1:], ("Export", str(default), "M3U files (*.m3u)"))
+        done = ("Exported 2 items to channels.m3u", "info")
+        self.assertTrue(wait_until(lambda: done in self.toasts, 5000), self.toasts)
+        text = target.read_text(encoding="utf-8")
+        self.assertEqual(text.count("#EXTINF"), 2)
+        self.assertIn(channel_urls()[0], text)
+
+    def test_an_export_the_section_cannot_make_says_why_and_asks_nothing(self):
+        self.show()
+        self.wait_for_drawer()
+        with mock.patch("ui.export_flow.QFileDialog.getSaveFileName") as ask:
+            self.menu_actions()["Complete Series (Fetch All)…"].trigger()
+        ask.assert_not_called()
+        self.assertIn("Complete export is only available for STB series", self.toasts[-1][0])
+
+    def test_the_providers_menu_lists_both_and_switches(self):
+        self.show()
+        self.wait_for_drawer()
+        menu = self.window.providers_menu
+
+        def entries():
+            return [(a.text(), a.isChecked()) for a in menu.actions()]
+
+        self.assertEqual(entries(), [(PROVIDER_NAME, True), (XTREAM, False)])
+        group = menu.actions()[0].actionGroup()
+        self.assertTrue(group is not None and group.isExclusive())
+        menu.actions()[1].trigger()
+        self.wait_ready(XTREAM)
+        self.assertTrue(wait_until(lambda: entries() == [(PROVIDER_NAME, False), (XTREAM, True)]))
+
+    def test_esc_while_exporting_cancels_the_export_only(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        with mock.patch.object(self.window.exports, "cancel", return_value=True) as cancel:
+            QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        cancel.assert_called_once_with()
+        self.assertTrue(drawer.isVisible())  # the Esc went to the export
+
+
+class XtreamLibraryTests(TwoProviderCase):
+    selected = XTREAM
+
+    def test_a_movie_plays_and_esc_returns_to_the_library_where_it_was(self):
+        plays = self.play_spy()
+        self.show()
+        self.wait_ready(XTREAM)
+        window = self.window
+        self.menu_actions()["Movies"].trigger()
+        grid = self.wait_for_titles()
+        QTest.keyClick(window, Qt.Key.Key_Right)
+        current = grid.item(grid.current_index())
+        self.assertIn(current["name"], local_xtream.movie_titles())
+        self.assertEqual(grid.current_index(), 1)
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertIs(window.pages.currentWidget(), window.player_page)
+        self.assertTrue(wait_until(lambda: plays == [current["cmd"]]))
+        self.assertTrue(current["cmd"].startswith(self.xtream.url))
+        if INSTANCE is not None:
+            playing = (PlaybackState.OPENING, PlaybackState.PLAYING, PlaybackState.BUFFERING)
+            self.assertTrue(wait_until(lambda: window.session.state() in playing))
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertIs(window.pages.currentWidget(), window.library_page)
+        self.assertEqual(grid.current_index(), 1)
+        self.assertIs(grid.item(1), current)  # the same title, not a reloaded list
+        self.wait_idle()
+
+    def test_choosing_movies_in_the_drawer_opens_the_library(self):
+        self.show()
+        self.wait_ready(XTREAM)
+        drawer = self.wait_for_drawer()  # no channels here: it opens on the idle player
+        for key in (Qt.Key.Key_Left, Qt.Key.Key_Down):  # the sections, then Movies
+            QTest.keyClick(self.window, key)
+        self.assertEqual(drawer.highlighted().title, "Movies")
+        QTest.keyClick(self.window, Qt.Key.Key_Return)
+        self.assertIs(self.window.pages.currentWidget(), self.window.library_page)
+        self.assertFalse(drawer.isVisible())
+        self.assertEqual(self.window.library_controller.section, "movies")
+        self.wait_for_titles()
+
+    def test_a_search_hit_on_another_provider_plays_once_it_is_ready(self):
+        # Review Focus 4: the play waits for its provider, and the shell's own provider
+        # change (it drops older requests) never drops it.
+        plays = self.play_spy()
+        self.show()
+        self.wait_ready(XTREAM)
+        window = self.window
+        actions = self.menu_actions()
+        actions["Movies"].trigger()
+        self.wait_for_titles()  # cached: the search reads every provider's saved catalog
+        self.provider_manager._cache_writer.submit(lambda: None).result(timeout=5)
+        window.providers_menu.actions()[0].trigger()
+        self.wait_ready(PROVIDER_NAME)
+        actions["Search"].trigger()
+        self.assertEqual(window.library_controller.mode, "search")
+        for letter in "quiet":
+            QTest.keyClick(window, letter)
+        grid = self.grid()
+        self.assertTrue(
+            wait_until(
+                lambda: grid.current_index() >= 0 and grid.item(0)["name"] == "Quiet Pier",
+                LIBRARY_WAIT_MS,
+            )
+        )
+        QTest.keyClick(window, Qt.Key.Key_Down)  # from the field to the results
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.wait_ready(XTREAM)
+        self.assertTrue(wait_until(lambda: len(plays) == 1, LIBRARY_WAIT_MS))
+        self.assertTrue(plays[0].endswith("/102.mp4"), plays)
+        QTest.qWait(300)
+        self.assertEqual(len(plays), 1)  # nothing plays twice, no channel after it
+        self.assertIs(window.pages.currentWidget(), window.player_page)
+        self.assertTrue(window.controller.vod_current())
+
+
+class DrawerSettingsTests(WindowCase):
+    def test_the_drawer_reaches_settings_and_add_provider_with_arrows_and_enter(self):
+        self.show()
+        drawer = self.wait_for_drawer()  # on the sections and the groups
+        with mock.patch("ui.tv_window.OptionsDialog") as dialog:
+            for key in (Qt.Key.Key_Left, Qt.Key.Key_Left, Qt.Key.Key_Down):
+                QTest.keyClick(self.window, key)  # the sources column, then ⚙ Settings
+            self.assertEqual(drawer.highlighted().title, "⚙ Settings")
+            QTest.keyClick(self.window, Qt.Key.Key_Return)
+            dialog.assert_called_once_with(self.window)
+            dialog.return_value.exec.assert_called_once_with()
+            dialog.return_value.start_new_provider.assert_not_called()
+            QTest.keyClick(self.window, Qt.Key.Key_Down)
+            self.assertEqual(drawer.highlighted().title, "＋ Add provider")
+            QTest.keyClick(self.window, Qt.Key.Key_Return)
+            dialog.return_value.start_new_provider.assert_called_once_with()
+        self.assertEqual(dialog.call_count, 2)
+        self.assertTrue(drawer.isVisible())
+
+    def test_add_provider_opens_the_providers_tab_on_a_new_entry(self):
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        before = dialog.provider_combo.count()
+        dialog.start_new_provider()
+        self.assertIs(dialog.options_tab.currentWidget(), dialog.providers_tab)
+        self.assertEqual(dialog.provider_combo.count(), before + 1)
+        self.assertEqual(dialog.provider_combo.currentIndex(), before)
+        self.assertEqual(dialog.name_input.text(), "")
+
+
+class HelpAndAboutTests(WindowCase):
+    def test_every_key_in_the_shortcuts_table_works_in_its_screen(self):
+        menu_keys = {
+            action.shortcut().toString()
+            for action in self.menu_actions().values()
+            if not action.shortcut().isEmpty()
+        }
+        for context, rows in SHORTCUTS.items():
+            for keys, what in rows:
+                for key in shortcut_keys(keys):
+                    with self.subTest(context=context, key=key, what=what):
+                        if context == "menu":
+                            self.assertIn(QKeySequence(key).toString(), menu_keys)
+                            continue
+                        combo = QKeySequence(key)[0]
+                        code, mods = combo.key().value, combo.keyboardModifiers()
+                        held = mods & _SHORTCUT_HELD
+                        text = chr(code).lower() if not held and 0x20 <= code < 0x7F else ""
+                        self.assertIsNotNone(resolve(code, mods, text, context=context))
+
+    def test_help_lists_the_table(self):
+        with mock.patch("ui.tv_window.ShortcutsDialog") as dialog:
+            self.menu_actions()["Keyboard Shortcuts…"].trigger()
+        dialog.assert_called_once_with(self.window)
+        dialog.return_value.exec.assert_called_once_with()
+        shown = ShortcutsDialog(self.window)
+        self.addCleanup(shown.deleteLater)
+        rows = table_rows()
+        self.assertEqual(len(rows), len(SHORTCUTS) + sum(len(r) for r in SHORTCUTS.values()))
+        self.assertEqual(shown.table.rowCount(), len(rows))
+        self.assertEqual(shown.table.item(0, 0).text(), "Watching TV")
+
+    def test_about_names_the_version_and_the_links(self):
+        with mock.patch("ui.tv_window.QMessageBox") as box:
+            self.menu_actions()["About QiTV"].trigger()
+        text = box.return_value.setText.call_args[0][0]
+        self.assertIn(f"QiTV {get_app_version()}", text)
+        self.assertIn(ISSUES_URL, text)
+        box.return_value.exec.assert_called_once_with()
+
+    def test_check_for_updates_and_report_an_issue(self):
+        with (
+            mock.patch("ui.tv_window.check_for_updates") as check,
+            mock.patch("ui.tv_window.QDesktopServices.openUrl") as open_url,
+        ):
+            actions = self.menu_actions()
+            actions["Check for Updates…"].trigger()
+            actions["Report an Issue…"].trigger()
+        check.assert_called_once_with(self.config, manual=True)
+        self.assertEqual(open_url.call_args[0][0].toString(), ISSUES_URL)
+
+
+_SHORTCUT_HELD = (
+    Qt.KeyboardModifier.ControlModifier
+    | Qt.KeyboardModifier.AltModifier
+    | Qt.KeyboardModifier.MetaModifier
+)
+
+
 class NoProviderTests(WindowCase):
     def provider_list(self):
         return []
 
-    def test_first_launch_without_providers_shows_the_welcome_hint(self):
+    def test_first_launch_without_providers_shows_the_welcome_card(self):
         self.show()
-        toast, host = self.window.overlays.toast, self.window.host
-        self.assertTrue(wait_until(lambda: toast.text() == WELCOME_TEXT and toast.isVisible()))
+        card, host = self.window.overlays.welcome, self.window.host
+        self.assertTrue(wait_until(card.isVisible))
         self.assertTrue(host.isVisible())
+        self.assertFalse(self.window.overlays.toast.isVisible())  # no hint under it
         # Laid out for the host's real size, though the host was hidden when it showed.
         self.assertEqual(host.size(), self.window.surface.size())
-        self.assertAlmostEqual(toast.geometry().center().x(), host.width() / 2, delta=2)
+        self.assertAlmostEqual(card.geometry().center().x(), host.width() / 2, delta=2)
+        self.assertAlmostEqual(card.geometry().center().y(), host.height() / 2, delta=2)
 
-    def test_the_welcome_hint_stays_until_a_provider_exists(self):
+    def test_its_button_and_enter_open_settings_on_a_new_provider(self):
         self.show()
-        toast = self.window.overlays.toast
-        self.assertTrue(wait_until(lambda: toast.text() == WELCOME_TEXT))
-        toast.show_message("Volume 50%", "info", 50)  # any message shows over it…
-        self.assertTrue(wait_until(lambda: toast.text() == WELCOME_TEXT))  # …and gives it back
-        QTest.qWait(150)
-        self.assertTrue(toast.isVisible())
+        card = self.window.overlays.welcome
+        self.assertTrue(wait_until(card.isVisible))
+        added = []
+        card.addRequested.connect(lambda: added.append(True))
+        with mock.patch("ui.tv_window.OptionsDialog") as dialog:
+            QTest.mouseClick(
+                card, Qt.MouseButton.LeftButton, pos=card.button_rect().center().toPoint()
+            )
+            self.assertEqual(added, [True])
+            dialog.assert_called_once_with(self.window)
+            dialog.return_value.start_new_provider.assert_called_once_with()
+            dialog.return_value.exec.assert_called_once_with()
+            QTest.keyClick(self.window, Qt.Key.Key_Return)  # OK on a remote
+        self.assertEqual(added, [True, True])
+        self.assertEqual(dialog.call_count, 2)
+        self.assertFalse(self.window.overlays.drawer.isVisible())
+
+    def test_the_card_hides_once_a_provider_is_saved(self):
+        self.show()
+        card = self.window.overlays.welcome
+        self.assertTrue(wait_until(card.isVisible))
+        write_local_provider(self.config_dir)  # what Settings would save
+        self.provider_manager.providers = [
+            {"type": "M3UPLAYLIST", "name": PROVIDER_NAME, "url": "missing.m3u"}
+        ]
+        self.window.set_provider(force_update=True)
+        self.assertFalse(card.isVisible())
 
 
 class FailingProviderTests(WindowCase):

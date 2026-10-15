@@ -1,4 +1,9 @@
-"""Layered navigation for the drawer: Source → Section → Group → Item → Season → Episode."""
+"""Layered navigation for the drawer: Source → Section → Group → Item → Season → Episode.
+
+The sources column ends with two action rows, Settings and Add provider: rows to choose, not
+providers or layers to open (the drawer hands them to the shell, as it does the Library's
+sections).
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,9 @@ from services.catalog import PROVIDER_LOADING_MESSAGE
 logger = logging.getLogger(__name__)
 
 SECTION_TITLES = {"live": "Live TV", "movies": "Movies", "series": "Series"}
+LIBRARY_SECTIONS = frozenset({"movies", "series"})  # chosen in the drawer, shown by the Library
+SETTINGS_ROW = "settings"
+ADD_PROVIDER_ROW = "add_provider"
 FAVORITES_GROUP = "@favorites"
 RECENT_GROUP = "@recent"
 _RECENT_LIMIT = 20
@@ -34,6 +42,12 @@ class NavNode:
 
     def __eq__(self, other):
         return isinstance(other, NavNode) and (self.layer, self.key) == (other.layer, other.key)
+
+
+ACTION_ROWS = (
+    NavNode("action", SETTINGS_ROW, "⚙ Settings"),
+    NavNode("action", ADD_PROVIDER_ROW, "＋ Add provider"),
+)
 
 
 def item_key(item: dict) -> str:
@@ -124,7 +138,8 @@ class NavModel(QObject):
         self, parent: Optional[NavNode]
     ) -> Optional[list[NavNode]]:
         if parent is None:
-            return [NavNode("source", name, name, name) for name in self.catalog.provider_names()]
+            sources = [NavNode("source", n, n, n) for n in self.catalog.provider_names()]
+            return sources + list(ACTION_ROWS)
         if parent.layer == "source":
             return [
                 NavNode("section", s, SECTION_TITLES.get(s, s.title()), s)

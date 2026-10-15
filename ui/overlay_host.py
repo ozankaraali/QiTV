@@ -120,6 +120,10 @@ class OverlayHost(QWidget):
     def _window_shown(self) -> bool:
         return isValid(self._window) and self._window.isVisible() and not self._window.isMinimized()
 
+    def _surface_shown(self) -> bool:
+        """The video is on screen: not on another page of the window (the Library)."""
+        return isValid(self._surface) and self._surface.isVisible()
+
     def _watch_platform(self) -> None:
         """Filter the window's QWindow (created on show): only it gets the platform's report
         of a restore that Qt asked for, the widget's state having changed already."""
@@ -135,7 +139,7 @@ class OverlayHost(QWidget):
             self._update_visibility()
 
     def _update_visibility(self) -> None:
-        wanted = bool(self.visible_overlays()) and self._window_shown()
+        wanted = bool(self.visible_overlays()) and self._window_shown() and self._surface_shown()
         # Qt says restored, macOS has not: it reports a restore once the window has landed,
         # but Qt reports one it asked for (showNormal()) at once. Shown now, the overlays sat
         # in their final place while the window still flew out of the Dock.

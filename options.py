@@ -769,6 +769,12 @@ class OptionsDialog(QDialog):
         self.load_providers()
         self.providers_modified = True
 
+    def start_new_provider(self):
+        """Open on the Providers tab with a new, empty provider to fill in (TV: Add provider)."""
+        self.options_tab.setCurrentWidget(self.providers_tab)
+        self.add_new_provider()
+        self.name_input.setFocus()
+
     def remove_provider(self):
         if len(self.providers) == 1:
             return

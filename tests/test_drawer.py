@@ -9,11 +9,19 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
-from services.navigation import NavModel
+from services.navigation import ADD_PROVIDER_ROW, SETTINGS_ROW, NavModel
 from tests.test_navigation import FakeCatalog
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_rows import NumberRole
-from ui.overlays.drawer import EMPTY_TEXT, LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
+from ui.overlays.drawer import (
+    EMPTY_TEXT,
+    LOADING_TEXT,
+    PREVIEW_DEBOUNCE_MS,
+    PROVIDER_ERROR_TEXT,
+    Drawer,
+)
+
+PREVIEW_WAIT_MS = PREVIEW_DEBOUNCE_MS + 120
 
 
 def make(live=None):
@@ -228,6 +236,75 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.highlighted().title, "Backup")
         self.drawer.right()
         self.assertEqual(self.catalog.selected, ["Backup"])
+
+    # ---- rows that leave the drawer: Settings, Add provider, the Library's sections ---------
+
+    def record_hand_offs(self):
+        self.actions, self.library = [], []
+        self.drawer.actionRequested.connect(self.actions.append)
+        self.drawer.libraryRequested.connect(self.library.append)
+
+    def open_on_the_sources(self):
+        self.nav.focus_source("Home")
+        self.drawer.open_drawer(focus_side="left")
+        self.record_hand_offs()
+        return self.drawer._columns["left"]
+
+    def test_the_sources_column_ends_with_settings_and_add_provider(self):
+        column = self.open_on_the_sources()
+        titles = [column.model.index(r).data() for r in range(column.model.rowCount())]
+        self.assertEqual(titles, ["Home", "Backup", "⚙ Settings", "＋ Add provider"])
+        self.assertEqual(self.drawer.highlighted().key, "Home")
+
+    def test_arrows_and_enter_reach_settings_and_add_provider(self):
+        self.open_on_the_sources()
+        path = self.nav.path
+        self.drawer.move_by(1)
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer.highlighted().key, SETTINGS_ROW)
+        QTest.qWait(PREVIEW_WAIT_MS)  # highlighting an action row starts nothing
+        self.assertEqual((self.actions, self.nav.path, self.catalog.selected), ([], path, []))
+        self.drawer.activate()  # Enter (OK on a remote)
+        self.drawer.move_by(1)
+        self.drawer.right()  # → like Enter
+        self.assertEqual(self.actions, [SETTINGS_ROW, ADD_PROVIDER_ROW])
+        # The drawer stays on the row (the dialog opens over it) and nothing else happened.
+        self.assertTrue(self.drawer.isVisible())
+        self.assertEqual(self.drawer.focus_side, "left")
+        self.assertEqual(self.drawer.highlighted().key, ADD_PROVIDER_ROW)
+        self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
+
+    def test_a_click_on_settings_asks_for_it(self):
+        column = self.open_on_the_sources()
+        self.drawer._on_row_clicked("left", 2)
+        self.assertEqual(self.actions, [SETTINGS_ROW])
+        self.assertEqual(column.current.key, SETTINGS_ROW)
+
+    def test_choosing_movies_or_series_hands_them_to_the_library(self):
+        self.nav.open(self.nav.path[0])  # the sources: the right column lists the sections
+        self.drawer.open_drawer()
+        self.record_hand_offs()
+        self.drawer.move_by(1)
+        self.assertEqual(self.drawer.highlighted().title, "Movies")
+        self.drawer.activate()
+        self.drawer.move_by(1)
+        self.drawer.right()
+        self.assertEqual(self.library, ["movies", "series"])
+        self.assertEqual([n.layer for n in self.nav.path], ["source"])  # not browsed here
+
+    def test_a_highlighted_library_section_is_not_previewed(self):
+        self.drawer.open_drawer()  # on the live group: ← twice shows the sections on the left
+        self.record_hand_offs()
+        self.drawer.left()
+        self.drawer.left()
+        self.assertEqual(self.drawer.highlighted().title, "Live TV")
+        self.drawer.move_by(1)
+        QTest.qWait(PREVIEW_WAIT_MS)
+        self.assertEqual(self.nav.path[-1].key, "live")  # Movies was not opened in the drawer
+        self.assertNotIn(("section", "movies"), self.catalog.requests)
+        self.drawer.right()
+        self.assertEqual(self.library, ["movies"])
+        self.assertEqual(self.nav.path[-1].key, "live")
 
     def test_left_typing_highlights_and_opens_first_match(self):
         self.many_groups()

@@ -1,8 +1,17 @@
 import unittest
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence
 
-from ui.keymap import Action, as_int, resolve
+from ui.keymap import (
+    CONTEXTS,
+    SHORTCUT_TITLES,
+    SHORTCUTS,
+    Action,
+    as_int,
+    resolve,
+    shortcut_keys,
+)
 
 NONE = Qt.KeyboardModifier.NoModifier
 SHIFT = Qt.KeyboardModifier.ShiftModifier
@@ -29,6 +38,15 @@ def guide(key, text="", mods=NONE):
 
 
 META = Qt.KeyboardModifier.MetaModifier
+
+
+def resolve_text(key_text, context):
+    """resolve() for a QKeySequence text such as "Ctrl+F" or "a", with the text it types."""
+    combo = QKeySequence(key_text)[0]
+    key, mods = combo.key().value, combo.keyboardModifiers()
+    held = mods & (CTRL | ALT | META)
+    text = chr(key).lower() if not held and 0x20 <= key < 0x7F else ""
+    return resolve(key, mods, text, context=context)
 
 
 class ClosedKeymapTests(unittest.TestCase):
@@ -293,3 +311,32 @@ class ContextTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShortcutTableTests(unittest.TestCase):
+    """Help → Keyboard Shortcuts lists SHORTCUTS: every key there resolves in its context."""
+
+    def test_alternatives_and_ranges_expand_to_single_keys(self):
+        self.assertEqual(shortcut_keys("Up, Down"), ["Up", "Down"])
+        self.assertEqual(shortcut_keys("/, Ctrl+F"), ["/", "Ctrl+F"])
+        self.assertEqual(shortcut_keys("Ctrl+,"), ["Ctrl+,"])
+        self.assertEqual(shortcut_keys("0…9"), [str(d) for d in range(10)])
+        self.assertEqual(len(shortcut_keys("A…Z")), 26)
+
+    def test_the_table_has_a_titled_section_per_context(self):
+        self.assertEqual(list(SHORTCUTS), list(SHORTCUT_TITLES))
+        self.assertEqual(set(SHORTCUTS) - {"menu"}, set(CONTEXTS))
+        for rows in SHORTCUTS.values():
+            self.assertTrue(rows)
+            for keys, what in rows:
+                self.assertTrue(keys and what)
+
+    def test_every_listed_key_resolves_in_its_context(self):
+        # The menu's keys are checked against the window's menus (test_tv_window).
+        for context, rows in SHORTCUTS.items():
+            if context == "menu":
+                continue
+            for keys, what in rows:
+                for key in shortcut_keys(keys):
+                    with self.subTest(context=context, key=key, what=what):
+                        self.assertIsNotNone(resolve_text(key, context))

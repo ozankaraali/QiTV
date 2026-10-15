@@ -177,6 +177,11 @@ class LibraryController(QObject):
     def query(self) -> str:
         return self._search.query
 
+    @property
+    def section(self) -> Optional[str]:
+        """The Movies or Series section opened last; None until one was."""
+        return self._section
+
     def _focus(self, zone: str) -> None:
         if zone == "nav" and self._zone != "nav":
             self._nav_return = self._zone

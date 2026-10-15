@@ -29,6 +29,7 @@ from ui.overlays.guide import Guide
 from ui.overlays.next_card import NextCard
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
+from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
 from ui.tv_controller import Overlays, TVController, scrub
 
@@ -413,6 +414,24 @@ class FakeNextCard(FakeOverlay):
         return True
 
 
+class FakeWelcome(FakeOverlay):
+    addRequested = Signal()
+
+    def show_card(self):
+        self.record("show_card")
+        self.visible = True
+
+    def dismiss(self):
+        self.record("dismiss")
+        self.visible = False
+
+    def activate(self):
+        if not self.visible:
+            return False
+        self.addRequested.emit()
+        return True
+
+
 class FakeLogos(QObject):
     logoReady = Signal(str)
 
@@ -592,6 +611,7 @@ class ControllerTestCase(unittest.TestCase):
         self.banner, self.column = FakeBanner(), FakeColumn()
         self.drawer, self.transport, self.toast = FakeDrawer(), FakeTransport(), FakeToast()
         self.guide, self.next_card = FakeGuide(), FakeNextCard()
+        self.welcome = FakeWelcome()
         self.controller = self.make_controller(self.column)
 
     def make_controller(self, column, **extra):
@@ -620,6 +640,7 @@ class ControllerTestCase(unittest.TestCase):
             self.toast,
             self.guide,
             self.next_card,
+            self.welcome,
         )
 
     def tune(self, index):
@@ -738,21 +759,30 @@ class LinkPipelineTests(ControllerTestCase):
 
 
 class StartupTests(ControllerTestCase):
-    def test_no_providers_shows_the_welcome_hint_until_one_exists(self):
+    def test_no_providers_shows_the_welcome_card_until_one_exists(self):
         self.catalog.names = []
         self.controller.start()
-        self.assertEqual(self.toast.hint, "Add a provider in Settings to start watching")
-        self.assertEqual(self.toast.messages(), [])  # a hint: no message that times out
+        self.assertTrue(self.welcome.visible)
+        self.assertIsNone(self.toast.hint)
+        self.assertEqual(self.toast.messages(), [])
         self.assertEqual(self.catalog.selected, [])
         self.assertEqual(self.drawer.calls, [])
         self.controller.handle(Action.OPEN_DRAWER)
         self.controller.select_provider(force_refresh=True)
         self.assertEqual(self.drawer.calls, [])
         self.assertEqual(self.catalog.selected, [])
-        self.assertEqual(self.toast.hint, "Add a provider in Settings to start watching")
+        self.assertTrue(self.welcome.visible)
+        added = []
+        self.welcome.addRequested.connect(lambda: added.append(True))
+        self.controller.handle(Action.OK)  # Enter, or OK on a remote: its button
+        self.assertEqual(added, [True])
+        self.assertEqual(self.drawer.calls, [])
         self.catalog.names = ["Home"]  # saved in Settings
         self.controller.select_provider(force_refresh=True)
+        self.assertFalse(self.welcome.visible)
         self.assertEqual(self.toast.hint, "Loading Home…")
+        self.controller.handle(Action.OK)  # a provider exists: the drawer, not the card
+        self.assertEqual(added, [True])
 
     def test_the_loading_hint_shows_until_the_first_live_section(self):
         self.controller.start()
@@ -1140,6 +1170,7 @@ class RealOverlayTests(ControllerTestCase):
             Toast(host),
             Guide(None, lambda channel, start, limit: [], lambda: NOW, parent=host),
             NextCard(host),
+            WelcomeCard(host),
         )
         controller = TVController(
             config=self.config,
@@ -2117,7 +2148,7 @@ class ResumeTests(PipelineCase):
         self.start_pipeline(0)
         self.controller.stop_live()
         self.live.released.emit()
-        self.controller.resume_live()
+        self.controller.resume_stopped()
         self.assertEqual(self.requested(), ["One", "One"])  # a fresh link (STB tokens)
         self.ready("http://stream/1")
         self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
@@ -2129,18 +2160,18 @@ class ResumeTests(PipelineCase):
         self.ready("http://vod/heat.mkv")
         self.watch.resume["Home:movie:m7"] = 600_000  # the watch state's last position
         self.controller.stop_live()
-        self.controller.resume_live()
+        self.controller.resume_stopped()
         self.ready("http://vod/heat.mkv")
         self.assertEqual(self.session.plays[-1][1]["start_ms"], 600_000)
         self.assertEqual(self.requested(), ["Heat", "Heat"])
 
     def test_nothing_resumes_when_nothing_played(self):
         self.controller.stop_live()
-        self.controller.resume_live()
+        self.controller.resume_stopped()
         self.config.play_in_vlc = True  # an external player: the app played nothing
         self.play(0)
         self.controller.stop_live()
-        self.controller.resume_live()
+        self.controller.resume_stopped()
         self.assertEqual(self.requested(), ["One"])
 
 
@@ -3044,6 +3075,162 @@ class MouseLayerTests(ControllerTestCase):
         self.assertEqual(len(self.drawer.named("open_drawer")), 1)
         self.controller.mouse_back()
         self.assertEqual(self.drawer.named("left"), [()])
+
+
+class LibraryTests(AutoplayCase):
+    """The window's Library hooks (Task 12, R5): stop for it, back to live TV, its plays."""
+
+    LAST = {"provider_name": "Home", "group_id": "10", "item": CHANNELS[2]}
+
+    def test_stop_for_library_stops_what_plays_and_closes_the_player_overlays(self):
+        self.play(0)
+        self.controller.handle(Action.GUIDE)
+        self.assertTrue(self.guide.visible)
+        self.drawer.visible = self.column.visible = True
+        stops = self.session.stops
+        self.controller.stop_for_library()
+        self.assertEqual(self.session.stops, stops + 1)
+        self.assertFalse(self.guide.visible)
+        self.assertEqual((self.drawer.visible, self.column.visible), (False, False))
+        self.assertTrue(self.transport.named("dismiss") and self.banner.named("dismiss"))
+        self.assertFalse(self.controller.vod_current())
+
+    def test_stop_for_library_closes_the_next_card(self):
+        films = [movie(1), movie(2)]
+        self.controller.play_vod(films[0], "movie", play_context(genre_items=films))
+        self.ready("http://vod/m1.mkv")
+        self.end()
+        self.assertTrue(self.next_card.visible)
+        self.controller.stop_for_library()
+        self.assertFalse(self.next_card.visible)
+        self.assertEqual(self.link_items(), ["m1"])  # nothing follows it
+
+    def test_a_link_still_on_its_way_never_opens_in_the_library(self):
+        self.tune(1)
+        self.controller.stop_for_library()
+        self.ready("http://stream/2")
+        self.assertEqual(self.session.plays, [])
+
+    def test_in_the_library_a_provider_change_neither_tunes_nor_opens_the_drawer(self):
+        self.config.last_live_channel = dict(self.LAST, provider_name="Backup")
+        self.controller.stop_for_library()
+        self.drawer.calls.clear()
+        self.controller.select_provider("Backup")
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.catalog.links, [])
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+
+    def test_resume_live_tunes_the_last_channel_in_its_group(self):
+        self.config.last_live_channel = dict(self.LAST)
+        self.controller.stop_for_library()
+        self.controller.resume_live()
+        self.assertEqual(self.requested(), ["Three"])
+        self.ready("http://stream/3")
+        self.assertEqual(self.played_urls(), ["http://stream/3"])
+        self.assertEqual(self.zap.context.group_key, "10")
+
+    def test_resume_live_tunes_even_when_startup_does_not(self):
+        self.config.start_with_last_channel = False  # that setting is about launching QiTV
+        self.config.last_live_channel = dict(self.LAST)
+        self.controller.stop_for_library()
+        self.controller.resume_live()
+        self.assertEqual(self.requested(), ["Three"])
+
+    def test_resume_live_without_a_last_channel_opens_the_drawer(self):
+        self.controller.stop_for_library()
+        self.drawer.calls.clear()
+        self.controller.resume_live()
+        self.assertEqual(self.catalog.links, [])
+        self.assertEqual(len(self.drawer.named("open_drawer")), 1)
+
+    def test_a_provider_that_failed_in_the_library_shows_its_retry_row_back_on_tv(self):
+        self.config.last_live_channel = dict(self.LAST, provider_name="Backup")
+        self.controller.stop_for_library()
+        self.drawer.calls.clear()
+        self.controller.select_provider("Backup")
+        self.catalog.provider = "Backup"
+        self.catalog.providerFailed.emit("Backup", "Handshake failed")
+        self.assertEqual(self.drawer.named("open_drawer"), [])  # not behind the Library
+        requests = list(self.catalog.requests)
+        self.controller.resume_live()
+        self.assertEqual(self.drawer.named("open_drawer"), [(None, "left")])
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Backup")])
+        self.assertEqual((self.catalog.links, self.catalog.requests), ([], requests))
+
+    def test_resume_live_during_a_provider_switch_tunes_once_it_is_ready(self):
+        self.config.start_with_last_channel = False
+        self.config.last_live_channel = dict(self.LAST, provider_name="Backup")
+        self.controller.stop_for_library()
+        self.controller.select_provider("Backup")
+        self.catalog.loading = True
+        self.controller.resume_live()
+        self.assertEqual(self.catalog.links, [])
+        self.catalog.loading = False
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.requested(), ["Three"])
+
+    def test_a_library_play_made_as_its_provider_becomes_ready_wins_over_the_last_channel(self):
+        # The Library runs a play waiting for its provider from its own providerReady slot,
+        # after the controller's (connected first): the play must survive the provider change.
+        self.config.last_live_channel = dict(self.LAST, provider_name="Backup")
+        film = movie(4)
+        self.controller.stop_for_library()
+        self.controller.select_provider("Backup")
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.connect(
+            lambda _name: self.controller.play_vod(film, "movie", play_context())
+        )
+        self.catalog.providerReady.emit("Backup")
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(self.link_items(), ["m4"])
+        self.ready(film["cmd"])
+        self.assertEqual(self.played_urls(), [film["cmd"]])
+        self.assertTrue(self.controller.vod_current())
+
+    def test_tune_live_tunes_among_every_channel(self):
+        self.controller.tune_live(CHANNELS[1])
+        self.assertEqual(self.requested(), ["Two"])
+        self.ready("http://stream/2")
+        self.assertEqual(self.zap.context.group_key, "*")
+        self.assertEqual(self.zap.context.channels, self.catalog.items("live", "*"))
+
+    def test_tune_live_before_the_live_section_loads_zaps_once_it_does(self):
+        self.controller.stop_for_library()
+        live, self.catalog.live = self.catalog.live, {}
+        self.controller.tune_live(CHANNELS[1])
+        self.ready("http://stream/2")
+        self.catalog.live = live
+        self.catalog.sectionReady.emit("live")
+        self.controller.handle(Action.CH_NEXT)
+        self.assertEqual(self.requested(), ["Two", "Three"])
+
+    def test_play_file_plays_a_local_file_without_a_link_or_history(self):
+        self.play(0)
+        plays = len(self.watch.plays)
+        self.controller.play_file("/videos/Holiday clip.mp4")
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual(url, "file:///videos/Holiday%20clip.mp4")
+        self.assertEqual(kwargs["kind"], PlayKind.VOD_FILE)
+        self.assertEqual(len(self.catalog.links), 1)  # only the channel's
+        self.assertEqual(len(self.watch.plays), plays)  # not in any provider's history
+        self.assertEqual(self.transport.named("show_vod")[-1], ("Holiday clip.mp4", ""))
+        self.assertTrue(self.controller.vod_current())
+        self.session.positionChanged.emit(5_000, 60_000)
+        self.assertEqual(self.transport.calls[-1], ("update_position", 5_000, 60_000))
+
+    def test_overlay_open_names_what_esc_would_close_first(self):
+        self.controller.play_vod(movie(1), "movie", play_context())
+        self.ready("http://vod/m1.mkv")
+        self.assertFalse(self.controller.overlay_open())
+        self.drawer.visible = True
+        self.assertTrue(self.controller.overlay_open())
+        self.drawer.visible = False
+        self.end()  # the Next card is not up without genre items: nothing else is open
+        self.assertFalse(self.controller.overlay_open())
 
 
 if __name__ == "__main__":

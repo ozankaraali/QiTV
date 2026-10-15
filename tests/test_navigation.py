@@ -8,7 +8,14 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
+from services.navigation import (
+    ADD_PROVIDER_ROW,
+    FAVORITES_GROUP,
+    RECENT_GROUP,
+    SETTINGS_ROW,
+    NavModel,
+    NavNode,
+)
 
 
 class FakeCatalog(QObject):
@@ -121,11 +128,18 @@ class NavModelTests(unittest.TestCase):
         )
         self.nav = NavModel(self.catalog, self.config)
 
-    def test_root_is_sources(self):
-        sources = self.nav.children(None)
+    def test_root_is_sources_then_the_settings_rows(self):
+        rows = self.nav.children(None)
         self.assertEqual(
-            [(n.layer, n.title) for n in sources], [("source", "Home"), ("source", "Backup")]
+            [(n.layer, n.key, n.title) for n in rows],
+            [
+                ("source", "Home", "Home"),
+                ("source", "Backup", "Backup"),
+                ("action", SETTINGS_ROW, "⚙ Settings"),
+                ("action", ADD_PROVIDER_ROW, "＋ Add provider"),
+            ],
         )
+        self.assertFalse(any(self.nav.is_playable(n) or self.nav.needs_setup(n) for n in rows[2:]))
 
     def test_open_other_source_selects_provider(self):
         backup = self.nav.children(None)[1]

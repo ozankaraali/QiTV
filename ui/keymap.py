@@ -220,3 +220,82 @@ def _text(text: str, mods: int, *, windows: bool) -> tuple[Action, str] | None:
     if mods & _ALT and all(c in _DIGITS for c in text):
         return None
     return Action.NAV_TEXT, text
+
+
+# ---- the shortcuts table (Help → Keyboard Shortcuts, the README) -----------------------------
+# Per context, (keys, what they do): keys are QKeySequence texts; ", " separates alternatives,
+# and "0…9" / "A…Z" stand for every key in between. The "menu" rows are the menu bar's own
+# shortcuts. Tests resolve every key in its context, so the table cannot drift from resolve().
+SHORTCUT_TITLES = {
+    "player": "Watching TV",
+    "drawer": "Channel list",
+    "guide": "Guide",
+    "library": "Movies and Series",
+    "menu": "Anywhere",
+}
+SHORTCUTS: dict[str, list[tuple[str, str]]] = {
+    "player": [
+        ("Up, Down", "Previous / next channel (volume during a movie)"),
+        ("0…9", "Type a channel number"),
+        ("Backspace", "Previous channel"),
+        ("Return", "Channel list"),
+        ("Left, Right", "Back / forward 10 seconds"),
+        ("Space", "Play / pause"),
+        ("L", "Go live"),
+        ("G", "Guide"),
+        ("I", "Channel info"),
+        ("+, -", "Volume up / down"),
+        ("M", "Mute"),
+        ("F", "Fullscreen"),
+        ("Ctrl+D", "Add or remove a favorite channel"),
+        ("Alt+P", "Mini player"),
+        ("Esc", "Close what is open, leave fullscreen; after a movie, back to the Library"),
+    ],
+    "drawer": [
+        ("Up, Down", "Move"),
+        ("PgUp, PgDown", "Page"),
+        ("Left, Right", "Layer up / down"),
+        ("Return", "Open or play"),
+        ("A…Z", "Type to filter"),
+        ("Backspace", "Delete a letter of the filter"),
+        ("Ctrl+D", "Add or remove a favorite channel"),
+        ("Esc", "Clear the filter, then close"),
+    ],
+    "guide": [
+        ("Up, Down", "Move between channels"),
+        ("Left, Right", "Earlier / later"),
+        ("0…9", "Jump to a channel number"),
+        ("Return", "Watch the channel"),
+        ("G, Esc", "Close the guide"),
+    ],
+    "library": [
+        ("Up, Down, Left, Right", "Move"),
+        ("Return", "Play or open"),
+        ("Home, End", "First / last title"),
+        ("A…Z", "Jump to a letter, or filter the genres"),
+        ("/, Ctrl+F", "Search"),
+        ("Ctrl+D", "Add to or remove from My list"),
+        ("F11, Ctrl+Meta+F", "Fullscreen"),
+        ("Esc", "Back; from the genres, back to live TV"),
+    ],
+    "menu": [
+        ("Ctrl+1", "Live TV"),
+        ("Ctrl+2", "Movies"),
+        ("Ctrl+3", "Series"),
+        ("Ctrl+O", "Open a file"),
+        ("Ctrl+,", "Settings"),
+        ("Ctrl+Q", "Quit"),
+    ],
+}
+
+
+def shortcut_keys(keys: str) -> list[str]:
+    """The single keys a SHORTCUTS entry names, e.g. "0…9" → ["0", "1", …, "9"]."""
+    result: list[str] = []
+    for part in keys.split(", "):
+        first, ellipsis, last = part.partition("…")
+        if ellipsis and len(first) == 1 and len(last) == 1:
+            result += [chr(c) for c in range(ord(first), ord(last) + 1)]
+        else:
+            result.append(part)
+    return result

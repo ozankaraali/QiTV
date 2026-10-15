@@ -23,6 +23,12 @@ The guide (ui/guide_controller.py) takes the keys while it is open. The drawer's
 (ui/context_actions.py) asks for links on LinkLanes' side lane; its "Play in VLC/MPV" releases
 the in-app stream first, as an external pick does. Only this controller holds the LiveTuner
 and the session: the others call back play_vod, tune or the external play.
+
+The window's Library (spec §5.4, R5): opening it stops what plays (`stop_for_library`), and
+while it is open a provider change neither tunes the last channel nor opens the drawer. Back
+to live TV (`resume_live`) tunes the last live channel again, or opens the drawer. The window
+wires this controller before the Library's: a Library play that waited for its provider runs
+from the Library's providerReady slot, after this controller settled the provider change.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import logging
+from pathlib import Path
 import re
 from typing import Callable, Optional
 from urllib.parse import urlsplit
@@ -62,12 +69,12 @@ from ui.overlays.next_card import NextCard
 from ui.overlays.painting import fmt_duration
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
+from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import BannerInfo, ZapBanner
 from ui.pointer import PointerInput
 
 logger = logging.getLogger(__name__)
 
-WELCOME_TEXT = "Add a provider in Settings to start watching"
 INFO_MS = 3000
 ERROR_MS = 6000
 VOLUME_STEP = 5
@@ -105,6 +112,7 @@ class Overlays:
     toast: Toast
     guide: Guide
     next_card: NextCard
+    welcome: WelcomeCard
 
 
 class TVController(QObject):
@@ -146,11 +154,14 @@ class TVController(QObject):
         self._ticks: list[tuple[float, str]] = []
         self._unavailable_noticed: set[tuple[str, str]] = set()  # (provider, channel) this run
         self._held_notice: Optional[tuple[str, str]] = None  # shown once the channel plays
-        self._resume: Optional[Target] = None  # what stop_live() stopped, for resume_live()
+        self._resume: Optional[Target] = None  # what stop_live() stopped, for resume_stopped()
+        self._in_library = False  # the window shows the Library: nothing live starts
+        self._live_on_ready = False  # back from the Library during a setup: tune once ready
         self._external_pending: Optional[tuple[Target, str]] = None
         self._external_settle = QTimer(self, singleShot=True)
         self._external_settle.timeout.connect(self._launch_settled)
         self._started = False
+        self._wired = False
         self._closed = False
         self._lanes = LinkLanes(catalog, self)
         self._current: Optional[Target] = None  # handed to the player
@@ -194,10 +205,16 @@ class TVController(QObject):
 
     # ---- lifecycle ----------------------------------------------------------------------------
 
+    def wire(self) -> None:
+        """Connect to the catalog, overlays and session (once; start() does it otherwise)."""
+        if not self._wired:
+            self._wired = True
+            self._wire()
+
     def start(self) -> None:
         if not self._started:
             self._started = True
-            self._wire()
+            self.wire()
         if not self.catalog.provider_names():
             # ProviderManager cannot set up without providers; the setup would only fail.
             self._welcome()
@@ -299,7 +316,7 @@ class TVController(QObject):
         self._resume = self._current if self._has_media() else None
         self._stop_tune()
 
-    def resume_live(self) -> None:
+    def resume_stopped(self) -> None:
         """Play again what stop_live() stopped (a self-update that could not launch).
 
         With a fresh link: a channel tunes again, a movie or episode reopens at the position
@@ -308,6 +325,102 @@ class TVController(QObject):
         target, self._resume = self._resume, None
         if not self._closed and target is not None and target is self._current:
             self._request(replace(target, zapped=False, retried=False, start_over=False))
+
+    def stop_for_library(self) -> None:
+        """The window opens the Library (spec §5.4, R5): stop what plays, waiting for nothing.
+
+        A link still on its way never opens, the guide, the Next card and the other player
+        overlays close, and the stream's budget slot goes back once LiveTuner's release gate
+        has let go of it. Until resume_live(), tune_live() or play_vod(), a provider change
+        neither tunes the last channel nor opens the drawer.
+        """
+        if self._closed:
+            return
+        self._in_library = True
+        self._live_on_ready = False
+        self._autotune = None
+        self._cancel_external()
+        self._lanes.supersede()  # an external play waiting for its link no longer plays
+        self._lanes.drop_tune()  # a link on its way never opens
+        self._autoplay.drop()  # the Next card, and a wait for the next season
+        self._guide.close()
+        self._tuning.stop()
+        if self._digits:
+            self.zap.cancel_digits()
+        overlays = self.overlays
+        overlays.column.close()
+        overlays.drawer.close_drawer()
+        overlays.banner.dismiss()
+        overlays.transport.dismiss()
+        try:
+            self.watch.flush()  # a movie's last position
+        except Exception as e:
+            self._log_failure("save the watch state", e)
+        self._stop_tune()
+        self._current, self._cid = None, None
+
+    def resume_live(self) -> None:
+        """Back to live TV from the Library (R5): the last live channel again, else the drawer.
+
+        Tuned whatever the "start with the last channel" setting says (that one is about
+        launching QiTV). During a provider setup it is tuned once the provider is ready.
+        """
+        if self._closed:
+            return
+        self._in_library = False
+        if not self.catalog.provider_names():
+            self._welcome()
+            return
+        if self.catalog.is_loading():
+            self._live_on_ready = True  # _on_provider_ready decides
+            return
+        name = self.catalog.current_provider_name()
+        if self.nav.provider_error(NavNode("source", name, name, name)):
+            # Its setup failed while the Library showed: the sources, with the retry row.
+            self.nav.focus_source(name)
+            self.overlays.drawer.open_drawer(focus_side="left")
+            return
+        last = self._last_channel(name)
+        if self._await_live:
+            self._autotune = last  # the live section is on its way: tuned when it is ready
+            return
+        if last is not None and self._tune_last(*last):
+            return
+        self._open_drawer()
+
+    def tune_live(self, channel: dict) -> None:
+        """A live channel from the Library's search: ↑/↓ then walk every channel (group "*")."""
+        self._in_library = False
+        self.tune(channel, group_key=ALL_GROUP_ID, channels=self._all_live())
+
+    def play_file(self, path: str) -> None:
+        """Play a local media file (File → Open File…) as a movie: no link, no history.
+
+        It is no provider's: nothing records it, and no position is saved for it.
+        """
+        if self._closed:
+            return
+        self._in_library = False
+        url = Path(path).absolute().as_uri()
+        title = Path(path).name
+        target = Target({"name": title, "cmd": url}, "movies", title)
+        self._cancel_external()
+        self._lanes.supersede()
+        self._lanes.drop_tune()  # a channel or movie still on its way never opens over it
+        self._autoplay.drop()
+        self._audio_id = self._subtitle_id = None
+        self._held_notice = None
+        self._ticks = []
+        self._current, self._cid = target, None
+
+        def open_file() -> None:
+            self.session.play(url, kind=classify(url, False), start_ms=0)
+            self._reset_speed()
+
+        self._tuner.open(self._guarded(target, open_file), direct=True)
+        self.overlays.banner.dismiss()
+        self.overlays.transport.set_next_available(False)
+        self.overlays.transport.show_vod(title, "")
 
     def settings_saved(self) -> None:
         """Settings were saved: a new live latency reaches the running channel at once.
@@ -328,6 +441,25 @@ class TVController(QObject):
         if self._guide.is_open():
             return "guide"
         return "drawer" if self.overlays.drawer.isVisible() else "player"
+
+    def overlay_open(self) -> bool:
+        """Whether Esc would close something first: the drawer, the guide, the Next card (or the
+        wait for the next season), a number being typed, the zap column or the banner."""
+        overlays = self.overlays
+        return bool(
+            self._guide.is_open()
+            or overlays.drawer.isVisible()
+            or self._autoplay.card_open()
+            or self._autoplay.waiting()
+            or self._digits
+            or overlays.column.isVisible()
+            or overlays.banner.isVisible()
+        )
+
+    def vod_current(self) -> bool:
+        """A movie, an episode or a local file is what the player has (playing or not)."""
+        current = self._current
+        return current is not None and not current.live
 
     def handle(self, action: Action, payload: str = "") -> None:
         if self._closed:
@@ -357,7 +489,9 @@ class TVController(QObject):
             if not self._on_demand():
                 self.zap.previous()
         elif action is Action.OK:
-            if self._autoplay.card_open():
+            if self.overlays.welcome.activate():
+                pass  # no provider yet: Enter is the card's Add provider
+            elif self._autoplay.card_open():
                 self._autoplay.play_now()
             elif self.overlays.column.isVisible():
                 self._on_column_row(self.overlays.column.current_index())  # tune it now
@@ -537,6 +671,7 @@ class TVController(QObject):
         """
         if self._closed:
             return
+        self._in_library = False
         context = play_context(context)
         episode = kind == "episode"
         series = context["series"]
@@ -557,6 +692,7 @@ class TVController(QObject):
 
     def _request(self, target: Target) -> None:
         self._cancel_external()
+        self._autotune = None  # a choice made before the live section loaded comes first
         self._autoplay.drop()  # a newer choice than what the Next card offers
         self._lanes.request(target)
 
@@ -977,25 +1113,32 @@ class TVController(QObject):
             self._autoplay.drop()
             self._guide.close()  # its channels are the old provider's
         self._provider = name
+        self.overlays.welcome.dismiss()
         if pending is not None:
             self._request(pending)
-        record = self.config.last_live_channel
-        item: Optional[dict] = None
-        group = ALL_GROUP_ID
-        if (
-            isinstance(record, dict)
-            and record.get("provider_name") == name
-            and isinstance(record.get("item"), dict)
-        ):
-            item, group = record["item"], str(record.get("group_id") or ALL_GROUP_ID)
+        back_to_live, self._live_on_ready = self._live_on_ready, False
+        last = self._last_channel(name)
         idle = pending is None and not self._has_media()
-        wanted = item is not None and self.config.start_with_last_channel and idle
-        self._autotune = (item, group) if wanted and item is not None else None
+        wanted = (
+            idle and not self._in_library and (back_to_live or self.config.start_with_last_channel)
+        )
+        self._autotune = last if wanted else None
         self._await_live = True
-        if item is not None:
-            self.nav.reset_to("live", group)
+        if last is not None:
+            self.nav.reset_to("live", last[1])
         else:
             self.nav.reset_to("live")
+
+    def _last_channel(self, provider: str) -> Optional[tuple[dict, str]]:
+        """The last live channel watched on `provider` and its group, from the config."""
+        record = self.config.last_live_channel
+        if (
+            isinstance(record, dict)
+            and record.get("provider_name") == provider
+            and isinstance(record.get("item"), dict)
+        ):
+            return record["item"], str(record.get("group_id") or ALL_GROUP_ID)
+        return None
 
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._closed:
@@ -1004,6 +1147,8 @@ class TVController(QObject):
         self._end_loading()
         self._error(f"{name}: {message}" if name else message)
         # The sources, on the failed one, with a row to connect again: never a black screen.
+        if self._in_library:
+            return  # back to live TV opens the drawer on it (resume_live)
         if self._has_media() and not self.overlays.drawer.isVisible():
             return  # the saved catalog still plays; the drawer offers the retry when opened
         self.nav.focus_source(name or self.catalog.current_provider_name())
@@ -1015,11 +1160,20 @@ class TVController(QObject):
             self._show_loading(name)
 
     def _on_section_ready(self, section: str) -> None:
-        if self._closed or section != "live" or not self._await_live:
+        if self._closed or section != "live":
+            return
+        context = self.zap.context
+        if context.group_key == ALL_GROUP_ID and not context.channels:
+            # A search's channel tuned before the live section loaded: ↑/↓ walk it now.
+            channels = self._all_live()
+            self.zap.set_context(ZapContext(ALL_GROUP_ID, channels, fallback=channels))
+        if not self._await_live:
             return
         self._await_live = False
         self._end_loading()
         autotune, self._autotune = self._autotune, None
+        if self._in_library:
+            return  # back to live TV decides (resume_live)
         if autotune is not None and self._tune_last(*autotune):
             return
         self._open_drawer_if_idle()
@@ -1050,7 +1204,7 @@ class TVController(QObject):
 
     def _open_drawer_if_idle(self) -> None:
         drawer = self.overlays.drawer
-        busy = self._has_media() or self._lanes.busy()
+        busy = self._has_media() or self._lanes.busy() or self._in_library
         if not busy and not drawer.isVisible():
             drawer.open_drawer()
 
@@ -1132,12 +1286,13 @@ class TVController(QObject):
             self._show_held_notice()  # the channel plays, directly: time-shift is not there
 
     def _on_position(self, position_ms: int, length_ms: int) -> None:
-        if self._closed or self._cid is None or self._current is None or self._current.live:
+        if self._closed or self._current is None or self._current.live:
             return
-        try:
-            self.watch.update_position(self._cid, position_ms, length_ms)
-        except Exception as e:
-            self._log_failure("save the playback position", e)
+        if self._cid is not None:  # a local file has no resume key
+            try:
+                self.watch.update_position(self._cid, position_ms, length_ms)
+            except Exception as e:
+                self._log_failure("save the playback position", e)
         self.overlays.transport.update_position(position_ms, length_ms)
 
     def _on_error(self, message: str) -> None:
@@ -1451,10 +1606,11 @@ class TVController(QObject):
         logger.debug("Could not %s:\n%s", what, safe_traceback(error))
 
     def _welcome(self) -> None:
-        """Until a provider exists (Phase 3 brings the welcome card)."""
-        self._autoplay.drop()  # its "Loading next season…" hint would hide this one
+        """Until a provider exists: the welcome card, whose button adds one (spec §8)."""
+        self._autoplay.drop()
         self._loading = False
-        self.overlays.toast.set_hint(WELCOME_TEXT)
+        self.overlays.toast.set_hint(None)
+        self.overlays.welcome.show_card()
 
     def _setup_name(self, name: Optional[str]) -> str:
         """The provider a setup for `name` loads, as ProviderManager picks it."""
@@ -1467,6 +1623,7 @@ class TVController(QObject):
     def _show_loading(self, name: str) -> None:
         """From a setup's start until the first live section or a failure (Review Focus 5)."""
         self._autoplay.drop()  # a provider setup: and the hint is the setup's
+        self.overlays.welcome.dismiss()  # a provider exists now
         self._loading = True
         self.overlays.toast.set_hint(f"Loading {name}…" if name else "Loading…")
 

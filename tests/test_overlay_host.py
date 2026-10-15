@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 from shiboken6 import isValid
 from timer_fixtures import elapse, wait_until
 
@@ -75,6 +75,30 @@ class OverlayHostTests(HostCase):
         self.window.show()
         QTest.qWait(30)
         self.assertTrue(self.host.isVisible())
+
+    def test_hidden_while_another_page_hides_the_surface(self):
+        # The TV window's Library page replaces the player page (and its surface).
+        pages = QStackedWidget()
+        player = QWidget()
+        self.surface.setParent(player)
+        player_layout = QVBoxLayout(player)
+        player_layout.addWidget(self.surface)
+        library = QWidget()
+        pages.addWidget(player)
+        pages.addWidget(library)
+        self.window.setCentralWidget(pages)
+        QTest.qWait(20)
+        self.panel.show()
+        self.assertTrue(wait_until(self.host.isVisible))
+        pages.setCurrentWidget(library)
+        QTest.qWait(20)
+        self.assertFalse(self.host.isVisible())
+        self.panel.update()  # an overlay still shown changes nothing while the page is away
+        self.host.overlay_changed()
+        self.assertFalse(self.host.isVisible())
+        pages.setCurrentWidget(player)
+        self.assertTrue(wait_until(self.host.isVisible))
+        self.assertEqual(self.host.geometry(), surface_rect(self.surface))
 
     def test_video_surface_is_native(self):
         self.assertGreater(self.surface.native_handle(), 0)
