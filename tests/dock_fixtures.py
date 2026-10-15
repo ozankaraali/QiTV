@@ -154,7 +154,7 @@ def main():
         result["shown"] = wait(lambda: host.isVisible())
         pause(0.3)
         parent_number, host_number = numbers()
-        landed = window_server({parent_number})[parent_number][1]
+        shown_at = window_server({parent_number})[parent_number][1]
         for restore in ("showNormal", "deminiaturize:"):
             _send(_ns_window(window), b"miniaturize:", None, (ctypes.c_void_p, None))
             docked = wait(
@@ -196,6 +196,11 @@ def main():
             stop.set()
             sampler.join()
             entry["host_shows"] = shows = watch.shows[shows_before:]
+            # Landed: where the window settles. Not always where it was shown: a runner's
+            # window server may put it back a few points off, and then every sample looked
+            # in flight.
+            landed = samples[-1][2] if samples else shown_at
+            entry["moved_by_restore"] = landed != shown_at
             flying = [at for at, _host_on, bounds in samples if bounds != landed]
             entry["animated"] = bool(flying)
             entry["host_on_screen_while_animating"] = sum(
