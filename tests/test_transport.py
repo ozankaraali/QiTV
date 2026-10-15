@@ -98,11 +98,52 @@ class TransportCase(unittest.TestCase):
         t.show_live("104", "Nature")
         self.assertEqual(t.texts(), ("LIVE", ""))
         spy = QSignalSpy(t.seekRequested)
-        self.click(t, QPoint(640, 720 - int(0.03 * 1280) - 5))
+        vod = Transport()
+        vod.setGeometry(0, 0, 1280, 720)
+        vod.show_vod("A", "b")
+        vod.update_position(0, 100_000)
+        where = vod.seek_rect().center().toPoint()
+        vod.close()
+        self.click(t, where)
         self.assertEqual(spy.count(), 0)
         play = QSignalSpy(t.playPauseRequested)
         self.click(t, t.button_rect("play").center().toPoint())
         self.assertEqual(play.count(), 1)
+
+    def test_drag_survives_idle(self):
+        t = self.make(idle_ms=60)
+        t.show_vod("A", "b")
+        t.update_position(0, 100_000)
+        spy = QSignalSpy(t.seekRequested)
+        r = t.seek_rect()
+        y = int(r.center().y())
+        QTest.mousePress(t, Qt.LeftButton, Qt.NoModifier, QPoint(int(r.x() + 5), y))
+        QTest.qWait(250)
+        self.assertTrue(t.isVisible())
+        QTest.mouseRelease(t, Qt.LeftButton, Qt.NoModifier, QPoint(int(r.center().x()), y))
+        self.assertEqual(spy.count(), 1)
+        self.assertTrue(t.isVisible())
+        QTest.qWait(250)
+        self.assertFalse(t.isVisible())
+
+    def test_mouse_move_keeps_alive(self):
+        t = self.make(idle_ms=200)
+        t.show_vod("A", "b")
+        for i in range(6):
+            QTest.qWait(60)
+            QTest.mouseMove(t, QPoint(300 + i * 7, 300))
+        self.assertTrue(t.isVisible())
+
+    def test_play_click_scales(self):
+        for w, h in ((800, 450), (1920, 1080)):
+            t = Transport()
+            t.setGeometry(0, 0, w, h)
+            t.show()
+            t.show_vod("A", "b")
+            spy = QSignalSpy(t.playPauseRequested)
+            self.click(t, t.button_rect("play").center().toPoint())
+            self.assertEqual(spy.count(), 1, w)
+            t.close()
 
     def test_mask_only_bars(self):
         t = self.make()

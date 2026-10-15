@@ -1,10 +1,17 @@
 """Transport overlay: title row on top, seek line and buttons at the bottom (VOD and plain live)."""
 
 from datetime import datetime
-import logging
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QLinearGradient, QMouseEvent, QPainter, QPaintEvent, QRegion
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QLinearGradient,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QRegion,
+)
 from PySide6.QtWidgets import QWidget
 
 from ui.overlays.base import Overlay
@@ -18,8 +25,6 @@ from ui.overlays.painting import (
     fmt_duration,
 )
 from ui.theme import PALETTE, qcolor
-
-logger = logging.getLogger(__name__)
 
 SPEEDS = (1.0, 1.25, 1.5, 2.0)
 TOP_FRACTION = 0.22
@@ -56,6 +61,10 @@ class Transport(Overlay):
         self._idle.setSingleShot(True)
         self._idle.setInterval(idle_ms)
         self._idle.timeout.connect(self.dismiss)
+        self._clock = QTimer(self)  # repaint so the clock stays current while shown
+        self._clock.setInterval(30_000)
+        self._clock.timeout.connect(self._tick)
+        self._clock.start()
         self.hide()
 
     # ---- public API ---------------------------------------------------------------------------
@@ -85,9 +94,15 @@ class Transport(Overlay):
         self._idle.start()
 
     def dismiss(self) -> None:
+        if self._drag_ms is not None:
+            return  # a drag in progress keeps the bar until release
         self._idle.stop()
         self._drag_ms = None
         self.hide()
+
+    def _tick(self) -> None:
+        if self.isVisible():
+            self.update()
 
     def texts(self) -> tuple[str, str]:
         if self._live:
@@ -207,7 +222,7 @@ class Transport(Overlay):
             sub = elided(p, self._subtitle, right - clock_w - un.px(2) - sx)
             p.drawText(QRectF(sx, y, right - sx, row_h), Qt.AlignVCenter | Qt.AlignLeft, sub)
 
-    def _paint_vod(self, p: QPainter, un: Units, rects: dict[str, QRectF], text) -> None:
+    def _paint_vod(self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor) -> None:
         seek = rects["seek"]
         shown = self._position if self._drag_ms is None else self._drag_ms
         frac = shown / self._length if self._length else 0.0
@@ -238,7 +253,7 @@ class Transport(Overlay):
         dark = qcolor(PALETTE.canvas)
         for name in ("back10", "fwd10"):
             r = rects[name]
-            side = un.px(2.2)
+            side = un.px(3.0)
             draw_icon(
                 p,
                 name,
@@ -252,7 +267,7 @@ class Transport(Overlay):
         p.setPen(text)
         p.drawText(chip, Qt.AlignCenter, _speed_label(self._speed))
 
-    def _paint_play(self, p: QPainter, rect: QRectF, dark) -> None:
+    def _paint_play(self, p: QPainter, rect: QRectF, dark: QColor) -> None:
         fill_round(p, rect, qcolor(PALETTE.text), rect.width() / 2)
         inner = rect.width() * 0.5
         draw_icon(
@@ -267,7 +282,7 @@ class Transport(Overlay):
             dark,
         )
 
-    def _paint_live(self, p: QPainter, un: Units, rects: dict[str, QRectF], text) -> None:
+    def _paint_live(self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor) -> None:
         self._paint_play(p, rects["play"], qcolor(PALETTE.canvas))
         pill = rects["live"]
         fill_round(p, pill, qcolor(PALETTE.live), pill.height() / 2)
@@ -293,6 +308,7 @@ class Transport(Overlay):
             hit = seek.adjusted(0, -seek.height(), 0, seek.height())
             if hit.contains(pos):
                 self._drag_ms = self._ms_at(pos.x())
+                self._idle.stop()
                 self.update()
                 return
         self._click(rects, pos)
@@ -311,6 +327,7 @@ class Transport(Overlay):
             target = self._ms_at(event.position().x())
             self._drag_ms = None
             self.update()
+            self._idle.start()
             self.seekRequested.emit(target)
 
     def _click(self, rects: dict[str, QRectF], pos: QPointF) -> None:
