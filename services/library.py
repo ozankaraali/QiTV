@@ -199,9 +199,17 @@ _SORT_KEYS = {
 }
 
 
+_LETTER_PREFIX = 8  # characters folded to find a title's first letter
+
+
 def letter_of(title: str) -> str:
-    """The A–Z rail letter of a title: its folded first character when a–z, else '#'."""
-    first = fold(title)[:1]
+    """The A–Z rail letter of a title: its folded first character when a–z, else '#'.
+
+    Only the start of the title is folded: folding works character by character (accents
+    are dropped, the base letters stay in order), so the first folded character of a prefix
+    is the title's, unless the prefix folds to nothing.
+    """
+    first = fold(title[:_LETTER_PREFIX])[:1] or fold(title)[:1]
     return first if "a" <= first <= "z" else "#"
 
 
@@ -481,6 +489,8 @@ class LibraryModel(QObject):
 
     def _my_list_items(self) -> list[dict]:
         kept = set(self._favorites())
+        if not kept:
+            return []
         return [i for i in self._loaded_items() if favorites.favorite_key(i) in kept]
 
     def _pinned_items(self, genre_id: str) -> list[dict]:

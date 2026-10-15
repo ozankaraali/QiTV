@@ -343,6 +343,38 @@ class LibraryModelTests(unittest.TestCase):
             model.items()
             self.assertEqual(spy.call_count, 2000)
 
+    def test_a_letter_needs_only_the_start_of_the_title_folded(self):
+        import random
+
+        def reference(title):
+            first = library.fold(title)[:1]
+            return first if "a" <= first <= "z" else "#"
+
+        pieces = ["É", "e\u0301", "\u0301" * 9, "ß", "İ", "ı", "ﬁ", "1", " ", "Ω", "z", "Ž", "x"]
+        rng = random.Random(7)
+        titles = ["", "\u0301" * 12 + "Abc", "\u0300" * 8 + "z", "ﬁlm"]
+        titles += [
+            "".join(rng.choice(pieces) for _ in range(rng.randint(1, 14))) for _ in range(3000)
+        ]
+        for title in titles:
+            self.assertEqual(library.letter_of(title), reference(title), repr(title))
+        long_title = "Zebra " + "très " * 50
+        with mock.patch.object(library, "fold", wraps=library.fold) as spy:
+            self.assertEqual(library.letter_of(long_title), "z")
+        self.assertEqual(spy.call_args.args[0], long_title[: library._LETTER_PREFIX])
+
+    def test_my_list_without_favorites_scans_nothing(self):
+        items = [movie(i) for i in range(30)]
+        cat = FakeCatalog({"movies": [("1", "G", 30)]}, {("movies", "1"): items})
+        model, cfg = build(cat)
+        with mock.patch.object(
+            library.favorites, "favorite_key", wraps=library.favorites.favorite_key
+        ) as spy:
+            self.assertEqual(model._my_list_items(), [])
+            self.assertEqual(spy.call_count, 0)
+        cfg.favorites.append("Movie 3")
+        self.assertEqual(model._my_list_items(), [items[3]])
+
 
 class FixRoundTests(unittest.TestCase):
     def test_continue_keeps_stb_episodes_of_one_series_id(self):
