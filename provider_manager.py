@@ -15,6 +15,8 @@ import requests
 import tzlocal
 from urlobject import URLObject
 
+from services.provider_api import provider_prefers_https
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,8 +55,8 @@ class ProviderManager(QObject):
             key: provider.get(key, "")
             for key in ("type", "url", "mac", "username", "password", "serial_number", "device_id")
         }
-        connection["prefer_https"] = provider.get(
-            "prefer_https",
+        connection["prefer_https"] = provider_prefers_https(
+            provider,
             self.config_manager.prefer_https if prefer_https is None else prefer_https,
         )
         connection["ssl_verify"] = provider.get(
@@ -279,8 +281,8 @@ class ProviderManager(QObject):
         ssl_verify_override=None,
     ):
         handshake = StbHandshake(
-            prefer_https=self.current_provider.get(
-                "prefer_https", self.config_manager.prefer_https
+            prefer_https=provider_prefers_https(
+                self.current_provider, self.config_manager.prefer_https
             ),
             ssl_verify=self.current_provider.get("ssl_verify", self.config_manager.ssl_verify),
             token=self.token,

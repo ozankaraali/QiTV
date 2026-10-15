@@ -18,6 +18,7 @@ from multikeydict import MultiKeyDict
 from services.provider_api import (
     base_from_url,
     https_fallback_candidates,
+    provider_prefers_https,
     stb_endpoint,
     xtream_xmltv_url,
 )
@@ -375,8 +376,8 @@ class EpgManager:
     def _fetch_epg_from_stb(self, provider_url, headers):
         provider_hash = _cache_key(provider_url)
         base = base_from_url(provider_url)
-        prefer_https = self.provider_manager.current_provider.get(
-            "prefer_https", self.config_manager.prefer_https
+        prefer_https = provider_prefers_https(
+            self.provider_manager.current_provider, self.config_manager.prefer_https
         )
         verify_ssl = self.provider_manager.current_provider.get(
             "ssl_verify", self.config_manager.ssl_verify
@@ -413,8 +414,8 @@ class EpgManager:
         provider_hash = _xtream_cache_key(provider_url, username)
         xmltv_url = xtream_xmltv_url(provider_url, username, password)
         logger.debug("Xtream XMLTV URL: %s", xmltv_url)
-        prefer_https = self.provider_manager.current_provider.get(
-            "prefer_https", self.config_manager.prefer_https
+        prefer_https = provider_prefers_https(
+            self.provider_manager.current_provider, self.config_manager.prefer_https
         )
         verify_ssl = self.provider_manager.current_provider.get(
             "ssl_verify", self.config_manager.ssl_verify

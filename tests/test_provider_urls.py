@@ -118,5 +118,25 @@ class StbExportBaseTests(unittest.TestCase):
         self.assertNotIn("//play", text.replace("http://", ""))
 
 
+class ProviderCacheIdentityTests(unittest.TestCase):
+    def _identity(self, provider, global_https):
+        from provider_manager import ProviderManager
+
+        manager = ProviderManager.__new__(ProviderManager)
+        manager.config_manager = SimpleNamespace(prefer_https=global_https, ssl_verify=True)
+        return manager.provider_cache_identity(provider)
+
+    def test_unset_provider_value_matches_global_default(self):
+        base = {"type": "STB", "url": "http://p.test"}
+        self.assertEqual(
+            self._identity({**base, "prefer_https": None}, True),
+            self._identity({**base, "prefer_https": True}, False),
+        )
+        self.assertNotEqual(
+            self._identity({**base, "prefer_https": None}, True),
+            self._identity({**base, "prefer_https": False}, True),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
