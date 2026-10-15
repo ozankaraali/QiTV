@@ -19,20 +19,39 @@ jobs:
           python-version: '3.14'
           enable-cache: true
       - name: Install VLC and xcb dependencies
-        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0 xvfb
+        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0 xvfb openbox xcompmgr x11-utils
+      - name: Silence ALSA
+        run: |
+          printf 'pcm.!default { type null }\n' > ~/.asoundrc
       - name: Sync dependencies
+        id: sync
         run: uv sync --frozen --dev
       - name: Run tests
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
       - name: Smoke test
-        run: xvfb-run -a -s "-screen 0 1920x1080x24" uv run python scripts/smoke_tv.py --out smoke-out
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        # openbox handles fullscreen and minimize; xcompmgr makes the overlays translucent.
+        run: |
+          xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
+            openbox &
+            xcompmgr &
+            for i in $(seq 50); do
+              xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break
+              sleep 0.2
+            done
+            if ! xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id"; then
+              echo "openbox did not start"
+              exit 1
+            fi
+            uv run python scripts/smoke_tv.py --out smoke-out
+          '
         timeout-minutes: 5
         env:
           QT_QPA_PLATFORM: xcb
       - name: Upload smoke results
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: smoke-linux
@@ -73,16 +92,18 @@ jobs:
       - name: Install VLC using Chocolatey
         run: choco install vlc -y --cache-location=C:\vlc-cache
       - name: Sync dependencies
+        id: sync
         run: uv sync --frozen --dev
       - name: Run tests
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
       - name: Smoke test
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
         run: uv run python scripts/smoke_tv.py --out smoke-out
         timeout-minutes: 5
       - name: Upload smoke results
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: smoke-windows
@@ -122,16 +143,18 @@ jobs:
         if: steps.vlc-cache.outputs.cache-hit != 'true'
         run: brew install --cask vlc
       - name: Sync dependencies
+        id: sync
         run: uv sync --frozen --dev
       - name: Run tests
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
       - name: Smoke test
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
         run: uv run python scripts/smoke_tv.py --out smoke-out
         timeout-minutes: 5
       - name: Upload smoke results
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: smoke-macos-arm
@@ -173,16 +196,18 @@ jobs:
         if: steps.vlc-cache.outputs.cache-hit != 'true'
         run: brew install --cask vlc
       - name: Sync dependencies
+        id: sync
         run: uv sync --frozen --dev
       - name: Run tests
         run: uv run python -m unittest discover -s tests -v
         env:
           QT_QPA_PLATFORM: offscreen
       - name: Smoke test
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
         run: uv run python scripts/smoke_tv.py --out smoke-out
         timeout-minutes: 5
       - name: Upload smoke results
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: smoke-macos-intel
