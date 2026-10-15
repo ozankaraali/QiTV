@@ -11,6 +11,11 @@ TV while the window offers picture in picture the second channel (P), then "Open
 player" (the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
 Left of the audio track (♪) a speaker opens the volume mixer on the large picture's row; it
 shows whether that picture is muted.
+Without a keyboard every key of the player has a control here too (the owner's mouse-only
+rule): left of the speaker sit Search, and on live TV the guide and the previous channel; a
+time-shifted channel at its live edge has ◀10 beside play; on live TV the channel's name (and
+logo) shows its info, and a star after the name adds or removes it from the favorites. Each
+names its key when hovered.
 At a small width the Stay live indicator's text is shortened, or the indicator left out, so it
 never runs under the play button.
 """
@@ -24,6 +29,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, 
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontMetrics,
     QFontMetricsF,
     QHelpEvent,
     QHideEvent,
@@ -38,6 +44,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from services.live.stay_live import TARGETS, Mode
+from ui.keymap import key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.painting import (
     Units,
@@ -64,8 +71,33 @@ TOOLTIPS = {
     "external": "Open in external player",
     "volume": "Volume (+/−, M)",
 }
-_ICONS = {"mini": "mini_player", "pip": "pip"}  # button name -> painting icon, if they differ
+# Controls for a key of the player's (ui.keymap.SHORTCUTS): what they do, and that key.
+KEY_HINTS = {
+    "play": ("Play / pause", "Space"),
+    "back10": ("Back 10 seconds", "Left"),
+    "fwd10": ("Forward 10 seconds", "Right"),
+    "golive": ("Go live", "L"),
+    "previous": ("Previous channel", "Backspace"),
+    "guide": ("Guide", "G"),
+    "search": ("Search", "Ctrl+F"),
+    "title": ("Channel info", "I"),
+}
+FAVORITE_KEY = "Ctrl+D"
+# button name -> painting icon, if they differ
+_ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
+_ICON_BUTTONS = (  # painted as icons
+    "previous",
+    "guide",
+    "search",
+    "subtitles",
+    "audio",
+    "volume",
+    "external",
+    "pip",
+    "mini",
+    "fullscreen",
+)
 
 
 def _speed_label(rate: float) -> str:
@@ -89,6 +121,18 @@ def fmt_behind(seconds: float) -> str:
 
 def _local_now() -> datetime:
     return datetime.now().astimezone()
+
+
+@dataclass(frozen=True)
+class _TitleRow:
+    """The top row: the channel's (or title's) name, on live TV a star after it, the clock."""
+
+    name: str  # elided to its room
+    name_rect: QRectF
+    star: QRectF  # empty but on live TV
+    subtitle_x: float
+    clock: str
+    clock_rect: QRectF
 
 
 @dataclass(frozen=True)
@@ -140,6 +184,11 @@ class Transport(Overlay):
     # top-left, global coordinates).
     externalRequested = Signal(QPoint)
     volumeRequested = Signal()  # the speaker: the mixer, on the large picture's row
+    searchRequested = Signal()
+    guideRequested = Signal()
+    previousRequested = Signal()  # the channel before
+    infoRequested = Signal()  # the channel's name: its info (the banner)
+    favoriteRequested = Signal()  # the star after the name: add or remove the channel
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
     def __init__(
@@ -165,6 +214,8 @@ class Transport(Overlay):
         self._pip_available = False  # the window can open a second channel
         self._pip_open = False
         self._muted = False  # the large picture's mute: the speaker shows it
+        self._favorite = False  # the live channel is a favorite: its star is lit
+        self._hand = False  # the pointer is over the title row's controls
         self._timeline: _Timeline | None = None
         self._claimed: tuple[object, ...] = ()  # what hole_claims() covered last
         self._ticks: list[tuple[float, str]] = []
@@ -278,14 +329,35 @@ class Transport(Overlay):
             self._muted = muted
             self.update()
 
+    def set_favorite(self, favorite: bool) -> None:
+        """Whether the live channel is a favorite: its star is lit."""
+        if favorite != self._favorite:
+            self._favorite = favorite
+            self.update()
+
+    def title_rects(self) -> dict[str, QRectF]:
+        """On live TV the title row's controls: "title" (the logo and the name: the channel's
+        info) and "favorite" (the star after the name); nothing otherwise."""
+        if not self._live:
+            return {}
+        row = self._title_row()
+        title = row.name_rect
+        badge = self.badge_rect()
+        if not badge.isEmpty():
+            title = title.united(badge)
+        return {"title": title, "favorite": row.star}
+
     def hole_claims(self) -> QRegion:
-        """Over the PiP, the clicks this keeps (host coordinates): its buttons and its bar."""
+        """Over the PiP, the clicks this keeps (host coordinates): its buttons and its bar, and
+        on live TV the channel's name and star."""
         region = QRegion()
         for name, rect in self._layout().items():
             if name in _LABELS:
                 continue
             if name == "seek":
                 rect = rect.adjusted(0, -rect.height(), 0, rect.height())  # its hit area
+            region = region.united(QRegion(rect.toAlignedRect()))
+        for rect in self.title_rects().values():
             region = region.united(QRegion(rect.toAlignedRect()))
         return region.translated(self.geometry().topLeft())
 
@@ -307,7 +379,11 @@ class Transport(Overlay):
 
     def _controls_changed(self) -> None:
         """The host masks the PiP anew when this shows other controls (a mode, the bar)."""
-        claimed = (self.size(), tuple(sorted(n for n in self._layout() if n not in _LABELS)))
+        claimed = (
+            self.size(),
+            tuple(sorted(n for n in self._layout() if n not in _LABELS)),
+            tuple((n, r.getRect()) for n, r in self.title_rects().items()),  # moves with the name
+        )
         if claimed == self._claimed:
             return
         self._claimed = claimed
@@ -317,11 +393,20 @@ class Transport(Overlay):
         self.bandChanged.emit()
 
     def tooltip_at(self, pos: QPointF) -> str:
-        """What hovering `pos` says: a button's name and key, or nothing."""
-        for name, rect in self._layout().items():
-            if name in TOOLTIPS and rect.contains(pos):
-                return TOOLTIPS[name]
+        """What hovering `pos` says: a control's name and key, or nothing."""
+        for name, rect in (*self.title_rects().items(), *self._layout().items()):
+            text = self._tooltip(name)
+            if text and rect.contains(pos):
+                return text
         return ""
+
+    def _tooltip(self, name: str) -> str:
+        if name == "favorite":
+            what = "Remove from favorites" if self._favorite else "Add to favorites"
+            return key_hint(what, FAVORITE_KEY)
+        if name in KEY_HINTS:
+            return key_hint(*KEY_HINTS[name])
+        return TOOLTIPS.get(name, "")
 
     def poke(self) -> None:
         """Show (fade later); already shown, only restart the fade: no repaint, no mask."""
@@ -451,6 +536,31 @@ class Transport(Overlay):
     def _indicator_font(un: Units) -> QFont:
         return un.font(1.1, QFont.Weight.DemiBold)
 
+    def _title_row(self) -> _TitleRow:
+        un = Units(self.width())
+        left, right = float(un.px(3)), float(self.width() - un.px(3))
+        y, row_h = float(un.px(2.4)), float(un.px(2.6))
+        clock = fmt_clock(self._wall(0.0))
+        clock_w = QFontMetrics(un.font(1.8, QFont.Weight.DemiBold)).horizontalAdvance(clock)
+        clock_rect = QRectF(right - clock_w, y, clock_w, row_h)
+        badge = self.badge_rect()
+        if not badge.isEmpty():
+            left = badge.right() + un.px(1.2)
+        gap = un.px(0.6)
+        room = right - left - clock_w - un.px(4)
+        if self._live:
+            room -= gap + row_h  # the star keeps its room: the name gives way
+        fm = QFontMetrics(un.font(1.8, QFont.Weight.Bold))
+        name = fm.elidedText(self._title, Qt.ElideRight, max(0, int(room)))
+        name_w = fm.horizontalAdvance(name)
+        name_rect = QRectF(left, y, name_w + 2, row_h)
+        star = QRectF()
+        subtitle_x = left + name_w + un.px(1.2)
+        if self._live:
+            star = QRectF(left + name_w + gap, y, row_h, row_h)
+            subtitle_x = star.right() + gap
+        return _TitleRow(name, name_rect, star, subtitle_x, clock, clock_rect)
+
     def _layout(self) -> dict[str, QRectF]:
         un = Units(self.width())
         left, right = un.px(3), self.width() - un.px(3)
@@ -476,8 +586,14 @@ class Transport(Overlay):
             rects[name] = QRectF(x, cy - size / 2, size, size)
             x += size + gap
 
+        skip = icon + un.px(1.6)
         if not bar:
-            put("play", big, un.px(1.5))
+            if self._timeshift:  # at the live edge: ← goes back into the buffer
+                put("play", big, un.px(0.6))
+                put("back10", skip, un.px(1.5))
+            else:
+                put("play", big, un.px(1.5))
+            left_end = x  # the left buttons and their gap
             x = float(right)
             for name in self._right_buttons("subtitles", "audio", "volume"):
                 x -= icon
@@ -493,7 +609,7 @@ class Transport(Overlay):
                 pill = rects["live"]
                 right_edge = pill.x() - un.px(0.8)
                 # A narrow transport shortens the tail (painted elided), else leaves it out.
-                room = right_edge - rects["play"].right() - un.px(1.5)
+                room = right_edge - left_end
                 if width > room:
                     width = room if room >= bare + fm.horizontalAdvance("…") else 0.0
                 if width > 0:
@@ -501,7 +617,6 @@ class Transport(Overlay):
                         right_edge - width, cy - un.px(1.1), width, un.px(2.2)
                     )
         else:
-            skip = icon + un.px(1.6)
             if shifted:
                 put("start", skip, un.px(0.6))
             put("back10", skip, un.px(0.6))
@@ -527,9 +642,11 @@ class Transport(Overlay):
         return rects
 
     def _right_buttons(self, *rest: str) -> tuple[str, ...]:
-        """The icon buttons from the right edge inwards."""
+        """The icon buttons from the right edge inwards: the window's and the picture's, the
+        sound's (`rest`), then Search and, on live TV, the guide and the previous channel."""
         pip = ("pip",) if self._pip_available and self._live else ()
-        return ("fullscreen", "mini", *pip, "external", *rest)
+        tv = ("search", "guide", "previous") if self._live else ("search",)
+        return ("fullscreen", "mini", *pip, "external", *rest, *tv)
 
     def seek_rect(self) -> QRectF:
         return self._layout()["seek"]
@@ -591,7 +708,7 @@ class Transport(Overlay):
             self._paint_timeshift(p, un, rects, text)
         else:
             self._paint_vod(p, un, rects, text)
-        for name in ("subtitles", "audio", "volume", "external", "pip", "mini", "fullscreen"):
+        for name in _ICON_BUTTONS:
             if name in rects:
                 lit = name == "pip" and self._pip_open
                 icon = "mute" if name == "volume" and self._muted else _ICONS.get(name, name)
@@ -612,31 +729,27 @@ class Transport(Overlay):
         p.fillRect(QRectF(0, y, self.width(), bottom_h), grad)
 
     def _paint_title(self, p: QPainter, un: Units) -> None:
-        left = un.px(3)
+        row = self._title_row()
         right = self.width() - un.px(3)
-        y = un.px(2.4)
-        row_h = un.px(2.6)
-        clock = fmt_clock(self._wall(0.0))
         p.setFont(un.font(1.8, QFont.Weight.DemiBold))
         p.setPen(qcolor(PALETTE.text))
-        clock_w = p.fontMetrics().horizontalAdvance(clock)
-        p.drawText(
-            QRectF(right - clock_w, y, clock_w, row_h), Qt.AlignVCenter | Qt.AlignRight, clock
-        )
+        p.drawText(row.clock_rect, Qt.AlignVCenter | Qt.AlignRight, row.clock)
         p.setFont(un.font(1.8, QFont.Weight.Bold))
         badge = self.badge_rect()
         if not badge.isEmpty():
             draw_logo(p, badge, self._title, self._logo, un.px(0.5))
-            left = badge.right() + un.px(1.2)
             p.setPen(qcolor(PALETTE.text))
-        title = elided(p, self._title, right - left - clock_w - un.px(4))
-        title_w = p.fontMetrics().horizontalAdvance(title)
-        p.drawText(QRectF(left, y, title_w + 2, row_h), Qt.AlignVCenter | Qt.AlignLeft, title)
+        p.drawText(row.name_rect, Qt.AlignVCenter | Qt.AlignLeft, row.name)
+        if not row.star.isEmpty():
+            size = un.px(1.9)
+            c = row.star.center()
+            lit = qcolor(PALETTE.accent) if self._favorite else qcolor(PALETTE.text, 0.75)
+            draw_icon(p, "star", QRectF(c.x() - size / 2, c.y() - size / 2, size, size), lit)
         if self._subtitle:
             p.setFont(un.font(1.5))
             p.setPen(qcolor(PALETTE.text, 0.75))
-            sx = left + title_w + un.px(1.2)
-            sub = elided(p, self._subtitle, right - clock_w - un.px(2) - sx)
+            sx, y, row_h = row.subtitle_x, row.name_rect.y(), row.name_rect.height()
+            sub = elided(p, self._subtitle, row.clock_rect.left() - un.px(2) - sx)
             p.drawText(QRectF(sx, y, right - sx, row_h), Qt.AlignVCenter | Qt.AlignLeft, sub)
 
     def _paint_track(self, p: QPainter, un: Units, seek: QRectF, track_alpha: float) -> QPointF:
@@ -780,6 +893,7 @@ class Transport(Overlay):
 
     def _paint_live(self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor) -> None:
         self._paint_play(p, rects["play"], qcolor(PALETTE.canvas))
+        self._paint_skips(p, un, rects, text)  # ◀10 at a time-shifted channel's live edge
         pill = rects["live"]
         fill_round(p, pill, qcolor(PALETTE.live), pill.height() / 2)
         p.setFont(un.font(1.15, QFont.Weight.Bold))
@@ -835,12 +949,23 @@ class Transport(Overlay):
         if pos != self._last_move:  # ignore synthetic moves from layout changes
             self._last_move = pos
             self.poke()
+            self._point_at(pos)
         if self._drag is not None:
             if not event.buttons() & Qt.LeftButton:
                 self._end_drag()  # its release went elsewhere (a focus switch, a lost grab)
                 return
             self._drag = self._frac_at(event.position().x())
             self.update()
+
+    def _point_at(self, pos: QPointF) -> None:
+        """A pointing hand over the title row's controls: they are not drawn as buttons."""
+        hand = any(rect.contains(pos) for rect in self.title_rects().values())
+        if hand != self._hand:
+            self._hand = hand
+            if hand:
+                self.setCursor(Qt.PointingHandCursor)
+            else:
+                self.unsetCursor()
 
     def event(self, event: QEvent) -> bool:
         if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
@@ -883,6 +1008,10 @@ class Transport(Overlay):
                 self.seekRequested.emit(target_ms)
 
     def _click(self, rects: dict[str, QRectF], pos: QPointF) -> None:
+        for name, rect in self.title_rects().items():
+            if rect.contains(pos):
+                (self.infoRequested if name == "title" else self.favoriteRequested).emit()
+                return
         for name, rect in rects.items():
             if not rect.contains(pos):
                 continue
@@ -919,6 +1048,12 @@ class Transport(Overlay):
                 self.miniPlayerRequested.emit()
             elif name == "external":
                 self.externalRequested.emit(self.mapToGlobal(rect.topLeft().toPoint()))
+            elif name == "search":
+                self.searchRequested.emit()
+            elif name == "guide":
+                self.guideRequested.emit()
+            elif name == "previous":
+                self.previousRequested.emit()
             return
 
     def _nearest_speed(self) -> int:

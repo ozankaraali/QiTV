@@ -9,6 +9,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, timeline, wait_until
 
+from ui.keymap import key_hint
 from ui.overlays.painting import Units, badge_color
 from ui.overlays.transport import Transport
 
@@ -429,6 +430,175 @@ class TransportCase(unittest.TestCase):
         self.assertFalse(mask.contains(QPoint(640, 360)))
 
 
+LIVE_EDGE = {
+    "start": 0.0,
+    "end": 60.0,
+    "position": 59.0,
+    "live_edge": 60.0,
+    "lag": 1.0,
+    "mode": "live",
+    "rate": 1.0,
+    "paused": False,
+}
+MIN_HIT_PX = 28  # the owner's mouse-only rule: every new control, at the default window
+
+
+class OnScreenKeysTests(unittest.TestCase):
+    """The owner's mouse-only rule (2.0.1): the player's keys have buttons too, each naming
+    its key, at least 28 px wide at the default window, and kept over the PiP."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def make(self):
+        t = Transport(idle_ms=3000)
+        t.setGeometry(0, 0, 1280, 720)
+        t.show()
+        self.addCleanup(t.close)
+        return t
+
+    def click(self, t, point):
+        QTest.mouseClick(t, Qt.LeftButton, Qt.NoModifier, point.toPoint())
+
+    def assert_big_enough(self, rect, name):
+        self.assertGreaterEqual(rect.width(), MIN_HIT_PX, name)
+        self.assertGreaterEqual(rect.height(), MIN_HIT_PX, name)
+
+    def test_live_tv_has_previous_channel_guide_and_search(self):
+        t = self.make()
+        t.show_live("One", "News at six")
+        signals = {
+            "previous": (t.previousRequested, key_hint("Previous channel", "Backspace")),
+            "guide": (t.guideRequested, key_hint("Guide", "G")),
+            "search": (t.searchRequested, key_hint("Search", "Ctrl+F")),
+        }
+        for name, (signal, tooltip) in signals.items():
+            with self.subTest(name=name):
+                rect = t.button_rect(name)
+                self.assert_big_enough(rect, name)
+                self.assertEqual(t.tooltip_at(rect.center()), tooltip)
+                spy = QSignalSpy(signal)
+                self.click(t, rect.center())
+                self.assertEqual(spy.count(), 1)
+        # Left to right: ⟲ ▦ ⌕, then the speaker (the channel's, then the sound's buttons).
+        lefts = [t.button_rect(n).left() for n in ("previous", "guide", "search", "volume")]
+        self.assertEqual(lefts, sorted(lefts))
+
+    def test_a_movie_has_search_but_not_the_channel_buttons(self):
+        t = self.make()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        rects = t._layout()
+        self.assertIn("search", rects)
+        self.assertLess(rects["search"].right(), rects["subtitles"].left())
+        for name in ("previous", "guide"):
+            self.assertNotIn(name, rects)
+        self.assertEqual(t.title_rects(), {})  # no channel: nothing to favor or to tell
+
+    def test_time_shifted_live_shows_back_10_seconds_at_the_live_edge(self):
+        t = self.make()
+        t.show_live("One", "")
+        self.assertNotIn("back10", t._layout())  # played directly: nothing to go back in
+        t.show_timeshift("One", "")
+        t.update_timeline(LIVE_EDGE, [])
+        back = t.button_rect("back10")
+        self.assertGreater(back.left(), t.button_rect("play").right())
+        self.assertLess(back.right(), t.button_rect("indicator").left())
+        self.assert_big_enough(back, "back10")
+        self.assertEqual(t.tooltip_at(back.center()), key_hint("Back 10 seconds", "Left"))
+        spy = QSignalSpy(t.seekRelativeRequested)
+        self.click(t, back.center())
+        self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [-10_000])
+
+    def test_the_bars_buttons_name_their_keys(self):
+        t = self.make()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        for name, tooltip in (
+            ("play", key_hint("Play / pause", "Space")),
+            ("back10", key_hint("Back 10 seconds", "Left")),
+            ("fwd10", key_hint("Forward 10 seconds", "Right")),
+        ):
+            self.assertEqual(t.tooltip_at(t.button_rect(name).center()), tooltip, name)
+        t.show_timeshift("One", "")
+        t.update_timeline(dict(LIVE_EDGE, position=30.0, lag=30.0, mode="shifted"), [])
+        golive = t.button_rect("golive")
+        self.assertEqual(t.tooltip_at(golive.center()), key_hint("Go live", "L"))
+
+    def test_the_channels_name_shows_its_info(self):
+        t = self.make()
+        t.show_live("Nature One", "Wild rivers")
+        title = t.title_rects()["title"]
+        self.assertTrue(title.contains(t.badge_rect()))  # the logo is part of it
+        self.assert_big_enough(title, "title")
+        self.assertEqual(t.tooltip_at(title.center()), key_hint("Channel info", "I"))
+        spy = QSignalSpy(t.infoRequested)
+        self.click(t, title.center())
+        self.assertEqual(spy.count(), 1)
+
+    def test_a_star_after_the_name_adds_or_removes_the_favorite(self):
+        t = self.make()
+        t.show_live("Nature One", "Wild rivers")
+        rects = t.title_rects()
+        star = rects["favorite"]
+        self.assert_big_enough(star, "favorite")
+        self.assertGreater(star.left(), rects["title"].right())
+        self.assertLess(star.bottom(), t.controls_top())  # the title row, not the controls
+        self.assertEqual(t.tooltip_at(star.center()), key_hint("Add to favorites", "Ctrl+D"))
+        spy = QSignalSpy(t.favoriteRequested)
+        self.click(t, star.center())
+        self.assertEqual(spy.count(), 1)
+        plain = t.grab().toImage().copy(star.toAlignedRect())
+        t.set_favorite(True)
+        self.assertEqual(t.tooltip_at(star.center()), key_hint("Remove from favorites", "Ctrl+D"))
+        self.assertNotEqual(t.grab().toImage().copy(star.toAlignedRect()), plain)  # lit
+        t.set_favorite(False)
+        self.assertEqual(t.grab().toImage().copy(star.toAlignedRect()), plain)
+
+    def test_the_subtitle_starts_after_the_star(self):
+        t = self.make()
+        t.show_live("Nature One", "Wild rivers")
+        star = t.title_rects()["favorite"]
+        image = t.grab().toImage()
+        rows = range(int(star.top()), int(star.bottom()))
+        after = range(int(star.right()) + 2, int(star.right()) + Units(1280).px(8))
+        self.assertTrue(any(image.pixelColor(x, y).lightness() > 150 for x in after for y in rows))
+
+    def test_over_the_pip_the_new_controls_keep_their_clicks(self):
+        t = self.make()
+        t.show_live("One", "")
+        claims = t.hole_claims()
+        for name in ("previous", "guide", "search"):
+            self.assertTrue(claims.contains(t.button_rect(name).center().toPoint()), name)
+        for name, rect in t.title_rects().items():
+            self.assertTrue(claims.contains(rect.center().toPoint()), name)
+        self.assertFalse(claims.contains(QPoint(1100, 40)))  # the clock is a label
+
+    def test_the_host_hears_when_the_star_moves(self):
+        class Host(QWidget):
+            changes = 0
+
+            def overlay_changed(self):
+                self.changes += 1
+
+        host = Host()
+        host.resize(1280, 720)
+        t = Transport(host)
+        t.show_live("One", "")
+        t.show_live("One", "")
+        before = host.changes
+        t.show_live("A channel with a much longer name", "")  # the star moves right
+        self.assertGreater(host.changes, before)
+
+    def test_the_channel_buttons_keep_the_controls_top(self):
+        # The PiP rises above the bottom row only: the title row is not part of it.
+        t = self.make()
+        t.show_live("One", "")
+        top = t.geometry().top()
+        self.assertEqual(t.controls_top(), top + round(t.button_rect("play").top()))
+
+
 class _Host(QWidget):
     """A host that counts the overlay changes it is told about (as OverlayHost recomputes)."""
 
@@ -607,6 +777,12 @@ class SmallWidthLayoutTests(unittest.TestCase):
                         if name not in ("seek", "times")  # the rows above the buttons
                     }
                     self.assertIn("volume", rects)
+                    self.assertIn("search", rects)
+                    if mode != "movie with Next":
+                        self.assertIn("guide", rects)
+                        self.assertIn("previous", rects)
+                    if mode == "stay live, catching up":
+                        self.assertIn("back10", rects)
                     names = list(rects)
                     for i, a in enumerate(names):
                         self.assertGreaterEqual(rects[a].left(), 0, a)
@@ -614,6 +790,19 @@ class SmallWidthLayoutTests(unittest.TestCase):
                         for b in names[i + 1 :]:
                             self.assertFalse(rects[a].intersects(rects[b]), f"{a} overlaps {b}")
                     self.assertFalse(t.grab().isNull())
+
+    def test_the_title_rows_controls_stay_inside_at_any_width(self):
+        for width in self.WIDTHS:
+            t = Transport(idle_ms=3000)
+            self.addCleanup(t.close)
+            t.setGeometry(0, 0, width, round(width * 9 / 16))
+            t.show_live("A channel with a rather long name indeed", "Its programme")
+            with self.subTest(width=width):
+                rects = t.title_rects()
+                self.assertFalse(rects["title"].intersects(rects["favorite"]))
+                for name, rect in rects.items():
+                    self.assertGreaterEqual(rect.left(), 0, name)
+                    self.assertLessEqual(rect.right(), width, name)
 
     def test_a_wide_transport_shows_the_whole_indicator(self):
         t = Transport(idle_ms=3000)

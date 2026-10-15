@@ -48,6 +48,7 @@ ICONS = [
     "plus",
     "external",
     "swap",
+    "guide",
 ]
 
 

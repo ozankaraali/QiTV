@@ -7,6 +7,7 @@ import sys
 from typing import Any
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence
 
 
 class Action(str, Enum):
@@ -305,6 +306,19 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+Q", "Quit"),
     ],
 }
+
+
+_ARROWS = {"Left": "←", "Right": "→", "Up": "↑", "Down": "↓"}
+
+
+def key_hint(what: str, keys: str) -> str:
+    """An on-screen control's tooltip naming its key, as this computer names it.
+
+    "Guide (G)", "Search (⌘F)" on macOS and "Search (Ctrl+F)" elsewhere; arrows read as
+    arrows everywhere.
+    """
+    name = _ARROWS.get(keys) or QKeySequence(keys).toString(QKeySequence.SequenceFormat.NativeText)
+    return f"{what} ({name})"
 
 
 def shortcut_keys(keys: str) -> list[str]:

@@ -529,6 +529,22 @@ class TVWindowTests(WindowCase):
         self.assertTrue(window.screens.library_shown())
         self.assertFalse(window.overlays.guide.isVisible())
 
+    def test_the_player_controls_search_button_opens_the_search(self):
+        # The owner's mouse-only rule (2.0.1): Ctrl/⌘+F has a button on the player too.
+        self.show()
+        drawer = self.wait_for_drawer()
+        drawer.close_drawer()
+        transport = self.window.overlays.transport
+        transport.show_live("Channel 1", "")
+        QTest.mouseClick(
+            transport,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            transport.button_rect("search").center().toPoint(),
+        )
+        self.assertTrue(self.window.screens.library_shown())
+        self.assertEqual(self.window.library_controller.mode, "search")
+
     def test_f11_toggles_fullscreen_in_the_library(self):
         self.show()
         self.wait_for_drawer()

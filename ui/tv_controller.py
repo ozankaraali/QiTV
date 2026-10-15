@@ -343,6 +343,11 @@ class TVController(QObject):
         transport.audioRequested.connect(self._cycle_audio)
         transport.volumeRequested.connect(self._mixer.open_main)
         transport.subtitleRequested.connect(self._cycle_subtitles)
+        # The buttons for the player's keys (the owner's mouse-only rule): they act as the keys.
+        transport.guideRequested.connect(partial(self.handle, Action.GUIDE))
+        transport.previousRequested.connect(partial(self.handle, Action.PREVIOUS))
+        transport.infoRequested.connect(partial(self.handle, Action.INFO))
+        transport.favoriteRequested.connect(self._favorite_playing)
         self._live_controls.wire()
         self._mixer.wire()
         if self._pip is not None:
@@ -1506,11 +1511,21 @@ class TVController(QObject):
         if channel is not None:
             self._toggle_favorite(channel)
 
+    def _favorite_playing(self) -> None:
+        """The player controls' star: the live channel playing, never a highlighted row."""
+        if self._on_demand():
+            return
+        channel = self._channel or self.zap.context.current()
+        if channel is not None:
+            self._toggle_favorite(channel)
+
     def _toggle_favorite(self, item: dict) -> None:
         if not favorites.favorite_key(item):
             return
         added = favorites.toggle(self.config, item)
         self.nav.changed.emit()  # the pinned Favorites group follows the list
+        if self._channel is not None:  # the star of the channel playing (by name, as the list)
+            self.overlays.transport.set_favorite(favorites.is_favorite(self.config, self._channel))
         if not favorites.save(self.config):
             self._toast(FAVORITES_SAVE_FAILED_TEXT, "error", ERROR_MS)
             return

@@ -307,9 +307,17 @@ class FakeTransport(FakeOverlay):
     miniPlayerRequested = Signal()
     externalRequested = Signal(QPoint)
     volumeRequested = Signal()
+    searchRequested = Signal()
+    guideRequested = Signal()
+    previousRequested = Signal()
+    infoRequested = Signal()
+    favoriteRequested = Signal()
 
     def set_muted(self, muted):
         self.record("set_muted", muted)
+
+    def set_favorite(self, favorite):
+        self.record("set_favorite", favorite)
 
     def set_next_available(self, available):
         self.record("set_next_available", available)
@@ -3038,6 +3046,66 @@ class FavoriteTests(ControllerTestCase):
         self.drawer.visible = True
         self.drawer.highlight = self.nav.path[-1]  # a group
         self.controller.handle(Action.FAVORITE)
+        self.assertEqual(self.config.favorites, [])
+
+
+class PlayerButtonTests(ControllerTestCase):
+    """The player controls' buttons for the player's keys (the owner's mouse-only rule)."""
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.nav.reset_to("live", "10")
+
+    def test_the_guide_button_opens_the_guide(self):
+        self.play(1)
+        self.transport.guideRequested.emit()
+        self.assertEqual(self.guide.named("open_guide"), [(CHANNELS, 1)])
+
+    def test_the_previous_channel_button_goes_back_a_channel(self):
+        self.play(0)
+        self.play(2)
+        self.transport.previousRequested.emit()
+        self.assertEqual(self.requested(), ["One", "Three", "One"])
+
+    def test_the_channels_name_shows_its_banner(self):
+        self.play(1)
+        self.banner.dismiss()
+        shown = len(self.banner.named("show_info"))
+        self.transport.infoRequested.emit()
+        self.assertEqual(len(self.banner.named("show_info")), shown + 1)
+        self.assertEqual(self.banner.named("show_info")[-1][0].name, "Two")
+
+    def test_the_star_adds_and_removes_the_channel_playing(self):
+        self.play(1)
+        self.drawer.visible = True  # Ctrl+D would take its highlight; the star never does
+        self.drawer.highlight = self.nav.children(self.nav.path[-1])[3]
+        self.transport.favoriteRequested.emit()
+        self.assertEqual(self.config.favorites, ["Two"])
+        self.assertEqual(self.transport.named("set_favorite")[-1], (True,))
+        self.assertEqual(self.toast.messages()[-1], ("Added to favorites", "info"))
+        self.transport.favoriteRequested.emit()
+        self.assertEqual(self.config.favorites, [])
+        self.assertEqual(self.transport.named("set_favorite")[-1], (False,))
+
+    def test_the_star_shows_whether_the_channel_is_a_favorite(self):
+        self.config.favorites = ["Two"]
+        self.play(1)
+        self.controller.mouse_moved()  # the transport shows the channel
+        self.assertEqual(self.transport.named("set_favorite")[-1], (True,))
+        self.play(2)
+        self.controller.mouse_moved()
+        self.assertEqual(self.transport.named("set_favorite")[-1], (False,))
+
+    def test_a_favorite_chosen_elsewhere_lights_the_star(self):
+        self.play(1)
+        self.controller.handle(Action.FAVORITE)  # Ctrl+D on the channel playing
+        self.assertEqual(self.transport.named("set_favorite")[-1], (True,))
+
+    def test_the_star_does_nothing_during_a_movie(self):
+        self.controller.play_vod(movie(1), "movie", play_context())
+        self.ready("http://vod/m1.mkv")
+        self.transport.favoriteRequested.emit()
         self.assertEqual(self.config.favorites, [])
 
 

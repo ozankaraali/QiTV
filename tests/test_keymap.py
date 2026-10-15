@@ -9,6 +9,7 @@ from ui.keymap import (
     SHORTCUTS,
     Action,
     as_int,
+    key_hint,
     resolve,
     shortcut_keys,
 )
@@ -345,6 +346,25 @@ class ContextTests(unittest.TestCase):
     def test_new_actions_exist(self):
         for name in ("SEARCH", "FAVORITE", "NAV_HOME", "NAV_END", "LIBRARY", "GUIDE", "OPEN_FILE"):
             self.assertIn(name, Action.__members__)
+
+
+class KeyHintTests(unittest.TestCase):
+    """On-screen controls name their key in their tooltip (owner's mouse-only rule, 2.0.1)."""
+
+    def test_a_hint_names_the_key_as_this_computer_does(self):
+        native = QKeySequence.SequenceFormat.NativeText
+        self.assertEqual(key_hint("Guide", "G"), "Guide (G)")
+        self.assertEqual(
+            key_hint("Search", "Ctrl+F"), f"Search ({QKeySequence('Ctrl+F').toString(native)})"
+        )
+        self.assertEqual(
+            key_hint("Previous channel", "Backspace"),
+            f"Previous channel ({QKeySequence('Backspace').toString(native)})",
+        )
+
+    def test_arrows_read_as_arrows_everywhere(self):
+        self.assertEqual(key_hint("Earlier", "Left"), "Earlier (←)")
+        self.assertEqual(key_hint("Later", "Right"), "Later (→)")
 
 
 if __name__ == "__main__":

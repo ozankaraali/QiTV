@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from PySide6.QtCore import QObject, QTimer, SignalInstance
 from PySide6.QtGui import QPixmap
 
+from services import favorites
 from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
@@ -397,6 +398,7 @@ class LiveControls(QObject):
         now = self._now_title(target.item)
         subtitle = now[0] if now else ""
         transport = self._transport
+        transport.set_favorite(favorites.is_favorite(self.config, target.item))  # its star
         if not self.pipeline_live():
             transport.show_live(target.title, subtitle, self._logo(target.item))
             return

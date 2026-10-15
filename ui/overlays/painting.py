@@ -372,6 +372,14 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             shaft.lineTo(0.76, 0.24)
             line(shaft)
             fill(_poly([(0.86, 0.14), (0.86, 0.44), (0.56, 0.14)]))
+        elif name == "guide":  # the programme guide: rows of programmes, staggered as on a grid
+            for y, spans in (
+                (0.2, ((0.1, 0.36), (0.46, 0.9))),
+                (0.43, ((0.1, 0.6), (0.7, 0.9))),
+                (0.66, ((0.1, 0.24), (0.34, 0.9))),
+            ):
+                for x0, x1 in spans:
+                    fill(_rrect(x0, y, x1 - x0, 0.14, 0.04))
         elif name == "live_dot":
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))
