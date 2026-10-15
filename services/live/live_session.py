@@ -7,9 +7,10 @@ plays the loopback stream from the oldest buffered segment with the pipeline pro
 Falling back (spec §9) never overlaps two upstream connections: the session is closed and
 the provider URL plays directly (`PlayKind.LIVE`) once the engine confirms the close, or
 after `_CLOSE_CAP_MS`. Only `available(False)` plays directly at once: no helper, so no
-upstream and no buffer, is left (also for a session whose input had ended). Unsupported sources, failures before ready and a ready that does not
-come within `ready_timeout_ms` fall back with "Time-shift isn't available for this
-channel"; after `available(False)` every start plays directly for the rest of the run.
+upstream and no buffer, is left (also for a session whose input had ended). Unsupported
+sources, failures before ready and a ready that does not come within `ready_timeout_ms`
+fall back with "Time-shift isn't available for this channel"; after `available(False)`
+every start plays directly for the rest of the run.
 
 Position (spec §6.3): the start of the opened segment plus VLC's `get_time()` deltas; a
 delta further than 1 s from wall clock × rate (counted only while VLC plays) is replaced by
@@ -17,19 +18,22 @@ wall clock × rate, so a timestamp jump in the stream does not move the position
 reopens the stream at a segment (about 2 s granularity) and keeps the pause intent: a
 reopened stream is paused again as soon as it plays (port map §8.19). A seek to within the
 target of the live edge goes live instead, still keeping the pause; only `go_live()` (the
-Go live button) unpauses.
+Go live button) unpauses. A paused session is time-shifted (StayLive SHIFTED), whatever
+reopened it, and stay-live leaves it alone: no rate changes, no reopen at live. After the
+pause it plays on from there, without catching up, until Go live.
 
 Every `tick_ms` the lag behind the live edge feeds `StayLive`, whose target is the latency
 setting's or the HLS burst (`burst_s`), whichever is larger: segments that arrive whole
 would make a smaller target underrun at every segment. With bursts the lag is a sawtooth
 as tall as a burst, so the lag used (and reported) is its mean, in closed form: the current
 lag plus the time since the edge last moved, less half a burst (see `_lag`); the step a
-landing burst adds is eased in over one burst, since it holds the jitter of when a burst
-is seen (see `_smooth`).
-Held against the instantaneous peak, the rate would change at every burst and settle only
-once the lag before each burst is under 0.75 s. Go live picks the segment whose mean lag
-is nearest the target while leaving at least 0.5 s before the next burst, so it shows live
-at once at any point of a burst.
+landing burst adds is eased in over a few bursts, since it holds the jitter of when a
+burst lands (see `_smooth`). Held against the instantaneous peak, the rate would change at
+every burst and settle only once the lag before each burst is under 0.75 s. Go live on a
+bursty source ranks every segment start, the open one included, by the mean lag it would
+give (see `_go_live_rank`): at the target and showing live, with a second buffered before
+each burst. When no start does that yet, it waits up to a second for the burst phase that
+lets one (`_live_choice`); not when paused, since a paused lag grows anyway.
 
 Interruptions while playing from the pipeline:
 - VLC ended or failed: reopen at the position, or at the oldest buffered point with "Rewound
@@ -91,6 +95,12 @@ _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _JUMP_S = 1.0  # get_time deltas further than this from wall clock x rate are not trusted
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
 _HEADROOM_S = 0.5  # go live never leaves less buffered than this before the next burst
+_EASE_BURSTS = 4  # how many bursts the step of a landing burst is eased in over
+_HEADROOM_GOAL_S = 1.0  # what it aims to leave wherever the target allows
+_BELOW_TARGET_S = 0.25  # how far below the target a Go live mean lag may preferably land
+_NUDGE_S = 0.75  # StayLive nudges the rate beyond the target plus this
+_BEHIND_S = 1.0  # the transport shows "behind live" from the target plus this
+_MAX_LIVE_WAIT_S = 1.0  # Go live may wait this long for a burst phase that suits it
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -112,6 +122,27 @@ class _Retry(Enum):
 
 def _number(value: Any) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _go_live_rank(mean: float, target: float, burst: float) -> tuple[int, float, float]:
+    """Order Go live candidates on a bursty source by the mean lag each would give.
+
+    Before the next burst the lag falls to the mean less half a burst. In order, each with
+    `_HEADROOM_GOAL_S` before every burst: at the target (from `_BELOW_TARGET_S` below it
+    to where stay-live would nudge); showing live (under the transport's target + 1 s);
+    behind live for a while. Then with `_HEADROOM_S` at least; else the most buffer there
+    is. Within a tier, the nearest the target.
+    """
+    headroom = mean - burst / 2
+    if headroom < _HEADROOM_S:
+        return (4, -mean, 0.0)
+    if headroom < _HEADROOM_GOAL_S:
+        tier = 3
+    elif target - _BELOW_TARGET_S <= mean <= target + _NUDGE_S:
+        tier = 0
+    else:
+        tier = 1 if mean < target + _BEHIND_S else 2
+    return (tier, abs(mean - target), mean)
 
 
 def _locate(spans: Sequence[Span], t: float) -> Optional[Span]:
@@ -168,8 +199,9 @@ class LiveSession(QObject):
         self._snapshot_cache: dict[str, Any] = {}
         self._ended = False  # the session's input is over: no reopen, no stay-live
         self._source_lost = False  # ended by a source failure: fall back when it runs out
-        self._live_on_update = False  # after a disk failure: act on the next state only
+        self._deferred: Optional[float] = None  # since a disk failure: act on the next state
         self._after_update: Optional[float] = None  # then seek here; None: go live
+        self._live_at: Optional[float] = None  # go live then, when the burst phase suits
         self._paused = False
         self._rate = 1.0
         # Position: _base (the opened segment's start) + _elapsed, sampled from VLC.
@@ -225,8 +257,9 @@ class LiveSession(QObject):
         }
         self._stay = StayLive(self._latency)
         self._snapshot_cache = {}
-        self._ended = self._source_lost = self._live_on_update = self._paused = False
-        self._after_update = self._retry = self._failing_since = None
+        self._ended = self._source_lost = self._paused = False
+        self._deferred = None
+        self._after_update = self._retry = self._failing_since = self._live_at = None
         self._edge_seen = self._smoothed = None
         self._base = self._elapsed = 0.0
         self._last_ms, self._last_wall = 0, self._clock()
@@ -257,13 +290,14 @@ class LiveSession(QObject):
             return
         if self._phase is not _Phase.PIPELINE:
             return
+        self._live_at = None  # a pending Go live gives way to the user's newer action
         if not self._paused:
             self._paused = True
             self._stay.user_paused()
             self._playback.set_paused(True)
             return
         self._paused = False
-        if self._live_on_update:
+        if self._deferred is not None:
             return  # the reopen on the RAM ring's first state plays
         position = self._advance()
         if position < self._buffer_start() - _EXPIRED_S:
@@ -274,11 +308,12 @@ class LiveSession(QObject):
     def seek_to(self, t: float) -> None:
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return
+        self._live_at = None
         snapshot = self._snapshot()
         if t >= self._live_edge(snapshot) - self._target(snapshot):
             self._go_live(unpause=False)  # at the edge: not a segment back, and back to LIVE
             return
-        if self._live_on_update:
+        if self._deferred is not None:
             self._after_update = t  # the spans still describe the lost disk ring
             return
         span = _locate(self._engine.spans(self._sid), t)
@@ -294,13 +329,14 @@ class LiveSession(QObject):
         """The Go live button: back to the live edge at 1x, playing (not paused)."""
         self._go_live(unpause=True)
 
-    def _go_live(self, *, unpause: bool) -> None:
+    def _go_live(self, *, unpause: bool, may_wait: bool = True) -> None:
         """Reopen at the live target behind the edge, at 1x; a paused one stays paused."""
         try:
             if self._phase is _Phase.PIPELINE:
+                self._live_at = None
                 if unpause:
                     self._paused = False
-                if self._live_on_update:  # stale spans: the RAM ring's first state goes live
+                if self._deferred is not None:  # stale spans: the RAM ring's next state does
                     self._after_update = None
                     return
                 if self._source_lost:
@@ -308,16 +344,26 @@ class LiveSession(QObject):
                     return
                 self._advance()
                 self._set_rate(1.0)
-                seq = self._live_seq()
+                # A paused stream's lag grows anyway: no point waiting for a burst phase.
+                seq, wait = self._live_choice(may_wait=may_wait and not self._paused)
+                if wait > 0:
+                    self._live_at = self._clock() + wait  # the tick goes live then
+                    return
+                self._live_at = None
                 if seq is None or not self._open_at(seq):
                     self._retry = _Retry.LIVE
         finally:
-            # Always: StayLive's reopen signal stays disarmed until this call.
-            self._stay.user_go_live()
+            # Always, so StayLive's edge-triggered reopen re-arms; but a pause that was kept
+            # stays time-shifted: only the Go live button (it unpaused) returns to LIVE.
+            if self._paused:
+                self._stay.user_paused()
+            else:
+                self._stay.user_go_live()
 
     def set_speed(self, rate: float) -> None:
         if self._phase is not _Phase.PIPELINE or rate <= 0 or self._stay.mode is Mode.LIVE:
             return  # at the edge, stay-live owns the rate
+        self._live_at = None
         self._advance()  # the time so far counts at the old rate
         self._set_rate(rate)
         self._stay.user_speed(rate)
@@ -376,8 +422,9 @@ class LiveSession(QObject):
         sid, self._sid = self._sid, None
         self._phase = _Phase.FALLING_BACK
         self._fallback_notice = message
-        self._paused = self._source_lost = self._live_on_update = False
-        self._after_update = self._retry = self._failing_since = None
+        self._paused = self._source_lost = False
+        self._deferred = None
+        self._after_update = self._retry = self._failing_since = self._live_at = None
         if sid is not None:
             self._close(sid)
         if not self._unclosed:
@@ -396,8 +443,8 @@ class LiveSession(QObject):
     def _recover(self) -> None:
         self._phase = _Phase.RECOVERING
         self._tick_timer.stop()
-        self._after_update = self._retry = self._failing_since = None
-        self._live_on_update = False
+        self._after_update = self._retry = self._failing_since = self._live_at = None
+        self._deferred = None
         self._snapshot_cache = {}
         self._edge_seen = self._smoothed = None  # the reopened session starts afresh
         self._recovery_timer.start(_RECOVERY_MS)
@@ -447,8 +494,8 @@ class LiveSession(QObject):
         if sid != self._sid:
             return
         self._since_edge_moved(snapshot)  # when a burst lands, to the update
-        if self._live_on_update and self._phase is _Phase.PIPELINE:
-            self._live_on_update = False  # the spans now describe the RAM ring
+        if self._deferred is not None and self._phase is _Phase.PIPELINE:
+            self._deferred = None  # the spans now describe the RAM ring
             seek, self._after_update = self._after_update, None
             if seek is None:
                 self._go_live(unpause=False)
@@ -470,7 +517,7 @@ class LiveSession(QObject):
             self.notice.emit(DISK)
             if self._phase is _Phase.PIPELINE:
                 # The history went with the disk ring; the spans still describe it.
-                self._live_on_update = True
+                self._deferred = self._clock()
                 self._after_update = None
             return
         if kind == "internal":
@@ -485,7 +532,7 @@ class LiveSession(QObject):
             self._fall_back(UNAVAILABLE)
         elif (
             self._phase is _Phase.PIPELINE
-            and not self._live_on_update  # else the history went with the disk ring
+            and self._deferred is None  # else the history went with the disk ring
             and self._behind_live()
         ):
             self._ended = self._source_lost = True  # the buffer still plays
@@ -543,9 +590,11 @@ class LiveSession(QObject):
         self._retry = None
         if self._source_lost:
             self._fall_back(LOST)  # the buffer ran out: play the channel live
-        elif self._ended or self._gave_up():
+        elif self._ended or self._deferred is not None or self._live_at is not None:
+            # The end of the buffer; or the RAM ring's next state reopens (bounded); or a
+            # pending Go live does, within a second.
             return
-        elif not self._live_on_update:  # else the RAM ring's first state goes live
+        elif not self._gave_up():
             self._reopen_at_position()
 
     # ---- ticks -------------------------------------------------------------------------
@@ -562,16 +611,30 @@ class LiveSession(QObject):
             if self._retry is not None:
                 self._emit_timeline()
                 return
-        if self._live_on_update:  # waiting for the RAM ring's first state
-            # An HLS source may send it only with its next burst.
+        if self._deferred is not None:  # waiting for the RAM ring's first state
+            # An HLS source may send it only with its next burst. Counted from the disk
+            # failure: neither a pause nor an interruption moves the bound.
             burst = _number(self._snapshot().get("burst_s"))
-            if not self._gave_up(max(self._ready_timeout_s, burst + 2.0)):
+            if self._clock() - self._deferred > max(self._ready_timeout_s, burst + 2.0):
+                _LOG.warning(
+                    "The live buffer sent nothing after its disk failed; playing directly."
+                )
+                self._fall_back(LOST)
+            else:
                 self._emit_timeline()
             return
+        if self._live_at is not None:  # Go live waits for a burst phase that suits it
+            if self._clock() < self._live_at:
+                return  # the reopen is moments away: the timeline holds until then
+            self._go_live(unpause=False, may_wait=False)  # the button already unpaused
+            if self._phase is not _Phase.PIPELINE:
+                return
         snapshot = self._snapshot()
         position = self._advance()
         lag = max(0.0, self._smooth(snapshot, position, self._lag(snapshot, position)))
-        if not self._ended:  # an ended source has no live edge left to stay near
+        # An ended source has no live edge left to stay near, and a paused player stays
+        # where the pause leaves it (StayLive is SHIFTED then).
+        if not self._ended and not self._paused:
             self._stay.target = self._target(snapshot)
             decision = self._stay.update(lag, self._playback.state() is PlaybackState.BUFFERING)
             self._set_rate(decision.rate)
@@ -612,7 +675,7 @@ class LiveSession(QObject):
             last, correction, when, last_position = self._smoothed
             elapsed = now - when
             step = (lag - last) - (elapsed - (position - last_position))
-            correction = (correction - step) * math.exp(-elapsed / burst)
+            correction = (correction - step) * math.exp(-elapsed / (burst * _EASE_BURSTS))
         self._smoothed = (lag, correction, now, position)
         return lag + correction
 
@@ -691,24 +754,45 @@ class LiveSession(QObject):
         # The open segment starts where the closed ones end (0.0 for the very first).
         return _number(self._snapshot().get("end"))
 
-    def _live_seq(self) -> Optional[int]:
+    def _live_choice(self, *, may_wait: bool) -> tuple[Optional[int], float]:
+        """The segment to go live at, or how long to wait for a better one (seconds)."""
         assert self._sid is not None
         spans = self._engine.spans(self._sid)
         if not spans:
-            return self._oldest_seq()
+            return self._oldest_seq(), 0.0
         snapshot = self._snapshot()
         edge, target = self._live_edge(snapshot), self._target(snapshot)
         burst = _number(snapshot.get("burst_s"))
         if burst <= 0:
             latest = edge - target
-            return ([span for span in spans if span.start <= latest] or spans)[-1].seq
-        # A start's mean lag (see `_lag`): the start nearest the target, so neither a whole
-        # segment of overshoot ("behind live" until stay-live closes it) nor an underrun.
-        shift = self._since_edge_moved(snapshot) - burst / 2
-        means = [(edge - span.start + shift, span) for span in spans]
-        # Before the next burst the lag falls to the mean less half a burst.
-        safe = [item for item in means if item[0] - burst / 2 >= _HEADROOM_S] or means[:1]
-        return min(safe, key=lambda item: (abs(item[0] - target), item[0]))[1].seq
+            return ([span for span in spans if span.start <= latest] or spans)[-1].seq, 0.0
+        # Every start, the open segment's too (where the closed ones end; the newest GOP of
+        # a burst stays open until the next one), by the mean lag it would give (`_lag`).
+        starts = [(span.start, span.seq) for span in spans]
+        open_seq = snapshot.get("open")
+        if isinstance(open_seq, int):
+            starts.append((_number(snapshot.get("end")), open_seq))
+        since = self._since_edge_moved(snapshot)
+        means = [(edge - start + since - burst / 2, seq) for start, seq in starts]
+        best = min(means, key=lambda m: _go_live_rank(m[0], target, burst))
+        tier = _go_live_rank(best[0], target, burst)[0]
+        if not may_wait or tier == 0:
+            return best[1], 0.0
+        # A start's mean lag grows with the time since the last burst, so within moments
+        # one may land at the target (2 s GOPs: within a second) instead of below it for
+        # good (stay-live never slows down) or behind live. Wait for that, if it is close
+        # and before the next burst; else for one showing live with a second buffered.
+        limit = min(_MAX_LIVE_WAIT_S, burst - since)
+        goal = burst / 2 + _HEADROOM_GOAL_S
+        floors = [(max(goal, target - _BELOW_TARGET_S), target + _NUDGE_S)]
+        if tier > 1:
+            floors.append((goal, target + _BEHIND_S - 1e-6))
+        for low, high in floors:
+            waits = [max(0.0, low - mean) for mean, _ in means if max(mean, low) <= high]
+            waits = [wait for wait in waits if wait <= limit]
+            if waits:
+                return None, min(waits)
+        return best[1], 0.0
 
     def _advance(self) -> float:
         """Add the play time since the last sample to the position (spec §6.3)."""
@@ -764,13 +848,13 @@ class LiveSession(QObject):
         if position < start - _EXPIRED_S:
             self.notice.emit(REWOUND)
 
-    def _gave_up(self, limit: Optional[float] = None) -> bool:
-        """After `limit` (default `ready_timeout_ms`) of trouble without VLC playing, fall back."""
+    def _gave_up(self) -> bool:
+        """After `ready_timeout_ms` of interruptions without VLC playing, fall back."""
         now = self._clock()
         if self._failing_since is None:
             self._failing_since = now
             return False
-        if now - self._failing_since <= (self._ready_timeout_s if limit is None else limit):
+        if now - self._failing_since <= self._ready_timeout_s:
             return False
         _LOG.warning("The time-shift stream kept failing; playing the channel directly.")
         self._fall_back(LOST)

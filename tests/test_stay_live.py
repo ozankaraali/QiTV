@@ -4,6 +4,7 @@ from services.live.stay_live import TARGETS, Decision, Mode, StayLive
 
 T = TARGETS["normal"]
 S, N, P, R = T + 0.2, T + 0.75, T + 3, T + 20
+H = 1.0  # from 1.10, back to 1.05 only at P - H or below
 
 
 PRIME = {1.0: 0.0, 1.05: N + 0.1, 1.10: P + 1}
@@ -35,9 +36,11 @@ class StayLiveTests(unittest.TestCase):
             (N, False, 1.0, Decision(1.0)),  # boundary is exclusive
             (N, False, 1.05, Decision(1.05)),
             (N + eps, False, 1.0, Decision(1.05)),
-            (P - eps, False, 1.10, Decision(1.05)),  # above N: 1.05 even from 1.10
+            (P - H, False, 1.10, Decision(1.05)),  # above N: 1.05 even from 1.10
+            (P - H + eps, False, 1.10, Decision(1.10)),  # hysteresis: keep 1.10
             (P, False, 1.0, Decision(1.05)),  # > N, not > P
-            (P, False, 1.10, Decision(1.05)),
+            (P, False, 1.05, Decision(1.05)),
+            (P, False, 1.10, Decision(1.10)),
             (P + eps, False, 1.0, Decision(1.10)),
             (R, False, 1.10, Decision(1.10)),
             (R + eps, False, 1.10, Decision(1.0, True)),
@@ -65,6 +68,12 @@ class StayLiveTests(unittest.TestCase):
         sl = StayLive()
         rates = [sl.update(lag, False).rate for lag in (N + 1, S + 0.3, S, S + 0.3)]
         self.assertEqual(rates, [1.05, 1.05, 1.0, 1.0])
+
+    def test_push_hysteresis_sequence(self):
+        sl = StayLive()
+        lags = (P + 0.1, P - 0.1, P + 0.1, P - H + 0.1, P - H, P - 0.1, P + 0.1)
+        rates = [sl.update(lag, False).rate for lag in lags]
+        self.assertEqual(rates, [1.10, 1.10, 1.10, 1.10, 1.05, 1.05, 1.10])
 
     def test_reopen_resets_rate(self):
         sl = StayLive()

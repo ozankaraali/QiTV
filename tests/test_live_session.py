@@ -1,4 +1,6 @@
+import math
 import os
+import random
 import time
 import unittest
 from unittest import mock
@@ -166,6 +168,10 @@ class FakePlayback(QObject):
 
     def set_paused(self, paused):
         self.paused.append(paused)
+        if paused and self.current is PlaybackState.PLAYING:
+            self.set_state(PlaybackState.PAUSED)
+        elif not paused and self.current is PlaybackState.PAUSED:
+            self.set_state(PlaybackState.PLAYING)
 
     def toggle_pause(self):
         self.toggles += 1
@@ -180,6 +186,90 @@ class Clock:
 
     def __call__(self):
         return self.now
+
+
+class Feed:
+    """A live source and a VLC around a test's fakes, modelled on the review's simulator.
+
+    Media arrives `burst` seconds at a time every `burst` seconds (raw TS when 0: a quarter
+    second at a time), each arrival optionally jittered, cut into `gop` second segments
+    whose newest stays open until the next arrival, as in the real segmenter. VLC plays at
+    the last rate set while it has data and buffers at the edge; LiveSession ticks every
+    0.25 s.
+    """
+
+    DT = 0.05
+
+    def __init__(self, case, sid, *, burst, edge=60.0, gop=2.0, jitter=0.0, seed=1, first=None):
+        self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
+        self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
+        self.jitter, self.rng = jitter, random.Random(seed)
+        self.nominal = case.clock.now + (self.chunk if first is None else first)
+        self.next_arrival = self.nominal
+        self.next_tick = case.clock.now + 0.25
+        self.position, self.media, self.plays_seen = None, 0.0, 0
+        self.before = []  # the lag right before each arrival
+        self.push()
+
+    def push(self):
+        closed = math.ceil(self.edge / self.gop - 1e-9) - 1  # the newest segment is open
+        spans = segments(0, closed, length=self.gop)
+        self.case.engine.buffer(
+            self.sid, spans, live_edge=self.edge, open_seq=closed, burst=self.burst
+        )
+
+    def ready(self):
+        self.case.engine.sessionReady.emit(self.sid)
+        self.sync()
+        return self
+
+    def sync(self):
+        """A new pipeline play opens at once (and is paused again if it should be)."""
+        playback = self.case.playback
+        if len(playback.plays) > self.plays_seen:
+            self.plays_seen = len(playback.plays)
+            if playback.plays[-1][1] is PlayKind.LIVE_PIPELINE:
+                self.position, self.media = self.case.live.position(), 0.0
+                playback.set_state(PlaybackState.PLAYING)
+
+    def run(self, seconds):
+        case, playback = self.case, self.case.playback
+        for _ in range(round(seconds / self.DT)):
+            case.clock.now = now = round(case.clock.now + self.DT, 6)
+            if now >= self.next_arrival - 1e-9:
+                if self.position is not None:
+                    self.before.append(self.edge - self.position)
+                while now >= self.next_arrival - 1e-9:
+                    self.edge += self.chunk
+                    self.nominal += self.chunk
+                    self.next_arrival = self.nominal + self.rng.uniform(-self.jitter, self.jitter)
+                self.push()
+            self.sync()
+            if self.position is not None and playback.current in (
+                PlaybackState.PLAYING,
+                PlaybackState.BUFFERING,
+            ):
+                rate = (playback.rates or [1.0])[-1]
+                advance = max(0.0, min(rate * self.DT, self.edge - self.position))
+                state = PlaybackState.PLAYING
+                if advance < rate * self.DT - 1e-9:
+                    state = PlaybackState.BUFFERING
+                if state is not playback.current:
+                    playback.set_state(state)
+                self.position += advance
+                self.media += advance
+                playback.ms = round(self.media * 1000)
+            if now >= self.next_tick - 1e-9:
+                self.next_tick += 0.25
+                case.live._tick()
+                self.sync()
+        return self
+
+
+def reversals(rates):
+    """How often the rate turns around (up after down, or down after up)."""
+    rates = [1.0] + list(rates)
+    return sum(1 for a, b, c in zip(rates, rates[1:], rates[2:]) if (b - a) * (c - b) < 0)
 
 
 class LiveSessionCase(unittest.TestCase):
@@ -560,12 +650,16 @@ class SeekTests(LiveSessionCase):
     def test_go_live_with_bursts_aims_the_mean_lag_at_the_target(self):
         sid = self.ready(segments(0, 10), live_edge=20.0, burst=6.0)
         # A burst just landed: the mean lag is the current one less half a burst. Starts
-        # 10 and 12 give means of 7 and 5 around the 6 s target; the tie goes to the newer.
+        # 10 and 12 give means of 7 and 5 around the 6 s target: neither at the target yet.
         self.live.go_live()
+        self.assertEqual(len(self.playback.plays), 1)
+        self.step(0.5)
+        self.assertEqual(len(self.playback.plays), 1)
+        self.step(0.25)  # start 12 now gives 5.75: at the target, less a quarter second
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 6))
-        self.clock.now += 3.0  # halfway to the next burst: the current lag is the mean
+        self.clock.now += 2.25  # halfway to the next burst: the current lag is the mean
         self.live.go_live()
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 7))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 7))  # 6.0: at once
 
     def test_go_live_with_bursts_keeps_headroom_before_the_next_burst(self):
         sid = self.ready(segments(5, 2, start=10.0), live_edge=14.0, burst=6.0)
@@ -587,6 +681,7 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.playback.paused, [True, True])  # paused again at the edge
         self.step(0.25, media=0)
         self.assertTrue(self.timelines[-1]["paused"])
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")  # only Go live sets LIVE
 
     def test_go_live_resumes_a_paused_session(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
@@ -659,84 +754,165 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.playback.rates, [])
         self.assertEqual(self.timelines[-1]["target"], 6.0)
 
-    def play_bursts(self, initial_edge, seconds=120):
-        """6 s segments arrive whole every 6 s while VLC plays at the rate it is given."""
-        sid = self.start()
-        edge, closed = initial_edge, int(initial_edge // 6)
-        self.engine.buffer(
-            sid, segments(0, closed, length=6.0), live_edge=edge, open_seq=closed, burst=6.0
-        )
-        self.engine.sessionReady.emit(sid)
-        self.playback.set_state(PlaybackState.PLAYING)
-        position, lags = 0.0, []
-        for tick in range(1, seconds * 4 + 1):
-            plays = len(self.playback.plays)
-            advance = 0.25 * (self.playback.rates[-1] if self.playback.rates else 1.0)
-            position += advance
-            if tick % 24 == 0:
-                edge, closed = edge + 6.0, closed + 1
-                self.engine.buffer(
-                    sid, segments(0, closed, length=6.0), live_edge=edge, open_seq=closed, burst=6.0
-                )
-            self.step(0.25, media=advance)
-            if len(self.playback.plays) > plays:  # reopened: playback restarts there
-                position = self.live.position()
-                self.playback.set_state(PlaybackState.PLAYING)
-            lags.append(edge - position)
-        return lags
-
     def test_hls_bursts_settle_without_rate_flapping(self):
-        lags = self.play_bursts(12.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=6.0, edge=12.0).ready().run(120.0)
         self.assertEqual(len(self.playback.plays), 1)  # no reopen
-        self.assertEqual(self.playback.rates, [1.05, 1.0])  # once down, no flapping
-        self.assertGreater(min(lags[-24:]), 2.0)  # headroom before every burst
+        rates = self.playback.rates
+        self.assertEqual(rates, sorted(rates, reverse=True))  # only ever down
+        self.assertEqual(rates[-1], 1.0)
+        self.assertGreater(min(feed.before[-4:]), 2.0)  # headroom before every burst
         reported = [timeline["lag"] for timeline in self.timelines[-24:]]
         self.assertLess(max(reported) - min(reported), 0.5)  # the mean, not the sawtooth
 
     def test_hls_bursts_settle_after_reopening_at_live(self):
-        lags = self.play_bursts(60.0)
+        sid = self.start()
+        feed = Feed(self, sid, burst=6.0, edge=60.0).ready().run(120.0)  # 60 s behind
         self.assertEqual(len(self.playback.plays), 2)  # one reopen at live, no loop
         rates = self.playback.rates
-        self.assertEqual(rates, sorted(rates, reverse=True))  # only ever down
-        self.assertEqual(rates[-1], 1.0)
-        self.assertGreater(min(lags[-24:]), 2.0)
+        self.assertEqual(rates, sorted(rates, reverse=True))  # only ever down, if at all
+        self.assertGreater(min(feed.before[-4:]), 2.0)
+
+    def go_live_at_every_phase(self, burst, latency, step=0.5):
+        """Go live at points through a burst (2 s GOPs, the newest open); per phase: the
+        largest reported lag after Go live less the target, the least lag before a burst,
+        the rates set and the plays after Go live."""
+        rows = []
+        for phase in [i * step for i in range(int(burst / step))]:
+            self.live = self.make()
+            sid = self.start(latency=latency)
+            feed = Feed(self, sid, burst=burst).ready()
+            feed.run(0.25)
+            self.live.seek_to(20.0)
+            feed.run(3 * burst + phase)
+            plays, rates, timelines = (
+                len(self.playback.plays),
+                len(self.playback.rates),
+                len(self.timelines),
+            )
+            arrivals = len(feed.before)
+            self.live.go_live()
+            feed.sync()
+            feed.run(60.0)
+            target = self.timelines[-1]["target"]
+            rows.append(
+                (
+                    phase,
+                    max(t["lag"] for t in self.timelines[timelines:]) - target,
+                    min(feed.before[arrivals:]),
+                    self.playback.rates[rates:],
+                    len(self.playback.plays) - plays,
+                )
+            )
+            self.live.stop()
+            self.engine.answer()
+        return rows
 
     def test_go_live_on_bursts_shows_live_at_every_phase(self):
-        """6 s bursts of 2 s segments: Go live at any point of a burst lands at the edge."""
-        for phase in range(0, 24, 2):  # every 0.5 s through a burst
-            with self.subTest(phase=phase / 4):
+        for burst in (2.0, 6.0):
+            for latency in ("low", "normal", "stable"):
+                self.assert_go_live_lands_live(burst, latency)
+
+    def assert_go_live_lands_live(self, burst, latency):
+        for phase, over, before, rates, plays in self.go_live_at_every_phase(burst, latency):
+            with self.subTest(burst=burst, latency=latency, phase=phase):
+                self.assertLess(over, 1.0)  # never "behind live"
+                self.assertGreaterEqual(before, 1.0)  # a second of headroom per burst
+                self.assertEqual(rates, [])  # landed at the target: nothing to correct
+                self.assertEqual(plays, 1)
+
+    def test_go_live_waits_for_a_burst_phase_with_headroom(self):
+        # 2 s bursts at Normal, 0.5 s after one landed: the open segment would leave 0.5 s
+        # before the next burst, the closed one before it would show "behind live".
+        # Waiting until the open segment gives the target less a quarter second fixes both.
+        sid = self.ready(segments(0, 29), live_edge=60.0, open_seq=29, burst=2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(20.0)
+        self.clock.now += 0.5
+        plays = len(self.playback.plays)
+        self.live.go_live()
+        self.assertEqual(len(self.playback.plays), plays)  # waits three quarters of a second
+        self.playback.errorOccurred.emit("The stream could not be played")
+        self.assertEqual(len(self.playback.plays), plays)  # the pending Go live reopens
+        self.step(0.5)
+        self.assertEqual(len(self.playback.plays), plays)
+        self.step(0.25)  # the open segment now gives 2.25 s: the target less a quarter
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 29))
+        self.assertEqual(self.timelines[-1]["mode"], "live")
+
+    def test_go_live_can_start_at_the_open_segment(self):
+        sid = self.ready(segments(0, 10), live_edge=23.0, open_seq=10, burst=2.0)
+        self.clock.now += 0.5  # half a second after the last burst landed
+        # The open segment (from 20.0) gives a mean lag of 3.0 + 0.5 - 1.0 = 2.5: the target.
+        self.live.go_live()
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 10))
+        self.assertEqual(self.live.position(), 20.0)
+
+    def test_paused_sessions_stay_time_shifted(self):
+        """No stay-live while paused, whatever reopened the stream; no catch-up after."""
+        for burst in (0.0, 6.0):
+            for scenario in ("near-live seek", "recovery", "disk failure"):
+                with self.subTest(burst=burst, scenario=scenario):
+                    self.live = self.make()
+                    sid = self.start()
+                    feed = Feed(self, sid, burst=burst).ready()
+                    feed.run(1.0)
+                    self.live.seek_to(30.0)
+                    feed.run(1.0)
+                    self.live.toggle_pause()
+                    feed.run(1.0)
+                    if scenario == "near-live seek":
+                        self.live.seek_to(feed.edge - 0.5)
+                    elif scenario == "recovery":
+                        self.engine.up = False
+                        self.engine.reset(sid)
+                        self.engine.sessionFailed.emit(sid, "internal", "The helper died.")
+                        feed.run(1.0)
+                        self.engine.up = True
+                        self.engine.available.emit(True)
+                        feed.push()  # the reopened session's first state
+                        self.engine.sessionReady.emit(sid)
+                    else:
+                        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+                        feed.push()  # the RAM ring's first state
+                    feed.sync()
+                    plays, rates = len(self.playback.plays), len(self.playback.rates)
+                    feed.run(90.0)
+                    self.assertEqual(len(self.playback.plays), plays)  # no reopen at live
+                    self.assertEqual(len(self.playback.rates), rates)  # no rate while paused
+                    self.assertEqual(self.timelines[-1]["mode"], "shifted")
+                    self.assertTrue(self.timelines[-1]["paused"])
+                    lag = self.timelines[-1]["lag"]
+                    self.live.toggle_pause()
+                    feed.run(20.0)
+                    self.assertEqual(len(self.playback.rates), rates)  # no catch-up
+                    self.assertEqual(self.timelines[-1]["mode"], "shifted")
+                    self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=0.5)
+                    self.live.go_live()
+                    feed.sync()
+                    feed.run(1.0)
+                    self.assertEqual(self.timelines[-1]["mode"], "live")
+                    self.assertFalse(self.timelines[-1]["paused"])
+
+    def test_catching_up_on_bursts_never_chatters(self):
+        """The review's chatter cases: from a far start, one way down to 1.0."""
+        cases = [(6.0, 12.0, 5.0, 0.0, 1), (10.0, 40.0, 4.5, 0.0, 1)]  # burst, edge, first
+        cases += [
+            (burst, edge, first, 1.0, seed)  # arrivals jittered by up to a second
+            for burst in (2.0, 6.0)
+            for edge in (burst * 2 + 1, 16.0)
+            for first in (0.5, burst - 0.25)
+            for seed in (1, 2, 3)
+        ]
+        for burst, edge, first, jitter, seed in cases:
+            with self.subTest(burst=burst, edge=edge, first=first, jitter=jitter, seed=seed):
                 self.live = self.make()
-                sid = self.start()
-                edge, closed = 60.0, 30
-                self.engine.buffer(sid, segments(0, closed), live_edge=edge, burst=6.0)
-                self.engine.sessionReady.emit(sid)
-                self.playback.set_state(PlaybackState.PLAYING)
-                self.live.seek_to(10.0)
-                self.playback.set_state(PlaybackState.PLAYING)
-                position, go_live = self.live.position(), 24 * 3 + phase
-                reported, before_burst = [], []
-                for tick in range(1, 24 * 8):
-                    if tick == go_live:
-                        self.live.go_live()
-                        position = self.live.position()
-                        self.playback.set_state(PlaybackState.PLAYING)
-                    rate = (self.playback.rates or [1.0])[-1]
-                    advance = min(0.25 * rate, edge - position)  # VLC cannot pass the edge
-                    position += advance
-                    if tick % 24 == 0:
-                        if tick > go_live:
-                            before_burst.append(edge - position)
-                        edge, closed = edge + 6.0, closed + 3
-                        self.engine.buffer(sid, segments(0, closed), live_edge=edge, burst=6.0)
-                    self.step(0.25, media=advance)
-                    if tick >= go_live:
-                        reported.append(self.timelines[-1]["lag"])
-                target = self.timelines[-1]["target"]
-                self.assertEqual(len(self.playback.plays), 3)  # ready, seek, go live
-                self.assertLess(max(reported), target + 1.0)  # never "behind live"
-                self.assertGreaterEqual(min(before_burst), 0.5)  # no underrun
-                self.live.stop()
-                self.engine.answer()
+                sid = self.start(latency="stable")
+                feed = Feed(self, sid, burst=burst, edge=edge, first=first, jitter=jitter)
+                feed.rng.seed(seed)
+                feed.ready().run(120.0)
+                self.assertLessEqual(reversals(self.playback.rates), 1)
+                self.assertGreater(min(feed.before[5:]), 0.0)  # no underrun
 
     def test_bursty_lag_follows_a_pause_without_delay(self):
         sid = self.ready(segments(0, 30), live_edge=60.0, burst=6.0)
@@ -930,6 +1106,30 @@ class InterruptionTests(LiveSessionCase):
         with self.assertLogs("services.live.live_session", "WARNING"):
             self.step(0.6)
         self.assert_falls_back(sid, LOST, 1)
+
+    def test_a_pause_does_not_extend_the_disk_deferral(self):
+        self.live = self.make(ready_timeout_ms=1000)
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+        self.step(0.25)
+        self.step(1.5)
+        self.live.toggle_pause()  # VLC reports "paused"
+        with self.assertLogs("services.live.live_session", "WARNING"):
+            self.step(0.5)  # 2.25 s since the failure: past the 2 s bound
+        self.assert_falls_back(sid, LOST, 1)
+
+    def test_an_interruption_during_the_disk_deferral_waits_for_its_bound(self):
+        self.live = self.make(ready_timeout_ms=1000)
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+        self.step(0.25)
+        self.step(1.1)  # over the 1 s ready timeout, within the 2 s deferral bound
+        self.playback.errorOccurred.emit("The stream could not be played")  # cut off
+        self.assertEqual(self.engine.closed, [])
+        self.engine.buffer(sid, segments(10, 3, start=20.0), live_edge=26.0)
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 11))
 
     def test_the_disk_deferral_waits_a_burst_for_hls(self):
         self.live = self.make(ready_timeout_ms=1000)

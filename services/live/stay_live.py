@@ -13,6 +13,7 @@ TARGETS = {"low": 1.0, "normal": 2.5, "stable": 6.0}
 _SETTLE = 0.2
 _NUDGE = 0.75
 _PUSH = 3.0
+_PUSH_HOLD = 1.0  # from 1.10, back to 1.05 only this far below the push threshold
 _REOPEN = 20.0
 
 
@@ -83,7 +84,10 @@ class StayLive:
         if lag_s > self.target + _PUSH:
             self._rate = 1.10
         elif lag_s > self.target + _NUDGE:
-            self._rate = 1.05
+            # Hysteresis, as between 1.0 and 1.05: a measured lag jitters (bursty sources
+            # most), and without it the rate would chatter at the push threshold.
+            if self._rate != 1.10 or lag_s <= self.target + _PUSH - _PUSH_HOLD:
+                self._rate = 1.05
         elif lag_s <= self.target + _SETTLE:
             self._rate = 1.0
         return Decision(self._rate)
