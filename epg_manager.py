@@ -37,6 +37,26 @@ def _xtream_cache_key(provider_url: str, username: str) -> str:
     return _cache_key(f"{provider_url}:{username}")
 
 
+_XMLTV_FORMATS = ("%Y%m%d%H%M%S %z", "%Y%m%d%H%M%S")
+
+
+def normalize_programme_stop(start: str, stop: str) -> str:
+    """Move a stop time that precedes its start (programme ends after midnight) to the next day.
+
+    Accepts XMLTV times with or without a UTC offset; unparseable values are returned unchanged.
+    """
+    for fmt in _XMLTV_FORMATS:
+        try:
+            start_dt = datetime.strptime(start, fmt)
+            stop_dt = datetime.strptime(stop, fmt)
+        except ValueError:
+            continue
+        if stop_dt < start_dt:
+            return (stop_dt + timedelta(days=1)).strftime(fmt)
+        return stop
+    return stop
+
+
 def xml_to_dict(element):
     """
     Recursively converts an XML element and its children into a dictionary.
@@ -177,13 +197,8 @@ class EpgManager:
                 # Skip malformed entries
                 continue
 
-            # Fix stop_time < start_time, which means the program ends on the next day
-            if start_time > stop_time:
-                stop_time = (
-                    datetime.strptime(stop_time, "%Y%m%d%H%M%S %z") + timedelta(days=1)
-                ).strftime("%Y%m%d%H%M%S %z")
-
             program_data = xml_to_dict(programme)["programme"]
+            program_data["@stop"] = normalize_programme_stop(start_time, stop_time)
             tmp_lists.setdefault(channel_id, []).append(program_data)
 
         # 3) Commit lists into MultiKeyDict with expanded keys per channel
