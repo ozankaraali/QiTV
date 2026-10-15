@@ -20,6 +20,42 @@ from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
 
+# Why an STB handshake failed (StbHandshake.failure); the setup worker words it for the user.
+HANDSHAKE_UNREACHABLE = "unreachable"  # DNS, connection, timeout or a server error
+HANDSHAKE_REJECTED = "rejected"  # an explicit refusal (401/403, blocked) or no token
+HANDSHAKE_UNEXPECTED = "unexpected"  # any other answer: a wrong path, not JSON
+# When attempts (portal paths, HTTPS then HTTP) fail differently, the stronger reason wins.
+_HANDSHAKE_FAILURE_RANK = {HANDSHAKE_UNREACHABLE: 0, HANDSHAKE_UNEXPECTED: 1, HANDSHAKE_REJECTED: 2}
+
+
+class _PortalStatus(Exception):
+    """A portal answered a handshake step with a non-200 status."""
+
+    def __init__(self, step, status_code):
+        super().__init__(f"Failed to fetch {step}: {status_code}")
+        self.status_code = status_code
+
+
+class _PortalRefused(Exception):
+    """A portal answered, but refused this device."""
+
+
+def classify_handshake_error(error):
+    """The HANDSHAKE_* reason for an exception raised during an STB handshake."""
+    if isinstance(error, _PortalStatus):
+        if error.status_code >= 500:
+            return HANDSHAKE_UNREACHABLE
+        if error.status_code in (401, 403):
+            return HANDSHAKE_REJECTED
+        return HANDSHAKE_UNEXPECTED
+    if isinstance(error, (_PortalRefused, KeyError, TypeError)):
+        return HANDSHAKE_REJECTED  # refused, or an answer without a token or profile
+    if isinstance(error, (requests.exceptions.InvalidJSONError, ValueError)):
+        return HANDSHAKE_UNEXPECTED  # not JSON (requests' JSON error is a RequestException)
+    if isinstance(error, requests.RequestException):
+        return HANDSHAKE_UNREACHABLE  # DNS, connection, SSL and timeouts
+    return HANDSHAKE_UNEXPECTED
+
 
 class ProviderManager(QObject):
     progress = Signal(str)
@@ -37,6 +73,7 @@ class ProviderManager(QObject):
         self.current_provider_content = {}
         self.token = ""
         self.headers = {}
+        self.handshake_failure = None  # a HANDSHAKE_* reason after a failed STB setup
         self._cache_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="provider-cache")
         self._cache_lock = threading.Lock()
         self._cache_generations = {}
@@ -160,7 +197,15 @@ class ProviderManager(QObject):
         self.invalidate_provider_cache(self.current_provider["name"])
 
     def set_current_provider(self, progress_callback):
-        """Select the configured provider; False when an STB portal rejects the handshake."""
+        """Select the configured provider.
+
+        False when an STB handshake fails; ``handshake_failure`` then says why.
+        """
+        # A setup that fails part-way (e.g. an STB entry without a MAC) must not leave the
+        # previous portal's session (MAC cookie, token) for the next requests.
+        self.headers = {}
+        self.token = ""
+        self.handshake_failure = None
         progress_callback.emit("Searching for provider...")
         self.current_provider = {}
         # search for provider in the list
@@ -180,7 +225,6 @@ class ProviderManager(QObject):
         accepted = True
         if self.current_provider["type"] == "STB":
             progress_callback.emit("Performing handshake...")
-            self.token = ""
             accepted = bool(
                 self.do_handshake(
                     self.current_provider["url"],
@@ -306,6 +350,7 @@ class ProviderManager(QObject):
         finally:
             self.token = handshake.token
             self.headers = handshake.headers
+            self.handshake_failure = handshake.failure
 
 
 class StbHandshake:
@@ -316,6 +361,7 @@ class StbHandshake:
         self.ssl_verify = ssl_verify
         self.token = token
         self.headers = {}
+        self.failure = None  # a HANDSHAKE_* reason once run() has returned False
 
     def run(
         self,
@@ -346,7 +392,7 @@ class StbHandshake:
             if handshake.status_code == 200:
                 body = handshake.json()
             else:
-                raise Exception(f"Failed to fetch handshake: {handshake.status_code}")
+                raise _PortalStatus("handshake", handshake.status_code)
             self.token = body["js"]["token"]
             self.headers["Authorization"] = f"Bearer {self.token}"
 
@@ -379,15 +425,21 @@ class StbHandshake:
             if profile.status_code == 200:
                 body = profile.json()
             else:
-                raise Exception(f"Failed to fetch profile: {profile.status_code}")
+                raise _PortalStatus("profile", profile.status_code)
 
             theId = body["js"]["id"]
             theName = body["js"]["name"]
             if not theId and not theName:
-                raise Exception("Provider is blocked")
+                raise _PortalRefused("Provider is blocked")
 
+            self.failure = None
             return True
         except Exception as e:
+            reason = classify_handshake_error(e)
+            if self.failure is None or (
+                _HANDSHAKE_FAILURE_RANK[reason] > _HANDSHAKE_FAILURE_RANK[self.failure]
+            ):
+                self.failure = reason
             if serverload != "/server/load.php" and "handshake" in fetchurl:
                 serverload = "/server/load.php"
                 return self.run(
@@ -413,7 +465,7 @@ class StbHandshake:
                     ssl_verify_override=ssl_verify_override,
                     _prefer_attempted=True,
                 )
-            logger.warning("STB handshake failed: %s", safe_exc(e))
+            logger.warning("STB handshake failed (%s): %s", self.failure, safe_exc(e))
             return False
 
     @staticmethod

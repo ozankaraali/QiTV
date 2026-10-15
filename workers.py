@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QTreeWidgetItem
 import requests
 from urlobject import URLObject
 
+from provider_manager import HANDSHAKE_UNEXPECTED, HANDSHAKE_UNREACHABLE
 from services.m3u import decode_playlist, parse_m3u
 from services.provider_api import (
     base_from_url,
@@ -640,6 +641,18 @@ class SetProviderThread(QThread):
             logger.warning("Error in initializing provider: %s", safe_exc(e))
 
 
+def _handshake_failure_message(failure: Optional[str]) -> str:
+    """The user's text for a failed STB handshake (provider_manager.HANDSHAKE_*)."""
+    # The catalog's friendly texts; it imports this module, so import them on use.
+    from services.catalog import UNEXPECTED_ANSWER_MESSAGE, UNREACHABLE_MESSAGE
+
+    if failure == HANDSHAKE_UNREACHABLE:
+        return UNREACHABLE_MESSAGE
+    if failure == HANDSHAKE_UNEXPECTED:
+        return UNEXPECTED_ANSWER_MESSAGE
+    return STB_DEVICE_REJECTED_MESSAGE
+
+
 class ProviderSetupWorker(QObject):
     """Select the configured provider (STB handshake, disk cache) without loading EPG."""
 
@@ -655,7 +668,11 @@ class ProviderSetupWorker(QObject):
     def run(self):
         try:
             if self.provider_manager.set_current_provider(self.progress) is False:
-                self.error.emit(STB_DEVICE_REJECTED_MESSAGE)
+                self.error.emit(
+                    _handshake_failure_message(
+                        getattr(self.provider_manager, "handshake_failure", None)
+                    )
+                )
                 return
             if self.force_refresh:
                 self.provider_manager.clear_current_provider_cache()
