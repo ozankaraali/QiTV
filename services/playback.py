@@ -60,11 +60,18 @@ class PlaybackState(str, Enum):
 
 def default_args() -> list[str]:
     """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one."""
+    args = ["--no-video-title-show"]
+    if platform.system() == "Windows":
+        # VLC 3's default Windows output, mmdevice, sets volume and mute on the process's
+        # audio session (ISimpleAudioVolume), which every player's stream joins: the main
+        # and PiP players would mute and level each other. DirectSound sets them on each
+        # player's own buffer. (Callers passing their own arguments keep their output.)
+        args.append("--aout=directsound")
     log = os.environ.get(VLC_LOG_ENV)
     if not log:
-        return ["--no-video-title-show", "--quiet"]
+        return [*args, "--quiet"]
     logger.warning("libVLC logs verbosely to %s (%s); it records stream URLs", log, VLC_LOG_ENV)
-    return ["--no-video-title-show", "--verbose=2", "--file-logging", f"--logfile={log}"]
+    return [*args, "--verbose=2", "--file-logging", f"--logfile={log}"]
 
 
 def create_instance(extra_args: Optional[list[str]] = None):

@@ -873,10 +873,37 @@ class MainThreadJoinTests(unittest.TestCase):
         self.assertFalse(player.deadlocked)
 
 
+def _on(system):
+    return mock.patch("services.playback.platform.system", return_value=system)
+
+
 class DefaultArgsTests(unittest.TestCase):
     def test_quiet_unless_a_log_file_is_named(self):
-        with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}):
+        with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Darwin"):
             self.assertEqual(default_args(), ["--no-video-title-show", "--quiet"])
+
+    def test_windows_plays_audio_through_directsound(self):
+        # mmdevice sets volume and mute on the process's audio session: main and PiP would
+        # mute and level each other. DirectSound sets them on each player's own buffer.
+        with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Windows"):
+            quiet = default_args()
+        self.assertEqual(quiet, ["--no-video-title-show", "--aout=directsound", "--quiet"])
+        with (
+            mock.patch.dict(os.environ, {VLC_LOG_ENV: "/tmp/smoke/libvlc.log"}),
+            _on("Windows"),
+            self.assertLogs("services.playback", "WARNING"),
+        ):
+            self.assertIn("--aout=directsound", default_args())
+
+    def test_other_platforms_keep_libvlcs_audio_output(self):
+        for system in ("Darwin", "Linux"):
+            with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on(system):
+                self.assertFalse([arg for arg in default_args() if arg.startswith("--aout")])
+
+    def test_arguments_given_to_create_instance_are_used_as_they_are(self):
+        with mock.patch("services.playback.vlc") as fake, _on("Windows"):
+            create_instance(["--aout=dummy", "--quiet"])
+        fake.Instance.assert_called_once_with(["--aout=dummy", "--quiet"])
 
     def test_a_named_log_file_gets_the_verbose_log(self):
         with (
