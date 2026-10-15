@@ -144,7 +144,7 @@ class ConfigManager:
     DEFAULT_OPTION_PIP_CORNER = "br"  # picture in picture: the small picture's corner
     PIP_CORNER_CHOICES = ("br", "bl", "tr", "tl")
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
-    TV_DEFAULTS_VERSION = 1
+    TV_DEFAULTS_VERSION = 2
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
     # A 1.x window smaller than this, or not landscape, does not size the TV window.
     MIN_REUSED_WINDOW = (640, 360)
@@ -284,10 +284,17 @@ class ConfigManager:
                 self.config[key] = value
                 need_update = True
 
-        if self.config.get("tv_defaults_version", 0) < ConfigManager.TV_DEFAULTS_VERSION:
+        # Each step runs once; a choice the user makes afterwards stays.
+        tv_defaults = self.config.get("tv_defaults_version", 0)
+        if tv_defaults < 1:
             # 2.0 is a TV: the zap banner and channel list need logos and now/next.
             self.config["channel_logos"] = True
             self.config["channel_epg"] = True
+        if tv_defaults < 2:
+            # 1.x's "play in VLC/MPV" would bypass the TV screen: players are picked in-app.
+            self.config["play_in_vlc"] = False
+            self.config["play_in_mpv"] = False
+        if tv_defaults < ConfigManager.TV_DEFAULTS_VERSION:
             self.config["tv_defaults_version"] = ConfigManager.TV_DEFAULTS_VERSION
             need_update = True
 

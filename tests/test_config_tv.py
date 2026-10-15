@@ -249,6 +249,43 @@ class TvConfigTests(unittest.TestCase):
             ConfigManager.TV_DEFAULTS_VERSION,
         )
 
+    def test_an_old_always_play_externally_setting_is_switched_off_once(self):
+        # Owner (2026-10-15): 1.x's "play in MPV" made 2.0 open every channel in MPV.
+        config, path = self._load({"play_in_vlc": True, "play_in_mpv": True})
+        self.assertFalse(config.play_in_vlc)
+        self.assertFalse(config.play_in_mpv)
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertFalse(on_disk["play_in_vlc"])
+        self.assertFalse(on_disk["play_in_mpv"])
+        config.play_in_mpv = True  # the user chooses it again in Settings
+        config.save_config()
+        self.assertTrue(ConfigManager().play_in_mpv, "the switch-off must run only once")
+
+    def test_a_2_0_config_keeps_an_external_player_turned_back_on(self):
+        saved = {
+            "play_in_vlc": True,
+            "tv_defaults_version": ConfigManager.TV_DEFAULTS_VERSION,
+        }
+        config, _ = self._load(saved)
+        self.assertTrue(config.play_in_vlc)
+
+    def test_a_config_from_the_first_tv_defaults_switches_only_the_players_off(self):
+        # A 2.0 build before this step already turned logos and the guide on once.
+        saved = {
+            "channel_logos": False,
+            "channel_epg": False,
+            "play_in_mpv": True,
+            "tv_defaults_version": 1,
+        }
+        config, path = self._load(saved)
+        self.assertFalse(config.play_in_mpv)
+        self.assertFalse(config.channel_logos, "the user's later choice stays")
+        self.assertFalse(config.channel_epg)
+        self.assertEqual(
+            json.loads(path.read_text(encoding="utf-8"))["tv_defaults_version"],
+            ConfigManager.TV_DEFAULTS_VERSION,
+        )
+
     def test_invalid_choices_fall_back_to_defaults(self):
         config, _ = self._load({"live_latency": "turbo", "mouse_wheel_action": 3})
         self.assertEqual(config.live_latency, "normal")
