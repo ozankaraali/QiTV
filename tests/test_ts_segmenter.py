@@ -600,6 +600,26 @@ class SegmenterTests(unittest.TestCase):
                 self.assertEqual(closes(events)[2].next_first_pts, 900000 + 125 * FRAME)
                 self.assert_closed_pts(events)
 
+    def test_a_slideshow_with_frames_seconds_apart_is_not_a_discontinuity(self):
+        # A radio channel's still picture every 5 s with continuous audio: steps of the
+        # stream's own frame cadence are no PTS jump, but a +60 s step still is.
+        data = fx.make_stream(30, fps=0.2)
+        for name, jumped in (("cadence", data), ("jump", shift_pts(data, 3, 60 * CLOCK))):
+            with self.subTest(name):
+                _, events = run(jumped)
+                o = opens(events)
+                shift = [0, 0, 0, 60, 60, 60] if name == "jump" else [0] * 6
+                self.assertEqual(
+                    [e.first_pts - 900000 for e in o],
+                    [(5 * k + shift[k]) * CLOCK for k in range(6)],
+                )
+                self.assertEqual(
+                    [e.discontinuity for e in o], [name == "jump" and k == 3 for k in range(6)]
+                )
+                self.assert_closed_pts(events)
+                if name == "jump":  # the still before the jump is shown for one cadence
+                    self.assertEqual(closes(events)[2].next_first_pts, 900000 + 15 * CLOCK)
+
     def test_an_outage_that_resumes_mid_gop_cuts_at_the_next_keyframe(self):
         # 10 s missing from 7.52 s (mid-GOP) to 17.52 s (mid-GOP); the wall clock and the PTS
         # both advance by 10 s, as after a reconnect to a live channel.

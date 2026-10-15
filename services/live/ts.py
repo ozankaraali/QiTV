@@ -34,7 +34,9 @@ _CRC_REPEATS = 3  # identical bad-CRC sections accepted while no valid one has b
 # Backward PTS steps up to this size are B-frame reordering, not a reset: with RAI on every
 # PES a reordered B-frame must not cut a one-frame "discontinuity" segment.
 _REORDER_TICKS = _CLOCK
-_JUMP_TICKS = 3 * _CLOCK  # a longer forward step between two PES is a timestamp jump
+# A longer forward step between two PES is a timestamp jump, unless the stream's own cadence
+# (its previous forward step) is at least half as long: a slideshow's stills seconds apart.
+_JUMP_TICKS = 3 * _CLOCK
 _SCRAMBLED_PACKETS = 8  # scrambled cut-PID packets that prove scrambling ...
 _SCRAMBLED_WINDOW_S = 2.0  # ... in total within this first wall time, later in a row
 _STALL_S = 5.0  # a longer pause between feeds is a stalled source: removed from the clock
@@ -154,6 +156,7 @@ class Segmenter:
         # shortest forward PTS step (one frame), which give where it ends at a jump.
         self._top: int | None = None
         self._frame: int | None = None
+        self._cadence: int | None = None  # its latest forward step; None right after a jump
         self._pusi_wall = 0.0  # wall time of the last cut-PID PES start (or cut)
         # Other PIDs' (first PTS, last PTS) since then: media time while the cut PID is quiet.
         self._quiet: dict[int, tuple[int, int]] = {}
@@ -379,7 +382,10 @@ class Segmenter:
             last = self._last_pts
             if last is not None:
                 step = pts_delta(last, pts)
-                if step < -_REORDER_TICKS or step > _JUMP_TICKS:
+                cadence = self._cadence
+                if step < -_REORDER_TICKS or (
+                    cadence is not None and step > max(_JUMP_TICKS, 2 * cadence)
+                ):
                     logger.debug("PTS jumped by %.2f s", step / _CLOCK)
                     self._latch()
                     self._carry()
@@ -388,9 +394,11 @@ class Segmenter:
                     # The segment ages by all of its media, not only the new content's.
                     carried = self._carried
                     self._media_ref = pts if carried is None else (pts - carried) % _PTS_MODULO
-                    self._top = self._frame = None
-                elif step > 0 and (self._frame is None or step < self._frame):
-                    self._frame = step
+                    self._top = self._frame = self._cadence = None
+                elif step > 0:
+                    self._cadence = step
+                    if self._frame is None or step < self._frame:
+                        self._frame = step
             self._last_pts = pts
             self._latest_pts = pts
             if self._top is None or pts_delta(self._top, pts) > 0:
