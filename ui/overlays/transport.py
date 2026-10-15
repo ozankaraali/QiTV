@@ -43,6 +43,7 @@ class Transport(Overlay):
     fullscreenRequested = Signal()
     audioRequested = Signal()
     subtitleRequested = Signal()
+    nextRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None, idle_ms: int = 3000) -> None:
         super().__init__(parent)
@@ -55,6 +56,7 @@ class Transport(Overlay):
         self._length = 0
         self._paused = False
         self._speed = 1.0
+        self._next_available = False
         self._drag_ms: int | None = None
         self._last_move = QPointF(-1, -1)
         self._idle = QTimer(self)
@@ -86,6 +88,10 @@ class Transport(Overlay):
 
     def set_speed(self, rate: float) -> None:
         self._speed = rate
+        self.update()
+
+    def set_next_available(self, available: bool) -> None:
+        self._next_available = available
         self.update()
 
     def poke(self) -> None:
@@ -152,7 +158,9 @@ class Transport(Overlay):
         else:
             put("back10", icon + un.px(1.6), un.px(0.6))
             put("play", big, un.px(0.6))
-            put("fwd10", icon + un.px(1.6), un.px(1.0))
+            put("fwd10", icon + un.px(1.6), un.px(0.6) if self._next_available else un.px(1.0))
+            if self._next_available:
+                put("next", icon + un.px(1.6), un.px(1.0))
             chip_w = un.px(3.6)
             rects["speed"] = QRectF(x, cy - un.px(1.1), chip_w, un.px(2.2))
             x = float(right)
@@ -251,9 +259,11 @@ class Transport(Overlay):
         p.drawText(times, Qt.AlignVCenter | Qt.AlignLeft, elapsed)
         p.drawText(times, Qt.AlignVCenter | Qt.AlignRight, remaining)
         dark = qcolor(PALETTE.canvas)
-        for name in ("back10", "fwd10"):
+        for name in ("back10", "fwd10", "next"):
+            if name not in rects:
+                continue
             r = rects[name]
-            side = un.px(3.0)
+            side = un.px(3.0) if name != "next" else un.px(2.4)
             draw_icon(
                 p,
                 name,
@@ -340,6 +350,8 @@ class Transport(Overlay):
                 self.seekRelativeRequested.emit(-10_000)
             elif name == "fwd10":
                 self.seekRelativeRequested.emit(10_000)
+            elif name == "next":
+                self.nextRequested.emit()
             elif name == "speed":
                 nxt = SPEEDS[(self._nearest_speed() + 1) % len(SPEEDS)]
                 self._speed = nxt

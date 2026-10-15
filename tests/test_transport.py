@@ -75,6 +75,20 @@ class TransportCase(unittest.TestCase):
         self.click(t, t.button_rect("fwd10").center().toPoint())
         self.assertEqual([spy.at(0)[0], spy.at(1)[0]], [-10_000, 10_000])
 
+    def test_next_button_only_when_available(self):
+        t = self.make()
+        t.show_vod("A", "b")
+        self.assertNotIn("next", t._layout())
+        t.set_next_available(True)
+        spy = QSignalSpy(t.nextRequested)
+        self.click(t, t.button_rect("next").center().toPoint())
+        self.assertEqual(spy.count(), 1)
+        t.set_next_available(False)
+        self.assertNotIn("next", t._layout())
+        t.set_next_available(True)
+        t.show_live("104", "Nature")
+        self.assertNotIn("next", t._layout())
+
     def test_speed_cycles(self):
         t = self.make()
         t.show_vod("A", "b")
