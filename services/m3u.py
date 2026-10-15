@@ -1,5 +1,5 @@
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 
@@ -85,6 +85,24 @@ def split_group_title(title: Optional[str]) -> List[str]:
     if ";" not in title:
         return [title]
     return list(dict.fromkeys(part.strip() for part in title.split(";") if part.strip()))
+
+
+def split_cached_groups(payload: Any) -> Any:
+    """A playlist cached before group titles were split ("A;B" as one group), with its groups
+    rebuilt from its channels: no download. Any other payload comes back as it is.
+
+    Split groups never keep a ";", so one in a group id marks the old shape.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    categories, contents = payload.get("categories"), payload.get("contents")
+    if not isinstance(categories, list) or not isinstance(contents, list):
+        return payload
+    if not any(isinstance(c, dict) and ";" in str(c.get("id", "")) for c in categories):
+        return payload
+    if not all(isinstance(item, dict) for item in contents):
+        return payload
+    return _build_categorized_structure(contents)
 
 
 def _build_categorized_structure(items: List[Dict]) -> Dict:

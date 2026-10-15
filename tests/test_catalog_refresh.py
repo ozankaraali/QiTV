@@ -90,6 +90,67 @@ class ProviderCacheTests(unittest.TestCase):
         self.assertNotIn("itv", manager.current_provider_content)
         self.assertEqual(manager.get_all_providers_cached_content(), [])
 
+    @staticmethod
+    def playlist_cached_before_the_split():
+        """An M3U playlist as 2.0 cached it before group titles with ";" were split."""
+        return {
+            "categories": [
+                {"id": "*", "title": "All"},
+                {"id": "Animation;Kids", "title": "Animation;Kids"},
+                {"id": "Kids", "title": "Kids"},
+            ],
+            "contents": [
+                {
+                    "id": 1,
+                    "name": "Toons",
+                    "group": "Animation;Kids",
+                    "tv_genre_id": "Animation;Kids",
+                    "number": "1",
+                    "cmd": "http://example.test/1",
+                },
+                {
+                    "id": 2,
+                    "name": "Blocks",
+                    "group": "Kids",
+                    "tv_genre_id": "Kids",
+                    "number": "2",
+                    "cmd": "http://example.test/2",
+                },
+            ],
+            "sorted_channels": {"Animation;Kids": [0], "Kids": [1]},
+        }
+
+    def cache(self, payload):
+        manager = self.manager
+        manager.current_provider_content = {"itv": payload}
+        manager.mark_content_fresh("itv")
+        manager.save_provider()
+        manager._cache_writer.submit(lambda: None).result(timeout=5)
+
+    def test_a_playlist_cached_before_the_split_is_split_when_it_loads(self):
+        # Review Minor 3: upgraders see split groups at once, with no download.
+        self.cache(self.playlist_cached_before_the_split())
+        manager = self.manager
+        manager.set_current_provider(self.progress)
+        itv = manager.current_provider_content["itv"]
+        self.assertEqual([c["title"] for c in itv["categories"]], ["All", "Animation", "Kids"])
+        self.assertEqual(itv["sorted_channels"], {"Animation": [0], "Kids": [0, 1]})
+        self.assertEqual([c["name"] for c in itv["contents"]], ["Toons", "Blocks"])
+        self.assertFalse(manager.is_content_stale("itv"))  # still the cached, fresh content
+        searched = dict(manager.get_all_providers_cached_content())["Fixture"]["itv"]
+        self.assertEqual(searched["sorted_channels"], {"Animation": [0], "Kids": [0, 1]})
+
+    def test_xtream_and_stb_caches_are_read_as_they_are(self):
+        manager = self.manager
+        for kind in ("XTREAM", "STB"):
+            with self.subTest(kind=kind):
+                manager.providers[0]["type"] = kind
+                manager.current_provider = manager.providers[0]
+                self.cache(self.playlist_cached_before_the_split())
+                # The cached content as a provider setup and search read it (no handshake).
+                itv = dict(manager.get_all_providers_cached_content())["Fixture"]["itv"]
+                self.assertEqual(itv["sorted_channels"], {"Animation;Kids": [0], "Kids": [1]})
+
 
 def _content(name):
     return {

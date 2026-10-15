@@ -14,6 +14,7 @@ import orjson as json
 import tzlocal
 
 from services.lazy_import import lazy_module
+from services.m3u import split_cached_groups
 from services.provider_api import provider_prefers_https
 from services.redact import safe_exc
 
@@ -123,6 +124,9 @@ class ProviderManager(QObject):
                 return {}
             if metadata.get("identity") != self.provider_cache_identity(provider):
                 return {}
+        if str(provider.get("type", "")).upper() == "M3UPLAYLIST" and "itv" in cache:
+            # Cached before "A;B" group titles were split: split now, from the cache.
+            cache["itv"] = split_cached_groups(cache["itv"])
         # Raw legacy payloads are readable, but have no trusted freshness timestamp.
         return cache
 
