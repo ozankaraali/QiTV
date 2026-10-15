@@ -1,7 +1,7 @@
 """Smoke test of the TV window with real libVLC on the local fixture provider (spec §11).
 
-    uv run python scripts/smoke_tv.py --out smoke-out [--seconds 3] [--pipeline]
-    QITV_SMOKE=1 <packaged app> --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
+    uv run python scripts/smoke_tv.py --out smoke-out [--seconds 3] [--pipeline] [--pip]
+    QITV_SMOKE=1 <app> --smoke --out smoke-frozen --pipeline --pip --fixtures tests/fixtures
 
 The app runs in a child process: an isolated QITV_CONFIG_DIR, the local M3U fixture
 (tests/fixtures/local_provider.py), the real TVWindow and libVLC. The script drives it:
@@ -29,23 +29,42 @@ close no helper process and nothing in the timeshift directory remain. Lags and
 positions are the LiveSession timeline's (`timelineChanged`), not VLC's. A run killed for a
 hang has its live helper killed too.
 
+`--pip` adds picture in picture and swap (spec §7) after that, on the same two sources (it
+serves them without --pipeline too): Channel 3 (A), then Down to Channel 4 (B), and P opens
+A small, muted. Checked: both play from the loopback stream; A's mute, asked for before its
+media opened, holds once it plays; the small picture is a quarter of the player's width in
+the bottom-right corner (raised above the transport while that shows) and the PiP label
+covers it in the overlay host's coordinates; S makes A large without restarting either
+player (their play and open counts stay) and moves the sound to A; after a 4 s pause of A
+and two more swaps A is still at least 3 s behind live; the two players keep a volume and a
+mute of their own, read back from libVLC; after a move and resize the geometry holds; P
+closes the small picture (B): one session plays on, its budget ticket is back and the live
+helper reports a single session. With the PiP up, each source never has more than one
+connection open and both together two. libVLC's audio output modules are recorded, and on
+Windows it must be DirectSound (per-player volume; services/playback.default_args).
+
 Every check is written to <out>/smoke.json as {"name", "ok", "detail"}; any failed check makes
 the exit code non-zero. The overlay gate (spec D4) passes only when every expected "overlay: …"
 check and every window change they rely on is present and passed; a platform that fails it
 gets the Qt-drawn frame fallback. With --pipeline, the pipeline gate likewise needs every
-"pipeline: …" check present and passed. Screenshots are the overlay host's grab() composited
-over black (OS capture needs permissions), plus libVLC snapshots of the video. Nothing here
-touches the network: Python-level lookups and connections beyond this machine are refused and
-recorded as a failure. Logs go to <out>/runner.log and <out>/app.log as well (the Windows app
-has no console).
+"pipeline: …" check present and passed, and with --pip the PiP gate every "pip: …" check and
+the helper and timeshift directory checks after the close. Screenshots are the overlay host's
+grab() composited over black (OS capture needs permissions), plus libVLC snapshots of the
+video; the PiP screenshots draw both players' snapshots where their surfaces are, under the
+overlays. Nothing here touches the network: Python-level lookups and connections beyond this
+machine are refused and recorded as a failure. Logs go to <out>/runner.log and <out>/app.log
+as well (the Windows app has no console).
 
 QITV_SMOKE_MUTE=1 gives libVLC a dummy audio output, so a local run on a desktop someone
-uses stays silent (the fixtures play a tone). CI leaves it unset: some checks need real audio.
+uses stays silent (the fixtures play a tone). CI leaves it unset: the dummy output keeps no
+volume or mute, so the PiP's audio read-backs are only recorded then (as they are on a machine
+where libVLC could open no audio output at all).
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import ctypes
 import ctypes.util
 import faulthandler
@@ -71,7 +90,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from PySide6 import __version__ as PYSIDE_VERSION  # noqa: E402
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer, qVersion  # noqa: E402
+from PySide6.QtCore import (  # noqa: E402
+    QEvent,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    Qt,
+    QTimer,
+    qVersion,
+)
 from PySide6.QtGui import QGuiApplication, QImage, QMouseEvent, QPainter  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -83,6 +111,8 @@ from services.epg_manager import EpgManager  # noqa: E402
 from services.image_manager import ImageManager  # noqa: E402
 from services.playback import VLC_LOG_ENV, PlaybackSession, PlaybackState  # noqa: E402
 from services.provider_manager import ProviderManager  # noqa: E402
+from services.sessions import MAIN_PURPOSE  # noqa: E402
+from services.sessions import PURPOSE as PIP_PURPOSE  # noqa: E402
 from services.vlc_profile import PlayKind  # noqa: E402
 from tests.fixtures.live_source import LIVE_TS, LiveSource, peak_of  # noqa: E402
 from tests.fixtures.local_provider import (  # noqa: E402
@@ -92,6 +122,7 @@ from tests.fixtures.local_provider import (  # noqa: E402
     write_local_provider,
 )
 from ui import tv_window  # noqa: E402
+from ui.pip import DEFAULT_CORNER, WIDTH_FRACTION, lifted_rect  # noqa: E402
 from ui.tv_window import TVWindow, fit_to_area, frame_margins  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -201,6 +232,50 @@ PIPELINE_CHECKS = (
     NO_HELPER_CHECK,
     EMPTY_DIR_CHECK,
 )
+
+# ---- picture in picture and swap (--pip) ----
+PIP_PREFIX = "pip: "
+PIP_SCREENSHOTS = ("pip-01-open.png", "pip-02-swapped.png")
+PIP_BUDGET_S = 120.0  # what the PiP phase may add before the hang dump
+PIP_OPEN_TIMEOUT_MS = 20_000  # its link, the helper's session, up to 6 s for ready, VLC's open
+SWAP_TIMEOUT_MS = 3_000
+SWAP_SETTLE_MS = 1_000  # a player a swap restarted would have opened again by now
+GEOMETRY_TIMEOUT_MS = 2_000  # for a lift (or its settling back) to finish
+AUDIO_APPLY_MS = 3_000  # PlaybackSession applies a wanted mute once the audio output opens
+AUDIO_SAMPLES = 5
+AUDIO_SETTLE_MS = 500  # for a shared audio session to report one player's change to the other
+SMALL_LEVEL, LARGE_LEVEL = 20, 80  # set on the two players (the small one stays muted)
+RELEASE_WAIT_MS = 5_000  # BudgetedStream gives a ticket back within 2.5 s of the stop
+HELPER_WATCH_MS = 1_500  # the helper reports each session's state several times a second
+PIP_STEPS = ("when it opens", "after a move and resize")
+DIRECTSOUND = "directsound"
+AUDIO_OUTPUT_STARTED = "main debug: output '"  # libVLC started an audio output
+AUDIO_OUTPUT_FAILED = "failed to create audio output"
+_AUDIO_MODULE = re.compile(r'using audio output module "([^"]+)"')
+
+PIP_OPEN_CHECK = (
+    f"{PIP_PREFIX}P opens {LIVE_CHANNEL} small while {ZAP_CHANNEL} plays large, both from the "
+    "time-shift pipeline"
+)
+MUTE_HELD_CHECK = (
+    f"{PIP_PREFIX}the small picture's mute, asked for before its media opened, holds once it plays"
+)
+SWAP_CHECK = f"{PIP_PREFIX}S makes {LIVE_CHANNEL} large; both play on and neither restarts"
+SWAP_AUDIO_CHECK = f"{PIP_PREFIX}after the swap {LIVE_CHANNEL} is heard and {ZAP_CHANNEL} is muted"
+SHIFTED_CHECK = (
+    f"{PIP_PREFIX}after a 4 s pause and two swaps the large picture is still at least 3 s "
+    "behind live"
+)
+LEVELS_CHECK = f"{PIP_PREFIX}each player keeps a volume and a mute of its own"
+PIP_WINDOW_CHANGE = f"{PIP_PREFIX}the window moves and resizes"
+ONE_SESSION_CHECK = f"{PIP_PREFIX}P closes the small picture and one session plays on"
+TICKET_CHECK = f"{PIP_PREFIX}the small picture's budget ticket is released"
+HELPER_SESSION_CHECK = f"{PIP_PREFIX}the live helper reports a single session"
+PEAK_CHECK = (
+    f"{PIP_PREFIX}with picture-in-picture each source has one connection open at most, and "
+    "both together two"
+)
+DIRECTSOUND_CHECK = f"{PIP_PREFIX}libVLC plays audio through DirectSound on Windows"
 _STREAM_PATH = re.compile(r"/[^/]+/[^/]+(/stream/[0-9]+\.ts)$")  # /<token>/<session>/stream/…
 
 
@@ -225,6 +300,38 @@ def gate_checks(cocoa: bool) -> list[str]:
         if cocoa:
             names += [child_window_check(when), panel_check(when)]
     return names + [MINIMIZED_CHECK, CLOSED_CHECK]
+
+
+def pip_corner_check(when: str) -> str:
+    return (
+        f"{PIP_PREFIX}the small picture is a quarter of the width, in the bottom-right corner "
+        f"{when}"
+    )
+
+
+def pip_label_check(when: str) -> str:
+    return f"{PIP_PREFIX}the PiP label covers the small picture in host coordinates {when}"
+
+
+def pip_gate_checks(directsound: bool) -> list[str]:
+    """Every check the PiP gate needs, by name (`directsound`: Windows with real audio)."""
+    names = [PIP_OPEN_CHECK, MUTE_HELD_CHECK]
+    for when in PIP_STEPS:
+        names += [pip_corner_check(when), pip_label_check(when)]
+    names += [
+        SWAP_CHECK,
+        SWAP_AUDIO_CHECK,
+        SHIFTED_CHECK,
+        LEVELS_CHECK,
+        PIP_WINDOW_CHANGE,
+        ONE_SESSION_CHECK,
+        TICKET_CHECK,
+        HELPER_SESSION_CHECK,
+        PEAK_CHECK,
+        NO_HELPER_CHECK,
+        EMPTY_DIR_CHECK,
+    ]
+    return names + ([DIRECTSOUND_CHECK] if directsound else [])
 
 
 # ---- the report -------------------------------------------------------------------------------
@@ -264,7 +371,12 @@ class Report:
         os.replace(temporary, self.path)
 
 
-def _summarize(data: dict[str, Any], pipeline: bool) -> None:
+def _directsound_expected(data: dict[str, Any]) -> bool:
+    """Windows with a real audio output: the DirectSound check applies."""
+    return sys.platform == "win32" and not data.get("muted")
+
+
+def _summarize(data: dict[str, Any], pipeline: bool, pip: bool = False) -> None:
     outcome = {c["name"]: c["ok"] for c in data["checks"]}
     failed = [name for name, ok in outcome.items() if not ok]
     qt_platform = (data.get("environment") or {}).get("qt_platform")
@@ -286,6 +398,16 @@ def _summarize(data: dict[str, Any], pipeline: bool) -> None:
             "missing": [n for n in PIPELINE_CHECKS if n not in outcome],
         }
         gate = data["pipeline_gate"]
+        gate["ok"] = not gate["failed"] and not gate["missing"]
+        gates.append(gate)
+    if pip:
+        expected = pip_gate_checks(_directsound_expected(data))
+        data["pip_gate"] = {
+            "ok": False,
+            "failed": [n for n in failed if n.startswith(PIP_PREFIX) or n in expected],
+            "missing": [n for n in expected if n not in outcome],
+        }
+        gate = data["pip_gate"]
         gate["ok"] = not gate["failed"] and not gate["missing"]
         gates.append(gate)
     data["failed"] = failed
@@ -345,19 +467,28 @@ def _child_command(args: list[str]) -> list[str]:
     return [sys.executable, "-X", "faulthandler", str(Path(__file__).resolve()), *args]
 
 
-def _hang_budget(seconds: float, pipeline: bool) -> float:
+def _hang_budget(seconds: float, pipeline: bool, pip: bool = False) -> float:
     """Seconds after which the app dumps its Python stacks (it keeps going)."""
-    return HANG_DUMP_S + seconds + (PIPELINE_BUDGET_S if pipeline else 0.0)
+    extra = (PIPELINE_BUDGET_S if pipeline else 0.0) + (PIP_BUDGET_S if pip else 0.0)
+    return HANG_DUMP_S + seconds + extra
 
 
-def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
-    stale = (*SCREENSHOTS, *PIPELINE_SCREENSHOTS, VIDEO_SNAPSHOT, PIPELINE_VIDEO, FAULTS)
+def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool, pip: bool = False) -> int:
+    stale = (
+        *SCREENSHOTS,
+        *PIPELINE_SCREENSHOTS,
+        *PIP_SCREENSHOTS,
+        VIDEO_SNAPSHOT,
+        PIPELINE_VIDEO,
+        FAULTS,
+    )
     for name in (REPORT, *stale, HANG_STACK, VLC_LOG):
         (out / name).unlink(missing_ok=True)
-    limit = _hang_budget(seconds, pipeline) + KILL_GRACE_S
+    limit = _hang_budget(seconds, pipeline, pip) + KILL_GRACE_S
     args = ["--child", "--out", str(out), "--seconds", str(seconds), "--fixtures", str(fixtures)]
-    # Channel 3 and, for the zap, Channel 4: two paced sources of the same clip.
-    sources = [LiveSource(fixtures / LIVE_TS.name) for _ in range(2)] if pipeline else []
+    args += (["--pipeline"] if pipeline else []) + (["--pip"] if pip else [])
+    # Channel 3 and Channel 4 (the zap; the two pictures): two paced sources of the same clip.
+    sources = [LiveSource(fixtures / LIVE_TS.name) for _ in range(2)] if pipeline or pip else []
     for source in sources:
         args += ["--live-url", source.url]
         logger.info("Serving %s at %s", LIVE_TS.name, source.url)
@@ -408,13 +539,17 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
         elapsed = exited_at - close_at
         report.check(within, elapsed <= EXIT_LIMIT_S, f"{elapsed:.1f} s")
     if sources:
-        _judge_sources(report, sources)
+        _judge_sources(report, sources, pipeline, pip)
+    if pip:
+        _judge_audio_outputs(report, out / VLC_LOG)
     report.data["frozen"] = _frozen()
-    _summarize(report.data, pipeline)
+    _summarize(report.data, pipeline, pip)
     report.save()
     gates = [("overlay", report.data["overlay_gate"])]
     if pipeline:
         gates.append(("pipeline", report.data["pipeline_gate"]))
+    if pip:
+        gates.append(("PiP", report.data["pip_gate"]))
     logger.info(
         "Smoke %s: %d checks, %d failed%s; %s. Report: %s",
         "passed" if report.data["ok"] else "FAILED",
@@ -431,8 +566,9 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
     return 0 if report.data["ok"] else 1
 
 
-def _judge_sources(report: Report, sources: list[LiveSource]) -> None:
-    """The zap check, from what the sources saw: one connection open at most, at any moment."""
+def _judge_sources(report: Report, sources: list[LiveSource], pipeline: bool, pip: bool) -> None:
+    """From what the sources saw: the zap (before the PiP phase) never had more than one
+    connection open, and with the PiP each source one and both together two."""
     facts = report.data.setdefault("pipeline", {})
     first, second = sources
     facts["source_connections"] = first.connections
@@ -443,17 +579,77 @@ def _judge_sources(report: Report, sources: list[LiveSource]) -> None:
     }
     together = peak_of(first.events + second.events)
     facts["sources_peak_concurrent"] = together
-    zap = facts.get("zap") or {}
-    zapped = bool(zap.get("opened")) and bool(zap.get("back"))
-    peaks = [source.peak for source in sources]
-    report.check(
-        ZAP_CHECK,
-        zapped and peaks == [1, 1] and together == 1,
-        f"peak concurrent connections: {LIVE_CHANNEL} {peaks[0]}, {ZAP_CHANNEL} {peaks[1]}, "
-        f"both {together}; connections {first.connections} and {second.connections}; "
-        f"{ZAP_CHANNEL} delivered before Up: {zap.get('opened')}, back on {LIVE_CHANNEL}: "
-        f"{zap.get('back')}",
+    # The sources' clock is this process's monotonic one; the app records wall-clock times.
+    started_at = (report.data.get("pip") or {}).get("started_at")
+    pip_from = None
+    if isinstance(started_at, (int, float)):
+        pip_from = started_at - (time.time() - time.monotonic())
+    if pipeline:
+        zap = facts.get("zap") or {}
+        zapped = bool(zap.get("opened")) and bool(zap.get("back"))
+        peaks = [peak_of(source.events, end=pip_from) for source in sources]
+        both = peak_of(first.events + second.events, end=pip_from)
+        report.check(
+            ZAP_CHECK,
+            zapped and peaks == [1, 1] and both == 1,
+            f"peak concurrent connections"
+            f"{' before the PiP phase' if pip_from is not None else ''}: {LIVE_CHANNEL} "
+            f"{peaks[0]}, {ZAP_CHANNEL} {peaks[1]}, both {both}; connections "
+            f"{first.connections} and {second.connections}; {ZAP_CHANNEL} delivered before Up: "
+            f"{zap.get('opened')}, back on {LIVE_CHANNEL}: {zap.get('back')}",
+        )
+    if pip:
+        if pip_from is None:
+            report.check(PEAK_CHECK, False, "the PiP phase never started")
+            return
+        peaks = [peak_of(source.events, start=pip_from) for source in sources]
+        both = peak_of(first.events + second.events, start=pip_from)
+        report.data["pip"]["sources_peak_concurrent"] = {
+            LIVE_CHANNEL: peaks[0],
+            ZAP_CHANNEL: peaks[1],
+            "both": both,
+        }
+        report.check(
+            PEAK_CHECK,
+            peaks == [1, 1] and both == 2,
+            f"peak concurrent connections from the PiP phase on: {LIVE_CHANNEL} {peaks[0]}, "
+            f"{ZAP_CHANNEL} {peaks[1]}, both {both}",
+        )
+
+
+def _audio_output_facts(log: Path) -> dict[str, Any]:
+    """Which audio output modules libVLC loaded, and how often one started or failed to."""
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return {"error": repr(e)}
+    return {
+        "modules": dict(Counter(_AUDIO_MODULE.findall(text))),
+        "started": text.count(AUDIO_OUTPUT_STARTED),
+        "failed": text.count(AUDIO_OUTPUT_FAILED),
+    }
+
+
+def _no_audio_reason(log: Path) -> Optional[str]:
+    """Why no audio output could be judged, when libVLC's log shows it never started one."""
+    facts = _audio_output_facts(log)
+    if "error" in facts or facts["started"] or not facts["failed"]:
+        return None
+    modules = ", ".join(facts["modules"]) or "none"
+    return (
+        f"libVLC never started an audio output on this machine ({facts['failed']} failures; "
+        f"modules: {modules})"
     )
+
+
+def _judge_audio_outputs(report: Report, log: Path) -> None:
+    """Record (and log) the audio outputs libVLC used; on Windows they must be DirectSound."""
+    facts = _audio_output_facts(log)
+    report.data.setdefault("pip", {})["audio_output"] = facts
+    logger.info("libVLC audio output: %s", facts)
+    if _directsound_expected(report.data):
+        modules = facts.get("modules") or {}
+        report.check(DIRECTSOUND_CHECK, bool(modules) and set(modules) == {DIRECTSOUND}, facts)
 
 
 # ---- the child: the app and its driver --------------------------------------------------------
@@ -713,12 +909,19 @@ class Resyncs:
         return [f"{at - moment:+.2f}s {shown}" for at, shown in self.calls if at >= moment]
 
 
-def run_app(out: Path, seconds: float, fixtures: Path, live_urls: list[str]) -> int:
+def run_app(
+    out: Path,
+    seconds: float,
+    fixtures: Path,
+    live_urls: list[str],
+    pipeline: bool = False,
+    pip: bool = False,
+) -> int:
     """Start the TV window over the fixture provider and drive it; returns app.exec()'s code."""
     # The packaged app has no -X faulthandler, and the Windows one no stderr.
     faults = sys.stderr if sys.stderr is not None else open(out / FAULTS, "w", encoding="utf-8")
     faulthandler.enable(file=faults)
-    budget = _hang_budget(seconds, bool(live_urls))
+    budget = _hang_budget(seconds, pipeline, pip)
     faulthandler.dump_traceback_later(budget, file=faults)  # a hang shows where; keeps going
     attempts: list[str] = []
     _refuse_network(attempts)
@@ -770,7 +973,7 @@ def run_app(out: Path, seconds: float, fixtures: Path, live_urls: list[str]) -> 
 
         tv_window.create_instance = muted  # the window's player and its PiP play to nothing
     window = TVWindow(app, config, providers, images, epg)
-    driver = Driver(window, report, out, seconds, fixtures, live_urls)
+    driver = Driver(window, report, out, seconds, fixtures, live_urls, pipeline, pip)
     window.show()
     QTimer.singleShot(0, driver.start)
     code = app.exec()
@@ -790,6 +993,8 @@ class Driver:
         seconds: float,
         fixtures: Path,
         live_urls: list[str],
+        pipeline: bool = False,
+        pip: bool = False,
     ) -> None:
         self.window = window
         self.report = report
@@ -797,9 +1002,15 @@ class Driver:
         self.seconds = seconds
         self.fixtures = fixtures
         self.live_urls = live_urls
+        self.pipeline = pipeline and bool(live_urls)
+        self.pip = pip and bool(live_urls)
         self.cocoa = QGuiApplication.platformName() == "cocoa"
         self.resyncs = Resyncs(window.host)
         self.timeline: list[tuple[float, dict[str, Any]]] = []  # (when, LiveSession state)
+        # The PiP phase: each slot's timeline, the helper's session updates, the play counts.
+        self.slot_timeline: list[tuple[float, str, dict[str, Any]]] = []  # (when, slot, state)
+        self.helper_updates: list[tuple[float, str]] = []  # (when, session id)
+        self.plays: dict[str, dict[str, int]] = {}  # slot -> {"play": n, "open": n}
         self.finished = False
         self.problem = ""
         self._steps = self._scenario()
@@ -1139,8 +1350,10 @@ class Driver:
         report.check(WINDOW_CHANGES[4], restored, self._states())
         self._check_glued(GLUE_STEPS[4], changed_at, quiet)
 
-        if self.live_urls:
+        if self.pipeline:
             yield from self._pipeline()
+        if self.pip:
+            yield from self._pip()
 
         # 6. Close; the parent judges the exit code and time, after_exit the helper and buffer.
         report.step("6. close")
@@ -1357,8 +1570,10 @@ class Driver:
             f"{k} {round(state[k], 3) if isinstance(state[k], float) else state[k]}" for k in keys
         )
 
-    def _pipeline_playing(self) -> bool:
-        live, session = self.window.live_session, self.window.session
+    def _pipeline_playing(self, live: Any = None, session: Any = None) -> bool:
+        """The live session plays from the loopback stream (by default the main slot's)."""
+        if live is None or session is None:
+            live, session = self.window.live_session, self.window.session
         url = session.url or ""
         return (
             live.is_pipeline()
@@ -1404,6 +1619,422 @@ class Driver:
         yield from self._wait(read, SPEED_TIMEOUT_MS)
         return rates[-1] if rates else None
 
+    # ---- picture in picture and swap (--pip) --------------------------------------------------
+
+    def _pip(self) -> Generator[int, None, None]:
+        """Channel 3 (A) small beside Channel 4 (B), swapped, paused, levelled, moved and
+        closed (module docstring); the close after it is the last step."""
+        w, report = self.window, self.report
+        sessions, engine = w.sessions, w.engine
+        facts: dict[str, Any] = report.data.setdefault("pip", {})
+        facts["started_at"] = time.time()  # the parent judges the sources from here on
+        report.save()
+        if sessions is None or engine is None:
+            report.check(PIP_OPEN_CHECK, False, "no picture-in-picture: libVLC is unavailable")
+            return
+        pipeline = report.data["pipeline"]
+        pipeline.setdefault("timeshift_dir", str(engine.root_dir))
+        self._count_plays(sessions)
+        sessions.slotTimeline.connect(self._on_slot_timeline)
+        engine.sessionUpdated.connect(self._on_helper_update)
+        a_url, b_url = self.live_urls[0], self.live_urls[1]
+
+        # 1. A, then B; P opens the channel before B small: A.
+        report.step("pip 1. tune Channel 3, then Channel 4")
+        drawer = w.overlays.drawer
+        if drawer.isVisible():
+            self._key(Qt.Key.Key_Escape)  # Down zaps again
+            yield from self._wait(lambda: not drawer.isVisible(), 2000)
+        if not self._slot_tuned(sessions.large(), a_url):
+            self._key(Qt.Key.Key_Down)  # Channel 2 → 3 (without --pipeline)
+        tuned_a = yield from self._wait(
+            lambda: self._slot_playing(sessions.large(), a_url), LIVE_PLAY_TIMEOUT_MS
+        )
+        if pipeline.get("helper_pid") is None:
+            pipeline["helper_pid"] = self._helper_pid()
+        self._key(Qt.Key.Key_Down)
+        tuned_b = yield from self._wait(
+            lambda: self._slot_playing(sessions.large(), b_url), LIVE_PLAY_TIMEOUT_MS
+        )
+        report.step("pip 1. open picture-in-picture")
+        self._key(Qt.Key.Key_P)
+
+        def both_open() -> bool:
+            small = sessions.small()
+            return (
+                small is not None
+                and self._slot_playing(small, a_url)
+                and self._slot_playing(sessions.large(), b_url)
+            )
+
+        opened = yield from self._wait(both_open, PIP_OPEN_TIMEOUT_MS)
+        report.check(
+            PIP_OPEN_CHECK,
+            tuned_a and tuned_b and opened,
+            f"{LIVE_CHANNEL} played first: {tuned_a}, then {ZAP_CHANNEL}: {tuned_b}; "
+            f"{self._slots_facts()}",
+        )
+        if not opened:
+            return  # the checks still missing fail the PiP gate
+        a_slot, b_slot = sessions.small(), sessions.large()
+        facts["slots"] = {LIVE_CHANNEL: a_slot.name, ZAP_CHANNEL: b_slot.name}
+        yield from self._check_mute_held(a_slot)
+
+        # 2. A quarter of the width in the bottom-right corner, the label over it.
+        report.step("pip 2. the small picture's geometry")
+        yield from self._check_pip_geometry(PIP_STEPS[0])
+        self._capture_pip(PIP_SCREENSHOTS[0])
+
+        # 3. S: A is large, nothing restarts, and the sound follows it.
+        report.step("pip 3. swap")
+        before = self._play_counts()
+        self._key(Qt.Key.Key_S)
+        swapped = yield from self._wait(self._large_is(a_slot), SWAP_TIMEOUT_MS)
+        yield SWAP_SETTLE_MS
+        after = self._play_counts()
+
+        def both_playing() -> bool:
+            return self._slot_playing(a_slot, a_url) and self._slot_playing(b_slot, b_url)
+
+        playing = both_playing()
+        facts["play_counts"] = {"before_swap": before, "after_swap": after}
+        report.check(
+            SWAP_CHECK,
+            swapped and playing and before == after,
+            f"large: {sessions.large().name} ({LIVE_CHANNEL} plays in {a_slot.name}); both "
+            f"playing: {playing}; plays and media opens before {before}, after {after}",
+        )
+        self._check_audio(SWAP_AUDIO_CHECK, {a_slot.name: (False, None), b_slot.name: (True, None)})
+        self._capture_pip(PIP_SCREENSHOTS[1])
+
+        # 4. A paused for 4 s, then two swaps: A, large again, is still behind live.
+        report.step("pip 4. pause, then swap twice")
+        playback = a_slot.playback
+        self._key(Qt.Key.Key_Space)
+        paused = yield from self._wait(
+            lambda: playback.state() is PlaybackState.PAUSED, STATE_CHANGE_MS
+        )
+        yield PAUSE_MS
+        self._key(Qt.Key.Key_Space)
+        resumed = yield from self._wait(
+            lambda: playback.state() is PlaybackState.PLAYING, STATE_CHANGE_MS
+        )
+        swaps: list[bool] = []
+        for large in (b_slot, a_slot):
+            yield from self._wait(both_playing, STATE_CHANGE_MS)  # a swap waits for an open
+            self._key(Qt.Key.Key_S)
+            swapped_to = yield from self._wait(self._large_is(large), SWAP_TIMEOUT_MS)
+            swaps.append(swapped_to)
+        state = yield from self._slot_fresh(
+            a_slot.name, time.monotonic(), lambda s: not s["paused"]
+        )
+        report.check(
+            SHIFTED_CHECK,
+            paused
+            and resumed
+            and all(swaps)
+            and sessions.large() is a_slot
+            and state is not None
+            and state["lag"] >= PAUSED_LAG_S,
+            f"VLC paused {paused}, playing again {resumed}, swapped {swaps}, large "
+            f"{sessions.large().name}; {self._describe(state)}",
+        )
+
+        # The two players' own volume and mute (Windows: per-player DirectSound buffers).
+        # The small one's first: with one audio session for both, the large one's would win.
+        report.step("pip 4. a volume and a mute for each player")
+        small, large = b_slot, a_slot
+        sessions.set_level(small.name, SMALL_LEVEL)
+        sessions.set_muted(small.name, True)
+        sessions.set_level(large.name, LARGE_LEVEL)
+        sessions.set_muted(large.name, False)
+        yield AUDIO_SETTLE_MS
+        self._check_audio(
+            LEVELS_CHECK, {large.name: (False, LARGE_LEVEL), small.name: (True, SMALL_LEVEL)}
+        )
+
+        # 5. Move and resize: the small picture and its label follow.
+        report.step("pip 5. move and resize")
+        before_rect = w.geometry()
+        changed_at = time.monotonic()
+        w.move(w.pos().x() - 40, w.pos().y() - 30)
+        w.resize(1000, 580)
+        yield from self._settle(changed_at)
+        after_rect = w.geometry()
+        report.check(  # small screens may clamp the size: it only has to change
+            PIP_WINDOW_CHANGE,
+            after_rect.topLeft() != before_rect.topLeft()
+            and after_rect.size() != before_rect.size(),
+            f"{_rect(before_rect)} -> {_rect(after_rect)}",
+        )
+        yield from self._check_pip_geometry(PIP_STEPS[1])
+
+        # 6. P closes the small picture (B): A plays on alone, B's ticket and session go.
+        report.step("pip 6. close picture-in-picture")
+        provider = w.catalog.current_provider_name()
+        closing, stays = sessions.small(), sessions.large()
+        tuner = closing.tuner
+        self._key(Qt.Key.Key_P)
+        closed = yield from self._wait(
+            lambda: not sessions.pip_open() and closing.playback.state() is PlaybackState.IDLE,
+            SWAP_TIMEOUT_MS,
+        )
+        released = yield from self._wait(
+            lambda: not tuner.releasing() and PIP_PURPOSE not in w.budget.holders(provider),
+            RELEASE_WAIT_MS,
+        )
+        frame, label = w.pip_frame, w.pip_label
+        alone = (
+            closed
+            and sessions.large() is stays
+            and self._slot_playing(stays, a_url)
+            and frame.small_rect().isEmpty()
+            and not label.isVisible()
+        )
+        report.check(
+            ONE_SESSION_CHECK,
+            alone,
+            f"PiP open {sessions.pip_open()}; {stays.name} ({LIVE_CHANNEL}) "
+            f"{stays.playback.state().value}, {closing.name} ({ZAP_CHANNEL}) "
+            f"{closing.playback.state().value}; small rect {_rect(frame.small_rect())}, label "
+            f"{'shown' if label.isVisible() else 'hidden'}",
+        )
+        holders = w.budget.holders(provider)
+        report.check(
+            TICKET_CHECK,
+            released and holders == [MAIN_PURPOSE],
+            f"the provider's budget holders: {holders}; the closed player still releasing: "
+            f"{tuner.releasing()}",
+        )
+        known = getattr(engine, "_sessions", {})  # the helper confirms each close
+        single = yield from self._wait(lambda: len(known) == 1, RELEASE_WAIT_MS)
+        since = time.monotonic()
+        yield HELPER_WATCH_MS
+        updated = {sid for at, sid in self.helper_updates if at >= since}
+        large_sid = getattr(stays.live, "_sid", None)
+        report.check(
+            HELPER_SESSION_CHECK,
+            single and large_sid is not None and updated == {large_sid},
+            f"sessions the engine holds: {len(known)}; sessions the helper updated in "
+            f"{HELPER_WATCH_MS} ms: {len(updated)}, {LIVE_CHANNEL}'s among them: "
+            f"{large_sid in updated}",
+        )
+        facts["play_counts"]["end"] = self._play_counts()
+        report.save()
+
+    def _count_plays(self, sessions: Any) -> None:
+        """Count each player's plays and libVLC media opens (a restart is one of either)."""
+        for slot in (sessions.large(), sessions.other()):
+            counts = self.plays.setdefault(slot.name, {"play": 0, "open": 0})
+            playback = slot.playback
+            for method, key in (("play", "play"), ("_open", "open")):
+                original = getattr(playback, method)
+
+                def counted(*args: Any, _call=original, _key=key, _counts=counts, **kwargs: Any):
+                    _counts[_key] += 1
+                    return _call(*args, **kwargs)
+
+                setattr(playback, method, counted)  # PlaybackSession looks them up on itself
+
+    def _play_counts(self) -> dict[str, dict[str, int]]:
+        return {name: dict(counts) for name, counts in self.plays.items()}
+
+    def _on_slot_timeline(self, name: str, state: dict) -> None:
+        self.slot_timeline.append((time.monotonic(), name, dict(state)))
+
+    def _on_helper_update(self, sid: str, _snapshot: dict) -> None:
+        self.helper_updates.append((time.monotonic(), sid))
+
+    def _slot_fresh(
+        self,
+        name: str,
+        since: float,
+        predicate: Callable[[dict[str, Any]], bool] = lambda _state: True,
+        timeout_ms: int = FRESH_TIMELINE_MS,
+    ) -> Generator[int, None, Optional[dict[str, Any]]]:
+        """The first timeline state of slot `name` emitted after `since` satisfying `predicate`."""
+        found: list[dict[str, Any]] = []
+
+        def seen() -> bool:
+            for at, slot, state in self.slot_timeline:
+                if slot == name and at > since and predicate(state):
+                    found.append(state)
+                    return True
+            return False
+
+        yield from self._wait(seen, timeout_ms)
+        return found[0] if found else None
+
+    @staticmethod
+    def _slot_tuned(slot: Any, url: str) -> bool:
+        """The slot's live session's channel is `url` (LiveSession keeps it private)."""
+        return getattr(slot.live, "_url", None) == url
+
+    def _large_is(self, slot: Any) -> Callable[[], bool]:
+        sessions = self.window.sessions
+        return lambda: sessions.large() is slot
+
+    def _slot_playing(self, slot: Any, url: str) -> bool:
+        return self._slot_tuned(slot, url) and self._pipeline_playing(slot.live, slot.playback)
+
+    def _slots_facts(self) -> str:
+        sessions = self.window.sessions
+        channels = dict(zip(self.live_urls, (LIVE_CHANNEL, ZAP_CHANNEL)))
+        parts = []
+        for role, slot in (("large", sessions.large()), ("small", sessions.small())):
+            if slot is None:
+                parts.append(f"{role}: none")
+                continue
+            playback = slot.playback
+            channel = channels.get(str(getattr(slot.live, "_url", "")), "another channel")
+            parts.append(
+                f"{role} {slot.name}: {channel}, mode {slot.live.mode!r}, "
+                f"{playback.state().value} {playback.kind} from {_redacted(playback.url)}"
+            )
+        return "; ".join(parts)
+
+    @staticmethod
+    def _audio_of(playback: Any) -> Optional[tuple[int, int]]:
+        """libVLC's (mute, volume) of a player: -1 without an audio output; None while a
+        worker holds the player."""
+        player = getattr(playback, "_player", None)
+        if player is None or getattr(playback, "_job", None) is not None:
+            return None
+        return int(player.audio_get_mute()), int(player.audio_get_volume())
+
+    def _judge_vlc_audio(self, ok: bool, detail: str) -> tuple[bool, str]:
+        """libVLC's read-back only counts where an audio output keeps a volume and a mute."""
+        if self.report.data.get("muted"):
+            return True, (
+                f"informational ({MUTE_ENV}=1: libVLC's dummy audio output keeps no volume or "
+                f"mute): {detail}"
+            )
+        if not ok:
+            reason = _no_audio_reason(self.out / VLC_LOG)
+            if reason is not None:
+                return True, f"informational ({reason}): {detail}"
+        return ok, detail
+
+    def _check_mute_held(self, slot: Any) -> Generator[int, None, None]:
+        """The small picture opened muted: the mute holds once its media plays."""
+        sessions, playback = self.window.sessions, slot.playback
+        applied = yield from self._wait(
+            lambda: not getattr(playback, "_audio_due", True), AUDIO_APPLY_MS
+        )
+        readings: list[Optional[tuple[int, int]]] = []
+        for _ in range(AUDIO_SAMPLES):
+            readings.append(self._audio_of(playback))
+            yield 100
+        seen = [r for r in readings if r is not None]
+        muted = sessions.muted(slot.name)
+        ok, detail = self._judge_vlc_audio(
+            bool(seen) and all(mute == 1 for mute, _ in seen),
+            f"wanted muted, the manager says {'muted' if muted else 'unmuted'}; applied to the "
+            f"audio output: {applied}; libVLC (mute, volume): {readings}",
+        )
+        self.report.data["pip"]["mute_held"] = readings
+        self.report.check(MUTE_HELD_CHECK, muted and ok, detail)
+
+    def _check_audio(self, name: str, wanted: dict[str, tuple[bool, Optional[int]]]) -> None:
+        """Each slot's (muted, level or None) as the manager and libVLC say."""
+        sessions = self.window.sessions
+        slots = {slot.name: slot for slot in (sessions.large(), sessions.other())}
+        manager_ok = vlc_ok = True
+        parts, readings = [], {}
+        for slot_name, (muted, level) in wanted.items():
+            got = self._audio_of(slots[slot_name].playback)
+            readings[slot_name] = got
+            manager_ok = manager_ok and sessions.muted(slot_name) == muted
+            manager_ok = manager_ok and (level is None or sessions.level(slot_name) == level)
+            vlc_ok = vlc_ok and got is not None and got[0] == int(muted)
+            vlc_ok = vlc_ok and (level is None or got is not None and got[1] == level)
+            parts.append(
+                f"{slot_name}: wanted {'muted' if muted else 'unmuted'}"
+                + ("" if level is None else f" at {level}")
+                + f", the manager says {'muted' if sessions.muted(slot_name) else 'unmuted'} at "
+                f"{sessions.level(slot_name)}, libVLC (mute, volume) {got}"
+            )
+        ok, detail = self._judge_vlc_audio(vlc_ok, "; ".join(parts))
+        self.report.data["pip"].setdefault("audio", {})[name] = readings
+        self.report.check(name, manager_ok and ok, detail)
+
+    def _check_pip_geometry(self, when: str) -> Generator[int, None, None]:
+        """The small picture's rect once it holds still, and the PiP label over it."""
+        w = self.window
+        frame, page, host, label = w.pip_frame, w.player_page, w.host, w.pip_label
+        seen: list[QRect] = []
+
+        def still() -> bool:
+            rect = frame.small_rect()
+            held = bool(seen) and seen[-1] == rect
+            seen.append(QRect(rect))
+            return held and not frame.lifting()
+
+        yield from self._wait(still, GEOMETRY_TIMEOUT_MS)
+        rect, size = frame.small_rect(), page.size()
+        lift = int(getattr(frame, "_lift", 0))  # raised above the transport while it shows
+        expected = lifted_rect(size, DEFAULT_CORNER, lift)
+        width = round(size.width() * WIDTH_FRACTION)
+        self.report.check(
+            pip_corner_check(when),
+            not rect.isEmpty()
+            and rect.width() == width
+            and frame.corner() == DEFAULT_CORNER
+            and rect == expected,
+            f"small picture {_rect(rect)} in a {size.width()}x{size.height()} player; expected "
+            f"{_rect(expected)} ({f'raised {lift} px above the transport' if lift else 'unraised'}"
+            f"), width {width}, corner {frame.corner()}",
+        )
+        in_host = QRect(host.mapFromGlobal(page.mapToGlobal(rect.topLeft())), rect.size())
+        self.report.check(
+            pip_label_check(when),
+            host.isVisible() and label.isVisible() and label.geometry() == in_host,
+            f"label {_rect(label.geometry())} {'shown' if label.isVisible() else 'hidden'}; the "
+            f"small picture in host coordinates {_rect(in_host)}",
+        )
+
+    def _capture_pip(self, name: str) -> None:
+        """Both players' video where their surfaces are, under the overlay host's rendering."""
+        w = self.window
+        sessions, host, page = w.sessions, w.host, w.player_page
+        pixmap = host.grab()
+        image = QImage(pixmap.size(), QImage.Format.Format_ARGB32)
+        image.setDevicePixelRatio(pixmap.devicePixelRatio())
+        image.fill(0xFF000000)
+        painter = QPainter(image)
+        layers = [(sessions.large(), host.rect())]
+        small = sessions.small()
+        if small is not None:
+            rect = w.pip_frame.small_rect()
+            target = QRect(host.mapFromGlobal(page.mapToGlobal(rect.topLeft())), rect.size())
+            layers.append((small, target))
+        videos = {}
+        for slot, target in layers:
+            frame = self._snapshot(slot.playback)
+            videos[slot.name] = frame is not None
+            if frame is not None:
+                painter.drawImage(QRectF(target), frame)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+        self.report.data["screenshots"][name] = image.save(str(self.out / name))
+        self.report.data["pip"].setdefault("screenshot_video", {})[name] = videos
+        self.report.save()
+
+    def _snapshot(self, playback: Any) -> Optional[QImage]:
+        """libVLC's snapshot of the player's video (None without a video output)."""
+        player = getattr(playback, "_player", None)
+        if player is None or getattr(playback, "_job", None) is not None:
+            return None
+        path = self.out / ".pip-snapshot.png"
+        path.unlink(missing_ok=True)
+        try:
+            if player.video_take_snapshot(0, str(path), 0, 0) != 0 or not path.exists():
+                return None
+            image = QImage(str(path))
+            return None if image.isNull() else image
+        finally:
+            path.unlink(missing_ok=True)
+
     def _close(self) -> None:
         report = self.report
         try:  # while libVLC still holds what it plays with
@@ -1438,7 +2069,11 @@ class Driver:
         if self.live_urls:
             self._after_pipeline()
         shots = report.data["screenshots"]
-        expected = SCREENSHOTS + (PIPELINE_SCREENSHOTS if self.live_urls else ())
+        expected = (
+            SCREENSHOTS
+            + (PIPELINE_SCREENSHOTS if self.pipeline else ())
+            + (PIP_SCREENSHOTS if self.pip else ())
+        )
         report.check("the screenshots are saved", all(shots.get(name) for name in expected), shots)
         report.check("nothing touches the network", not attempts, attempts)
         report.data["overlay_shows_and_hides"] = len(self.resyncs.calls)
@@ -1481,6 +2116,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="also play a live channel through the time-shift pipeline",
     )
     parser.add_argument(
+        "--pip",
+        action="store_true",
+        help="also open picture-in-picture, swap and close it (two live channels)",
+    )
+    parser.add_argument(
         "--fixtures",
         help="the directory with smoke.mp4 and live.ts (required in the packaged app, which "
         "has none; default: the checkout's tests/fixtures)",
@@ -1505,9 +2145,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     fixtures = Path(args.fixtures or FIXTURE_DIR).resolve()
     seconds = max(MIN_SECONDS, args.seconds)
     if args.child:
-        return run_app(out, seconds, fixtures, args.live_url or [])
+        return run_app(out, seconds, fixtures, args.live_url or [], args.pipeline, args.pip)
     try:
-        return run_smoke(out, seconds, fixtures, args.pipeline)
+        return run_smoke(out, seconds, fixtures, args.pipeline, args.pip)
     except Exception:
         logger.exception("The smoke test could not run")
         return 2

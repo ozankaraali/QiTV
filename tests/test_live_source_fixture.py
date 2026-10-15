@@ -139,6 +139,15 @@ class LiveSourceTests(unittest.TestCase):
         self.assertEqual(peak_of([(2.0, 1), (1.0, 1), (3.0, -1), (4.0, -1)]), 2)
         self.assertEqual(peak_of([]), 0)
 
+    def test_the_peak_between_two_moments_counts_what_was_already_open(self):
+        overlap = [(1.0, 1), (2.0, 1), (3.0, -1), (4.0, -1), (5.0, 1), (6.0, -1)]
+        self.assertEqual(peak_of(overlap), 2)
+        self.assertEqual(peak_of(overlap, start=4.5), 1)  # the overlap ended before it
+        self.assertEqual(peak_of(overlap, end=2.0), 1)  # the second open is at the end
+        self.assertEqual(peak_of(overlap, start=2.5, end=3.5), 2)  # both open at its start
+        self.assertEqual(peak_of([(1.0, 1)], start=5.0), 1)  # still open after the last event
+        self.assertEqual(peak_of([(1.0, 1), (2.0, -1)], start=5.0), 0)
+
     def test_other_paths_are_not_found(self):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(self.source.url + ".m3u8", timeout=5)

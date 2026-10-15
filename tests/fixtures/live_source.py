@@ -172,13 +172,25 @@ class LoopedStream:
         return bytes(out)
 
 
-def peak_of(events: list[tuple[float, int]]) -> int:
-    """The most connections open at once in `events` ((when, +1 or -1), any order)."""
+def peak_of(
+    events: list[tuple[float, int]], *, start: Optional[float] = None, end: Optional[float] = None
+) -> int:
+    """The most connections open at once in `events` ((when, +1 or -1), any order).
+
+    With `start` and/or `end`, only from `start` (counting those already open then) until
+    before `end`.
+    """
     peak = current = 0
-    for _, change in sorted(events):  # at the same moment, a close counts before an open
+    started = start is None
+    for at, change in sorted(events):  # at the same moment, a close counts before an open
+        if end is not None and at >= end:
+            break
+        if not started and start is not None and at >= start:
+            started, peak = True, current  # what was open when it began
         current += change
-        peak = max(peak, current)
-    return peak
+        if started:
+            peak = max(peak, current)
+    return peak if started else current  # it began after the last event before `end`
 
 
 class LiveSource:

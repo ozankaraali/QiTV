@@ -47,7 +47,7 @@ jobs:
               echo "openbox did not start"
               exit 1
             fi
-            uv run python scripts/smoke_tv.py --out smoke-out --pipeline
+            uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
           '
         timeout-minutes: 8
         env:
@@ -81,7 +81,7 @@ jobs:
               echo "openbox did not start"
               exit 1
             fi
-            dist/qitv-linux --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
+            dist/qitv-linux --smoke --out smoke-frozen --pipeline --pip --fixtures tests/fixtures
           '
         timeout-minutes: 8
         env:
@@ -142,7 +142,7 @@ jobs:
           QT_QPA_FONTDIR: C:\Windows\Fonts
       - name: Smoke test
         if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline
+        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
         timeout-minutes: 8
       - name: Upload smoke results
         if: ${{ !cancelled() }}
@@ -164,7 +164,7 @@ jobs:
         shell: pwsh
         run: |
           $smoke = Start-Process -FilePath dist\qitv-windows.exe -PassThru -ArgumentList @(
-            "--smoke", "--out", "$PWD\smoke-frozen", "--pipeline", "--fixtures", "$PWD\tests\fixtures")
+            "--smoke", "--out", "$PWD\smoke-frozen", "--pipeline", "--pip", "--fixtures", "$PWD\tests\fixtures")
           $null = $smoke.Handle  # keeps the exit code readable once it exits
           $smoke.WaitForExit()
           Get-Content -Path smoke-frozen\runner.log -ErrorAction SilentlyContinue
@@ -220,7 +220,7 @@ jobs:
           QITV_GUI_TESTS: '1'  # tests that show real windows (a GUI session)
       - name: Smoke test
         if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline
+        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
         timeout-minutes: 8
       - name: Upload smoke results
         if: ${{ !cancelled() }}
@@ -246,7 +246,7 @@ jobs:
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
         # the bundle, and libVLC and its plugins must load from it. The fixtures come from
         # the checkout; the app has none.
-        run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
+        run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --pip --fixtures tests/fixtures
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
@@ -304,7 +304,7 @@ jobs:
           QITV_GUI_TESTS: '1'  # tests that show real windows (a GUI session)
       - name: Smoke test
         if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline
+        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
         timeout-minutes: 8
       - name: Upload smoke results
         if: ${{ !cancelled() }}
@@ -330,7 +330,7 @@ jobs:
         # The same scenario through main.py's --smoke entry: the live helper must spawn from
         # the bundle, and libVLC and its plugins must load from it. The fixtures come from
         # the checkout; the app has none.
-        run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --fixtures tests/fixtures
+        run: dist/QiTV.app/Contents/MacOS/QiTV --smoke --out smoke-frozen --pipeline --pip --fixtures tests/fixtures
         timeout-minutes: 8
         env:
           QITV_SMOKE: '1'
