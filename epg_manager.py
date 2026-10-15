@@ -1,10 +1,10 @@
 from datetime import datetime, timedelta
 import gzip
 import hashlib
-import io
 import logging
 import os
 import pickle
+import shutil
 from typing import Any, Dict, List, Set
 import xml.etree.ElementTree as ET
 import zipfile
@@ -90,6 +90,37 @@ def xml_to_dict(element):
         return parsed_data
 
     return {element.tag: parse_element(element)}
+
+
+def write_xmltv_body(response, path: str) -> None:
+    """Write an XMLTV download to ``path``, unpacking gzip or zip bodies by their bytes.
+
+    Headers are not trusted: feeds are often served as ``application/octet-stream``, and
+    requests has already decoded ``Content-Encoding``. The body is streamed to a temporary
+    ``.download`` file first, which is always removed.
+    """
+    temp_path = path + ".download"
+    try:
+        with open(temp_path, "wb") as f:
+            for chunk in response.iter_content(65536):
+                f.write(chunk)
+        with open(temp_path, "rb") as f:
+            magic = f.read(4)
+        if magic[:2] == b"\x1f\x8b":
+            with gzip.open(temp_path, "rb") as src, open(path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        elif magic == b"PK\x03\x04":
+            with zipfile.ZipFile(temp_path) as z:
+                name = next((n for n in z.namelist() if n.endswith(".xml")), None)
+                if name is None:
+                    raise ValueError("no XML in archive")
+                with z.open(name) as src, open(path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        else:
+            os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 class EpgManager:
@@ -441,20 +472,7 @@ class EpgManager:
                 self._mark_epg_unavailable(provider_hash)
             else:
                 xmltv_file_path = os.path.join(self._cache_dir(), f"{provider_hash}_xtream.xml")
-
-                # Handle compressed responses
-                content_type = r.headers.get("Content-Type", "")
-                content_encoding = r.headers.get("Content-Encoding", "")
-
-                if content_encoding == "gzip" or content_type == "application/gzip":
-                    with (
-                        gzip.GzipFile(fileobj=io.BytesIO(r.content)) as gz,
-                        open(xmltv_file_path, "wb") as f,
-                    ):
-                        f.write(gz.read())
-                else:
-                    with open(xmltv_file_path, "wb") as f:
-                        f.write(r.content)
+                write_xmltv_body(r, xmltv_file_path)
 
                 # Parse and index the XMLTV file
                 self.epg = self._index_programs(xmltv_file_path)
@@ -470,28 +488,16 @@ class EpgManager:
         self.save_index()
 
     def _fetch_epg_from_url(self, url):
-        r = requests.get(url, stream=True, timeout=10, verify=self.config_manager.ssl_verify)
+        r = requests.get(url, stream=True, timeout=30, verify=self.config_manager.ssl_verify)
         if r.status_code == 200:
-            content_type = r.headers.get("Content-Type", "")
             url_hash = _cache_key(url)
             xmltv_file_path = os.path.join(self._cache_dir(), f"{url_hash}.xml")
 
-            if content_type == "application/zip":
-                with zipfile.ZipFile(io.BytesIO(r.raw.read())) as z:
-                    for name in z.namelist():
-                        if name.endswith(".xml"):
-                            with z.open(name) as xml_file, open(xmltv_file_path, "wb") as f:
-                                f.write(xml_file.read())
-                            break
-            elif content_type == "application/gzip":
-                with (
-                    gzip.GzipFile(fileobj=io.BytesIO(r.raw.read())) as gz,
-                    open(xmltv_file_path, "wb") as f,
-                ):
-                    f.write(gz.read())
-            else:
-                with open(xmltv_file_path, "wb") as f:
-                    f.write(r.content)
+            try:
+                write_xmltv_body(r, xmltv_file_path)
+            except ValueError as e:
+                # An archive without XML leaves no file, so the index is left untouched.
+                logger.warning(f"Error fetching XMLTV from {url}: {e}")
 
             if os.path.exists(xmltv_file_path):
                 self.epg = self._index_programs(xmltv_file_path)
