@@ -327,6 +327,10 @@ class Transport(Overlay):
         return un.font(1.2, QFont.Weight.DemiBold)
 
     @staticmethod
+    def _times_font(un: Units) -> QFont:
+        return un.font(1.25)
+
+    @staticmethod
     def _indicator_font(un: Units) -> QFont:
         return un.font(1.1, QFont.Weight.DemiBold)
 
@@ -342,9 +346,11 @@ class Transport(Overlay):
         shifted = bar and self._timeshift
         if bar:
             seek_h = un.px(1.9)
-            seek_y = row_top - un.px(1.2) - un.px(1.6) - seek_h
+            # As tall as its text: in the mini player the font floor outgrows 1.6u.
+            times_h = max(float(un.px(1.6)), QFontMetricsF(self._times_font(un)).height())
+            seek_y = row_top - un.px(1.2) - times_h - seek_h
             rects["seek"] = QRectF(left, seek_y, right - left, seek_h)
-            rects["times"] = QRectF(left, seek_y + seek_h, right - left, un.px(1.6))
+            rects["times"] = QRectF(left, seek_y + seek_h, right - left, times_h)
         cy = row_top + big / 2
         x = float(left)
 
@@ -427,7 +433,7 @@ class Transport(Overlay):
         if tl is None or span <= 0:
             return []
         fm = QFontMetricsF(self._tick_font(un))
-        label_h = un.px(1.5)
+        label_h = max(float(un.px(1.5)), fm.height())
         top = seek.center().y() - un.px(1.5) / 2 - un.px(0.3) - label_h
         gap = un.px(0.8)
         taken = -math.inf  # right edge of the last label drawn
@@ -527,7 +533,7 @@ class Transport(Overlay):
 
     def _paint_times(self, p: QPainter, un: Units, rects: dict[str, QRectF]) -> None:
         first, second = self.texts()
-        p.setFont(un.font(1.25))
+        p.setFont(self._times_font(un))
         p.setPen(qcolor(PALETTE.text, 0.8))
         times = rects["times"]
         p.drawText(times, Qt.AlignVCenter | Qt.AlignLeft, first)
@@ -615,7 +621,7 @@ class Transport(Overlay):
         label = self._wall(self._shown_lag()).strftime("%H:%M:%S")
         p.setFont(un.font(1.05, QFont.Weight.Bold))
         w = p.fontMetrics().horizontalAdvance(label) + 2 * un.px(0.6)
-        h = un.px(2.1)
+        h = max(float(un.px(2.1)), p.fontMetrics().height())
         x = min(max(kc.x() - w / 2, seek.x()), seek.right() - w)
         bubble = QRectF(x, seek.center().y() - un.px(2.7) - h, w, h)
         p.save()

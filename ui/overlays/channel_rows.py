@@ -239,3 +239,9 @@ class ChannelListView(QListView):
             event.ignore()  # Back/Forward are the shell's: not a row selection
             return
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() in NAV_BUTTONS:
+            event.ignore()  # a quick second Back/Forward is one more press for the shell
+            return
+        super().mouseDoubleClickEvent(event)

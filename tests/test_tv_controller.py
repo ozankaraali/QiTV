@@ -1143,6 +1143,16 @@ class BottomOverlayTests(ControllerTestCase):
         self.assertTrue(self.banner.isVisible())
         self.assertFalse(self.transport.isVisible())
 
+    def test_a_vod_start_replaces_the_banner_with_the_transport(self):
+        self.play(0)
+        self.assertTrue(self.banner.isVisible())  # the live tune's banner
+        self.nav.reset_to("movies")
+        movie = NavNode("item", "m7", "Heat", VodTests.MOVIE)
+        self.controller.play_item(movie, [movie], NavNode("group", "5", "Films"))
+        self.ready("http://vod/heat.mkv")
+        self.assertTrue(self.transport.isVisible())
+        self.assertFalse(self.banner.isVisible())
+
     def test_a_media_key_zap_keeps_the_transport(self):
         self.play(0)
         self.clock.now += 5

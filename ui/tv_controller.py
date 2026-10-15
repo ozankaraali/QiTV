@@ -548,6 +548,7 @@ class TVController(QObject):
             self._reset_speed()
             if start:
                 self._toast(f"Resumed at {fmt_duration(start)}")
+            self.overlays.banner.dismiss()  # the transport takes the bottom of the video
             self.overlays.transport.show_vod(target.title, target.subtitle)
         if target.live:
             self.zap.tuned(item)

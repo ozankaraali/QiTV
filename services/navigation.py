@@ -480,10 +480,13 @@ class NavModel(QObject):
         self._fail(("episodes", series_id, season_id), message)
 
     def _on_provider_failed(self, name: str, message: str) -> None:
-        # Requests made for the setup's provider will never settle: none is loading now.
+        # Requests made for the setup's provider will never settle: none is loading now,
+        # and a request refused because the setup ran is not loading either.
         self._events += 1
         self._pending.clear()
         self._requested_sections.clear()
+        for key in [k for k, m in self._errors.items() if m == PROVIDER_LOADING_MESSAGE]:
+            del self._errors[key]
         self._provider_errors[name] = message or "Couldn't connect"
         self.changed.emit()
 

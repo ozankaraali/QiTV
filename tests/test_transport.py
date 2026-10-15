@@ -4,10 +4,11 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QFontMetricsF, QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
+from ui.overlays.painting import Units
 from ui.overlays.transport import Transport
 
 
@@ -275,6 +276,37 @@ def wait_until(predicate, timeout_ms=2000):
         QTest.qWait(10)
         waited += 10
     return predicate()
+
+
+class MiniPlayerLayoutTests(unittest.TestCase):
+    """At a mini player's 360 px the font floor (11 px) is taller than the unit-sized rows."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_the_time_labels_clear_the_seek_line_and_the_buttons(self):
+        t = Transport(idle_ms=3000)
+        self.addCleanup(t.close)
+        t.setGeometry(0, 0, 360, 202)
+        t.show_vod("Film", "")
+        t.update_position(60_000, 600_000)
+        rects = t._layout()
+        text_h = QFontMetricsF(t._times_font(Units(360))).height()
+        times, seek, play = rects["times"], rects["seek"], rects["play"]
+        self.assertGreaterEqual(times.height(), text_h)
+        self.assertGreaterEqual(times.top(), seek.bottom())  # below the seek line
+        self.assertLessEqual(times.bottom(), play.top())  # above the buttons
+        self.assertFalse(t.grab().isNull())
+
+    def test_a_large_transport_keeps_its_unit_layout(self):
+        t = Transport(idle_ms=3000)
+        self.addCleanup(t.close)
+        t.setGeometry(0, 0, 1280, 720)
+        t.show_vod("Film", "")
+        t.update_position(60_000, 600_000)
+        times = t._layout()["times"]
+        self.assertEqual(round(times.height()), Units(1280).px(1.6))
 
 
 class HostSizingTests(unittest.TestCase):

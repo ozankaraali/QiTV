@@ -301,10 +301,6 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.opened, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class HostedDrawerInputTests(unittest.TestCase):
     """Wheel and clicks over the drawer stay in it: the overlay host behind would zap or
     toggle the drawer (real widgets in a real OverlayHost; QTest's window events propagate
@@ -376,3 +372,14 @@ class HostedDrawerInputTests(unittest.TestCase):
         self.assertFalse(self.drawer.isVisible())
         self.assertEqual(self.closed, [True])
         self.assertEqual(self.events, [])  # closed once, not toggled open again
+
+    def test_a_quick_second_back_over_the_rows_counts(self):
+        backs = []
+        self.host.backPressed.connect(lambda: backs.append(True))
+        over_rows = self.drawer._columns["right"].view.geometry().center()
+        QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.BackButton, pos=over_rows)
+        self.assertEqual(len(backs), 2)  # two presses, not a double-click on a row
+
+
+if __name__ == "__main__":
+    unittest.main()

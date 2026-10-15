@@ -422,6 +422,17 @@ class NavModelTests(unittest.TestCase):
         self.assertFalse(self.nav.is_loading(movies))
         self.assertEqual(self.nav.load_error(movies), "Timed out")
 
+    def test_a_provider_failure_ends_a_section_left_loading_by_its_setup(self):
+        self.nav.reset_to("live")
+        section = self.nav.path[-1]
+        self.catalog.loading = True
+        self.catalog.sectionFailed.emit("live", PROVIDER_LOADING_MESSAGE)
+        self.assertTrue(self.nav.is_loading(section))
+        self.catalog.loading = False
+        self.catalog.providerFailed.emit("Home", "Couldn't reach the provider")
+        self.assertFalse(self.nav.is_loading(section))  # not "Loading…" for good
+        self.assertIn("10", [n.key for n in self.nav.children(section)])  # the saved groups
+
     def test_everything_is_loading_while_a_provider_sets_up(self):
         self.nav.reset_to("live")
         self.catalog.sectionReady.emit("live")
