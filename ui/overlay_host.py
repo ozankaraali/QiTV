@@ -114,12 +114,15 @@ class OverlayHost(QWidget):
             self.sync_geometry()
             if not self.isVisible():
                 self.show()
-                self.raise_()
                 # On every show: macOS drops a child window from its parent when the child
-                # is ordered out.
+                # is ordered out. A child is ordered above its parent: no raise there, since
+                # on macOS raise_() activates QiTV, and an overlay shown over the inactive
+                # window (a wheel zap's banner) must not take the focus from another app.
                 native_id = int(self.winId())
                 if attach_child_window(self._window, self):
                     self._attached_id = native_id
+                else:
+                    self.raise_()
         elif self.isVisible():
             self.hide()
 

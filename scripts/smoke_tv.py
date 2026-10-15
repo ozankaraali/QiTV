@@ -117,13 +117,18 @@ def child_window_check(when: str) -> str:
     return f"{OVERLAY_PREFIX}host is a child window of the TV window {when}"
 
 
+def panel_check(when: str) -> str:
+    """macOS: overlays show while QiTV is inactive, and never float over other apps."""
+    return f"{OVERLAY_PREFIX}host stays up while QiTV is inactive, at the window's level {when}"
+
+
 def gate_checks(cocoa: bool) -> list[str]:
     """Every check the overlay gate needs, by name."""
     names = list(WINDOW_CHANGES)
     for when in GLUE_STEPS:
         names.append(glue_check(when))
         if cocoa:
-            names.append(child_window_check(when))
+            names += [child_window_check(when), panel_check(when)]
     return names + [MINIMIZED_CHECK, CLOSED_CHECK]
 
 
@@ -362,6 +367,17 @@ def _cocoa_miniaturized(widget: Any) -> bool:
     return bool(_send(_ns_window(widget), b"isMiniaturized", ctypes.c_bool))
 
 
+def _cocoa_panel(child: Any, parent: Any) -> tuple[bool, int, int]:
+    """(hidesOnDeactivate, level) of the child's NSWindow, and the parent's level."""
+    window = _ns_window(child)
+    hides = bool(_send(window, b"hidesOnDeactivate", ctypes.c_bool))
+    return (
+        hides,
+        _send(window, b"level", ctypes.c_long),
+        _send(_ns_window(parent), b"level", ctypes.c_long),
+    )
+
+
 class Resyncs:
     """Records each overlay show or hide: each one re-syncs the host to the surface.
 
@@ -555,6 +571,12 @@ class Driver:
         )
         if self.cocoa:
             self.report.check(child_window_check(when), _cocoa_child_window_of(host, self.window))
+            hides, level, window_level = _cocoa_panel(host, self.window)
+            self.report.check(
+                panel_check(when),
+                not hides and level == window_level,
+                f"hidesOnDeactivate {hides}, level {level}, window level {window_level}",
+            )
 
     def _capture(self, name: str) -> None:
         """The overlay host's own rendering over black: no screen-capture permission needed."""
