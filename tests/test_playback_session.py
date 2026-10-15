@@ -229,7 +229,10 @@ class PlaybackSessionTests(unittest.TestCase):
         session.play(f"http://127.0.0.1:{server.server_address[1]}/live.ts", kind=PlayKind.LIVE)
         self.assertTrue(wait_for(lambda: session.state() is PlaybackState.ERROR, 4000))
         self.assertEqual(errors, ["Timed out opening the stream"])
-        QTest.qWait(2500)  # the slow answer has arrived by now
+        # libVLC is stopped on a worker. Wait in short steps: one long QTest.qWait holds the
+        # GIL throughout, so neither that worker nor the slow server's thread could run.
+        self.assertTrue(wait_for(lambda: session._job is None, 6000))
+        wait_for(lambda: False, 2500)  # the slow answer has arrived by now
         self.assertIsNone(session._player.get_media())
         self.assertNotIn(
             session._player.get_state(), (vlc.State.Opening, vlc.State.Playing, vlc.State.Buffering)
