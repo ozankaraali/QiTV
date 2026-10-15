@@ -17,6 +17,9 @@ class FakeCatalog(QObject):
     groupReady = Signal(str, str)
     seasonsReady = Signal(str)
     episodesReady = Signal(str, str)
+    groupFailed = Signal(str, str, str)
+    seasonsFailed = Signal(str, str)
+    episodesFailed = Signal(str, str, str)
 
     def __init__(self):
         super().__init__()
@@ -28,6 +31,12 @@ class FakeCatalog(QObject):
         }
         self.movies = {}
         self.season_map = {}
+        self.ptype = "STB"
+        self.items_calls = 0
+        self.loaded = True
+
+    def provider_type(self):
+        return self.ptype
 
     def provider_names(self):
         return ["Home", "Backup"]
@@ -45,11 +54,14 @@ class FakeCatalog(QObject):
         self.requests.append(("section", section))
 
     def groups(self, section):
+        if not self.loaded:
+            return []
         if section == "live":
             return [Group("live", "10", "News", 2)]
         return [Group(section, "5", "Films", None)]
 
     def items(self, section, group_id):
+        self.items_calls += 1
         if section == "live":
             return self.live.get(group_id) if group_id != "*" else self.live["10"]
         return self.movies.get(group_id)
@@ -170,6 +182,87 @@ class NavModelTests(unittest.TestCase):
         self.nav.open(self.nav.children(home)[0])
         self.assertTrue(self.nav.up())
         self.assertFalse(self.nav.up())
+
+    def _series_nav(self):
+        self.nav.reset_to("series", "5")
+        return NavNode("item", "s1", "Show", {"id": "s1", "name": "Show"})
+
+    def test_stb_episodes_have_distinct_keys_and_titles(self):
+        from services.navigation import _item_node
+
+        base = {"id": "s1", "name": "Show", "cmd": "c"}
+        e1 = _item_node({**base, "number": "1", "ename": "Episode 1", "series": 1}, "episode")
+        e2 = _item_node({**base, "number": "2", "ename": "Episode 2", "series": 2}, "episode")
+        self.assertNotEqual(e1, e2)
+        self.assertEqual([e1.title, e2.title], ["Episode 1", "Episode 2"])
+        x1 = _item_node({"id": 11, "name": "Pilot"}, "episode")
+        x2 = _item_node({"id": 12, "name": "Second"}, "episode")
+        self.assertNotEqual(x1, x2)
+        self.assertEqual([x1.title, x2.title], ["Pilot", "Second"])
+
+    def test_loading_series_requests_once(self):
+        series = self._series_nav()
+        for _ in range(3):
+            self.assertIsNone(self.nav.children(series))
+        self.assertEqual(self.catalog.requests.count(("seasons", "s1")), 1)
+
+    def test_failure_stops_requests_until_retry(self):
+        series = self._series_nav()
+        self.nav.children(series)
+        changes = []
+        self.nav.changed.connect(lambda: changes.append(1))
+        self.catalog.seasonsFailed.emit("s1", "boom")
+        self.assertEqual(changes, [1])
+        self.assertEqual(self.nav.load_error(series), "boom")
+        self.assertEqual(self.nav.children(series), [])
+        self.assertEqual(self.catalog.requests.count(("seasons", "s1")), 1)
+        self.nav.retry(series)
+        self.assertIsNone(self.nav.load_error(series))
+        self.assertIsNone(self.nav.children(series))
+        self.assertEqual(self.catalog.requests.count(("seasons", "s1")), 2)
+
+    def test_group_failure_and_provider_reset_clear_errors(self):
+        self.nav.reset_to("movies")
+        films = [n for n in self.nav.children(self.nav.path[-1]) if n.key == "5"][0]
+        self.nav.children(films)
+        self.catalog.groupFailed.emit("movies", "5", "bad")
+        self.assertEqual(self.nav.load_error(films), "bad")
+        self.catalog.providerReady.emit("Home")
+        self.assertIsNone(self.nav.load_error(films))
+
+    def test_non_stb_unloaded_group_requests_section(self):
+        self.catalog.ptype = "XTREAM"
+        self.nav.reset_to("movies")
+        films = [n for n in self.nav.children(self.nav.path[-1]) if n.key == "5"][0]
+        before = self.catalog.requests.count(("section", "movies"))
+        self.assertIsNone(self.nav.children(films))
+        self.assertEqual(self.catalog.requests.count(("section", "movies")), before + 1)
+        self.assertNotIn(("group", "movies", "5"), self.catalog.requests)
+
+    def test_reset_to_waits_for_unloaded_group(self):
+        self.catalog.loaded = False
+        self.nav.reset_to("live", "10")
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section"])
+        self.catalog.loaded = True
+        changes = []
+        self.nav.changed.connect(lambda: changes.append(1))
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section", "group"])
+        self.assertEqual(self.nav.path[-1].title, "News")
+        self.assertTrue(changes)
+
+    def test_pinned_groups_are_memoized(self):
+        home = self.nav.children(None)[0]
+        self.nav.open(home)
+        live = self.nav.children(home)[0]
+        self.nav.open(live)
+        self.nav.children(live)
+        calls = self.catalog.items_calls
+        self.nav.children(live)
+        self.assertEqual(self.catalog.items_calls, calls)
+        self.config.favorites = []
+        groups = self.nav.children(live)
+        self.assertNotIn(FAVORITES_GROUP, [n.key for n in groups])
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from PySide6.QtCore import QObject, Signal
 
@@ -36,9 +36,20 @@ def _item_key(item: dict) -> str:
 
 
 def _item_node(item: dict, layer: str = "item") -> NavNode:
-    return NavNode(
-        layer, _item_key(item), str(item.get("name") or item.get("title") or "Untitled"), item
-    )
+    key = _item_key(item)
+    title = item.get("name") or item.get("title")
+    if layer == "episode":
+        # STB episodes copy the series dict, so id/name belong to the series
+        key = ":".join(
+            str(v)
+            for v in (
+                item.get("id", ""),
+                item.get("season_id") or item.get("season") or "",
+                item.get("series") or item.get("episode_num") or item.get("number") or "",
+            )
+        )
+        title = item.get("ename") or title
+    return NavNode(layer, key, str(title or "Untitled"), item)
 
 
 class NavModel(QObject):
@@ -49,13 +60,18 @@ class NavModel(QObject):
         self.catalog = catalog
         self.config = config
         self._path: list[NavNode] = []
-        for signal in (
-            catalog.sectionReady,
-            catalog.groupReady,
-            catalog.seasonsReady,
-            catalog.episodesReady,
-        ):
-            signal.connect(self._emit_changed)
+        self._pending: set[tuple] = set()
+        self._errors: dict[tuple, str] = {}
+        self._pending_group: Optional[tuple[str, str]] = None
+        self._memo: dict[str, Any] = {}
+        self._fingerprint: Optional[tuple] = None
+        catalog.sectionReady.connect(self._on_section_ready)
+        catalog.groupReady.connect(self._on_group_ready)
+        catalog.seasonsReady.connect(self._on_seasons_ready)
+        catalog.episodesReady.connect(self._on_episodes_ready)
+        catalog.groupFailed.connect(self._on_group_failed)
+        catalog.seasonsFailed.connect(self._on_seasons_failed)
+        catalog.episodesFailed.connect(self._on_episodes_failed)
         catalog.providerReady.connect(self._on_provider_ready)
 
     @property
@@ -95,8 +111,10 @@ class NavModel(QObject):
         if parent.layer == "item" and self.section_of(parent) == "series":
             seasons = self.catalog.seasons(parent.payload)
             if seasons is None:
-                self.catalog.request_seasons(parent.payload)
-                return None
+                sid = _item_key(parent.payload)
+                return self._load(
+                    ("seasons", sid), lambda: self.catalog.request_seasons(parent.payload)
+                )
             return [_item_node(s, "season") for s in seasons]
         if parent.layer == "season":
             series = next((n for n in reversed(self._path) if n.layer == "item"), None)
@@ -104,8 +122,10 @@ class NavModel(QObject):
                 return []
             episodes = self.catalog.episodes(series.payload, parent.payload)
             if episodes is None:
-                self.catalog.request_episodes(series.payload, parent.payload)
-                return None
+                key = ("episodes", _item_key(series.payload), _item_key(parent.payload))
+                return self._load(
+                    key, lambda: self.catalog.request_episodes(series.payload, parent.payload)
+                )
             return [_item_node(e, "episode") for e in episodes]
         return []
 
@@ -117,9 +137,44 @@ class NavModel(QObject):
         section = self.section_of(group) or "live"
         items = self.catalog.items(section, group.key)
         if items is None:
-            self.catalog.request_group(section, group.key)
-            return None
+            key = self._node_key(group)
+            if key and key[0] == "group":
+                return self._load(key, lambda: self.catalog.request_group(section, group.key))
+            return self._load(("section", section), lambda: self.catalog.request_section(section))
         return [_item_node(i) for i in items]
+
+    def _load(self, key: tuple, request) -> Optional[list[NavNode]]:
+        if key in self._errors:
+            return []
+        if key not in self._pending:
+            self._pending.add(key)
+            request()
+        return None
+
+    def _node_key(self, node: NavNode) -> Optional[tuple]:
+        if node.layer == "group":
+            section = self.section_of(node) or "live"
+            if self.catalog.provider_type() == "STB":
+                return ("group", section, node.key)
+            return ("section", section)
+        if node.layer == "item":
+            return ("seasons", node.key)
+        if node.layer == "season":
+            series = next((n for n in reversed(self._path) if n.layer == "item"), None)
+            return ("episodes", series.key, node.key) if series else None
+        return None
+
+    def load_error(self, node: NavNode) -> Optional[str]:
+        key = self._node_key(node)
+        return self._errors.get(key) if key else None
+
+    def retry(self, node: NavNode) -> None:
+        key = self._node_key(node)
+        if key is None:
+            return
+        self._errors.pop(key, None)
+        self._pending.discard(key)
+        self.changed.emit()
 
     def _all_live_items(self) -> list[dict]:
         seen, result = set(), []
@@ -131,11 +186,34 @@ class NavModel(QObject):
                     result.append(item)
         return result
 
+    def _check_memo(self) -> None:
+        history = self.config.watch_history or []
+        fingerprint = (
+            tuple(self.config.favorites or []),
+            len(history),
+            repr(history[0]) if history else None,
+        )
+        if fingerprint != self._fingerprint:
+            self._fingerprint = fingerprint
+            self._memo.clear()
+
     def _favorite_items(self) -> list[dict]:
+        self._check_memo()
+        if "fav" not in self._memo:
+            self._memo["fav"] = self._compute_favorites()
+        return cast(list[dict], self._memo["fav"])
+
+    def _recent_items(self) -> list[dict]:
+        self._check_memo()
+        if "recent" not in self._memo:
+            self._memo["recent"] = self._compute_recent()
+        return cast(list[dict], self._memo["recent"])
+
+    def _compute_favorites(self) -> list[dict]:
         names = set(self.config.favorites or [])
         return [i for i in self._all_live_items() if i.get("name") in names] if names else []
 
-    def _recent_items(self) -> list[dict]:
+    def _compute_recent(self) -> list[dict]:
         provider = self.catalog.current_provider_name()
         seen, result = set(), []
         for entry in self.config.watch_history or []:
@@ -151,6 +229,12 @@ class NavModel(QObject):
         return result
 
     def _pinned_groups(self) -> list[NavNode]:
+        self._check_memo()
+        if "pinned" not in self._memo:
+            self._memo["pinned"] = self._compute_pinned()
+        return list(self._memo["pinned"])
+
+    def _compute_pinned(self) -> list[NavNode]:
         pinned = []
         favorites = self._favorite_items()
         if favorites:
@@ -189,13 +273,27 @@ class NavModel(QObject):
         source = self._source()
         section_node = NavNode("section", section, SECTION_TITLES.get(section, section), section)
         self._path = [source, section_node]
+        self._pending_group = None
         self.catalog.request_section(section)
-        if group_id is not None:
-            group = next((g for g in self.children(section_node) or [] if g.key == group_id), None)
-            self._path.append(group or NavNode("group", group_id, group_id))
+        if group_id is not None and not self._resolve_group(section, group_id):
+            self._pending_group = (section, group_id)
         self.changed.emit()
 
-    def columns(self):
+    def _resolve_group(self, section: str, group_id: str) -> bool:
+        if len(self._path) != 2 or self._path[1].key != section:
+            return False
+        group = next((g for g in self.children(self._path[1]) or [] if g.key == group_id), None)
+        if group is None:
+            return False
+        self._path.append(group)
+        return True
+
+    def columns(
+        self,
+    ) -> tuple[
+        tuple[Optional[NavNode], Optional[list[NavNode]]],
+        tuple[Optional[NavNode], Optional[list[NavNode]]],
+    ]:
         if not self._path:
             return (None, self.children(None)), (None, None)
         left_parent = self._path[-2] if len(self._path) >= 2 else None
@@ -206,10 +304,48 @@ class NavModel(QObject):
         )
 
     # --- catalog events ------------------------------------------------------------------
-    def _emit_changed(self, *args) -> None:
+    def _settled(self, key: tuple) -> None:
+        self._memo.clear()
+        self._pending.discard(key)
         self.changed.emit()
 
+    def _on_section_ready(self, section: str) -> None:
+        self._memo.clear()
+        self._pending.discard(("section", section))
+        if self._pending_group and self._pending_group[0] == section:
+            if self._resolve_group(*self._pending_group):
+                self._pending_group = None
+        self.changed.emit()
+
+    def _on_group_ready(self, section: str, group_id: str) -> None:
+        self._settled(("group", section, group_id))
+
+    def _on_seasons_ready(self, series_id: str) -> None:
+        self._settled(("seasons", series_id))
+
+    def _on_episodes_ready(self, series_id: str, season_id: str) -> None:
+        self._settled(("episodes", series_id, season_id))
+
+    def _fail(self, key: tuple, message: str) -> None:
+        logger.info("Load failed for %s: %s", key, message)
+        self._pending.discard(key)
+        self._errors[key] = message or "Load failed"
+        self.changed.emit()
+
+    def _on_group_failed(self, section: str, group_id: str, message: str) -> None:
+        self._fail(("group", section, group_id), message)
+
+    def _on_seasons_failed(self, series_id: str, message: str) -> None:
+        self._fail(("seasons", series_id), message)
+
+    def _on_episodes_failed(self, series_id: str, season_id: str, message: str) -> None:
+        self._fail(("episodes", series_id, season_id), message)
+
     def _on_provider_ready(self, name: str) -> None:
+        self._memo.clear()
+        self._pending.clear()
+        self._errors.clear()
+        self._pending_group = None
         if not self._path or self._path[0].key != name:
             self._path = [self._source()]
         self.changed.emit()
