@@ -204,6 +204,18 @@ class RoomTests(unittest.TestCase):
         stay.user_go_live()  # Go live lands at the target less a quarter second at most
         self.assertEqual(self.rates(stay, (9.75, 9.9)), [1.0, 1.0])
 
+    def test_a_source_that_turns_steady_while_slowing_plays_at_normal_speed(self):
+        stay = self.live(burst=6.0, target=6.0)
+        self.assertEqual(self.rates(stay, (4.0,)), [0.95])
+        stay.target, stay.burst = T, 0.0  # steady after all: the latency's target
+        self.assertEqual(self.rates(stay, (T + 0.5,)), [1.0])  # not 0.95 in the hold band
+
+    def test_a_smaller_burst_while_slowing_plays_at_normal_speed(self):
+        stay = self.live()
+        self.assertEqual(self.rates(stay, (8.0,)), [0.95])
+        stay.target, stay.burst = 4.0, 4.0
+        self.assertEqual(self.rates(stay, (4.5,)), [1.0])
+
     def test_a_catch_up_settles_above_the_room_and_never_slows(self):
         stay = self.live()
         lags = (14.0, 12.0, 10.2, 10.1, 10.0)

@@ -109,7 +109,9 @@ class StayLive:
             self._rate = _SLOW  # under half a burst of room: build it
         elif self._rate == _SLOW and lag_s < self.burst:
             pass  # still building it
-        elif lag_s <= self.target + _SETTLE:
+        elif lag_s <= self.target + _SETTLE or self._rate == _SLOW:
+            # Built, or no longer needed (the burst shrank, or the source turned steady):
+            # the 1.05 hold band above the target never keeps a slow-down.
             self._rate = 1.0
         return Decision(self._rate)
 
