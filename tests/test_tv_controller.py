@@ -1911,7 +1911,7 @@ class PipelineTuneTests(PipelineCase):
         self.play(0)
         QTest.qWait(30)
         self.assertEqual(
-            self.toast.messages(), [("Your provider allows 1 streams at a time", "error")]
+            self.toast.messages(), [("Your provider allows 1 stream at a time", "error")]
         )
         self.assertEqual(self.live.calls, [])
         self.assertEqual(self.budget.holders("Home"), ["pip"])
@@ -2075,20 +2075,26 @@ class SlotWaitTests(PipelineCase):
 
 
 class StreamLimitTests(PipelineCase):
-    def test_a_refusal_names_the_limit_once_the_stb_link_was_made_again(self):
+    def test_a_stream_limit_refusal_is_never_retried(self):
+        # Spec §9: the limit is reached; asking again (not even an STB fresh link) would only
+        # be refused again, or take a slot another device of the user's holds.
         self.start_pipeline(0)
         self.live.failed.emit(STREAM_LIMIT)
-        self.assertEqual(self.requested(), ["One", "One"])  # an STB token first
-        self.ready("http://stream/1?token=new")
-        self.live.released.emit()
-        self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
-        self.live.failed.emit(STREAM_LIMIT)
+        self.assertEqual(self.requested(), ["One"])  # no new link
         self.assertEqual(
-            self.toast.messages(), [("Your provider allows 1 streams at a time", "error")]
+            self.toast.messages(), [("Your provider allows 1 stream at a time", "error")]
         )
         self.assertEqual(self.live.calls[-1], ("stop",))  # its slot goes back
         self.live.released.emit()
         self.assertEqual(self.budget.holders("Home"), [])
+
+    def test_a_limit_above_one_says_streams(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
+        self.start_pipeline(0)
+        self.live.failed.emit(STREAM_LIMIT)
+        self.assertEqual(
+            self.toast.messages(), [("Your provider allows 2 streams at a time", "error")]
+        )
 
     def test_an_unknown_limit_is_said_plainly(self):
         self.catalog.ptype = "M3UPLAYLIST"
@@ -2119,7 +2125,7 @@ class StreamLimitTests(PipelineCase):
             self.toast.messages(),
             [
                 (
-                    "The provider refused the stream — it may allow only 1 streams at a time",
+                    "The provider refused the stream — it may allow only 1 stream at a time",
                     "error",
                 ),
                 ("The provider refused the stream — it may limit concurrent streams", "error"),
@@ -2128,7 +2134,7 @@ class StreamLimitTests(PipelineCase):
 
     def test_a_refusal_whose_new_link_fails_ends_the_tune(self):
         self.start_pipeline(0)
-        self.refuse(STREAM_LIMIT)
+        self.refuse(STREAM_REFUSED)  # a plain 403 may be an expired STB token: one new link
         self.assertEqual(self.requested(), ["One", "One"])
         self.assertEqual(self.live.calls[-1], ("stop",))  # ended before the new link
         self.live.released.emit()

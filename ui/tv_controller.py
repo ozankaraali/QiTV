@@ -50,7 +50,7 @@ from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
 from services.live.live_session import UNAVAILABLE, LiveSession
-from services.live.source import REFUSALS, STREAM_REFUSED
+from services.live.source import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
 from services.next_episode import play_context
 from services.redact import safe_traceback
@@ -95,6 +95,10 @@ _VOLUME_MODIFIERS = (
 _PINNED_TITLES = {FAVORITES_GROUP: "Favorites", RECENT_GROUP: "Recent"}
 _ADDRESS = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S*", re.IGNORECASE)
 _QUERY = re.compile(r"\S*\?\S*=\S*")  # a query string carries "=": "Who?Me" stays
+
+
+def _streams(count: int) -> str:
+    return f"{count} stream" if count == 1 else f"{count} streams"
 
 
 def scrub(text: object) -> str:
@@ -930,7 +934,7 @@ class TVController(QObject):
         )
 
     def _limit_text(self, limit: Optional[int]) -> str:
-        return f"Your provider allows {limit} streams at a time" if limit else LIMITED_TEXT
+        return f"Your provider allows {_streams(limit)} at a time" if limit else LIMITED_TEXT
 
     def _tune_pipeline(self, target: Target, url: str) -> bool:
         """Ask for a budget slot for `target` (spec §6.9); it starts once the old one is released.
@@ -1036,6 +1040,12 @@ class TVController(QObject):
         if self._closed:
             return
         current = self._current
+        if message == STREAM_LIMIT:
+            # Never asked again (spec §9), not even with a fresh STB link: the limit is
+            # reached, and a retry would only be refused or take another device's slot.
+            self._stop_tune()  # nothing plays: its slot goes back
+            self._toast(self._refusal_text(message), "error", ERROR_MS)
+            return
         if current is not None and self._may_retry(current):
             self._retry(current)  # STB play tokens expire: a fresh link before the error
             return
@@ -1051,7 +1061,7 @@ class TVController(QObject):
         if message != STREAM_REFUSED:
             return self._limit_text(limit)
         if limit:
-            return f"{REFUSED_TEXT} allow only {limit} streams at a time"
+            return f"{REFUSED_TEXT} allow only {_streams(limit)} at a time"
         return f"{REFUSED_TEXT} limit concurrent streams"
 
     def _seek_relative_ms(self, delta_ms: int) -> None:
