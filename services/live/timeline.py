@@ -9,12 +9,15 @@ timeline stays monotone and nothing is aborted.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import List, Optional, Tuple
 
 PTS_TICKS_PER_SECOND = 90_000
 _PTS_MODULUS = 1 << 33
 _MIN_WALL_DURATION = 0.04
 _FORCED_CUT = 10.0
+
+log = logging.getLogger(__name__)
 
 
 def _pts_delta(a: int, b: int) -> int:
@@ -47,26 +50,41 @@ class Timeline:
         self._spans: List[Span] = []
         self._end = 0.0
         self._open: Optional[_Open] = None
+        self._next_seq = 0
+        self._max_edge = 0.0
 
     # -- segment lifecycle -------------------------------------------------
     def on_opened(
         self, seq: int, first_pts: Optional[int], wall: float, discontinuity: bool
     ) -> None:
+        if self._open is not None:
+            log.warning("segment %r opened while %r was still open", seq, self._open.seq)
+            self._close(self._open, None, wall, force_discontinuity=True)
         self._open = _Open(seq, first_pts, wall, discontinuity)
 
     def on_closed(self, seq: int, next_first_pts: Optional[int], wall: float) -> Span:
+        """Close the open segment ``seq``; raises ValueError if it is not the open one."""
         opened = self._open
         if opened is None or opened.seq != seq:
             raise ValueError("segment %r is not open" % seq)
+        return self._close(opened, next_first_pts, wall)
+
+    def _close(
+        self, opened: _Open, next_first_pts: Optional[int], wall: float, force_discontinuity=False
+    ) -> Span:
         limit = 5 * self._target
         duration = self._pts_seconds(opened.first_pts, next_first_pts)
-        discontinuity = opened.discontinuity
-        if duration is None or duration <= 0 or duration > limit:
-            duration = min(max(wall - opened.wall, _MIN_WALL_DURATION), limit)
+        discontinuity = opened.discontinuity or force_discontinuity
+        if duration is None or duration < 0 or duration > limit:
             discontinuity = True
-        span = Span(seq, self._end, self._end + duration, discontinuity)
+            duration = None
+        if duration is None or duration == 0:
+            # Equal stamps are not a reset, but carry no duration: use wall time.
+            duration = min(max(wall - opened.wall, _MIN_WALL_DURATION), limit)
+        span = Span(opened.seq, self._end, self._end + duration, discontinuity)
         self._spans.append(span)
         self._end = span.end
+        self._next_seq = opened.seq + 1
         self._open = None
         return span
 
@@ -94,18 +112,25 @@ class Timeline:
         return self._spans[-1].seq if self._spans else None
 
     def live_edge(self, latest_pts: Optional[int], now_wall: float) -> float:
+        """Buffered end plus open-segment progress; never decreases between calls."""
+        edge = self._end
         opened = self._open
-        if opened is None:
-            return self._end
-        progress = self._pts_seconds(opened.first_pts, latest_pts)
-        if progress is None or progress < 0 or progress > _FORCED_CUT:
-            progress = now_wall - opened.wall
-        return self._end + min(max(progress, 0.0), _FORCED_CUT)
+        if opened is not None:
+            progress = self._pts_seconds(opened.first_pts, latest_pts)
+            if progress is None or progress < 0 or progress > _FORCED_CUT:
+                progress = now_wall - opened.wall
+            edge += min(max(progress, 0.0), _FORCED_CUT)
+        self._max_edge = max(self._max_edge, edge)
+        return self._max_edge
 
-    def locate(self, t: float) -> Tuple[int, float]:
-        """Segment seq and in-segment offset for ``t``, clamped to the buffer."""
+    def locate(self, t: float) -> Optional[Tuple[int, float]]:
+        """Segment seq and in-segment offset for ``t``, clamped to the closed spans.
+
+        None when nothing is closed yet. The open segment is not addressable, so
+        ``locate(live_edge(...))`` lands on the last closed span's end.
+        """
         if not self._spans:
-            raise LookupError("timeline is empty")
+            return None
         t = min(max(t, self.start), self._end)
         for span in self._spans:
             if t < span.end:
@@ -120,7 +145,7 @@ class Timeline:
                 return span.seq
         if self._open is not None:
             return self._open.seq
-        return self._spans[-1].seq + 1 if self._spans else 0
+        return self._next_seq
 
     @staticmethod
     def _pts_seconds(a: Optional[int], b: Optional[int]) -> Optional[float]:

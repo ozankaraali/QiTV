@@ -34,6 +34,7 @@ class StayLive:
         self.target = TARGETS[latency]
         self._rate = 1.0  # last rate decided in LIVE
         self._user_rate = 1.0
+        self._reopened = False
 
     def set_latency(self, name: str) -> None:
         self.target = TARGETS[name]
@@ -48,14 +49,22 @@ class StayLive:
         self.mode = Mode.LIVE
         self._rate = 1.0
         self._user_rate = 1.0
+        self._reopened = False
 
     def user_speed(self, rate: float) -> None:
+        if rate <= 0:
+            raise ValueError("rate must be positive")
         if self.mode is Mode.LIVE:
             return
         self._user_rate = rate
         self.mode = Mode.CATCHING_UP if rate > 1 else Mode.SHIFTED
 
     def update(self, lag_s: float, buffering: bool) -> Decision:
+        """Decide the rate for the measured lag.
+
+        ``reopen_live`` is edge-triggered: once True is returned, later updates return
+        False (rate 1.0) until the caller reopens and calls ``user_go_live()``.
+        """
         if self.mode is Mode.SHIFTED:
             return Decision(self._user_rate)
         if self.mode is Mode.CATCHING_UP:
@@ -67,6 +76,9 @@ class StayLive:
             return Decision(self._rate)
         if lag_s > self.target + _REOPEN:
             self._rate = 1.0
+            if self._reopened:
+                return Decision(1.0)
+            self._reopened = True
             return Decision(1.0, reopen_live=True)
         if lag_s > self.target + _PUSH:
             self._rate = 1.10
