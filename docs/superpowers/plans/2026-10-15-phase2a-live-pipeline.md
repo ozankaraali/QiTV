@@ -421,7 +421,7 @@ Everything is tested headless.
   4. sends `("hello", base_url)`;
   5. loops on `conn.poll(0.1)`.
 - **Commands (parent to helper):**
-  - `("open", sid: str, url: str, headers: dict, verify_ssl: bool, ring: dict)`, where `ring` is `{"kind": "ram", "max_bytes": int}` or `{"kind": "disk", "root": str, "dir": str, "max_bytes": int}`;
+  - `("open", sid: str, url: str, headers: dict, verify_ssl: bool, ring: dict, live_delay: float)`, where `ring` is `{"kind": "ram", "max_bytes": int}` or `{"kind": "disk", "root": str, "dir": str, "max_bytes": int}`;
   - `("close", sid)`;
   - `("shutdown",)`.
 - **Messages (helper to parent):**
@@ -436,7 +436,7 @@ Everything is tested headless.
   - A `Discontinuity` marker calls `segmenter.discontinuity()`.
   - `Unsupported` and `SourceError("unsupported")` produce `error kind="unsupported"`.
   - A `RingError` on the disk ring switches the session to a fresh `RamRing` and reports `("error", sid, "disk", msg)`, but keeps running (spec §9).
-  - `close` sets the session stop event and calls `source.close()`. The session thread ends within 1 s and sends `closed`; its ring is torn down; the server removes the session.
+  - `close` sets the session stop event and calls `source.close()` (which never blocks), removes the session from the server, and sends `closed` from the command loop **without joining the session thread** (DNS and TCP connect cannot be interrupted, so the thread may linger up to the 60 s connect timeout). The abandoned thread checks a per-session cancelled flag before it sends any message or touches a ring, then tears its ring down and exits. `open_source(..., live_delay=…)` is passed from the `open` command's `live_delay` (seconds; Phase 2B maps Low/Normal/Stable to 3/6/12).
   - A catch-all `BaseException` handler sends the fixed `"internal"` error.
 - **On `shutdown`:** close every session, stop the server and exit.
 
