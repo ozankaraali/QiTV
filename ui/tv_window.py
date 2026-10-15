@@ -54,6 +54,7 @@ from services import thread_cleanup
 from services.catalog import CatalogService
 from services.connection_budget import ConnectionBudget
 from services.jobs import JobRunner
+from services.lazy_import import deferred_modules, load_module
 from services.live.engine import LiveEngine
 from services.live.live_session import LiveSession
 from services.navigation import NavModel
@@ -278,6 +279,9 @@ class TVWindow(QMainWindow):
         self.pip_surface = VideoSurface(self.player_page)
         for surface in (self.surface, self.pip_surface):
             surface.installEventFilter(self)  # before the PiP frame's: it sees them first
+        # The first frame: then the libraries background jobs need load (services.lazy_import).
+        self._first_frame = False
+        self.player_page.installEventFilter(self)
         self.logos = LogoCache(image_manager, config_manager, self)
         self.posters = PosterCache(image_manager, config_manager, self)
         self.library_page = LibraryScreen(self.posters, self.logos)
@@ -533,6 +537,14 @@ class TVWindow(QMainWindow):
         ):
             self._on_video_mouse(event)
         elif (
+            watched is self.player_page
+            and event.type() == QEvent.Type.Paint
+            and not self._first_frame
+        ):
+            self._first_frame = True
+            self.player_page.removeEventFilter(self)
+            self._load_deferred(deferred_modules())  # after this frame is shown
+        elif (
             self._mini_waiting
             and watched is self.windowHandle()
             and event.type() == QEvent.Type.WindowStateChange
@@ -542,6 +554,15 @@ class TVWindow(QMainWindow):
             # The platform reports the end of the fullscreen exit (after its animation).
             QTimer.singleShot(0, self, self._enter_mini_after_fullscreen)
         return super().eventFilter(watched, event)
+
+    def _load_deferred(self, names: list[str]) -> None:
+        """Load the deferred libraries one per pass of the event loop (services.lazy_import)."""
+        if names and not self._closing:
+            QTimer.singleShot(0, self, lambda: self._load_first(names))
+
+    def _load_first(self, names: list[str]) -> None:
+        load_module(names[0])
+        self._load_deferred(names[1:])
 
     def _on_video_mouse(self, event: QMouseEvent) -> None:
         """Track the left button on the video; in the mini player a drag moves the window."""

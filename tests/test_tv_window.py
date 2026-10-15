@@ -218,6 +218,20 @@ class TVWindowTests(WindowCase):
         self.assertIs(window.surface.parentWidget(), window.player_page)
         self.assertEqual(window.surface.geometry(), window.player_page.rect())
 
+    def test_the_deferred_libraries_load_after_the_first_frame(self):
+        with (
+            mock.patch("ui.tv_window.deferred_modules", return_value=["a", "b"]),
+            mock.patch("ui.tv_window.load_module") as load,
+        ):
+            self.window.player_page.update()
+            QApplication.processEvents()
+            load.assert_not_called()  # not before the window shows
+            self.show()
+            self.assertTrue(wait_until(lambda: load.call_count == 2))
+            self.window.player_page.repaint()
+            QTest.qWait(20)
+        self.assertEqual(load.call_args_list, [mock.call("a"), mock.call("b")])
+
     def test_the_player_page_paints_the_black_behind_the_video(self):
         # macOS never repaints under an opaque native view: after the Library page, its last
         # pixels stayed where the video goes (seen on screen with QScreen.grabWindow). The

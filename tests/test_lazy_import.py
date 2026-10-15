@@ -8,7 +8,8 @@ import tempfile
 import threading
 import unittest
 
-from services.lazy_import import lazy_module
+from services import lazy_import
+from services.lazy_import import deferred_modules, lazy_module, load_lazy_modules
 
 ROOT = Path(__file__).resolve().parents[1]
 # What main() imports before the window shows (main.py imports these inside main()).
@@ -48,6 +49,24 @@ class LazyModuleTests(unittest.TestCase):
         self.assertIs(sys.modules["qitv_lazy_probe"], module)
         self.assertEqual(module.X, 1)
         self.assertEqual(sys.qitv_lazy_runs, 1)
+
+    def test_deferred_modules_load_together_on_request(self):
+        self.make_module("qitv_lazy_a", "import sys\nsys.qitv_lazy_a = 1\n")
+        self.make_module("qitv_lazy_b", "import sys\nsys.qitv_lazy_b = 1\n")
+        self.addCleanup(lambda: [vars(sys).pop(k, None) for k in ("qitv_lazy_a", "qitv_lazy_b")])
+        self.addCleanup(
+            lambda: [
+                lazy_import._lazy.remove(n)
+                for n in ("qitv_lazy_a", "qitv_lazy_b")
+                if n in lazy_import._lazy
+            ]
+        )
+        lazy_module("qitv_lazy_a")
+        lazy_module("qitv_lazy_b")
+        self.assertEqual(deferred_modules()[-2:], ["qitv_lazy_a", "qitv_lazy_b"])
+        self.assertFalse(hasattr(sys, "qitv_lazy_a"))
+        load_lazy_modules()
+        self.assertEqual((sys.qitv_lazy_a, sys.qitv_lazy_b), (1, 1))
 
     def test_an_imported_module_is_returned_as_it_is(self):
         self.assertIs(lazy_module("json"), json)
