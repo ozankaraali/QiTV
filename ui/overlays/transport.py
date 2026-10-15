@@ -14,6 +14,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetricsF,
+    QHideEvent,
     QLinearGradient,
     QMouseEvent,
     QPainter,
@@ -208,9 +209,10 @@ class Transport(Overlay):
         self.update()
 
     def poke(self) -> None:
-        self._fit()
-        self.show()
-        self.update()
+        """Show (fade later); already shown, only restart the fade: no repaint, no mask."""
+        if self.isHidden():
+            self._fit()
+            self.show()  # paints, and the host takes the new mask
         self._idle.start()
 
     def dismiss(self) -> None:
@@ -691,8 +693,24 @@ class Transport(Overlay):
             self._last_move = pos
             self.poke()
         if self._drag is not None:
+            if not event.buttons() & Qt.LeftButton:
+                self._end_drag()  # its release went elsewhere (a focus switch, a lost grab)
+                return
             self._drag = self._frac_at(event.position().x())
             self.update()
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        # Hidden mid-drag (the host hides with a minimized window): no release will come.
+        self._end_drag()
+        super().hideEvent(event)
+
+    def _end_drag(self) -> None:
+        """Drop a drag whose release was lost, without seeking; the idle fade runs again."""
+        if self._drag is None:
+            return
+        self._drag = None
+        self.update()
+        self._idle.start()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton and self._drag is not None:
@@ -752,6 +770,7 @@ class Transport(Overlay):
         self._drag = None
         if live:
             self._position = self._length = 0
+        self.update()  # already shown, the new mode needs a repaint
         self.poke()
 
     def _clear_timeline(self) -> None:

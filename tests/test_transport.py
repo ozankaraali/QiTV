@@ -3,7 +3,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -170,6 +171,110 @@ class TransportCase(unittest.TestCase):
         self.assertTrue(mask.contains(QPoint(640, 10)))
         self.assertTrue(mask.contains(QPoint(640, 700)))
         self.assertFalse(mask.contains(QPoint(640, 360)))
+
+
+class _Host(QWidget):
+    """A host that counts the overlay changes it is told about (as OverlayHost recomputes)."""
+
+    def __init__(self):
+        super().__init__()
+        self.changes = 0
+        self.resize(1280, 720)
+
+    def overlay_changed(self):
+        self.changes += 1
+
+
+class _PaintCounter(QObject):
+    def __init__(self, widget):
+        super().__init__(widget)
+        self.paints = 0
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Paint:
+            self.paints += 1
+        return False
+
+
+class LostDragAndRepaintTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def make(self, idle_ms=60):
+        host = _Host()
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        transport = Transport(host, idle_ms=idle_ms)
+        host.show()
+        transport.show_vod("A", "b")
+        transport.update_position(0, 100_000)
+        transport.grab()
+        return host, transport
+
+    def press_on_the_bar(self, transport):
+        r = transport.seek_rect()
+        QTest.mousePress(
+            transport, Qt.LeftButton, Qt.NoModifier, QPoint(int(r.x() + 5), int(r.center().y()))
+        )
+
+    def test_a_hide_during_a_drag_ends_it(self):
+        # The host hides with a minimized window: the release never comes.
+        host, transport = self.make()
+        seeks = QSignalSpy(transport.seekRequested)
+        self.press_on_the_bar(transport)
+        host.hide()
+        host.show()
+        transport.poke()
+        self.assertTrue(wait_until(lambda: not transport.isVisible(), 1000))
+        self.assertEqual(seeks.count(), 0)
+        QTest.mouseRelease(transport, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))
+
+    def test_a_move_without_the_button_ends_a_drag_whose_release_was_lost(self):
+        host, transport = self.make()
+        seeks = QSignalSpy(transport.seekRequested)
+        self.press_on_the_bar(transport)
+        moved = QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(400, 650),
+            QPointF(transport.mapToGlobal(QPoint(400, 650))),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(transport, moved)
+        self.assertTrue(wait_until(lambda: not transport.isVisible(), 1000))
+        self.assertEqual(seeks.count(), 0)
+        QTest.mouseRelease(transport, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))
+
+    def test_mouse_moves_over_a_visible_transport_neither_repaint_nor_reshow_it(self):
+        host, transport = self.make(idle_ms=3000)
+        QTest.qWait(50)
+        counter = _PaintCounter(transport)
+        changes = host.changes
+        for i in range(5):
+            QTest.mouseMove(transport, QPoint(300 + i * 7, 300))
+            transport.poke()  # what the controller does for moves over the video
+        QTest.qWait(50)
+        self.assertEqual(counter.paints, 0)
+        self.assertEqual(host.changes, changes)  # no mask recomputation per move
+        self.assertTrue(transport.isVisible())
+
+    def test_a_poke_that_shows_it_paints_it(self):
+        host, transport = self.make(idle_ms=3000)
+        transport.dismiss()
+        counter = _PaintCounter(transport)
+        transport.poke()
+        self.assertTrue(wait_until(lambda: counter.paints > 0, 1000))
+
+
+def wait_until(predicate, timeout_ms=2000):
+    waited = 0
+    while not predicate() and waited < timeout_ms:
+        QTest.qWait(10)
+        waited += 10
+    return predicate()
 
 
 class HostSizingTests(unittest.TestCase):
