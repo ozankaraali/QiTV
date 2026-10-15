@@ -2,7 +2,18 @@ import unittest
 
 from services.catalog import format_xtream_episodes
 from services.navigation import episode_key, item_key
-from services.next_episode import NeedEpisodes, NextUp, next_episode, next_movie
+from services.next_episode import (
+    NeedEpisodes,
+    NextUp,
+    advanced_context,
+    episode_label,
+    following,
+    genre_title,
+    has_next,
+    next_episode,
+    next_movie,
+    play_context,
+)
 
 
 def stb_episodes(series, season, numbers):
@@ -141,6 +152,78 @@ class NextMovieTests(unittest.TestCase):
         self.assertEqual(next_movie(items, items[1], key=item_key), items[2])
         self.assertIsNone(next_movie(items, items[2], key=item_key))
         self.assertIsNone(next_movie(items, {"id": "zzz"}, key=item_key))
+
+
+class PlayContextTests(unittest.TestCase):
+    def test_play_context_fills_the_librarys_keys(self):
+        self.assertEqual(
+            play_context({"start_over": True}),
+            {
+                "start_over": True,
+                "series": None,
+                "season": None,
+                "episodes": None,
+                "genre_items": None,
+            },
+        )
+
+    def test_has_next_needs_a_season_or_a_genre(self):
+        series, season = {"id": "s"}, {"id": "1"}
+        self.assertTrue(has_next("episode", play_context({"series": series, "season": season})))
+        self.assertFalse(has_next("episode", play_context({"series": series})))
+        self.assertTrue(has_next("movie", play_context({"genre_items": [{"id": 1}]})))
+        self.assertFalse(has_next("movie", play_context({})))
+
+    def test_episode_label(self):
+        self.assertEqual(episode_label({"number": "2"}, {"number": "1"}), "S2 · E1")
+        self.assertEqual(episode_label(None, {"season": "3", "episode_num": "4"}), "S3 · E4")
+        self.assertEqual(episode_label({}, {"series": 5}), "E5")
+
+    def test_genre_title(self):
+        groups = [("5", "Films"), ("6", "Drama")]
+        self.assertEqual(genre_title({"category_id": "6"}, groups), "Drama")
+        self.assertEqual(genre_title({"tv_genre_id": 5}, groups), "Films")
+        self.assertEqual(genre_title({"genre": "Noir"}, groups), "Noir")
+        self.assertEqual(genre_title({}, groups), "")
+
+    def test_following_reads_the_play_context(self):
+        series, s1, s2 = {"id": "s"}, {"id": "1"}, {"id": "2"}
+        loaded = {"1": [{"id": "a"}, {"id": "b"}], "2": None}
+
+        def resolve(kind, context, item, seasons=None):
+            return following(
+                kind,
+                context,
+                item,
+                seasons=lambda _series: seasons,
+                episodes=lambda _series, season: loaded[season["id"]],
+                key=item_key,
+                episode_key=item_key,
+            )
+
+        episode_context = play_context({"series": series, "season": s1})
+        self.assertEqual(resolve("episode", episode_context, {"id": "a"}), NextUp(s1, {"id": "b"}))
+        self.assertIsNone(resolve("episode", episode_context, {"id": "b"}))  # seasons unknown
+        self.assertEqual(
+            resolve("episode", episode_context, {"id": "b"}, [s1, s2]), NeedEpisodes(s2)
+        )
+        self.assertIsNone(resolve("episode", play_context({"series": series}), {"id": "a"}))
+        films = play_context({"genre_items": [{"id": 1}, {"id": 2}]})
+        self.assertEqual(resolve("movie", films, {"id": 1}), NextUp(None, {"id": 2}))
+        self.assertIsNone(resolve("movie", films, {"id": 2}))
+
+    def test_advanced_context_moves_to_the_next_season(self):
+        old = play_context({"start_over": True, "series": {"id": "s"}, "season": {"id": "1"}})
+        new = advanced_context(old, NextUp({"id": "2"}, {"id": "e"}), [{"id": "e"}])
+        self.assertEqual(new["season"], {"id": "2"})
+        self.assertEqual(new["episodes"], [{"id": "e"}])
+        self.assertFalse(new["start_over"])
+        self.assertTrue(old["start_over"])  # the old context is left alone
+        movie_context = play_context({"genre_items": [{"id": 1}], "start_over": True})
+        self.assertEqual(
+            advanced_context(movie_context, NextUp(None, {"id": 1}), None),
+            {**movie_context, "start_over": False},
+        )
 
 
 if __name__ == "__main__":

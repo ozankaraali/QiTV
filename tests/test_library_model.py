@@ -173,6 +173,14 @@ class LibraryModelTests(unittest.TestCase):
         self.assertEqual(cfg.saves, 2)
         self.assertTrue(spy)
 
+    def test_a_title_without_a_name_is_kept_by_its_title(self):
+        film = {"id": "7", "title": "Untold", "category_id": "1"}
+        cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [film]})
+        model, cfg = build(cat)
+        self.assertTrue(model.toggle_favorite(film))
+        self.assertEqual(cfg.favorites, ["Untold"])
+        self.assertTrue(model.is_favorite(film))
+
     def test_toggle_survives_save_failure(self):
         cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})
         model, cfg = build(cat)
@@ -181,7 +189,7 @@ class LibraryModelTests(unittest.TestCase):
             raise PermissionError("locked")
 
         cfg.save_config = boom
-        with self.assertLogs("services.library", level="WARNING"):
+        with self.assertLogs("services.favorites", level="WARNING"):
             self.assertTrue(model.toggle_favorite(movie(1)))
         self.assertEqual(cfg.favorites, ["Movie 1"])
 
@@ -422,7 +430,7 @@ class FixRoundTests(unittest.TestCase):
             raise PermissionError("locked")
 
         cfg.save_config = boom
-        with self.assertLogs("services.library", level="WARNING"):
+        with self.assertLogs("services.favorites", level="WARNING"):
             model.toggle_favorite(movie(1))
         self.assertEqual(notices, ["Couldn't save your list; it will be lost when QiTV closes"])
 

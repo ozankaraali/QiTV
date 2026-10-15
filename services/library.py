@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional, TypeVar, cast
 
 from PySide6.QtCore import QObject, Signal
 
+from services import favorites
 from services.navigation import item_key
 from services.text_fold import fold
 from services.watch_state import WatchState
@@ -371,7 +372,7 @@ class LibraryModel(QObject):
 
     # --- fingerprints -----------------------------------------------------------------
     def _favorites(self) -> tuple:
-        return tuple(self._config.favorites or [])
+        return tuple(favorites.names(self._config))
 
     def _history_entries(self) -> list[dict]:
         wanted = "episode" if self._section == "series" else "movie"
@@ -479,8 +480,8 @@ class LibraryModel(QObject):
         return out
 
     def _my_list_items(self) -> list[dict]:
-        favorites = set(self._favorites())
-        return [i for i in self._loaded_items() if i.get("name") in favorites]
+        kept = set(self._favorites())
+        return [i for i in self._loaded_items() if favorites.favorite_key(i) in kept]
 
     def _pinned_items(self, genre_id: str) -> list[dict]:
         fp = self._fingerprint()
@@ -617,21 +618,11 @@ class LibraryModel(QObject):
         )
 
     def is_favorite(self, item: dict) -> bool:
-        return item.get("name") in self._favorites()
+        return favorites.is_favorite(self._config, item)
 
     def toggle_favorite(self, item: dict) -> bool:
-        name = item.get("name")
-        favorites = list(self._config.favorites or [])
-        now = name not in favorites
-        if now:
-            favorites.append(name)
-        else:
-            favorites = [f for f in favorites if f != name]
-        self._config.favorites = favorites
-        try:
-            self._config.save_config()
-        except Exception as e:
-            logger.warning("Couldn't save the favorites (%s)", type(e).__name__)
+        now = favorites.toggle(self._config, item)
+        if not favorites.save(self._config):
             self.notice.emit(SAVE_FAILED_NOTICE)
         self._ensure_selection()
         self.changed.emit()

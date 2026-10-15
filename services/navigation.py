@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, Signal
 
+from services import favorites
 from services.catalog import PROVIDER_LOADING_MESSAGE
 
 logger = logging.getLogger(__name__)
@@ -58,13 +59,16 @@ def episode_key(item: dict) -> str:
     )
 
 
+def item_title(item: dict, *, episode: bool = False) -> str:
+    """How the drawer names a channel, title or season (an episode by its own name)."""
+    title = (item.get("ename") if episode else None) or item.get("name") or item.get("title")
+    return str(title or "Untitled")
+
+
 def _item_node(item: dict, layer: str = "item") -> NavNode:
-    key = item_key(item)
-    title = item.get("name") or item.get("title")
-    if layer == "episode":
-        key = episode_key(item)
-        title = item.get("ename") or title
-    return NavNode(layer, key, str(title or "Untitled"), item)
+    episode = layer == "episode"
+    key = episode_key(item) if episode else item_key(item)
+    return NavNode(layer, key, item_title(item, episode=episode), item)
 
 
 class NavModel(QObject):
@@ -195,7 +199,7 @@ class NavModel(QObject):
         return version() if callable(version) else self._events
 
     def _favorites_fingerprint(self) -> tuple:
-        return tuple(self.config.favorites or [])
+        return tuple(favorites.names(self.config))
 
     def _history_fingerprint(self) -> tuple:
         history = self.config.watch_history or []
@@ -312,8 +316,10 @@ class NavModel(QObject):
         return cast(list[dict], self._cached(("@recent",), deps, self._compute_recent))
 
     def _compute_favorites(self) -> list[dict]:
-        names = set(self.config.favorites or [])
-        return [i for i in self._all_live_items() if i.get("name") in names] if names else []
+        kept = set(favorites.names(self.config))
+        if not kept:
+            return []
+        return [i for i in self._all_live_items() if favorites.favorite_key(i) in kept]
 
     def _compute_recent(self) -> list[dict]:
         provider = self.catalog.current_provider_name()

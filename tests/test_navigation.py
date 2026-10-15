@@ -147,6 +147,15 @@ class NavModelTests(unittest.TestCase):
         recent = self.nav.children(groups[1])
         self.assertEqual([n.title for n in recent], ["One"])
 
+    def test_a_favorite_without_a_name_is_found_by_its_title(self):
+        self.catalog.live["10"].append({"id": 3, "title": "Three"})
+        self.config.favorites = ["Three"]
+        home = self.nav.children(None)[0]
+        self.nav.open(home)
+        live = self.nav.children(home)[0]
+        favorites = self.nav.children(self.nav.children(live)[0])
+        self.assertEqual([n.payload.get("id") for n in favorites], [3])
+
     def test_columns_show_two_neighbouring_layers(self):
         self.nav.reset_to("live", "10")
         (left_parent, left), (right_parent, right) = self.nav.columns()

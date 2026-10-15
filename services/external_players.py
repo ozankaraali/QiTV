@@ -1,4 +1,8 @@
-"""Launch external VLC / MPV players. No Qt: failures are returned, not shown."""
+"""Launch external VLC / MPV players. No Qt: failures are returned, not shown.
+
+find_vlc() and find_mpv() name the player launch_vlc() and launch_mpv() would start, so a
+caller can say a player is missing before it stops anything.
+"""
 
 import logging
 import os
@@ -12,91 +16,84 @@ logger = logging.getLogger(__name__)
 # Single-instance python-mpv player, reused across launches (was PlaybackMixin state).
 _external_mpv_player: Optional[Any] = None
 
+PYTHON_MPV = "python-mpv"  # find_mpv(): mpv plays through the python-mpv module
+VLC_MISSING = (
+    "VLC Media Player is not installed.\n\n"
+    "Please install VLC:\n"
+    "• macOS: Download from https://www.videolan.org/vlc/\n"
+    "• Linux: Use your package manager (apt install vlc)\n"
+    "• Windows: Download from https://www.videolan.org/vlc/"
+)
+MPV_MISSING = (
+    "MPV Media Player is not installed.\n\n"
+    "Please install MPV:\n"
+    "• macOS: brew install mpv\n"
+    "• Linux: Use your package manager (apt install mpv)\n"
+    "• Windows: Download from https://mpv.io/installation/"
+)
+
+
+def find_vlc() -> Optional[str]:
+    """The VLC launch_vlc() starts: the app bundle on macOS, else the executable; or None."""
+    if platform.system() == "Darwin":
+        # macOS: 'open -a VLC' reuses the running instance
+        for path in ("/Applications/VLC.app", os.path.expanduser("~/Applications/VLC.app")):
+            if os.path.exists(path):
+                return path
+        return None
+
+    vlc_cmd = shutil.which("vlc")
+    if not vlc_cmd and platform.system() == "Windows":
+        possible_paths = [
+            os.path.join(
+                os.environ.get("ProgramFiles", r"C:\Program Files"),
+                "VideoLAN",
+                "VLC",
+                "vlc.exe",
+            ),
+            os.path.join(
+                os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                "VideoLAN",
+                "VLC",
+                "vlc.exe",
+            ),
+        ]
+        vlc_cmd = next((path for path in possible_paths if os.path.exists(path)), None)
+    return vlc_cmd
+
 
 def launch_vlc(url: str) -> Tuple[bool, str]:
     """Launch VLC with platform-specific handling."""
-    vlc_cmd = None
-
-    if platform.system() == "Darwin":
-        # macOS: use 'open -a VLC' which reuses existing instance
-        vlc_paths = [
-            "/Applications/VLC.app",
-            os.path.expanduser("~/Applications/VLC.app"),
-        ]
-        for path in vlc_paths:
-            if os.path.exists(path):
-                try:
-                    # "--": a URL that starts with "-" must not be read as an option.
-                    subprocess.Popen(["open", "-a", path, "--", url])
-                    return True, ""
-                except Exception as e:
-                    return False, f"Failed to launch VLC: {str(e)}"
-
-    elif platform.system() == "Windows":
-        # Windows: find VLC executable
-        vlc_cmd = shutil.which("vlc")
-        if not vlc_cmd:
-            possible_paths = [
-                os.path.join(
-                    os.environ.get("ProgramFiles", r"C:\Program Files"),
-                    "VideoLAN",
-                    "VLC",
-                    "vlc.exe",
-                ),
-                os.path.join(
-                    os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-                    "VideoLAN",
-                    "VLC",
-                    "vlc.exe",
-                ),
-            ]
-            for path in possible_paths:
-                if os.path.exists(path):
-                    vlc_cmd = path
-                    break
-    else:
-        # Linux
-        vlc_cmd = shutil.which("vlc")
-
+    vlc_cmd = find_vlc()
     if not vlc_cmd:
-        return False, (
-            "VLC Media Player is not installed.\n\n"
-            "Please install VLC:\n"
-            "• macOS: Download from https://www.videolan.org/vlc/\n"
-            "• Linux: Use your package manager (apt install vlc)\n"
-            "• Windows: Download from https://www.videolan.org/vlc/"
-        )
-
-    try:
+        return False, VLC_MISSING
+    if platform.system() == "Darwin":
+        # "--": a URL that starts with "-" must not be read as an option.
+        argv = ["open", "-a", vlc_cmd, "--", url]
+    else:
         # --started-from-file sends URL to existing VLC instance (replaces current)
-        subprocess.Popen([vlc_cmd, "--started-from-file", "--", url])
+        argv = [vlc_cmd, "--started-from-file", "--", url]
+    try:
+        subprocess.Popen(argv)
         return True, ""
     except Exception as e:
         return False, f"Failed to launch VLC: {str(e)}"
 
 
-def launch_mpv(url: str) -> Tuple[bool, str]:
-    """Launch MPV - try python-mpv first, fall back to subprocess."""
-    global _external_mpv_player
-
-    # Try python-mpv for single-instance behavior
+def _python_mpv_loads() -> bool:
+    """Whether the python-mpv module (with libmpv) loads: launch_mpv() tries it first."""
+    if _external_mpv_player is not None:
+        return True
     try:
-        import mpv
-
-        if _external_mpv_player is None:
-            _external_mpv_player = mpv.MPV(
-                input_default_bindings=True,
-                input_vo_keyboard=True,
-                osc=True,
-            )
-
-        _external_mpv_player.play(url)
-        return True, ""
+        import mpv  # noqa: F401
     except Exception as e:
-        # python-mpv not available or failed, fall back to subprocess
-        logger.debug("python-mpv unavailable (%s); launching mpv executable", e)
+        logger.debug("python-mpv unavailable (%s)", type(e).__name__)
+        return False
+    return True
 
-    # Subprocess fallback with platform-specific paths
+
+def _mpv_executable() -> Optional[str]:
+    """The mpv executable, with platform-specific paths."""
     mpv_cmd = None
 
     if platform.system() == "Darwin":
@@ -183,15 +180,38 @@ def launch_mpv(url: str) -> Tuple[bool, str]:
     else:
         # Linux
         mpv_cmd = shutil.which("mpv")
+    return mpv_cmd
 
+
+def find_mpv() -> Optional[str]:
+    """The mpv launch_mpv() starts: PYTHON_MPV, else the executable's path; or None."""
+    return PYTHON_MPV if _python_mpv_loads() else _mpv_executable()
+
+
+def launch_mpv(url: str) -> Tuple[bool, str]:
+    """Launch MPV - try python-mpv first, fall back to subprocess."""
+    global _external_mpv_player
+
+    # Try python-mpv for single-instance behavior
+    try:
+        import mpv
+
+        if _external_mpv_player is None:
+            _external_mpv_player = mpv.MPV(
+                input_default_bindings=True,
+                input_vo_keyboard=True,
+                osc=True,
+            )
+
+        _external_mpv_player.play(url)
+        return True, ""
+    except Exception as e:
+        # python-mpv not available or failed, fall back to subprocess
+        logger.debug("python-mpv unavailable (%s); launching mpv executable", e)
+
+    mpv_cmd = _mpv_executable()
     if not mpv_cmd:
-        return False, (
-            "MPV Media Player is not installed.\n\n"
-            "Please install MPV:\n"
-            "• macOS: brew install mpv\n"
-            "• Linux: Use your package manager (apt install mpv)\n"
-            "• Windows: Download from https://mpv.io/installation/"
-        )
+        return False, MPV_MISSING
 
     try:
         subprocess.Popen([mpv_cmd, "--", url])

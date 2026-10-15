@@ -95,6 +95,42 @@ class ExternalPlayersTest(unittest.TestCase):
             argv = call.args[0]
             self.assertEqual(argv[-2:], ["--", url])
 
+    def test_find_vlc_names_the_player_launch_vlc_starts(self):
+        with (
+            mock.patch("platform.system", return_value="Darwin"),
+            mock.patch("os.path.exists", side_effect=lambda p: p == "/Applications/VLC.app"),
+        ):
+            self.assertEqual(external_players.find_vlc(), "/Applications/VLC.app")
+        with (
+            mock.patch("platform.system", return_value="Linux"),
+            mock.patch("shutil.which", return_value=None),
+        ):
+            self.assertIsNone(external_players.find_vlc())
+
+    def test_find_mpv_prefers_python_mpv_then_the_executable(self):
+        with mock.patch.dict(sys.modules, {"mpv": mock.MagicMock()}):
+            self.assertEqual(external_players.find_mpv(), external_players.PYTHON_MPV)
+        with (
+            mock.patch.dict(sys.modules, {"mpv": None}),
+            mock.patch("platform.system", return_value="Linux"),
+            mock.patch("shutil.which", return_value="/usr/bin/mpv"),
+        ):
+            self.assertEqual(external_players.find_mpv(), "/usr/bin/mpv")
+        with (
+            mock.patch.dict(sys.modules, {"mpv": None}),
+            mock.patch("platform.system", return_value="Linux"),
+            mock.patch("shutil.which", return_value=None),
+        ):
+            self.assertIsNone(external_players.find_mpv())
+
+    def test_the_missing_messages_start_with_one_line_for_a_toast(self):
+        self.assertEqual(
+            external_players.MPV_MISSING.partition("\n")[0], "MPV Media Player is not installed."
+        )
+        self.assertEqual(
+            external_players.VLC_MISSING.partition("\n")[0], "VLC Media Player is not installed."
+        )
+
     def test_mpv_python_player_reused(self):
         fake = mock.MagicMock()
         with mock.patch.dict(sys.modules, {"mpv": fake}):
