@@ -11,6 +11,10 @@ Principles
 - Use consistent logging over prints and propagate errors meaningfully to the UI when needed.
 - Write code that’s testable; isolate logic from PySide UI where possible.
 
+Layout
+- The root holds only `main.py` (the entry point; `python main.py` runs the app), the three PyInstaller specs, `pyproject.toml`/`uv.lock`/`requirements.txt`, README/AGENTS/LICENSE and the folders.
+- `services/`: everything without widgets (providers, catalog, EPG, config, images, live pipeline, update checker). `ui/`: the TV window, its overlays, the Library and the settings dialog (`ui/settings_dialog.py`). `scripts/`: the smoke test and the Linux installer. `tests/`: unittest suites (`uv run python -m unittest discover -s tests`).
+
 Style & Tooling
 - Format: black + isort (configured via pre-commit).
 - Lint: flake8 (treats most issues as warnings except syntax/undefined names).
@@ -22,7 +26,7 @@ Current Work Plan (Living TODO)
   - [x] Phase 0 Foundation: tidy-up landed; fixed STB prehash, image cache eviction, overnight EPG stop, per-provider HTTPS, STB export bases, STB next-season autoplay, M3U line endings; design tokens (`ui/theme.py`); CI runs tests on all platforms and releases only from `main`
   - [ ] Phase 1 TV shell (Live TV): single window, native VLC surface + glued overlay host, zap banner/column/drawer, NavModel/ZapContext, transport
   - [ ] Phase 2 Live pipeline: TS segmenter, RAM/disk rings, loopback server, timeline, stay-live, connection budget, time-shift UI, CI playback smoke
-  - [ ] Phase 3 Library + guide; remove old windows; release 2.0.0
+  - [ ] Phase 3 Library + guide; remove old windows (done: v1.13.8 windows deleted, root modules moved into `services/` and `ui/`); release 2.0.0
   - [ ] Phase 4 PiP + swap
 1) Input/UI polish and correctness
    - [x] Separate dblclick fullscreen from single-click play/pause (video_player.py)
@@ -41,7 +45,7 @@ Current Work Plan (Living TODO)
    - [x] Extract delegates to `widgets/delegates.py`
    - [x] Move M3U parsing to `services/m3u.py`
    - [x] Move export helpers to `services/export.py`
-   - [ ] Split remaining `channel_list.py` into widgets/ (panels) and services/ (provider, epg)
+   - [x] ~~Split remaining `channel_list.py`~~: the v1.13.8 windows were removed in 2.0 (the TV window replaced them)
    - [ ] Move EPG parsing unit-testable logic out of UI code paths
    - [x] Refactor image pipeline: workers only cache bytes; GUI builds QPixmap/QIcon on main thread
    - [ ] Consider a small event-bus/signal helper to decouple UI components
@@ -69,8 +73,6 @@ Current Work Plan (Living TODO)
    - [x] Drive bundle/app version from `pyproject.toml` in PyInstaller specs
 
 Next Steps (Paused)
-- Extract panels from `channel_list.py` into `widgets/`:
-  - content info panel, list panel, media controls
 - Add `services/provider_api.py` to centralize STB/Xtream calls with timeouts + QThread wrappers
 - Move remaining UI-thread `requests` to workers (exports may stay synchronous)
 - Introduce lightweight dataclasses for Channel/Program for safer data access
@@ -78,6 +80,7 @@ Next Steps (Paused)
 - Add unit tests for `services/m3u.py` and `services/export.py`
 
 Recent Changes (for context)
+- Phase 3 T13 (`tv/vlc`): Removed the v1.13.8 windows (`channel_list.py`, `video_player.py`, `mixins/`, `widgets/`) and the old-only workers (tree widget items, `SetProviderThread`, `XtreamAuthWorker`). Their tests were retargeted to the services that own the behaviour (CatalogService, `services.next_episode`, the link worker, the exporter, ProviderManager) or deleted with a reason (Task 13 report). The root modules moved with `git mv` into `services/` (config_manager, provider_manager, epg_manager, image_loader, image_manager, multikeydict, sleep_manager, update_checker, content_loader, workers) and `options.py` became `ui/settings_dialog.py`. The config file location is unchanged (portable mode looks beside `main.py`). Dropped settings only the old windows read (Keyboard/Remote mode, smooth paused seeking, info panel switches); the drawer plays only channels (Movies/Series play from the Library). Season chips show the provider's season name again.
 - Phase 0 (`tv/vlc`): Restarted from v1.13.8 after retiring the MPV line. Landed a behaviour-preserving service-layer tidy-up and fixed seven bugs it surfaced, each with a regression test (STB profile prehash sent as a set; image cache never evicting and deleting wrong files; overnight EPG stop discarded; global instead of per-provider HTTPS; `…/c//play` STB export URLs; STB next-season autoplay; CRLF/CR/BOM M3U names). Added design tokens and cross-platform CI test runs (CI run 38660241530 on `tv/vlc` passed tests and packaging on Windows, Linux, Intel macOS and ARM macOS with the release job skipped); releases now publish only from `main`.
 - v1.13.8 (unreleased): Restore missing window geometry during config migration without overwriting saved windows or user preferences. Returning from the MPV experiment left no `window_positions.video_player`, so the VLC-based 1.13.7 release raised `KeyError: 'video_player'` before displaying its windows. A regression covers player initialization and subsequent geometry persistence while preserving existing state.
 - Verification: Confirmed the installed Intel 1.13.7 bundle fails with the MPV-shaped config; a rebuilt 1.13.8 bundle starts with it and restores the missing entry. Native source startup displayed the local catalog, produced a window capture, and closed normally; all 14 tests, focused config types, lint, and the lock check passed. Frozen verification observed native windows and config migration; OS screenshot/interaction permissions were unavailable, and the isolated frozen process was stopped through its supervisor. No new cross-platform CI run has been performed for this patch.
