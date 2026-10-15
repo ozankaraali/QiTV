@@ -111,5 +111,37 @@ class WatchStateTests(unittest.TestCase):
         self.assertEqual(self.cfg.saves, 2)
 
 
+class LockedConfigTests(unittest.TestCase):
+    """config.json can stay locked on Windows: a zap or a close must not raise."""
+
+    def setUp(self):
+        self.cfg = make_config()
+        self.attempts = 0
+
+        def locked():
+            self.attempts += 1
+            raise PermissionError(13, "Access is denied")
+
+        self.cfg.save_config = locked
+        self.clock = Clock()
+        self.ws = WatchState(self.cfg, flush_interval_s=30.0, clock=self.clock)
+
+    def test_record_play_and_flush_log_instead_of_raising(self):
+        with self.assertLogs("services.watch_state", "WARNING"):
+            self.ws.record_play("P", {"id": 1}, item_type="channel", link="u")
+            self.ws.flush()
+        self.assertEqual(self.cfg.last_live_channel["item"], {"id": 1})
+        self.assertEqual(self.attempts, 2)
+
+    def test_a_failed_save_is_retried_after_the_flush_interval(self):
+        with self.assertLogs("services.watch_state", "WARNING"):
+            self.ws.record_play("P", {"id": 1}, item_type="movie", link="u")
+            self.ws.update_position("cid", 60000, 600000)  # within the interval: no retry
+            self.assertEqual(self.attempts, 1)
+            self.clock.t += 31
+            self.ws.update_position("cid", 61000, 600000)
+        self.assertEqual(self.attempts, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -150,6 +150,22 @@ class FailureSignalTests(unittest.TestCase):
         for emitted in (group_failed, episodes_failed, link_failed):
             self.assert_safe(emitted)
 
+    def test_setup_starts_when_the_choice_cannot_be_saved(self):
+        service, _, factory, _ = make_service({"name": "X", "type": "XTREAM", "url": "h"})
+
+        def locked():
+            raise PermissionError(13, "Access is denied", "/home/alice/config.json")
+
+        service.config.save_config = locked
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        ready = collect(service.providerReady)
+        with self.assertLogs("services.catalog", "WARNING") as logs:
+            service.select_provider("Y")
+        self.assertNotIn("alice", "\n".join(logs.output))
+        self.assertEqual(service.config.selected_provider_name, "Y")
+        self.assertEqual(factory.calls[0][0], "provider_setup")
+        self.assertEqual(ready, [("X",)])
+
     def test_epg_failure_log_has_no_url(self):
         service, _, factory, _ = make_service({"name": "X", "type": "XTREAM", "url": "h"})
         factory.results["provider_setup"] = {"result": {"name": "X"}}

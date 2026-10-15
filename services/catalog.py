@@ -409,7 +409,11 @@ class CatalogService(QObject):
     def _start_setup(self, name: Optional[str], force_refresh: bool) -> None:
         if name is not None and name != self.config.selected_provider_name:
             self.config.selected_provider_name = name
-            self.config.save_config()
+            try:
+                self.config.save_config()
+            except Exception as e:
+                # The setup still runs; the choice is saved with the next settings write.
+                logger.warning("Couldn't save the provider choice (%s)", type(e).__name__)
         target = name if name is not None else self.config.selected_provider_name
         worker = self.factory.provider_setup(self.provider_manager, force_refresh)
         self._state_job = "provider"

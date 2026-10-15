@@ -7,6 +7,7 @@ import platform
 import shutil
 import sys
 import tempfile
+import time
 import tomllib
 
 import orjson as json
@@ -14,6 +15,11 @@ import orjson as json
 from multikeydict import MultiKeyDict
 
 logger = logging.getLogger(__name__)
+
+# Swapping config.json in can fail while Windows antivirus or the indexer holds the file
+# open: retry briefly before giving up.
+_REPLACE_RETRIES = 5
+_REPLACE_RETRY_DELAY_S = 0.05
 
 
 def _one_of(choices, default):
@@ -441,13 +447,28 @@ class ConfigManager:
                 f.write(serialized_config)
             if os.path.exists(self.config_path):
                 shutil.copymode(self.config_path, temporary)
-            os.replace(temporary, self.config_path)
+            self._replace_config(temporary)
         except BaseException:
             try:
                 os.remove(temporary)
             except OSError as e:
                 logger.debug("Could not remove %s: %s", temporary, e)
             raise
+
+    def _replace_config(self, temporary):
+        for attempt in range(_REPLACE_RETRIES + 1):
+            try:
+                os.replace(temporary, self.config_path)
+                return
+            except PermissionError:
+                if attempt == _REPLACE_RETRIES:
+                    # The exception text names the paths: log only what happened.
+                    logger.warning(
+                        "Couldn't save the settings: config.json stayed locked (%d tries)",
+                        attempt + 1,
+                    )
+                    raise
+                time.sleep(_REPLACE_RETRY_DELAY_S)
 
     # Integer config properties using factory with coercion
     epg_list_window_hours = _config_property(

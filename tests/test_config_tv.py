@@ -78,6 +78,48 @@ class TvConfigTests(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["favorites"], ["Lost"])
         self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["config.json"])
 
+    def _flaky_replace(self, failures):
+        """os.replace that raises PermissionError `failures` times (Windows AV/indexer)."""
+        real_replace, calls = os.replace, []
+
+        def replace(src, dst):
+            calls.append((src, dst))
+            if len(calls) <= failures:
+                raise PermissionError(13, "Access is denied", src, None, dst)
+            return real_replace(src, dst)
+
+        return replace, calls
+
+    def test_save_retries_a_locked_file(self):
+        config, path = self._load({"favorites": ["Old"]})
+        config.favorites = ["New"]
+        replace, calls = self._flaky_replace(5)
+        with (
+            patch("config_manager.os.replace", side_effect=replace),
+            patch("time.sleep") as sleep,
+        ):
+            config.save_config()
+        self.assertEqual(len(calls), 6)  # the first try and five retries
+        self.assertEqual([c.args for c in sleep.call_args_list], [(0.05,)] * 5)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["favorites"], ["New"])
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["config.json"])
+
+    def test_save_gives_up_on_a_file_that_stays_locked(self):
+        config, path = self._load({"favorites": ["Old"]})
+        config.favorites = ["New"]
+        replace, calls = self._flaky_replace(100)
+        with (
+            patch("config_manager.os.replace", side_effect=replace),
+            patch("time.sleep"),
+            self.assertLogs("config_manager", "WARNING") as logs,
+            self.assertRaises(PermissionError),
+        ):
+            config.save_config()
+        self.assertEqual(len(calls), 6)
+        self.assertNotIn(path.parent.name, "\n".join(logs.output))  # no paths in the log
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["favorites"], ["Old"])
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["config.json"])
+
     def test_one_time_migration_turns_on_logos_and_epg(self):
         config, path = self._load({"channel_logos": False, "channel_epg": False})
         self.assertTrue(config.channel_logos)

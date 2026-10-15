@@ -60,8 +60,7 @@ class WatchState:
                 "group_id": "" if group_id is None else str(group_id),
                 "item": item,
             }
-        self.config.save_config()
-        self._mark_flushed()
+        self._save()
 
     def resume_position(self, cid: str) -> Optional[int]:
         # ConfigManager.get_playback_position returns only the position (int); the
@@ -85,9 +84,15 @@ class WatchState:
         self.flush()
 
     def flush(self) -> None:
-        self.config.save_config()
-        self._mark_flushed()
+        self._save()
 
-    def _mark_flushed(self) -> None:
+    def _save(self) -> None:
+        """Write the config; a zap or a close never fails because the file is locked."""
+        self._last_flush = self._clock()  # a failed write is tried again after the interval
+        try:
+            self.config.save_config()
+        except Exception as e:
+            logger.warning("Couldn't save the watch state (%s)", type(e).__name__)
+            self._dirty = True
+            return
         self._dirty = False
-        self._last_flush = self._clock()
