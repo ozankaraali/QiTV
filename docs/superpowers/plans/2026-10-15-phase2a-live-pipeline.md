@@ -136,7 +136,7 @@ Everything is tested headless.
   - `Data(payload: bytes)`;
   - `Closed(seq: int, next_first_pts: int | None, wall: float)`;
   - `class Segmenter`:
-    - `__init__(self, *, target_s=2.0, forced_s=10.0, rai_fallback_s=6.0, clock=time.monotonic)`;
+    - `__init__(self, *, target_s=2.0, forced_s=10.0, clock=time.monotonic)` (the RAI fallback timer was removed in review: keyframes are detected by NAL scan until a RAI is seen);
     - `feed(chunk: bytes) -> list[Opened | Data | Closed]`, which raises `Unsupported`;
     - `finish() -> list[Closed]`, which closes the open segment at EOF;
     - `discontinuity()`, which marks the next cut as a discontinuity (used by HLS `#EXT-X-DISCONTINUITY`);
@@ -157,10 +157,11 @@ Everything is tested headless.
 - **Scrambling:** non-zero scrambling bits (`(b3 >> 6) & 3`) on a video packet raise `Unsupported("scrambled")`.
 - **Keyframes** (on the cut PID, PUSI packets only):
   - RAI = adaptation field present with length > 0 and bit `0x40` set.
-  - Until a RAI has been seen and while less than `rai_fallback_s` of PTS (or wall time when there is no PTS) has passed since the first video PUSI, only RAI counts. After that, the NAL scan of that packet's PES payload also counts:
-    - H.264: start-code NAL type 5 or 7;
-    - HEVC: `(b >> 1) & 0x3F` in 16..21 or 32;
+  - *(Amended in review.)* Before any RAI has been seen, a positively detected keyframe in the PUSI packet's PES payload counts at once:
+    - H.264: NAL 5, or NAL 7 with no NAL 1;
+    - HEVC: an IRAP 16..21, or a VPS (32) with no non-IRAP slice;
     - MPEG-2: start code `0xB3`.
+  - Once a RAI has been seen, RAI governs, verified by the same NAL scan: a cut is rejected when the scan positively finds only non-IRAP slices; an inconclusive scan accepts the RAI. With RAI set, an H.264 NAL 1 whose slice header says I/SI also counts (open-GOP recovery points).
   - Audio-only mode: every audio PUSI with a PTS counts as a cut point.
 - **Cutting:**
   - Before the first cut point, packets are dropped.
