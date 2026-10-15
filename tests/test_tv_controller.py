@@ -1524,12 +1524,10 @@ class ReviewFixTests(ControllerTestCase):
             self.toast.messages(), [("Couldn't refresh Live TV; showing saved channels", "info")]
         )
 
-    def test_refresh_overlays_reloads_the_guide_but_epg_ready_does_not(self):
-        self.controller.refresh_overlays()
-        self.assertEqual(self.catalog.epg_refreshes, 1)
+    def test_epg_ready_repaints_but_never_asks_for_the_guide_again(self):
         self.catalog.epgReady.emit()  # a loaded guide repaints; asking again would loop
-        self.assertEqual(self.catalog.epg_refreshes, 1)
-        self.assertEqual(self.column.named("refresh_now"), [(), ()])
+        self.assertEqual(self.catalog.epg_refreshes, 0)
+        self.assertEqual(self.column.named("refresh_now"), [()])
 
     def test_numbers_reach_channels_outside_the_group(self):
         self.catalog.live = {"10": CHANNELS[:2], "20": CHANNELS[2:]}

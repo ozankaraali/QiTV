@@ -36,6 +36,19 @@ class TvConfigTests(unittest.TestCase):
         self.assertTrue(config.channel_epg)
         self.assertIn("tv_window", config.config["window_positions"])
 
+    def test_new_install_has_no_settings_only_the_old_windows_read(self):
+        config, path = self._load(None)
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        for key in (
+            "keyboard_remote_mode",
+            "smooth_paused_seek",
+            "show_info_panel",
+            "show_stb_content_info",
+        ):
+            with self.subTest(key=key):
+                self.assertNotIn(key, on_disk)
+                self.assertFalse(hasattr(config, key))
+
     def test_tv_window_starts_where_the_larger_old_window_was(self):
         saved = {
             "window_positions": {

@@ -65,7 +65,7 @@ from ui.tv_window import (
 import update_checker
 
 INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--quiet"])
-HOST_METHODS = ("save_config", "set_provider", "refresh_channels", "refresh_content_list_size")
+HOST_METHODS = ("save_config", "set_provider", "reload_epg")
 HOST_ATTRIBUTES = ("config_manager", "provider_manager", "epg_manager", "image_manager")
 _OFFSCREEN_NOISE = "This plugin does not support"
 
@@ -1581,6 +1581,7 @@ class OptionsDialogTests(WindowCase):
         self.config.start_with_last_channel = False
         dialog = self.dialog()
         self.assertFalse(hasattr(dialog, "keyboard_remote_checkbox"))
+        self.assertFalse(hasattr(dialog, "smooth_paused_seek_checkbox"))
         self.assertEqual(dialog.live_latency_combo.currentData(), "stable")
         self.assertEqual(dialog.mouse_wheel_combo.currentData(), "volume")
         self.assertFalse(dialog.start_last_channel_checkbox.isChecked())

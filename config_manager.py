@@ -111,7 +111,6 @@ def get_app_version() -> str:
 
 class ConfigManager:
     DEFAULT_OPTION_CHECKUPDATE = True
-    DEFAULT_OPTION_STB_CONTENT_INFO = True
     DEFAULT_OPTION_CHANNEL_EPG = True
     DEFAULT_OPTION_CHANNEL_LOGO = True
     DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE = 100
@@ -122,7 +121,6 @@ class ConfigManager:
     DEFAULT_OPTION_EPG_EXPIRATION_UNIT = "Hours"
     DEFAULT_OPTION_PREFER_HTTPS = False
     DEFAULT_OPTION_SSL_VERIFY = True
-    DEFAULT_OPTION_KEYBOARD_REMOTE_MODE = False
     DEFAULT_OPTION_LIVE_LATENCY = "normal"
     LIVE_LATENCY_CHOICES = ("low", "normal", "stable")
     DEFAULT_OPTION_MOUSE_WHEEL = "channel"
@@ -134,16 +132,11 @@ class ConfigManager:
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
     DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
     DEFAULT_OPTION_EPG_STB_PERIOD_HOURS = 5
-    DEFAULT_OPTION_SHOW_INFO_PANEL = True
-    DEFAULT_OPTION_SMOOTH_PAUSED_SEEK = True
     DEFAULT_OPTION_PLAY_IN_VLC = False
     DEFAULT_OPTION_PLAY_IN_MPV = False
     # Auto-play settings
     DEFAULT_OPTION_AUTO_PLAY_EPISODES = True
     DEFAULT_OPTION_AUTO_PLAY_MOVIES = True
-    DEFAULT_OPTION_EPISODE_COUNTDOWN = 5  # seconds
-    DEFAULT_OPTION_MOVIE_COUNTDOWN = 10  # seconds
-    DEFAULT_OPTION_RESUME_COUNTDOWN = 10  # seconds
     DEFAULT_WATCH_HISTORY_LIMIT = 100
     DEFAULT_WATCHED_THRESHOLD = 0.90  # 90% = watched
 
@@ -221,7 +214,7 @@ class ConfigManager:
     def update_patcher(self):
         need_update = False
 
-        # Other player versions may remove windows that this build still uses.
+        # 1.x windows stay listed so going back to 1.x finds them (1.13.7 failed without).
         window_positions = self.config.setdefault("window_positions", {})
         if "tv_window" not in window_positions:
             window_positions["tv_window"] = self._initial_tv_window(window_positions)
@@ -236,8 +229,6 @@ class ConfigManager:
             "favorites": [],
             "last_watched": None,
             "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
-            "show_stb_content_info": ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO,
-            "show_info_panel": ConfigManager.DEFAULT_OPTION_SHOW_INFO_PANEL,
             "channel_logos": ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO,
             "max_cache_image_size": ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE,
             "epg_source": ConfigManager.DEFAULT_OPTION_EPG_SOURCE,
@@ -248,8 +239,6 @@ class ConfigManager:
             "xmltv_channel_map": MultiKeyDict(),
             "prefer_https": ConfigManager.DEFAULT_OPTION_PREFER_HTTPS,
             "ssl_verify": ConfigManager.DEFAULT_OPTION_SSL_VERIFY,
-            "keyboard_remote_mode": ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE,
-            "smooth_paused_seek": ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK,
             "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
             "epg_stb_period_hours": ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
             "live_latency": ConfigManager.DEFAULT_OPTION_LIVE_LATENCY,
@@ -282,10 +271,6 @@ class ConfigManager:
     skipped_update_version = _config_property("skipped_update_version", "")
     favorites = _config_property("favorites", [])
     last_watched = _config_property("last_watched", None)
-    show_stb_content_info = _config_property(
-        "show_stb_content_info", DEFAULT_OPTION_STB_CONTENT_INFO
-    )
-    show_info_panel = _config_property("show_info_panel", DEFAULT_OPTION_SHOW_INFO_PANEL)
     selected_provider_name = _config_property("selected_provider_name", "iptv-org.github.io")
     channel_epg = _config_property("channel_epg", DEFAULT_OPTION_CHANNEL_EPG)
     channel_logos = _config_property("channel_logos", DEFAULT_OPTION_CHANNEL_LOGO)
@@ -321,12 +306,6 @@ class ConfigManager:
     # Boolean config properties using factory with coercion
     prefer_https = _config_property("prefer_https", DEFAULT_OPTION_PREFER_HTTPS, coerce=bool)
     ssl_verify = _config_property("ssl_verify", DEFAULT_OPTION_SSL_VERIFY, coerce=bool)
-    keyboard_remote_mode = _config_property(
-        "keyboard_remote_mode", DEFAULT_OPTION_KEYBOARD_REMOTE_MODE, coerce=bool
-    )
-    smooth_paused_seek = _config_property(
-        "smooth_paused_seek", DEFAULT_OPTION_SMOOTH_PAUSED_SEEK, coerce=bool
-    )
     play_in_vlc = _config_property("play_in_vlc", DEFAULT_OPTION_PLAY_IN_VLC, coerce=bool)
     play_in_mpv = _config_property("play_in_mpv", DEFAULT_OPTION_PLAY_IN_MPV, coerce=bool)
 
@@ -404,14 +383,10 @@ class ConfigManager:
                 "tv_window": dict(ConfigManager.DEFAULT_TV_WINDOW),
             },
             "favorites": [],
-            "show_stb_content_info": ConfigManager.DEFAULT_OPTION_STB_CONTENT_INFO,
-            "show_info_panel": ConfigManager.DEFAULT_OPTION_SHOW_INFO_PANEL,
             "channel_logos": ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO,
             "channel_epg": ConfigManager.DEFAULT_OPTION_CHANNEL_EPG,
             "xmltv_channel_map": MultiKeyDict(),
             "max_cache_image_size": ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE,
-            "keyboard_remote_mode": ConfigManager.DEFAULT_OPTION_KEYBOARD_REMOTE_MODE,
-            "smooth_paused_seek": ConfigManager.DEFAULT_OPTION_SMOOTH_PAUSED_SEEK,
             "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
             "epg_stb_period_hours": ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
             "live_latency": ConfigManager.DEFAULT_OPTION_LIVE_LATENCY,
@@ -431,20 +406,11 @@ class ConfigManager:
             "width": pos.width(),
             "height": pos.height(),
         }
-        if window_name == "channel_list":
-            self.config["window_positions"][window_name]["splitter_ratio"] = window.splitter_ratio
-            self.config["window_positions"][window_name][
-                "splitter_content_info_ratio"
-            ] = window.splitter_content_info_ratio
-
         self.save_config()
 
     def apply_window_settings(self, window_name, window):
         settings = self.config["window_positions"][window_name]
         window.setGeometry(settings["x"], settings["y"], settings["width"], settings["height"])
-        if window_name == "channel_list":
-            window.splitter_ratio = settings.get("splitter_ratio", 0.75)
-            window.splitter_content_info_ratio = settings.get("splitter_content_info_ratio", 0.33)
 
     def save_config(self):
         self.xmltv_channel_map = self.xmltv_channel_map.serialize()

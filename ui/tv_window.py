@@ -719,12 +719,6 @@ class TVWindow(QMainWindow):
     def set_provider(self, force_update: bool = False) -> None:
         self.controller.select_provider(force_refresh=force_update)
 
-    def refresh_channels(self) -> None:
-        self.controller.refresh_overlays()
-
-    def refresh_content_list_size(self) -> None:
-        """Rows size themselves to the video area; nothing to do."""
-
     def reload_epg(self) -> None:
         """The EPG settings changed: reload the guide in the background (it repaints when ready)."""
         self.catalog.refresh_epg(force=True)

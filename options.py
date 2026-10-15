@@ -292,25 +292,16 @@ class OptionsDialog(QDialog):
         self.start_last_channel_checkbox.setChecked(self.config_manager.start_with_last_channel)
         self.settings_layout.addRow(self.start_last_channel_checkbox)
 
-        # Smooth seeking while paused: briefly resume to seek, then pause again
-        self.smooth_paused_seek_checkbox = QCheckBox(
-            "Smooth seeking while paused (briefly resume to seek)", self.settings_tab
-        )
-        self.smooth_paused_seek_checkbox.setToolTip(
-            "Reduces timestamp errors during paused seeking by resuming momentarily."
-        )
-        self.smooth_paused_seek_checkbox.setChecked(self.config_manager.smooth_paused_seek)
-        self.settings_layout.addRow(self.smooth_paused_seek_checkbox)
-
         # Auto-play settings section
         self.autoplay_section_label = QLabel("<b>Auto-Play Settings</b>", self.settings_tab)
         self.settings_layout.addRow(self.autoplay_section_label)
 
         self.auto_play_episodes_checkbox = QCheckBox(
-            "Auto-play next episode (5s countdown)", self.settings_tab
+            "Auto-play next episode (10s countdown)", self.settings_tab
         )
         self.auto_play_episodes_checkbox.setToolTip(
-            "Automatically play the next episode when one ends. Shows a 5-second countdown to cancel."
+            "Automatically play the next episode when one ends. "
+            "Shows a 10-second countdown to cancel."
         )
         self.auto_play_episodes_checkbox.setChecked(self.config_manager.auto_play_episodes)
         self.settings_layout.addRow(self.auto_play_episodes_checkbox)
@@ -820,17 +811,11 @@ class OptionsDialog(QDialog):
         self.config_manager.live_latency = self.live_latency_combo.currentData()
         self.config_manager.mouse_wheel_action = self.mouse_wheel_combo.currentData()
         self.config_manager.start_with_last_channel = self.start_last_channel_checkbox.isChecked()
-        self.config_manager.smooth_paused_seek = self.smooth_paused_seek_checkbox.isChecked()
         self.config_manager.auto_play_episodes = self.auto_play_episodes_checkbox.isChecked()
         self.config_manager.auto_play_movies = self.auto_play_movies_checkbox.isChecked()
         self.config_manager.timeshift_enabled = self.timeshift_checkbox.isChecked()
         self.config_manager.timeshift_max_mib = self.timeshift_size_slider.value()
-
-        need_to_refresh_content_list_size = False
-
-        if self.config_manager.channel_logos != self.channel_logos_checkbox.isChecked():
-            self.config_manager.channel_logos = self.channel_logos_checkbox.isChecked()
-            need_to_refresh_content_list_size = True
+        self.config_manager.channel_logos = self.channel_logos_checkbox.isChecked()
 
         if self.epg_source_combo.currentText() != self.config_manager.epg_source:
             self.config_manager.epg_source = self.epg_source_combo.currentText()
@@ -873,18 +858,10 @@ class OptionsDialog(QDialog):
         if current_provider_changed or force_provider_refresh:
             self.parent().set_provider(force_update=force_provider_refresh)
         elif self.epg_settings_modified:
-            reload_epg = getattr(self.parent(), "reload_epg", None)
-            if reload_epg is not None:
-                reload_epg()  # in the background (TV window); the guide repaints when ready
-            else:
-                self.epg_manager.set_current_epg()
-                self.parent().refresh_channels()
+            self.parent().reload_epg()  # in the background; the guide repaints when ready
         elif self.xmltv_mapping_modified:
             if self.config_manager.epg_source != "STB":
                 self.epg_manager.reindex_programs()
-
-        if need_to_refresh_content_list_size:
-            self.parent().refresh_content_list_size()
 
         self.accept()
 

@@ -308,11 +308,6 @@ class TVController(QObject):
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
         self._flow.select_provider(name, force_refresh=force_refresh)
 
-    def refresh_overlays(self) -> None:
-        """After a settings change: repaint the rows and reload the guide."""
-        self._repaint()
-        self.catalog.refresh_epg()
-
     def stop_live(self) -> None:
         """Stop what plays (window close, self-update): its slot goes back once released."""
         self._resume = self._current if self._has_media() else None
