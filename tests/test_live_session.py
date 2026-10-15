@@ -48,6 +48,7 @@ class FakeEngine(QObject):
     def __init__(self):
         super().__init__()
         self.up = True
+        self.gave_up = False  # an engine that gave up before this LiveSession existed
         self.opened = []  # (sid, url, keyword arguments)
         self.closed = []
         self.events = []  # ("open", sid) as sessions open
@@ -66,10 +67,16 @@ class FakeEngine(QObject):
         sid = f"s{len(self.opened) + 1}"
         self.opened.append((sid, url, kwargs))
         self.events.append(("open", sid))
+        if self.gave_up:  # the engine's answer after its give-up, queued like a relay
+            QTimer.singleShot(
+                0, lambda: self.sessionFailed.emit(sid, "unavailable", "Not available.")
+            )
         return sid
 
     def close_session(self, sid):
         self.closed.append(sid)
+        if self.gave_up:
+            QTimer.singleShot(0, self.answer)
 
     def answer(self):
         """The helper confirms every close so far."""
@@ -550,16 +557,36 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["mode"], "live")
         self.assertEqual(self.playback.rates, [1.5, 1.0, 1.05])
 
-    def test_go_live_with_bursts_aims_half_a_burst_further_back(self):
+    def test_go_live_with_bursts_aims_the_mean_lag_at_the_target(self):
         sid = self.ready(segments(0, 10), live_edge=20.0, burst=6.0)
+        # A burst just landed: the mean lag is the current one less half a burst. Starts
+        # 10 and 12 give means of 7 and 5 around the 6 s target; the tie goes to the newer.
         self.live.go_live()
-        # The 6 s burst is the target; plus half a burst, at most 11.0: segment 5.
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 6))
+        self.clock.now += 3.0  # halfway to the next burst: the current lag is the mean
+        self.live.go_live()
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 7))
+
+    def test_go_live_with_bursts_keeps_headroom_before_the_next_burst(self):
+        sid = self.ready(segments(5, 2, start=10.0), live_edge=14.0, burst=6.0)
+        self.live.go_live()  # neither start leaves 0.5 s before the next burst: the oldest
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 5))
 
     def test_go_live_takes_the_newest_segment_when_none_is_far_enough_behind(self):
-        sid = self.ready(segments(5, 2, start=10.0), live_edge=14.0, burst=6.0)
+        sid = self.ready(segments(5, 2, start=10.0), live_edge=14.0, latency="stable")
         self.live.go_live()
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 6))
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 6))
+
+    def test_a_seek_near_live_keeps_the_pause(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()
+        self.live.seek_to(19.0)
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 8))
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused, [True, True])  # paused again at the edge
+        self.step(0.25, media=0)
+        self.assertTrue(self.timelines[-1]["paused"])
 
     def test_go_live_resumes_a_paused_session(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
@@ -661,7 +688,7 @@ class StayLiveTests(LiveSessionCase):
     def test_hls_bursts_settle_without_rate_flapping(self):
         lags = self.play_bursts(12.0)
         self.assertEqual(len(self.playback.plays), 1)  # no reopen
-        self.assertEqual(self.playback.rates, [1.10, 1.05, 1.0])  # once down, no flapping
+        self.assertEqual(self.playback.rates, [1.05, 1.0])  # once down, no flapping
         self.assertGreater(min(lags[-24:]), 2.0)  # headroom before every burst
         reported = [timeline["lag"] for timeline in self.timelines[-24:]]
         self.assertLess(max(reported) - min(reported), 0.5)  # the mean, not the sawtooth
@@ -673,6 +700,60 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(rates, sorted(rates, reverse=True))  # only ever down
         self.assertEqual(rates[-1], 1.0)
         self.assertGreater(min(lags[-24:]), 2.0)
+
+    def test_go_live_on_bursts_shows_live_at_every_phase(self):
+        """6 s bursts of 2 s segments: Go live at any point of a burst lands at the edge."""
+        for phase in range(0, 24, 2):  # every 0.5 s through a burst
+            with self.subTest(phase=phase / 4):
+                self.live = self.make()
+                sid = self.start()
+                edge, closed = 60.0, 30
+                self.engine.buffer(sid, segments(0, closed), live_edge=edge, burst=6.0)
+                self.engine.sessionReady.emit(sid)
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.live.seek_to(10.0)
+                self.playback.set_state(PlaybackState.PLAYING)
+                position, go_live = self.live.position(), 24 * 3 + phase
+                reported, before_burst = [], []
+                for tick in range(1, 24 * 8):
+                    if tick == go_live:
+                        self.live.go_live()
+                        position = self.live.position()
+                        self.playback.set_state(PlaybackState.PLAYING)
+                    rate = (self.playback.rates or [1.0])[-1]
+                    advance = min(0.25 * rate, edge - position)  # VLC cannot pass the edge
+                    position += advance
+                    if tick % 24 == 0:
+                        if tick > go_live:
+                            before_burst.append(edge - position)
+                        edge, closed = edge + 6.0, closed + 3
+                        self.engine.buffer(sid, segments(0, closed), live_edge=edge, burst=6.0)
+                    self.step(0.25, media=advance)
+                    if tick >= go_live:
+                        reported.append(self.timelines[-1]["lag"])
+                target = self.timelines[-1]["target"]
+                self.assertEqual(len(self.playback.plays), 3)  # ready, seek, go live
+                self.assertLess(max(reported), target + 1.0)  # never "behind live"
+                self.assertGreaterEqual(min(before_burst), 0.5)  # no underrun
+                self.live.stop()
+                self.engine.answer()
+
+    def test_bursty_lag_follows_a_pause_without_delay(self):
+        sid = self.ready(segments(0, 30), live_edge=60.0, burst=6.0)
+        self.live.seek_to(40.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.live.toggle_pause()
+        self.playback.set_state(PlaybackState.PAUSED)
+        before = self.timelines[-1]["lag"]
+        edge = 60.0
+        for tick in range(1, 49):  # 12 s paused, two bursts landing
+            if tick % 24 == 0:
+                edge += 6.0
+                self.engine.buffer(sid, segments(0, int(edge // 2)), live_edge=edge, burst=6.0)
+            self.step(0.25, media=0)
+        # Paused, the mean lag grows with the wall clock, the transport's "behind live" too.
+        self.assertAlmostEqual(self.timelines[-1]["lag"], before + 12.0, delta=0.3)
 
     def test_no_rate_change_while_buffering(self):
         self.ready(segments(0, 2), live_edge=4.0)
@@ -844,10 +925,47 @@ class InterruptionTests(LiveSessionCase):
         self.playback.set_state(PlaybackState.PLAYING)
         self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
         self.step(0.25)
+        self.step(1.5)  # past the ready timeout, but under the 2 s floor
         self.assertEqual(self.engine.closed, [])
         with self.assertLogs("services.live.live_session", "WARNING"):
-            self.step(1.1)  # no state of the RAM ring for over the ready timeout
+            self.step(0.6)
         self.assert_falls_back(sid, LOST, 1)
+
+    def test_the_disk_deferral_waits_a_burst_for_hls(self):
+        self.live = self.make(ready_timeout_ms=1000)
+        sid = self.ready(segments(0, 10), live_edge=20.0, burst=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+        self.step(0.25)
+        self.step(7.5)  # the next burst may take 6 s to bring the RAM ring's first state
+        self.assertEqual(self.engine.closed, [])
+        with self.assertLogs("services.live.live_session", "WARNING"):
+            self.step(0.6)
+        self.assert_falls_back(sid, LOST, 1)
+
+    def test_user_actions_during_the_disk_deferral_wait_for_the_fresh_state(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()
+        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+        self.live.seek_to(6.0)
+        self.live.toggle_pause()  # resume
+        self.assertEqual(self.playback.paused, [True])
+        self.assertEqual(len(self.playback.plays), 1)  # nothing on the lost disk ring
+        self.engine.buffer(sid, segments(10, 3, start=20.0), live_edge=26.0)
+        # The seek runs on the RAM ring: 6.0 is gone, so its oldest point, playing.
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 10))
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused, [True])
+
+    def test_go_live_during_the_disk_deferral_waits_for_the_fresh_state(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.live.seek_to(4.0)
+        self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+        self.live.go_live()
+        self.assertEqual(len(self.playback.plays), 2)
+        self.engine.buffer(sid, segments(10, 3, start=20.0), live_edge=26.0)
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 11))
 
     def test_the_source_giving_up_before_the_ram_ring_reports_falls_back(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
@@ -1044,6 +1162,26 @@ class HelperDeathTests(LiveSessionCase):
         QTest.qWait(100)
         self.assertEqual(len(self.playback.plays), 1)
         self.assertEqual(self.notices, [])
+
+    def test_an_ended_session_falls_back_when_the_helper_is_gone(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.engine.sessionEnded.emit(sid)
+        self.engine.lose()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.assertEqual(self.notices, [LOST])
+        self.assertEqual(self.engine.closed, [sid])
+        self.assertEqual(self.active_timers(), [])
+
+    def test_a_session_made_after_the_engine_gave_up_falls_back_at_once(self):
+        self.engine.gave_up = True  # this LiveSession never saw available(False)
+        self.engine.up = False
+        sid = self.start()
+        started = time.monotonic()
+        self.wait_until(lambda: self.playback.plays, timeout=1.0)  # not the 6 s ready wait
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(self.engine.closed, [sid])
+        self.assertEqual(self.playback.plays, [DIRECT])
+        self.assertEqual(self.notices, [UNAVAILABLE])
 
     def test_engine_lost_during_the_wait_plays_directly_at_once(self):
         sid = self.start()
