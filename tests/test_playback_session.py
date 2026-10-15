@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -51,8 +52,107 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertIn("playing", self.states)
 
     def test_resume_position(self):
-        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE, start_ms=1000)
-        self.assertTrue(wait_for(lambda: self.session.time_ms() >= 900))
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE, start_ms=4000)
+        self.assertTrue(wait_for(lambda: self.session.state() is PlaybackState.PLAYING))
+        positions = []
+        self.session.positionChanged.connect(lambda t, _l: positions.append(t))
+        self.assertTrue(wait_for(lambda: any(t > 0 for t in positions), 4000))
+        self.assertGreaterEqual(next(t for t in positions if t > 0), 3500)
+
+    def test_release_twice_and_calls_after_release_are_safe(self):
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+        self.assertTrue(wait_for(lambda: self.session.state() is PlaybackState.PLAYING))
+        self.session.release()
+        self.session.release()
+        self.assertEqual(self.session.time_ms(), 0)
+        self.assertEqual(self.session.length_ms(), 0)
+        self.assertFalse(self.session.is_seekable())
+        self.assertEqual(self.session.audio_tracks(), [])
+        self.assertEqual(self.session.volume(), 0)
+        self.session.stop()
+        self.session.toggle_pause()
+        self.session.set_paused(True)
+        self.session.seek(100)
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+        self.session._tick()
+        QTest.qWait(200)
+
+    def test_seekable_false_when_media_is_replaced(self):
+        flags = []
+        self.session.seekableChanged.connect(flags.append)
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+        self.assertTrue(wait_for(lambda: True in flags))
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+        self.assertEqual(flags[-1], False)
+
+    def test_seekable_false_on_stop(self):
+        flags = []
+        self.session.seekableChanged.connect(flags.append)
+        self.session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+        self.assertTrue(wait_for(lambda: True in flags))
+        self.session.stop()
+        self.assertEqual(flags[-1], False)
+
+    def _stalling_session(self):
+        session = PlaybackSession(INSTANCE, poll_ms=50, stall_ms=0)
+        self.addCleanup(session.release)
+        session._kind = PlayKind.LIVE
+        session._stall_clock.start()
+        return session
+
+    def test_no_stall_counted_while_time_stays_zero(self):
+        session = self._stalling_session()
+        with mock.patch.object(session, "time_ms", return_value=0):
+            for _ in range(6):
+                session._watch_stall(PlaybackState.PLAYING)
+        self.assertEqual(session._stalls, 0)
+
+    def test_stall_counted_when_time_stops_advancing(self):
+        session = self._stalling_session()
+        with mock.patch.object(session, "time_ms", return_value=500):
+            for _ in range(3):
+                session._watch_stall(PlaybackState.PLAYING)
+        self.assertGreaterEqual(session._stalls, 1)
+
+    def test_audio_restore_does_not_touch_a_replaced_media(self):
+        session = self._stalling_session()
+        session.play(FIXTURE.as_uri(), kind=PlayKind.LIVE)
+        player = session._player
+        with (
+            mock.patch.object(player, "audio_get_track", return_value=7),
+            mock.patch.object(player, "audio_set_track") as set_track,
+        ):
+            with mock.patch.object(session, "time_ms", return_value=500):
+                for _ in range(2):
+                    session._watch_stall(PlaybackState.PLAYING)
+            self.assertEqual(set_track.call_args_list, [mock.call(-1)])
+            session.stop()
+            session.play(FIXTURE.as_uri(), kind=PlayKind.VOD_FILE)
+            QTest.qWait(800)
+            self.assertEqual(set_track.call_args_list, [mock.call(-1)])
+
+    def test_audio_restore_after_release_is_harmless(self):
+        session = self._stalling_session()
+        session.play(FIXTURE.as_uri(), kind=PlayKind.LIVE)
+        with mock.patch.object(session, "time_ms", return_value=500):
+            for _ in range(3):
+                session._watch_stall(PlaybackState.PLAYING)
+        session.release()
+        QTest.qWait(800)
+
+    def test_stall_restart_is_cancelled_by_a_user_zap(self):
+        session = self._stalling_session()
+        session.play(FIXTURE.as_uri(), kind=PlayKind.LIVE)
+        session._stalls = 2
+        with mock.patch.object(session, "time_ms", return_value=500):
+            for _ in range(3):
+                session._watch_stall(PlaybackState.PLAYING)
+        other = (FIXTURE.parent / "other.mp4").as_uri()
+        session.play(other, kind=PlayKind.VOD_FILE)
+        with mock.patch.object(session, "_start_media") as start:
+            QTest.qWait(600)
+        start.assert_not_called()
+        self.assertEqual(session.url, other)
 
     def test_bad_stream_reports_error(self):
         errors = []
