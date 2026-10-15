@@ -451,7 +451,7 @@ class TVController(QObject):
         self._flow.leave_library()
         url = Path(path).absolute().as_uri()
         title = Path(path).name
-        target = Target({"name": title, "cmd": url}, "movies", title)
+        target = Target({"name": title, "cmd": url}, "movies", title, local=True)
         self._close_pip()  # picture in picture is for live TV
         self._cancel_external()
         self._lanes.supersede()
@@ -947,7 +947,8 @@ class TVController(QObject):
             large.group_key = target.group_key if target.live else None
         if target.live:
             self.zap.tuned(target.item)
-        self._record_watched(target, url)
+        if not target.local:  # a file is no provider's: no history, as play_file
+            self._record_watched(target, url)
 
     def _record_watched(self, target: Target, url: str) -> None:
         try:
@@ -1543,6 +1544,7 @@ class TVController(QObject):
             if self._current is target:
                 self._restore_channel()  # INFO, the guide and Ctrl+D follow what it plays
 
+        # Nothing plays in the app: no provider slot is held, for a stream or a file alike.
         self._tuner.open(self._guarded(target, launch))
 
     # ---- state helpers ------------------------------------------------------------------------

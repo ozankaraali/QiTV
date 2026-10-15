@@ -47,12 +47,6 @@ def is_channel(nav: NavModel, node: Optional[NavNode]) -> bool:
     )
 
 
-def _local_file(target: Target) -> str:
-    """A local file's address (file:), else ""."""
-    cmd = str(target.item.get("cmd") or "")
-    return cmd if cmd.startswith("file:") else ""
-
-
 def _css(value: str, alpha: Optional[float] = None) -> str:
     color = qcolor(value, alpha)
     return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alphaF():.2f})"
@@ -186,10 +180,9 @@ class ContextActions(QObject):
             logger.info("Not playing %s externally: %s is not installed", target.title, player)
             self._notify(missing.partition("\n")[0], "error")
             return
-        local = _local_file(target)
-        if local:
+        if target.local:  # its address is the file's (play_file)
             self.lanes.supersede()  # a newer choice than a side play waiting for its link
-            self._play_external(target, local, launch)
+            self._play_external(target, str(target.item.get("cmd") or ""), launch)
             return
         self.lanes.request_side(
             target, lambda url: self._play_external(target, url, launch), play=True

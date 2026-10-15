@@ -43,6 +43,7 @@ class Target:
     retried: bool = False  # its link was made again after a playback failure (STB tokens)
     context: Optional[dict] = None  # a movie's or episode's play context (see play_vod)
     start_over: bool = False  # from the start, not where it stopped
+    local: bool = False  # a file opened from the disk: no provider's link, slot or history
 
     @property
     def live(self) -> bool:

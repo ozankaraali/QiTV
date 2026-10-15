@@ -2187,6 +2187,26 @@ class ReleaseOrderTests(PipelineCase):
         self.assertEqual(len(self.played_urls()), 2)
 
 
+class LocalFileExternalTests(PipelineCase):
+    """Review I1: an opened file sent to VLC keeps play_file's contract: no provider slot,
+    no history."""
+
+    def test_an_opened_file_sent_to_vlc_takes_no_slot_and_leaves_no_history(self):
+        path = Path("clip.mkv")
+        self.controller.play_file(str(path))
+        shown = []
+        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append(menu)):
+            self.transport.externalRequested.emit(QPoint(300, 600))
+        [menu] = shown
+        self.addCleanup(menu.deleteLater)
+        with mock.patch.object(self.budget, "request", wraps=self.budget.request) as request:
+            ContextMenuTests.choose(menu, "Play in VLC")
+        self.assertEqual(self.external.calls, [("vlc", path.absolute().as_uri())])
+        request.assert_not_called()
+        self.assertEqual(self.budget.holders("Home"), [])
+        self.assertEqual(self.watch.plays, [])
+
+
 class SlotWaitTests(PipelineCase):
     def test_pause_pressed_while_the_tune_waits_applies_at_its_start(self):
         self.play(0)
@@ -3119,6 +3139,8 @@ class ExternalButtonTests(ControllerTestCase):
         self.choose("Play in VLC")
         self.assertEqual(self.catalog.links, [])  # a file is no provider's: no link to ask for
         self.assertEqual(self.external.calls, [("vlc", path.absolute().as_uri())])
+        # Nor its history: record_play keeps the watch history and last_watched (review I1).
+        self.assertEqual(self.watch.plays, [])
 
     def test_with_nothing_played_there_is_no_menu(self):
         self.assertIsNone(self.open_menu())
