@@ -67,6 +67,14 @@ class ThreadCleanupTests(unittest.TestCase):
         """Exercise the real content lifecycle, including loss of its QObject owner."""
         self.run_scenario("content-loading")
 
+    def test_job_runner_teardown_survives_gui_object_churn(self):
+        """Hundreds of jobs finishing while the GUI destroys connected QObjects must not hang.
+
+        A worker deleted on its own thread made Qt call back into Python while holding a
+        signal-slot mutex, deadlocking against the GUI thread holding the GIL.
+        """
+        self.run_scenario("jobrunner-churn")
+
 
 def run_child(scenario, playlist):
     # Keep QApplication, production imports, and crash-prone threads out of the
@@ -115,9 +123,9 @@ def run_child(scenario, playlist):
             self.timer.start()
 
         def block(self):
-            # QObject deferred destruction runs after QThread.finished, but is
-            # still inside native thread teardown. Never leave it blocked on a
-            # failing assertion or a GUI-side blocking wait regression.
+            # Connected directly to QThread.finished: it runs on the worker thread
+            # inside native thread teardown, before the thread can be joined. Never
+            # leave it blocked on a failing assertion or a GUI-side blocking wait.
             self.entered.set()
             if not self.release.wait(5):
                 self.expired.set()
@@ -162,10 +170,14 @@ def run_child(scenario, playlist):
         gate = TeardownGate()
         observer = Observer()
         destroyed = threading.Event()
+        worker_destroyed_on = []
         thread = QThread()
         worker = Worker()
         worker.moveToThread(thread)
-        worker.destroyed.connect(gate.block, Qt.DirectConnection)
+        thread.finished.connect(gate.block, Qt.DirectConnection)
+        worker.destroyed.connect(
+            lambda *_: worker_destroyed_on.append(threading.get_ident()), Qt.DirectConnection
+        )
         thread.destroyed.connect(lambda *_: destroyed.set())
         thread.started.connect(worker.run)
         cleanup = ThreadCleanup(thread, worker)
@@ -174,12 +186,17 @@ def run_child(scenario, playlist):
         thread.start()
         del cleanup, thread, worker
         try:
-            wait_until(gate.entered.is_set, "worker deferred deletion was never reached")
+            wait_until(gate.entered.is_set, "native thread teardown was never reached")
             gate.assert_pending(thread_ref, worker_ref)
             case.assertEqual(observer.completions, [], "completion preceded native join")
+            case.assertEqual(worker_destroyed_on, [], "worker destroyed before the native join")
         finally:
             gate.finish(destroyed)
         case.assertEqual(observer.completions, [(True, True)])
+        # Never destroyed on its own thread (that deadlocks against the GIL): the
+        # cleanup releases it on the GUI thread once the thread has been joined.
+        wait_until(lambda: worker_ref() is None, "worker was not released after the join")
+        case.assertEqual(worker_destroyed_on, [threading.get_ident()])
     elif scenario == "content-loading":
         from mixins.content_loading_mixin import ContentLoadingMixin
         from workers import M3ULoaderWorker
@@ -231,8 +248,14 @@ def run_child(scenario, playlist):
         gate = TeardownGate()
         destroyed = threading.Event()
         consumer_destroyed = threading.Event()
-        worker = M3ULoaderWorker(playlist)
-        worker.destroyed.connect(gate.block, Qt.DirectConnection)
+
+        class GatedM3ULoaderWorker(M3ULoaderWorker):
+            def run(self):
+                # Hold native teardown open once the real worker has finished.
+                QThread.currentThread().finished.connect(gate.block, Qt.DirectConnection)
+                super().run()
+
+        worker = GatedM3ULoaderWorker(playlist)
         consumer.destroyed.connect(lambda *_: consumer_destroyed.set())
         consumer._start_content_worker(worker, consumer._on_catalog_loaded)
         thread = worker.thread()
@@ -250,6 +273,50 @@ def run_child(scenario, playlist):
             gate.assert_pending(thread_ref, worker_ref)
         finally:
             gate.finish(destroyed)
+    elif scenario == "jobrunner-churn":
+        import faulthandler
+
+        from PySide6.QtCore import Signal
+        from PySide6.QtTest import QTest
+
+        from services.jobs import JobRunner
+
+        # A deadlock exits with a stack dump instead of waiting for the parent's timeout.
+        faulthandler.dump_traceback_later(45, exit=True)
+
+        class Worker(QObject):
+            finished = Signal(object)
+            error = Signal(str)
+
+            def run(self):
+                self.finished.emit(1)
+
+        class Churn(QObject):
+            ping = Signal()
+
+            @Slot()
+            def pong(self):
+                pass
+
+        runner = JobRunner()
+        delivered = []
+        rounds, per_round = 60, 8
+        for _ in range(rounds):
+            for _ in range(per_round):
+                runner.run_worker(Worker(), lambda _context, payload: delivered.append(payload))
+            # GUI-thread churn: destroy connected Python-created QObjects while jobs end.
+            churn = [Churn() for _ in range(40)]
+            for sender, receiver in zip(churn, churn[1:]):
+                sender.ping.connect(receiver.pong)
+            for item in churn:
+                item.deleteLater()
+            del churn
+            QTest.qWait(5)
+        wait_until(
+            lambda: runner.pending() == 0 and len(delivered) == rounds * per_round,
+            "jobs did not all deliver and retire",
+        )
+        faulthandler.cancel_dump_traceback_later()
     else:
         raise ValueError(f"Unknown scenario: {scenario}")
 
