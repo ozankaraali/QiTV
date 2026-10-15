@@ -5,10 +5,12 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QThread, Signal
+from PySide6.QtCore import QCoreApplication, QElapsedTimer, QThread, Signal
 from PySide6.QtGui import QColor, QImage
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from services.thread_cleanup import has_pending_threads
 from ui import logos
 from ui.logos import LogoCache, PosterCache
 
@@ -45,6 +47,16 @@ class ImageCacheTest(unittest.TestCase):
         patcher = mock.patch.object(logos, "ImageLoader", FakeLoader)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.addCleanup(self.assert_no_pending_threads)
+
+    def assert_no_pending_threads(self):
+        # Runs before the loader patch is undone and after cache.shutdown (LIFO order).
+        QTest.qWait(1)
+        deadline = QElapsedTimer()
+        deadline.start()
+        while has_pending_threads() and deadline.elapsed() < 2000:
+            QTest.qWait(10)
+        self.assertFalse(has_pending_threads(), "a test leaked a pending thread cleanup")
 
     def image(self, width, height):
         img = QImage(width, height, QImage.Format_RGB32)
@@ -61,8 +73,6 @@ class ImageCacheTest(unittest.TestCase):
         return cache
 
     def settle(self, cache, timeout=5000):
-        from PySide6.QtCore import QElapsedTimer
-
         timer = QElapsedTimer()
         timer.start()
         while (cache._loader is not None or cache._queue) and timer.elapsed() < timeout:
@@ -84,7 +94,10 @@ class ImageCacheTest(unittest.TestCase):
 
     def test_poster_loads_full_size_not_iconified(self):
         cache = self.make()
-        with mock.patch.object(logos, "ImageLoader") as loader:
+        with (
+            mock.patch.object(logos, "ImageLoader") as loader,
+            mock.patch.object(logos, "ThreadCleanup"),
+        ):
             cache.request(["p"])
         self.assertFalse(loader.call_args.kwargs["iconified"])
 
@@ -133,6 +146,28 @@ class ImageCacheTest(unittest.TestCase):
         self.assertIsNone(cache.pixmap("u"))
         cache._on_progress(1, 1, data, generation=2)
         self.assertIsNotNone(cache.pixmap("u"))
+
+    def test_shutdown_mid_batch_still_releases_the_loader(self):
+        class SlowLoader(FakeLoader):
+            def run(self):
+                while not self.isInterruptionRequested():
+                    QThread.msleep(5)
+
+            def cancel(self):
+                self.requestInterruption()
+
+        cache = self.make()
+        with mock.patch.object(logos, "ImageLoader", SlowLoader):
+            cache.request(["slow"])
+            self.assertIsNotNone(cache._loader)
+            cache.shutdown()
+            self.assertTrue(has_pending_threads())
+            self.assertEqual(cache._queue, [])
+            deadline = QElapsedTimer()
+            deadline.start()
+            while has_pending_threads() and deadline.elapsed() < 3000:
+                QTest.qWait(10)
+        self.assertFalse(has_pending_threads())
 
     def test_missing_poster_file_leaves_no_entry(self):
         cache = self.make()
