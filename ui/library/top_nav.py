@@ -1,0 +1,209 @@
+"""The Library's top bar: QiTV, Live TV / Movies / Series, and the Search and source pills."""
+
+import logging
+
+from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal
+from PySide6.QtGui import QFont, QFontMetrics, QPainter
+from PySide6.QtWidgets import QWidget
+
+from ui.overlays.painting import Units, elided, fill_round
+from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
+
+logger = logging.getLogger(__name__)
+
+HEIGHT_U = 6.0
+DEFAULT_HOST_WIDTH = 1280
+TAB_LABELS = {"live": "Live TV", "movies": "Movies", "series": "Series"}
+ALL_TABS = ["live", "movies", "series"]
+SEARCH_LABEL = "⌕ Search"
+PILL_H_U = 3.2
+MAX_SOURCE_U = 22.0
+
+
+class TopNav(QWidget):
+    tabRequested = Signal(str)  # "live" | "movies" | "series"
+    searchRequested = Signal()
+    sourceRequested = Signal(QPoint)  # global position under the pill
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.NoFocus)
+        self._tabs = list(ALL_TABS)
+        self._active = "live"
+        self._source = ""
+        self._focused = False
+        self._focus_item = "live"
+        if parent is not None:
+            parent.installEventFilter(self)
+        self._relayout()
+
+    # ---- public API -------------------------------------------------------------------------
+
+    def set_active(self, tab: str) -> None:
+        if tab not in (*ALL_TABS, "search"):
+            raise ValueError(f"Unknown tab: {tab!r}")
+        self._active = tab
+        self._focus_item = tab
+        self.update()
+
+    def set_source_name(self, name: str) -> None:
+        self._source = name
+        self.update()
+
+    def set_tabs(self, tabs: list[str]) -> None:
+        self._tabs = [t for t in ALL_TABS if t in tabs]
+        if self._focus_item in ALL_TABS and self._focus_item not in self._tabs:
+            self._focus_item = "search"
+        self.update()
+
+    def set_focused(self, focused: bool) -> None:
+        self._focused = focused
+        self.update()
+
+    def move_by(self, delta: int) -> None:
+        order = self._order()
+        row = order.index(self._focus_item) if self._focus_item in order else 0
+        self._focus_item = order[min(len(order) - 1, max(0, row + delta))]
+        self.update()
+
+    def activate(self) -> None:
+        self._trigger(self._focus_item)
+
+    # ---- internals --------------------------------------------------------------------------
+
+    def _order(self) -> list[str]:
+        return [*self._tabs, "search", "source"]
+
+    def _trigger(self, item: str) -> None:
+        if item in ALL_TABS:
+            self.tabRequested.emit(item)
+        elif item == "search":
+            self.searchRequested.emit()
+        elif item == "source":
+            rect = self._item_rects()["source"]
+            self.sourceRequested.emit(
+                self.mapToGlobal(QPoint(int(rect.left()), int(rect.bottom())))
+            )
+
+    def _host_width(self) -> int:
+        parent = self.parentWidget()
+        return parent.width() if parent is not None and parent.width() > 0 else DEFAULT_HOST_WIDTH
+
+    def _source_text(self) -> str:
+        return f"{self._source} ▾" if self._source else "Source ▾"
+
+    def _item_rects(self) -> dict[str, QRectF]:
+        units = Units(self._host_width())
+        u = units.u
+        height = self.height()
+        rects: dict[str, QRectF] = {}
+        # right-aligned pills
+        pill_h = PILL_H_U * u
+        top = (height - pill_h) / 2
+        pad = 1.4 * u
+        pill_font = units.font(1.1)
+        fm = QFontMetrics(pill_font)
+        source_w = (
+            min(fm.horizontalAdvance(self._source_text()) + u, MAX_SOURCE_U * u - 2 * pad) + 2 * pad
+        )
+        search_w = fm.horizontalAdvance(SEARCH_LABEL) + u + 2 * pad
+        x = self.width() - 2.0 * u - source_w
+        rects["source"] = QRectF(x, top, source_w, pill_h)
+        x -= 1.0 * u + search_w
+        rects["search"] = QRectF(x, top, search_w, pill_h)
+        # tabs
+        brand_font = units.font(1.6, QFont.Weight.Bold)
+        x = 2.0 * u + QFontMetrics(brand_font).horizontalAdvance("QiTV") + 3.0 * u
+        tab_fm = QFontMetrics(units.font(1.3, QFont.Weight.DemiBold))
+        for tab in self._tabs:
+            width = tab_fm.horizontalAdvance(TAB_LABELS[tab])
+            rects[tab] = QRectF(x, 0, width, height)
+            x += width + 2.6 * u
+        return rects
+
+    def _item_at(self, pos) -> str | None:
+        u = Units(self._host_width()).u
+        for item, rect in self._item_rects().items():
+            hit = rect.adjusted(-0.8 * u, 0, 0.8 * u, 0)
+            if hit.contains(pos):
+                return item
+        return None
+
+    def mousePressEvent(self, event) -> None:
+        item = self._item_at(event.position())
+        if item is None:
+            super().mousePressEvent(event)
+            return
+        self._focus_item = item
+        self.update()
+        self._trigger(item)
+
+    def eventFilter(self, obj, event):
+        if obj is self.parentWidget() and event.type() == QEvent.Resize:
+            self._relayout()
+        return False
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.update()
+
+    def _relayout(self) -> None:
+        self.setFixedHeight(Units(self._host_width()).px(HEIGHT_U))
+        self.update()
+
+    def _paint_focus(self, p: QPainter, rect: QRectF, radius: float) -> None:
+        fill_round(p, rect, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), radius)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(qcolor(PALETTE.accent))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(rect.adjusted(0.75, 0.75, -0.75, -0.75), radius, radius)
+        p.restore()
+
+    def paintEvent(self, event) -> None:
+        units = Units(self._host_width())
+        u = units.u
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.fillRect(self.rect(), qcolor(PALETTE.canvas))
+        p.fillRect(0, self.height() - 1, self.width(), 1, qcolor(PALETTE.text, 0.06))
+        rects = self._item_rects()
+        height = self.height()
+        p.setFont(units.font(1.6, QFont.Weight.Bold))
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(QRectF(2.0 * u, 0, 10 * u, height), Qt.AlignLeft | Qt.AlignVCenter, "QiTV")
+        for tab in self._tabs:
+            rect = rects[tab]
+            active = tab == self._active
+            if self._focused and self._focus_item == tab:
+                self._paint_focus(
+                    p,
+                    QRectF(
+                        rect.x() - 0.8 * u, (height - 3.6 * u) / 2, rect.width() + 1.6 * u, 3.6 * u
+                    ),
+                    1.0 * u,
+                )
+            p.setFont(units.font(1.3, QFont.Weight.DemiBold))
+            p.setPen(qcolor(PALETTE.text, 1.0 if active else PALETTE.text_muted_alpha))
+            p.drawText(rect, Qt.AlignCenter, TAB_LABELS[tab])
+            if active:
+                p.fillRect(
+                    QRectF(rect.x(), height - 1.25 * u, rect.width(), 0.25 * u),
+                    qcolor(PALETTE.accent),
+                )
+        p.setFont(units.font(1.1))
+        pad = 1.4 * u
+        for item, text in (("search", SEARCH_LABEL), ("source", self._source_text())):
+            rect = rects[item]
+            radius = 1.6 * u
+            if self._focused and self._focus_item == item:
+                self._paint_focus(p, rect, radius)
+            else:
+                p.setPen(qcolor(PALETTE.text, 0.15))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+            active = item == self._active
+            p.setPen(qcolor(PALETTE.accent if active else PALETTE.text, 1.0 if active else 0.85))
+            inner = rect.adjusted(pad, 0, -pad, 0)
+            p.drawText(inner, Qt.AlignCenter, elided(p, text, inner.width()))
+        p.end()
