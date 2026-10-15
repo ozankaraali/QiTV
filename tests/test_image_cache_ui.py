@@ -5,11 +5,12 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QElapsedTimer, QThread, Signal
+from PySide6.QtCore import QCoreApplication, QElapsedTimer, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+import image_loader
 from services.thread_cleanup import has_pending_threads
 from ui import logos
 from ui.logos import LogoCache, PosterCache
@@ -112,16 +113,74 @@ class ImageCacheTest(unittest.TestCase):
         self.assertEqual(FakeLoader.batches, [["p"]])
         self.assertIsNone(logo._loader)
 
-    def test_keeps_most_recent_entries(self):
+    def test_keeps_most_recent_entries_within_the_byte_budget(self):
         path = self.image(8, 8)
         names = ["a", "b", "c", "d", "e"]
         FakeLoader.paths = {n: path for n in names}
         cache = self.make()
-        with mock.patch.object(PosterCache, "MAX_ENTRIES", 3):
+        with mock.patch.object(PosterCache, "MAX_BYTES", 3 * 8 * 8 * 4):  # three 8×8 images
             for name in names:
                 cache.request([name])
                 self.settle(cache)
         self.assertEqual(list(cache._pixmaps), ["c", "d", "e"])
+        self.assertEqual(cache.size_bytes(), 3 * 8 * 8 * 4)
+
+    def test_the_caches_are_bounded_by_bytes(self):
+        self.assertEqual(LogoCache.MAX_BYTES, 48 * 1024 * 1024)
+        self.assertGreater(PosterCache.MAX_BYTES, 0)
+        self.assertFalse(hasattr(LogoCache, "MAX_ENTRIES"))  # a byte budget, not a count
+
+    def test_an_image_larger_than_the_budget_is_kept_alone(self):
+        FakeLoader.paths = {"a": self.image(8, 8), "big": self.image(40, 40)}
+        cache = self.make()
+        with mock.patch.object(PosterCache, "MAX_BYTES", 1000):
+            for name in ("a", "big"):
+                cache.request([name])
+                self.settle(cache)
+        self.assertEqual(list(cache._pixmaps), ["big"])
+        self.assertEqual(cache.size_bytes(), 40 * 40 * 4)
+
+    def test_logos_are_stored_at_the_size_they_are_painted(self):
+        # About 8u of a ~1600 px host: the banner's logo; rows (4u) scale down from it.
+        FakeLoader.paths = {"l": self.image(1000, 500)}
+        cache = self.make(LogoCache)
+        cache.request(["l"])
+        self.settle(cache)
+        dpr = max(1, round(self.app.devicePixelRatio()))
+        stored = cache.pixmap("l")
+        self.assertEqual((stored.width(), stored.height()), (128 * dpr, 64 * dpr))
+        self.assertEqual(cache.size_bytes(), 128 * dpr * 64 * dpr * 4)
+
+    def test_the_loader_decodes_at_the_stored_size(self):
+        cache = self.make(LogoCache)
+        with (
+            mock.patch.object(logos, "ImageLoader") as loader,
+            mock.patch.object(logos, "ThreadCleanup"),
+        ):
+            cache.request(["l"])
+        dpr = self.app.devicePixelRatio()
+        self.assertEqual(loader.call_args.kwargs["decode_side"], round(LogoCache.MAX_SIDE * dpr))
+
+    def test_an_image_decoded_by_the_loader_is_used_as_is(self):
+        cache = self.make()
+        cache._batch = ["u"]
+        image = QImage(30, 20, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor("green"))
+        cache._on_progress(1, 1, {"rank": 0, "cache_path": "/nonexistent.png", "image": image})
+        stored = cache.pixmap("u")
+        self.assertEqual((stored.width(), stored.height()), (30, 20))
+
+    def test_an_image_the_loader_could_not_decode_is_not_read_again(self):
+        cache = self.make()
+        cache._batch = ["u"]
+        path = self.image(10, 10)
+        with (
+            mock.patch.object(logos, "read_scaled") as read,
+            self.assertLogs("ui.logos", "INFO"),
+        ):
+            cache._on_progress(1, 1, {"rank": 0, "cache_path": path, "image": None})
+        read.assert_not_called()
+        self.assertIsNone(cache.pixmap("u"))
 
     def test_failing_url_is_requested_three_times_in_total(self):
         cache = self.make()
@@ -194,6 +253,61 @@ class ImageCacheTest(unittest.TestCase):
         cache._batch = ["u"]
         cache._on_progress(1, 1, {"rank": 0, "cache_path": "/nonexistent/poster.png"})
         self.assertIsNone(cache.pixmap("u"))
+
+
+class LoaderDecodeTests(unittest.TestCase):
+    """ImageLoader decodes and scales into a QImage on its own thread (never a QPixmap)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_decodes_and_scales_off_the_gui_thread(self):
+        img = QImage(1000, 500, QImage.Format_RGB32)
+        img.fill(QColor("blue"))
+        handle, path = tempfile.mkstemp(suffix=".png")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        img.save(path)
+
+        class Manager:
+            async def cache_image_from_base64(self, image_str, iconified):
+                return path
+
+        threads = []
+        read = image_loader.read_scaled
+
+        def recording(*args):
+            threads.append(QThread.currentThread())
+            return read(*args)
+
+        results = []
+        loader = image_loader.ImageLoader(
+            ["data:image/png;base64,AAAA"], Manager(), iconified=True, decode_side=64
+        )
+        loader.progress_updated.connect(
+            lambda _c, _t, data: results.append(data), Qt.ConnectionType.QueuedConnection
+        )
+        with mock.patch.object(image_loader, "read_scaled", side_effect=recording):
+            loader.start()
+            self.assertTrue(loader.wait(5000))
+        QCoreApplication.processEvents()
+        self.assertEqual(len(results), 1)
+        image = results[0]["image"]
+        self.assertIsInstance(image, QImage)
+        self.assertEqual((image.width(), image.height()), (64, 32))
+        self.assertEqual(len(threads), 1)
+        self.assertIsNot(threads[0], self.app.thread())
+
+    def test_read_scaled_keeps_small_images_and_rejects_unreadable_files(self):
+        img = QImage(20, 10, QImage.Format_RGB32)
+        img.fill(QColor("red"))
+        handle, path = tempfile.mkstemp(suffix=".png")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        img.save(path)
+        self.assertEqual(image_loader.read_scaled(path, 64).size().toTuple(), (20, 10))
+        self.assertIsNone(image_loader.read_scaled("/nonexistent/x.png", 64))
 
 
 if __name__ == "__main__":

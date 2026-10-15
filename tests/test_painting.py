@@ -158,7 +158,7 @@ class LogoCacheTest(unittest.TestCase):
     def test_lru_eviction_and_touch(self):
         cache = self.make()
         path = self.png(4)
-        with mock.patch.object(LogoCache, "MAX_ENTRIES", 3):
+        with mock.patch.object(LogoCache, "MAX_BYTES", 3 * 4 * 4 * 4):  # three 4×4 logos
             for name in "abc":
                 self.load(cache, name, path)
             cache.pixmap("a")  # touch: b is now least recent

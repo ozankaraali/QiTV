@@ -1,13 +1,43 @@
 import asyncio
 import logging
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QImage, QImageReader
 import aiohttp
 
 logger = logging.getLogger(__name__)
 
 
+def read_scaled(path: str, max_side: int) -> QImage | None:
+    """The image at `path`, scaled so its long side is at most `max_side` pixels.
+
+    A QImage, not a QPixmap: safe on a worker thread. None when the file is unreadable.
+    """
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if size.isValid() and max(size.width(), size.height()) > max_side:
+        reader.setScaledSize(size.scaled(max_side, max_side, Qt.AspectRatioMode.KeepAspectRatio))
+    image = reader.read()
+    if image.isNull():
+        return None
+    if max(image.width(), image.height()) > max_side:  # a format that ignored the scaled size
+        image = image.scaled(
+            max_side,
+            max_side,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    return image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+
+
 class ImageLoader(QThread):
+    """Caches images on disk; with `decode_side`, also decodes them for the GUI.
+
+    Each result dict then carries "image": a QImage scaled to `decode_side` pixels on this
+    thread, or None when the file could not be decoded. The GUI only wraps it in a QPixmap.
+    """
+
     progress_updated = Signal(int, int, dict)
 
     def __init__(
@@ -17,6 +47,7 @@ class ImageLoader(QThread):
         iconified=False,
         verify_ssl=True,
         refresh_cache=False,
+        decode_side: int | None = None,
     ):
         super().__init__()
         self.image_urls = image_urls
@@ -24,8 +55,9 @@ class ImageLoader(QThread):
         self.iconified = iconified
         self.verify_ssl = verify_ssl
         self.refresh_cache = refresh_cache
-        self._loop = None
-        self._load_task = None
+        self.decode_side = decode_side
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._load_task: asyncio.Task | None = None
 
     def cancel(self):
         """Interrupt pending I/O without blocking the GUI thread."""
@@ -46,7 +78,7 @@ class ImageLoader(QThread):
                 session, image_url, self.iconified
             )
             if cache_path:
-                return {"rank": image_rank, "cache_path": cache_path, "iconified": self.iconified}
+                return self._result(image_rank, cache_path)
         except Exception as e:
             logger.warning(f"Error fetching image {image_url}: {e}")
             raise
@@ -57,8 +89,14 @@ class ImageLoader(QThread):
         # failures and returns None for them.
         cache_path = await self.image_manager.cache_image_from_base64(image_str, self.iconified)
         if cache_path:
-            return {"rank": image_rank, "cache_path": cache_path, "iconified": self.iconified}
+            return self._result(image_rank, cache_path)
         return None
+
+    def _result(self, image_rank, cache_path) -> dict:
+        result = {"rank": image_rank, "cache_path": cache_path, "iconified": self.iconified}
+        if self.decode_side:
+            result["image"] = read_scaled(cache_path, self.decode_side)  # on this thread
+        return result
 
     async def load_images(self):
         self._loop = asyncio.get_running_loop()

@@ -1,6 +1,7 @@
 """GUI-thread image caches (channel logos, library posters).
 
-Batches URL downloads and builds bounded QPixmaps on the GUI thread.
+Batches URL downloads; the loader thread decodes and scales each image into a QImage, and
+the GUI thread only wraps it in a QPixmap, kept within a byte budget.
 """
 
 from collections import OrderedDict
@@ -8,23 +9,31 @@ from functools import partial
 import logging
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtGui import QGuiApplication, QImage, QPixmap
 
-from image_loader import ImageLoader
+from image_loader import ImageLoader, read_scaled
 from services.thread_cleanup import ThreadCleanup
 
 logger = logging.getLogger(__name__)
 
+MIB = 1024 * 1024
+
+
+def _cost(pixmap: QPixmap) -> int:
+    """The bytes a pixmap holds (32-bit pixels)."""
+    return pixmap.width() * pixmap.height() * 4
+
 
 class ImageCache(QObject):
-    """Bounded LRU pixmap cache fed by batched ImageLoader downloads.
+    """LRU pixmap cache within MAX_BYTES, fed by batched ImageLoader downloads.
 
     Subclasses set the limits. Full-size images are never kept: every stored pixmap is
-    scaled so its long side is at most MAX_SIDE logical pixels (times devicePixelRatio).
+    scaled so its long side is at most MAX_SIDE logical pixels (times devicePixelRatio),
+    on the loader thread.
     """
 
     MAX_SIDE = 192  # logical pixels; scaled by devicePixelRatio when stored
-    MAX_ENTRIES = 2000
+    MAX_BYTES = 48 * MIB
     ICONIFIED = True
     MAX_RETRIES = 2
 
@@ -37,6 +46,7 @@ class ImageCache(QObject):
         self._image_manager = image_manager
         self._config = config_manager
         self._pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
+        self._bytes = 0
         self._retries: dict[str, int] = {}
         self._closed = False
         self._seen: set[str] = set()
@@ -53,6 +63,10 @@ class ImageCache(QObject):
         if pixmap is not None:
             self._pixmaps.move_to_end(url)
         return pixmap
+
+    def size_bytes(self) -> int:
+        """The bytes the stored pixmaps hold (at most MAX_BYTES, but for one larger image)."""
+        return self._bytes
 
     def shutdown(self) -> None:
         """Stop loading; late results are ignored."""
@@ -89,6 +103,7 @@ class ImageCache(QObject):
             self._image_manager,
             iconified=self.ICONIFIED,
             verify_ssl=self._config.ssl_verify,
+            decode_side=self._side(),
         )
         self._loader = loader
         self._generation += 1
@@ -111,26 +126,31 @@ class ImageCache(QObject):
         if not isinstance(rank, int) or not 0 <= rank < len(self._batch) or not path:
             return
         url = self._batch[rank]
-        pixmap = QPixmap(path)  # GUI thread only
-        if pixmap.isNull():
+        if "image" in data:
+            image = data["image"]  # decoded and scaled on the loader thread
+        else:
+            image = read_scaled(path, self._side())  # a loader that does not decode
+        if not isinstance(image, QImage) or image.isNull():
             logger.info("Unreadable cached image for %s", url)
             return
-        self._store(url, self._bounded(pixmap))
+        self._store(url, QPixmap.fromImage(image))  # GUI thread only
         self.logoReady.emit(url)
 
-    def _bounded(self, pixmap: QPixmap) -> QPixmap:
+    def _side(self) -> int:
+        """MAX_SIDE in device pixels."""
         app = QGuiApplication.instance()
         dpr = app.devicePixelRatio() if isinstance(app, QGuiApplication) else 1.0
-        limit = max(1, round(self.MAX_SIDE * dpr))
-        if max(pixmap.width(), pixmap.height()) <= limit:
-            return pixmap
-        return pixmap.scaled(limit, limit, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return max(1, round(self.MAX_SIDE * dpr))
 
     def _store(self, url: str, pixmap: QPixmap) -> None:
+        old = self._pixmaps.pop(url, None)
+        if old is not None:
+            self._bytes -= _cost(old)
         self._pixmaps[url] = pixmap
-        self._pixmaps.move_to_end(url)
-        while len(self._pixmaps) > self.MAX_ENTRIES:
-            evicted, _ = self._pixmaps.popitem(last=False)
+        self._bytes += _cost(pixmap)
+        while self._bytes > self.MAX_BYTES and len(self._pixmaps) > 1:
+            evicted, gone = self._pixmaps.popitem(last=False)
+            self._bytes -= _cost(gone)
             self._seen.discard(evicted)  # may be requested again
 
     def _on_cleanup(self, _thread) -> None:
@@ -147,8 +167,15 @@ class ImageCache(QObject):
 
 
 class LogoCache(ImageCache):
-    MAX_SIDE = 192
-    MAX_ENTRIES = 2000
+    """Channel logos at the size the banner paints them (8u of a ~1600 px host).
+
+    One size for every use: rows (about 4u) scale down from it when they paint, so each
+    logo is decoded and kept once. A logo costs at most 64 KiB (256 KiB at 2× DPR), so
+    48 MiB holds 750 (190 at 2×) even when square; most logos are wider than tall.
+    """
+
+    MAX_SIDE = 128
+    MAX_BYTES = 48 * MIB
     ICONIFIED = True
 
     def _enabled(self) -> bool:
@@ -156,8 +183,8 @@ class LogoCache(ImageCache):
 
 
 class PosterCache(ImageCache):
-    """Library posters: always on, larger than logos, fewer kept."""
+    """Library posters: always on, larger than logos (a 2:3 poster is ~1.4 MB at 2× DPR)."""
 
     MAX_SIDE = 360
-    MAX_ENTRIES = 400
+    MAX_BYTES = 96 * MIB
     ICONIFIED = False
