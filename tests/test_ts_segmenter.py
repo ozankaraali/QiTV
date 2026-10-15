@@ -13,7 +13,16 @@ from unittest import mock
 
 import ts_fixtures as fx
 
-from services.live.ts import PACKET, Closed, Data, Opened, Segmenter, Unsupported, pts_delta
+from services.live.ts import (
+    PACKET,
+    Closed,
+    Data,
+    Opened,
+    Segmenter,
+    Unsupported,
+    _h264_intra,
+    pts_delta,
+)
 
 CLOCK = fx.CLOCK
 TARGET = 2 * CLOCK
@@ -169,9 +178,53 @@ def hevc_au(key):
     return b"".join(b"\x00\x00\x00\x01" + bytes([t << 1, 1]) + b"\x55" * n for t, n in nals)
 
 
-def mpeg2_au(key):
-    picture = b"\x00\x00\x01\x00" + b"\x55" * 300
+def mpeg2_au(key, coding_type=None):
+    """A sequence header and an I picture when `key`, else a P picture (or `coding_type`)."""
+    coding_type = coding_type or (1 if key else 2)  # picture_coding_type: 1 I, 2 P, 3 B
+    picture = b"\x00\x00\x01\x00\x01" + bytes([coding_type << 3]) + b"\x55" * 300
     return (b"\x00\x00\x01\xb3" + b"\x55" * 40 if key else b"") + picture
+
+
+def h264_slice_at_packet_end(intra):
+    """The NAL 1 header byte is the last byte of the PES's first packet.
+
+    With the fixture's PCR and PTS headers the ES starts at packet byte 26: AUD (6 bytes) and
+    an SEI (152 bytes) put the slice's start code at ES 158 and its NAL header at byte 187.
+    """
+    nal = b"\x00\x00\x00\x01"
+    au = nal + b"\x09\xf0" + nal + b"\x06" + b"\x55" * 147 + b"\x00\x00\x01\x41"
+    return au + (b"\x88" if intra else b"\x9a") + b"\x55" * 300
+
+
+def exp_golomb(value):
+    value += 1
+    return "0" * (value.bit_length() - 1) + format(value, "b")
+
+
+def with_subtitles(data, ahead):
+    """Add a subtitle PID after every PMT, its PTS `ahead` ticks ahead of the latest audio."""
+    out, cc, audio = [], 0, None
+    for p in split_packets(data):
+        out.append(p)
+        if pid_of(p) == fx.AUDIO_PID and p[1] & 0x40:
+            audio = pusi_pts(p)
+        if pid_of(p) == fx.PMT_PID and audio is not None:
+            pkts, cc = fx.pes_packets(0x102, 0xBD, b"\x20" * 40, audio + ahead, cc_start=cc)
+            out.extend(pkts)
+    return b"".join(out)
+
+
+def escaped(raw):
+    """Insert H.264 emulation prevention bytes."""
+    out = bytearray()
+    zeros = 0
+    for b in raw:
+        if zeros >= 2 and b <= 3:
+            out.append(3)
+            zeros = 0
+        out.append(b)
+        zeros = zeros + 1 if b == 0 else 0
+    return bytes(out)
 
 
 def h264_au_with_sps(idr):
@@ -196,10 +249,12 @@ def h264_open_gop_au(intra):
 
 
 def au_with_sei(video_type, key):
-    """An access unit whose slice starts beyond the first packet, after a 200-byte SEI.
-
-    Keyframes carry SPS (H.264) or VPS (HEVC) before the SEI; other frames do not.
+    """An access unit whose slice (picture) starts beyond the first packet, after 200 bytes of
+    SEI (user data for MPEG-2). Keyframes carry SPS, VPS or a sequence header before it.
     """
+    if video_type == 0x02:  # sequence header (keyframes) and user data before the picture
+        head = b"\x00\x00\x01\xb3" + b"\x55" * 40 if key else b""
+        return head + b"\x00\x00\x01\xb2" + b"\x55" * 200 + mpeg2_au(False, 1 if key else 2)
     if video_type == 0x1B:
         nals = ([(7, 20), (8, 8)] if key else []) + [(6, 200), (5 if key else 1, 300)]
         return b"".join(b"\x00\x00\x00\x01" + bytes([0x60 | t]) + b"\x55" * n for t, n in nals)
@@ -241,8 +296,8 @@ def run_at(data, points, **kwargs):
     return seg, events
 
 
-def shift_pts(data, from_frame, offset):
-    """Add `offset` ticks to every PES timestamp from video frame `from_frame` on."""
+def shift_pts(data, from_frame, offset, pids=(fx.VIDEO_PID, fx.AUDIO_PID)):
+    """Add `offset` ticks to the PES timestamps on `pids` from video frame `from_frame` on."""
     out = bytearray(data)
     frame = -1
     for i, p in enumerate(split_packets(data)):
@@ -250,7 +305,7 @@ def shift_pts(data, from_frame, offset):
         if not p[1] & 0x40 or pid not in (fx.VIDEO_PID, fx.AUDIO_PID):
             continue
         frame += pid == fx.VIDEO_PID
-        if frame >= from_frame:
+        if frame >= from_frame and pid in pids:
             at = i * PACKET + 4 + (1 + p[4] if p[3] & 0x20 else 0) + 9
             out[at : at + 5] = fx._pts_bytes(pusi_pts(p) + offset)
     return bytes(out)
@@ -277,6 +332,14 @@ class PtsDeltaTests(unittest.TestCase):
 
 
 class SegmenterTests(unittest.TestCase):
+    def assert_closed_pts(self, events):
+        """A Closed carries the next first PTS, or None when the next segment is a
+        discontinuity (the jump must not be credited to the closing segment)."""
+        nxt = {e.seq: e for e in opens(events)}
+        for c in closes(events)[:-1]:
+            o = nxt[c.seq + 1]
+            self.assertEqual(c.next_first_pts, None if o.discontinuity else o.first_pts)
+
     # 1
     def test_ten_second_stream_cuts_every_two_seconds_from_the_first_keyframe(self):
         data = fx.make_stream(10, gop_s=1.0)
@@ -293,6 +356,7 @@ class SegmenterTests(unittest.TestCase):
         c = closes(events)
         self.assertEqual([e.seq for e in c], [0, 1, 2, 3, 4])
         self.assertEqual([e.next_first_pts for e in c[:-1]], [e.first_pts for e in o[1:]])
+        self.assert_closed_pts(events)
         self.assertEqual(seg.video_pid, fx.VIDEO_PID)
         for opened, body in segments(events):
             start = pusi_offset(data, fx.VIDEO_PID, opened.first_pts)
@@ -361,7 +425,7 @@ class SegmenterTests(unittest.TestCase):
                 self.assertEqual(deltas(events), [TARGET] * 4)
 
     def test_a_parameter_set_without_a_slice_in_the_first_packet_is_a_keyframe(self):
-        for video_type in (0x1B, 0x24):
+        for video_type in (0x1B, 0x24, 0x02):
             with self.subTest(video_type=hex(video_type)):
                 frames = [
                     (900000 + i * FRAME, au_with_sei(video_type, i % 25 == 0), False)
@@ -413,6 +477,45 @@ class SegmenterTests(unittest.TestCase):
         self.assertEqual([frame_of(e.first_pts) for e in opens(events)], [60, 120, 180, 240])
         self.assertTrue(starts_with_idr(segments(events)[0][1]))
 
+    def test_mpeg2_with_rai_on_every_pes_cuts_only_on_i_pictures(self):
+        def au(i):  # an I picture every 1.2 s, P and B pictures between
+            return mpeg2_au(True) if i % 30 == 0 else mpeg2_au(False, 3 if i % 3 else 2)
+
+        for video_type in (0x02, 0x01):
+            with self.subTest(video_type=hex(video_type)):
+                frames = [(900000 + i * FRAME, au(i), True) for i in range(300)]
+                _, events = run(video_only(frames, video_type=video_type))
+                starts = [frame_of(e.first_pts) for e in opens(events)]
+                self.assertEqual(starts, [0, 60, 120, 180, 240])
+
+    def test_a_slice_header_cut_off_by_the_packet_end_is_undecided(self):
+        # RAI on keyframes only; every slice header starts in the PES's second packet, so the
+        # scan is inconclusive and the RAI is trusted.
+        frames = [
+            (900000 + i * FRAME, h264_slice_at_packet_end(i % 25 == 0), i % 25 == 0)
+            for i in range(250)
+        ]
+        data = video_only(frames)
+        first = split_packets(data)[pusi_offset(data, fx.VIDEO_PID, 900000) // PACKET]
+        self.assertEqual(first[184:], b"\x00\x00\x01\x41")
+        _, events = run(data)
+        self.assertEqual(deltas(events), [TARGET] * 4)
+
+    def test_h264_slice_types_are_read_through_emulation_prevention(self):
+        # Up to the largest legal first_mb_in_slice (level 6.2: 139264 macroblocks), with a
+        # zero-heavy tail so that emulation prevention bytes follow the two codes.
+        for first_mb in (0, 1, 30, 1000, 8191, 32399, 139263):
+            for slice_type in range(10):
+                bits = exp_golomb(first_mb) + exp_golomb(slice_type) + "1" + "0" * 40
+                bits += "0" * (-len(bits) % 8)
+                header = escaped(int(bits, 2).to_bytes(len(bits) // 8, "big"))
+                got = _h264_intra(header, 0)
+                self.assertEqual(got, slice_type % 5 in (2, 4), (first_mb, slice_type))
+                # Cut off before the codes end: undecided, never a guess.
+                need = (len(exp_golomb(first_mb)) + len(exp_golomb(slice_type)) + 7) // 8
+                self.assertIsNone(_h264_intra(header[: need - 1], 0), (first_mb, slice_type))
+        self.assertIsNone(_h264_intra(b"", 0))
+
     def test_rai_on_every_pes_with_b_frame_reordering_is_not_a_discontinuity(self):
         # Decode order I0 P3 B1 B2 P6 B4 B5 ...: B-frames step back by one or two frames, and
         # the leading B-frames after each IDR (every 1.2 s) step back from the cut point.
@@ -434,6 +537,8 @@ class SegmenterTests(unittest.TestCase):
         for a, b in zip(o, o[1:]):
             if not b.discontinuity:
                 self.assertGreaterEqual(pts_delta(a.first_pts, b.first_pts), TARGET)
+        self.assertIsNone(closes(events)[2].next_first_pts)
+        self.assert_closed_pts(events)
 
     def test_timestamp_jumps_are_flagged_at_the_next_keyframe(self):
         # A step at frame 120 (4.8 s, mid-GOP; keyframes every 25 frames) is remembered and
@@ -452,6 +557,26 @@ class SegmenterTests(unittest.TestCase):
                 for a, b in zip(o, o[1:]):
                     if not b.discontinuity:
                         self.assertEqual(pts_delta(a.first_pts, b.first_pts), TARGET)
+                # The segment before the jump closes without the jumped PTS (1 s of media,
+                # not 1 s plus the jump).
+                self.assertIsNone(closes(events)[2].next_first_pts)
+                self.assert_closed_pts(events)
+
+    def test_an_outage_that_resumes_mid_gop_cuts_at_the_next_keyframe(self):
+        # 10 s missing from 7.52 s (mid-GOP) to 17.52 s (mid-GOP); the wall clock and the PTS
+        # both advance by 10 s, as after a reconnect to a live channel.
+        whole = fx.make_stream(30)
+        gone = pusi_offset(whole, fx.VIDEO_PID, 900000 + 188 * FRAME)
+        back = pusi_offset(whole, fx.VIDEO_PID, 900000 + 438 * FRAME)
+        data = whole[:gone] + whole[back:]
+        _, events = run_at(data, by_pts(data))
+        o = opens(events)
+        starts = [frame_of(e.first_pts) for e in o]
+        self.assertEqual(starts, [0, 50, 100, 150, 450, 500, 550, 600, 650, 700])
+        self.assertEqual([e.discontinuity for e in o], [k == 4 for k in range(10)])
+        for opened, body in segments(events):
+            self.assertTrue(starts_with_idr(body))
+        self.assert_closed_pts(events)
 
     def test_a_pending_discontinuity_is_force_cut_by_wall_time_only(self):
         # One keyframe only; PTS jumps +60 s at frame 112. The PTS delta must not cut there;
@@ -562,6 +687,50 @@ class SegmenterTests(unittest.TestCase):
         head = segments(events)[3][1][:PACKET]
         self.assertEqual((pid_of(head), bool(head[1] & 0x40)), (fx.AUDIO_PID, True))
         self.assertIsNone(closes(events)[2].next_first_pts)
+
+    def test_a_silent_video_pid_is_noticed_in_media_time_under_bursty_feeding(self):
+        # HLS-like: each 6 s of media arrives in one burst when complete, so feeds pause for
+        # 6 s (a stall by wall clock). The audio PTS still shows the video has gone quiet.
+        whole = fx.make_stream(30)
+        stop = pusi_offset(whole, fx.VIDEO_PID, 900000 + 150 * FRAME)
+        kept = [p for p in split_packets(whole[stop:]) if pid_of(p) != fx.VIDEO_PID]
+        plain = whole[:stop] + b"".join(kept)
+        # Also with a subtitle PID on a clock 12 s ahead: silence is measured on one PID.
+        for name, data in (
+            ("plain", plain),
+            ("offset subtitles", with_subtitles(plain, 12 * CLOCK)),
+        ):
+            with self.subTest(name):
+                points = [(off, (int(t // 6) + 1) * 6.0) for off, t in by_pts(data)]
+                _, events = run_at(data, points)
+                silent = [(o, body) for o, body in segments(events) if o.first_pts is None]
+                self.assertEqual(len(silent), 2)
+                o, body = silent[0]
+                self.assertTrue(o.discontinuity)
+                self.assertEqual(o.wall, 18.0)
+                self.assertEqual(pid_of(body[:PACKET]), fx.AUDIO_PID)
+                self.assertEqual(pusi_pts(body[:PACKET]), 900000 + 749 * fx.AUDIO_FRAME_TICKS)
+
+    def test_offset_or_jumping_clocks_on_other_pids_are_not_silence(self):
+        whole = fx.make_stream(10)
+        # The audio jumps +15 s between two audio PES that follow the same video PES (frame
+        # 112 at 4.48 s, then audio at 4.48 s and 4.5013 s).
+        jumped = bytearray(whole)
+        for i, p in enumerate(split_packets(whole)):
+            if pid_of(p) == fx.AUDIO_PID and p[1] & 0x40:
+                pts = pusi_pts(p)
+                if pts >= 900000 + 211 * fx.AUDIO_FRAME_TICKS:
+                    at = i * PACKET + 4 + (1 + p[4] if p[3] & 0x20 else 0) + 9
+                    jumped[at : at + 5] = fx._pts_bytes(pts + 15 * CLOCK)
+        cases = {
+            "subtitles 12 s ahead": with_subtitles(whole, 12 * CLOCK),
+            "audio jumps +15 s": bytes(jumped),
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                _, events = run(data)
+                o = opens(events)
+                self.assertEqual([e.first_pts - 900000 for e in o], [k * TARGET for k in range(5)])
 
     def test_a_stalled_source_is_not_a_silent_video_pid(self):
         # The source stalls for 12 s right after the keyframe at 4 s; audio arrives first after.

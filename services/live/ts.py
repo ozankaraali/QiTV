@@ -37,7 +37,7 @@ _REORDER_TICKS = _CLOCK
 _JUMP_TICKS = 3 * _CLOCK  # a longer forward step between two PES is a timestamp jump
 _SCRAMBLED_PACKETS = 8  # scrambled cut-PID packets that prove scrambling ...
 _SCRAMBLED_WINDOW_S = 2.0  # ... in total within this first wall time, later in a row
-_STALL_S = 5.0  # a longer pause between feeds is a stalled source, not a silent cut PID
+_STALL_S = 5.0  # a longer pause between feeds is a stalled source: not silence, not age
 
 _VIDEO_TYPES = (0x1B, 0x24, 0x02, 0x01)  # H.264, HEVC, MPEG-2, MPEG-1
 _AUDIO_TYPES = (0x03, 0x04, 0x0F, 0x11, 0x81, 0x87)  # MPEG audio, AAC, LATM, AC-3, E-AC-3
@@ -140,6 +140,8 @@ class Segmenter:
         self._last_pts: int | None = None
         self._latest_pts: int | None = None
         self._pusi_wall = 0.0  # wall time of the last cut-PID PES start (or cut)
+        # One other PID's (PID, first PTS, last PTS) since then: media time while it is quiet.
+        self._quiet: tuple[int, int, int] | None = None
         self._scrambled_total = 0
         self._scrambled_run = 0
         # The open segment.
@@ -207,7 +209,9 @@ class Segmenter:
         if self._start_wall is None:
             self._start_wall = wall
         if self._feed_wall is not None and wall - self._feed_wall > _STALL_S:
-            self._pusi_wall += wall - self._feed_wall  # a stall does not count as silence
+            stall = wall - self._feed_wall  # a stalled source: neither silence nor segment age
+            self._pusi_wall += stall
+            self._seg_wall += stall
         self._feed_wall = wall
         # The cut PID went quiet while other packets flow: cut at the next PES start of any PID.
         silent = self._open and wall - self._pusi_wall >= self._forced_s
@@ -260,10 +264,13 @@ class Segmenter:
                                 events.extend(cut)
                                 run = off
             else:
-                if silent and (b1 & 0xC0) == 0x40:
+                if (
+                    (b1 & 0xC0) == 0x40  # a PES or section start without a transport error
+                    and self._open
+                    and (silent or self._media_quiet(pid, data[off:end]))
+                ):
                     silent = False
-                    quiet = wall - self._pusi_wall
-                    logger.debug("no PES start on PID %#x for %.1f s; cutting", cut_pid, quiet)
+                    logger.debug("PID %#x went quiet; cutting at PID %#x", cut_pid, pid)
                     if 0 <= run < off:
                         events.append(Data(data[run:off]))
                     events.extend(self._cut(None, wall, True))
@@ -283,6 +290,27 @@ class Segmenter:
         self._searching = searching
         self._scrambled_run = scrambled
 
+    def _media_quiet(self, pid: int, pkt: bytes) -> bool:
+        """Whether one other PID's PTS advanced `forced_s` since the cut PID's last PES start.
+
+        Media time also notices a silent cut PID when the input arrives in bursts.
+        """
+        pts = _pes_start(pkt)[1]
+        if pts is None:
+            return False
+        if self._quiet is None:
+            self._quiet = (pid, pts, pts)
+            return False
+        ref_pid, ref, last = self._quiet
+        if pid != ref_pid:  # other PIDs may run on offset clocks
+            return False
+        step = pts_delta(last, pts)
+        if step < -_REORDER_TICKS or step > _JUMP_TICKS:  # that clock jumped: measure from here
+            self._quiet = (pid, pts, pts)
+            return False
+        self._quiet = (pid, ref, pts)
+        return pts_delta(ref, pts) >= self._forced
+
     def _check_scrambled(self, run: int, wall: float) -> None:
         """Isolated scrambling bits are corruption; many mean the stream is encrypted."""
         start = wall if self._start_wall is None else self._start_wall
@@ -297,6 +325,7 @@ class Segmenter:
         if es >= PACKET:
             logger.debug("PES header not readable from its first packet")
         self._pusi_wall = wall
+        self._quiet = None
         if rai:
             self._rai_seen = True
         if pts is not None:
@@ -338,14 +367,15 @@ class Segmenter:
 
     def _cut(self, pts: int | None, wall: float, discontinuity: bool) -> list[Event]:
         events: list[Event] = []
-        if self._open:
-            events.append(Closed(self._seq, pts, wall))
+        if self._open:  # across a discontinuity the next PTS says nothing about this segment
+            events.append(Closed(self._seq, None if discontinuity else pts, wall))
             self._seq += 1
         events.append(Opened(self._seq, pts, self._pat + self._pmt, wall, discontinuity))
         self._open = True
         self._seg_pts = pts
         self._seg_wall = wall
         self._pusi_wall = wall
+        self._quiet = None
         self._pending = False
         return events
 
@@ -540,10 +570,11 @@ def _pes_start(pkt: bytes) -> tuple[bool, int | None, int]:
 def _classify(pkt: bytes, start: int, video_type: int | None) -> int:
     """Whether the picture starting in this packet's ES bytes is a keyframe.
 
-    `_KEY`: an IRAP slice (H.264 IDR 5 or an intra slice 1, which open-GOP encoders use; HEVC
-    16-21), a parameter set (H.264 SPS 7, HEVC VPS 32) without a non-IRAP slice, or an MPEG-1/2
-    sequence header. `_NOT_KEY`: the first slice is not IRAP (H.264 1-4 with P or B slices,
-    HEVC 0-9). `_UNDECIDED`: no slice or parameter set in this packet.
+    `_KEY`: an IRAP picture (H.264 IDR 5 or an intra slice 1, which open-GOP encoders use;
+    HEVC 16-21; an MPEG-1/2 I picture), or a parameter set (H.264 SPS 7, HEVC VPS 32, MPEG-1/2
+    sequence header) without a picture in this packet. `_NOT_KEY`: the first picture is not
+    IRAP (H.264 1-4 with P or B slices, HEVC 0-9, MPEG-1/2 P or B). `_UNDECIDED`: neither, or
+    the first slice header is cut off by the end of the packet.
     """
     parameter_set = False
     i = pkt.find(_START_CODE, start)
@@ -554,7 +585,10 @@ def _classify(pkt: bytes, start: int, video_type: int | None) -> int:
             if nal_type == 5:
                 return _KEY
             if nal_type == 1:  # the first slice decides
-                return _KEY if _h264_intra(pkt, i + 4) else _NOT_KEY
+                intra = _h264_intra(pkt, i + 4)
+                if intra is None:
+                    return _UNDECIDED
+                return _KEY if intra else _NOT_KEY
             if 2 <= nal_type <= 4:  # data partitions: never intra-only
                 return _NOT_KEY
             if nal_type == 7:
@@ -567,19 +601,29 @@ def _classify(pkt: bytes, start: int, video_type: int | None) -> int:
                 return _NOT_KEY
             if nal_type == 32:
                 parameter_set = True
+        elif code == 0x00:  # MPEG-1/2 picture header: the first picture decides
+            if i + 6 > PACKET:
+                break
+            coding_type = (pkt[i + 5] >> 3) & 7  # after the 10-bit temporal_reference
+            if coding_type == 1:
+                return _KEY
+            if coding_type in (2, 3):
+                return _NOT_KEY
+            return _UNDECIDED
         elif code == 0xB3:  # MPEG-1/2 sequence header
-            return _KEY
+            parameter_set = True
         i = pkt.find(_START_CODE, i + 3)
     return _KEY if parameter_set else _UNDECIDED
 
 
-def _h264_intra(pkt: bytes, at: int) -> bool:
-    """Whether the H.264 slice header at `at` is an I or SI slice.
+def _h264_intra(pkt: bytes, at: int) -> bool | None:
+    """Whether the H.264 slice header at `at` is an I or SI slice; None when undecidable.
 
-    Reads first_mb_in_slice and slice_type (two Exp-Golomb codes). For the first slice of a
-    picture (first_mb_in_slice 0) both fit in the first byte, before any emulation prevention.
+    Reads first_mb_in_slice and slice_type, two Exp-Golomb codes, from up to 6 bytes: enough
+    for any legal first_mb_in_slice (level 6.2 allows 139264 macroblocks). Such codes never
+    hold the 22 zero bits an emulation prevention byte needs. None when the packet ends first.
     """
-    head = pkt[at : at + 4]
+    head = pkt[at : at + 6]
     bits = int.from_bytes(head, "big")
     left = 8 * len(head)  # bits not read yet
     value = 0
@@ -589,9 +633,11 @@ def _h264_intra(pkt: bytes, at: int) -> bool:
             zeros += 1
             left -= 1
         if left <= zeros:  # truncated
-            return False
+            return None
         left -= 1 + zeros
         value = (1 << zeros) - 1 + (bits >> left & ((1 << zeros) - 1))
+    if value > 9:
+        return None
     return value % 5 in (2, 4)  # slice_type: 0 P, 1 B, 2 I, 3 SP, 4 SI (+5: all slices alike)
 
 
