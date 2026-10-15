@@ -37,7 +37,18 @@ from services.live.worker import helper_main
 REPO = Path(__file__).resolve().parents[1]
 SECRET_PATH = "/user/secret/live.ts"
 RAM = {"kind": "ram", "max_bytes": 32 * 1024 * 1024}
-STATE_KEYS = {"oldest", "newest", "open", "start", "end", "live_edge", "bytes", "ended", "burst_s"}
+STATE_KEYS = {
+    "oldest",
+    "newest",
+    "open",
+    "start",
+    "end",
+    "live_edge",
+    "bytes",
+    "ended",
+    "burst_s",
+    "received",
+}
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
 # helper's command loop never sees EOF: only the owner-death watchdog can end the helper.
@@ -502,6 +513,41 @@ class LiveWorkerTests(unittest.TestCase):
                 self.assertEqual(helper.of(sid, "ended"), [])
         self.assertTrue(helper.process.is_alive())
         self.assert_no_credentials(helper)
+
+    def test_bytes_before_anything_playable_are_reported_as_they_arrive(self):
+        # An on-demand restream starting up: bytes flow, but no keyframe yet (2.0.1, L2a).
+        null = b"\x47\x1f\xff\x10" + b"\xff" * 184  # MPEG-TS null packets
+        stream = make_stream(4)
+
+        def body(request):
+            try:
+                for _ in range(8):
+                    if self.stop.wait(0.1):
+                        return
+                    request.wfile.write(null * 20)
+                    request.wfile.flush()
+                request.wfile.write(stream)
+                request.wfile.flush()
+                self.stop.wait(10)
+            except OSError:
+                pass
+
+        source = self.source({SECRET_PATH: (200, {}, body)})
+        helper = self.helper()
+        sid = helper.open(source.url + SECRET_PATH)
+        ready = helper.wait_for(lambda message: message == ("ready", sid))
+        early = [
+            message[2]
+            for message in helper.messages[: helper.messages.index(ready)]
+            if message[:2] == ("state", sid) and message[2]["oldest"] is None
+        ]
+        self.assertGreaterEqual(len(early), 2, "no state while bytes arrived before ready")
+        self.assertEqual(set(early[0]), STATE_KEYS)
+        received = [snapshot["received"] for snapshot in early]
+        self.assertGreater(received[0], 0)
+        self.assertEqual(received, sorted(received))
+        self.assertEqual(helper.of(sid, "state")[-1][2]["oldest"], 0)  # then playable
+        self.assertGreaterEqual(helper.of(sid, "state")[-1][2]["received"], 8 * 20 * 188)
 
     def test_a_source_that_sends_nothing_is_a_network_failure(self):
         source = self.source({SECRET_PATH: (200, {}, b"")})

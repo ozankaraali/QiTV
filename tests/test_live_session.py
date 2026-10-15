@@ -27,6 +27,7 @@ LOST = "Lost the time-shift buffer; playing live"
 BUFFERED = "Lost the connection; playing what's buffered"
 DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
+LOADING = "Still loading…"
 DIRECT = (URL, PlayKind.LIVE, "normal")
 MiB = 1024 * 1024
 
@@ -118,6 +119,22 @@ class FakeEngine(QObject):
             "bytes": 0,
             "ended": False,
             "burst_s": burst,
+        }
+        self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
+
+    def receive(self, sid, count):
+        """`count` bytes arrived, but nothing is playable yet: the helper's state before ready."""
+        self._snapshots[sid] = {
+            "oldest": None,
+            "newest": None,
+            "open": None,
+            "start": 0.0,
+            "end": 0.0,
+            "live_edge": 0.0,
+            "bytes": 0,
+            "ended": False,
+            "burst_s": 0.0,
+            "received": count,
         }
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
@@ -514,6 +531,50 @@ class StartTests(LiveSessionCase):
         self.engine.buffer(sid, [], open_seq=0)
         self.engine.sessionReady.emit(sid)  # too late
         self.assertEqual(len(self.playback.plays), 1)
+
+    def test_a_source_that_sends_nothing_falls_back_at_the_ready_timeout(self):
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=60_000)
+        sid = self.start()
+        self.wait_until(lambda: self.engine.closed)  # not 60 s later
+        self.assert_falls_back(sid, UNAVAILABLE, 0)
+        self.assertEqual(self.notices, [UNAVAILABLE])
+
+    def test_bytes_without_anything_playable_extend_the_wait_with_a_hint(self):
+        """An on-demand restream starting up (2.0.1, L2a): bytes flow, no keyframe yet."""
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=60_000)
+        sid = self.start()
+        self.engine.receive(sid, 188 * 20)
+        self.wait_until(lambda: self.notices)
+        self.assertEqual(self.notices, [LOADING])
+        self.assertEqual(self.engine.closed, [])  # still waiting
+        self.assertEqual(self.playback.plays, [])
+        self.engine.buffer(sid, [], open_seq=0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertEqual(self.notices, [LOADING])
+
+    def test_the_extended_wait_is_bounded(self):
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=250)
+        sid = self.start()
+        self.engine.receive(sid, 188 * 20)
+        self.wait_until(lambda: self.notices)
+        self.assertEqual(self.engine.closed, [])
+        self.wait_until(lambda: self.engine.closed)
+        self.assert_falls_back(sid, UNAVAILABLE, 0)
+        self.assertEqual(self.notices, [LOADING, UNAVAILABLE])
+
+    def test_the_next_channel_waits_only_the_ready_timeout_again(self):
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=250)
+        sid = self.start()
+        self.engine.receive(sid, 188 * 20)
+        self.wait_until(lambda: self.engine.closed)
+        self.engine.answer()
+        started = time.monotonic()
+        sid = self.start()  # the next channel sends nothing
+        self.wait_until(lambda: sid in self.engine.closed)
+        self.assertLess(time.monotonic() - started, 0.2)  # not the extended 0.25 s
+        self.assertEqual(self.notices[-1], UNAVAILABLE)
 
     def test_a_fallback_plays_directly_after_the_close_cap(self):
         self.patch("_CLOSE_CAP_MS", 50)

@@ -23,7 +23,8 @@ Commands (parent to helper):
 - `("shutdown",)`.
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
-additions)`; `("ready", sid)` once the first segment is open (its state comes first);
+additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet;
+`("ready", sid)` once the first segment is open (its state comes first);
 `("error", sid, kind, message)`; `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
 - a `SourceError` kind ("unsupported", "network", "tls", "timeout", "http"; "unsupported"
@@ -298,6 +299,7 @@ class _Session:
         self._segmenter = Segmenter()
         self._timeline = Timeline()
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
+        self._received = 0  # bytes from the source, those before the first keyframe too
         self._pending: list[_Addition] = []
         self._last_notify = 0.0
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
@@ -356,16 +358,17 @@ class _Session:
             raise _Cancelled()
         self._adopt(self._make_ring())
         segmenter = self._segmenter
-        received = 0
         try:
             for item in source.chunks():
                 self._check()
                 if isinstance(item, Discontinuity):
                     segmenter.discontinuity()
                 else:
-                    received += len(item)
+                    self._received += len(item)
                     self._apply(segmenter.feed(item))
                     self._measure()
+                    if not self._ready:
+                        self._notify()  # bytes flow, nothing playable yet: say so
             self._check()
             self._apply(segmenter.finish())
         except SourceError as error:
@@ -380,7 +383,7 @@ class _Session:
             self._fail("unsupported", str(error))
             return
         if not self._ready:
-            if received:
+            if self._received:
                 self._fail("unsupported", _NO_MEDIA)
             else:
                 self._fail("network", _NO_DATA)
@@ -541,6 +544,8 @@ class _Session:
             # HLS: the target duration, which a reload may change; raw TS: what the meter
             # measured (0.0 for a steady source). The larger, should both apply.
             "burst_s": max(source.burst_s if source is not None else 0.0, self._bursts.burst_s),
+            # Before ready: bytes arrived, though nothing is playable yet (no keyframe).
+            "received": self._received,
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the

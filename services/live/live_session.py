@@ -13,7 +13,10 @@ after `_CLOSE_CAP_MS`. Only `available(False)` plays directly at once: no helper
 upstream and no buffer, is left (also for a session whose input had ended). Unsupported
 sources, failures before ready and a ready that does not come within `ready_timeout_ms`
 fall back with "Time-shift isn't available for this channel"; after `available(False)`
-every start plays directly for the rest of the run.
+every start plays directly for the rest of the run. A source that sent bytes by then without
+anything playable (no keyframe yet: an on-demand restream starting up, say) gets until
+`ready_max_ms` from the start, with "Still loading…" at `ready_timeout_ms`; one that sent
+nothing falls back at `ready_timeout_ms`.
 
 Position (spec §6.3): the start of the opened segment plus VLC's `get_time()` deltas; a
 delta further than 1 s from wall clock × rate (counted only while VLC plays) is replaced by
@@ -118,6 +121,7 @@ LOST = "Lost the time-shift buffer; playing live"
 BUFFERED = "Lost the connection; playing what's buffered"
 DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
+LOADING = "Still loading…"
 _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _JUMP_S = 1.0  # get_time deltas further than this from wall clock x rate are not trusted
@@ -183,15 +187,19 @@ class LiveSession(QObject):
         *,
         tick_ms: int = 250,
         ready_timeout_ms: int = 6000,
+        ready_max_ms: int = 15_000,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__()
         self._engine = engine
         self._playback = playback
         self._clock = clock
+        self._ready_timeout_ms = ready_timeout_ms
         self._ready_timeout_s = ready_timeout_ms / 1000.0
-        self._ready_timer = QTimer(self, singleShot=True, interval=ready_timeout_ms)
+        self._ready_more_ms = max(0, ready_max_ms - ready_timeout_ms)
+        self._ready_timer = QTimer(self, singleShot=True)
         self._ready_timer.timeout.connect(self._on_ready_timeout)
+        self._loading = False  # bytes flowed but nothing was playable: the wait was extended
         self._tick_timer = QTimer(self, interval=tick_ms)
         self._tick_timer.timeout.connect(self._tick)
         self._recovery_timer = QTimer(self, singleShot=True)
@@ -456,8 +464,8 @@ class LiveSession(QObject):
             self._url, **self._open_args, live_delay=LIVE_DELAY[self._latency]
         )
         self._phase = _Phase.WAITING
-        self._ready_seen = False
-        self._ready_timer.start()
+        self._ready_seen = self._loading = False
+        self._ready_timer.start(self._ready_timeout_ms)
 
     def _close(self, sid: str) -> None:
         self._engine.close_session(sid)
@@ -584,8 +592,18 @@ class LiveSession(QObject):
             return
         if self._ready_seen and self._oldest_seq() is not None:
             self._play_first(cushion=False)  # Stable's cushion did not fill in time
+        elif not self._ready_seen and not self._loading and self._receiving():
+            # Bytes flow but nothing is playable yet (an on-demand restream starting up,
+            # say): wait up to `ready_max_ms` in all before playing directly.
+            self._loading = True
+            self._ready_timer.start(self._ready_more_ms)
+            self.notice.emit(LOADING)
         else:
             self._fall_back(UNAVAILABLE)
+
+    def _receiving(self) -> bool:
+        """The source sent bytes (the helper's state before ready says how many)."""
+        return self._ready_more_ms > 0 and _number(self._snapshot().get("received")) > 0
 
     def _play_first(self, *, cushion: bool = True) -> None:
         """The tune's first play: from the oldest segment, so zapping is quick; for Stable,

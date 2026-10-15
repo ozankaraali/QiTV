@@ -40,7 +40,18 @@ REPO = Path(__file__).resolve().parents[1]
 SECRET_PATH = "/user/secret/live.ts"
 INTERNAL = "The live buffer stopped unexpectedly."
 UNAVAILABLE = "The live buffer is not available."
-STATE_KEYS = {"oldest", "newest", "open", "start", "end", "live_edge", "bytes", "ended", "burst_s"}
+STATE_KEYS = {
+    "oldest",
+    "newest",
+    "open",
+    "start",
+    "end",
+    "live_edge",
+    "bytes",
+    "ended",
+    "burst_s",
+    "received",
+}
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
 PAYLOAD = make_stream(120)
