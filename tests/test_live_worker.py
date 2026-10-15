@@ -1,0 +1,645 @@
+"""The live helper process: a real spawn child hosting sessions against loopback sources.
+
+Ports main's recording-child tests (tests/test_timeshift.py: a stalled provider stops
+promptly without exposing credentials, stopping one recording leaves its sibling playing,
+and owner death closes the upstream socket) to one long-lived helper with many sessions.
+"""
+
+import multiprocessing
+import os
+from pathlib import Path
+import secrets
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import urlopen
+
+from http_fixtures import LocalSource, leaf
+from ts_fixtures import PMT_PID, make_stream
+
+from services.live import worker
+from services.live.worker import helper_main
+
+REPO = Path(__file__).resolve().parents[1]
+SECRET_PATH = "/user/secret/live.ts"
+RAM = {"kind": "ram", "max_bytes": 32 * 1024 * 1024}
+STATE_KEYS = {"oldest", "newest", "open", "start", "end", "live_edge", "bytes", "ended", "burst_s"}
+DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
+# The owner hands a copy of its pipe end to a sleeping holder process (POSIX), so the
+# helper's command loop never sees EOF: only the owner-death watchdog can end the helper.
+OWNER = """
+import multiprocessing, os, subprocess, sys, time
+from services.live.worker import helper_main
+context = multiprocessing.get_context("spawn")
+conn, child = context.Pipe(duplex=True)
+process = context.Process(target=helper_main, args=(child, sys.argv[2]), daemon=True)
+process.start()
+child.close()
+assert conn.recv()[0] == "hello"
+holder = 0
+if os.name != "nt":
+    sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
+    holder = subprocess.Popen(sleep, pass_fds=[conn.fileno()]).pid
+conn.send(("open", "owned", sys.argv[1], {}, True, {"kind": "ram", "max_bytes": 1 << 24}, 6.0))
+print(process.pid, holder, flush=True)
+time.sleep(60)
+"""
+
+
+class Helper:
+    """One spawned helper and the parent's end of its pipe; every message is kept."""
+
+    def __init__(self, root):
+        context = multiprocessing.get_context("spawn")
+        self.conn, child = context.Pipe(duplex=True)
+        self.process = context.Process(
+            target=helper_main, args=(child, str(root)), name="qitv-live-test", daemon=True
+        )
+        self.process.start()
+        child.close()
+        self.messages = []
+        self.base_url = self.wait_for(lambda message: message[0] == "hello", timeout=60)[1]
+
+    def open(self, url, ring=RAM, live_delay=6.0):
+        sid = secrets.token_hex(8)
+        self.conn.send(("open", sid, url, {"User-Agent": "QiTV-test"}, True, ring, live_delay))
+        return sid
+
+    def close(self, sid):
+        self.conn.send(("close", sid))
+
+    def wait_for(self, predicate, timeout=10.0, start=0):
+        deadline = time.monotonic() + timeout
+        index = start
+        while True:
+            while index < len(self.messages):
+                message = self.messages[index]
+                index += 1
+                if predicate(message):
+                    return message
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"no matching helper message among {self.messages!r}")
+            if self.conn.poll(min(remaining, 0.05)):
+                self.messages.append(self.conn.recv())
+
+    def drain(self, seconds):
+        deadline = time.monotonic() + seconds
+        while (remaining := deadline - time.monotonic()) > 0:
+            if self.conn.poll(min(remaining, 0.05)):
+                self.messages.append(self.conn.recv())
+
+    def of(self, sid, kind=None):
+        return [
+            message
+            for message in self.messages
+            if len(message) > 1 and message[1] == sid and kind in (None, message[0])
+        ]
+
+    def stream_url(self, sid, seq):
+        return f"{self.base_url}/{sid}/stream/{seq}.ts"
+
+    def stop(self):
+        if self.process.is_alive():
+            try:
+                self.conn.send(("shutdown",))
+            except OSError:
+                pass
+            self.process.join(5)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join(5)
+        self.conn.close()
+
+
+def spans(helper, sid):
+    """The parent's span list, rebuilt from the state deltas as main's supervisor did."""
+    completed = []
+    for message in helper.of(sid, "state"):
+        _, _, _, first, additions = message
+        if first is None:
+            completed = []
+        else:
+            completed = [item for item in completed + list(additions) if item[0] >= first]
+    return completed
+
+
+def pid_of(packet):
+    return ((packet[1] & 0x1F) << 8) | packet[2]
+
+
+def split_header(body):
+    """The PAT/PMT copies a stream starts with, and the source bytes after them."""
+    header = 0
+    while pid_of(body[header : header + 188]) in (0, PMT_PID):
+        header += 188
+    return body[:header], body[header:]
+
+
+def paced(payload, stop, hung_up, *, block=188 * 20, interval=0.02):
+    """A close-delimited body that streams at a few times real time until the client hangs up."""
+
+    def body(request):
+        try:
+            for offset in range(0, len(payload), block):
+                if stop.wait(interval):
+                    return
+                request.wfile.write(payload[offset : offset + block])
+        except OSError:
+            hung_up.set()
+
+    return body
+
+
+def paced_route(payload, stop, hung_up):
+    """A route answering every request, reconnects included, with a fresh paced body."""
+    return lambda _request, _count: (200, {}, paced(payload, stop, hung_up))
+
+
+class StalledUpstream:
+    """Accepts one HTTP request, sends `response` (part of an answer) and waits for EOF."""
+
+    def __init__(self, response):
+        self.response = response
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.url = f"http://127.0.0.1:{self.listener.getsockname()[1]}{SECRET_PATH}"
+        self.requested = threading.Event()
+        self.hung_up = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        try:
+            client, _address = self.listener.accept()
+        except OSError:
+            return
+        with client:
+            client.settimeout(30)
+            try:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    received = client.recv(4096)
+                    if not received:
+                        return
+                    data += received
+                self.requested.set()
+                client.sendall(self.response)
+                while client.recv(4096):
+                    pass  # the client sends nothing more: EOF means it hung up
+            except ConnectionError:
+                pass  # Windows reports a reset or an abort where Unix reports EOF
+            except OSError:
+                return
+            self.hung_up.set()
+
+    def close(self):
+        self.listener.close()
+
+
+class StreamReader:
+    """Reads a loopback stream on a thread and counts the bytes received."""
+
+    def __init__(self, url):
+        self.received = 0
+        self.changed = threading.Condition()
+        self.response = urlopen(url, timeout=10)
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        try:
+            while data := self.response.read1(64 * 1024):
+                with self.changed:
+                    self.received += len(data)
+                    self.changed.notify_all()
+        except OSError, ValueError:
+            pass  # closed by the test or by the helper's shutdown
+
+    def wait_for(self, count, timeout=10.0):
+        with self.changed:
+            return self.changed.wait_for(lambda: self.received >= count, timeout)
+
+    def close(self):
+        self.response.close()
+
+
+class LiveWorkerTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.stop = threading.Event()
+
+    def source(self, routes):
+        server = LocalSource(routes)
+        self.addCleanup(server.close)
+        self.addCleanup(self.stop.set)  # runs first: paced bodies stop writing
+        return server
+
+    def helper(self):
+        helper = Helper(self.root)
+        self.addCleanup(helper.stop)
+        return helper
+
+    def assert_no_credentials(self, helper):
+        for message in helper.messages:
+            self.assertNotIn("secret", repr(message))
+
+    def test_the_hello_url_serves_an_opened_session_from_its_oldest_segment(self):
+        payload = make_stream(8)
+        source = self.source({SECRET_PATH: (200, {}, payload)})
+        helper = self.helper()
+        self.assertRegex(helper.base_url, r"^http://127\.0\.0\.1:[0-9]+/[0-9a-f]{32}$")
+        sid = helper.open(source.url + SECRET_PATH)
+        helper.wait_for(lambda message: message == ("ready", sid))
+        # The state before "ready" names the segment to start playback from.
+        snapshot = helper.of(sid, "state")[-1][2]
+        self.assertEqual(set(snapshot), STATE_KEYS)
+        self.assertEqual(snapshot["oldest"], 0)
+        self.assertEqual(snapshot["open"], 0)
+        self.assertEqual(snapshot["burst_s"], 0.0)
+        with urlopen(helper.stream_url(sid, snapshot["oldest"]), timeout=10) as response:
+            self.assertEqual(response.headers["Content-Type"], "video/mp2t")
+            body = response.read()  # the stream ends once the finite source has ended
+        header, media = split_header(body)
+        self.assertGreater(len(header), 0)
+        start = payload.index(media[:188])
+        self.assertLessEqual(start, 4 * 188, "the stream must start at the first keyframe")
+        self.assertEqual(media, payload[start:])
+        self.assertEqual(source.counts[SECRET_PATH], 1)
+        self.assertEqual(source.requests[0][1].get("User-Agent"), "QiTV-test")
+        self.assert_no_credentials(helper)
+
+    def test_a_finite_source_ends_after_its_last_segment(self):
+        first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
+        source = self.source(
+            {
+                SECRET_PATH: (200, {}, make_stream(9)),
+                "/user/secret/channel.m3u8": (200, {}, leaf("a.ts", "b.ts")),
+                "/user/secret/a.ts": (200, {}, first),
+                "/user/secret/b.ts": (200, {}, second),
+            }
+        )
+        helper = self.helper()
+        for path, seconds, burst in (
+            (SECRET_PATH, 9.0, 0.0),
+            ("/user/secret/channel.m3u8", 8.0, 4.0),
+        ):
+            with self.subTest(path=path):
+                sid = helper.open(source.url + path)
+                ended = helper.wait_for(lambda message: message == ("ended", sid))
+                states = helper.of(sid, "state")
+                self.assertLess(helper.messages.index(states[-1]), helper.messages.index(ended))
+                snapshot = states[-1][2]
+                self.assertTrue(snapshot["ended"])
+                self.assertIsNone(snapshot["open"])
+                self.assertEqual(snapshot["burst_s"], burst)
+                self.assertGreater(snapshot["bytes"], 0)
+                self.assertEqual(helper.of(sid, "error"), [])
+                buffered = spans(helper, sid)
+                self.assertGreaterEqual(len(buffered), 3)
+                self.assertEqual([item[0] for item in buffered], list(range(len(buffered))))
+                self.assertEqual(snapshot["oldest"], 0)
+                self.assertEqual(snapshot["newest"], buffered[-1][0])
+                for before, after in zip(buffered, buffered[1:]):
+                    self.assertAlmostEqual(before[2], after[1])
+                self.assertAlmostEqual(buffered[-1][2] - buffered[0][1], seconds, delta=0.25)
+                self.assertAlmostEqual(snapshot["end"], buffered[-1][2])
+        self.assert_no_credentials(helper)
+
+    def test_closing_one_session_leaves_its_sibling_streaming(self):
+        payload = make_stream(60)
+        hung_up = {name: threading.Event() for name in "ab"}
+        sources = {
+            name: self.source({SECRET_PATH: paced_route(payload, self.stop, hung_up[name])})
+            for name in "ab"
+        }
+        helper = self.helper()
+        sids = {name: helper.open(sources[name].url + SECRET_PATH) for name in "ab"}
+        for sid in sids.values():
+            helper.wait_for(lambda message, sid=sid: message == ("ready", sid))
+        for sid in sids.values():  # both ingest concurrently
+            helper.wait_for(lambda m, sid=sid: m[0] == "state" and m[1] == sid and m[4])
+        reader = StreamReader(helper.stream_url(sids["a"], 0))
+        self.addCleanup(reader.close)
+        self.assertTrue(reader.wait_for(1), "the sibling's stream did not start")
+
+        started = time.monotonic()
+        helper.close(sids["b"])
+        closed = helper.wait_for(lambda message: message == ("closed", sids["b"]), timeout=2)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertTrue(hung_up["b"].wait(3), "the closed session kept its upstream connection")
+        mark = len(helper.messages)
+        received = reader.received
+        helper.wait_for(lambda m: m[0] == "state" and m[1] == sids["a"] and m[4], start=mark)
+        self.assertTrue(reader.wait_for(received + 64 * 1024), "the sibling stopped streaming")
+        self.assertFalse(hung_up["a"].is_set())
+        with self.assertRaises(HTTPError) as missing:
+            urlopen(helper.stream_url(sids["b"], 0), timeout=5)
+        self.assertEqual(missing.exception.code, 404)
+        missing.exception.close()
+        helper.drain(0.5)
+        self.assertEqual(helper.of(sids["b"])[-1], closed, "a closed session kept reporting")
+        self.assertEqual(helper.of(sids["b"], "error"), [])
+        self.assertTrue(helper.process.is_alive())
+        self.assert_no_credentials(helper)
+
+    def test_closing_a_stalled_session_is_prompt_and_keeps_the_helper(self):
+        finite = self.source({SECRET_PATH: (200, {}, make_stream(6))})
+        helper = self.helper()
+        sibling = helper.open(finite.url + SECRET_PATH)
+        helper.wait_for(lambda message: message == ("ended", sibling))
+        head = b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n"
+        for stage, response in (
+            ("mid-header", b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n"),
+            ("mid-body", head + make_stream(3)),
+        ):
+            with self.subTest(stage=stage):
+                upstream = StalledUpstream(response)
+                self.addCleanup(upstream.close)
+                sid = helper.open(upstream.url)
+                self.assertTrue(upstream.requested.wait(10))
+                if stage == "mid-body":
+                    helper.wait_for(lambda message, sid=sid: message == ("ready", sid))
+                time.sleep(0.2)  # the session is now blocked on its upstream
+                if os.name != "nt":
+                    command = subprocess.run(
+                        ["ps", "-o", "command=", "-p", str(helper.process.pid)],
+                        capture_output=True,
+                        check=True,
+                        timeout=5,
+                    ).stdout.decode()
+                    self.assertIn("multiprocessing", command)
+                    self.assertNotIn("secret", command)
+                    self.assertNotIn(upstream.url, command)
+                started = time.monotonic()
+                helper.close(sid)
+                helper.wait_for(lambda message, sid=sid: message == ("closed", sid), timeout=2)
+                self.assertLess(time.monotonic() - started, 2.0, "a stalled upstream held close")
+                self.assertTrue(upstream.hung_up.wait(2), "the stalled upstream stayed open")
+                self.assertTrue(helper.process.is_alive())
+                helper.drain(0.3)
+                self.assertEqual(helper.of(sid)[-1], ("closed", sid))
+                self.assertEqual(helper.of(sid, "error"), [])
+                with urlopen(helper.stream_url(sibling, 0), timeout=5) as response:
+                    self.assertGreater(len(response.read()), 0, "the sibling stopped serving")
+        self.assert_no_credentials(helper)
+
+    def test_unsupported_input_reports_exactly_one_unsupported_error(self):
+        fragmented = (
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:4\n"
+            '#EXT-X-MAP:URI="movie.mp4"\n#EXTINF:4,\nmovie.mp4\n#EXT-X-ENDLIST\n'
+        ).encode()
+        bodies = {
+            "not-ts": b"<html>not a transport stream</html>" * 2000,
+            "192-byte-packets": make_stream(4, packet_size=192),
+            "scrambled": make_stream(4, scrambled=True),
+            "too-short": b"<html>nope</html>",
+            "fragmented-hls": fragmented,
+        }
+        routes = {f"/user/secret/{name}": (200, {}, body) for name, body in bodies.items()}
+        # A live input that turns out scrambled: its upstream is released at the error.
+        hung_up = threading.Event()
+        live = make_stream(30, scrambled=True)
+        routes["/user/secret/scrambled-live"] = paced_route(live, self.stop, hung_up)
+        source = self.source(routes)
+        helper = self.helper()
+        for name in [*bodies, "scrambled-live"]:
+            with self.subTest(input=name):
+                sid = helper.open(f"{source.url}/user/secret/{name}")
+                helper.wait_for(lambda m, sid=sid: m[0] == "error" and m[1] == sid)
+                if name == "scrambled-live":
+                    self.assertTrue(hung_up.wait(3), "a failed session kept its upstream")
+                helper.close(sid)
+                helper.wait_for(lambda message, sid=sid: message == ("closed", sid))
+                errors = helper.of(sid, "error")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertEqual(errors[0][2], "unsupported")
+                self.assertTrue(errors[0][3])
+                self.assertEqual(helper.of(sid, "ready"), [])
+                self.assertEqual(helper.of(sid, "ended"), [])
+        self.assertTrue(helper.process.is_alive())
+        self.assert_no_credentials(helper)
+
+    def test_an_unexpected_session_failure_reports_one_internal_error(self):
+        hung_up = threading.Event()
+        source = self.source(
+            {
+                SECRET_PATH: (200, {}, make_stream(4)),
+                "/user/secret/live": paced_route(make_stream(30), self.stop, hung_up),
+            }
+        )
+        helper = self.helper()
+        # The bad ring spec fails after the live upstream connected.
+        broken = helper.open(source.url + "/user/secret/live", ring={"kind": "ram"})
+        helper.wait_for(lambda message: message[0] == "error" and message[1] == broken)
+        self.assertTrue(hung_up.wait(3), "a failed session kept its upstream")
+        helper.conn.send(("open", "not/a-session", source.url + SECRET_PATH, {}, True, RAM, 6.0))
+        helper.wait_for(lambda message: message[:2] == ("error", "not/a-session"))
+        working = helper.open(source.url + SECRET_PATH)
+        helper.wait_for(lambda message: message == ("ended", working))
+        for sid in (broken, "not/a-session"):
+            errors = helper.of(sid, "error")
+            self.assertEqual(errors, [("error", sid, "internal", errors[0][3])])
+            self.assertNotIn("max_bytes", errors[0][3])
+        helper.close(broken)
+        helper.wait_for(lambda message: message == ("closed", broken))
+        self.assert_no_credentials(helper)
+
+    def test_a_failing_disk_ring_falls_back_to_ram_and_keeps_streaming(self):
+        payload = make_stream(9)
+        source = self.source({SECRET_PATH: (200, {}, payload)})
+        helper = self.helper()
+        cases = (
+            ("unusable directory", "not-a-session", 1 << 30, 0),
+            # Too small for one segment: an append fails after the first segment opened.
+            ("full disk buffer", ".qitv-timeshift-" + secrets.token_hex(16), 16 * 1024, 1),
+        )
+        for case, directory, cap, oldest in cases:
+            with self.subTest(case=case):
+                ring = {"kind": "disk", "root": str(self.root), "dir": directory, "max_bytes": cap}
+                sid = helper.open(source.url + SECRET_PATH, ring=ring)
+                helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
+                errors = helper.of(sid, "error")
+                self.assertEqual(len(errors), 1, errors)
+                self.assertEqual(errors[0][2], "disk")
+                if oldest:
+                    self.assertEqual(errors[0][3], DISK_LIMIT)
+                self.assertEqual(len(helper.of(sid, "ready")), 1)
+                snapshot = helper.of(sid, "state")[-1][2]
+                self.assertEqual(snapshot["oldest"], oldest)
+                buffered = spans(helper, sid)
+                self.assertEqual(buffered[0][0], oldest)
+                with urlopen(helper.stream_url(sid, oldest), timeout=10) as response:
+                    _header, media = split_header(response.read())
+                self.assertEqual(media, payload[payload.index(media[:188]) :])
+                self.assertEqual(list(self.root.iterdir()), [], "the disk buffer was left behind")
+                helper.close(sid)
+                helper.wait_for(lambda message, sid=sid: message == ("closed", sid))
+        self.assert_no_credentials(helper)
+
+    def test_a_disk_session_removes_its_directory_once_closed(self):
+        payload = make_stream(60)
+        hung_up = threading.Event()
+        source = self.source({SECRET_PATH: paced_route(payload, self.stop, hung_up)})
+        helper = self.helper()
+        directory = ".qitv-timeshift-" + secrets.token_hex(16)
+        ring = {"kind": "disk", "root": str(self.root), "dir": directory, "max_bytes": 1 << 30}
+        sid = helper.open(source.url + SECRET_PATH, ring=ring)
+        helper.wait_for(lambda message: message == ("ready", sid))
+        helper.wait_for(lambda m: m[0] == "state" and m[1] == sid and m[4])
+        segments = list((self.root / directory).iterdir())
+        self.assertTrue(any(item.name == "segment-0.ts" for item in segments), segments)
+        helper.close(sid)
+        helper.wait_for(lambda message: message == ("closed", sid), timeout=2)
+        deadline = time.monotonic() + 3
+        while (self.root / directory).exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse((self.root / directory).exists())
+        self.assertTrue(hung_up.wait(3))
+        self.assertEqual(helper.of(sid, "error"), [])
+
+    def test_owner_death_closes_the_upstream_connection(self):
+        # A multiprocessing daemon flag only handles orderly owner exit. An abruptly
+        # killed GUI must not leave its helper holding provider connections.
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            listener.settimeout(30)
+            url = f"http://127.0.0.1:{listener.getsockname()[1]}{SECRET_PATH}"
+            owner = subprocess.Popen(
+                [sys.executable, "-c", OWNER, url, str(self.root)],
+                cwd=REPO,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            helper_pid = holder_pid = None
+            closed = False
+            try:
+                with listener.accept()[0] as peer:
+                    peer.settimeout(5)
+                    request = b""
+                    while b"\r\n\r\n" not in request:
+                        request += peer.recv(4096)
+                    helper_pid, holder_pid = map(int, owner.stdout.readline().split())
+                    owner.kill()
+                    owner.wait(5)
+                    peer.settimeout(3)
+                    try:
+                        remaining = peer.recv(1)
+                    except ConnectionResetError:
+                        # Windows reports a reset when the exiting helper closes its
+                        # socket, rather than an orderly TCP EOF.
+                        remaining = b""
+                    self.assertEqual(remaining, b"", "the orphaned helper kept its socket")
+                    closed = True
+            finally:
+                if owner.poll() is None:
+                    owner.kill()
+                    owner.wait(5)
+                for pid in (holder_pid, None if closed else helper_pid):
+                    if pid:
+                        try:
+                            os.kill(pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                owner.stdout.close()
+
+    def test_the_helper_discards_its_standard_output_and_error(self):
+        # Native code and library loggers can print provider URLs straight to fd 1 or 2.
+        pid = str(self.helper().process.pid)
+        if sys.platform.startswith("linux"):
+            targets = [os.readlink(f"/proc/{pid}/fd/{fd}") for fd in (1, 2)]
+        elif os.name != "nt" and shutil.which("lsof"):
+            listing = subprocess.run(
+                ["lsof", "-a", "-p", pid, "-d", "1,2", "-Fn"],
+                capture_output=True,
+                check=True,
+                timeout=10,
+            ).stdout.decode()
+            targets = [line[1:] for line in listing.splitlines() if line.startswith("n")]
+        else:
+            self.skipTest("no way to list another process's descriptors here")
+        self.assertEqual(targets, [os.devnull, os.devnull])
+
+
+class SpawnTargetTests(unittest.TestCase):
+    def test_the_spawn_target_imports_neither_qt_nor_the_network_stack(self):
+        # Spawn imports the target's module before anything else runs: keep it fast.
+        probe = (
+            "import sys, services.live.worker; "
+            "print(sorted({name.split('.')[0] for name in sys.modules} & "
+            "{'PySide6', 'requests', 'urllib3', 'm3u8', 'Cryptodome'}))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe], cwd=REPO, capture_output=True, check=True, timeout=30
+        )
+        self.assertEqual(result.stdout.decode().strip(), "[]")
+
+
+class StuckSessionTests(unittest.TestCase):
+    """In process: a session stuck where its stop event cannot reach (a DNS lookup or a TCP
+    connect) must not hold up `close`, and once abandoned it must stay silent."""
+
+    def test_close_answers_at_once_and_the_abandoned_thread_stays_silent(self):
+        entered, release = threading.Event(), threading.Event()
+        closed_sources = []
+
+        class Source:
+            burst_s = 0.0
+
+            def chunks(self):
+                yield make_stream(4)
+
+            def close(self):
+                closed_sources.append(self)
+
+        def stuck_open(_url, **_options):
+            entered.set()
+            release.wait(10)  # deaf to the session's stop event, like getaddrinfo
+            return Source()
+
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
+        self.addCleanup(temporary.cleanup)
+        parent, child = multiprocessing.Pipe(duplex=True)
+        self.addCleanup(parent.close)
+        helper = worker._Helper(child, temporary.name)
+        loop = threading.Thread(target=helper.run, daemon=True)
+        with patch("services.live.source.open_source", stuck_open):
+            loop.start()
+            try:
+                self.assertTrue(parent.poll(10))
+                base_url = parent.recv()[1]
+                parent.send(("open", "stuck", "http://192.0.2.1" + SECRET_PATH, {}, True, RAM, 6))
+                self.assertTrue(entered.wait(5))
+                session = helper._sessions["stuck"]
+                started = time.monotonic()
+                parent.send(("close", "stuck"))
+                self.assertTrue(parent.poll(2), "close waited for the stuck session")
+                self.assertEqual(parent.recv(), ("closed", "stuck"))
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertTrue(session.thread.is_alive())
+            finally:
+                release.set()
+            session.thread.join(5)
+            self.assertFalse(session.thread.is_alive())
+        self.assertEqual(len(closed_sources), 1, "the late source was not closed")
+        self.assertFalse(parent.poll(0.3), "the abandoned session sent a message")
+        with self.assertRaises(HTTPError) as missing:
+            urlopen(f"{base_url}/stuck/stream/0.ts", timeout=5)
+        self.assertEqual(missing.exception.code, 404)
+        missing.exception.close()
+        parent.send(("shutdown",))
+        loop.join(5)
+        self.assertFalse(loop.is_alive())
+        helper.shutdown()
+        child.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
