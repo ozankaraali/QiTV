@@ -40,6 +40,7 @@ from ui.overlays.transport import fmt_behind
 logger = logging.getLogger(__name__)
 
 PIP_LIVE_ONLY = "Picture-in-picture is for live TV"
+PIP_EXTERNAL = "Picture-in-picture is off while channels play in an external player"
 NO_PREVIOUS = "No previous channel yet"
 OPEN_PIP_FIRST = "Open picture-in-picture first (P)"
 ALREADY_LARGE = "This channel is already playing"
@@ -79,6 +80,7 @@ class PipControls(QObject):
         all_live: Callable[[], list[dict]],
         large_channel: Callable[[], Optional[dict]],
         vod: Callable[[], bool],
+        external: Callable[[], bool],
         closed: Callable[[], bool],
         toast: Callable[..., None],
         swap: Callable[[], bool],
@@ -90,7 +92,8 @@ class PipControls(QObject):
         `budget` is the ConnectionBudget; `live_start(target, url)` a main tune's LiveStart;
         `nav`, `drawer` and `zap` the shell's (P on the drawer's channel, the previous
         channel); `all_live()` every live channel; `large_channel()` what the large picture
-        plays; `vod()` whether a movie or an episode is current; `swap()` the shell's swap
+        plays; `vod()` whether a movie or an episode is current; `external()` whether channels
+        play in an external player (it holds the provider's stream); `swap()` the shell's swap
         (False when it has to wait); `mixer()` opens the mixer on the PiP's row.
         """
         super().__init__(parent)
@@ -109,6 +112,7 @@ class PipControls(QObject):
         self._all_live = all_live
         self._large_channel = large_channel
         self._vod = vod
+        self._external = external
         self._closed = closed
         self._toast = toast
         self._swap = swap
@@ -225,8 +229,7 @@ class PipControls(QObject):
         if self.busy():
             self.close()
             return
-        if self._vod():
-            self._toast(PIP_LIVE_ONLY)
+        if self._refused():
             return
         previous, context = self._previous_channel()
         if previous is None:
@@ -238,8 +241,7 @@ class PipControls(QObject):
         """Open `channel` small, or show it in the small picture instead of what it shows."""
         if self._closed():
             return
-        if self._vod():
-            self._toast(PIP_LIVE_ONLY)
+        if self._refused():
             return
         if ZapContext.same(channel, self._large_channel()):
             self._toast(ALREADY_LARGE)
@@ -253,6 +255,16 @@ class PipControls(QObject):
         target = Target(channel, "live", title, group_key=group)
         self._wanted = (target, context if context is not None else ZapContext())
         self._request(target)
+
+    def _refused(self) -> bool:
+        """A movie plays, or channels play in an external player: no PiP (toasted)."""
+        if self._vod():
+            self._toast(PIP_LIVE_ONLY)
+            return True
+        if self._external():
+            self._toast(PIP_EXTERNAL)
+            return True
+        return False
 
     def links_dropped(self, ask_again: bool) -> None:
         """The shell dropped every link request (a provider setup or failure): none comes.

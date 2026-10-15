@@ -277,6 +277,7 @@ class TVController(QObject):
                 all_live=self._all_live,
                 large_channel=lambda: self._channel,
                 vod=self.vod_current,
+                external=lambda: self._external_launcher() is not None,
                 closed=lambda: self._closed,
                 toast=self._toast,
                 swap=self.swap,

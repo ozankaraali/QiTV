@@ -33,6 +33,7 @@ from ui.pip_controls import (
     ALREADY_LARGE,
     NO_PREVIOUS,
     OPEN_PIP_FIRST,
+    PIP_EXTERNAL,
     PIP_LIVE_ONLY,
     SWITCHING,
     SWITCHING_MS,
@@ -514,6 +515,29 @@ class PipTests(PipCase):
         self.play(2)
         self.assertFalse(self.sessions.pip_open())
         self.assertEqual(self.pip_live.calls[-1], ("stop",))
+
+    def test_with_an_external_player_picture_in_picture_says_no(self):
+        # Review M4: the external player holds the provider's stream; a PiP would be a second.
+        self.start_large(0)
+        self.config.play_in_vlc = True
+        self.play(1)  # Two plays in VLC once the in-app stream let go
+        self.live.released.emit()
+        self.assertEqual(self.external.calls, [("vlc", "http://stream/2")])
+        links = len(self.catalog.links)
+        asks = {
+            "P": lambda: self.controller.handle(Action.PIP),
+            "the menu": lambda: self.controller.open_pip(
+                CHANNELS[2], group_key="10", channels=CHANNELS
+            ),
+            "the transport's button": self.transport.pipRequested.emit,
+        }
+        for name, ask in asks.items():
+            with self.subTest(name):
+                ask()
+                self.assertEqual(self.toast.messages()[-1], (PIP_EXTERNAL, "info"))
+                self.assertEqual(len(self.catalog.links), links)  # no link: nothing opens
+                self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.pip_live.calls, [])
 
     def test_play_in_vlc_from_the_menu_closes_the_small_picture_first(self):
         self.start_large(0)
