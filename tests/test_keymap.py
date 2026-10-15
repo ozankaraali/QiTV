@@ -192,8 +192,9 @@ class LibraryKeymapTests(unittest.TestCase):
         self.assertEqual(library(K.Key_D, "d"), (Action.NAV_TEXT, "d"))
 
     def test_slash_and_ctrl_f_search(self):
-        self.assertEqual(library(K.Key_Slash, "/"), (Action.SEARCH, ""))
-        self.assertEqual(library(K.Key_7, "/", SHIFT), (Action.SEARCH, ""))  # Shift+7 layouts
+        # "/" carries its text: a zone that takes text (search, genre filter) types it
+        self.assertEqual(library(K.Key_Slash, "/"), (Action.SEARCH, "/"))
+        self.assertEqual(library(K.Key_7, "/", SHIFT), (Action.SEARCH, "/"))  # Shift+7 layouts
         self.assertEqual(library(K.Key_F, "f", CTRL), (Action.SEARCH, ""))
 
     def test_ctrl_d_favorite(self):

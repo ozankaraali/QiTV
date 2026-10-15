@@ -17,6 +17,7 @@ from services.watch_state import WatchState
 from ui.keymap import Action
 from ui.library.library_screen import LIVE_TILE, GridPosters, LibraryScreen
 from ui.library.poster_grid import FAVORITE
+from ui.library.search_session import SEARCH_PROMPT
 from ui.library_controller import RETRY_TEXT, SEARCH_DEBOUNCE_MS, LibraryController
 from ui.theme import PALETTE, qcolor
 
@@ -64,6 +65,15 @@ class FakeCatalog(QObject):
         self.episode_map = {}  # (series id, season id) -> list | None
         self.requests = []
         self.selected = []
+        self.loading = False  # a provider setup is running (CatalogService.is_loading)
+        self.providerReady.connect(self._settled)
+        self.providerFailed.connect(self._settled)
+
+    def _settled(self, *_args):
+        self.loading = False
+
+    def is_loading(self):
+        return self.loading
 
     def current_provider_name(self):
         return self.name
@@ -111,6 +121,7 @@ class FakeCatalog(QObject):
 
     def select_provider(self, name=None, *, force_refresh=False):
         self.selected.append(name)
+        self.loading = True
 
 
 class FakeProviderManager:
@@ -212,8 +223,8 @@ class LibraryControllerTests(unittest.TestCase):
         self.backs = []
         self.model = LibraryModel(self.catalog, self.config, self.watch)
 
-    def build(self, jobs=None):
-        self.screen = LibraryScreen(self.posters)
+    def build(self, jobs=None, logos=None):
+        self.screen = LibraryScreen(self.posters, logos)
         self.addCleanup(self.screen.deleteLater)
         self.addCleanup(self.screen.close)
         self.screen.resize(1280, 800)
@@ -446,14 +457,44 @@ class LibraryControllerTests(unittest.TestCase):
         runner = DeferredRunner()
         ctl = self.build(jobs=runner)
         ctl.open_search()
-        self.type_text("sa")
+        self.type_text("sand")
         QTest.qWait(WAIT_MS)
-        self.type_text("l")
-        QTest.qWait(WAIT_MS)
+        ctl.handle(Action.ESCAPE)  # cleared while the search runs
+        runner.finish(0)  # its result arrives late
+        self.assertEqual(self.grid_names(), [])
+        self.assertEqual(self.screen.grid._message, SEARCH_PROMPT)
+
+    def test_queries_typed_during_a_slow_first_search_run_once_afterwards(self):
+        runner = DeferredRunner()
+        ctl = self.build(jobs=runner)
+        ctl.open_search()
+        for text in ("sa", "l", "t", " r"):
+            self.type_text(text)
+            QTest.qWait(WAIT_MS)
+        self.assertEqual(len(runner.jobs), 1)
+        runner.finish(0)
         self.assertEqual(len(runner.jobs), 2)
-        runner.finish(1)  # the newer "sal"
-        runner.finish(0)  # the older "sa" arrives late
-        self.assertEqual(self.grid_names(), ["Salt TV", "Salt Roads", "Salt Lake"])
+        runner.finish(1)
+        self.assertEqual(self.grid_names(), ["Salt Roads"])
+        self.assertEqual(self.pm.loads, 1)
+
+    def test_one_letter_shows_the_prompt(self):
+        ctl = self.build()
+        ctl.open_search()
+        self.type_text("s")
+        QTest.qWait(WAIT_MS)
+        self.assertEqual(self.jobs.workers, [])
+        self.assertEqual(self.screen.grid._message, SEARCH_PROMPT)
+        self.assertEqual(self.screen.search_field.count_text, "")
+
+    def test_provider_ready_searches_the_visible_query_again(self):
+        ctl = self.build()
+        ctl.open_search()
+        self.type_text("salt")
+        QTest.qWait(WAIT_MS)
+        self.catalog.providerReady.emit("P")
+        self.assertEqual(len(self.jobs.workers), 2)
+        self.assertEqual(self.pm.loads, 2)
 
     def test_search_snapshot_is_dropped_on_provider_ready_and_refresh(self):
         ctl = self.build()
@@ -494,13 +535,26 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual((self.played[-1][0]["name"], self.played[-1][1]), ("Salt Roads", "movie"))
 
     def test_live_hits_use_the_logo_tile(self):
-        ctl = self.build()
+        ctl = self.build(logos=FakePosters())
         ctl.open_search()
         self.type_text("salt")
         QTest.qWait(WAIT_MS)
         grid = self.screen.grid
         self.assertEqual(grid._poster_url(grid.item(0)), LIVE_TILE + "http://logos.invalid/1")
         self.assertEqual(grid._poster_url(grid.item(1)), "http://posters.invalid/1.jpg")
+        self.assertTrue(grid._tile_provider(grid.item(0)))
+        self.assertFalse(grid._tile_provider(grid.item(1)))
+        ctl.handle(Action.ESCAPE)  # leaves search for the TV (no section open)
+        ctl.open("movies")
+        self.assertIsNone(grid._tile_provider)
+
+    def test_one_cache_names_logos_by_their_own_url(self):
+        ctl = self.build()
+        ctl.open_search()
+        self.type_text("salt")
+        QTest.qWait(WAIT_MS)
+        grid = self.screen.grid
+        self.assertEqual(grid._poster_url(grid.item(0)), "http://logos.invalid/1")
 
     # 6 -----------------------------------------------------------------------------------
     def test_a_hit_from_another_provider_plays_once_that_provider_is_ready(self):
@@ -541,9 +595,77 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.handle(Action.NAV_DOWN)
         ctl.handle(Action.NAV_ACTIVATE)
         self.catalog.providerFailed.emit("Q", "Couldn't reach the provider")
-        self.assertEqual(notices, ["Q: Couldn't reach the provider"])
+        self.assertEqual(notices, ["Switching to Q…", "Q: Couldn't reach the provider"])
         ctl.handle(Action.NAV_ACTIVATE)
         self.assertEqual(self.catalog.selected, ["Q", "Q"])
+        self.catalog.name = "Q"
+        self.catalog.providerReady.emit("Q")
+        self.assertEqual(len(self.played), 1)
+
+    def search_salt(self):
+        ctl = self.build()
+        ctl.open_search()
+        self.type_text("salt")
+        QTest.qWait(WAIT_MS)
+        ctl.handle(Action.NAV_DOWN)  # the results
+        return ctl
+
+    def activate_name(self, ctl, name):
+        self.screen.grid.set_current_index(self.grid_names().index(name))
+        ctl.handle(Action.NAV_ACTIVATE)
+
+    def test_a_second_enter_during_the_switch_plays_once(self):  # review (a)
+        ctl = self.search_salt()
+        self.activate_name(ctl, "Salt Lake")
+        self.catalog.name = "Q"  # the provider manager names Q before it is ready
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.played, [])
+        self.assertEqual(self.catalog.selected, ["Q"])
+        self.catalog.providerReady.emit("Q")
+        self.assertEqual([i["name"] for i, _k, _c in self.played], ["Salt Lake"])
+
+    def test_the_latest_activation_wins_during_a_switch(self):  # review (b)
+        ctl = self.search_salt()
+        notices = []
+        ctl.notice.connect(notices.append)
+        self.activate_name(ctl, "Salt Lake")  # Q
+        self.activate_name(ctl, "Salt Roads")  # back to P, the provider still named current
+        self.assertEqual(self.played, [])
+        self.assertEqual(self.catalog.selected, ["Q", "P"])
+        self.assertEqual(notices, ["Switching to Q…", "Switching to P…"])
+        self.catalog.providerReady.emit("P")  # the superseded Q setup never reports
+        self.assertEqual([i["name"] for i, _k, _c in self.played], ["Salt Roads"])
+
+    def test_leaving_the_library_drops_the_pending_hit(self):  # review (c)
+        ctl = self.build()
+        ctl.open_search()
+        self.type_text("salt lake")
+        QTest.qWait(WAIT_MS)
+        ctl.handle(Action.NAV_DOWN)
+        ctl.handle(Action.NAV_ACTIVATE)
+        ctl.handle(Action.ESCAPE)  # grid -> search
+        ctl.handle(Action.ESCAPE)  # clears the query
+        ctl.handle(Action.ESCAPE)  # leaves search: no section, so back to TV
+        self.assertEqual(self.backs, [True])
+        self.catalog.name = "Q"
+        self.catalog.providerReady.emit("Q")
+        self.assertEqual(self.played, [])
+
+    def test_leave_drops_the_pending_hit(self):
+        ctl = self.search_salt()
+        self.activate_name(ctl, "Salt Lake")
+        ctl.leave()  # the window left the Library (a menu, the drawer)
+        self.catalog.name = "Q"
+        self.catalog.providerReady.emit("Q")
+        self.assertEqual(self.played, [])
+
+    def test_a_current_provider_play_drops_the_pending_hit(self):
+        ctl = self.search_salt()
+        self.activate_name(ctl, "Salt Lake")
+        self.catalog.loading = False  # Q's setup failed silently elsewhere; P stays current
+        self.catalog.providerFailed.emit("Q", "Couldn't reach the provider")
+        self.activate_name(ctl, "Salt Roads")
+        self.assertEqual([i["name"] for i, _k, _c in self.played], ["Salt Roads"])
         self.catalog.name = "Q"
         self.catalog.providerReady.emit("Q")
         self.assertEqual(len(self.played), 1)
@@ -584,10 +706,31 @@ class LibraryControllerTests(unittest.TestCase):
         self.catalog.providerReady.emit("R")
         self.assertIn(("section", "series"), self.catalog.requests)
         self.assertNotIn(("seasons", "77"), self.catalog.requests)
+        self.catalog.providerReady.emit("R")  # a repeat keeps the series waiting
         self.catalog.sectionReady.emit("series")
         self.assertIn(("seasons", "77"), self.catalog.requests)
         self.assertEqual(ctl.mode, "series")
         ctl.handle(Action.ESCAPE)
+        self.assertEqual(ctl.mode, "search")
+
+    def test_a_pending_series_whose_section_fails_is_dropped(self):
+        self.pm.caches.append(("R", {"series": [dict(SERIES)]}))
+        self.catalog.names.append("R")
+        ctl = self.build()
+        notices = []
+        ctl.notice.connect(notices.append)
+        ctl.open_search()
+        self.type_text("harbour")
+        QTest.qWait(WAIT_MS)
+        ctl.handle(Action.NAV_DOWN)
+        ctl.handle(Action.NAV_DOWN)
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.catalog.name = "R"
+        self.catalog.providerReady.emit("R")
+        self.catalog.sectionFailed.emit("series", "Couldn't reach the provider")
+        self.assertEqual(notices[-1], "Couldn't load that series")
+        self.catalog.sectionReady.emit("series")
+        self.assertNotIn(("seasons", "77"), self.catalog.requests)
         self.assertEqual(ctl.mode, "search")
 
     def test_source_menu_lists_providers_and_switches(self):
@@ -643,6 +786,100 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.catalog.requests.count(("group", "movies", "c")), 2)
         self.assertEqual(self.screen.grid._message, "Loading…")
 
+    def test_a_loading_provider_keeps_loading_and_a_shown_genre_keeps_its_titles(self):
+        self.catalog.item_map[("movies", "c")] = None
+        ctl = self.open_movies()
+        self.model.select_genre("c")
+        self.model.failed.emit("The provider is still loading")
+        self.assertEqual(self.screen.grid._message, "Loading…")
+        self.model.select_genre("d")
+        self.model.failed.emit("Couldn't reach the provider")  # not about the titles shown
+        self.assertIsNone(self.screen.grid._message)
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.played[-1][0]["name"], "Dune Songs")
+
+    # review minors -----------------------------------------------------------------------
+    def test_up_from_the_first_genre_reaches_nav_and_down_returns(self):
+        ctl = self.open_movies()
+        ctl.handle(Action.NAV_LEFT)
+        ctl.handle(Action.NAV_UP)  # the first genre
+        self.assertEqual(ctl.zone, "nav")
+        ctl.handle(Action.NAV_DOWN)
+        self.assertEqual(ctl.zone, "genres")
+
+    def test_slash_types_where_text_goes_and_searches_elsewhere(self):
+        ctl = self.open_movies()
+        ctl.handle(Action.NAV_LEFT)
+        ctl.handle(Action.SEARCH, "/")
+        self.assertEqual(self.screen.genres.filter_text, "/")
+        self.assertEqual(ctl.mode, "browse")
+        ctl.handle(Action.NAV_RIGHT)
+        ctl.handle(Action.SEARCH, "/")  # from the grid: search
+        self.assertEqual(ctl.mode, "search")
+        self.type_text("ac")
+        ctl.handle(Action.SEARCH, "/")
+        self.assertEqual(ctl.query, "ac/")
+        ctl.handle(Action.SEARCH)  # Ctrl+F has no text
+        self.assertEqual(ctl.query, "ac/")
+
+    def accent_pixels_around_current(self):
+        grid = self.screen.grid
+        rect = grid.item_rect(grid.current_index()).adjusted(-6, -6, 6, 6)
+        image = grid.viewport().grab().toImage()
+        accent = qcolor(PALETTE.accent)
+        count = 0
+        for x in range(max(0, rect.left()), min(image.width(), rect.right())):
+            for y in (rect.top() + 4, rect.center().y(), rect.bottom() - 4):
+                c = QColor(image.pixel(x, y))
+                if all(abs(a - b) <= 30 for a, b in zip(c.getRgb()[:3], accent.getRgb()[:3])):
+                    count += 1
+        return count
+
+    def test_the_grid_ring_follows_the_focused_zone(self):
+        ctl = self.open_movies()
+        self.assertGreater(self.accent_pixels_around_current(), 0)
+        ctl.handle(Action.NAV_LEFT)  # the genres
+        self.assertEqual(self.accent_pixels_around_current(), 0)
+        ctl.handle(Action.NAV_RIGHT)
+        self.assertGreater(self.accent_pixels_around_current(), 0)
+
+    def test_series_mode_hides_the_genres_and_takes_the_width(self):
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertFalse(self.screen.genres.isVisible())
+        self.assertEqual(self.screen.series.width(), self.screen.width())
+        self.assertEqual(self.screen.series.x(), 0)
+        ctl.handle(Action.ESCAPE)
+        self.assertTrue(self.screen.genres.isVisible())
+        self.assertEqual(self.screen.grid.x(), self.screen.genres.width())
+
+    def test_failed_seasons_and_episodes_retry(self):
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.catalog.seasonsFailed.emit("77", "Couldn't reach the provider")
+        ctl.handle(Action.NAV_ACTIVATE)  # retry
+        self.assertEqual(self.catalog.requests.count(("seasons", "77")), 2)
+        self.catalog.season_map["77"] = SEASONS
+        self.catalog.seasonsReady.emit("77")
+        self.catalog.episodesFailed.emit("77", "1", "Couldn't reach the provider")
+        ctl.handle(Action.NAV_ACTIVATE)  # retry
+        self.assertEqual(self.catalog.requests.count(("episodes", "77", "1")), 2)
+        self.catalog.episode_map[("77", "1")] = episodes("1")
+        self.catalog.episodesReady.emit("77", "1")
+        self.assertEqual(self.screen.series.current_episode()["ename"], "Episode 1")
+
+    def test_a_section_the_provider_lacks_says_so(self):
+        self.catalog.section_list = ["live"]
+        ctl = self.build()
+        ctl.open("movies")
+        self.assertNotIn(("section", "movies"), self.catalog.requests)
+        self.assertEqual(self.screen.grid._message, "P has no movies")
+        self.assertEqual(self.screen.genres.rows(), [])
+
 
 class GridPostersTests(unittest.TestCase):
     def setUp(self):
@@ -651,30 +888,30 @@ class GridPostersTests(unittest.TestCase):
         self.shim = GridPosters(self.posters, self.logos)
 
     def test_requests_go_to_their_cache(self):
+        self.assertEqual(self.shim.logo_key("http://l/1"), LIVE_TILE + "http://l/1")
         self.shim.request(["http://p/1", LIVE_TILE + "http://l/1"], replace_pending=True)
         self.assertEqual(self.posters.requested, [(["http://p/1"], True)])
         self.assertEqual(self.logos.requested, [(["http://l/1"], True)])
 
-    def test_one_cache_gets_one_request(self):
+    def test_one_cache_needs_no_prefix_and_emits_once(self):
         shim = GridPosters(self.posters, self.posters)
-        shim.request(["http://p/1", LIVE_TILE + "http://l/1"], replace_pending=True)
+        self.assertEqual(shim.logo_key("http://l/1"), "http://l/1")
+        shim.request(["http://p/1", "http://l/1"], replace_pending=True)
         self.assertEqual(self.posters.requested, [(["http://p/1", "http://l/1"], True)])
+        ready = []
+        shim.logoReady.connect(ready.append)
+        self.posters.logoReady.emit("http://l/1")
+        self.assertEqual(ready, ["http://l/1"])
 
-    def test_logo_is_centred_on_a_dark_tile(self):
+    def test_logos_are_the_cache_pixmaps_themselves(self):
         self.assertIsNone(self.shim.pixmap(LIVE_TILE + "http://l/1"))
         logo = QPixmap(100, 50)
-        logo.fill(QColor("#ffffff"))
         self.logos.pixmaps["http://l/1"] = logo
         ready = []
         self.shim.logoReady.connect(ready.append)
         self.logos.logoReady.emit("http://l/1")
         self.assertEqual(ready, [LIVE_TILE + "http://l/1"])
-        tile = self.shim.pixmap(LIVE_TILE + "http://l/1").toImage()
-        self.assertAlmostEqual(tile.height() / tile.width(), 1.5, places=2)
-        centre = QColor(tile.pixel(tile.width() // 2, tile.height() // 2))
-        corner = QColor(tile.pixel(2, 2))
-        self.assertEqual(centre.name(), "#ffffff")
-        self.assertEqual(corner.name(), qcolor(PALETTE.panel_raised).name())
+        self.assertIs(self.shim.pixmap(LIVE_TILE + "http://l/1"), logo)
 
     def test_posters_pass_through(self):
         pixmap = QPixmap(10, 15)
@@ -684,6 +921,30 @@ class GridPostersTests(unittest.TestCase):
         self.shim.logoReady.connect(ready.append)
         self.posters.logoReady.emit("http://p/1")
         self.assertEqual(ready, ["http://p/1"])
+
+
+class LogoTilePaintTests(unittest.TestCase):
+    def test_a_channel_logo_is_centred_on_a_raised_tile(self):
+        posters = FakePosters()
+        host = LibraryScreen(posters)
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        host.resize(1280, 800)
+        host.show()
+        logo = QPixmap(100, 50)
+        logo.fill(QColor("#ffffff"))
+        posters.pixmaps["http://l/1"] = logo
+        grid = host.grid
+        grid.set_poster_url_provider(lambda item: "http://l/1")
+        grid.set_tile_provider(lambda item: True)
+        grid.set_sections([("", [{"name": "Salt TV"}, {"name": "Tide TV"}])])
+        grid.set_current_index(0)
+        rect = grid.item_rect(1)
+        image = grid.viewport().grab().toImage()
+        centre = QColor(image.pixel(rect.center().x(), rect.center().y()))
+        edge = QColor(image.pixel(rect.left() + 6, rect.top() + 12))
+        self.assertEqual(centre.name(), "#ffffff")
+        self.assertEqual(edge.name(), qcolor(PALETTE.panel_raised).name())
 
 
 if __name__ == "__main__":

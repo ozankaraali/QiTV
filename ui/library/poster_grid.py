@@ -60,6 +60,9 @@ PROGRESS_INSET_U = 0.8
 PROGRESS_TRACK_ALPHA = 0.25
 LIFT_U = 0.3  # the focused poster is drawn this much larger
 FOCUS_RING_PX = 1.5
+UNFOCUSED_RING_ALPHA = 0.35  # the current poster's ring while keys move another zone
+TILE_LOGO_W = 0.7  # a channel logo fits in this share of its tile's width…
+TILE_LOGO_H = 0.4  # …and of its height
 STRIP_H_U = 11.0
 STRIP_PAD_U = 2.0
 STRIP_TINT_ALPHA = 0.2
@@ -211,6 +214,8 @@ class PosterGrid(QAbstractScrollArea):
         self._details_provider: Callable[[dict], Details | None] | None = None
         self._poster_url: Callable[[dict], str] = poster_url
         self._progress_provider: Callable[[dict], float | None] | None = None
+        self._tile_provider: Callable[[dict], bool] | None = None
+        self._focused = True
         self._details_cache: tuple[int, dict, Details | None] | None = None
         self._progress_cache: dict[int, float | None] = {}
         # layout (see _layout_rows)
@@ -313,6 +318,19 @@ class PosterGrid(QAbstractScrollArea):
         self._progress_provider = fn
         self._progress_cache.clear()
         self.viewport().update()
+
+    def set_tile_provider(self, fn: Callable[[dict], bool] | None) -> None:
+        """Titles for which `fn` is True are channel logos: their image is drawn centred on a
+        raised tile instead of covering the poster."""
+        self._tile_provider = fn
+        self.viewport().update()
+
+    def set_focused(self, focused: bool) -> None:
+        """Whether keys move this grid. The current poster is lifted with the accent ring;
+        otherwise it keeps its place with a dimmed ring."""
+        if focused != self._focused:
+            self._focused = focused
+            self.viewport().update()
 
     def set_letter_index(self, index: dict[str, int] | None) -> None:
         """Letter ('#', 'a'…'z') -> first flat index; None or {} hides the A–Z rail."""
@@ -875,10 +893,14 @@ class PosterGrid(QAbstractScrollArea):
                 width = view.width() - 2 * self._pad
                 self._paint_strip(p, QRectF(self._pad, strip_top, width, self._strip_h))
         if focus is not None:
-            half = LIFT_U * self._units.u / 2
-            lifted = focus.adjusted(-half, -half, half, half)
-            self._paint_poster(p, self._cur, lifted, card_font, visible)
-            self._paint_focus_ring(p, lifted)
+            if self._focused:
+                half = LIFT_U * self._units.u / 2
+                lifted = focus.adjusted(-half, -half, half, half)
+                self._paint_poster(p, self._cur, lifted, card_font, visible)
+                self._paint_focus_ring(p, lifted, qcolor(PALETTE.accent))
+            else:
+                self._paint_poster(p, self._cur, focus, card_font, visible)
+                self._paint_focus_ring(p, focus, qcolor(PALETTE.text, UNFOCUSED_RING_ALPHA))
         p.translate(0, scroll)
         if self._rail_visible():
             self._paint_rail(p)
@@ -937,7 +959,10 @@ class PosterGrid(QAbstractScrollArea):
                 pixmap = self._posters.pixmap(url)
         progress = self._progress(i)
         if pixmap is not None and not pixmap.isNull():
-            self._paint_cover(p, rect, pixmap)
+            if self._tile_provider is not None and self._tile_provider(item):
+                self._paint_tile(p, rect, pixmap)
+            else:
+                self._paint_cover(p, rect, pixmap)
         else:
             self._paint_card(p, rect, title_of(item), card_font, progress is not None)
         if progress is not None:
@@ -961,6 +986,19 @@ class PosterGrid(QAbstractScrollArea):
         p.setBrush(brush)
         p.drawRoundedRect(rect, RADIUS_CARD, RADIUS_CARD)
         p.restore()
+
+    def _paint_tile(self, p: QPainter, rect: QRectF, pixmap: QPixmap) -> None:
+        """A channel logo centred on a raised tile, scaled at paint time."""
+        fill_round(p, rect, qcolor(PALETTE.panel_raised), RADIUS_CARD)
+        scale = min(
+            rect.width() * TILE_LOGO_W / pixmap.width(),
+            rect.height() * TILE_LOGO_H / pixmap.height(),
+        )
+        width, height = pixmap.width() * scale, pixmap.height() * scale
+        target = QRectF(
+            rect.center().x() - width / 2, rect.center().y() - height / 2, width, height
+        )
+        p.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
 
     def _paint_card(
         self, p: QPainter, rect: QRectF, title: str, font: QFont, has_progress: bool
@@ -991,9 +1029,9 @@ class PosterGrid(QAbstractScrollArea):
             y += line_h
         p.restore()
 
-    def _paint_focus_ring(self, p: QPainter, rect: QRectF) -> None:
+    def _paint_focus_ring(self, p: QPainter, rect: QRectF, color: QColor) -> None:
         p.save()
-        p.setPen(QPen(qcolor(PALETTE.accent), FOCUS_RING_PX))
+        p.setPen(QPen(color, FOCUS_RING_PX))
         p.setBrush(Qt.NoBrush)
         half = FOCUS_RING_PX / 2
         p.drawRoundedRect(rect.adjusted(half, half, -half, -half), RADIUS_CARD, RADIUS_CARD)

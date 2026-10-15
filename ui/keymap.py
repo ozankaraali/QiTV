@@ -161,7 +161,7 @@ def resolve(
         if key in _LIBRARY_KEYS:
             return _LIBRARY_KEYS[key], ""
         if (key == _K.Key_Slash.value or text == "/") and not mods & (_CTRL | _META):
-            return Action.SEARCH, ""
+            return Action.SEARCH, "/"  # the Library types it where text goes
         return _text(text, mods, windows=platform.startswith("win"))
     if context == "drawer":
         if key in _DRAWER_KEYS:

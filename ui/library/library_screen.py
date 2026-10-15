@@ -4,7 +4,6 @@ Mockup 05, option 1. 1 u = 1% of this screen's width. The screen only lays its p
 paints the search field; the LibraryController decides what they show and routes the keys.
 """
 
-from collections import OrderedDict
 import logging
 
 from PySide6.QtCore import QObject, QRectF, Qt, Signal
@@ -12,7 +11,7 @@ from PySide6.QtGui import QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from ui.library.genre_list import GenreList
-from ui.library.poster_grid import HEADER_H_U, PAD_U, POSTER_ASPECT, PosterGrid
+from ui.library.poster_grid import HEADER_H_U, PAD_U, PosterGrid
 from ui.library.series_view import SeriesView
 from ui.library.top_nav import TopNav
 from ui.overlays.painting import Units, elided, fill_round
@@ -22,11 +21,7 @@ logger = logging.getLogger(__name__)
 
 MODES = ("browse", "series", "search")
 DEFAULT_HOST_WIDTH = 1280
-LIVE_TILE = "live-tile:"  # a poster URL drawn as the channel logo centred on a dark tile
-TILE_W = 320  # pixels; tall enough to stay sharp when the grid scales it to a poster
-TILE_LOGO_W = 0.7  # the logo fits in this share of the tile's width…
-TILE_LOGO_H = 0.4  # …and of its height
-MAX_TILES = 300
+LIVE_TILE = "live-tile:"  # routes a grid URL to the channel logo cache
 FIELD_W_U = 46.0
 FIELD_H_U = 3.2
 FIELD_RADIUS_U = 0.8
@@ -37,11 +32,11 @@ SEARCH_PLACEHOLDER = "⌕ Search movies, series and channels"
 
 
 class GridPosters(QObject):
-    """The grid's image source: posters, and live channel logos centred on a dark tile.
+    """The grid's image source: posters, and live channel logos from a separate cache.
 
-    A URL that starts with LIVE_TILE names a channel logo; the logo cache loads it and the
-    tile is composed here, on the GUI thread, when the grid paints it. Anything else is a
-    poster. `logos` defaults to `posters`.
+    With a separate logo cache, a logo's grid URL is LIVE_TILE + its URL (`logo_key`), which
+    routes its request and its pixmap to that cache. When one cache serves both, URLs pass
+    through unchanged. The grid draws channel logos itself (PosterGrid.set_tile_provider).
     """
 
     logoReady = Signal(str)
@@ -50,31 +45,24 @@ class GridPosters(QObject):
         super().__init__(parent)
         self._posters = posters
         self._logos = logos if logos is not None else posters
-        self._tiles: OrderedDict[str, QPixmap] = OrderedDict()
+        self._shared = self._logos is self._posters
         if posters is not None:
             posters.logoReady.connect(self.logoReady)
-        if self._logos is not None:
+        if not self._shared and self._logos is not None:
             self._logos.logoReady.connect(self._on_logo_ready)
 
+    def logo_key(self, url: str) -> str:
+        """The grid URL of a channel logo."""
+        return url if self._shared else LIVE_TILE + url
+
     def pixmap(self, url: str) -> QPixmap | None:
-        if not url.startswith(LIVE_TILE):
-            return self._posters.pixmap(url) if self._posters is not None else None
-        logo_url = url[len(LIVE_TILE) :]
-        tile = self._tiles.get(logo_url)
-        if tile is not None:
-            self._tiles.move_to_end(logo_url)
-            return tile
-        logo = self._logos.pixmap(logo_url) if self._logos is not None else None
-        if logo is None or logo.isNull():
-            return None
-        tile = _logo_tile(logo)
-        self._tiles[logo_url] = tile
-        while len(self._tiles) > MAX_TILES:
-            self._tiles.popitem(last=False)
-        return tile
+        if url.startswith(LIVE_TILE):
+            logos = self._logos
+            return logos.pixmap(url[len(LIVE_TILE) :]) if logos is not None else None
+        return self._posters.pixmap(url) if self._posters is not None else None
 
     def request(self, urls: list[str], replace_pending: bool = False) -> None:
-        if self._logos is self._posters:
+        if self._shared:
             both = [u[len(LIVE_TILE) :] if u.startswith(LIVE_TILE) else u for u in urls]
             if both and self._posters is not None:
                 self._posters.request(list(dict.fromkeys(both)), replace_pending=replace_pending)
@@ -88,26 +76,7 @@ class GridPosters(QObject):
             self._logos.request(logos, replace_pending=replace_pending)
 
     def _on_logo_ready(self, url: str) -> None:
-        self._tiles.pop(url, None)
         self.logoReady.emit(LIVE_TILE + url)
-
-
-def _logo_tile(logo: QPixmap) -> QPixmap:
-    """The logo centred on a raised-panel tile with the poster's aspect ratio."""
-    tile = QPixmap(TILE_W, round(TILE_W * POSTER_ASPECT))
-    tile.fill(qcolor(PALETTE.panel_raised))
-    scaled = logo.scaled(
-        round(tile.width() * TILE_LOGO_W),
-        round(tile.height() * TILE_LOGO_H),
-        Qt.KeepAspectRatio,
-        Qt.SmoothTransformation,
-    )
-    p = QPainter(tile)
-    p.drawPixmap(
-        (tile.width() - scaled.width()) // 2, (tile.height() - scaled.height()) // 2, scaled
-    )
-    p.end()
-    return tile
 
 
 class SearchField(QWidget):
@@ -188,9 +157,9 @@ class SearchField(QWidget):
 
 
 class LibraryScreen(QWidget):
-    """Top nav across the top; the genre column on the left (not in search mode); the grid,
-    or the series view, filling the rest. `logos` (channel logos for search results) defaults
-    to `posters`."""
+    """Top nav across the top; the genre column on the left (browse mode only); the grid, or
+    the series view, filling the rest. `logos` (channel logos for search results) defaults to
+    `posters`."""
 
     def __init__(self, posters, logos=None, parent=None) -> None:
         super().__init__(parent)
@@ -214,7 +183,7 @@ class LibraryScreen(QWidget):
         if mode not in MODES:
             raise ValueError(f"Unknown library mode: {mode!r}")
         self._mode = mode
-        self.genres.setVisible(mode != "search")
+        self.genres.setVisible(mode == "browse")
         self.grid.setVisible(mode != "series")
         self.series.setVisible(mode == "series")
         self.search_field.setVisible(mode == "search")
@@ -229,7 +198,7 @@ class LibraryScreen(QWidget):
         top = self.nav.height()
         self.nav.setGeometry(0, 0, width, top)
         left = 0
-        if self._mode != "search":
+        if self._mode == "browse":
             self.genres.setGeometry(0, top, self.genres.width(), max(0, height - top))
             left = self.genres.width()
         content = (left, top, max(0, width - left), max(0, height - top))
