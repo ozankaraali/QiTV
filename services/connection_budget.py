@@ -58,7 +58,7 @@ class ConnectionBudget(QObject):
         """Streams allowed at once; None means unlimited."""
         try:
             override = int(provider.get("max_streams") or 0)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             override = 0
         if override > 0:
             return override
@@ -109,6 +109,21 @@ class ConnectionBudget(QObject):
             return
         self._pending_emit.discard(ticket)
         self._promote(entry[0])
+
+    def relabel(self, ticket: int, purpose: str) -> None:
+        """Give a held or queued ticket another purpose (a PiP swap exchanges the roles).
+
+        Its place is kept. Unknown tickets and ``DENIED`` are ignored.
+        """
+        entry = self._active.get(ticket)
+        if entry is not None:
+            self._active[ticket] = (entry[0], purpose)
+            return
+        for waiting in self._waiting.values():
+            for w in waiting:
+                if w.ticket == ticket:
+                    w.purpose = purpose
+                    return
 
     def cancel(self, ticket: int) -> None:
         """Drop a queued request, or release a held one. ``DENIED`` is ignored."""

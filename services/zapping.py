@@ -252,6 +252,10 @@ class ZapController(QObject):
             self.numberNotFound.emit(text)
         self.digitsChanged.emit("")
 
+    def previous_channel(self) -> Optional[dict]:
+        """The channel tuned before the current one (None before the second tune)."""
+        return self._previous
+
     def previous(self) -> None:
         dest = self._previous
         if dest is not None and ZapContext.same(dest, self._target):

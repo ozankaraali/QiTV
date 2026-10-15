@@ -127,6 +127,9 @@ class ConfigManager:
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
     DEFAULT_OPTION_TIMESHIFT_ENABLED = False
     DEFAULT_OPTION_TIMESHIFT_MAX_MIB = 2048
+    DEFAULT_OPTION_PIP_CORNER = "br"  # picture in picture: the small picture's corner
+    PIP_CORNER_CHOICES = ("br", "bl", "tr", "tl")
+    DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
     TV_DEFAULTS_VERSION = 1
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
     DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS = 24  # 0 = unlimited
@@ -334,6 +337,14 @@ class ConfigManager:
     )
     timeshift_max_mib = _config_property(
         "timeshift_max_mib", DEFAULT_OPTION_TIMESHIFT_MAX_MIB, coerce=int, clamp=(256, 16384)
+    )
+    pip_corner = _config_property(
+        "pip_corner",
+        DEFAULT_OPTION_PIP_CORNER,
+        coerce=_one_of(PIP_CORNER_CHOICES, DEFAULT_OPTION_PIP_CORNER),
+    )
+    pip_volume = _config_property(
+        "pip_volume", DEFAULT_OPTION_PIP_VOLUME, coerce=int, clamp=(0, 100)
     )
     watch_history = _config_property("watch_history", [])
     playback_positions = _config_property("playback_positions", {})

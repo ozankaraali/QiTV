@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
 
-from services.budgeted_stream import RELEASE_CAP_MS, BudgetedStream
+from services.budgeted_stream import RELEASE_CAP_MS, BudgetedStream, HeldSlot
 from services.connection_budget import DENIED, ConnectionBudget
 
 app = QApplication.instance() or QApplication([])
@@ -127,6 +127,33 @@ class BudgetedStreamTests(_Fixture):
         self.assertFalse(self.stream.running())
         self.assertEqual(self.live.calls, [("stop",)])  # whatever it had begun is stopped
         self.assertEqual(self.releases, [])  # that released() was not asked for
+
+
+class PurposeTests(_Fixture):
+    """A swap gives the stream another role: its tickets follow (Phase 4)."""
+
+    def test_set_purpose_relabels_the_running_and_the_releasing_tickets(self):
+        self.running_stream()
+        self.live.auto_release = False
+        self.stream.stop()  # its ticket waits for the upstream's close
+        self.stream.request(P, 2)  # the next one, granted while the old one still counts
+        self.stream.set_purpose("pip")
+        self.assertEqual(sorted(self.budget.holders(P)), ["pip", "pip"])
+        self.assertEqual(self.stream.purpose, "pip")
+        self.live.released.emit()
+        self.assertEqual(self.budget.holders(P), ["pip"])
+        self.stream.request(P, 2)
+        self.assertEqual(self.budget.holders(P), ["pip"])  # new requests use the new purpose
+
+    def test_a_held_slot_follows_its_new_purpose(self):
+        held = HeldSlot(self.budget, "main")
+        held.take(P)
+        held.set_purpose("pip")
+        self.assertEqual(self.budget.holders(P), ["pip"])
+        held.take(P)
+        self.assertEqual(self.budget.holders(P), ["pip"])
+        held.give_back()
+        self.assertEqual(self.budget.holders(P), [])
 
 
 class ReleaseCapTests(_Fixture):

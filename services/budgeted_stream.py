@@ -74,6 +74,13 @@ class BudgetedStream(QObject):
             self.ticket = ticket
         return ticket
 
+    def set_purpose(self, purpose: str) -> None:
+        """Take another role (a PiP swap): the held and the releasing tickets follow."""
+        self.purpose = purpose
+        for ticket in (self.ticket, *self._releasing):
+            if ticket is not None:
+                self.budget.relabel(ticket, purpose)
+
     def is_granted(self) -> bool:
         return self._granted
 
@@ -150,6 +157,11 @@ class HeldSlot:
         """Hold a ticket for `provider` in place of any held one; never queued."""
         self.give_back()
         self.ticket = self.budget.request(provider, None, purpose=self.purpose)
+
+    def set_purpose(self, purpose: str) -> None:
+        self.purpose = purpose
+        if self.ticket is not None:
+            self.budget.relabel(self.ticket, purpose)
 
     def give_back(self) -> None:
         ticket, self.ticket = self.ticket, None

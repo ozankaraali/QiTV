@@ -260,5 +260,35 @@ class TimeshiftConfigTests(unittest.TestCase):
         self.assertEqual(config.timeshift_max_mib, 256)
 
 
+class PipConfigTests(unittest.TestCase):
+    """Phase 4: the PiP's corner and its own volume level."""
+
+    _load = TvConfigTests._load
+
+    def test_defaults(self):
+        config, _ = self._load(None)
+        self.assertEqual(config.pip_corner, "br")
+        self.assertEqual(config.pip_volume, 30)
+
+    def test_the_corner_is_one_of_four(self):
+        config, _ = self._load(None)
+        for value in ("tl", "tr", "bl", "br"):
+            config.pip_corner = value
+            self.assertEqual(config.pip_corner, value)
+        for value in ("middle", None, 3):
+            with self.subTest(value=value):
+                config.config["pip_corner"] = value
+                self.assertEqual(config.pip_corner, "br")
+
+    def test_the_volume_is_a_clamped_level(self):
+        config, _ = self._load(None)
+        for value, expected in ((45, 45), ("60", 60), (-5, 0), (250, 100), ("junk", 30)):
+            with self.subTest(value=value):
+                config.config["pip_volume"] = value
+                self.assertEqual(config.pip_volume, expected)
+        config.pip_volume = 55
+        self.assertEqual(config.config["pip_volume"], 55)
+
+
 if __name__ == "__main__":
     unittest.main()

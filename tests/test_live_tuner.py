@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
 
 from services.connection_budget import ConnectionBudget
-from ui.live_tuner import LiveStart, LiveTuner
+from ui.live_tuner import LiveStart, LiveTuner, start_kwargs
 
 app = QApplication.instance() or QApplication([])
 
@@ -146,6 +146,93 @@ class DirectSlotTests(unittest.TestCase):
         self.assertEqual(self.holders(), ["main"])
         tuner.stop()
         self.assertEqual(self.holders(), [])
+
+    def test_a_direct_play_books_its_slot_under_the_provider_it_is_given(self):
+        # During a provider setup the selected provider is already the new one while the
+        # catalog (and the pipeline tunes) still use the old: both must book under one name.
+        self.tuner.config.selected_provider_name = "Next provider"
+        self.tuner.open(self.play("channel"), direct=True, provider=PROVIDER)
+        self.assertEqual(self.holders(), ["main"])
+        self.assertEqual(self.budget.holders("Next provider"), [])
+        self.tuner.stop()
+        self.assertEqual(self.holders(), [])
+
+
+class SlotRoleTests(unittest.TestCase):
+    """Phase 4: one tuner per player; a swap gives each another role (its purpose)."""
+
+    def setUp(self):
+        self.session = FakeSession()
+        self.live = FakeLive()
+        self.budget = ConnectionBudget()
+        self.config = SimpleNamespace(
+            selected_provider_name=PROVIDER,
+            live_latency="low",
+            timeshift_enabled=True,
+            timeshift_max_mib=4096,
+        )
+        self.tuner = LiveTuner(self.session, self.config, self.live, self.budget, purpose="pip")
+        self.released = []
+        self.tuner.released.connect(lambda: self.released.append(True))
+
+    def holders(self):
+        return self.budget.holders(PROVIDER)
+
+    def start_pipeline(self):
+        self.tuner.tune(LiveStart(URL, "QiTV", True), PROVIDER, 2)
+        QTest.qWait(10)
+        self.assertEqual(self.live.starts, [URL])
+
+    def test_its_purpose_names_its_slots_and_follows_a_new_role(self):
+        self.start_pipeline()
+        self.assertEqual(self.holders(), ["pip"])
+        self.tuner.set_purpose("main")
+        self.assertEqual(self.holders(), ["main"])
+        self.assertEqual(self.tuner.purpose, "main")
+        self.tuner.open(lambda: None, direct=True, provider=PROVIDER)
+        self.assertEqual(self.holders(), ["main"])  # the direct play's, as the large picture
+        self.tuner.set_purpose("pip")
+        self.assertEqual(self.holders(), ["pip"])
+
+    def test_released_follows_once_nothing_of_its_player_is_open(self):
+        self.tuner.open(lambda: None, direct=True, provider=PROVIDER)
+        self.session.holding = True
+        self.tuner.stop()
+        self.assertTrue(self.tuner.releasing())
+        self.assertEqual(self.released, [])
+        self.session.let_go()
+        self.assertFalse(self.tuner.releasing())
+        self.assertEqual(self.released, [True])
+        self.start_pipeline()
+        self.tuner.stop()  # FakeLive releases at once
+        self.assertFalse(self.tuner.releasing())
+        self.assertEqual(self.released, [True, True])
+
+    def test_its_stream_is_the_budgeted_stream_of_its_live_session(self):
+        self.assertIs(self.tuner.stream.live, self.live)
+        self.assertEqual(self.tuner.stream.purpose, "pip")
+        self.assertIsNone(LiveTuner(self.session, self.config, None, self.budget).stream)
+
+    def test_start_kwargs_are_a_main_tunes(self):
+        self.start_pipeline()
+        kwargs = start_kwargs(LiveStart(URL, "QiTV", True), self.config)
+        self.assertEqual(kwargs.pop("url"), URL)
+        self.assertEqual(
+            kwargs,
+            {
+                "headers": {"User-Agent": "QiTV"},
+                "verify_ssl": True,
+                "latency": "low",
+                "user_agent": "QiTV",
+                "disk": True,
+                "max_bytes": 4096 * 1024 * 1024,
+            },
+        )
+        self.config.timeshift_enabled = False
+        self.assertEqual(
+            start_kwargs(LiveStart(URL, "QiTV", False), self.config)["max_bytes"],
+            128 * 1024 * 1024,
+        )
 
 
 if __name__ == "__main__":

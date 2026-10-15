@@ -129,6 +129,16 @@ class ZapControllerTests(unittest.TestCase):
         self.zap.previous()
         self.assertEqual(self.tunes, [CHANNELS[0]])
 
+    def test_previous_channel_names_the_one_tuned_before(self):
+        fresh = ZapController(clock=self.clock)
+        self.assertIsNone(fresh.previous_channel())
+        fresh.tuned(CHANNELS[0])
+        self.assertIsNone(fresh.previous_channel())
+        fresh.tuned(CHANNELS[2])
+        self.assertEqual(fresh.previous_channel(), CHANNELS[0])
+        fresh.reset()
+        self.assertIsNone(fresh.previous_channel())
+
     def test_second_press_during_async_tune_advances_without_duplicate(self):
         self.zap.step(1)  # immediate tune of CHANNELS[1]; tuned() not called yet
         self.clock.now += 0.2

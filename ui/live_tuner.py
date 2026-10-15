@@ -17,10 +17,17 @@ the queue, so the freed slot goes to it and to no other consumer. A pause or Go 
 during that wait applies once the tune starts.
 
 A direct play (`open(direct=True)`: a channel the pipeline cannot read, a movie, an
-episode) holds a "main" slot too (a `HeldSlot`, the selected provider's), from its start
-until libVLC let go of its stream, so a PiP sees the slot taken. It never waits for one:
-this gate already orders the main player's streams. A local file (`local=True`) is no
-provider's stream: it is stopped and waited for like a direct play, but holds no slot.
+episode) holds a "main" slot too (a `HeldSlot`, under the provider the caller names: the
+catalog's, as for pipeline tunes), from its start until libVLC let go of its stream, so a
+PiP sees the slot taken. It never waits for one: this gate already orders the main player's
+streams. A local file (`local=True`) is no provider's stream: it is stopped and waited for
+like a direct play, but holds no slot.
+
+Picture in picture (Phase 4) gives each player a tuner of its own. Its slots carry its role
+as their purpose: "main" for the large picture's, "pip" for the small one's
+(`set_purpose()`, which a swap calls), and a stream keeps its tuner across swaps, so a swap
+moves nothing. `released` says when nothing of the player is left open after a stop: the
+PiP's `SessionManager` waits for it before it opens another channel there.
 """
 
 from __future__ import annotations
@@ -52,8 +59,24 @@ class LiveStart:
     verify_ssl: bool
 
 
+def start_kwargs(start: LiveStart, config: Any) -> dict[str, Any]:
+    """`LiveSession.start()`'s arguments for `start` with the settings in `config`."""
+    disk = bool(config.timeshift_enabled)
+    mib = config.timeshift_max_mib if disk else RAM_RING_MIB
+    return {
+        "url": start.url,
+        "headers": {"User-Agent": start.user_agent},
+        "verify_ssl": start.verify_ssl,
+        "latency": config.live_latency,
+        "user_agent": start.user_agent,
+        "disk": disk,
+        "max_bytes": mib * 1024 * 1024,
+    }
+
+
 class LiveTuner(QObject):
     startFailed = Signal(str)  # LiveSession.start() raised: its message (scrub before showing)
+    released = Signal()  # after a stop, nothing of the player is open any more
 
     def __init__(
         self,
@@ -62,12 +85,16 @@ class LiveTuner(QObject):
         live: Optional[LiveSession] = None,
         budget: Optional[ConnectionBudget] = None,
         parent: Optional[QObject] = None,
+        *,
+        purpose: str = PURPOSE,
     ) -> None:
         super().__init__(parent)
         self.session = session
-        self.config = config  # live_latency, timeshift_*, selected_provider_name (its slots)
+        # live_latency, timeshift_*, and selected_provider_name for a slot no caller named
+        self.config = config
         self.live = live
         self.budget = budget if budget is not None else ConnectionBudget(self)
+        self.purpose = purpose
         self.timeline: Optional[dict] = None  # the running tune's last timelineChanged state
         self._pending: Optional[LiveStart] = None  # a tune waiting for its slot or the release
         # The pipeline tune's budget slot, its start and the wait for its release.
@@ -76,32 +103,57 @@ class LiveTuner(QObject):
         self._pause = False  # pressed while the pending tune waited: applied at its start
         self._input_wait = False  # a direct play was stopped; inputEnded has not come
         self._direct = False  # the player plays a provider stream an open() asked for
-        self._held = HeldSlot(self.budget, PURPOSE)  # that stream's slot, until VLC let go
+        self._held = HeldSlot(self.budget, purpose)  # that stream's slot, until VLC let go
         self._action: Optional[Callable[[], None]] = None  # an open waiting for the release
         self._action_direct = False
         self._action_slot = False  # that open plays a provider stream: it holds a slot
+        self._action_provider: Optional[str] = None  # whose slot it holds
         self._input_cap = QTimer(self, singleShot=True, interval=RELEASE_CAP_MS)
         self._input_cap.timeout.connect(self._on_input_cap)
         session.inputEnded.connect(self._on_input_ended)
         if live is not None:
-            self._stream = BudgetedStream(live, self.budget, PURPOSE, parent=self)
+            self._stream = BudgetedStream(live, self.budget, purpose, parent=self)
             self._stream.granted.connect(self._on_granted)
             self._stream.released.connect(self._on_released)
             live.timelineChanged.connect(self._on_timeline)
 
     # ---- opening ------------------------------------------------------------------------------
 
+    @property
+    def stream(self) -> Optional[BudgetedStream]:
+        """The live session's budget slot and start (None without the pipeline)."""
+        return self._stream
+
+    def set_purpose(self, purpose: str) -> None:
+        """Take another role (a PiP swap): the slots this player holds or waits for follow."""
+        self.purpose = purpose
+        self._held.set_purpose(purpose)
+        if self._stream is not None:
+            self._stream.set_purpose(purpose)
+
+    def releasing(self) -> bool:
+        """A stopped stream of this player may still hold the provider (`released` follows)."""
+        stream = self._stream
+        return self._input_wait or (stream is not None and stream.waiting())
+
     def open(
-        self, action: Callable[[], None], *, direct: bool = False, local: bool = False
+        self,
+        action: Callable[[], None],
+        *,
+        direct: bool = False,
+        local: bool = False,
+        provider: Optional[str] = None,
     ) -> None:
         """Stop what plays, then run `action` once it is released: now when nothing waits.
 
         `direct`: `action` plays a provider URL in the session, whose input the next open
-        then waits for. `local`: it plays a local file instead, which takes no provider slot.
+        then waits for; its slot is `provider`'s (by default the selected provider's).
+        `local`: it plays a local file instead, which takes no provider slot.
         """
         self.stop()
         self._action, self._action_direct = action, direct or local
         self._action_slot = direct and not local
+        self._action_provider = provider
         self._proceed()
 
     def tune(self, start: LiveStart, provider: str, limit: Optional[int]) -> None:
@@ -115,7 +167,7 @@ class LiveTuner(QObject):
         """Whether other streams (Phase 4: picture in picture) take the whole limit."""
         if limit is None:
             return False
-        others = [purpose for purpose in self.budget.holders(provider) if purpose != PURPOSE]
+        others = [p for p in self.budget.holders(provider) if p != self.purpose]
         return limit <= 0 or len(others) >= limit
 
     def stop(self) -> None:
@@ -149,7 +201,10 @@ class LiveTuner(QObject):
             action, self._action = self._action, None
             self._direct = self._action_direct
             if self._action_slot:
-                self._held.take(str(getattr(self.config, "selected_provider_name", "") or ""))
+                provider = self._action_provider
+                if provider is None:
+                    provider = str(getattr(self.config, "selected_provider_name", "") or "")
+                self._held.take(provider)
             action()
         elif self._pending is not None and stream is not None and stream.is_granted():
             self._start()
@@ -159,20 +214,9 @@ class LiveTuner(QObject):
         if pending is None or stream is None:
             return
         self._pending = None
-        config = self.config
-        disk = bool(config.timeshift_enabled)
-        mib = config.timeshift_max_mib if disk else RAM_RING_MIB
-        self._latency = config.live_latency
+        self._latency = self.config.live_latency
         try:
-            stream.start(
-                pending.url,
-                headers={"User-Agent": pending.user_agent},
-                verify_ssl=pending.verify_ssl,
-                latency=config.live_latency,
-                user_agent=pending.user_agent,
-                disk=disk,
-                max_bytes=mib * 1024 * 1024,
-            )
+            stream.start(**start_kwargs(pending, self.config))
         except Exception as error:  # the stream gave its slot back and stopped the session
             logger.warning("Could not start the live channel (%s)", type(error).__name__)
             self._pause = False
@@ -190,6 +234,7 @@ class LiveTuner(QObject):
 
     def _on_released(self) -> None:
         self._proceed()
+        self._report_released()
 
     def _on_input_ended(self) -> None:
         if self._input_wait:
@@ -197,6 +242,11 @@ class LiveTuner(QObject):
             self._input_cap.stop()
             self._held.give_back()
             self._proceed()
+            self._report_released()
+
+    def _report_released(self) -> None:
+        if not self.releasing():
+            self.released.emit()
 
     def _on_input_cap(self) -> None:
         if self._input_wait:
@@ -218,6 +268,18 @@ class LiveTuner(QObject):
         if self._action is not None or self._pending is not None:
             return True
         return self.running() and self.live is not None and not self.live.mode
+
+    def settling(self) -> bool:
+        """An open or a tune waits for its budget slot or for the old stream's release."""
+        return self._action is not None or self._pending is not None
+
+    def idle(self) -> bool:
+        """Nothing plays, and nothing waits to."""
+        return not (self.settling() or self.running() or self._direct)
+
+    def playing_direct(self) -> bool:
+        """The player plays a provider stream or a file an open() handed it."""
+        return self._direct
 
     def pipeline(self) -> bool:
         """The running tune plays from the time-shift buffer."""
