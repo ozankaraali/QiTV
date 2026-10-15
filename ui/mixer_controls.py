@@ -63,7 +63,7 @@ class MixerControls(QObject):
         self._names = names
         self._audio_changed = audio_changed
         self._row = MAIN_ROW
-        self._pip_level_changed = False
+        self._pip_level: Optional[int] = None  # the small picture's changed level, to remember
         self._main_muted = False  # without a SessionManager: the player's own mute
 
     def wire(self) -> None:
@@ -145,10 +145,10 @@ class MixerControls(QObject):
     def save(self) -> None:
         """Remember the "pip" player's level (config pip_volume) once it changed."""
         sessions = self.sessions
-        if sessions is None or not self._pip_level_changed:
+        level, self._pip_level = self._pip_level, None
+        if sessions is None or level is None:
             return
-        self._pip_level_changed = False
-        self.config.pip_volume = sessions.level("pip")
+        self.config.pip_volume = level
         try:
             self.config.save_config()
         except Exception as e:
@@ -210,7 +210,7 @@ class MixerControls(QObject):
             return
         self.sessions.set_level(slot.name, level)
         if slot.name == "pip" and slot is self.sessions.small():
-            self._pip_level_changed = True  # pip_volume: the small picture's level
+            self._pip_level = level  # pip_volume: the small picture's level, as set now
 
     def _muted(self, row: int) -> bool:
         slot = self._slot(row)

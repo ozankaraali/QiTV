@@ -730,6 +730,21 @@ class MixerTests(PipCase):
         self.assertEqual(self.requested()[-1], "Two")
         self.assertEqual(self.sessions.level("main"), 95)
 
+    def test_a_swap_and_a_main_row_change_within_the_delay_do_not_replace_the_remembered_level(
+        self,
+    ):
+        # Review M7: the level was read when the mixer hid, by which time the "pip" player
+        # could be large and changed from the Main row.
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.label.mixerRequested.emit()
+        self.controller.handle(Action.CH_PREV, key=UP)  # the small picture: 30 -> 35
+        self.controller.handle(Action.SWAP)  # S: the "pip" player is large
+        self.mixer.levelRequested.emit(0, 30)  # the Main row: that same player, 35 -> 30
+        self.assertEqual(self.sessions.level("pip"), 30)
+        self.mixer.dismiss()  # within the 3 s
+        self.assertEqual((self.config.pip_volume, self.config.saves), (35, 1))
+
     def test_the_pip_level_is_remembered_only_while_the_pip_player_is_small(self):
         # Review M4 (ruling): pip_volume is the small picture's level.
         self.start_large(0)
