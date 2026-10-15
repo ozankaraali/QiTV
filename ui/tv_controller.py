@@ -13,7 +13,7 @@ import logging
 import re
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QAbstractScrollArea
 
@@ -21,6 +21,7 @@ from services import external_players
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.epg_view import Programme, now_next
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, episode_key, item_key
+from services.redact import safe_traceback
 from services.vlc_profile import classify
 from services.zapping import ZapContext
 from ui.keymap import Action, as_int
@@ -39,6 +40,7 @@ INFO_MS = 3000
 ERROR_MS = 6000
 VOLUME_STEP = 5
 SEEK_STEP_MS = 10_000
+TUNING_KEEP_MS = 3000  # under the banner's 4 s: it is shown again while a link resolves
 _ACTIVE_STATES = frozenset({"opening", "buffering", "playing", "paused"})
 _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
@@ -133,6 +135,9 @@ class TVController(QObject):
         self._audio_id: Optional[int] = None
         self._subtitle_id: Optional[int] = None
         self._column_wheel = PointerInput(self)
+        # While a live link resolves, the banner is shown again before it fades (Minor 11).
+        self._tuning = QTimer(self, interval=TUNING_KEEP_MS)
+        self._tuning.timeout.connect(self._keep_tuning_banner)
 
     # ---- lifecycle ----------------------------------------------------------------------------
 
@@ -193,6 +198,7 @@ class TVController(QObject):
             return
         self._closed = True
         self._drop_links()
+        self._tuning.stop()
         self._autotune = None
         self._loading = False
         self.overlays.toast.set_hint(None)  # e.g. the closing notice needs the toast
@@ -378,6 +384,7 @@ class TVController(QObject):
             return
         title = str(channel.get("name") or "")
         self._request(_Target(channel, "live", title, group_key=group_key))
+        self._tuning.start(TUNING_KEEP_MS)
 
     def play_item(self, node: NavNode, siblings: list[NavNode], parent: NavNode) -> None:
         if self._closed:
@@ -481,6 +488,24 @@ class TVController(QObject):
             return  # the failed target was superseded: no error for it
         self._restore_channel()
         self._error(f"{target.title}: {message}")
+
+    def _keep_tuning_banner(self) -> None:
+        """Show the banner again while the link of the channel it announces resolves."""
+        pending = self._queued or (self._inflight[1] if self._inflight is not None else None)
+        channel, banner = self._channel, self.overlays.banner
+        tuning = (
+            not self._closed
+            and pending is not None
+            and pending.live
+            and not self._is_stay(pending)
+            and channel is not None
+            and ZapContext.same(pending.item, channel)
+        )
+        if not tuning:
+            self._tuning.stop()  # delivered or failed: the banner fades on its own
+            return
+        if banner.isVisible() and channel is not None:  # never one that was dismissed
+            banner.show_info(self.banner_info(channel))
 
     def _restore_channel(self) -> None:
         """After a failed tune, INFO and the drawer follow the channel still playing."""
@@ -911,16 +936,16 @@ class TVController(QObject):
         self.overlays.toast.show_message(text, kind, ms)
 
     def _error(self, text: str) -> None:
-        """Toast an error; addresses and query strings never reach the toast or INFO logs."""
+        """Toast an error; addresses and query strings never reach the toast or any log."""
         clean = scrub(text)
-        logger.debug("Error (raw): %s", text)
         logger.info("Error shown: %s", clean)
         self._toast(clean, "error", ERROR_MS)
 
     @staticmethod
     def _log_failure(what: str, error: Exception) -> None:
         logger.warning("Could not %s: %s (%s)", what, scrub(error), type(error).__name__)
-        logger.debug("Could not %s", what, exc_info=True)
+        # The frames only: the exception's text can carry a provider URL with credentials.
+        logger.debug("Could not %s:\n%s", what, safe_traceback(error))
 
     def _welcome(self) -> None:
         """Until a provider exists (Phase 3 brings the welcome card)."""

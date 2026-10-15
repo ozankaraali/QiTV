@@ -55,6 +55,7 @@ CLOSE_THREAD_WAIT_MS = 30_000  # then quit anyway: a stuck worker must not keep 
 CLOSING_NOTICE_AFTER = 10  # close retries (half a second) before the notice shows
 CLOSING_NOTICE_MS = 60_000  # shown again only if it hides before the wait ends
 EPG_REFRESH_MS = 2 * 60 * 60 * 1000
+WATCH_SAVE_DELAY_MS = 2000  # a play is saved once the zapping settles (and on close)
 MINI_WIDTH_FRACTION = 0.25
 MINI_MARGIN = 10
 FULLSCREEN_EXIT_MS = 1500  # the longest wait for the platform to finish leaving fullscreen
@@ -211,7 +212,7 @@ class TVWindow(QMainWindow):
             self.session = NullSession(self)
         else:
             self.session = PlaybackSession(self._instance, self)
-        self.watch = WatchState(config_manager)
+        self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
 
         # The drawer and column ask the controller for "now" titles, and the controller
         # needs the overlays: a closure breaks the cycle.

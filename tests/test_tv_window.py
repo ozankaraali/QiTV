@@ -39,6 +39,7 @@ from ui.tv_controller import WELCOME_TEXT
 from ui.tv_window import (
     CLOSE_RETRY_MS,
     CLOSING_TEXT,
+    WATCH_SAVE_DELAY_MS,
     TVWindow,
     _exit_now,
     fit_to_area,
@@ -220,6 +221,10 @@ class TVWindowTests(WindowCase):
         text = "Couldn't refresh Live TV; showing saved channels"
         self.window.nav.notice.emit(text)
         self.assertEqual(self.toasts.count((text, "info")), 1)
+
+    def test_watch_state_is_saved_off_the_tune_path(self):
+        self.assertEqual(self.window.watch.save_delay_ms, WATCH_SAVE_DELAY_MS)
+        self.assertGreater(WATCH_SAVE_DELAY_MS, 0)
 
     def test_the_guide_is_refreshed_every_two_hours(self):
         timer = self.window.epg_refresh

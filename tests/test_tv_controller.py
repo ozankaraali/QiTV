@@ -3,6 +3,7 @@ import logging
 import os
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -980,6 +981,25 @@ class RealOverlayTests(ControllerTestCase):
         self.assertFalse(overlays.drawer.isVisible())
 
 
+class DebugLogRedactionTests(ControllerTestCase):
+    """DEBUG logs never carry raw provider text: it can hold Xtream credentials (Minor 8)."""
+
+    SECRET = "http://h:80/get.php?username=bob&password=hunter2"
+
+    def test_errors_and_failures_log_no_raw_text(self):
+        with self.assertLogs("ui.tv_controller", "DEBUG") as logs:
+            self.controller._error(f"One: refused at {self.SECRET}")
+            try:
+                raise RuntimeError(f"boom {self.SECRET}")
+            except RuntimeError as e:
+                self.controller._log_failure("play One", e)
+        text = "\n".join(logs.output)
+        self.assertNotIn("hunter2", text)
+        self.assertNotIn("username=bob", text)
+        self.assertIn("RuntimeError", text)  # the type and the frames stay
+        self.assertIn("Traceback", text)
+
+
 class ProviderRetryTests(ControllerTestCase):
     """A provider that fails to set up can be retried from the drawer (real overlays)."""
 
@@ -1060,6 +1080,44 @@ class UnnumberedChannelTests(ControllerTestCase):
         self.assertEqual(shown, ["1", "2", "3", "4"])
 
 
+class TuningBannerTests(ControllerTestCase):
+    """The banner stays up while a slow link resolves (Minor 11)."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch("ui.tv_controller.TUNING_KEEP_MS", 40)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.host = QWidget()
+        self.addCleanup(self.host.close)
+        self.host.resize(1280, 720)
+        self.banner = ZapBanner(self.host, visible_ms=100)
+        self.controller = self.make_controller(self.column)
+        self.host.show()
+        self.controller.start()
+
+    def test_the_banner_stays_until_the_link_resolves_then_fades(self):
+        self.tune(0)
+        QTest.qWait(800)  # well past the banner's own time and its fade
+        self.assertTrue(self.banner.isVisible())
+        self.assertEqual(self.banner.info.name, "One")
+        self.ready()
+        self.assertTrue(wait_until(lambda: not self.banner.isVisible(), 2000))
+
+    def test_the_banner_stays_until_the_link_fails(self):
+        self.tune(0)
+        QTest.qWait(800)  # well past the banner's own time and its fade
+        self.assertTrue(self.banner.isVisible())
+        self.catalog.linkFailed.emit(1, "Portal down")
+        self.assertTrue(wait_until(lambda: not self.banner.isVisible(), 2000))
+
+    def test_a_dismissed_banner_is_not_brought_back(self):
+        self.tune(0)
+        self.controller.handle(Action.ESCAPE)
+        QTest.qWait(200)
+        self.assertFalse(self.banner.isVisible())
+
+
 class BottomOverlayTests(ControllerTestCase):
     """The banner and the full-host transport share the bottom: only one shows at a time."""
 
@@ -1135,7 +1193,7 @@ class ReviewFixTests(ControllerTestCase):
         )
         self.assert_no_leak(logs)
         debug = [r.getMessage() for r in logs.records if r.levelno == logging.DEBUG]
-        self.assertTrue(any("password=p" in m for m in debug))  # the raw text, at DEBUG only
+        self.assertFalse(any("password=p" in m for m in debug))  # not even at DEBUG
 
     def test_drawer_pick_in_flight_then_down_moves_on_from_it(self):
         self.play(0)

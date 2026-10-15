@@ -1,5 +1,11 @@
+import os
 from types import SimpleNamespace
 import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 from services.watch_state import WatchState
 
@@ -111,6 +117,46 @@ class WatchStateTests(unittest.TestCase):
         self.ws.flush()
         self.ws.flush()
         self.assertEqual(self.cfg.saves, 2)
+
+
+def wait_until(predicate, timeout_ms=2000):
+    waited = 0
+    while not predicate() and waited < timeout_ms:
+        QTest.qWait(10)
+        waited += 10
+    return predicate()
+
+
+class DeferredSaveTests(unittest.TestCase):
+    """The shell saves plays on a timer, not on the GUI thread at every tune (Minor 7)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.cfg = make_config()
+        self.ws = WatchState(self.cfg, save_delay_ms=40)
+
+    def test_a_burst_of_plays_is_saved_once_after_it_settles(self):
+        for i in range(5):
+            self.ws.record_play("P", {"id": i}, item_type="channel", link="u", group_id=1)
+        self.assertEqual(self.cfg.saves, 0)
+        self.assertEqual(self.cfg.last_live_channel["item"], {"id": 4})  # in memory at once
+        self.assertTrue(wait_until(lambda: self.cfg.saves == 1))
+        QTest.qWait(100)
+        self.assertEqual(self.cfg.saves, 1)
+
+    def test_flush_saves_a_pending_play_at_once(self):
+        self.ws.record_play("P", {"id": 1}, item_type="channel", link="u")
+        self.ws.flush()  # e.g. the window closes
+        self.assertEqual(self.cfg.saves, 1)
+        QTest.qWait(100)
+        self.assertEqual(self.cfg.saves, 1)  # the timer no longer runs
+
+    def test_without_a_delay_a_play_is_saved_at_once(self):
+        WatchState(self.cfg).record_play("P", {"id": 1}, item_type="movie", link="u")
+        self.assertEqual(self.cfg.saves, 1)
 
 
 class LockedConfigTests(unittest.TestCase):

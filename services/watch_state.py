@@ -8,6 +8,8 @@ import logging
 import time
 from typing import Callable, Optional
 
+from PySide6.QtCore import QTimer
+
 logger = logging.getLogger(__name__)
 
 RESUME_MIN_MS = 5000
@@ -15,18 +17,29 @@ RESUME_MAX_RATIO = 0.90
 
 
 class WatchState:
+    """Watch bookkeeping in the config; `save_delay_ms` defers the save of a play.
+
+    With a delay (the TV shell), a play marks the state dirty and a timer saves it once the
+    tuning settles, so a burst of zaps writes config.json once, and never on the GUI thread
+    at every tune (a locked file on Windows retries for up to 250 ms). flush() saves at once
+    (on close). Without a delay every play is saved immediately.
+    """
+
     def __init__(
         self,
         config,
         *,
         flush_interval_s: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
+        save_delay_ms: int = 0,
     ):
         self.config = config
         self._flush_interval_s = flush_interval_s
         self._clock = clock
         self._last_flush = clock()
         self._dirty = False
+        self.save_delay_ms = save_delay_ms
+        self._save_timer: Optional[QTimer] = None
 
     @staticmethod
     def content_id(provider_name: str, item: dict, *, item_type: str) -> str:
@@ -66,7 +79,14 @@ class WatchState:
                 "group_id": "" if group_id is None else str(group_id),
                 "item": item,
             }
-        self._save()
+        self._dirty = True
+        if self.save_delay_ms <= 0:
+            self._save()
+            return
+        if self._save_timer is None:
+            self._save_timer = QTimer(singleShot=True, interval=self.save_delay_ms)
+            self._save_timer.timeout.connect(self._save)
+        self._save_timer.start()  # restarted: one save once the zapping settles
 
     def resume_position(self, cid: str) -> Optional[int]:
         # ConfigManager.get_playback_position returns only the position (int); the
@@ -94,6 +114,8 @@ class WatchState:
 
     def _save(self) -> None:
         """Write the config; a zap or a close never fails because the file is locked."""
+        if self._save_timer is not None:
+            self._save_timer.stop()  # this save covers a pending play
         self._last_flush = self._clock()  # a failed write is tried again after the interval
         try:
             self.config.save_config()
