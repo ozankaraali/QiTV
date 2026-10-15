@@ -460,6 +460,16 @@ class EpgSerializationTests(unittest.TestCase):
         runner.complete(0)
         self.assertEqual(self.kinds(runner), ["provider", "epg"])
 
+    def test_refresh_epg_after_shutdown_starts_nothing_for_a_ready_provider(self):
+        # With a ready provider refresh_epg reaches _request_epg: its closed check holds.
+        service, runner, _ = self.make()
+        service.select_provider()
+        runner.complete(0)  # ready: its guide loads
+        runner.complete(1)
+        service.shutdown()
+        service.refresh_epg(force=True)
+        self.assertEqual(self.kinds(runner), ["provider", "epg"])
+
     def test_queued_epg_refresh_is_dropped_by_a_switch(self):
         service, runner, _ = self.make()
         service.select_provider()

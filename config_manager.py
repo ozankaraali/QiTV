@@ -150,13 +150,14 @@ class ConfigManager:
     def __init__(self):
         self.config = {}
         self.config_path = self._get_config_path()
+        os.makedirs(os.path.dirname(self.config_path) or ".", exist_ok=True)
         self._migrate_old_config()
         self.load_config()
 
     def _get_config_path(self):
+        """Where config.json lives; resolving it creates nothing (__init__ makes the dir)."""
         override = os.environ.get("QITV_CONFIG_DIR")
         if override:
-            os.makedirs(override, exist_ok=True)
             return os.path.join(override, "config.json")
         # Check for portable mode (portable.txt file in program directory)
         # Get the directory where the script/executable is located
@@ -186,7 +187,6 @@ class ConfigManager:
             else:
                 raise RuntimeError("Unsupported operating system")
 
-        os.makedirs(config_dir, exist_ok=True)
         return os.path.join(config_dir, "config.json")
 
     def get_config_dir(self):

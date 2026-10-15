@@ -148,6 +148,28 @@ class TvConfigTests(unittest.TestCase):
         self.assertEqual(ConfigManager().last_live_channel, record)
 
 
+class ConfigDirTests(unittest.TestCase):
+    """Resolving the config path touches nothing; the manager creates the directory."""
+
+    def test_resolving_the_path_creates_no_directory(self):
+        # Without this, test_unset_or_empty_override_is_ignored made the real config dir.
+        with tempfile.TemporaryDirectory() as home:
+            env = {"HOME": home, "APPDATA": home, "QITV_CONFIG_DIR": ""}
+            with patch.dict(os.environ, env):
+                path = ConfigManager._get_config_path(ConfigManager.__new__(ConfigManager))
+            self.assertTrue(path.startswith(home), path)
+            self.assertFalse(os.path.exists(os.path.dirname(path)))
+            self.assertEqual(os.listdir(home), [])
+
+    def test_the_manager_creates_its_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = os.path.join(root, "new", "qitv")
+            with patch.dict(os.environ, {"QITV_CONFIG_DIR": target}):
+                config = ConfigManager()
+            self.assertTrue(os.path.isfile(os.path.join(target, "config.json")))
+            self.assertEqual(config.get_config_dir(), target)
+
+
 class TimeshiftConfigTests(unittest.TestCase):
     _load = TvConfigTests._load
 

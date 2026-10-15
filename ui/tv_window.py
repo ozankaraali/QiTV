@@ -59,6 +59,7 @@ WATCH_SAVE_DELAY_MS = 2000  # a play is saved once the zapping settles (and on c
 MINI_WIDTH_FRACTION = 0.25
 MINI_MARGIN = 10
 FULLSCREEN_EXIT_MS = 1500  # the longest wait for the platform to finish leaving fullscreen
+ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
 _SHORTCUT_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier
     | Qt.KeyboardModifier.AltModifier
@@ -88,15 +89,19 @@ def _pending_thread_names() -> list[str]:
 
 
 def _exit_now() -> None:
-    """Leave without tearing the interpreter down.
+    """Leave without tearing the interpreter down, with ABANDONED_EXIT_CODE.
 
-    Registered last with atexit, so it runs after Python's own threads (the provider cache
-    writer) are joined: destroying a QThread that still runs makes Qt abort the process.
+    Registered with atexit only when the close gave up waiting for a QThread: destroying a
+    QThread that still runs makes Qt abort the process. The interpreter joins Python's own
+    non-daemon threads (the provider cache writer) before it runs any atexit handler, and
+    atexit runs handlers last-in-first-out: this one, registered last, runs first, and the
+    handlers registered before it never run. The exit code tells whoever started QiTV that
+    background work was abandoned.
     """
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
-    os._exit(0)
+    os._exit(ABANDONED_EXIT_CODE)
 
 
 def fit_to_area(rect: QRect, margins: QMargins, area: QRect) -> QRect:

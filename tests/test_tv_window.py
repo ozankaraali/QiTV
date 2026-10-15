@@ -37,6 +37,7 @@ from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.tv_controller import WELCOME_TEXT
 from ui.tv_window import (
+    ABANDONED_EXIT_CODE,
     CLOSE_RETRY_MS,
     CLOSING_TEXT,
     WATCH_SAVE_DELAY_MS,
@@ -695,7 +696,9 @@ class StuckWorkerExitTests(unittest.TestCase):
             text=True,
             timeout=60,
         )
-        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        # Abandoned work is a failure for whoever ran QiTV (not 0), but no abort.
+        self.assertEqual(result.returncode, ABANDONED_EXIT_CODE, result.stderr[-2000:])
+        self.assertNotEqual(ABANDONED_EXIT_CODE, 0)
         self.assertIn("exec returned 0", result.stdout)
         self.assertIn("StuckWorker", result.stderr)  # the WARNING names it
         self.assertNotIn("Destroyed while thread", result.stderr)
