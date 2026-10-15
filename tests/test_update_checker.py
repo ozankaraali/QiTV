@@ -2,6 +2,7 @@
 
 import gc
 import os
+from pathlib import Path
 import sys
 import unittest
 from unittest import mock
@@ -13,6 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from services import update_checker
+from ui import update_dialogs
 
 
 class Holder(QObject):
@@ -85,12 +87,14 @@ class WindowsUpdateTests(unittest.TestCase):
         with (
             mock.patch.object(update_checker, "has_pending_threads", return_value=False),
             mock.patch.object(update_checker, "subprocess") as process,
-            mock.patch.object(update_checker, "QMessageBox", side_effect=dialog),
-            mock.patch.object(update_checker, "_polish_msgbox"),
+            mock.patch.object(update_dialogs, "QMessageBox", side_effect=dialog),
+            mock.patch.object(update_dialogs, "_polish_msgbox"),
             mock.patch.object(self.app, "closeAllWindows") as close_all,
         ):
             process.Popen.side_effect = OSError("not a valid application")
-            update_checker._perform_windows_update("C:/Downloads/qitv.exe", "https://release")
+            update_checker._perform_windows_update(
+                "C:/Downloads/qitv.exe", "https://release", update_dialogs.DIALOGS
+            )
         self.assertEqual(self.calls, ["stop_live", "restart_live", "dialog"])
         close_all.assert_not_called()
         self.assertEqual(update_checker._undo_update, [])  # once
@@ -116,6 +120,21 @@ class WindowsUpdateTests(unittest.TestCase):
         with self.assertLogs("services.update_checker", "ERROR"):
             self.update()
         self.assertEqual(self.calls, ["stop_live"])
+
+
+class LayoutTests(unittest.TestCase):
+    """Review M9 (ruling): services/ holds the update logic; its dialogs are ui/'s."""
+
+    def test_the_service_builds_no_widgets(self):
+        source = Path(update_checker.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("QtWidgets", source)
+        for name in ("QMessageBox", "QProgressDialog", "QCheckBox", "webbrowser"):
+            self.assertFalse(hasattr(update_checker, name), name)
+
+    def test_the_dialogs_check_through_the_service(self):
+        with mock.patch.object(update_checker, "check_for_updates") as check:
+            update_dialogs.check_for_updates(None, manual=True)
+        check.assert_called_once_with(None, True, update_dialogs.DIALOGS)
 
 
 if __name__ == "__main__":

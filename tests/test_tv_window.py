@@ -1101,8 +1101,6 @@ class LivePipelineWindowTests(WindowCase):
         first = window.engine
         with (
             mock.patch("services.update_checker.subprocess") as process,
-            mock.patch("services.update_checker.QMessageBox"),
-            mock.patch("services.update_checker._polish_msgbox"),
             mock.patch.object(self.app, "closeAllWindows") as close_all,
         ):
             process.Popen.side_effect = OSError("not a valid application")

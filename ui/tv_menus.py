@@ -21,10 +21,10 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLay
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
 from services.navigation import ADD_PROVIDER_ROW, SETTINGS_ROW
-from services.update_checker import check_for_updates
 from ui.brand import logo_pixmap
 from ui.keymap import Action
 from ui.shortcuts_dialog import ShortcutsDialog
+from ui.update_dialogs import check_for_updates
 
 logger = logging.getLogger(__name__)
 

@@ -1,21 +1,22 @@
+"""Checking for, downloading and launching a QiTV update; no widgets (they are ui/'s).
+
+`check_for_updates` asks GitHub for the latest release on a QThread, `start_download` fetches
+it on another, and `perform_update` launches it: on Windows the new executable replaces this
+one once the background work stopped (`call_before_update`); elsewhere the user replaces the
+app. What the user sees (the update prompt, progress and errors) is the `UpdateUI` the caller
+passes: ui/update_dialogs.py's dialogs.
+"""
+
 import logging
 from pathlib import Path
 import platform
 import re
 import subprocess
 import sys
-from typing import Callable, List, Optional, Tuple, TypeAlias
+from typing import Callable, List, Optional, Protocol, Tuple, TypeAlias
 import weakref
-import webbrowser
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QGridLayout,
-    QMessageBox,
-    QProgressDialog,
-)
+from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
 from packaging.version import parse
 import requests
 
@@ -30,6 +31,21 @@ ASSET_PATTERNS = {
     "Darwin": "qitv-macos",  # Will match qitv-macos-universal.zip or qitv-macos-intel.zip
     "Linux": "qitv-linux",
 }
+
+
+class UpdateUI(Protocol):
+    """What the user sees of an update (ui/update_dialogs.py)."""
+
+    def up_to_date(self) -> None: ...  # a manual check found nothing newer
+
+    def check_failed(self, message: str) -> None: ...  # a manual check failed
+
+    def update_available(self, info: dict, config_manager, manual: bool) -> None: ...
+
+    def launch_failed(self, downloaded_path: str, release_url: str) -> None: ...
+
+    def downloaded(self, downloaded_path: str) -> None: ...  # replace the app by hand
+
 
 # Keep references to background threads/workers to avoid premature GC
 _update_jobs: List[Tuple[QThread, "UpdateWorker"]] = []
@@ -108,7 +124,11 @@ class UpdateWorker(QObject):
             self.error.emit(str(e))
 
 
-def check_for_updates(config_manager: Optional[ConfigManager] = None, manual: bool = False):
+def check_for_updates(
+    config_manager: Optional[ConfigManager] = None,
+    manual: bool = False,
+    ui: Optional[UpdateUI] = None,
+):
     """Check for updates in background.
 
     Args:
@@ -117,6 +137,7 @@ def check_for_updates(config_manager: Optional[ConfigManager] = None, manual: bo
                 or error dialogs. Automatic checks (manual=False) are silent
                 when no newer version is available and honour the skipped
                 version stored in config.
+        ui: What the user sees (None: the log only).
     """
     thread = QThread()
     worker = UpdateWorker()
@@ -137,13 +158,13 @@ def check_for_updates(config_manager: Optional[ConfigManager] = None, manual: bo
 
     def _cleanup(_thread):
         _update_jobs.remove((thread, worker))
-        app = QApplication.instance()
+        app = QCoreApplication.instance()
         if update_error is not None:
             logger.warning(f"Error checking for updates: {update_error}")
-            if manual and app:
-                QTimer.singleShot(0, app, lambda: _show_check_error(update_error))
+            if manual and app and ui is not None:
+                QTimer.singleShot(0, app, lambda: ui.check_failed(update_error))
             return
-        if app is None:
+        if app is None or ui is None:
             return
         if update_result:
             version = update_result.get("version", "")
@@ -157,10 +178,10 @@ def check_for_updates(config_manager: Optional[ConfigManager] = None, manual: bo
                 logger.debug("Skipping update dialog for version %s (user skipped)", version)
                 return
             QTimer.singleShot(
-                0, app, lambda: show_update_dialog(update_result, config_manager, manual)
+                0, app, lambda: ui.update_available(update_result, config_manager, manual)
             )
         elif manual:
-            QTimer.singleShot(0, app, _show_up_to_date)
+            QTimer.singleShot(0, app, ui.up_to_date)
 
     thread.started.connect(worker.run)
     worker.finished.connect(on_finished, Qt.DirectConnection)
@@ -170,7 +191,7 @@ def check_for_updates(config_manager: Optional[ConfigManager] = None, manual: bo
     thread.start()
 
 
-def _skip_version(config_manager: Optional[ConfigManager], version: str):
+def skip_version(config_manager: Optional[ConfigManager], version: str):
     """Record a version to skip in future automatic checks."""
     if config_manager is None:
         logger.warning("Cannot skip version: no config_manager provided")
@@ -180,7 +201,7 @@ def _skip_version(config_manager: Optional[ConfigManager], version: str):
     logger.info("Skipping future prompts for version %s", version)
 
 
-def _disable_update_reminders(config_manager: Optional[ConfigManager]):
+def disable_update_reminders(config_manager: Optional[ConfigManager]):
     """Turn off automatic update checks entirely.
 
     Re-enable in Settings or via Help > Check for Updates.
@@ -191,25 +212,6 @@ def _disable_update_reminders(config_manager: Optional[ConfigManager]):
     config_manager.check_updates = False
     config_manager.save_config()
     logger.info("Automatic update reminders disabled")
-
-
-def _show_up_to_date():
-    msg = QMessageBox()
-    msg.setIcon(QMessageBox.Information)
-    msg.setWindowTitle("No Updates")
-    msg.setText(f"You're running the latest version ({get_app_version()}).")
-    _polish_msgbox(msg)
-    msg.exec_()
-
-
-def _show_check_error(error_msg: str):
-    msg = QMessageBox()
-    msg.setIcon(QMessageBox.Warning)
-    msg.setWindowTitle("Update Check Failed")
-    msg.setText("Could not check for updates.")
-    msg.setInformativeText(error_msg)
-    _polish_msgbox(msg)
-    msg.exec_()
 
 
 def extract_version_from_tag(tag):
@@ -328,126 +330,23 @@ class UpdateDownloader(QObject):
             self.error.emit(f"Failed to save file: {e}")
 
 
-def _polish_msgbox(msg: QMessageBox):
-    """Reduce icon-to-text spacing and ensure buttons are not truncated.
-
-    Button sizing is deferred to the first show event so that font metrics
-    are fully resolved by the platform style.
-    """
-    layout = msg.layout()
-    if layout:
-        layout.setHorizontalSpacing(10)
-        layout.setContentsMargins(10, 10, 10, 10)
-        if isinstance(layout, QGridLayout):
-            layout.setColumnMinimumWidth(0, 0)
-            layout.setColumnStretch(0, 0)
-            layout.setColumnStretch(1, 1)
-
-    # Defer button width calculation until after the dialog is laid out,
-    # so font metrics are resolved by the platform style engine.
-    original_show = msg.showEvent
-
-    def _on_show(event):
-        original_show(event)
-        total_buttons_width = 0
-        for btn in msg.buttons():
-            fm = btn.fontMetrics()
-            # Strip & accelerator markers for accurate text measurement
-            display_text = btn.text().replace("&&", "\x00").replace("&", "").replace("\x00", "&")
-            text_width = fm.horizontalAdvance(display_text) + 32
-            btn.setMinimumWidth(text_width)
-            total_buttons_width += text_width + 8  # 8px spacing between buttons
-
-        min_dialog_width = max(400, total_buttons_width + 80)
-        msg.setMinimumWidth(min_dialog_width)
-
-    msg.showEvent = _on_show  # type: ignore[method-assign]
-
-
-def show_update_dialog(
-    update_info: dict,
-    config_manager: Optional[ConfigManager] = None,
-    manual: bool = False,
-):
-    """Show update dialog with download option if available.
-
-    Buttons:
-        - Download & Install  (frozen builds with a download URL)
-        - Open Release Page
-        - Skip This Version   (records the version so automatic checks won't show it again)
-
-    Checkbox:
-        - "Do not remind me about updates"  — if checked when the dialog is
-          dismissed via *Skip This Version*, automatic update checks are
-          disabled entirely (not just for this version).
-
-    Args:
-        update_info: Dict with keys ``version``, ``url``, and optionally
-                     ``download_url`` / ``file_size``.
-        config_manager: Persists skip-version and reminder preferences.
-        manual: True when the user triggered the check explicitly.
-    """
-    version = update_info["version"]
-    release_url = update_info["url"]
-    download_url = update_info.get("download_url") or ""
-    file_size = update_info.get("file_size", 0)
-
-    # Check if we're running as a frozen executable
-    is_frozen = getattr(sys, "frozen", False)
-
-    msg = QMessageBox()
-    msg.setIcon(QMessageBox.Information)
-    msg.setText(f"A new version ({version}) is available!")
-    msg.setWindowTitle("Update Available")
-
-    # "Do not remind me" checkbox — only shown for automatic checks
-    mute_checkbox: Optional[QCheckBox] = None
-    if not manual and config_manager is not None:
-        mute_checkbox = QCheckBox("Do not remind me about updates")
-        msg.setCheckBox(mute_checkbox)
-
-    download_btn = None
-    if download_url and is_frozen:
-        msg.setInformativeText("Would you like to download and install the update?")
-        download_btn = msg.addButton("Download && Install", QMessageBox.AcceptRole)
-        browser_btn = msg.addButton("Open Release Page", QMessageBox.ActionRole)
-    else:
-        # Fallback: running from source or no download URL available
-        msg.setInformativeText("Would you like to open the release page?")
-        browser_btn = msg.addButton("Open Release Page", QMessageBox.AcceptRole)
-    skip_btn = msg.addButton("Skip This Version", QMessageBox.RejectRole)
-
-    _polish_msgbox(msg)
-    msg.exec_()
-    clicked = msg.clickedButton()
-
-    if download_btn is not None and clicked == download_btn:
-        # Clear any previous skip for this version so it doesn't block
-        # future checks after the download is complete / cancelled.
-        if config_manager:
-            config_manager.skipped_update_version = ""
-            config_manager.save_config()
-        start_download(download_url, file_size, release_url)
-    elif clicked == browser_btn:
-        webbrowser.open(release_url)
-    elif clicked == skip_btn:
-        if mute_checkbox and mute_checkbox.isChecked():
-            _disable_update_reminders(config_manager)
-        else:
-            _skip_version(config_manager, version)
-
-
 # Keep reference to download jobs to avoid GC
-_download_jobs: List[Tuple[QThread, UpdateDownloader, QProgressDialog]] = []
+_download_jobs: List[Tuple[QThread, UpdateDownloader]] = []
 
 
-def start_download(download_url: str, file_size: int, release_url: str):
-    """Start downloading the update with a progress dialog."""
-    progress = QProgressDialog("Downloading update...", "Cancel", 0, 100)
-    progress.setWindowTitle("Downloading Update")
-    progress.setMinimumDuration(0)
-    progress.setValue(0)
+def start_download(
+    download_url: str,
+    file_size: int,
+    *,
+    progress: Callable[[int, int], None],
+    finished: Callable[[str], None],
+    failed: Callable[[str], None],
+) -> Callable[[], None]:
+    """Download the update on a QThread; returns what cancels it.
 
+    The callbacks run on the GUI thread: `progress(downloaded, total)`, then `finished(path)`
+    or `failed(message)` (also "Download cancelled").
+    """
     thread = QThread()
     downloader = UpdateDownloader(download_url, file_size)
     downloader.moveToThread(thread)
@@ -456,23 +355,15 @@ def start_download(download_url: str, file_size: int, release_url: str):
     # Signals from a blocking worker delivered via QueuedConnection to Python
     # closures lack thread affinity and may run on the worker thread, which
     # crashes macOS (NSWindow operations must be on the Main Thread).
-    app = QApplication.instance()
+    app = QCoreApplication.instance()
     downloaded_path = None
     download_error = None
     completed = False
 
     def on_progress(downloaded: int, total: int):
         def _update():
-            if completed or progress.wasCanceled():
-                return
-            if total > 0:
-                percent = int(downloaded * 100 / total)
-                progress.setValue(percent)
-                mb_downloaded = downloaded / (1024 * 1024)
-                mb_total = total / (1024 * 1024)
-                progress.setLabelText(
-                    f"Downloading update... {mb_downloaded:.1f} / {mb_total:.1f} MB"
-                )
+            if not completed:
+                progress(downloaded, total)
 
         if app:
             QTimer.singleShot(0, app, _update)
@@ -487,65 +378,47 @@ def start_download(download_url: str, file_size: int, release_url: str):
         download_error = error_msg
         thread.quit()
 
-    def on_cancelled():
-        downloader.cancel()
-
     def _cleanup(_thread):
         nonlocal completed
         completed = True
-        progress.canceled.disconnect(on_cancelled)
-        progress.close()
-        _download_jobs.remove((thread, downloader, progress))
+        _download_jobs.remove((thread, downloader))
         if app:
             if downloaded_path is not None:
-                QTimer.singleShot(0, app, lambda: perform_update(downloaded_path, release_url))
-            elif download_error is not None and "cancelled" not in download_error.lower():
-                QTimer.singleShot(0, app, lambda: _show_download_error(download_error, release_url))
+                path = downloaded_path
+                QTimer.singleShot(0, app, lambda: finished(path))
+            elif download_error is not None:
+                message = download_error
+                QTimer.singleShot(0, app, lambda: failed(message))
 
     thread.started.connect(downloader.run)
     downloader.progress.connect(on_progress, Qt.DirectConnection)
     downloader.finished.connect(on_finished, Qt.DirectConnection)
     downloader.error.connect(on_error, Qt.DirectConnection)
-    progress.canceled.connect(on_cancelled)
     ThreadCleanup(thread, downloader).finished.connect(_cleanup)
 
-    _download_jobs.append((thread, downloader, progress))
+    _download_jobs.append((thread, downloader))
     thread.start()
-    progress.show()
+    return downloader.cancel
 
 
-def _show_download_error(error_msg: str, release_url: str):
-    """Show download error with option to open release page."""
-    error_dialog = QMessageBox()
-    error_dialog.setIcon(QMessageBox.Warning)
-    error_dialog.setWindowTitle("Download Failed")
-    error_dialog.setText("Failed to download update.")
-    error_dialog.setInformativeText(error_msg)
-    open_btn = error_dialog.addButton("Open Release Page", QMessageBox.ActionRole)
-    error_dialog.addButton(QMessageBox.Close)
-    _polish_msgbox(error_dialog)
-
-    error_dialog.exec_()
-    if error_dialog.clickedButton() == open_btn:
-        webbrowser.open(release_url)
-
-
-def perform_update(downloaded_path: str, release_url: str):
+def perform_update(downloaded_path: str, release_url: str, ui: UpdateUI):
     """Execute platform-specific update process."""
     system = platform.system()
 
     if system == "Windows":
-        _perform_windows_update(downloaded_path, release_url)
+        _perform_windows_update(downloaded_path, release_url, ui)
     else:
-        _perform_unix_update(downloaded_path)
+        ui.downloaded(downloaded_path)  # macOS/Linux: the user replaces the app
 
 
-def _perform_windows_update(downloaded_path: str, release_url: str):
+def _perform_windows_update(downloaded_path: str, release_url: str, ui: Optional[UpdateUI] = None):
     """Windows: launch new exe with --replace flag, then quit."""
-    app = QApplication.instance()
+    app = QCoreApplication.instance()
     _run_before_update()  # once: later retries find nothing left to stop
     if app and has_pending_threads():
-        QTimer.singleShot(25, app, lambda: _perform_windows_update(downloaded_path, release_url))
+        QTimer.singleShot(
+            25, app, lambda: _perform_windows_update(downloaded_path, release_url, ui)
+        )
         return
 
     # Get the path to the original executable (not the temp extraction folder)
@@ -559,43 +432,21 @@ def _perform_windows_update(downloaded_path: str, release_url: str):
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
 
-        # Run the normal window shutdown paths before exiting.
-        if app:
-            app.closeAllWindows()
+        # Run the normal window shutdown paths before exiting (a QApplication's).
+        close_all = getattr(app, "closeAllWindows", None)
+        if close_all is not None:
+            close_all()
 
     except OSError as e:
         logger.error(f"Failed to launch update: {e}")
         _undo_before_update()  # QiTV goes on: restart what the update stopped
-        error_dialog = QMessageBox()
-        error_dialog.setIcon(QMessageBox.Warning)
-        error_dialog.setWindowTitle("Update Failed")
-        error_dialog.setText("Failed to launch the update.")
-        error_dialog.setInformativeText(f"The update was downloaded to:\n{downloaded_path}")
-        open_btn = error_dialog.addButton("Open Release Page", QMessageBox.ActionRole)
-        error_dialog.addButton(QMessageBox.Close)
-        _polish_msgbox(error_dialog)
-
-        error_dialog.exec_()
-        if error_dialog.clickedButton() == open_btn:
-            webbrowser.open(release_url)
+        if ui is not None:
+            ui.launch_failed(downloaded_path, release_url)
 
 
-def _perform_unix_update(downloaded_path: str):
-    """macOS/Linux: open Downloads folder for manual replacement."""
+def open_downloads_folder() -> None:
+    """Show the Downloads folder (best effort), where the update was saved."""
     downloads_folder = get_downloads_folder()
-
-    msg = QMessageBox()
-    msg.setIcon(QMessageBox.Information)
-    msg.setWindowTitle("Update Downloaded")
-    msg.setText("Update downloaded successfully!")
-    msg.setInformativeText(
-        f"The new version has been saved to:\n{downloaded_path}\n\n"
-        "Please replace the current application with the downloaded file."
-    )
-    _polish_msgbox(msg)
-    msg.exec_()
-
-    # Open the Downloads folder
     try:
         if platform.system() == "Darwin":
             subprocess.run(["open", str(downloads_folder)], check=False)

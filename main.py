@@ -86,8 +86,8 @@ def main() -> int:
     from services.image_manager import ImageManager
     from services.provider_manager import ProviderManager
     from services.sleep_manager import allow_sleep, prevent_sleep
-    from services.update_checker import check_for_updates
     from ui.tv_window import TVWindow
+    from ui.update_dialogs import check_for_updates
 
     # Basic logging configuration (tweak level as needed)
     logging.basicConfig(

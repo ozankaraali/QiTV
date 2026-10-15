@@ -34,7 +34,7 @@ from services.config_manager import ConfigManager
 from services.multikeydict import MultiKeyDict
 from services.provider_manager import StbHandshake
 from services.thread_cleanup import ThreadCleanup
-from services.update_checker import check_for_updates
+from ui.update_dialogs import check_for_updates
 
 # Jobs outlive a closed dialog; a running QThread must never be owned by that dialog.
 _verification_jobs: list[tuple[QThread, QObject]] = []

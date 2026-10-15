@@ -13,7 +13,7 @@ Principles
 
 Layout
 - The root holds only `main.py` (the entry point; `python main.py` runs the app), the three PyInstaller specs, `pyproject.toml`/`uv.lock`/`requirements.txt`, README/AGENTS/LICENSE and the folders.
-- `services/`: everything without widgets (providers, catalog, EPG, config, images, live pipeline, update checker). `ui/`: the TV window, its overlays, the Library and the settings dialog (`ui/settings_dialog.py`). `scripts/`: the smoke test and the Linux installer. `tests/`: unittest suites (`uv run python -m unittest discover -s tests`).
+- `services/`: everything without widgets (providers, catalog, EPG, config, images, live pipeline, sessions, the update check, download and launch; images are decoded to QImage only). `ui/`: the TV window, its overlays, the Library, the settings dialog (`ui/settings_dialog.py`) and the update dialogs (`ui/update_dialogs.py`). `scripts/`: the smoke test and the Linux installer. `tests/`: unittest suites (`uv run python -m unittest discover -s tests`).
 
 Style & Tooling
 - Format: black + isort (configured via pre-commit).
