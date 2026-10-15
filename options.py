@@ -262,15 +262,32 @@ class OptionsDialog(QDialog):
         self.ssl_verify_checkbox.setChecked(self.config_manager.ssl_verify)
         self.settings_layout.addRow(self.ssl_verify_checkbox)
 
-        # Keyboard/Remote mode: use Up/Down to surf channels while playing
-        self.keyboard_remote_checkbox = QCheckBox(
-            "Keyboard/Remote Mode (Up/Down channel surf)", self.settings_tab
+        # TV playback
+        self.live_latency_combo = QComboBox(self.settings_tab)
+        for label, value in (("Low", "low"), ("Normal", "normal"), ("Stable", "stable")):
+            self.live_latency_combo.addItem(label, value)
+        self.live_latency_combo.setCurrentIndex(
+            max(0, self.live_latency_combo.findData(self.config_manager.live_latency))
         )
-        self.keyboard_remote_checkbox.setToolTip(
-            "When enabled, the video player will use Up/Down keys to switch to the previous/next playable item."
+        self.live_latency_combo.setToolTip(
+            "Low starts live channels sooner; Stable buffers more for unreliable streams."
         )
-        self.keyboard_remote_checkbox.setChecked(self.config_manager.keyboard_remote_mode)
-        self.settings_layout.addRow(self.keyboard_remote_checkbox)
+        self.settings_layout.addRow("Live latency", self.live_latency_combo)
+
+        self.mouse_wheel_combo = QComboBox(self.settings_tab)
+        for label, value in (("Change channel", "channel"), ("Volume", "volume")):
+            self.mouse_wheel_combo.addItem(label, value)
+        self.mouse_wheel_combo.setCurrentIndex(
+            max(0, self.mouse_wheel_combo.findData(self.config_manager.mouse_wheel_action))
+        )
+        self.mouse_wheel_combo.setToolTip("Ctrl/⌘ + wheel always changes the volume.")
+        self.settings_layout.addRow("Mouse wheel", self.mouse_wheel_combo)
+
+        self.start_last_channel_checkbox = QCheckBox(
+            "Start with the last channel", self.settings_tab
+        )
+        self.start_last_channel_checkbox.setChecked(self.config_manager.start_with_last_channel)
+        self.settings_layout.addRow(self.start_last_channel_checkbox)
 
         # Smooth seeking while paused: briefly resume to seek, then pause again
         self.smooth_paused_seek_checkbox = QCheckBox(
@@ -692,7 +709,9 @@ class OptionsDialog(QDialog):
         self.config_manager.max_cache_image_size = int(self.cache_image_size_input.text())
         self.config_manager.prefer_https = self.prefer_https_checkbox.isChecked()
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
-        self.config_manager.keyboard_remote_mode = self.keyboard_remote_checkbox.isChecked()
+        self.config_manager.live_latency = self.live_latency_combo.currentData()
+        self.config_manager.mouse_wheel_action = self.mouse_wheel_combo.currentData()
+        self.config_manager.start_with_last_channel = self.start_last_channel_checkbox.isChecked()
         self.config_manager.smooth_paused_seek = self.smooth_paused_seek_checkbox.isChecked()
         self.config_manager.auto_play_episodes = self.auto_play_episodes_checkbox.isChecked()
         self.config_manager.auto_play_movies = self.auto_play_movies_checkbox.isChecked()
@@ -756,7 +775,7 @@ class OptionsDialog(QDialog):
         self.accept()
 
     def get_cache_size(self):
-        cache_dir = self.parent().get_cache_directory()
+        cache_dir = os.path.join(self.config_manager.get_config_dir(), "cache")
         total_size = 0
         for dirpath, dirnames, filenames in os.walk(cache_dir):
             for f in filenames:

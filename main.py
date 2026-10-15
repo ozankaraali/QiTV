@@ -1,5 +1,6 @@
 import ctypes
 import logging
+import multiprocessing
 import os
 import platform
 import shutil
@@ -8,18 +9,17 @@ import time
 import warnings
 
 from PySide6 import QtGui
-from PySide6.QtCore import QLoggingCategory, QTimer, qInstallMessageHandler
+from PySide6.QtCore import QLoggingCategory, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
 import qdarktheme
 
-from channel_list import ChannelList
 from config_manager import ConfigManager, get_app_version
 from epg_manager import EpgManager
 from image_manager import ImageManager
 from provider_manager import ProviderManager
 from sleep_manager import allow_sleep, prevent_sleep
+from ui.tv_window import TVWindow
 from update_checker import check_for_updates
-from video_player import VideoPlayer
 
 
 def handle_replace_flag():
@@ -55,7 +55,10 @@ def handle_replace_flag():
         logging.error(f"Failed to perform update replacement: {e}")
 
 
-if __name__ == "__main__":
+def main() -> int:
+    # Frozen builds re-run this entry point in worker processes (Phase 2's live worker).
+    multiprocessing.freeze_support()
+
     # Basic logging configuration (tweak level as needed)
     logging.basicConfig(
         level=logging.INFO,
@@ -104,36 +107,20 @@ if __name__ == "__main__":
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)  # type: ignore
 
     app.setWindowIcon(QtGui.QIcon(icon_path))
+    qdarktheme.setup_theme("dark", custom_colors={"primary": "#C96B43"})
 
     prevent_sleep()
     try:
-        player = VideoPlayer(config_manager)
-        channel_list = ChannelList(
-            app, player, config_manager, provider_manager, image_manager, epg_manager
-        )
-        qdarktheme.setup_theme("auto", custom_colors={"primary": "#C96B43"})
-        # Skip showing embedded player if external player (VLC/MPV) is enabled
-        if not config_manager.play_in_vlc and not config_manager.play_in_mpv:
-            player.show()
-        channel_list.show()
-
-        def _bring_main_window_to_front():
-            try:
-                if channel_list.isMinimized():
-                    channel_list.showNormal()
-                channel_list.raise_()
-                channel_list.activateWindow()
-            except Exception:
-                pass
-
-        # Bring the app to foreground on startup. A second delayed attempt
-        # helps on desktops where theme/app init races with activation.
-        QTimer.singleShot(0, _bring_main_window_to_front)
-        QTimer.singleShot(250, _bring_main_window_to_front)
+        window = TVWindow(app, config_manager, provider_manager, image_manager, epg_manager)
+        window.show()
 
         if config_manager.check_updates:
             check_for_updates(config_manager=config_manager)
 
-        sys.exit(app.exec())
+        return app.exec()
     finally:
         allow_sleep()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
