@@ -124,6 +124,23 @@ class TimeShiftCase(unittest.TestCase):
         QTest.qWait(250)
         self.assertFalse(t.isVisible())
 
+    def test_drag_anchors_on_the_bar_while_the_buffer_slides(self):
+        t = self.shifted()
+        spy = QSignalSpy(t.seekToRequested)
+        r = t.seek_rect()
+        x, y = round(r.center().x()), round(r.center().y())
+        frac = (x - r.x()) / r.width()
+        QTest.mousePress(t, Qt.LeftButton, Qt.NoModifier, QPoint(x, y))
+        # The ring evicts and grows by 120 s while the button is held.
+        t.update_timeline(
+            timeline(start=120.0, end=3600.0, live_edge=3600.0, position=3562.0), PROGRAMME
+        )
+        target = 120.0 + frac * 3480.0  # the same spot on the bar, not the same moment
+        self.assertEqual(t.texts()[1], f"{fmt_behind(3600.0 - target)} behind live")
+        QTest.mouseRelease(t, Qt.LeftButton, Qt.NoModifier, QPoint(x, y))
+        self.assertEqual(spy.count(), 1)
+        self.assertAlmostEqual(spy.at(0)[0], target, places=6)
+
     # ---- buttons ------------------------------------------------------------------------------
 
     def test_go_live_chip_only_when_behind(self):
@@ -144,7 +161,7 @@ class TimeShiftCase(unittest.TestCase):
         t.update_timeline(timeline(position=3473.0, lag=7.0, target=6.0), PROGRAMME)
         self.assertIn("golive", t._layout())
         # Stay-live drifted far behind: still live mode, but the bar and Go live show.
-        t.update_timeline(at_edge(lag=4.0, rate=1.10), PROGRAMME)
+        t.update_timeline(at_edge(lag=5.0, rate=1.10), PROGRAMME)
         self.assertIn("seek", t._layout())
         self.assertIn("golive", t._layout())
         t.update_timeline(at_edge(), PROGRAMME)
@@ -229,6 +246,63 @@ class TimeShiftCase(unittest.TestCase):
         t.show_live_edge(1.2, False)
         self.assertNotIn("seek", t._layout())
         self.assertEqual(t.texts(), ("LIVE", "Stay live ● 1.2 s behind source"))
+
+    def test_edge_row_holds_through_the_deadband(self):
+        # Default target 2.5 s: the edge row is entered under 3.5 s and left at 4.5 s.
+        t = self.shifted()
+        t.update_timeline(at_edge(lag=4.0), PROGRAMME)
+        self.assertIn("seek", t._layout())  # still the bar: 4.0 s is not under 3.5 s
+        t.update_timeline(at_edge(lag=3.4), PROGRAMME)
+        self.assertNotIn("seek", t._layout())
+        for lag in (4.0, 4.4, 3.6):  # a bursty source swings inside the band
+            t.update_timeline(at_edge(lag=lag), PROGRAMME)
+            self.assertNotIn("seek", t._layout(), lag)
+            self.assertEqual(t.texts()[0], "LIVE", lag)
+        t.update_timeline(at_edge(lag=4.5), PROGRAMME)
+        self.assertIn("seek", t._layout())
+        self.assertIn("golive", t._layout())
+        t.update_timeline(at_edge(lag=3.6), PROGRAMME)
+        self.assertIn("seek", t._layout())  # back in the band, so the bar holds
+        t.update_timeline(at_edge(lag=1.0), PROGRAMME)
+        t.update_timeline(timeline(position=3479.0, lag=1.0), PROGRAMME)
+        self.assertIn("seek", t._layout())  # a pause leaves the edge at once
+
+    def test_non_finite_or_negative_lag_reads_as_zero(self):
+        for bad in (float("inf"), float("-inf"), float("nan"), -4.0):
+            self.assertEqual(fmt_behind(bad), "−00:00", bad)
+        t = self.shifted()
+        for bad in (float("inf"), float("nan"), -4.0):
+            t.update_timeline(at_edge(lag=bad), PROGRAMME)
+            self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.0 s behind source"), bad)
+            self.assertFalse(t.grab().isNull())
+            t.update_timeline(timeline(lag=bad), PROGRAMME)
+            self.assertEqual(t.texts()[1], "−00:00 behind live", bad)
+            self.assertNotIn("golive", t._layout())
+            self.assertFalse(t.grab().isNull())
+        t.show_live_edge(float("inf"), False)
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.0 s behind source"))
+
+    def test_tick_labels_elide_and_never_overlap(self):
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        long_title = "19:00 " + "A Very Long Documentary About Coastlines " * 4
+        ticks = [
+            (960.0, long_title),
+            (1000.0, "19:01 Short Break"),  # 40 s later: a few pixels to the right
+            (2760.0, "19:30 News"),
+        ]
+        t.update_timeline(timeline(), ticks)
+        marks = t.tick_marks()
+        self.assertEqual(len(marks), 3)  # every programme keeps its tick
+        (x0, text0, box0), (x1, text1, box1), (x2, text2, box2) = marks
+        self.assertLess(x0, x1)
+        self.assertTrue(text0.startswith("19:00 A Very") and text0.endswith("…"), text0)
+        self.assertLessEqual(box0.width(), round(1280 * 0.25) + 1)
+        self.assertIsNone(box1)  # the later of two overlapping labels is dropped
+        self.assertEqual(text1, "")
+        self.assertEqual(text2, "19:30 News")
+        self.assertGreater(box2.x(), box0.right())
+        self.assertFalse(t.grab().isNull())
 
     def test_new_channel_forgets_the_old_timeline(self):
         t = self.shifted()

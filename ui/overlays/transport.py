@@ -6,6 +6,7 @@ the bar over the buffered range, or, at the live edge, the stay-live latency ind
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import math
 from typing import Callable
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
@@ -38,7 +39,9 @@ from ui.theme import PALETTE, qcolor
 SPEEDS = (1.0, 1.25, 1.5, 2.0)
 TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
-EDGE_MARGIN_S = 1.0  # this far past the stay-live target counts as behind live
+EDGE_ENTER_S = 1.0  # under target + this, the edge row shows; from it, Go live does
+EDGE_LEAVE_S = 2.0  # the edge row holds until target + this (a bursty source swings)
+TICK_LABEL_MAX_U = 25.0
 MINUS = "−"
 
 
@@ -46,9 +49,14 @@ def _speed_label(rate: float) -> str:
     return f"{rate:g}x"
 
 
+def _seconds(value: float) -> float:
+    """A lag or age in seconds; a negative or non-finite value reads as zero."""
+    return value if math.isfinite(value) and value > 0 else 0.0
+
+
 def fmt_behind(seconds: float) -> str:
-    """'−MM:SS' behind live ('−H:MM:SS' from an hour); a negative lag reads as zero."""
-    total = int(max(0.0, seconds))
+    """'−MM:SS' behind live ('−H:MM:SS' from an hour); a negative or non-finite lag reads as 0."""
+    total = int(_seconds(seconds))
     hours, rest = divmod(total, 3600)
     minutes, secs = divmod(rest, 60)
     if hours:
@@ -81,7 +89,7 @@ class _Timeline:
             end=float(state["end"]),
             position=float(state["position"]),
             live_edge=float(state["live_edge"]),
-            lag=float(state["lag"]),
+            lag=_seconds(float(state["lag"])),
             mode=Mode(state["mode"]),
             rate=float(state["rate"]),
             paused=bool(state["paused"]),
@@ -127,7 +135,8 @@ class Transport(Overlay):
         self._edge_lag: float | None = None
         self._catching_up = False
         self._rate = 1.0
-        self._drag: float | None = None  # fraction along the bar while dragging
+        # A bar fraction, not a time: the knob stays under the cursor while the buffer slides.
+        self._drag: float | None = None
         self._last_move = QPointF(-1, -1)
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
@@ -161,7 +170,8 @@ class Transport(Overlay):
         self._timeline = tl
         self._ticks = [(float(t), str(label)) for t, label in ticks]
         live = tl.mode is Mode.LIVE
-        self._edge = live and tl.lag < tl.target + EDGE_MARGIN_S
+        margin = EDGE_LEAVE_S if self._edge else EDGE_ENTER_S
+        self._edge = live and tl.lag < tl.target + margin
         self._edge_lag = tl.lag
         self._catching_up = live and tl.rate > 1.0
         self._rate = tl.rate
@@ -173,7 +183,7 @@ class Transport(Overlay):
         """Show the live-edge indicator instead of the bar; never changes visibility."""
         self._live = self._timeshift = True
         self._edge = True
-        self._edge_lag = lag_s
+        self._edge_lag = _seconds(lag_s)
         self._catching_up = catching_up
         self.update()
 
@@ -243,7 +253,7 @@ class Transport(Overlay):
 
     def _behind(self) -> bool:
         tl = self._timeline
-        return tl is not None and tl.lag >= tl.target + EDGE_MARGIN_S
+        return tl is not None and tl.lag >= tl.target + EDGE_ENTER_S
 
     def _seekable(self) -> bool:
         if self._timeshift:
@@ -263,7 +273,7 @@ class Transport(Overlay):
     def _shown_lag(self) -> float:
         tl = self._timeline
         assert tl is not None
-        return tl.lag if self._drag is None else tl.live_edge - self._shown_t()
+        return tl.lag if self._drag is None else _seconds(tl.live_edge - self._shown_t())
 
     def _shown_frac(self) -> float:
         if self._timeshift:
@@ -280,13 +290,13 @@ class Transport(Overlay):
         now = self._now()
         if now.tzinfo is None:
             now = now.astimezone()  # a naive clock reads local time
-        then = now.astimezone(timezone.utc) - timedelta(seconds=max(0.0, seconds_ago))
+        then = now.astimezone(timezone.utc) - timedelta(seconds=_seconds(seconds_ago))
         return then.astimezone()
 
     def _indicator_parts(self) -> tuple[str, str]:
         if self._edge_lag is None:
             return ("", "")
-        tail = f"{max(0.0, self._edge_lag):.1f} s behind source"
+        tail = f"{self._edge_lag:.1f} s behind source"
         if self._catching_up:
             tail += " · catching up" + (f" {self._rate:g}×" if self._rate > 1.0 else "")
         return ("Stay live", tail)
@@ -378,6 +388,44 @@ class Transport(Overlay):
 
     def button_rect(self, name: str) -> QRectF:
         return self._layout()[name]
+
+    def tick_marks(self) -> list[tuple[float, str, QRectF | None]]:
+        """The bar's programme ticks: (x, shown label, label box or None when dropped)."""
+        seek = self._layout().get("seek")
+        if seek is None or not self._timeshift:
+            return []
+        return self._tick_marks(Units(self.width()), seek)
+
+    @staticmethod
+    def _tick_font(un: Units) -> QFont:
+        return un.font(1.05)
+
+    def _tick_marks(self, un: Units, seek: QRectF) -> list[tuple[float, str, QRectF | None]]:
+        """Ticks inside the buffer, in time order. Each label is elided to TICK_LABEL_MAX_U;
+        a label that would overlap the previous one is dropped, but its tick stays."""
+        tl = self._timeline
+        span = tl.end - tl.start if tl is not None else 0.0
+        if tl is None or span <= 0:
+            return []
+        fm = QFontMetricsF(self._tick_font(un))
+        label_h = un.px(1.5)
+        top = seek.center().y() - un.px(1.5) / 2 - un.px(0.3) - label_h
+        gap = un.px(0.8)
+        taken = -math.inf  # right edge of the last label drawn
+        marks: list[tuple[float, str, QRectF | None]] = []
+        for t, label in sorted(self._ticks):
+            if not tl.start <= t <= tl.end:
+                continue
+            x = seek.x() + seek.width() * (t - tl.start) / span
+            text = fm.elidedText(label, Qt.ElideRight, un.px(TICK_LABEL_MAX_U))
+            w = fm.horizontalAdvance(text)
+            lx = min(max(x - w / 2, seek.x()), seek.right() - w)
+            if not text or lx < taken + gap:
+                marks.append((x, "", None))
+                continue
+            taken = lx + w
+            marks.append((x, text, QRectF(lx, top, w + 1, label_h)))
+        return marks
 
     # ---- painting -----------------------------------------------------------------------------
 
@@ -506,23 +554,13 @@ class Transport(Overlay):
         seek = rects["seek"]
         cy = seek.center().y()
         kc = self._paint_track(p, un, seek, 0.3)
-        span = tl.end - tl.start
-        p.setFont(un.font(1.05))
-        fm = p.fontMetrics()
+        p.setFont(self._tick_font(un))
+        p.setPen(qcolor(PALETTE.text, 0.75))
         tick_h = un.px(1.5)
-        for t, label in self._ticks:
-            if span <= 0 or not tl.start <= t <= tl.end:
-                continue
-            x = seek.x() + seek.width() * (t - tl.start) / span
+        for x, label, box in self._tick_marks(un, seek):
             p.fillRect(QRectF(x - 1, cy - tick_h / 2, 2, tick_h), qcolor("#ffffff", 0.55))
-            w = fm.horizontalAdvance(label)
-            lx = min(max(x - w / 2, seek.x()), seek.right() - w)
-            p.setPen(qcolor(PALETTE.text, 0.75))
-            p.drawText(
-                QRectF(lx, cy - tick_h / 2 - un.px(0.3) - un.px(1.5), w + 1, un.px(1.5)),
-                Qt.AlignHCenter | Qt.AlignBottom,
-                label,
-            )
+            if box is not None:
+                p.drawText(box, Qt.AlignHCenter | Qt.AlignBottom, label)
         dot_d = un.px(1.1)
         fill_round(
             p,
