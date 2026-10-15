@@ -12,7 +12,15 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.*=false")
 
-from PySide6.QtCore import QLoggingCategory, QPoint, Qt, QTimer, qInstallMessageHandler
+from PySide6.QtCore import (
+    QLoggingCategory,
+    QMargins,
+    QPoint,
+    QRect,
+    Qt,
+    QTimer,
+    qInstallMessageHandler,
+)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -28,7 +36,14 @@ from tests.fixtures.local_provider import channel_urls, seed_channels, write_loc
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.tv_controller import WELCOME_TEXT
-from ui.tv_window import CLOSE_RETRY_MS, CLOSING_TEXT, TVWindow, _exit_now
+from ui.tv_window import (
+    CLOSE_RETRY_MS,
+    CLOSING_TEXT,
+    TVWindow,
+    _exit_now,
+    fit_to_area,
+    frame_margins as frame_margins_of,
+)
 
 INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--quiet"])
 HOST_METHODS = ("save_config", "set_provider", "refresh_channels", "refresh_content_list_size")
@@ -644,6 +659,64 @@ class GeometryRestoreTests(WindowCase):
     def test_restores_the_saved_geometry_at_construction(self):
         geometry = self.window.geometry()
         self.assertEqual(geometry.getRect(), (140, 90, 1024, 576))
+
+
+class FitToAreaTests(unittest.TestCase):
+    AREA = QRect(0, 25, 1024, 743)  # a 1024×768 display below the macOS menu bar
+    TITLE = QMargins(0, 28, 0, 0)
+
+    def test_a_window_that_fits_stays_put(self):
+        rect = QRect(60, 103, 800, 450)
+        self.assertEqual(fit_to_area(rect, self.TITLE, self.AREA), rect)
+
+    def test_a_window_wider_than_the_screen_is_narrowed_and_moved_on(self):
+        # CI macOS ARM: [60, 103, 1100, 620] came back from fullscreen at x = -256.
+        fitted = fit_to_area(QRect(60, 103, 1100, 620), self.TITLE, self.AREA)
+        self.assertEqual(fitted.getRect(), (0, 103, 1024, 620))
+
+    def test_the_frame_stays_inside_on_every_edge(self):
+        margins = QMargins(4, 30, 4, 4)
+        for rect in (QRect(-300, 50, 500, 300), QRect(900, 600, 500, 300), QRect(10, 0, 400, 300)):
+            fitted = fit_to_area(rect, margins, self.AREA)
+            self.assertTrue(self.AREA.contains(fitted.marginsAdded(margins)), fitted)
+            self.assertEqual(fitted.size(), rect.size())
+
+    def test_a_window_taller_than_the_area_is_shortened(self):
+        fitted = fit_to_area(QRect(0, 40, 600, 900), self.TITLE, self.AREA)
+        self.assertEqual(fitted.getRect(), (0, 53, 600, 715))
+
+
+class FullscreenExitTests(WindowCase):
+    def test_leaving_fullscreen_returns_inside_the_screen(self):
+        # A display smaller than the window from before fullscreen (macOS put it off screen).
+        self.show()
+        window = self.window
+        area = window.screen().availableGeometry()
+        window.setGeometry(area.x() + 60, area.y() + 40, area.width() + 76, area.height() // 2)
+        before = window.geometry()
+        window.toggle_fullscreen()
+        self.assertTrue(wait_until(window.isFullScreen))
+        window.toggle_fullscreen()
+        margins = frame_margins_of(window)
+        expected = fit_to_area(before, margins, area)
+        self.assertTrue(
+            wait_until(lambda: not window.isFullScreen() and window.geometry() == expected),
+            f"{window.geometry()} != {expected}",
+        )
+        self.assertTrue(area.contains(window.frameGeometry()), window.frameGeometry())
+
+    def test_a_window_that_fits_comes_back_unchanged(self):
+        self.show()
+        window = self.window
+        area = window.screen().availableGeometry()
+        window.setGeometry(area.x() + 40, area.y() + 40, area.width() // 2, area.height() // 2)
+        before = window.geometry()
+        window.toggle_fullscreen()
+        self.assertTrue(wait_until(window.isFullScreen))
+        window.leave_fullscreen()
+        self.assertTrue(wait_until(lambda: not window.isFullScreen()))
+        QTest.qWait(100)
+        self.assertEqual(window.geometry(), before)
 
 
 @unittest.skipIf(INSTANCE is None, "libVLC is not available")

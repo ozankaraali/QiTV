@@ -15,7 +15,7 @@ import platform
 import sys
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QPoint, QRect, Qt, QTimer
+from PySide6.QtCore import QElapsedTimer, QEvent, QMargins, QObject, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -23,14 +23,15 @@ from PySide6.QtGui import (
     QKeyEvent,
     QKeySequence,
     QMouseEvent,
+    QWindowStateChangeEvent,
 )
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu
 
 from options import OptionsDialog
+from services import thread_cleanup
 from services.catalog import CatalogService
 from services.navigation import NavModel
 from services.playback import NullSession, PlaybackSession, Session, create_instance
-from services import thread_cleanup
 from services.thread_cleanup import has_pending_threads
 from services.watch_state import WatchState
 from services.zapping import ZapController
@@ -56,7 +57,7 @@ CLOSING_NOTICE_MS = 60_000  # shown again only if it hides before the wait ends
 EPG_REFRESH_MS = 2 * 60 * 60 * 1000
 MINI_WIDTH_FRACTION = 0.25
 MINI_MARGIN = 10
-FULLSCREEN_EXIT_MS = 1500  # the mini player waits at most this long for fullscreen to end
+FULLSCREEN_EXIT_MS = 1500  # the longest wait for the platform to finish leaving fullscreen
 _SHORTCUT_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier
     | Qt.KeyboardModifier.AltModifier
@@ -95,6 +96,47 @@ def _exit_now() -> None:
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)
+
+
+def fit_to_area(rect: QRect, margins: QMargins, area: QRect) -> QRect:
+    """A window's client rect, moved and if need be shrunk so its frame lies inside `area`.
+
+    The frame is `rect` grown by `margins` (the title bar and borders).
+    """
+    left, top, right, bottom = margins.left(), margins.top(), margins.right(), margins.bottom()
+    width = min(rect.width() + left + right, area.width())
+    height = min(rect.height() + top + bottom, area.height())
+    x = min(max(rect.x() - left, area.x()), area.x() + area.width() - width)
+    y = min(max(rect.y() - top, area.y()), area.y() + area.height() - height)
+    return QRect(x + left, y + top, width - left - right, height - top - bottom)
+
+
+def frame_margins(window: QMainWindow) -> QMargins:
+    geometry, frame = window.geometry(), window.frameGeometry()
+    return QMargins(
+        geometry.left() - frame.left(),
+        geometry.top() - frame.top(),
+        frame.right() - geometry.right(),
+        frame.bottom() - geometry.bottom(),
+    )
+
+
+class _FullscreenExitWatch(QObject):
+    """Calls back when the platform reports that it has finished leaving fullscreen."""
+
+    def __init__(self, window: QMainWindow, callback: Callable[[], None]) -> None:
+        super().__init__(window)
+        self._window = window
+        self._callback = callback
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and event.spontaneous()
+            and not self._window.isFullScreen()
+        ):
+            QTimer.singleShot(0, self._window, self._callback)
+        return False
 
 
 class _Geometry:
@@ -140,6 +182,11 @@ class TVWindow(QMainWindow):
         # (normal geometry, window flags, maximized) to restore when the mini player ends
         self._mini_restore: Optional[tuple[QRect, Qt.WindowType, bool]] = None
         self._mini_waiting = False  # for the fullscreen exit before entering the mini player
+        # Leaving fullscreen: the normal geometry to return to, fitted to the screen.
+        self._fullscreen_restore: Optional[QRect] = None
+        self._exit_watch = _FullscreenExitWatch(self, self._fit_to_screen)
+        self._fit_fallback = QTimer(self, singleShot=True, interval=FULLSCREEN_EXIT_MS)
+        self._fit_fallback.timeout.connect(self._fit_to_screen)
         self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
         self._dragged = False  # the last press on the video moved the mini player
         self._pressed = False  # the left button is down on the video
@@ -345,10 +392,13 @@ class TVWindow(QMainWindow):
             return
         if self._mini_restore is not None:
             self._leave_mini()
+        if self.isFullScreen():
+            self._fullscreen_restore = self.normalGeometry()
         self.setWindowState(self.windowState() ^ Qt.WindowState.WindowFullScreen)
 
     def leave_fullscreen(self) -> None:
         if self.isFullScreen() and not self._closing:
+            self._fullscreen_restore = self.normalGeometry()
             self.setWindowState(self.windowState() & ~Qt.WindowState.WindowFullScreen)
 
     def toggle_mini_player(self) -> None:
@@ -438,7 +488,59 @@ class TVWindow(QMainWindow):
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
             self._update_menu_bar()
+            if (
+                isinstance(event, QWindowStateChangeEvent)
+                and event.oldState() & Qt.WindowState.WindowFullScreen
+                and not self.isFullScreen()
+            ):
+                self._after_fullscreen_exit(event.spontaneous())
         super().changeEvent(event)
+
+    def _after_fullscreen_exit(self, finished: bool) -> None:
+        """Fit the window once the platform has restored it (macOS animates the exit)."""
+        if finished:  # the platform left fullscreen itself and reports it done
+            QTimer.singleShot(0, self, self._fit_to_screen)
+            return
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.installEventFilter(self._exit_watch)
+        self._fit_fallback.start()
+
+    def _fit_to_screen(self) -> None:
+        """Return to the geometry from before fullscreen, inside the screen's work area.
+
+        macOS restores the frame from before fullscreen even when it is wider than the
+        screen (on macOS 26 even the size first asked for), leaving part of the window off
+        screen: on a 1024×768 display it came back at x = -256.
+        """
+        self._fit_fallback.stop()
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.removeEventFilter(self._exit_watch)
+        target, self._fullscreen_restore = self._fullscreen_restore, None
+        unfit_states = (
+            Qt.WindowState.WindowFullScreen
+            | Qt.WindowState.WindowMaximized
+            | Qt.WindowState.WindowMinimized
+        )
+        if (
+            self._closing
+            or self._mini_waiting
+            or self._mini_restore is not None
+            or self.windowState() & unfit_states
+        ):
+            return
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        geometry = self.geometry()
+        fitted = fit_to_area(
+            target if target is not None else geometry,
+            frame_margins(self),
+            screen.availableGeometry(),
+        )
+        if fitted != geometry:
+            self.setGeometry(fitted)
 
     # ---- OptionsDialog host -------------------------------------------------------------------
 
