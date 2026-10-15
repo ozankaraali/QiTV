@@ -8,11 +8,14 @@ keymap resolves are claimed before any shortcut or native menu key equivalent
 
 from __future__ import annotations
 
+import atexit
 import logging
+import os
 import platform
+import sys
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer
+from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -27,6 +30,7 @@ from options import OptionsDialog
 from services.catalog import CatalogService
 from services.navigation import NavModel
 from services.playback import NullSession, PlaybackSession, Session, create_instance
+from services import thread_cleanup
 from services.thread_cleanup import has_pending_threads
 from services.watch_state import WatchState
 from services.zapping import ZapController
@@ -46,8 +50,9 @@ logger = logging.getLogger(__name__)
 WINDOW_NAME = "tv_window"
 CLOSING_TEXT = "Closing after background requests finish…"
 CLOSE_RETRY_MS = 50
-CLOSING_NOTICE_AFTER = 10  # close retries (half a second) between showings of the notice
-CLOSING_NOTICE_MS = 60_000  # re-shown long before it would time out
+CLOSE_THREAD_WAIT_MS = 30_000  # then quit anyway: a stuck worker must not keep QiTV open
+CLOSING_NOTICE_AFTER = 10  # close retries (half a second) before the notice shows
+CLOSING_NOTICE_MS = 60_000  # shown again only if it hides before the wait ends
 EPG_REFRESH_MS = 2 * 60 * 60 * 1000
 MINI_WIDTH_FRACTION = 0.25
 MINI_MARGIN = 10
@@ -59,7 +64,7 @@ _SHORTCUT_MODIFIERS = (
 )
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
-_DRAG_EVENTS = (
+_MOUSE_EVENTS = (
     QEvent.Type.MouseButtonPress,
     QEvent.Type.MouseMove,
     QEvent.Type.MouseButtonRelease,
@@ -69,6 +74,27 @@ _DRAG_EVENTS = (
 def _native_video_handles() -> bool:
     """False on Qt platforms without real window ids (offscreen, Wayland): libVLC would crash."""
     return QGuiApplication.platformName() == _NATIVE_PLATFORMS.get(platform.system())
+
+
+def _pending_thread_names() -> list[str]:
+    """The workers of the QThreads still running, for the log (e.g. ["EpgLoadWorker"])."""
+    names = []
+    for cleanup in list(getattr(thread_cleanup, "_pending", ())):
+        job = getattr(cleanup, "_worker", None) or getattr(cleanup, "_thread", None)
+        names.append(type(job).__name__)
+    return sorted(names)
+
+
+def _exit_now() -> None:
+    """Leave without tearing the interpreter down.
+
+    Registered last with atexit, so it runs after Python's own threads (the provider cache
+    writer) are joined: destroying a QThread that still runs makes Qt abort the process.
+    """
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 class _Geometry:
@@ -104,12 +130,20 @@ class TVWindow(QMainWindow):
         self._close_retries = 0
         self._video_released = False
         self._closed = False
+        self._threads_abandoned = False
+        self._thread_wait = QElapsedTimer()
+        # The close advances only on this timer: restarted, never stacked.
+        self.close_retry = QTimer(self, singleShot=True, interval=CLOSE_RETRY_MS)
+        self.close_retry.timeout.connect(self._close_step)
+        self._stepping = False
         self._bound_handle: Optional[int] = None
         # (normal geometry, window flags, maximized) to restore when the mini player ends
         self._mini_restore: Optional[tuple[QRect, Qt.WindowType, bool]] = None
         self._mini_waiting = False  # for the fullscreen exit before entering the mini player
         self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
-        self._dragged = False
+        self._dragged = False  # the last press on the video moved the mini player
+        self._pressed = False  # the left button is down on the video
+        self._click_on_release = False  # a click that came while the button was still down
 
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -256,16 +290,19 @@ class TVWindow(QMainWindow):
         if self._dragged:  # the press moved the mini player
             self._dragged = False
             return
+        if self._pressed and self._mini_restore is not None:
+            # Still held: a click only if it is released without dragging the mini player.
+            self._click_on_release = True
+            return
         self.controller.video_clicked()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if (
             watched is self.surface
-            and self._mini_restore is not None
-            and event.type() in _DRAG_EVENTS
+            and event.type() in _MOUSE_EVENTS
             and isinstance(event, QMouseEvent)
         ):
-            self._drag_mini(event)
+            self._on_video_mouse(event)
         elif (
             self._mini_waiting
             and watched is self.windowHandle()
@@ -277,23 +314,29 @@ class TVWindow(QMainWindow):
             QTimer.singleShot(0, self, self._enter_mini_after_fullscreen)
         return super().eventFilter(watched, event)
 
-    def _drag_mini(self, event: QMouseEvent) -> None:
-        """Dragging the video moves the frameless mini player (the press still counts)."""
+    def _on_video_mouse(self, event: QMouseEvent) -> None:
+        """Track the left button on the video; in the mini player a drag moves the window."""
         kind, position = event.type(), event.globalPosition().toPoint()
-        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-            self._drag = (position, self.pos())
-            self._dragged = False
+        left = Qt.MouseButton.LeftButton
+        if kind == QEvent.Type.MouseButtonPress and event.button() == left:
+            self._pressed, self._dragged, self._click_on_release = True, False, False
+            if self._mini_restore is not None:
+                self._drag = (position, self.pos())
         elif kind == QEvent.Type.MouseMove and self._drag is not None:
-            if not event.buttons() & Qt.MouseButton.LeftButton:
+            if not event.buttons() & left:
                 self._drag = None
                 return
             start, origin = self._drag
             delta = position - start
             if self._dragged or delta.manhattanLength() >= QApplication.startDragDistance():
                 self._dragged = True
+                self._click_on_release = False  # a drag, not a click
                 self.move(origin + delta)
-        elif kind == QEvent.Type.MouseButtonRelease:
-            self._drag = None
+        elif kind == QEvent.Type.MouseButtonRelease and event.button() == left:
+            self._pressed, self._drag = False, None
+            if self._click_on_release:
+                self._click_on_release = False
+                self.controller.video_clicked()
 
     # ---- window actions (the controller's window_actions) -------------------------------------
 
@@ -358,6 +401,7 @@ class TVWindow(QMainWindow):
         geometry, flags, maximized = self._mini_restore
         self._mini_restore = None
         self._drag = None
+        self._dragged = self._click_on_release = False  # never swallow the next click
         self.setWindowFlags(flags)
         self.setGeometry(geometry)
         if maximized:
@@ -454,29 +498,39 @@ class TVWindow(QMainWindow):
             self.session.set_window(handle)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Close in steps, each after the event loop ran again.
+        """Close in steps, each after the event loop ran again (`close_retry`).
 
         1. Stop: the catalog starts no more jobs, playback stops, the geometry is saved.
-        2. Wait for running QThreads (never block the GUI), with a notice after half a second.
+        2. Wait for running QThreads (never block the GUI), with a notice after half a second,
+           for at most CLOSE_THREAD_WAIT_MS.
         3. Save the image and EPG indexes and release libVLC. On macOS libVLC removes its
            video view on the run loop after a stop, and closing before that crashes.
         4. Close.
+
+        Another close() meanwhile (Quit again) changes nothing; the retry timer finishes it.
         """
-        if self._closed:  # a late retry
+        if self._closed:
             event.accept()
+            return
+        if self._closing and not self._stepping:
+            event.ignore()
             return
         if not self._closing:
             self._closing = True
             self._mini_waiting = False
             self._shut_down()
+            self._thread_wait.start()
             self._close_later(event)
             return
-        if has_pending_threads():
-            self._close_retries += 1
-            if self._close_retries % CLOSING_NOTICE_AFTER == 0:
-                self.overlays.toast.show_message(CLOSING_TEXT, "info", CLOSING_NOTICE_MS)
-            self._close_later(event)
-            return
+        if has_pending_threads() and not self._threads_abandoned:
+            if self._thread_wait.elapsed() < CLOSE_THREAD_WAIT_MS:
+                self._close_retries += 1
+                toast = self.overlays.toast
+                if self._close_retries >= CLOSING_NOTICE_AFTER and not toast.isVisible():
+                    toast.show_message(CLOSING_TEXT, "info", CLOSING_NOTICE_MS)
+                self._close_later(event)
+                return
+            self._abandon_threads()
         if not self._video_released:
             self._video_released = True
             self._run_steps(
@@ -492,7 +546,23 @@ class TVWindow(QMainWindow):
 
     def _close_later(self, event: QCloseEvent) -> None:
         event.ignore()
-        QTimer.singleShot(CLOSE_RETRY_MS, self, self.close)
+        self.close_retry.start()
+
+    def _close_step(self) -> None:
+        self._stepping = True
+        try:
+            self.close()
+        finally:
+            self._stepping = False
+
+    def _abandon_threads(self) -> None:
+        self._threads_abandoned = True
+        logger.warning(
+            "Quitting while background work still runs after %d s: %s",
+            CLOSE_THREAD_WAIT_MS // 1000,
+            ", ".join(_pending_thread_names()) or "unknown",
+        )
+        atexit.register(_exit_now)
 
     def _shut_down(self) -> None:
         self.epg_refresh.stop()

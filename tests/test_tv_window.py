@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Optional
 import unittest
 from unittest import mock
@@ -10,7 +12,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.*=false")
 
-from PySide6.QtCore import QLoggingCategory, QPoint, Qt, qInstallMessageHandler
+from PySide6.QtCore import QLoggingCategory, QPoint, Qt, QTimer, qInstallMessageHandler
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -26,7 +28,7 @@ from tests.fixtures.local_provider import channel_urls, seed_channels, write_loc
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.tv_controller import WELCOME_TEXT
-from ui.tv_window import CLOSING_TEXT, TVWindow
+from ui.tv_window import CLOSE_RETRY_MS, CLOSING_TEXT, TVWindow, _exit_now
 
 INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--quiet"])
 HOST_METHODS = ("save_config", "set_provider", "refresh_channels", "refresh_content_list_size")
@@ -113,9 +115,14 @@ class WindowCase(unittest.TestCase):
         """Change the configuration before the window is built."""
 
     def close_window(self):
-        # The close runs in steps (stop, threads, release); close() returns True once accepted.
-        self.assertTrue(wait_until(self.window.close))
-        self.assertFalse(self.window.isVisible())
+        # One close(); the window's retry timer runs the steps (stop, threads, release). The
+        # timer check also covers windows that were never shown.
+        self.window.close()
+        self.assertTrue(
+            wait_until(
+                lambda: not self.window.isVisible() and not self.window.close_retry.isActive()
+            )
+        )
         self.assertFalse(has_pending_threads())
 
     def show(self):
@@ -338,6 +345,48 @@ class TVWindowTests(WindowCase):
         QTest.qWait(QApplication.doubleClickInterval() + 100)
         self.assertFalse(drawer.isVisible())  # the drag is not a click on the video
 
+    def press_and_hold(self):
+        """Press on the video and hold past the double-click interval (the click is due)."""
+        QTest.mousePress(self.window.surface, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
+        QTest.qWait(QApplication.doubleClickInterval() + 100)
+
+    def test_mini_player_drag_after_a_long_hold_is_not_a_click(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.mini()
+        start = self.window.pos()
+        self.press_and_hold()
+        QTest.mouseMove(self.window.surface, QPoint(10, 20))
+        QTest.mouseRelease(self.window.surface, Qt.MouseButton.LeftButton, pos=QPoint(10, 20))
+        self.assertEqual(self.window.pos(), start + QPoint(-30, -20))
+        QTest.qWait(100)
+        self.assertFalse(drawer.isVisible())
+
+    def test_mini_player_long_press_without_a_drag_is_a_click(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.mini()
+        self.press_and_hold()
+        self.assertFalse(drawer.isVisible())  # not while the button is still down
+        QTest.mouseRelease(self.window.surface, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
+        self.assertTrue(wait_until(drawer.isVisible, 2000))
+
+    def test_the_first_click_after_the_mini_player_is_not_swallowed(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.mini()
+        self.press_and_hold()
+        QTest.mouseMove(self.window.surface, QPoint(10, 20))
+        QTest.mouseRelease(self.window.surface, Qt.MouseButton.LeftButton, pos=QPoint(10, 20))
+        self.mini()  # back to the normal window
+        self.assert_not_mini()
+        drawer.close_drawer()
+        self.window.host.clicked.emit()  # a click on the video around an overlay
+        self.assertTrue(drawer.isVisible())
+
     # ---- closing ------------------------------------------------------------------------------
 
     def test_close_stops_the_catalog_before_new_jobs_can_start(self):
@@ -410,6 +459,18 @@ class TVWindowTests(WindowCase):
             ["x", "stop", "wait", "wait", "wait", "images", "epg", ("release", True), "wait"],
         )  # the last check is the final step's, just before the window closes
 
+    def visible_when_shown(self):
+        """Record, for each toast shown, whether one was already visible."""
+        toast, seen = self.window.overlays.toast, []
+        show_message = toast.show_message
+
+        def record(text, kind="info", ms=3000):
+            seen.append(toast.isVisible())
+            show_message(text, kind, ms)
+
+        toast.show_message = record
+        return seen
+
     def test_closing_notice_stays_visible_for_the_whole_wait(self):
         self.show()
         self.wait_for_drawer()
@@ -422,10 +483,67 @@ class TVWindowTests(WindowCase):
                 QTest.qWait(400)
                 self.assertTrue(toast.isVisible())
                 self.assertEqual(self.toasts[-1], (CLOSING_TEXT, "info"))
-            # Shown again and again, so its timer never runs out however long the wait.
-            self.assertGreaterEqual(self.toasts.count((CLOSING_TEXT, "info")), 3)
+            self.assertEqual(self.toasts.count((CLOSING_TEXT, "info")), 1)  # not laid out again
             waiting[0] = False
             self.assertTrue(wait_until(lambda: not self.window.isVisible()))
+
+    def test_closing_notice_is_shown_again_only_after_it_hid(self):
+        self.show()
+        self.wait_for_drawer()
+        shown_over = self.visible_when_shown()
+        waiting = [True]
+        with (
+            mock.patch("ui.tv_window.has_pending_threads", side_effect=lambda: waiting[0]),
+            mock.patch("ui.tv_window.CLOSING_NOTICE_MS", 200),
+        ):
+            self.assertFalse(self.window.close())
+            self.assertTrue(
+                wait_until(lambda: self.toasts.count((CLOSING_TEXT, "info")) >= 3, 5000)
+            )
+            waiting[0] = False
+            self.assertTrue(wait_until(lambda: not self.window.isVisible()))
+        self.assertNotIn(True, shown_over)
+
+    def test_repeated_close_keeps_a_single_retry_timer(self):
+        # Quit pressed again and again while a worker is pending must not multiply retries.
+        self.show()
+        self.wait_for_drawer()
+        checks, waiting = [], [True]
+
+        def pending():
+            checks.append(time.monotonic())
+            return waiting[0]
+
+        with mock.patch("ui.tv_window.has_pending_threads", side_effect=pending):
+            for _ in range(20):
+                self.assertFalse(self.window.close())
+            retries = [
+                t
+                for t in self.window.findChildren(QTimer)
+                if t.isActive() and t.isSingleShot() and t.interval() == CLOSE_RETRY_MS
+            ]
+            self.assertEqual(retries, [self.window.close_retry])
+            started = time.monotonic()
+            QTest.qWait(500)
+            in_window = [c for c in checks if c >= started]
+            self.assertLessEqual(len(in_window), 500 // CLOSE_RETRY_MS + 2)  # one chain
+            waiting[0] = False
+            self.assertTrue(wait_until(lambda: not self.window.isVisible()))
+
+    def test_the_wait_for_background_work_is_bounded(self):
+        self.show()
+        self.wait_for_drawer()
+        with (
+            mock.patch("ui.tv_window.has_pending_threads", return_value=True),
+            mock.patch("ui.tv_window.CLOSE_THREAD_WAIT_MS", 300),
+            mock.patch("ui.tv_window._pending_thread_names", return_value=["EpgLoadWorker"]),
+            mock.patch("ui.tv_window.atexit") as at_exit,
+            self.assertLogs("ui.tv_window", "WARNING") as logs,
+        ):
+            self.assertFalse(self.window.close())
+            self.assertTrue(wait_until(lambda: not self.window.isVisible(), 3000))
+        self.assertIn("EpgLoadWorker", "\n".join(logs.output))
+        at_exit.register.assert_called_once_with(_exit_now)  # leaves without destroying it
 
     def test_a_late_close_retry_after_closing_does_nothing(self):
         self.show()
@@ -457,6 +575,65 @@ class TVWindowTests(WindowCase):
             self.assertFalse(drawer.isVisible())
             waiting[0] = False
             self.assertTrue(wait_until(lambda: not self.window.isVisible()))
+
+
+STUCK_WORKER_SCRIPT = r"""
+import os, sys, tempfile, time
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+os.environ["QITV_CONFIG_DIR"] = tempfile.mkdtemp(prefix="qitv-stuck-")
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtWidgets import QApplication
+from config_manager import ConfigManager
+from epg_manager import EpgManager
+from image_manager import ImageManager
+from provider_manager import ProviderManager
+from tests.fixtures.local_provider import seed_channels, write_local_provider
+import ui.tv_window as tw
+
+app = QApplication([])
+tw.CLOSE_THREAD_WAIT_MS = 300
+tw.create_instance = lambda *args: None
+provider = write_local_provider(os.environ["QITV_CONFIG_DIR"])
+config = ConfigManager()
+providers = ProviderManager(config)
+seed_channels(providers, provider)
+window = tw.TVWindow(app, config, providers, ImageManager(config, 1 << 20), EpgManager(config, providers))
+
+
+class StuckWorker(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+
+    def run(self):
+        time.sleep(30)
+
+
+window.catalog.runner.run_worker(StuckWorker(), lambda *a: None, lambda *a: None)
+window.show()
+QTimer.singleShot(300, window.close)
+print("exec returned", app.exec(), flush=True)
+"""
+
+
+class StuckWorkerExitTests(unittest.TestCase):
+    def test_quits_cleanly_when_a_worker_never_finishes(self):
+        # Qt aborts the process if a QThread that still runs is destroyed at exit.
+        repo = Path(__file__).resolve().parent.parent
+        env = {**os.environ, "QT_LOGGING_RULES": "qt.qpa.*=false"}
+        started = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, "-c", STUCK_WORKER_SCRIPT],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertIn("exec returned 0", result.stdout)
+        self.assertIn("StuckWorker", result.stderr)  # the WARNING names it
+        self.assertNotIn("Destroyed while thread", result.stderr)
+        self.assertLess(time.monotonic() - started, 25)  # not waiting for the worker
 
 
 class GeometryRestoreTests(WindowCase):
