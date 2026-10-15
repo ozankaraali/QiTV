@@ -1,7 +1,8 @@
 """The drawer's context menu: a right-click on a channel, title or episode.
 
 The player controls' "Open in external player" offers the two players for what plays now
-(`show_players`): the same plays as the menu's, opening upwards from the button.
+(`show_players`): the same plays as the menu's, opening upwards from the button. A right-click
+on a Library title or episode offers the players and its link (`show_target`).
 
 - "Add to favorites" / "Remove from favorites" (channels only);
 - "Open in picture-in-picture" (channels, when the shell offers picture in picture): the
@@ -116,6 +117,16 @@ class ContextActions(QObject):
         menu.aboutToHide.connect(menu.deleteLater)
         menu.popup(QPoint(anchor.x(), anchor.y() - menu.sizeHint().height()))
 
+    def show_target(
+        self, target: Target, global_pos: QPoint, parent: Optional[QObject] = None
+    ) -> None:
+        """A Library title's or episode's menu: the players and its link (no favorites)."""
+        menu = QMenu(parent if isinstance(parent, QWidget) else None)
+        menu.setStyleSheet(menu_style())
+        self._add_link_actions(menu, target)
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(global_pos)
+
     def menu(self, node: NavNode, parent: Optional[QWidget] = None) -> Optional[QMenu]:
         """`node`'s menu; None when it has nothing to offer (a series)."""
         channel = is_channel(self.nav, node)
@@ -135,12 +146,7 @@ class ContextActions(QObject):
         if playable:
             if channel:
                 menu.addSeparator()
-            target = self._target(node)
-            self._add_players(menu, target)
-            menu.addSeparator()
-            menu.addAction("Copy stream link").triggered.connect(
-                lambda _=False: self.lanes.request_side(target, self._copy_link, play=False)
-            )
+            self._add_link_actions(menu, self._target(node))
         return menu
 
     def _target(self, node: NavNode) -> Target:
@@ -148,6 +154,14 @@ class ContextActions(QObject):
         group = next((n.key for n in reversed(self.nav.path) if n.layer == "group"), "")
         section = self.nav.section_of(node) or "live"
         return Target(node.payload, section, node.title, group_key=group)
+
+    def _add_link_actions(self, menu: QMenu, target: Target) -> None:
+        """The players, then "Copy stream link"."""
+        self._add_players(menu, target)
+        menu.addSeparator()
+        menu.addAction("Copy stream link").triggered.connect(
+            lambda _=False: self.lanes.request_side(target, self._copy_link, play=False)
+        )
 
     def _add_players(self, menu: QMenu, target: Target) -> None:
         for text, player in PLAYERS:

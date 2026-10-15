@@ -5,7 +5,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QRectF, Signal
+from PySide6.QtCore import QObject, QPoint, QRectF, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
@@ -226,6 +226,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.played = []
         self.tuned = []
         self.backs = []
+        self.menus = []  # (item, section, global position) of each right-click menu
         self.model = LibraryModel(self.catalog, self.config, self.watch)
 
     def build(self, jobs=None, logos=None):
@@ -246,6 +247,7 @@ class LibraryControllerTests(unittest.TestCase):
             play=lambda item, kind, context: self.played.append((item, kind, context)),
             tune_live=self.tuned.append,
             back_to_tv=lambda: self.backs.append(True),
+            context_menu=lambda item, section, pos: self.menus.append((item, section, pos)),
         )
         self.addCleanup(self.ctl.shutdown)
         return self.ctl
@@ -429,6 +431,62 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual((episode["ename"], kind), ("Episode 1", "episode"))
         self.assertIsNone(context["series"])
         self.assertIsNone(context["episodes"])
+
+    def test_a_movie_posters_right_click_menu_is_for_a_movie(self):
+        # Owner (2026-10-15): Play in VLC/MPV and Copy stream link, as for channels.
+        self.open_movies()
+        grid = self.screen.grid
+        grid.contextRequested.emit(1, QPoint(30, 40))
+        self.assertEqual(self.menus, [(grid.item(1), "movies", QPoint(30, 40))])
+        self.assertEqual(self.played, [])
+
+    def test_a_series_has_no_menu_and_its_episodes_have(self):
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        self.screen.grid.contextRequested.emit(0, QPoint(1, 2))  # the series: it plays nothing
+        self.assertEqual(self.menus, [])
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.catalog.season_map["77"] = SEASONS
+        self.catalog.seasonsReady.emit("77")
+        self.catalog.episode_map[("77", "1")] = episodes("1")
+        self.catalog.episodesReady.emit("77", "1")
+        episode = episodes("1")[1]
+        self.screen.series.episodeContextRequested.emit(SEASONS[0], episode, QPoint(5, 6))
+        self.assertEqual(self.menus, [(episode, "series", QPoint(5, 6))])
+        self.assertEqual(self.played, [])
+
+    def test_a_continue_episode_poster_is_for_an_episode(self):
+        ep = {**episodes("1")[0], "season": "1"}
+        self.config.watch_history.append(
+            {"item_data": ep, "item_type": "episode", "provider_name": "P"}
+        )
+        cid = WatchState.content_id("P", ep, item_type="episode")
+        self.config.playback_positions[cid] = {"position": 60_000, "duration": 1_200_000}
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        grid = self.screen.grid
+        grid.contextRequested.emit(grid.current_index(), QPoint(1, 2))
+        self.assertEqual(self.menus, [(ep, "series", QPoint(1, 2))])
+
+    def test_only_the_current_providers_films_have_a_menu(self):
+        # Links are asked of the provider QiTV is on: another's title, a channel or a title
+        # during a provider switch has none.
+        ctl = self.build()
+        ctl.open_search()
+        self.type_text("sal")
+        elapse(WAIT_MS)
+        self.assertEqual(self.grid_names(), ["Salt TV", "Salt Roads", "Salt Lake"])
+        grid = self.screen.grid
+        for index in (0, 2):  # P's channel, Q's film
+            grid.contextRequested.emit(index, QPoint(1, 2))
+        self.assertEqual(self.menus, [])
+        grid.contextRequested.emit(1, QPoint(1, 2))
+        self.assertEqual([(i["name"], s) for i, s, _pos in self.menus], [("Salt Roads", "movies")])
+        self.catalog.loading = True
+        grid.contextRequested.emit(1, QPoint(1, 2))
+        self.assertEqual(len(self.menus), 1)
 
     # 4 -----------------------------------------------------------------------------------
     def test_escape_from_genres_goes_back_to_tv_once_the_filter_is_empty(self):

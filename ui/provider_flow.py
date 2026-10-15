@@ -106,6 +106,10 @@ class ProviderFlow(QObject):
         self._live_on_ready = False
         self._autotune = None
 
+    def in_library(self) -> bool:
+        """The window shows the Library (from enter_library until the player is back)."""
+        return self._in_library
+
     def leave_library(self) -> None:
         """Something plays (a movie, a channel, a file): the player is back."""
         self._in_library = False

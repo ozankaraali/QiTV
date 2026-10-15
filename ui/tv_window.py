@@ -396,6 +396,7 @@ class TVWindow(QMainWindow):
             welcome=WelcomeCard(host),
             pip_label=self.pip_label,
             mixer=self.mixer,
+            library_toast=self.library_toast,
         )
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, speaker and × stay within reach; elsewhere on the PiP

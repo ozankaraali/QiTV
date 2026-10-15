@@ -7,7 +7,7 @@ import zlib
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QContextMenuEvent, QFont, QFontMetricsF, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, timeline
@@ -305,6 +305,29 @@ class PosterGridTests(unittest.TestCase):
         QTest.mouseDClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
         self.assertEqual(self.grid.current_index(), 5)
         self.assertEqual(self.named("activated"), [3, 5])
+
+    def context_menu(self, point):
+        """The context menu event the platform sends after a right press."""
+        viewport = self.grid.viewport()
+        event = QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse, point, viewport.mapToGlobal(point)
+        )
+        QApplication.sendEvent(viewport, event)
+
+    def test_a_right_click_asks_for_the_posters_menu_and_leaves_the_current_title(self):
+        # Owner (2026-10-15): a poster's menu plays it in VLC or MPV, or copies its link.
+        self.grid.set_sections([("", titles(30))])
+        seen = []
+        self.grid.contextRequested.connect(lambda i, pos: seen.append((i, pos)))
+        point = self.grid.item_rect(3).center()
+        QTest.mousePress(self.grid.viewport(), Qt.RightButton, Qt.NoModifier, point)
+        self.context_menu(point)
+        QTest.mouseRelease(self.grid.viewport(), Qt.RightButton, Qt.NoModifier, point)
+        self.assertEqual(seen, [(3, self.grid.viewport().mapToGlobal(point))])
+        self.assertEqual(self.grid.current_index(), 0)
+        self.assertEqual(self.named("activated"), [])
+        self.context_menu(self.grid.item_rect(0).topLeft() - QPoint(4, 4))  # the margin
+        self.assertEqual(len(seen), 1)
 
     def test_a_third_click_does_not_activate_again(self):
         self.grid.set_sections([("", titles(30))])

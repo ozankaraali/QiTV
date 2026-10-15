@@ -4,7 +4,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse
@@ -108,6 +108,24 @@ class SeriesViewTests(unittest.TestCase):
         self.assertEqual(view.focus_zone, "episodes")
         view.activate()
         self.assertEqual(got, [(ss[0], eps[0])])
+
+    def test_a_right_click_asks_for_the_episodes_menu_and_leaves_the_current_row(self):
+        # Owner (2026-10-15): an episode's menu plays it in VLC or MPV, or copies its link.
+        view = self.make()
+        view.show()
+        got = []
+        view.episodeContextRequested.connect(lambda s, e, pos: got.append((s, e, pos)))
+        ss, eps = seasons(), episodes()
+        view.set_seasons(ss)
+        view.set_episodes(ss[0], eps)
+        rows = view._view
+        point = rows.visualRect(rows.model().index(2, 0)).center()
+        QTest.mousePress(rows.viewport(), Qt.RightButton, Qt.NoModifier, point)  # no selection
+        rows.customContextMenuRequested.emit(point)  # what Qt sends after it
+        QTest.mouseRelease(rows.viewport(), Qt.RightButton, Qt.NoModifier, point)
+        self.assertEqual(got, [(ss[0], eps[2], rows.viewport().mapToGlobal(point))])
+        self.assertIs(view.current_episode(), eps[0])
+        self.assertEqual(rows.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)
 
     def test_up_from_first_episode_focuses_seasons(self):
         view = self.make()

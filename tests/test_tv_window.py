@@ -22,9 +22,9 @@ from PySide6.QtCore import (
     QTimer,
     qInstallMessageHandler,
 )
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QContextMenuEvent, QGuiApplication, QKeySequence
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 from timer_fixtures import elapse, wait_until
 
 import main as qitv_main
@@ -1453,6 +1453,31 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertEqual(grid.current_index(), 1)
         self.assertIs(grid.item(1), current)  # the same title, not a reloaded list
         self.wait_idle()
+
+    def test_a_posters_right_click_menu_copies_its_link_and_says_so_on_the_library(self):
+        # Owner (2026-10-15): a Library title offers the channels' Play in VLC/MPV and link.
+        self.show()
+        self.wait_ready(XTREAM)
+        window = self.window
+        self.menu_actions()["Movies"].trigger()
+        grid = self.wait_for_titles()
+        item, point = grid.item(1), grid.item_rect(1).center()
+        shown = []
+        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append(menu)):
+            event = QContextMenuEvent(
+                QContextMenuEvent.Reason.Mouse, point, grid.viewport().mapToGlobal(point)
+            )
+            QApplication.sendEvent(grid.viewport(), event)
+        [menu] = shown
+        self.addCleanup(menu.deleteLater)
+        actions = {a.text(): a for a in menu.actions() if not a.isSeparator()}
+        self.assertEqual(list(actions), ["Play in VLC", "Play in MPV", "Copy stream link"])
+        QGuiApplication.clipboard().setText("")
+        actions["Copy stream link"].trigger()
+        clipboard = QGuiApplication.clipboard()
+        self.assertTrue(wait_until(lambda: clipboard.text() == item["cmd"]), clipboard.text())
+        self.assertEqual(window.library_toast.text(), "Link copied")
+        self.assertIs(window.pages.currentWidget(), window.library_page)
 
     def test_choosing_movies_in_the_drawer_opens_the_library(self):
         self.show()

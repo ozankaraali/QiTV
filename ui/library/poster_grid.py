@@ -188,6 +188,8 @@ class PosterGrid(QAbstractScrollArea):
     sortRequested = Signal(str)  # a Sort value
     leftEdge = Signal()  # ← in the first column
     upEdge = Signal()  # ↑ in the first row
+    # A right-click on a poster (flat index, global position): the shell's menu for it.
+    contextRequested = Signal(int, QPoint)
 
     def __init__(self, posters, parent=None) -> None:
         super().__init__(parent)
@@ -774,6 +776,16 @@ class PosterGrid(QAbstractScrollArea):
             self._mouse_activate(("poster", i), self.activated, i)
         else:
             self.set_current_index(i)
+
+    def contextMenuEvent(self, event) -> None:
+        """A right-click on a poster asks for its menu; the current title stays."""
+        pos = event.pos()  # the viewport's, as for the mouse
+        i = self.index_at(pos)
+        if i < 0:
+            event.ignore()
+            return
+        self._cancel_hover()
+        self.contextRequested.emit(i, self.viewport().mapToGlobal(pos))
 
     def mouseDoubleClickEvent(self, event) -> None:
         # The first press made the poster current (and may have scrolled), so the second

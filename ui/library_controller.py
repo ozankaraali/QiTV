@@ -8,6 +8,11 @@ Search lives in a SearchSession. Every activation (a title, an episode, a search
 through one PendingAction: it runs at once when its provider is ready, otherwise the catalog
 switches to that provider and it runs once the provider is ready. Leaving the Library, or
 playing something else, drops it.
+
+A right-click on a film's poster or an episode row asks the shell for its menu (Play in VLC,
+Play in MPV, Copy stream link: `context_menu(item, section, global position)`, section "movies"
+or "series"). Links are asked of the provider QiTV is on, so a title of another provider, or
+any title during a provider switch, has no menu; nor has a series or a channel.
 """
 
 from __future__ import annotations
@@ -88,6 +93,7 @@ class LibraryController(QObject):
         play: Callable[[dict, str, dict], None],
         tune_live: Callable[[dict], None],
         back_to_tv: Callable[[], None],
+        context_menu: Optional[Callable[[dict, str, QPoint], None]] = None,
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
@@ -99,6 +105,7 @@ class LibraryController(QObject):
         self._play = play
         self._tune_live = tune_live
         self._back_to_tv = back_to_tv
+        self._context_menu = context_menu
         self._closed = False
         self._mode = "browse"
         self._zone = "grid"
@@ -146,6 +153,7 @@ class LibraryController(QObject):
         grid.sortRequested.connect(lambda value: model.set_sort(Sort(value)))
         grid.leftEdge.connect(self._on_left_edge)
         grid.upEdge.connect(self._on_up_edge)
+        grid.contextRequested.connect(self._on_grid_context)
         series.seasonSelected.connect(self._load_episodes)
         series.episodeActivated.connect(self._activate_episode)
         series.startOverRequested.connect(
@@ -153,6 +161,7 @@ class LibraryController(QObject):
         )
         series.retryRequested.connect(self._retry_series)
         series.backRequested.connect(self._leave_series)
+        series.episodeContextRequested.connect(self._on_episode_context)
         nav.tabRequested.connect(self._on_tab)
         nav.searchRequested.connect(self.open_search)
         nav.sourceRequested.connect(self._show_source_menu)
@@ -619,6 +628,39 @@ class LibraryController(QObject):
         else:
             context = _context(start_over=start_over)
             self._request(provider, lambda: self._play(item, "movie", context))
+
+    # ---- right-click menus -------------------------------------------------------------------
+
+    def _on_grid_context(self, index: int, global_pos: QPoint) -> None:
+        if self._closed:
+            return
+        if self._grid_content == "search":
+            hit = self._search.hit_at(index)
+            if hit is None or hit.section != "movies":
+                return  # a channel or a series: nothing to play from a menu
+            self._menu(hit.item, "movies", hit.provider, global_pos)
+            return
+        item = self._screen.grid.item(index)
+        if item is None:
+            return
+        kind = self._model.item_kind(item)
+        if kind != "series":  # a series plays nothing: its episodes have the menu
+            section = "series" if kind == "episode" else "movies"
+            self._menu(item, section, self._browse_provider(), global_pos)
+
+    def _on_episode_context(self, _season: dict, episode: dict, global_pos: QPoint) -> None:
+        if not self._closed:
+            provider = self._series_provider or self._catalog.current_provider_name()
+            self._menu(episode, "series", provider, global_pos)
+
+    def _menu(self, item: dict, section: str, provider: str, global_pos: QPoint) -> None:
+        """The shell's menu for `item`, when its links can be asked of the current provider."""
+        if (
+            self._context_menu is not None
+            and not self._catalog.is_loading()
+            and provider == self._catalog.current_provider_name()
+        ):
+            self._context_menu(item, section, global_pos)
 
     def _open_hit_series(self, series: dict, provider: str) -> None:
         back = "search" if self._grid_content == "search" else "browse"

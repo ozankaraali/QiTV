@@ -625,6 +625,7 @@ class ControllerTestCase(unittest.TestCase):
         self.drawer, self.transport, self.toast = FakeDrawer(), FakeTransport(), FakeToast()
         self.guide, self.next_card = FakeGuide(), FakeNextCard()
         self.welcome = FakeWelcome()
+        self.library_toast = FakeToast()  # the Library page's
         self.controller = self.make_controller(self.column)
 
     def make_controller(self, column, **extra):
@@ -665,6 +666,7 @@ class ControllerTestCase(unittest.TestCase):
             self.guide,
             self.next_card,
             self.welcome,
+            library_toast=self.library_toast,
         )
 
     def tune(self, index):
@@ -3121,6 +3123,65 @@ class ExternalButtonTests(ControllerTestCase):
     def test_with_nothing_played_there_is_no_menu(self):
         self.assertIsNone(self.open_menu())
         self.assertEqual(self.catalog.links, [])
+
+
+class LibraryMenuTests(ControllerTestCase):
+    """Owner (2026-10-15): a right-click on a Library title or episode offers VLC, MPV and its
+    link, as a channel's menu does, while the Library shows."""
+
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.controller.stop_for_library()  # the window shows the Library
+
+    def menu_for(self, item, section):
+        shown = []
+        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append((menu, pos))):
+            self.controller.show_library_menu(item, section, QPoint(40, 50))
+        menu, pos = shown[0]
+        self.addCleanup(menu.deleteLater)
+        self.assertEqual(pos, QPoint(40, 50))
+        return menu
+
+    def test_a_movie_offers_the_players_and_its_link(self):
+        menu = self.menu_for(VodTests.MOVIE, "movies")
+        self.assertEqual(
+            ContextMenuTests.texts(menu), ["Play in VLC", "Play in MPV", "Copy stream link"]
+        )
+        ContextMenuTests.choose(menu, "Play in VLC")
+        self.assertEqual(self.catalog.links[-1][1:], (VodTests.MOVIE, "movies", False))
+        self.ready("http://vod/heat.mkv")
+        self.assertEqual(self.external.calls, [("vlc", "http://vod/heat.mkv")])
+        self.assertEqual(self.watch.plays[-1][1:3], (VodTests.MOVIE, "movie"))
+        self.assertEqual(self.session.plays, [])  # nothing plays in the app
+
+    def test_an_episode_asks_for_an_episode_link(self):
+        episode = {"id": "s", "cmd": "x", "series": 2, "name": "Pilot"}
+        ContextMenuTests.choose(self.menu_for(episode, "series"), "Play in MPV")
+        self.assertEqual(self.catalog.links[-1][1:], (episode, "series", True))
+        self.ready("http://vod/pilot.mkv")
+        self.assertEqual(self.external.calls, [("mpv", "http://vod/pilot.mkv")])
+        self.assertEqual(self.watch.plays[-1][1:3], (episode, "episode"))
+
+    def test_its_messages_show_on_the_librarys_toast(self):
+        # The player's page, and its toast, are hidden while the Library shows.
+        ContextMenuTests.choose(self.menu_for(VodTests.MOVIE, "movies"), "Copy stream link")
+        self.ready("http://vod/heat.mkv")
+        self.assertEqual(QGuiApplication.clipboard().text(), "http://vod/heat.mkv")
+        self.assertEqual(self.library_toast.messages()[-1], ("Link copied", "info"))
+        self.external.missing = {"vlc"}
+        ContextMenuTests.choose(self.menu_for(VodTests.MOVIE, "movies"), "Play in VLC")
+        self.assertEqual(
+            self.library_toast.messages()[-1], ("VLC Media Player is not installed.", "error")
+        )
+        ContextMenuTests.choose(self.menu_for(VodTests.MOVIE, "movies"), "Play in MPV")
+        self.catalog.linkFailed.emit(self.catalog.links[-1][0], "No stream")
+        self.assertEqual(self.library_toast.messages()[-1], ("Heat: No stream", "error"))
+        self.external.result = (False, "MPV could not start\ndetails")
+        ContextMenuTests.choose(self.menu_for(VodTests.MOVIE, "movies"), "Play in MPV")
+        self.ready("http://vod/heat.mkv")
+        self.assertEqual(self.library_toast.messages()[-1], ("MPV could not start", "error"))
+        self.assertEqual(self.toast.messages(), [])
 
 
 class CardRoutingTests(AutoplayCase):

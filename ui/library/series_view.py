@@ -16,13 +16,14 @@ import re
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
+    QPoint,
     QRectF,
     QSize,
     Qt,
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QFont, QFontMetrics, QPainter
+from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QWidget
 
 from services.library import Details
@@ -282,6 +283,13 @@ class EpisodesView(ChannelListView):
         super().__init__(parent)
         self.focus_active = False
         self.button_active = False  # the focused row's "Start over" button has focus
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.RightButton:
+            event.accept()  # not a selection: the row's menu follows, the current row stays
+            return
+        super().mousePressEvent(event)
 
 
 class SeriesView(QWidget):
@@ -290,6 +298,8 @@ class SeriesView(QWidget):
     startOverRequested = Signal(object, object)
     retryRequested = Signal()
     backRequested = Signal()  # Esc / ← from the seasons row's first chip
+    # A right-click on an episode row (season, episode, global position): the shell's menu.
+    episodeContextRequested = Signal(object, object, QPoint)
 
     def __init__(self, posters, parent=None) -> None:
         super().__init__(parent)
@@ -314,6 +324,7 @@ class SeriesView(QWidget):
         self._view.setModel(self._model)
         self._view.setItemDelegate(self._delegate)
         self._view.rowClicked.connect(self._on_row_clicked)
+        self._view.customContextMenuRequested.connect(self._on_row_context)
         self._view.hide()
 
         self._debounce = QTimer(self)
@@ -550,6 +561,13 @@ class SeriesView(QWidget):
         self._view.setCurrentIndex(self._model.index(row))
         self._sync()
         self.activate()
+
+    def _on_row_context(self, pos: QPoint) -> None:
+        index = self._view.indexAt(pos)  # `pos` is the viewport's
+        if index.isValid() and self._season is not None:
+            episode = self._model.item(index.row())
+            global_pos = self._view.viewport().mapToGlobal(pos)
+            self.episodeContextRequested.emit(self._season, episode, global_pos)
 
     def _on_poster_ready(self, url: str) -> None:
         if url == self._poster_url:

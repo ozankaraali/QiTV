@@ -20,8 +20,10 @@ volume, and number entry, the previous channel and the guide wait for live TV.
 The guide (ui/guide_controller.py) takes the keys while it is open. The drawer's context menu
 (ui/context_actions.py) asks for links on LinkLanes' side lane; its "Play in VLC/MPV" releases
 the in-app stream first, as an external pick does. The transport's "Open in external player"
-offers the same two plays for what plays now. Only this controller holds the LiveTuner
-and the session: the others call back play_vod, tune or the external play.
+offers the same two plays for what plays now, and a right-click in the Library offers them
+with the link (`show_library_menu`); while the Library shows, the menus' messages go to its
+toast. Only this controller holds the LiveTuner and the session: the others call back
+play_vod, tune or the external play.
 
 Picture in picture (spec §7, Phase 4) is PipControls' (ui/pip_controls.py) over the window's
 SessionManager: each player has its own LiveTuner, and `session`, `live` and the tuner here
@@ -112,6 +114,7 @@ class Overlays:
     welcome: WelcomeCard
     pip_label: Any = None  # the PipLabel (Phase 4), with picture in picture only
     mixer: Any = None  # the volume mixer (Phase 4)
+    library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
 
 
 class TVController(QObject):
@@ -245,7 +248,7 @@ class TVController(QObject):
             external=self.external,
             toggle_favorite=self._toggle_favorite,
             play_external=self._play_external,
-            notify=self._notify,
+            notify=self._menu_notify,
             open_pip=self._open_pip_node if sessions is not None else None,
             parent=self,
         )
@@ -814,7 +817,7 @@ class TVController(QObject):
     def _on_side_failed(self, target: Target, message: str) -> None:
         """A context menu's link failed (or what used it did)."""
         if not self._closed:
-            self._error(f"{target.title}: {message}")
+            self._menu_error(f"{target.title}: {message}")
 
     def _keep_tuning_banner(self) -> None:
         """Show the banner again while the link of the channel it announces resolves."""
@@ -930,7 +933,7 @@ class TVController(QObject):
             if rest.strip():
                 logger.info("External player: %s", scrub(rest))
             self._restore_channel()
-            self._error(first.strip() or "The external player could not start")
+            self._menu_error(first.strip() or "The external player could not start")
             return
         self._current, self._cid = target, None
         self._delivered(target, url)
@@ -1511,6 +1514,15 @@ class TVController(QObject):
         if not self._closed:
             self._context.show(node, global_pos, self.overlays.drawer)
 
+    def show_library_menu(
+        self, item: dict, section: str, global_pos: QPoint, parent: Optional[QObject] = None
+    ) -> None:
+        """A right-click on a Library film ("movies") or episode ("series"): Play in VLC, Play
+        in MPV or Copy stream link, as the drawer's menu offers them."""
+        if not self._closed:
+            target = Target(item, section, item_title(item, episode=section == "series"))
+            self._context.show_target(target, global_pos, parent)
+
     def _on_external_requested(self, anchor: QPoint) -> None:
         """The transport's "Open in external player": what plays now, in VLC or MPV."""
         target = self._current
@@ -1563,6 +1575,22 @@ class TVController(QObject):
         clean = scrub(text)
         logger.info("Error shown: %s", clean)
         self._toast(clean, "error", ERROR_MS)
+
+    def _menu_notify(self, text: str, kind: str) -> None:
+        """A context menu's message: on the Library's toast while the Library shows (the
+        player's page, with its toast, is hidden then), else on the player's."""
+        toast = self.overlays.library_toast
+        if toast is not None and self._flow.in_library():
+            toast.show_message(text, kind, ERROR_MS if kind == "error" else INFO_MS)
+        else:
+            self._notify(text, kind)
+
+    def _menu_error(self, text: str) -> None:
+        """An external play or a context menu's link failed: _error's text, on _menu_notify's
+        toast."""
+        clean = scrub(text)
+        logger.info("Error shown: %s", clean)
+        self._menu_notify(clean, "error")
 
     @staticmethod
     def _log_failure(what: str, error: Exception) -> None:

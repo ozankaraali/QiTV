@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QPoint
 from PySide6.QtWidgets import QFileDialog, QWidget
 
 from services.exporter import ExportKind
@@ -49,6 +49,7 @@ class TVPages(QObject):
             play=self.play,
             tune_live=self.tune_live,
             back_to_tv=self.back_to_tv,
+            context_menu=self.context_menu,
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)
@@ -137,6 +138,12 @@ class TVPages(QObject):
             return False
         self._enter_library()
         return True
+
+    def context_menu(self, item: dict, section: str, global_pos: QPoint) -> None:
+        """A right-click on a Library film or episode: Play in VLC/MPV or Copy stream link."""
+        window = self._window
+        if not window.closing():
+            window.controller.show_library_menu(item, section, global_pos, window.library_page)
 
     def open_file(self) -> None:
         """File → Open File…: a local media file plays as a movie."""
