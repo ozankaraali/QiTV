@@ -25,7 +25,7 @@ All of it is unit-tested without network access or a real UI.
 
 ## Global Constraints
 
-- Python `>=3.14,<3.15`. Run everything through `uv run …` from `/Users/ozankaraali/QiTV` on branch `tv/vlc`.
+- Python `>=3.14,<3.15`. Run everything through `uv run …` from `<repo>` on branch `tv/vlc`.
 - **No native or compiled dependencies and no new runtime dependencies** (spec D1/D2).
 - Never block the GUI thread on network or disk-heavy work: catalog, EPG, link and provider setup always go through `JobRunner`.
 - **Thread affinity:**

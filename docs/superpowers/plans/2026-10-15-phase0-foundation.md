@@ -17,7 +17,7 @@
 
 ## Global Constraints
 
-- Python `>=3.14,<3.15`. Run everything through `uv run …` from the repository root `/Users/ozankaraali/QiTV`, on branch `tv/vlc`.
+- Python `>=3.14,<3.15`. Run everything through `uv run …` from the repository root `<repo>`, on branch `tv/vlc`.
 - Tests use `unittest`. Run the suite with `uv run python -m unittest discover -s tests -v`; Qt tests set `QT_QPA_PLATFORM=offscreen`.
 - Formatting: black and isort with line length 100. Lint: `uv run flake8 <files>`, which selects only E9, F63, F7 and F82. mypy must be no worse than baseline on touched modules.
 - Logging uses `logging.getLogger(__name__)`. No `print` and no silent `except: pass`.
@@ -39,7 +39,7 @@ These inputs are implied by the spec but not exercised by any existing test. Eac
 
 ### Task 1: Land the behaviour-preserving tidy-up
 
-The tidy-up lives uncommitted in worktree `/Users/ozankaraali/QiTV/.claude/worktrees/agent-a642403a20b2d2dbf` on branch `tidy/v1.13.8`, based on `16459ee`.
+The tidy-up lives uncommitted in worktree `<repo>/.claude/worktrees/agent-a642403a20b2d2dbf` on branch `tidy/v1.13.8`, based on `16459ee`.
 
 **Files:**
 - Modify (from the patch): `config_manager.py`, `content_loader.py`, `epg_manager.py`, `image_loader.py`, `image_manager.py`, `mixins/content_loading_mixin.py`, `mixins/export_mixin.py`, `mixins/playback_mixin.py`, `provider_manager.py`, `services/m3u.py`, `services/provider_api.py`, `sleep_manager.py`, `update_checker.py`, `workers.py`
@@ -55,7 +55,7 @@ The tidy-up lives uncommitted in worktree `/Users/ozankaraali/QiTV/.claude/workt
 - [ ] **Step 1: Record baselines on `tv/vlc`**
 
 ```bash
-cd /Users/ozankaraali/QiTV && git switch tv/vlc && uv sync --frozen --dev
+cd <repo> && git switch tv/vlc && uv sync --frozen --dev
 uv run python -m unittest discover -s tests 2>&1 | tail -3
 ```
 Expected: `Ran 14 tests` … `OK`.
@@ -63,8 +63,8 @@ Expected: `Ran 14 tests` … `OK`.
 - [ ] **Step 2: Export the tidy-up as a patch and apply it**
 
 ```bash
-W=/Users/ozankaraali/QiTV/.claude/worktrees/agent-a642403a20b2d2dbf
-SP=/private/tmp/claude-501/-Users-ozankaraali-QiTV/33b8c4af-5cee-4f7d-ac28-5590ca47103a/scratchpad
+W=<repo>/.claude/worktrees/agent-a642403a20b2d2dbf
+SP=<scratchpad>
 git -C "$W" diff > "$SP/tidy.patch"
 git apply --check "$SP/tidy.patch" && git apply "$SP/tidy.patch"
 cp "$W/tests/test_provider_api.py" tests/test_provider_api.py
@@ -118,10 +118,10 @@ EOF
 - [ ] **Step 6: Remove the spent worktree**
 
 ```bash
-git worktree remove /Users/ozankaraali/QiTV/.claude/worktrees/agent-a642403a20b2d2dbf --force
+git worktree remove <repo>/.claude/worktrees/agent-a642403a20b2d2dbf --force
 git branch -D tidy/v1.13.8 worktree-agent-a642403a20b2d2dbf 2>/dev/null; git worktree list
 ```
-Expected: `git worktree list` shows only `/Users/ozankaraali/QiTV  <sha> [tv/vlc]`.
+Expected: `git worktree list` shows only `<repo>  <sha> [tv/vlc]`.
 
 ---
 

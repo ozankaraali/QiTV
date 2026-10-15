@@ -45,7 +45,7 @@ Earlier plans give the consumed interfaces: Phase 1A (`services/*`), Phase 1B (`
 
 ## Global Constraints
 
-- Python `>=3.14,<3.15`. Run everything through `uv run …` from `/Users/ozankaraali/QiTV` on branch `tv/vlc`.
+- Python `>=3.14,<3.15`. Run everything through `uv run …` from `<repo>` on branch `tv/vlc`.
 - No native or compiled dependencies and no new runtime dependencies.
 - Never block the GUI thread on network or heavy disk work. All provider requests and cache reads go through `services/jobs.JobRunner` workers (`on_finished(context, payload)` / `on_error(context, message)` on the GUI thread) or the existing `CatalogService` requests. Never build QPixmap/QIcon off the GUI thread.
 - **Text matching** for filters, search, genre lists and the A–Z index uses `services.text_fold.fold` on both sides (casefold, NFKD, combining marks dropped, `ı`→`i`).

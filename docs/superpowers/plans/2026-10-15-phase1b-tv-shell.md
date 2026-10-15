@@ -28,7 +28,7 @@ Approved mockups: `docs/superpowers/specs/assets/2026-10-15-tv-on-vlc/01-shapes.
 
 ## Global Constraints
 
-- Python `>=3.14,<3.15`. Run everything through `uv run …` from `/Users/ozankaraali/QiTV` on branch `tv/vlc`.
+- Python `>=3.14,<3.15`. Run everything through `uv run …` from `<repo>` on branch `tv/vlc`.
 - No native or compiled dependencies and no new runtime dependencies.
 - **Overlay host:** VLC renders natively into `VideoSurface` (a native child widget), and every overlay is a child of `OverlayHost`, a frameless translucent tool window glued over the surface. Its **mask is the union of the visible overlays**, so the video stays visible and clickable elsewhere, and it degrades to opaque panels without a compositor.
 - Every overlay widget (banner, toast, column, drawer, transport) subclasses `ui.overlays.base.Overlay` (Task 1).
