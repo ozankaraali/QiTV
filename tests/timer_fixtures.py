@@ -7,13 +7,15 @@ loaded CI runner the product's timer can still be pending at that moment, so a t
 Qt fires due timers in deadline order, so a probe timer started after a product timer with a
 longer interval fires after it, however late the process gets to run. A coarse timer (the
 QTimer default) may slip by 5% of its interval, so give the probe at least that much margin.
+(That order holds for Qt's own timer list, on macOS and Linux. Windows runs timers natively; see
+the note in ``timeline``.)
 """
 
 from collections.abc import Callable
 import time
 from typing import Any
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QCoreApplication, Qt, QTimer
 from PySide6.QtTest import QTest
 
 __all__ = ["elapse", "timeline", "wait_until"]
@@ -42,6 +44,9 @@ def timeline(*steps: tuple[int, Callable[[], Any]]) -> list[Any]:
     longest = max((ms for ms, _action in steps), default=0)
     if not wait_until(lambda: len(results) == len(steps), longest + _TIMEOUT_MS):
         raise AssertionError(f"timers of {[ms for ms, _action in steps]} ms did not all fire")
+    # Windows delivers a precise timer as a posted event but a coarse one (the QTimer default)
+    # as a low-priority WM_TIMER message, so a due product timer can trail the last probe there.
+    QCoreApplication.processEvents()
     return [results[k] for k in range(len(steps))]
 
 
