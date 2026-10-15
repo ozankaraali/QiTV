@@ -73,6 +73,7 @@ from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.logos import LogoCache, PosterCache
+from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.drawer import Drawer
@@ -114,6 +115,12 @@ _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
 _MOUSE_EVENTS = (
     QEvent.Type.MouseButtonPress,
     QEvent.Type.MouseMove,
+    QEvent.Type.MouseButtonRelease,
+)
+# A press or release on a video surface (the first responder: ui.macos_window).
+_CLICK_EVENTS = (
+    QEvent.Type.MouseButtonPress,
+    QEvent.Type.MouseButtonDblClick,
     QEvent.Type.MouseButtonRelease,
 )
 
@@ -557,12 +564,11 @@ class TVWindow(QMainWindow):
         self.controller.video_clicked()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if (
-            watched in (self.surface, self.pip_surface)
-            and event.type() in _MOUSE_EVENTS
-            and isinstance(event, QMouseEvent)
-        ):
-            self._on_video_mouse(event)
+        if watched in (self.surface, self.pip_surface) and isinstance(event, QMouseEvent):
+            if event.type() in _CLICK_EVENTS:
+                reclaim_first_responder(self)  # macOS: libVLC's view took the keys
+            if event.type() in _MOUSE_EVENTS:
+                self._on_video_mouse(event)
         elif (
             watched is self.player_page
             and event.type() == QEvent.Type.Paint

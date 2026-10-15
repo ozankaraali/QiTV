@@ -1,4 +1,5 @@
-"""Attach the overlay as a Cocoa child window so macOS moves it with the player (spec §5.7)."""
+"""The TV window's Cocoa details: the overlay attached as a child window, so macOS moves it with
+the player (spec §5.7), and the keys given back to the window after a click on the video."""
 
 import ctypes
 import ctypes.util
@@ -38,6 +39,30 @@ def animates_restore() -> bool:
     then (checked on macOS 13): only the platform's report marks the end.
     """
     return QGuiApplication.platformName() == "cocoa"
+
+
+def reclaim_first_responder(window) -> bool:
+    """macOS: give the keys back to `window`'s own view after a click on a video surface.
+
+    A mouse down on the video makes libVLC's VLCVideoLayerView, which libVLC puts inside the
+    surface's NSView, the window's first responder. Keys then reach VLC's view first: they
+    still travel on to Qt, but macOS beeps on the way. `window` is the top-level widget; its
+    winId() is Qt's QNSView, made first responder again ([[view window] makeFirstResponder:
+    view]). Nothing happens elsewhere (False).
+    """
+    if QGuiApplication.platformName() != "cocoa":
+        return False
+    try:
+        view = int(window.winId())
+        ns_window = _send(view, b"window")
+        if not ns_window:
+            return False
+        return bool(
+            _send(ns_window, b"makeFirstResponder:", ctypes.c_bool, (ctypes.c_void_p, view))
+        )
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("Could not give the keys back to the window: %s", e)
+        return False
 
 
 def attach_child_window(parent, child) -> bool:

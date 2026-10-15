@@ -347,6 +347,19 @@ class TVWindowTests(WindowCase):
         self.assertTrue(wait_until(lambda: host.size() == self.window.surface.size()))
         self.assertEqual(transport.geometry(), host.rect())
 
+    def test_a_click_on_the_video_gives_the_keys_back_to_the_window(self):
+        # macOS: libVLC's view inside the clicked surface took the keys, and the next arrow
+        # key beeped on its way on to Qt (ui/macos_window.py).
+        self.show()
+        surface = self.window.surface
+        with mock.patch("ui.tv_window.reclaim_first_responder") as reclaim:
+            QTest.mousePress(surface, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
+            reclaim.assert_called_once_with(self.window)
+            QTest.mouseRelease(surface, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
+            self.assertEqual(reclaim.call_count, 2)
+            QTest.mouseMove(surface, QPoint(60, 60))
+            self.assertEqual(reclaim.call_count, 2)  # a move takes no keys
+
     def test_mouse_back_and_forward_step_through_the_drawer_layers(self):
         self.show()
         drawer = self.wait_for_drawer()

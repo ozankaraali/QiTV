@@ -36,6 +36,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
 from services.redact import safe_message
+from ui.macos_window import reclaim_first_responder
 from ui.overlays.painting import Units
 
 logger = logging.getLogger(__name__)
@@ -290,6 +291,10 @@ class PipFrame(QObject):
         if not isinstance(watched, QWidget):
             return False
         kind, left = event.type(), Qt.MouseButton.LeftButton
+        if kind != QEvent.Type.MouseMove and watched in self._surfaces.values():
+            # macOS: libVLC's view in the clicked surface took the keys. The window's filter
+            # never sees the presses this frame takes.
+            reclaim_first_responder(self._container.window())
         position = event.globalPosition().toPoint()
         if kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
             if event.button() != left:

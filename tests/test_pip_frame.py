@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -412,6 +413,20 @@ class NativeSurfaceTests(FrameCase):
         frame.__dict__.clear()
         delete(container)  # raises the filter's error, if it has one
         self.assertFalse(isValid(main))
+
+    def test_a_press_on_either_surface_gives_the_keys_back_to_the_window(self):
+        # macOS: libVLC's view inside the clicked surface took the keys (ui/macos_window.py).
+        frame = self.make()
+        frame.show_pip()
+        with mock.patch("ui.pip.reclaim_first_responder") as reclaim:
+            click(self.pip)  # the frame's own click (a swap): the window never sees it
+            self.assertEqual(reclaim.call_args_list, [mock.call(self.container.window())] * 2)
+            reclaim.reset_mock()
+            click(self.main)
+            self.assertEqual(reclaim.call_count, 2)
+            reclaim.reset_mock()
+            send(self.main, QEvent.Type.MouseMove, centre(self.main), NONE, NONE)
+            reclaim.assert_not_called()
 
     def test_back_on_the_small_surface_still_reaches_the_shell(self):
         frame = self.make()

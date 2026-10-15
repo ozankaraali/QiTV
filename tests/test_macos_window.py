@@ -98,6 +98,37 @@ class AttachChildWindowTests(unittest.TestCase):
         self.assertEqual(fake.sent, [])
 
 
+class FirstResponderTests(unittest.TestCase):
+    """A click on the video made libVLC's VLCVideoLayerView (inside the surface's NSView) the
+    window's first responder: the next arrow key reached VLC's view first and macOS beeped on
+    its way on to Qt. The window's own QNSView takes the keys back."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_the_windows_own_view_becomes_the_first_responder(self):
+        fake = FakeObjC()
+        with (
+            mock.patch.object(macos_window, "_send", fake),
+            mock.patch.object(macos_window.QGuiApplication, "platformName", return_value="cocoa"),
+        ):
+            macos_window.reclaim_first_responder(View(PARENT_VIEW))
+        self.assertEqual(
+            fake.sent,
+            [
+                (PARENT_VIEW, b"window", ()),
+                (PARENT_WINDOW, b"makeFirstResponder:", (PARENT_VIEW,)),
+            ],
+        )
+
+    def test_other_platforms_send_nothing(self):
+        fake = FakeObjC()
+        with mock.patch.object(macos_window, "_send", fake):
+            self.assertFalse(macos_window.reclaim_first_responder(View(PARENT_VIEW)))
+        self.assertEqual(fake.sent, [])
+
+
 class HostShowTests(unittest.TestCase):
     """Showing an overlay never activates QiTV: on macOS QWidget.raise_() activates the app
     (QT_MAC_SET_RAISE_PROCESS), so a banner over the inactive window would steal the focus.
