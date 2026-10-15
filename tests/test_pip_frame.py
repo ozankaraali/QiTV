@@ -9,7 +9,7 @@ from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 from shiboken6 import delete, isValid
-from timer_fixtures import elapse
+from timer_fixtures import elapse, wait_until
 
 from ui.overlay_host import OverlayHost
 from ui.overlays.pip_label import PipLabel
@@ -183,15 +183,13 @@ class PipFrameTests(FrameCase):
         frame.smallRectChanged.connect(rects.append)
         frame.set_lift(100)
         self.assertEqual(frame.small_rect(), BOTTOM_RIGHT)  # it moves over ~150 ms
-        elapse(LIFT_MS + 100)
         raised = BOTTOM_RIGHT.translated(0, -100)
-        self.assertEqual(frame.small_rect(), raised)
+        self.assertTrue(wait_until(lambda: frame.small_rect() == raised, 2000))
         self.assertEqual(rects[-1], raised)
         self.assertGreater(len(rects), 2)  # the label and the host's hole follow every step
         self.assertIs(self.on_top_at_small_centre(), self.pip)
         frame.set_lift(0)
-        elapse(LIFT_MS + 100)
-        self.assertEqual(frame.small_rect(), BOTTOM_RIGHT)
+        self.assertTrue(wait_until(lambda: frame.small_rect() == BOTTOM_RIGHT, 2000))
 
     def test_a_lift_taken_back_at_once_does_not_move_it(self):
         frame = self.make()

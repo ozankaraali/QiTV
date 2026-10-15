@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import elapse
+from timer_fixtures import elapse, timeline
 
 from ui.overlays.mixer import BOTTOM_U, FLOOR_GAP_U, Mixer, MixerRow
 from ui.overlays.painting import Units
@@ -76,14 +76,15 @@ class MixerTests(MixerCase):
         self.assertEqual(mixer.geometry().bottom() + 1, host.height() - Units(1280).px(BOTTOM_U))
 
     def test_it_hides_three_seconds_after_the_last_change(self):
-        _host, mixer = self.make(idle_ms=60)
+        # Timer order, not wall-clock waits (CI): each step runs as its probe fires, before
+        # any timer due later; the change at 100 ms restarts the 200 ms wait (due at 300+).
+        _host, mixer = self.make(idle_ms=200)
         closed = QSignalSpy(mixer.closed)
         mixer.show_rows([MAIN], 0)
-        elapse(40)
-        mixer.show_rows([MAIN], 0)  # a change: the full wait again
-        elapse(40)
-        self.assertTrue(mixer.isVisible())
-        elapse(40)
+        _, shown = timeline((100, lambda: mixer.show_rows([MAIN], 0)), (250, mixer.isVisible))
+        self.assertTrue(shown)
+        self.assertEqual(closed.count(), 0)
+        elapse(250)  # past the restarted wait however late it started
         self.assertFalse(mixer.isVisible())
         self.assertEqual(closed.count(), 1)
 

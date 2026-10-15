@@ -6,13 +6,13 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QWidget
-from timer_fixtures import elapse
+from timer_fixtures import wait_until
 
 from ui.bottom_band import BottomBand
 from ui.overlays.mixer import BOTTOM_U, Mixer, MixerRow
 from ui.overlays.painting import Units
 from ui.overlays.transport import Transport
-from ui.pip import LIFT_MS, PipFrame, corner_rect
+from ui.pip import PipFrame, corner_rect
 
 SHIFTED = {
     "start": 0.0,
@@ -57,7 +57,8 @@ class BottomBandTests(unittest.TestCase):
         self.gap = Units(1280).px(1)
 
     def settled(self):
-        elapse(LIFT_MS + 100)
+        """The small rect once the lift animation (LIFT_MS, started at once) has ended."""
+        self.assertTrue(wait_until(lambda: not self.frame.lifting(), 2000))
         return self.frame.small_rect()
 
     def test_the_pip_rises_above_the_transport_and_settles_back(self):

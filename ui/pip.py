@@ -213,6 +213,10 @@ class PipFrame(QObject):
     def _saved_corner(self) -> str:
         return _valid_corner(getattr(self._config, "pip_corner", DEFAULT_CORNER))
 
+    def lifting(self) -> bool:
+        """The small surface is on its way up or down (set_lift)."""
+        return self._lifting.state() == QVariantAnimation.State.Running
+
     def _small_target(self) -> QRect:
         return lifted_rect(self._container.size(), self._corner, self._lift)
 
