@@ -35,6 +35,36 @@ class ThemeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             qcolor("not-a-colour")
 
+    def test_css_eight_digit_hex_is_rrggbbaa(self):
+        color = qcolor("#11223380")
+        self.assertEqual(
+            (color.red(), color.green(), color.blue(), color.alpha()), (17, 34, 51, 128)
+        )
+
+    def test_css_four_digit_hex_is_rgba(self):
+        color = qcolor("#1238")
+        self.assertEqual(
+            (color.red(), color.green(), color.blue(), color.alpha()), (17, 34, 51, 136)
+        )
+
+    def test_short_hex(self):
+        self.assertEqual(qcolor("#fff").name(), "#ffffff")
+
+    def test_bad_hex_lengths_rejected(self):
+        for bad in ("#12345", "#1234567", "#ggg", "#"):
+            with self.assertRaises(ValueError, msg=bad):
+                qcolor(bad)
+
+    def test_rgba_components_validated(self):
+        for bad in ("rgba(300,0,0,1)", "rgba(0,0,0,1.5)"):
+            with self.assertRaises(ValueError, msg=bad):
+                qcolor(bad)
+
+    def test_alpha_override_validated(self):
+        for bad in (-0.1, 1.1):
+            with self.assertRaises(ValueError):
+                qcolor("#ffffff", bad)
+
 
 if __name__ == "__main__":
     unittest.main()
