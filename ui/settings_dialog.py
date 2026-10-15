@@ -37,6 +37,11 @@ from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from ui.update_dialogs import check_for_updates
 
+EXTERNAL_PLAYERS_HINT = (
+    "Any channel or movie can also go to VLC or MPV from its right-click menu or the player"
+    " controls."
+)
+
 requests = lazy_module("requests")
 
 # Jobs outlive a closed dialog; a running QThread must never be owned by that dialog.
@@ -296,6 +301,24 @@ class OptionsDialog(QDialog):
         )
         self.start_last_channel_checkbox.setChecked(self.config_manager.start_with_last_channel)
         self.settings_layout.addRow(self.start_last_channel_checkbox)
+
+        # External players as a mode: every channel opens there instead of the TV screen.
+        self.play_in_vlc_checkbox = QCheckBox("Always play in VLC", self.settings_tab)
+        self.play_in_mpv_checkbox = QCheckBox("Always play in MPV", self.settings_tab)
+        self.play_in_vlc_checkbox.setChecked(self.config_manager.play_in_vlc)
+        self.play_in_mpv_checkbox.setChecked(
+            self.config_manager.play_in_mpv and not self.config_manager.play_in_vlc
+        )
+        for box, other in (
+            (self.play_in_vlc_checkbox, self.play_in_mpv_checkbox),
+            (self.play_in_mpv_checkbox, self.play_in_vlc_checkbox),
+        ):
+            # One player at most; both off plays on the TV screen.
+            box.toggled.connect(lambda on, other=other: other.setChecked(False) if on else None)
+            self.settings_layout.addRow(box)
+        self.external_players_hint = QLabel(EXTERNAL_PLAYERS_HINT, self.settings_tab)
+        self.external_players_hint.setWordWrap(True)
+        self.settings_layout.addRow(self.external_players_hint)
 
         # Auto-play settings section
         self.autoplay_section_label = QLabel("<b>Auto-Play Settings</b>", self.settings_tab)
@@ -846,6 +869,8 @@ class OptionsDialog(QDialog):
         self.config_manager.live_latency = self.live_latency_combo.currentData()
         self.config_manager.mouse_wheel_action = self.mouse_wheel_combo.currentData()
         self.config_manager.start_with_last_channel = self.start_last_channel_checkbox.isChecked()
+        self.config_manager.play_in_vlc = self.play_in_vlc_checkbox.isChecked()
+        self.config_manager.play_in_mpv = self.play_in_mpv_checkbox.isChecked()
         self.config_manager.auto_play_episodes = self.auto_play_episodes_checkbox.isChecked()
         self.config_manager.auto_play_movies = self.auto_play_movies_checkbox.isChecked()
         self.config_manager.timeshift_enabled = self.timeshift_checkbox.isChecked()

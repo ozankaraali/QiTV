@@ -74,6 +74,8 @@ filter.
   in 1.x, because the banner and the channel list show them. To stop loading logos, untick
   **Enable Channel Logos** in Settings; to stop the guide downloads, set **EPG Source** to
   **No Source** in Settings → EPG.
+- **"Always play in VLC/MPV" is switched off once.** If it was on, 2.0 switches it off once so
+  channels play in the TV screen; turn it on again in Settings → **Always play in…**.
 - **Resume points of episodes do not carry over.** 2.0 tells episodes apart in a new way, so an
   episode you were in the middle of in 1.x starts from the beginning once.
 - **The minimum system is unchanged from 1.13.8** (on a Mac, macOS 13 or newer).

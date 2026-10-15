@@ -222,7 +222,14 @@ The exported files contain the stream addresses, which VLC and most players can 
 
 ## Playing in another player
 
-Right-click a channel, movie or episode in the channel list: **Play in VLC** and **Play in MPV** open it in those players (when they are installed), and **Copy stream link** copies its address. QiTV closes its own stream first, so a provider that allows one stream still works.
+Any channel, movie or episode can go to VLC or MPV (when they are installed):
+
+- right-click a channel in the channel list, or a film's poster or an episode in the Library: **Play in VLC** and **Play in MPV** open it in those players, and **Copy stream link** copies its address;
+- while it plays, the **Open in external player** button on the right of the player controls (a box with an arrow) offers **Play in VLC** and **Play in MPV**.
+
+QiTV closes its own stream first, so a provider that allows one stream still works.
+
+To open every channel in one of them instead of on the TV screen, turn on **Always play in VLC** or **Always play in MPV** in Settings.
 
 ## Portable mode
 

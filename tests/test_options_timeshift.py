@@ -27,8 +27,11 @@ class TimeshiftSettingsTests(base.WindowCase):
         )
         self.assertEqual(dialog.timeshift_size_slider.minimum(), 256)
         self.assertEqual(dialog.timeshift_size_slider.maximum(), 16384)
+        # The time-shift tab's copy (Settings names MPV for the external players).
+        tab = dialog.timeshift_checkbox.parentWidget()
+        self.assertEqual(tab.objectName(), "timeshiftSettings")
         texts = " ".join(
-            label.text() for label in dialog.findChildren(type(dialog.timeshift_size_label))
+            label.text() for label in tab.findChildren(type(dialog.timeshift_size_label))
         )
         self.assertIn("Without disk, each picture keeps its memory per stream", texts)
         self.assertNotIn("MPV", texts)
@@ -167,6 +170,45 @@ class MaxStreamsTests(base.WindowCase):
         dialog.max_streams_input.setValue(0)
         dialog.apply_provider()
         self.assertEqual(dialog.edited_provider.get("max_streams", 0), 0)
+
+
+class ExternalPlayerSettingsTests(base.WindowCase):
+    """Owner (2026-10-15): playing in VLC or MPV is picked in-app; Settings keeps it as a mode."""
+
+    def dialog(self):
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        return dialog
+
+    def test_the_options_read_as_a_mode_with_a_hint(self):
+        dialog = self.dialog()
+        self.assertEqual(dialog.play_in_vlc_checkbox.text(), "Always play in VLC")
+        self.assertEqual(dialog.play_in_mpv_checkbox.text(), "Always play in MPV")
+        self.assertEqual(
+            dialog.external_players_hint.text(),
+            "Any channel or movie can also go to VLC or MPV from its right-click menu or the"
+            " player controls.",
+        )
+        self.assertFalse(dialog.play_in_vlc_checkbox.isChecked())
+        self.assertFalse(dialog.play_in_mpv_checkbox.isChecked())
+
+    def test_one_player_at_most_is_saved(self):
+        dialog = self.dialog()
+        dialog.play_in_vlc_checkbox.setChecked(True)
+        dialog.play_in_mpv_checkbox.setChecked(True)  # the controller would prefer VLC
+        self.assertFalse(dialog.play_in_vlc_checkbox.isChecked())
+        dialog.save_settings()
+        saved = ConfigManager()
+        self.assertFalse(saved.play_in_vlc)
+        self.assertTrue(saved.play_in_mpv)
+
+    def test_a_saved_mode_opens_checked_and_can_be_turned_off(self):
+        self.config.play_in_vlc = True
+        dialog = self.dialog()
+        self.assertTrue(dialog.play_in_vlc_checkbox.isChecked())
+        dialog.play_in_vlc_checkbox.setChecked(False)
+        dialog.save_settings()
+        self.assertFalse(ConfigManager().play_in_vlc)
 
 
 if __name__ == "__main__":
