@@ -86,12 +86,14 @@ def draw_logo(p: QPainter, rect: QRectF, name: str, pixmap: QPixmap | None, radi
         p.save()
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.setClipPath(path)
         inner = rect.adjusted(
             rect.width() * 0.08, rect.height() * 0.08, -rect.width() * 0.08, -rect.height() * 0.08
         )
         scaled = pixmap.scaled(
-            int(inner.width()), int(inner.height()), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            int(inner.width()), int(inner.height()), Qt.KeepAspectRatio, Qt.FastTransformation
         )
         p.drawPixmap(
             QPointF(
@@ -291,7 +293,7 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
                 pts.append((0.5 + rad * math.cos(ang), 0.54 + rad * math.sin(ang)))
             fill(_poly(pts))
         elif name == "recent":
-            line(_arc(0.5, 0.5, 0.34, 90, 270 + 0))
+            line(_arc(0.5, 0.5, 0.34, 90, 270))
             hands = QPainterPath(QPointF(0.5, 0.3))
             hands.lineTo(0.5, 0.5)
             hands.lineTo(0.64, 0.58)

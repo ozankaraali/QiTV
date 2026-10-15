@@ -2,6 +2,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import tempfile
 import unittest
 from unittest import mock
 
@@ -132,6 +133,65 @@ class LogoCacheTest(unittest.TestCase):
         config = mock.Mock(channel_logos=logos, ssl_verify=True)
         return LogoCache(mock.Mock(), config)
 
+    def png(self, side):
+        pix = QPixmap(side, side)
+        pix.fill(QColor("red"))
+        handle, path = tempfile.mkstemp(suffix=".png")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        pix.save(path)
+        return path
+
+    def load(self, cache, url, path):
+        cache._batch = [url]
+        cache._seen.add(url)
+        cache._on_progress(1, 1, {"rank": 0, "cache_path": path})
+
+    def test_large_logo_is_bounded(self):
+        cache = self.make()
+        self.load(cache, "u", self.png(1000))
+        stored = cache.pixmap("u")
+        self.assertLessEqual(
+            max(stored.width(), stored.height()), 192 * max(1, round(self.app.devicePixelRatio()))
+        )
+
+    def test_lru_eviction_and_touch(self):
+        from ui import logos
+
+        cache = self.make()
+        path = self.png(4)
+        with mock.patch.object(logos, "MAX_ENTRIES", 3):
+            for name in "abc":
+                self.load(cache, name, path)
+            cache.pixmap("a")  # touch: b is now least recent
+            self.load(cache, "d", path)
+        self.assertIsNone(cache.pixmap("b"))
+        self.assertIsNotNone(cache.pixmap("a"))
+        self.assertIsNotNone(cache.pixmap("d"))
+
+    def test_shutdown_cancels_and_ignores_late_results(self):
+        cache = self.make()
+        loader = mock.Mock()
+        cache._loader = loader
+        cache._batch = ["u"]
+        cache._queue = ["q"]
+        cache.shutdown()
+        loader.cancel.assert_called_once()
+        cache._on_progress(1, 1, {"rank": 0, "cache_path": self.png(4)})
+        self.assertIsNone(cache.pixmap("u"))
+        with mock.patch("ui.logos.ImageLoader") as made:
+            cache.request(["z"])
+        made.assert_not_called()
+
+    def test_failed_url_is_retried_at_most_twice(self):
+        cache = self.make()
+        for attempt in range(4):
+            cache._seen.add("bad")
+            cache._batch = ["bad"]
+            with mock.patch("ui.logos.ImageLoader"), mock.patch("ui.logos.ThreadCleanup"):
+                cache._on_cleanup(None)
+            self.assertEqual("bad" in cache._seen, attempt >= 2)
+
     def test_pixmap_none_before_load(self):
         self.assertIsNone(self.make().pixmap("http://x/a.png"))
 
@@ -145,9 +205,7 @@ class LogoCacheTest(unittest.TestCase):
         cache = self.make()
         pix = QPixmap(4, 4)
         pix.fill(QColor("red"))
-        path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "qitv_logo_test.png")
-        pix.save(path)
-        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        path = self.png(4)
         ready = []
         cache.logoReady.connect(ready.append)
         with mock.patch("ui.logos.ImageLoader") as loader, mock.patch("ui.logos.ThreadCleanup"):
@@ -160,7 +218,7 @@ class LogoCacheTest(unittest.TestCase):
             loader.assert_called_once()
             instance = loader.return_value
             instance.start.assert_called_once()
-            cache._on_progress(instance, 1, 1, {"rank": 0, "cache_path": path})
+            cache._on_progress(1, 1, {"rank": 0, "cache_path": path})
         self.assertEqual(ready, ["http://x/a.png"])
         self.assertIsNotNone(cache.pixmap("http://x/a.png"))
         # unseen request urls are not re-requested

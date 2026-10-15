@@ -1,14 +1,19 @@
 """GUI-thread logo cache: batches URL downloads and builds QPixmaps on the GUI thread."""
 
+from collections import OrderedDict
 import logging
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QGuiApplication, QPixmap
 
 from image_loader import ImageLoader
 from services.thread_cleanup import ThreadCleanup
 
 logger = logging.getLogger(__name__)
+
+MAX_LOGO_SIDE = 192  # logical pixels; scaled by devicePixelRatio when stored
+MAX_ENTRIES = 2000
+MAX_RETRIES = 2
 
 
 class LogoCache(QObject):
@@ -18,17 +23,29 @@ class LogoCache(QObject):
         super().__init__(parent)
         self._image_manager = image_manager
         self._config = config_manager
-        self._pixmaps: dict[str, QPixmap] = {}
+        self._pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
+        self._retries: dict[str, int] = {}
+        self._closed = False
         self._seen: set[str] = set()
         self._queue: list[str] = []
         self._loader: ImageLoader | None = None
         self._batch: list[str] = []
 
     def pixmap(self, url: str) -> QPixmap | None:
-        return self._pixmaps.get(url)
+        pixmap = self._pixmaps.get(url)
+        if pixmap is not None:
+            self._pixmaps.move_to_end(url)
+        return pixmap
+
+    def shutdown(self) -> None:
+        """Stop loading; late results are ignored."""
+        self._closed = True
+        self._queue.clear()
+        if self._loader is not None:
+            self._loader.cancel()
 
     def request(self, urls: list[str]) -> None:
-        if not self._config.channel_logos:
+        if self._closed or not self._config.channel_logos:
             return
         for url in urls:
             if url and url not in self._seen:
@@ -47,15 +64,15 @@ class LogoCache(QObject):
             verify_ssl=self._config.ssl_verify,
         )
         self._loader = loader
-        loader.progress_updated.connect(
-            lambda cur, tot, data, ld=loader: self._on_progress(ld, cur, tot, data),
-            Qt.QueuedConnection,
-        )
+        loader.progress_updated.connect(self._on_progress, Qt.QueuedConnection)
         ThreadCleanup(loader).finished.connect(self._on_cleanup)
         loader.start()
 
-    def _on_progress(self, loader, current: int, total: int, data: dict) -> None:
-        if loader is not self._loader or not data:
+    def _on_progress(self, current: int, total: int, data: dict) -> None:
+        if self._closed or not data:
+            return
+        sender = self.sender()  # None when invoked directly
+        if sender is not None and sender is not self._loader:
             return
         rank = data.get("rank")
         path = data.get("cache_path")
@@ -66,10 +83,33 @@ class LogoCache(QObject):
         if pixmap.isNull():
             logger.info("Unreadable cached logo for %s", url)
             return
-        self._pixmaps[url] = pixmap
+        self._store(url, self._bounded(pixmap))
         self.logoReady.emit(url)
 
+    @staticmethod
+    def _bounded(pixmap: QPixmap) -> QPixmap:
+        app = QGuiApplication.instance()
+        dpr = app.devicePixelRatio() if isinstance(app, QGuiApplication) else 1.0
+        limit = max(1, round(MAX_LOGO_SIDE * dpr))
+        if max(pixmap.width(), pixmap.height()) <= limit:
+            return pixmap
+        return pixmap.scaled(limit, limit, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def _store(self, url: str, pixmap: QPixmap) -> None:
+        self._pixmaps[url] = pixmap
+        self._pixmaps.move_to_end(url)
+        while len(self._pixmaps) > MAX_ENTRIES:
+            evicted, _ = self._pixmaps.popitem(last=False)
+            self._seen.discard(evicted)  # may be requested again
+
     def _on_cleanup(self, _thread) -> None:
+        for url in self._batch:
+            if url not in self._pixmaps and url in self._seen:
+                tries = self._retries.get(url, 0) + 1
+                self._retries[url] = tries
+                if tries <= MAX_RETRIES:
+                    self._seen.discard(url)  # failed: allow a later retry
         self._loader = None
         self._batch = []
-        self._start_next()
+        if not self._closed:
+            self._start_next()
