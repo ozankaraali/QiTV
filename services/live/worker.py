@@ -94,7 +94,8 @@ _Addition = tuple[int, float, float, bool]  # seq, start, end, discontinuity
 
 # BurstMeter (see its docstring):
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
-_BURST_PACE = 2.0  # a burst brings its media at least this many times faster than it plays
+_BURST_SHARE = 0.5  # a burst's bytes arrive within this share of the time until the next
+_FIRST_BURST_S = 1.5  # a burst this long counts at once, before a second one confirms it
 _BURST_SPREAD = 1.5  # two bursts in a row are alike when neither is larger by more than this
 _BURST_RUN = 3  # the estimate is the largest of this many latest bursts
 _STEADY_BURSTS = 3.0  # this many estimates' worth of seconds without a gap: steady again
@@ -105,18 +106,27 @@ class BurstMeter:
 
     Some providers' raw MPEG-TS restreams send ~10 s of media at once every ~10 s, as HLS
     sends a segment at a time. `add()` takes each chunk's arrival time and the media position
-    after it (the live edge, in seconds; it starts at 0.0). A burst ends where `_BURST_GAP_S`
-    passes without a byte; it counts only when it brought its media at least `_BURST_PACE`
-    times faster than real time, so the stretch before a hiccup on a steady stream (about as
-    long to deliver as to play) is no burst, and clears the run of bursts.
+    after it (the live edge, in seconds; it starts at 0.0).
 
-    `burst_s` stays 0.0 until two bursts in a row are alike (within `_BURST_SPREAD`): a single
-    hiccup never makes a steady source bursty, and a provider's large initial backlog does not
-    become the estimate. From then on it is the largest of the last `_BURST_RUN` alike bursts:
-    a burst larger than the estimate would starve the player before the next one lands (and
-    count as a stall), one smaller costs nothing. A burst unlike the one before starts a new
-    run and leaves the estimate as it was until two are alike again. Once `_STEADY_BURSTS`
-    estimates' worth of seconds pass without a gap, the source is steady again (0.0).
+    A burst ends where `_BURST_GAP_S` passes without a byte, and is measured when the next
+    one begins: its period is the time from its first byte to the next burst's first byte.
+    It counts only when its bytes arrived within `_BURST_SHARE` of that period (mostly gap),
+    so the stretch before a hiccup on a steady stream, which takes about as long to deliver
+    as to play, is no burst (it clears the run of bursts), also when a backlog at connect
+    came first. It counts for its media, but at most its period: at real time no more plays
+    until the next burst lands, so anything beyond that was a backlog. That keeps the
+    provider's backlog at connect (12 s, then 10 s every 10 s) or after a reconnect out of
+    the estimate without treating the first burst apart.
+
+    The first clear burst (at least `_FIRST_BURST_S`) is the estimate at once, so the target,
+    the mean lag and the stall bound follow from the second burst on, before stay-live could
+    eat the buffer catching up with a lag that is only the sawtooth. Once two bursts in a row
+    are alike (within `_BURST_SPREAD`), the estimate is the largest of the last `_BURST_RUN`
+    alike ones: a burst larger than the estimate would starve the player before the next one
+    lands (and count as a stall), one smaller costs nothing. A burst unlike the one before
+    starts a new run and leaves the estimate as it was until two are alike again, which
+    corrects a first burst that was not typical. Once `_STEADY_BURSTS` estimates' worth of
+    seconds pass without a gap, the source is steady again (0.0).
 
     Pure logic: no clock of its own.
     """
@@ -137,24 +147,32 @@ class BurstMeter:
         last = self._last_wall
         if last is None or wall - last >= _BURST_GAP_S:
             if last is not None:
-                self._ended(self._media - self._start_media, last - self._start_wall)
+                self._ended(
+                    self._media - self._start_media,
+                    last - self._start_wall,
+                    wall - self._start_wall,
+                )
             self._start_wall, self._start_media = wall, self._media
         self._last_wall, self._media = wall, media
         if self._estimate and wall - self._start_wall >= _STEADY_BURSTS * self._estimate:
             self._estimate = 0.0  # no gap for a while: steady after all
             self._run.clear()
 
-    def _ended(self, size: float, took: float) -> None:
-        """A burst of `size` media seconds ended; its bytes arrived over `took` seconds."""
-        if size <= 0 or took * _BURST_PACE > size:
+    def _ended(self, media: float, took: float, period: float) -> None:
+        """A burst of `media` seconds ended: its bytes arrived over `took` seconds, and the
+        next burst began `period` seconds after it did."""
+        if media <= 0 or took > _BURST_SHARE * period:
             self._run.clear()  # about as long to deliver as to play: no burst
             return
+        size = min(media, period)  # more than plays until the next one: a backlog
         run = self._run
         if run and max(size, run[-1]) > _BURST_SPREAD * min(size, run[-1]):
             run.clear()  # unlike the one before: a new run starts
         run.append(size)
         if len(run) >= 2:
             self._estimate = max(run)
+        elif not self._estimate and size >= _FIRST_BURST_S:
+            self._estimate = size  # the first clear burst, until others confirm or correct it
 
 
 class _Cancelled(Exception):

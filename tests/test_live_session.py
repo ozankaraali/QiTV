@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from services.live import worker
 import services.live.live_session as live_session
 from services.live.live_session import LiveSession
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
@@ -221,10 +222,10 @@ class Feed:
     """A live source and a VLC around a test's fakes, modelled on the review's simulator.
 
     Media arrives `burst` seconds at a time every `burst` seconds (raw TS when 0: a quarter
-    second at a time), reported as `burst_s` from arrival `measured_after` on (the helper
-    measures a raw TS source's bursts; HLS reports its own at once), each arrival optionally
-    jittered, cut into `gop` second segments
-    whose newest stays open until the next arrival, as in the real segmenter. VLC plays at
+    second at a time), each arrival optionally jittered, cut into `gop` second segments
+    whose newest stays open until the next arrival, as in the real segmenter. The state
+    reports `burst` as `burst_s` (HLS: its target duration), or with `metered` what the
+    helper's BurstMeter measures from the arrivals (raw TS; `edge` arrived at connect). VLC plays at
     the last rate set while it has data; at the edge it reports `starved` (BUFFERING; real
     libVLC 3 keeps reporting PLAYING with its clock standing still). While `stalled` the
     source sends nothing: the edge stands still and no state arrives. LiveSession ticks every
@@ -245,10 +246,10 @@ class Feed:
         seed=1,
         first=None,
         starved=PlaybackState.BUFFERING,
-        measured_after=0,
+        metered=False,
     ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
-        self.measured_after, self.arrivals = measured_after, 0
+        self.meter = worker.BurstMeter() if metered else None
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
         self.jitter, self.rng = jitter, random.Random(seed)
         self.nominal = case.clock.now + (self.chunk if first is None else first)
@@ -263,7 +264,10 @@ class Feed:
     def push(self):
         closed = math.ceil(self.edge / self.gop - 1e-9) - 1  # the newest segment is open
         spans = segments(0, closed, length=self.gop)
-        burst = self.burst if self.arrivals >= self.measured_after else 0.0
+        burst = self.burst
+        if self.meter is not None:
+            self.meter.add(self.case.clock.now, self.edge)
+            burst = self.meter.burst_s
         self.case.engine.buffer(self.sid, spans, live_edge=self.edge, open_seq=closed, burst=burst)
 
     def ready(self):
@@ -290,7 +294,6 @@ class Feed:
                 while now >= self.next_arrival - 1e-9:
                     if not self.stalled:
                         self.edge += self.chunk
-                        self.arrivals += 1
                     self.nominal += self.chunk
                     self.next_arrival = self.nominal + self.rng.uniform(-self.jitter, self.jitter)
                 if not self.stalled:
@@ -1177,21 +1180,23 @@ class StayLiveTests(LiveSessionCase):
         # Paused, the mean lag grows with the wall clock, the transport's "behind live" too.
         self.assertAlmostEqual(self.timelines[-1]["lag"], before + 12.0, delta=0.3)
 
-    def test_raw_ts_bursts_once_measured_are_handled_as_hls_bursts(self):
-        """The owner's channel (2.0.1, L1): raw TS, 10 s at once every 10 s, measured by the
-        helper from the second burst on. From then on: no stall shown between bursts, the
-        burst is the target, no catch-up into the next gap, and Go live keeps a burst's room."""
+    def test_raw_ts_bursts_are_handled_as_hls_bursts_from_the_second_burst(self):
+        """The owner's channel (2.0.1, L1): raw TS, 12 s at connect, then 10 s at once every
+        10 s, measured as the helper does. From the second burst on: no stall shown between
+        bursts, the burst is the target (never the 12 s backlog), no catch-up into the next
+        gap and nothing starves; Go live keeps a burst's room."""
         sid = self.start()
-        feed = Feed(self, sid, burst=10.0, edge=12.0, measured_after=2).ready()
-        feed.run(10.5)
-        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])  # not measured yet
-        feed.run(10.0)  # the second burst landed: measured
-        timelines, rates = len(self.timelines), len(self.playback.rates)
+        feed = Feed(self, sid, burst=10.0, edge=12.0, metered=True).ready()
+        feed.run(10.0)  # the second burst lands at its end
+        self.assertEqual(self.timelines[-2]["target"], TARGETS["normal"])  # not known yet
+        self.assertEqual(self.timelines[-1]["target"], 10.0)
+        timelines = len(self.timelines) - 1
         feed.run(60.0)
         after = self.timelines[timelines:]
         self.assertTrue(all(state["target"] == 10.0 for state in after))
         self.assertFalse(any(state["stalled"] for state in after))
-        self.assertTrue(all(rate <= 1.0 for rate in self.playback.rates[rates:]))
+        self.assertTrue(all(state["rate"] <= 1.05 for state in after))
+        self.assertEqual(max(state["target"] for state in self.timelines), 10.0)
         self.assertEqual(len(self.playback.plays), 1)  # nothing reopened
         self.assertEqual(feed.starved_s, 0.0)
         arrivals = len(feed.before)
@@ -1204,6 +1209,25 @@ class StayLiveTests(LiveSessionCase):
         self.assertGreater(min(feed.before[arrivals + 1 :]), 10.0 / 2 - 0.25 - 0.5)
         self.assertFalse(any(state["stalled"] for state in self.timelines[timelines:]))
         self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_steady_raw_ts_source_shows_a_hiccup_only_while_it_lasts(self):
+        """30 s at connect, then real time with one 3 s hiccup: never taken for bursts."""
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=30.0, metered=True).ready()
+        self.live.go_live()
+        feed.sync()
+        feed.run(20.0)
+        feed.stalled = True
+        feed.run(3.0)
+        self.assertTrue(self.timelines[-1]["stalled"])  # "Reconnecting…" while it lasts
+        feed.stalled = False
+        feed.run(0.25)  # the source sends again
+        self.assertFalse(self.timelines[-1]["stalled"])
+        timelines = len(self.timelines)
+        feed.run(40.0)
+        self.assertFalse(any(state["stalled"] for state in self.timelines[timelines:]))
+        self.assertEqual({state["target"] for state in self.timelines}, {TARGETS["normal"]})
+        self.assertEqual(feed.meter.burst_s, 0.0)
 
     def test_a_source_bursty_again_after_steady_eases_afresh(self):
         """A raw TS source's measured bursts may stop and come back (2.0.1, L1)."""

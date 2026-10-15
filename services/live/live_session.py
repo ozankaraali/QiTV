@@ -37,9 +37,9 @@ setting's or the source's burst (`burst_s`), whichever is larger: segments that 
 would make a smaller target underrun at every segment. The burst is an HLS source's target
 duration, or what the helper measured on a raw TS source that arrives in bursts (some
 providers' restreams send ~10 s at once every ~10 s); 0.0 for a steady source, and for a
-raw TS one until two alike bursts were seen (`services.live.worker.BurstMeter`). With
-bursts the lag is a sawtooth as tall as a burst, so the lag used (and reported) is its
-mean, in closed form: the current
+raw TS one until its first clear burst was followed by the next (from the second burst on;
+`services.live.worker.BurstMeter`). With bursts the lag is a sawtooth as tall as a burst,
+so the lag used (and reported) is its mean, in closed form: the current
 lag plus the time since the edge last moved, less half a burst (see `_lag`); the step a
 landing burst adds is eased in over a few bursts, since it holds the jitter of when a
 burst lands (see `_smooth`). Held against the instantaneous peak, the rate would change at

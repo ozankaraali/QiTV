@@ -62,32 +62,55 @@ class BurstMeterTests(unittest.TestCase):
         self.assertEqual(set(measured(steady(0.0, 120.0))), {0.0})
 
     def test_ten_second_bursts_every_ten_seconds(self):
-        series = bursts(0.0, 10.0, 10.0, 6)
-        readings = measured(series)
-        # Reported once two bursts are complete: the third one's first chunk shows the gap.
-        third = 2 * 5
-        self.assertEqual(set(readings[:third]), {0.0})
-        self.assertEqual(set(readings[third:]), {10.0})
+        readings = measured(bursts(0.0, 10.0, 10.0, 6))
+        # From the first clear burst on: the second one's first chunk shows the gap.
+        self.assertEqual(set(readings[:5]), {0.0})
+        self.assertEqual(set(readings[5:]), {10.0})
 
     def test_two_second_bursts_every_two_seconds(self):
         readings = measured(bursts(0.0, 2.0, 2.0, 10))
-        self.assertEqual(set(readings[: 2 * 5]), {0.0})
-        self.assertEqual(set(readings[2 * 5 :]), {2.0})
+        self.assertEqual(set(readings[:5]), {0.0})
+        self.assertEqual(set(readings[5:]), {2.0})
 
-    def test_the_estimate_is_the_largest_of_the_last_three_bursts(self):
-        # The provider's first burst carries a little backlog: 12 s, then 10 s each.
-        series = bursts(0.0, 12.0, 10.0, 1, chunks=5)
+    def test_a_burst_under_a_second_and_a_half_waits_for_a_second_alike(self):
+        readings = [round(reading, 6) for reading in measured(bursts(0.0, 1.2, 1.2, 6, spread=0.1))]
+        self.assertEqual(set(readings[:10]), {0.0})
+        self.assertEqual(set(readings[10:]), {1.2})
+
+    def test_a_connect_backlog_counts_only_up_to_the_next_burst(self):
+        # The owner's provider: 12 s at connect, then 10 s every 10 s. Only what plays
+        # until the next burst lands counts; the rest was a backlog.
+        series = bursts(0.0, 12.0, 10.0, 1)
         series += bursts(10.0, 10.0, 10.0, 5, media=12.0)
         readings = measured(series)
-        self.assertEqual(readings[2 * 5], 12.0)  # 12 and 10: consistent, the larger
-        self.assertEqual(readings[4 * 5], 10.0)  # 10, 10, 10: the backlog has left the run
+        self.assertEqual(set(readings[:5]), {0.0})
+        self.assertEqual(set(readings[5:]), {10.0})
 
-    def test_a_large_initial_backlog_is_not_the_estimate(self):
-        series = bursts(0.0, 30.0, 10.0, 1, chunks=5)
+    def test_a_large_connect_backlog_is_not_the_estimate(self):
+        series = bursts(0.0, 30.0, 10.0, 1)
         series += bursts(10.0, 10.0, 10.0, 5, media=30.0)
+        self.assertEqual(set(measured(series)[5:]), {10.0})
+
+    def test_the_estimate_is_the_largest_of_the_last_three_alike_bursts(self):
+        # 9, 10, 11 and 9 s bursts, each landing as the one before has played.
+        series, media = [], 0.0
+        for wall, size in ((0.0, 9.0), (10.0, 10.0), (21.0, 11.0), (33.0, 9.0), (43.0, 9.0)):
+            series += bursts(wall, size, 0.0, 1, media=media)
+            media += size
         readings = measured(series)
-        self.assertEqual(set(readings[: 3 * 5]), {0.0})  # 30 then 10: not two alike yet
-        self.assertEqual(set(readings[3 * 5 :]), {10.0})
+        self.assertEqual(readings[5], 9.0)  # the first: provisional
+        self.assertEqual(readings[10], 10.0)  # 9 and 10 alike: the larger
+        self.assertEqual(readings[15], 11.0)
+        self.assertEqual(readings[20], 11.0)  # 10, 11, 9
+
+    def test_bursts_unlike_the_first_correct_it_once_two_are_alike(self):
+        # 10 s at connect, a 10 s wait while the restream starts, then 4 s every 4 s.
+        series = bursts(0.0, 10.0, 10.0, 1)
+        series += bursts(10.0, 4.0, 4.0, 5, media=10.0)
+        readings = measured(series)
+        self.assertEqual(readings[5], 10.0)  # provisional
+        self.assertEqual(readings[10], 10.0)  # one 4 s burst: not yet
+        self.assertEqual(set(readings[15:]), {4.0})  # two alike: corrected
 
     def test_one_hiccup_does_not_make_a_continuous_source_bursty(self):
         # 30 s steady, 3 s without a byte, then the backlog at once and steady again.
@@ -101,6 +124,21 @@ class BurstMeterTests(unittest.TestCase):
         series += steady(33.0, 30.0, media=33.0)
         series += steady(66.0, 30.0, media=66.0)
         self.assertEqual(set(measured(series)), {0.0})
+
+    def test_a_steady_source_with_a_connect_backlog_and_a_hiccup_stays_steady(self):
+        series = [(0.0, 30.0)]  # 30 s at connect, then real time
+        series += steady(0.1, 20.0, media=30.0)
+        series += steady(23.1, 30.0, media=50.0)
+        self.assertEqual(set(measured(series)), {0.0})
+
+    def test_a_hiccup_right_after_connect_is_steady_again_soon(self):
+        # 2 s at connect, 3 s without a byte, then steady: a clear burst, at first.
+        series = bursts(0.0, 2.0, 0.0, 1) + steady(3.0, 20.0, media=2.0)
+        readings = measured(series)
+        self.assertEqual(readings[5], 2.0)
+        steady_from = 5 + round(6.0 / 0.1) + 1  # three estimates without a gap: 6 s
+        self.assertEqual(readings[steady_from - 12], 2.0)
+        self.assertEqual(set(readings[steady_from:]), {0.0})
 
     def test_a_bursty_source_that_turns_continuous_is_steady_again(self):
         bursty = bursts(0.0, 4.0, 4.0, 5)
