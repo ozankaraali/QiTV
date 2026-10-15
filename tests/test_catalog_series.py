@@ -181,7 +181,9 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(failed, [("1", "boom")])
         service.request_seasons(series)  # error released the pending slot
         self.assertEqual(len(factory.calls), 2)
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
         service.select_provider()  # switch clears pending
+        runner.complete(len(runner.jobs) - 1)  # requests wait for the setup to finish
         service.request_seasons(series)
         self.assertEqual([c[0] for c in factory.calls].count("xtream_series"), 3)
 

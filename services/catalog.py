@@ -11,7 +11,7 @@ from datetime import datetime
 import itertools
 import logging
 import re
-from typing import Optional
+from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 SECTION_CONTENT_TYPES = {"live": "itv", "movies": "vod", "series": "series"}
 ALL_GROUP_ID = "*"
 NO_SERIES_MESSAGE = "This provider has no series"
+PROVIDER_LOADING_MESSAGE = "The provider is still loading"
+GROUP_UNAVAILABLE_MESSAGE = "This group isn't available"
+# Catalog network jobs (sections, groups, seasons, episodes) running at once per service:
+# portals rate-limit, and some ban a MAC that opens many connections.
+MAX_CATALOG_JOBS = 2
 
 
 def normalize_seasons(series_name: str, items: list[dict]) -> list[dict]:
@@ -138,25 +143,48 @@ class Group:
     count: Optional[int] = None  # None: an STB group that has not been fetched yet
 
 
+@dataclass(frozen=True, eq=False)
+class _Job:
+    """A running job's context: results are kept only for the same generation and provider."""
+
+    kind: str
+    generation: int
+    provider: str
+    data: Any = None
+    key: Optional[tuple] = None  # catalog jobs: the de-duplication key
+
+
+@dataclass(eq=False)
+class _CatalogRequest:
+    """A catalog network request waiting for a free job slot."""
+
+    key: tuple
+    kind: str
+    data: Any
+    build: Callable[[], QObject]
+
+
 class WorkerFactory:
     """Creates the real workers; tests substitute a fake with the same method names."""
 
-    def provider_setup(self, provider_manager, force_refresh):
+    def provider_setup(self, provider_manager, force_refresh) -> QObject:
         from workers import ProviderSetupWorker
 
         return ProviderSetupWorker(provider_manager, force_refresh)
 
-    def epg(self, epg_manager, force_refresh):
+    def epg(self, epg_manager, force_refresh) -> QObject:
         from workers import EpgLoadWorker
 
         return EpgLoadWorker(epg_manager, force_refresh)
 
-    def m3u(self, url, verify_ssl, prefer_https):
+    def m3u(self, url, verify_ssl, prefer_https) -> QObject:
         from workers import M3ULoaderWorker
 
         return M3ULoaderWorker(url, verify_ssl=verify_ssl, prefer_https=prefer_https)
 
-    def xtream(self, base_url, username, password, content_type, verify_ssl, prefer_https):
+    def xtream(
+        self, base_url, username, password, content_type, verify_ssl, prefer_https
+    ) -> QObject:
         from workers import XtreamLoaderWorker
 
         return XtreamLoaderWorker(
@@ -168,30 +196,38 @@ class WorkerFactory:
             prefer_https=prefer_https,
         )
 
-    def stb_categories(self, url, headers, content_type, verify_ssl, prefer_https):
+    def stb_categories(self, url, headers, content_type, verify_ssl, prefer_https) -> QObject:
         from workers import STBCategoriesWorker
 
         return STBCategoriesWorker(
             url, headers, content_type, verify_ssl=verify_ssl, prefer_https=prefer_https
         )
 
-    def stb_list(self, **loader_kwargs):
+    def stb_list(self, **loader_kwargs) -> QObject:
         from workers import StbListWorker
 
         return StbListWorker(**loader_kwargs)
 
-    def xtream_series(self, **kwargs):
+    def xtream_series(self, **kwargs) -> QObject:
         from workers import XtreamSeriesInfoWorker
 
         return XtreamSeriesInfoWorker(**kwargs)
 
-    def link(self, **kwargs):
+    def link(self, **kwargs) -> QObject:
         from workers import LinkCreatorWorker
 
         return LinkCreatorWorker(**kwargs)
 
 
 class CatalogService(QObject):
+    """The TV shell's view of the current provider.
+
+    Provider setups and EPG loads mutate the shared ProviderManager/EpgManager, so they
+    run one at a time in a small serial queue. While a setup is running or queued, catalog
+    and link requests fail fast instead of reading half-switched provider state. Catalog
+    network jobs run at most MAX_CATALOG_JOBS at a time; the rest wait newest-first.
+    """
+
     providerReady = Signal(str)
     providerFailed = Signal(str, str)
     sectionReady = Signal(str)
@@ -223,11 +259,21 @@ class CatalogService(QObject):
         self.factory = factory or WorkerFactory()
         self._generation = 0
         self._epg_ready = False
-        self._setup_running = False
+        self._ready_provider: Optional[str] = None
+        # Serial provider-state queue: setups and EPG loads never overlap.
+        self._state_job: Optional[str] = None  # "provider" or "epg" while one runs
         self._pending_setup: Optional[tuple[Optional[str], bool]] = None
-        self._pending_groups: set[tuple[int, str, str]] = set()
-        self._pending_seasons: set[tuple[int, str]] = set()
-        self._pending_episodes: set[tuple[int, str, str]] = set()
+        self._pending_epg: Optional[bool] = None  # a queued EPG load (its force flag)
+        # Catalog network jobs: keys are (generation, kind, ...) for queued and running jobs.
+        self._catalog_running = 0
+        self._catalog_queue: list[_CatalogRequest] = []
+        self._catalog_inflight: set[tuple] = set()
+        self._catalog_handlers: dict[str, tuple[Callable, Callable]] = {
+            "section": (self._on_section_loaded, self._on_section_error),
+            "group": (self._on_group_loaded, self._on_group_error),
+            "seasons": (self._on_seasons_loaded, self._on_seasons_error),
+            "episodes": (self._on_episodes_loaded, self._on_episodes_error),
+        }
         self._link_ids = itertools.count(1)
 
     # --- providers -------------------------------------------------------------------
@@ -244,17 +290,22 @@ class CatalogService(QObject):
         return str(self.current_provider().get("type", "")).upper()
 
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
-        # Setups mutate the shared ProviderManager, so only one runs at a time; the
-        # generation bumps now so a superseded setup's results are ignored.
+        # Only one setup runs at a time; the generation bumps now so results of anything
+        # issued for the previous provider are ignored, and queued catalog requests and a
+        # queued EPG load (both for the previous provider) are dropped.
         self._generation += 1
         self._epg_ready = False
-        self._pending_groups.clear()
-        self._pending_seasons.clear()
-        self._pending_episodes.clear()
-        if self._setup_running:
+        self._ready_provider = None
+        self._catalog_queue.clear()
+        self._pending_epg = None
+        if self._state_job is not None:
             self._pending_setup = (name, force_refresh)
             return
         self._start_setup(name, force_refresh)
+
+    def _setup_active(self) -> bool:
+        """True while a provider setup is running or waiting to run."""
+        return self._state_job == "provider" or self._pending_setup is not None
 
     def _start_setup(self, name: Optional[str], force_refresh: bool) -> None:
         if name is not None and name != self.config.selected_provider_name:
@@ -262,7 +313,7 @@ class CatalogService(QObject):
             self.config.save_config()
         target = name if name is not None else self.config.selected_provider_name
         worker = self.factory.provider_setup(self.provider_manager, force_refresh)
-        self._setup_running = True
+        self._state_job = "provider"
         self._start(
             worker,
             "provider",
@@ -271,35 +322,72 @@ class CatalogService(QObject):
             self._on_provider_error,
         )
 
-    def _finish_setup(self) -> bool:
-        """Mark the running setup done; True when a queued request took over."""
-        self._setup_running = False
-        pending, self._pending_setup = self._pending_setup, None
-        if pending is None:
-            return False
-        self._start_setup(*pending)
-        return True
+    def _next_state_job(self) -> bool:
+        """The running setup or EPG load is done: start the next queued one.
 
-    def _on_provider_ready(self, job, payload) -> None:
-        if self._finish_setup() or not self._current(job):
+        True when a queued provider setup took over (the finished job is superseded).
+        """
+        self._state_job = None
+        if self._pending_setup is not None:
+            pending, self._pending_setup = self._pending_setup, None
+            self._start_setup(*pending)
+            return True
+        if self._pending_epg is not None:
+            force, self._pending_epg = self._pending_epg, None
+            self._start_epg(force)
+        return False
+
+    def _on_provider_ready(self, job: _Job, payload) -> None:
+        if self._next_state_job() or job.generation != self._generation:
             return
-        self.providerReady.emit(self.current_provider_name())
-        worker = self.factory.epg(self.epg_manager, job[2][1])
-        self._start(worker, "epg", None, self._on_epg_ready, self._on_epg_error)
+        # A new generation for the ready provider: nothing issued before or during the
+        # setup can store its result now.
+        self._generation += 1
+        self._ready_provider = self.current_provider_name()
+        self.providerReady.emit(self._ready_provider)
+        self._request_epg(job.data[1])
+        self._pump_catalog()
 
-    def _on_provider_error(self, job, message: str) -> None:
-        if self._finish_setup() or not self._current(job):
+    def _on_provider_error(self, job: _Job, message: str) -> None:
+        if self._next_state_job() or job.generation != self._generation:
             return
-        self.providerFailed.emit(job[2][0] or self.current_provider_name(), message)
+        self.providerFailed.emit(job.data[0] or self.current_provider_name(), message)
+        self._pump_catalog()
 
-    def _on_epg_ready(self, job, payload) -> None:
-        if self._current(job):
-            self._epg_ready = True
-            self.epgReady.emit()
+    # --- EPG --------------------------------------------------------------------------
+    def refresh_epg(self, *, force: bool = False) -> None:
+        """Reload the ready provider's guide (the TV shell calls this periodically).
 
-    def _on_epg_error(self, job, message: str) -> None:
-        if self._current(job):
-            logger.info("EPG unavailable: %s", message)
+        Runs behind any setup or EPG load already running; ignored while a setup is
+        pending, since a finished setup loads its own guide.
+        """
+        if self._ready_provider is None or self._ready_provider != self.current_provider_name():
+            return
+        self._request_epg(force)
+
+    def _request_epg(self, force: bool) -> None:
+        if self._setup_active():
+            return
+        if self._state_job is not None:  # an EPG load is running: load once more after it
+            self._pending_epg = bool(force or self._pending_epg)
+            return
+        self._start_epg(force)
+
+    def _start_epg(self, force: bool) -> None:
+        self._state_job = "epg"
+        worker = self.factory.epg(self.epg_manager, force)
+        self._start(worker, "epg", force, self._on_epg_ready, self._on_epg_error)
+
+    def _on_epg_ready(self, job: _Job, payload) -> None:
+        if self._next_state_job() or not self._current(job):
+            return
+        self._epg_ready = True
+        self.epgReady.emit()
+
+    def _on_epg_error(self, job: _Job, message: str) -> None:
+        if self._next_state_job() or not self._current(job):
+            return
+        logger.info("EPG unavailable: %s", message)
 
     def epg_ready(self) -> bool:
         return self._epg_ready
@@ -328,14 +416,15 @@ class CatalogService(QObject):
         return None  # M3U entries may be live or on demand
 
     def request_section(self, section: str, *, force: bool = False) -> None:
+        if self._setup_active():
+            self._emit_later(self.sectionFailed, section, PROVIDER_LOADING_MESSAGE)
+            return
         ct = SECTION_CONTENT_TYPES[section]
         content = self.provider_manager.current_provider_content.get(ct)
         if not force and self._usable(content) and not self.provider_manager.is_content_stale(ct):
             self._emit_later(self.sectionReady, section)
             return
         provider, ptype = self.current_provider(), self.provider_type()
-        verify = provider.get("ssl_verify", self.config.ssl_verify)
-        https = provider_prefers_https(provider, self.config.prefer_https)
         if ptype == "M3USTREAM":
             item = {
                 "id": 1,
@@ -352,10 +441,20 @@ class CatalogService(QObject):
             )
             self._emit_later(self.sectionReady, section)
             return
+        if ptype not in ("M3UPLAYLIST", "XTREAM", "STB"):
+            self._emit_later(self.sectionFailed, section, f"Unsupported provider: {ptype}")
+            return
+        self._request_catalog(("section", section), "section", section, self._section_worker)
+
+    def _section_worker(self, section: str) -> QObject:
+        provider, ptype = self.current_provider(), self.provider_type()
+        ct = SECTION_CONTENT_TYPES[section]
+        verify = provider.get("ssl_verify", self.config.ssl_verify)
+        https = provider_prefers_https(provider, self.config.prefer_https)
         if ptype == "M3UPLAYLIST":
-            worker = self.factory.m3u(provider.get("url", ""), verify, https)
-        elif ptype == "XTREAM":
-            worker = self.factory.xtream(
+            return self.factory.m3u(provider.get("url", ""), verify, https)
+        if ptype == "XTREAM":
+            return self.factory.xtream(
                 provider.get("url", ""),
                 provider.get("username", ""),
                 provider.get("password", ""),
@@ -363,25 +462,17 @@ class CatalogService(QObject):
                 verify,
                 https,
             )
-        elif ptype == "STB":
-            worker = self.factory.stb_categories(
-                provider.get("url", ""), self.provider_manager.headers, ct, verify, https
-            )
-        else:
-            self._emit_later(self.sectionFailed, section, f"Unsupported provider: {ptype}")
-            return
-        self._start(worker, "section", section, self._on_section_loaded, self._on_section_error)
+        return self.factory.stb_categories(
+            provider.get("url", ""), self.provider_manager.headers, ct, verify, https
+        )
 
-    def _on_section_loaded(self, job, payload) -> None:
-        if not self._current(job):
-            return
-        section = job[2]
+    def _on_section_loaded(self, job: _Job, payload) -> None:
+        section = job.data
         self._store_section(SECTION_CONTENT_TYPES[section], payload)
         self.sectionReady.emit(section)
 
-    def _on_section_error(self, job, message: str) -> None:
-        if self._current(job):
-            self.sectionFailed.emit(job[2], message)
+    def _on_section_error(self, job: _Job, message: str) -> None:
+        self.sectionFailed.emit(job.data, message)
 
     def _store_section(self, ct: str, payload) -> None:
         self.provider_manager.current_provider_content[ct] = payload
@@ -446,15 +537,24 @@ class CatalogService(QObject):
         return None
 
     def request_group(self, section: str, group_id: str) -> None:
+        if self._setup_active():
+            self._emit_later(self.groupFailed, section, group_id, PROVIDER_LOADING_MESSAGE)
+            return
         if self.items(section, group_id) is not None:
             self._emit_later(self.groupReady, section, group_id)
             return
-        key = (self._generation, section, group_id)
-        if key in self._pending_groups:
+        if self.provider_type() != "STB":
+            # Only STB portals load groups on demand; elsewhere the section holds them all.
+            self._emit_later(self.groupFailed, section, group_id, GROUP_UNAVAILABLE_MESSAGE)
             return
-        self._pending_groups.add(key)
+        self._request_catalog(
+            ("group", section, group_id), "group", (section, group_id), self._group_worker
+        )
+
+    def _group_worker(self, data: tuple[str, str]) -> QObject:
+        section, group_id = data
         provider = self.current_provider()
-        worker = self.factory.stb_list(
+        return self.factory.stb_list(
             url=stb_endpoint(
                 stb_portal_base(
                     provider.get("url", ""),
@@ -466,28 +566,21 @@ class CatalogService(QObject):
             category_id=group_id,
             verify_ssl=provider.get("ssl_verify", self.config.ssl_verify),
         )
-        self._start(
-            worker, "group", (section, group_id), self._on_group_loaded, self._on_group_error
-        )
 
-    def _on_group_loaded(self, job, payload) -> None:
-        section, group_id = job[2]
-        self._pending_groups.discard((job[1], section, group_id))
-        if not self._current(job):
-            return
+    def _on_group_loaded(self, job: _Job, payload) -> None:
+        section, group_id = job.data
         content = self.provider_manager.current_provider_content.get(SECTION_CONTENT_TYPES[section])
         if not isinstance(content, dict):
             logger.warning("Dropping %s group %s: section content is not loaded", section, group_id)
+            self.groupFailed.emit(section, group_id, GROUP_UNAVAILABLE_MESSAGE)
             return
         content.setdefault("contents", {})[group_id] = list(payload.get("items") or [])
         self.provider_manager.save_provider()
         self.groupReady.emit(section, group_id)
 
-    def _on_group_error(self, job, message: str) -> None:
-        section, group_id = job[2]
-        self._pending_groups.discard((job[1], section, group_id))
-        if self._current(job):
-            self.groupFailed.emit(section, group_id, message)
+    def _on_group_error(self, job: _Job, message: str) -> None:
+        section, group_id = job.data
+        self.groupFailed.emit(section, group_id, message)
 
     # --- series -----------------------------------------------------------------------
     def _series_cache(self) -> dict:
@@ -496,29 +589,31 @@ class CatalogService(QObject):
         if not isinstance(content, dict):
             logger.debug("Replacing non-dict series content %r", type(content))
             content = contents["series"] = {}
-        return content
+        return cast(dict, content)
 
     def seasons(self, series: dict) -> Optional[list[dict]]:
         cached = self._series_cache().get("seasons", {}).get(str(series.get("id")))
         return list(cached) if isinstance(cached, list) else None
 
     def request_seasons(self, series: dict) -> None:
-        if self.seasons(series) is not None:
-            self._emit_later(self.seasonsReady, str(series.get("id")))
-            return
         series_id = str(series.get("id"))
+        if self._setup_active():
+            self._emit_later(self.seasonsFailed, series_id, PROVIDER_LOADING_MESSAGE)
+            return
+        if self.seasons(series) is not None:
+            self._emit_later(self.seasonsReady, series_id)
+            return
         if self.provider_type() not in ("XTREAM", "STB"):
             self._emit_later(self.seasonsFailed, series_id, NO_SERIES_MESSAGE)
             return
-        key = (self._generation, series_id)
-        if key in self._pending_seasons:
-            return
-        self._pending_seasons.add(key)
+        self._request_catalog(("seasons", series_id), "seasons", series, self._seasons_worker)
+
+    def _seasons_worker(self, series: dict) -> QObject:
         provider = self.current_provider()
         verify = provider.get("ssl_verify", self.config.ssl_verify)
         https = provider_prefers_https(provider, self.config.prefer_https)
         if self.provider_type() == "XTREAM":
-            worker = self.factory.xtream_series(
+            return self.factory.xtream_series(
                 base_url=provider.get("url", ""),
                 username=provider.get("username", ""),
                 password=provider.get("password", ""),
@@ -527,25 +622,20 @@ class CatalogService(QObject):
                 verify_ssl=verify,
                 prefer_https=https,
             )
-        else:
-            worker = self.factory.stb_list(
-                url=stb_endpoint(stb_portal_base(provider.get("url", ""), https)),
-                headers=self.provider_manager.headers,
-                content_type="series",
-                category_id=series.get("category_id") or series.get("tv_genre_id", ""),
-                movie_id=series.get("id"),
-                season_id=0,
-                action="get_ordered_list",
-                sortby="name",
-                verify_ssl=verify,
-            )
-        self._start(worker, "seasons", series, self._on_seasons_loaded, self._on_seasons_error)
+        return self.factory.stb_list(
+            url=stb_endpoint(stb_portal_base(provider.get("url", ""), https)),
+            headers=self.provider_manager.headers,
+            content_type="series",
+            category_id=series.get("category_id") or series.get("tv_genre_id", ""),
+            movie_id=series.get("id"),
+            season_id=0,
+            action="get_ordered_list",
+            sortby="name",
+            verify_ssl=verify,
+        )
 
-    def _on_seasons_loaded(self, job, payload) -> None:
-        self._pending_seasons.discard((job[1], str(job[2].get("id"))))
-        if not self._current(job):
-            return
-        series = job[2]
+    def _on_seasons_loaded(self, job: _Job, payload) -> None:
+        series = job.data
         cache = self._series_cache()
         if payload.get("resolved_base"):
             cache["resolved_base"] = payload["resolved_base"]
@@ -555,10 +645,8 @@ class CatalogService(QObject):
         self.provider_manager.save_provider()
         self.seasonsReady.emit(str(series.get("id")))
 
-    def _on_seasons_error(self, job, message: str) -> None:
-        self._pending_seasons.discard((job[1], str(job[2].get("id"))))
-        if self._current(job):
-            self.seasonsFailed.emit(str(job[2].get("id")), message)
+    def _on_seasons_error(self, job: _Job, message: str) -> None:
+        self.seasonsFailed.emit(str(job.data.get("id")), message)
 
     def episodes(self, series: dict, season: dict) -> Optional[list[dict]]:
         if self.provider_type() == "XTREAM":
@@ -579,19 +667,24 @@ class CatalogService(QObject):
         return list(cached) if isinstance(cached, list) else None
 
     def request_episodes(self, series: dict, season: dict) -> None:
-        if self.episodes(series, season) is not None:
-            self._emit_later(self.episodesReady, str(series.get("id")), str(season.get("id")))
-            return
         series_id, season_id = str(series.get("id")), str(season.get("id"))
+        if self._setup_active():
+            self._emit_later(self.episodesFailed, series_id, season_id, PROVIDER_LOADING_MESSAGE)
+            return
+        if self.episodes(series, season) is not None:
+            self._emit_later(self.episodesReady, series_id, season_id)
+            return
         if self.provider_type() != "STB":
             self._emit_later(self.episodesFailed, series_id, season_id, NO_SERIES_MESSAGE)
             return
-        key = (self._generation, series_id, season_id)
-        if key in self._pending_episodes:
-            return
-        self._pending_episodes.add(key)
+        self._request_catalog(
+            ("episodes", series_id, season_id), "episodes", (series, season), self._episodes_worker
+        )
+
+    def _episodes_worker(self, data: tuple[dict, dict]) -> QObject:
+        series, season = data
         provider = self.current_provider()
-        worker = self.factory.stb_list(
+        return self.factory.stb_list(
             url=stb_endpoint(
                 stb_portal_base(
                     provider.get("url", ""),
@@ -607,15 +700,9 @@ class CatalogService(QObject):
             sortby="added",
             verify_ssl=provider.get("ssl_verify", self.config.ssl_verify),
         )
-        self._start(
-            worker, "episodes", (series, season), self._on_episodes_loaded, self._on_episodes_error
-        )
 
-    def _on_episodes_loaded(self, job, payload) -> None:
-        series, season = job[2]
-        self._pending_episodes.discard((job[1], str(series.get("id")), str(season.get("id"))))
-        if not self._current(job):
-            return
+    def _on_episodes_loaded(self, job: _Job, payload) -> None:
+        series, season = job.data
         season_id = str(season.get("id"))
         selected = next(
             (item for item in payload.get("items") or [] if str(item.get("id")) == season_id),
@@ -638,16 +725,17 @@ class CatalogService(QObject):
         self.provider_manager.save_provider()
         self.episodesReady.emit(str(series.get("id")), season_id)
 
-    def _on_episodes_error(self, job, message: str) -> None:
-        series, season = job[2]
-        self._pending_episodes.discard((job[1], str(series.get("id")), str(season.get("id"))))
-        if self._current(job):
-            self.episodesFailed.emit(str(series.get("id")), str(season.get("id")), message)
+    def _on_episodes_error(self, job: _Job, message: str) -> None:
+        series, season = job.data
+        self.episodesFailed.emit(str(series.get("id")), str(season.get("id")), message)
 
     # --- links ------------------------------------------------------------------------
     def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
         """Resolve a playable URL. STB portals mint a fresh link; others play `cmd` directly."""
         request_id = next(self._link_ids)
+        if self._setup_active():
+            self._emit_later(self.linkFailed, request_id, PROVIDER_LOADING_MESSAGE)
+            return request_id
         if section not in SECTION_CONTENT_TYPES:
             self._emit_later(self.linkFailed, request_id, f"Unknown section: {section}")
             return request_id
@@ -672,32 +760,87 @@ class CatalogService(QObject):
         self._start(worker, "link", request_id, self._on_link_ready, self._on_link_error)
         return request_id
 
-    def _on_link_ready(self, job, payload) -> None:
+    def _on_link_ready(self, job: _Job, payload) -> None:
         if not self._current(job):
             return
         url = str(payload.get("link") or "").strip()
         if url:
-            self.linkReady.emit(job[2], url)
+            self.linkReady.emit(job.data, url)
         else:
-            self.linkFailed.emit(job[2], "The portal returned an empty link")
+            self.linkFailed.emit(job.data, "The portal returned an empty link")
 
-    def _on_link_error(self, job, message: str) -> None:
+    def _on_link_error(self, job: _Job, message: str) -> None:
         if self._current(job):
-            self.linkFailed.emit(job[2], message)
+            self.linkFailed.emit(job.data, message)
+
+    # --- catalog job queue ------------------------------------------------------------
+    def _request_catalog(
+        self, key: tuple, kind: str, data, build: Callable[[Any], QObject]
+    ) -> None:
+        """Run a catalog network job once per key, at most MAX_CATALOG_JOBS at a time."""
+        key = (self._generation, *key)
+        if key in self._catalog_inflight:
+            return
+        for index, queued in enumerate(self._catalog_queue):
+            if queued.key == key:
+                # Asked again: it is the user's latest focus, so it goes next.
+                self._catalog_queue.append(self._catalog_queue.pop(index))
+                return
+        self._catalog_queue.append(_CatalogRequest(key, kind, data, lambda: build(data)))
+        self._pump_catalog()
+
+    def _pump_catalog(self) -> None:
+        while (
+            self._catalog_queue
+            and self._catalog_running < MAX_CATALOG_JOBS
+            and not self._setup_active()
+        ):
+            request = self._catalog_queue.pop()  # newest first: the user's latest focus
+            self._catalog_running += 1
+            self._catalog_inflight.add(request.key)
+            job = _Job(
+                request.kind,
+                self._generation,
+                self.current_provider_name(),
+                request.data,
+                request.key,
+            )
+            self.runner.run_worker(
+                request.build(), self._on_catalog_loaded, self._on_catalog_error, context=job
+            )
+
+    def _finish_catalog_job(self, job: _Job) -> bool:
+        """Free the job's slot; True when its result still belongs to the current provider."""
+        self._catalog_running -= 1
+        self._catalog_inflight.discard(job.key)
+        return self._current(job)
+
+    def _on_catalog_loaded(self, job: _Job, payload) -> None:
+        try:
+            if self._finish_catalog_job(job):
+                self._catalog_handlers[job.kind][0](job, payload)
+        finally:
+            self._pump_catalog()
+
+    def _on_catalog_error(self, job: _Job, message: str) -> None:
+        try:
+            if self._finish_catalog_job(job):
+                self._catalog_handlers[job.kind][1](job, message)
+        finally:
+            self._pump_catalog()
 
     # --- job bookkeeping -------------------------------------------------------------
     def _start(self, worker, kind: str, data, on_finished, on_error) -> None:
-        self.runner.run_worker(
-            worker, on_finished, on_error, context=(kind, self._generation, data)
-        )
+        job = _Job(kind, self._generation, self.current_provider_name(), data)
+        self.runner.run_worker(worker, on_finished, on_error, context=job)
 
-    def _current(self, job) -> bool:
-        """True while the job belongs to the current provider generation."""
-        return bool(job[1] == self._generation)
+    def _current(self, job: _Job) -> bool:
+        """True while the job belongs to the current provider generation and provider."""
+        return job.generation == self._generation and job.provider == self.current_provider_name()
 
     def _emit_later(self, signal, *args) -> None:
         generation = self._generation
-        QTimer.singleShot(0, lambda: self._emit_if_current(generation, signal, *args))
+        QTimer.singleShot(0, self, lambda: self._emit_if_current(generation, signal, *args))
 
     def _emit_if_current(self, generation: int, signal, *args) -> None:
         if generation == self._generation:

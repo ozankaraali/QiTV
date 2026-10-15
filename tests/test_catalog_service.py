@@ -278,8 +278,9 @@ class CatalogServiceTests(unittest.TestCase):
                 collect(service.epgReady),
                 collect(service.sectionReady),
             )
+            # Requests made while the setup runs fail fast; the shell asks once it is ready.
+            service.providerReady.connect(lambda _name: service.request_section("live"))
             service.select_provider()
-            service.request_section("live")
             for _ in range(300):
                 if ready and epg and sections:
                     break
@@ -349,16 +350,27 @@ class CatalogServiceTests(unittest.TestCase):
         runner.complete(0)
         self.assertEqual(service.items("movies", "5"), [{"id": 1}])
 
-    def test_group_result_with_unloaded_section_is_dropped(self):
+    def test_group_result_with_unloaded_section_fails(self):
+        # Formerly dropped silently, which left the drawer loading forever (finding m1).
         runner = ManualRunner()
         provider = {"name": "S", "type": "STB", "url": "http://portal/c/"}
         service, providers, factory, _ = make_service(provider, runner=runner)
         factory.results["stb_list"] = {"result": {"items": []}}
-        ready = collect(service.groupReady)
+        ready, failed = collect(service.groupReady), collect(service.groupFailed)
         service.request_group("movies", "5")
         with self.assertLogs("services.catalog", "WARNING"):
             runner.complete(0)
         self.assertEqual(ready, [])
+        self.assertEqual(failed, [("movies", "5", "This group isn't available")])
+
+    def test_non_stb_group_without_items_fails_without_a_request(self):
+        service, providers, factory, _ = make_service({"name": "X", "type": "XTREAM", "url": "h"})
+        providers.current_provider_content["vod"] = {"categories": [], "contents": {}}
+        failed = collect(service.groupFailed)
+        service.request_group("movies", "5")
+        self.pump()
+        self.assertEqual(failed, [("movies", "5", "This group isn't available")])
+        self.assertEqual(factory.calls, [])
 
 
 if __name__ == "__main__":
