@@ -158,7 +158,7 @@
     - `set_speed(rate)`: `playback.set_rate(rate)` plus `stay_live.user_speed(rate)`.
   - **Interruptions:**
     - playback `ended` or `errorOccurred` in pipeline mode while the session is not ended: reopen at `max(position, oldest)`. If the position was older than the oldest, emit `notice("Rewound past the buffer")`.
-    - `sessionFailed(kind="internal")` after ready: wait for `available(True)` and the engine's reopen, then `go_live()`.
+    - `sessionFailed(kind="internal")` after ready: wait for `available(True)` and the engine's reopen, then `go_live()`. The engine sends `internal` only for sessions whose input is not over: after `sessionEnded` or a final `sessionFailed`, only `sessionClosed` follows for that sid.
     - `available(False)`: switch to direct and keep it for this run.
     - `sessionFailed(kind="disk")` **after** ready (the helper swapped in a RAM ring and dropped the history): notice "Disk time-shift isn't available; using memory", then `go_live()`.
     - `sessionFailed` with kind `network`, `timeout` or `http` **after** ready (the source gave up; the session is ended): play the original URL directly with the LIVE profile and the notice "Lost the time-shift buffer; playing live". If that direct play also fails, the usual error toast applies.
