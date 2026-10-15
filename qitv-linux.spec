@@ -47,6 +47,10 @@ a = Analysis(
     datas=[
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read
         ('assets', 'assets'),  # Include icons and desktop file
+        # QiTV's license, and those of what the app ships (VLC, Qt, Python libraries).
+        ('LICENSE', '.'),
+        ('THIRD-PARTY-NOTICES.md', '.'),
+        ('licenses', 'licenses'),
     ],
     hiddenimports=[
         # The live time-shift helper process (spawned) and what its source imports.
