@@ -14,6 +14,7 @@ import requests
 import tzlocal
 
 from services.content_loader import ContentLoader
+from services.epg_store import read_guide, write_guide
 from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_as
 from services.multikeydict import MultiKeyDict
 from services.provider_api import (
@@ -38,6 +39,12 @@ def _cache_key(source: str) -> str:
 
 def _xtream_cache_key(provider_url: str, username: str) -> str:
     return _cache_key(f"{provider_url}:{username}")
+
+
+def _file_stamp(path: str) -> tuple[int, int, int]:
+    """What changes when a file is written again: inode, size and modification time."""
+    stat = os.stat(path)
+    return (stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
 _XMLTV_FORMATS = ("%Y%m%d%H%M%S %z", "%Y%m%d%H%M%S")
@@ -135,6 +142,9 @@ class EpgManager:
         # one and swaps it in (see _publish), while the GUI thread keeps reading.
         self.epg: MultiKeyDict = MultiKeyDict()
         self._epg_source: Optional[str] = None  # the cache key self.epg was loaded from
+        # The guide last read from or written to its file: (path, file stamp, guide). While
+        # it is still the one shown and the file is unchanged, it is not read again.
+        self._saved: Optional[tuple[str, tuple[int, int, int], Any]] = None
         self._load_index()
 
     def _cache_dir(self):
@@ -145,7 +155,11 @@ class EpgManager:
     def _index_file(self):
         return os.path.join(self._cache_dir(), "index.json")
 
+    def _guide_path(self, cache_key):
+        return os.path.join(self._cache_dir(), f"{cache_key}.guide")
+
     def _pickle_path(self, cache_key):
+        """Where versions before the piecewise format (epg_store) saved the guide."""
         return os.path.join(self._cache_dir(), f"{cache_key}.pkl")
 
     def _is_expired(self, epg_info):
@@ -163,20 +177,48 @@ class EpgManager:
         self.epg = guide
 
     def _load_cached_epg(self, cache_key):
-        """Load a previously indexed EPG from disk; return False if it is missing."""
-        epg_file = self._pickle_path(cache_key)
-        if not os.path.exists(epg_file):
-            return False
-        with open(epg_file, "rb") as f:
-            self._publish(cache_key, pickle.load(f))
+        """Load a previously indexed EPG from disk; return False if it is missing.
+
+        The guide shown is kept when it is the one in that file and the file is unchanged.
+        """
+        path = self._guide_path(cache_key)
+        legacy = not os.path.exists(path)
+        if legacy:
+            path = self._pickle_path(cache_key)
+            if not os.path.exists(path):
+                return False
+        stamp = _file_stamp(path)
+        saved = self._saved
+        shown = (
+            saved is not None
+            and self._epg_source == cache_key
+            and self.epg is saved[2]
+            and saved[:2] == (path, stamp)
+        )
+        if not shown:
+            if legacy:
+                with open(path, "rb") as f:
+                    guide = pickle.load(f)
+            else:
+                guide = read_guide(path)
+            self._publish(cache_key, guide)
+            self._saved = (path, stamp, guide)
         self.index[cache_key]["last_access"] = datetime.now().strftime(_INDEX_TIME_FORMAT)
         return True
 
     def _store_guide(self, cache_key, guide, source_date=None):
         """Show a freshly loaded guide, save it and record when its source was updated."""
         self._publish(cache_key, guide)
-        with open(self._pickle_path(cache_key), "wb") as f:
-            pickle.dump(guide, f)
+        path = self._guide_path(cache_key)
+        saved = write_guide(path, guide)
+        # The same guide as it loads from the file (programmes packed until looked up): the
+        # one parsed above, about 1 KiB of objects per programme, can go.
+        self._publish(cache_key, saved)
+        self._saved = (path, _file_stamp(path), saved)
+        try:
+            os.remove(self._pickle_path(cache_key))  # an earlier version's copy
+        except FileNotFoundError:
+            pass
         now = datetime.now()
         self.index[cache_key] = {
             "date": (source_date or now).strftime(_INDEX_TIME_FORMAT),

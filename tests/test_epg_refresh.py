@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta
 import os
+import pickle
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 import requests
 
+from services import epg_manager as epg_manager_module
 from services.epg_manager import _INDEX_TIME_FORMAT, EpgManager, _cache_key, _xtream_cache_key
 from services.multikeydict import MultiKeyDict
 
@@ -63,7 +65,7 @@ class _Config(SimpleNamespace):
         return self._directory
 
 
-class EpgRefreshTests(unittest.TestCase):
+class _GuideCase(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="qitv-epg-")
         self.addCleanup(directory.cleanup)
@@ -97,6 +99,8 @@ class EpgRefreshTests(unittest.TestCase):
         manager.index[self.key]["date"] = old
         manager.save_index()
 
+
+class EpgRefreshTests(_GuideCase):
     # --- the reload keeps the current guide until the new one is swapped in ----------------
     def test_periodic_refresh_keeps_the_guide_visible_while_it_reloads(self):
         manager = self.manager()
@@ -225,6 +229,75 @@ class EpgRefreshTests(unittest.TestCase):
         with patch("services.epg_manager.requests.get", side_effect=failing):
             manager.set_current_epg()
         self.assertEqual(self.titles(manager), [])
+
+
+class SavedGuideTests(_GuideCase):
+    """The saved guide is read in pieces, and only when the one shown is not it already."""
+
+    def cache_files(self):
+        return sorted(os.listdir(os.path.join(self.config.get_config_dir(), "cache", "epg")))
+
+    def reads(self):
+        return patch.object(
+            epg_manager_module, "read_guide", side_effect=epg_manager_module.read_guide
+        )
+
+    def test_the_guide_is_saved_in_the_piecewise_format(self):
+        manager = self.manager()
+        self.load(manager)
+        self.assertEqual(self.cache_files(), [f"{self.key}.guide", "index.json"])
+        restarted = self.manager()
+        with self.reads() as read:
+            restarted.set_current_epg()
+        read.assert_called_once()
+        self.assertEqual(self.titles(restarted), ["Old"])
+
+    def test_an_unchanged_saved_guide_already_shown_is_not_read_again(self):
+        manager = self.manager()
+        self.load(manager)
+        with self.reads() as read:
+            manager.set_current_epg()  # a provider switch or the periodic refresh
+            manager.set_current_epg()
+        read.assert_not_called()
+        self.assertEqual(self.titles(manager), ["Old"])
+
+    def test_a_saved_guide_is_read_again_once_it_changed_or_another_was_shown(self):
+        manager = self.manager()
+        self.load(manager)
+        other = self.manager()  # another QiTV saves its guide meanwhile
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("Elsewhere"))):
+            other.force_refresh_current_epg()
+        with self.reads() as read:
+            manager.set_current_epg()
+        read.assert_called_once()
+        self.assertEqual(self.titles(manager), ["Elsewhere"])
+        manager.reindex_programs()  # the guide shown is no longer the saved one
+        with self.reads() as read:
+            manager.set_current_epg()
+        read.assert_called_once()
+
+    def test_a_guide_saved_by_an_earlier_version_is_read_and_replaced(self):
+        guide = MultiKeyDict()
+        guide[("news.test", "News")] = [
+            {
+                "@start": "20261015200000 +0000",
+                "@stop": "20261015210000 +0000",
+                "title": {"__text": "Legacy"},
+            }
+        ]
+        manager = self.manager()
+        manager.index[self.key] = {
+            "date": datetime.now().strftime(_INDEX_TIME_FORMAT),
+            "last_access": datetime.now().strftime(_INDEX_TIME_FORMAT),
+        }
+        legacy = os.path.join(manager._cache_dir(), f"{self.key}.pkl")
+        with open(legacy, "wb") as f:
+            pickle.dump(guide, f)
+        manager.set_current_epg()
+        self.assertEqual(self.titles(manager), ["Legacy"])
+        self.expire(manager)
+        self.load(manager, "New")
+        self.assertEqual(self.cache_files(), [f"{self.key}.guide", "index.json"])
 
 
 if __name__ == "__main__":
