@@ -24,6 +24,38 @@ and the `licenses/` folder are inside every packaged app.
 - License texts: `licenses/qt/LGPL-3.0.txt` and `licenses/qt/GPL-3.0.txt` (the LGPLv3 adds
   permissions to the GPLv3, so both apply).
 
+## Python runtime
+
+The apps contain the CPython 3.14.8 interpreter and standard library as `uv` installs it: the
+python-build-standalone build of release 20261009. On macOS and Linux that build links the
+libraries below into the interpreter (`libpython`); on Windows they are separate files, and the
+app contains those of the modules QiTV uses. Tcl/Tk, and on Linux Berkeley DB and the X11
+libraries, are separate modules QiTV does not use: they are not in the apps.
+
+| Component | Version | License, as its source states it | Text | Platforms |
+| --- | --- | --- | --- | --- |
+| CPython | 3.14.8 | Python Software Foundation License Version 2 (PSF-2.0); its LICENSE also carries the older BeOpen, CNRI and CWI terms | `licenses/python/CPython.txt` (the installed Python's `lib/python3.14/LICENSE.txt`) | all |
+| Software CPython incorporates (HACL\*, mimalloc and others) | 3.14.8 | each as listed | `licenses/python/CPython-incorporated-software.rst` (CPython 3.14.8's `Doc/license.rst`) | all |
+| OpenSSL | 3.5.9 | Apache-2.0 | `licenses/python/OpenSSL.txt` (its `LICENSE.txt`) | all |
+| libffi | 3.8.0; on Windows 3.4.7 (CPython's own copy) | MIT | `licenses/python/libffi.txt` (3.8.0's `LICENSE`; 3.4.7's has the same terms) | all |
+| bzip2 | 1.0.8 | its own BSD-style license (SPDX: bzip2-1.0.6) | `licenses/python/bzip2.txt` (its `LICENSE`) | all |
+| xz (liblzma) | 5.8.4 | 0BSD | `licenses/python/liblzma.txt` (its `COPYING.0BSD`) | all |
+| SQLite | 3.53.1 | public domain: no license text (<https://sqlite.org/copyright.html>) | none | all |
+| Expat | 2.9.0; on Windows 2.8.5 (CPython's own copy) | MIT | `licenses/python/expat.txt` (2.9.0's `COPYING`) | all |
+| mpdecimal (libmpdec) | 4.0.0 | BSD-2-Clause | `licenses/python/mpdecimal.txt` (its `COPYRIGHT.txt`) | all |
+| Zstandard | 1.5.7 | BSD-3-Clause (zstd is BSD or GPLv2; used under the BSD license) | `licenses/python/zstd.txt` (its `LICENSE`) | all |
+| zlib | 1.3.2 | Zlib | `licenses/python/zlib.txt` (its `LICENSE`) | Linux (macOS uses the system's) |
+| zlib-ng | 2.2.4 | Zlib | `licenses/python/zlib-ng.txt` (its `LICENSE.md`) | Windows |
+| ncurses | 6.5 | X11 (MIT-style) | `licenses/python/ncurses.txt` (its `COPYING`) | Linux (macOS uses the system's) |
+| libedit | 20240808-3.1 | BSD-3-Clause | `licenses/python/libedit.txt` (its `COPYING`) | Linux (macOS uses the system's) |
+| libuuid | 1.0.3 | BSD-3-Clause | `licenses/python/libuuid.txt` (its `COPYING`, and the license its `uuid.h` states) | macOS, Linux |
+
+- Source code: <https://www.python.org/downloads/source/>, and the build at
+  <https://github.com/astral-sh/python-build-standalone> (release 20261009), which names each
+  library's source and checksum.
+- The texts come from the installed Python where it has them (`CPython.txt`) and otherwise from
+  each project's own release of that version.
+
 ## Python libraries
 
 Each license as the installed package's metadata states it.

@@ -65,6 +65,15 @@ class ReadmeTests(unittest.TestCase):
             self.assertIn(row, notices)
 
 
+class NoticesTests(unittest.TestCase):
+    def test_every_license_text_it_names_is_in_the_repository(self):
+        # The specs ship licenses/ whole: a text named here but missing is missing in the app.
+        named = set(re.findall(r"`(licenses/[^`]+)`", NOTICES.read_text(encoding="utf-8")))
+        self.assertTrue(any(path.startswith("licenses/python/") for path in named))  # M10
+        for path in sorted(named):
+            self.assertTrue((ROOT / path).is_file(), path)
+
+
 def stated_license(metadata) -> str:
     """The license as a package's metadata states it: its expression, else its License
     field, else its license classifiers."""
