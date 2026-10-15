@@ -198,6 +198,7 @@ class TVController(QObject):
             error=self._error,
             request=self._request,
             restore_channel=self._restore_channel,
+            logo=self._logo,
             show_transport=self._show_transport,
             parent=self,
         )
@@ -1363,6 +1364,8 @@ class TVController(QObject):
         banner, channel = self.overlays.banner, self._channel
         if self._closed or channel is None or channel.get("logo") != url:
             return
+        if not self.overlays.transport.badge_rect().isEmpty():
+            self.overlays.transport.set_logo(self._logo(channel))
         if banner.isVisible() and banner.info is not None and banner.info.logo is None:
             banner.show_info(self.banner_info(channel))
 

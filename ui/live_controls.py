@@ -21,6 +21,7 @@ from typing import Callable, Optional
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, SignalInstance
+from PySide6.QtGui import QPixmap
 
 from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE, LiveSession
@@ -65,6 +66,7 @@ class LiveControls(QObject):
         request: Callable[[Target], None],
         restore_channel: Callable[[], None],
         show_transport: Callable[[], None],
+        logo: Callable[[dict], Optional[QPixmap]] = lambda channel: None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -85,6 +87,7 @@ class LiveControls(QObject):
         self._request = request
         self._restore_channel = restore_channel
         self._show_transport = show_transport
+        self._logo = logo
         self._ticks: list[tuple[float, str]] = []
         self._unavailable_noticed: set[tuple[str, str]] = set()  # (provider, channel) this run
         self._held_notice: Optional[tuple[str, str]] = None  # shown once the channel plays
@@ -340,9 +343,9 @@ class LiveControls(QObject):
         subtitle = now[0] if now else ""
         transport = self._transport
         if not self.pipeline_live():
-            transport.show_live(target.title, subtitle)
+            transport.show_live(target.title, subtitle, self._logo(target.item))
             return
-        transport.show_timeshift(target.title, subtitle)
+        transport.show_timeshift(target.title, subtitle, self._logo(target.item))
         timeline = self._tuner.timeline
         if timeline is not None:
             self._ticks = self._programme_ticks(target.item, timeline)

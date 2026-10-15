@@ -4,11 +4,11 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QFontMetricsF, QMouseEvent
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QMouseEvent, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
-from ui.overlays.painting import Units
+from ui.overlays.painting import Units, badge_color
 from ui.overlays.transport import Transport
 
 
@@ -492,6 +492,66 @@ class HostSizingTests(unittest.TestCase):
         host.resize(1280, 720)  # pending until the host shows
         transport.show_live("News", "")
         self.assertEqual(transport.geometry(), QRect(0, 0, 1280, 720))
+
+
+class TransportBadgeCase(TransportCase):
+    def logo(self, color="#ff0000"):
+        pixmap = QPixmap(40, 40)
+        pixmap.fill(QColor(color))
+        return pixmap
+
+    def centre(self, t):
+        image = t.grab().toImage()
+        r = t.badge_rect()
+        return image.pixelColor(int(r.center().x()), int(r.center().y()))
+
+    def test_a_logo_is_painted_and_the_name_starts_after_it(self):
+        t = self.make()
+        t.show_live("Nature One", "", self.logo())
+        r = t.badge_rect()
+        self.assertFalse(r.isEmpty())
+        self.assertGreater(self.centre(t).red(), 200)
+        self.assertLess(self.centre(t).green(), 60)
+        un = Units(t.width())
+        self.assertAlmostEqual(
+            r.height(), QFontMetricsF(un.font(1.8, QFont.Weight.Bold)).capHeight() * 1.6, 1
+        )
+        self.assertGreater(r.right(), un.px(3))
+        # the name is painted right of the badge, none of it under it
+        image = t.grab().toImage()
+        gap = range(int(r.right()) + 1, int(r.right() + un.px(1.0)))
+        name = range(int(r.right() + un.px(1.4)), int(r.right() + un.px(10)))
+        rows = range(int(r.y()), int(r.bottom()))
+
+        def bright(xs):
+            return any(image.pixelColor(x, y).lightness() > 200 for x in xs for y in rows)
+
+        self.assertFalse(bright(gap))
+        self.assertTrue(bright(name))
+
+    def test_no_logo_paints_the_initials_badge(self):
+        t = self.make()
+        t.show_live("Nature One", "")
+        image = t.grab().toImage()
+        r = t.badge_rect()
+        corner = image.pixelColor(int(r.x() + r.width() * 0.2), int(r.y() + r.height() * 0.8))
+        want = badge_color("Nature One")
+        self.assertEqual(
+            (corner.red(), corner.green(), corner.blue()), (want.red(), want.green(), want.blue())
+        )
+
+    def test_vod_shows_no_badge(self):
+        t = self.make()
+        t.show_vod("Salt Roads", "2024")
+        self.assertTrue(t.badge_rect().isEmpty())
+
+    def test_a_logo_arriving_later_repaints(self):
+        t = self.make()
+        t.show_live("Nature One", "")
+        before = t.grab().toImage()
+        t.set_logo(self.logo("#00ff00"))
+        self.assertNotEqual(before, t.grab().toImage())
+        self.assertGreater(self.centre(t).green(), 200)
 
 
 if __name__ == "__main__":

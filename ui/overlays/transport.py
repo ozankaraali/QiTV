@@ -28,6 +28,7 @@ from PySide6.QtGui import (
     QPainter,
     QPaintEvent,
     QPen,
+    QPixmap,
     QRegion,
 )
 from PySide6.QtWidgets import QToolTip, QWidget
@@ -37,6 +38,7 @@ from ui.overlays.base import Overlay
 from ui.overlays.painting import (
     Units,
     draw_icon,
+    draw_logo,
     draw_progress,
     elided,
     fill_round,
@@ -143,6 +145,7 @@ class Transport(Overlay):
         self._live = False
         self._timeshift = False
         self._title = ""
+        self._logo: QPixmap | None = None
         self._subtitle = ""
         self._position = 0
         self._length = 0
@@ -180,12 +183,27 @@ class Transport(Overlay):
     def show_vod(self, title: str, subtitle: str) -> None:
         self._set_mode(False, title, subtitle)
 
-    def show_live(self, title: str, subtitle: str) -> None:
-        self._set_mode(True, title, subtitle)
+    def show_live(self, title: str, subtitle: str, logo: QPixmap | None = None) -> None:
+        """Live channels show a badge before the name: the logo, else the name's initials."""
+        self._set_mode(True, title, subtitle, logo=logo)
 
-    def show_timeshift(self, title: str, subtitle: str) -> None:
+    def show_timeshift(self, title: str, subtitle: str, logo: QPixmap | None = None) -> None:
         """Show a pipeline live channel. A different title (a zap) forgets the old timeline."""
-        self._set_mode(True, title, subtitle, timeshift=True)
+        self._set_mode(True, title, subtitle, timeshift=True, logo=logo)
+
+    def set_logo(self, logo: QPixmap | None) -> None:
+        """The channel's logo arrived after the channel was shown."""
+        self._logo = logo
+        self.update()
+
+    def badge_rect(self) -> QRectF:
+        """The title row's logo/initials badge (empty for VOD)."""
+        if not self._live:
+            return QRectF()
+        un = Units(self.width())
+        size = QFontMetricsF(un.font(1.8, QFont.Weight.Bold)).capHeight() * 1.6
+        y = un.px(2.4) + (un.px(2.6) - size) / 2
+        return QRectF(un.px(3), y, size, size)
 
     def update_timeline(self, state: dict, ticks: list[tuple[float, str]]) -> None:
         """Take a `LiveSession.timelineChanged` state; never changes visibility.
@@ -589,6 +607,11 @@ class Transport(Overlay):
             QRectF(right - clock_w, y, clock_w, row_h), Qt.AlignVCenter | Qt.AlignRight, clock
         )
         p.setFont(un.font(1.8, QFont.Weight.Bold))
+        badge = self.badge_rect()
+        if not badge.isEmpty():
+            draw_logo(p, badge, self._title, self._logo, un.px(0.5))
+            left = badge.right() + un.px(1.2)
+            p.setPen(qcolor(PALETTE.text))
         title = elided(p, self._title, right - left - clock_w - un.px(4))
         title_w = p.fontMetrics().horizontalAdvance(title)
         p.drawText(QRectF(left, y, title_w + 2, row_h), Qt.AlignVCenter | Qt.AlignLeft, title)
@@ -879,12 +902,20 @@ class Transport(Overlay):
     def _nearest_speed(self) -> int:
         return min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - self._speed))
 
-    def _set_mode(self, live: bool, title: str, subtitle: str, timeshift: bool = False) -> None:
+    def _set_mode(
+        self,
+        live: bool,
+        title: str,
+        subtitle: str,
+        timeshift: bool = False,
+        logo: QPixmap | None = None,
+    ) -> None:
         if not (timeshift and self._timeshift and title == self._title):
             self._clear_timeline()
         self._live = live
         self._timeshift = timeshift
         self._title = title
+        self._logo = logo
         self._subtitle = subtitle
         self._drag = None
         if live:
