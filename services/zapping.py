@@ -11,9 +11,17 @@ from PySide6.QtCore import QObject, QTimer, Signal
 class ZapContext:
     """The ordered channels ↑/↓ moves through: the group the current channel was tuned from."""
 
-    def __init__(self, group_key: str = "", channels: Optional[list[dict]] = None):
+    def __init__(
+        self,
+        group_key: str = "",
+        channels: Optional[list[dict]] = None,
+        fallback: Optional[list[dict]] = None,
+    ):
         self.group_key = group_key
         self.channels = list(channels or [])
+        # Searched by number entry when the group has no match (the shell passes every
+        # live channel: TV numbers are global, not per group).
+        self.fallback = list(fallback or [])
         self.current_index = -1
 
     @staticmethod
@@ -64,18 +72,24 @@ class ZapContext:
         return "" if value is None else str(value).strip()
 
     def by_number(self, text: str) -> Optional[dict]:
-        # Compared numerically ("0" matches "00"); with duplicates the first channel wins.
+        """The channel with this number in the group, else in the fallback list."""
         if not text.isdecimal():
             return None
-        wanted = int(text)
-        for channel in self.channels:
-            number = self._number(channel)
+        found = self._find_number(self.channels, int(text))
+        if found is None and self.fallback:
+            found = self._find_number(self.fallback, int(text))
+        return found
+
+    @classmethod
+    def _find_number(cls, channels: list[dict], wanted: int) -> Optional[dict]:
+        # Compared numerically ("0" matches "00"); with duplicates the first channel wins.
+        for channel in channels:
+            number = cls._number(channel)
             if number.isdecimal() and int(number) == wanted:
                 return channel
-        if not any(self._number(c) for c in self.channels):
-            position = wanted
-            if 1 <= position <= len(self.channels):
-                return self.channels[position - 1]
+        if not any(cls._number(c) for c in channels):
+            if 1 <= wanted <= len(channels):  # nothing is numbered: list positions stand in
+                return channels[wanted - 1]
         return None
 
 

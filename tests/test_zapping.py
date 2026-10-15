@@ -27,6 +27,16 @@ class ZapContextTests(unittest.TestCase):
         ctx.set_current(CHANNELS[3])
         self.assertEqual(ctx.peek(1), (0, CHANNELS[0]))
 
+    def test_by_number_falls_back_to_all_channels(self):
+        # Finding m2: "101" in Sports said "No channel 101"; TV numbers are global.
+        everything = CHANNELS + [{"id": 101, "name": "C101", "number": "101"}]
+        sports = ZapContext("sports", CHANNELS[:2], fallback=everything)
+        self.assertEqual(sports.by_number("101")["id"], 101)
+        self.assertEqual(sports.by_number("2"), CHANNELS[1])  # the group wins
+        self.assertIsNone(sports.by_number("55"))
+        self.assertIsNone(ZapContext("g", CHANNELS[:2]).by_number("7"))  # no fallback given
+        self.assertEqual(ZapContext("g", CHANNELS).fallback, [])
+
     def test_single_and_empty(self):
         self.assertIsNone(ZapContext("g", []).peek(1))
         one = ZapContext("g", [CHANNELS[0]])
@@ -90,6 +100,14 @@ class ZapControllerTests(unittest.TestCase):
         QTest.qWait(150)
         self.assertEqual(self.tunes, [CHANNELS[3]])
         self.assertEqual(self.digits[-1], "")
+
+    def test_digits_tune_a_channel_outside_the_group(self):
+        outside = {"id": 101, "name": "C101", "number": "101"}
+        self.zap.set_context(ZapContext("g", CHANNELS, fallback=CHANNELS + [outside]))
+        for d in "101":
+            self.zap.digit(d)
+        QTest.qWait(150)
+        self.assertEqual((self.tunes, self.missing), ([outside], []))
 
     def test_unknown_number(self):
         self.zap.digit("9")
