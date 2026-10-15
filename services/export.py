@@ -36,7 +36,7 @@ def _write_export_file(content_data, file_path, url_formatter, extinf_formatter)
         raise
 
 
-def save_m3u_content(content_data, file_path):
+def save_m3u_content(content_data, file_path) -> int:
     def url_formatter(item):
         return item.get("cmd")
 
@@ -50,7 +50,7 @@ def save_m3u_content(content_data, file_path):
     return _write_export_file(content_data, file_path, url_formatter, extinf_formatter)
 
 
-def save_stb_content(base_url, content_data, mac, file_path):
+def save_stb_content(base_url, content_data, mac, file_path) -> int:
     base_url = stb_portal_base(base_url)  # callers may pass a full portal URL like http://host/c/
 
     def url_formatter(item):
