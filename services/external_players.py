@@ -9,7 +9,10 @@ import os
 import platform
 import shutil
 import subprocess
-from typing import Any, Optional, Tuple
+import sys
+from typing import Any, Mapping, Optional, Tuple
+
+from services.vlc_bundle import ENV_LIB, ENV_MODULES, ENV_PLUGINS
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,31 @@ MPV_MISSING = (
     "• Linux: Use your package manager (apt install mpv)\n"
     "• Windows: Download from https://mpv.io/installation/"
 )
+
+
+def player_env(
+    environ: Optional[Mapping[str, str]] = None,
+    system: Optional[str] = None,
+    frozen: Optional[bool] = None,
+) -> dict[str, str]:
+    """The environment an external player starts with: QiTV's, less its own VLC's.
+
+    VLC_PLUGIN_PATH (and python-vlc's two variables) point at the bundled libVLC, and an
+    installed VLC would scan those plugins as well as its own. In a frozen Linux app,
+    LD_LIBRARY_PATH points into the bundle: the value from before QiTV started comes back
+    (PyInstaller's LD_LIBRARY_PATH_ORIG), or none when there was none.
+    """
+    environ = os.environ if environ is None else environ
+    system = system or platform.system()
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    env = {k: v for k, v in environ.items() if k not in (ENV_LIB, ENV_MODULES, ENV_PLUGINS)}
+    if system == "Linux" and frozen:
+        original = env.get("LD_LIBRARY_PATH_ORIG")
+        if original is not None:
+            env["LD_LIBRARY_PATH"] = original
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+    return env
 
 
 def find_vlc() -> Optional[str]:
@@ -74,7 +102,7 @@ def launch_vlc(url: str) -> Tuple[bool, str]:
         # --started-from-file sends URL to existing VLC instance (replaces current)
         argv = [vlc_cmd, "--started-from-file", "--", url]
     try:
-        subprocess.Popen(argv)
+        subprocess.Popen(argv, env=player_env())
         return True, ""
     except Exception as e:
         return False, f"Failed to launch VLC: {str(e)}"
@@ -214,7 +242,7 @@ def launch_mpv(url: str) -> Tuple[bool, str]:
         return False, MPV_MISSING
 
     try:
-        subprocess.Popen([mpv_cmd, "--", url])
+        subprocess.Popen([mpv_cmd, "--", url], env=player_env())
         return True, ""
     except Exception as e:
         return False, f"Failed to launch MPV: {str(e)}"

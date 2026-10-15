@@ -22,7 +22,9 @@ class ExternalPlayersTest(unittest.TestCase):
         ):
             result = external_players.launch_vlc("http://x/s")
         self.assertEqual(result, (True, ""))
-        popen.assert_called_once_with(["open", "-a", "/Applications/VLC.app", "--", "http://x/s"])
+        popen.assert_called_once_with(
+            ["open", "-a", "/Applications/VLC.app", "--", "http://x/s"], env=mock.ANY
+        )
 
     def test_vlc_linux_launches_found_binary(self):
         with (
@@ -32,7 +34,9 @@ class ExternalPlayersTest(unittest.TestCase):
         ):
             result = external_players.launch_vlc("http://x/s")
         self.assertEqual(result, (True, ""))
-        popen.assert_called_once_with(["/usr/bin/vlc", "--started-from-file", "--", "http://x/s"])
+        popen.assert_called_once_with(
+            ["/usr/bin/vlc", "--started-from-file", "--", "http://x/s"], env=mock.ANY
+        )
 
     def test_vlc_linux_missing(self):
         with (
@@ -77,7 +81,7 @@ class ExternalPlayersTest(unittest.TestCase):
         ):
             result = external_players.launch_mpv("http://x/s")
         self.assertEqual(result, (True, ""))
-        popen.assert_called_once_with(["/usr/bin/mpv", "--", "http://x/s"])
+        popen.assert_called_once_with(["/usr/bin/mpv", "--", "http://x/s"], env=mock.ANY)
 
     def test_url_that_looks_like_an_option_is_not_one(self):
         # Finding m8: an untrusted URL beginning with "-" became a player option.
@@ -94,6 +98,47 @@ class ExternalPlayersTest(unittest.TestCase):
         for call in popen.call_args_list:
             argv = call.args[0]
             self.assertEqual(argv[-2:], ["--", url])
+
+    def test_a_player_never_sees_the_apps_own_vlc(self):
+        # M5: VLC_PLUGIN_PATH made an installed VLC scan the bundle's plugins as well.
+        environ = {
+            "PATH": "/usr/bin",
+            "VLC_PLUGIN_PATH": "/tmp/_MEI1/vlc/plugins",
+            "PYTHON_VLC_LIB_PATH": "/tmp/_MEI1/vlc/libvlc.so.5",
+            "PYTHON_VLC_MODULE_PATH": "/tmp/_MEI1/vlc/plugins",
+        }
+        for system in ("Linux", "Windows", "Darwin"):
+            with self.subTest(system):
+                env = external_players.player_env(environ, system=system, frozen=True)
+                self.assertEqual(env, {"PATH": "/usr/bin"})
+        self.assertIn("VLC_PLUGIN_PATH", environ)  # the app's own environment is kept
+
+    def test_a_frozen_linux_app_gives_a_player_the_original_library_path(self):
+        # PyInstaller's documented pattern: LD_LIBRARY_PATH points into the bundle.
+        bundle = {"LD_LIBRARY_PATH": "/tmp/_MEI1", "LD_LIBRARY_PATH_ORIG": "/opt/lib"}
+        env = external_players.player_env(bundle, system="Linux", frozen=True)
+        self.assertEqual(env["LD_LIBRARY_PATH"], "/opt/lib")
+        env = external_players.player_env({"LD_LIBRARY_PATH": "/tmp/_MEI1"}, "Linux", True)
+        self.assertNotIn("LD_LIBRARY_PATH", env)  # it was not set before the app started
+        for system, frozen in (("Linux", False), ("Windows", True)):
+            with self.subTest(system=system, frozen=frozen):
+                env = external_players.player_env(bundle, system=system, frozen=frozen)
+                self.assertEqual(env["LD_LIBRARY_PATH"], "/tmp/_MEI1")
+
+    def test_players_start_with_that_environment(self):
+        bundle = {"PATH": "/usr/bin", "VLC_PLUGIN_PATH": "/tmp/_MEI1/vlc/plugins"}
+        with (
+            mock.patch.dict("os.environ", bundle, clear=True),
+            mock.patch.dict(sys.modules, {"mpv": None}),
+            mock.patch("platform.system", return_value="Linux"),
+            mock.patch("shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
+            mock.patch("subprocess.Popen") as popen,
+        ):
+            external_players.launch_vlc("http://x/s")
+            external_players.launch_mpv("http://x/s")
+        self.assertEqual(popen.call_count, 2)
+        for call in popen.call_args_list:
+            self.assertEqual(call.kwargs["env"], {"PATH": "/usr/bin"})
 
     def test_find_vlc_names_the_player_launch_vlc_starts(self):
         with (
