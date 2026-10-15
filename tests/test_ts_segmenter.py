@@ -1,4 +1,8 @@
-"""Tests for the MPEG-TS scanner and keyframe segmenter (services/live/ts.py)."""
+"""Tests for the MPEG-TS scanner and keyframe segmenter (services/live/ts.py).
+
+Run with `uv run python -m unittest discover -s tests -p test_ts_segmenter.py` (the module-path
+form cannot import `ts_fixtures`).
+"""
 
 import os
 import random
@@ -170,6 +174,96 @@ def mpeg2_au(key):
     return (b"\x00\x00\x01\xb3" + b"\x55" * 40 if key else b"") + picture
 
 
+def h264_au_with_sps(idr):
+    """An access unit that repeats SPS and PPS on every frame, IDR or not."""
+    nals = [(9, 6), (7, 20), (8, 8), (5 if idr else 1, 300)]
+    return b"".join(b"\x00\x00\x00\x01" + bytes([0x60 | t]) + b"\x55" * (n - 5) for t, n in nals)
+
+
+def hevc_au_with_vps(irap):
+    """An access unit that repeats VPS, SPS and PPS on every frame, IRAP or not."""
+    nals = [(32, 20), (33, 20), (34, 8), (19 if irap else 1, 300)]
+    return b"".join(b"\x00\x00\x00\x01" + bytes([t << 1, 1]) + b"\x55" * n for t, n in nals)
+
+
+def h264_open_gop_au(intra):
+    """Open-GOP H.264: keyframes are non-IDR (NAL 1) intra slices after SPS and PPS."""
+    nal = b"\x00\x00\x00\x01"
+    head = nal + b"\x09\xf0"
+    if intra:  # slice header 0x88: first_mb_in_slice 0, slice_type 7 (I)
+        head += nal + b"\x67" + b"\x55" * 15 + nal + b"\x68" + b"\x55" * 3
+    return head + nal + b"\x41" + (b"\x88" if intra else b"\x9a") + b"\x55" * 300  # 0x9a: P
+
+
+def au_with_sei(video_type, key):
+    """An access unit whose slice starts beyond the first packet, after a 200-byte SEI.
+
+    Keyframes carry SPS (H.264) or VPS (HEVC) before the SEI; other frames do not.
+    """
+    if video_type == 0x1B:
+        nals = ([(7, 20), (8, 8)] if key else []) + [(6, 200), (5 if key else 1, 300)]
+        return b"".join(b"\x00\x00\x00\x01" + bytes([0x60 | t]) + b"\x55" * n for t, n in nals)
+    nals = ([(32, 20), (33, 20), (34, 8)] if key else []) + [(39, 200), (19 if key else 1, 300)]
+    return b"".join(b"\x00\x00\x00\x01" + bytes([t << 1, 1]) + b"\x55" * n for t, n in nals)
+
+
+def pes_starts(data, pids=(fx.VIDEO_PID, fx.AUDIO_PID)):
+    """[(offset, pts or None)] of the PES starts on `pids`."""
+    out = []
+    for i, p in enumerate(split_packets(data)):
+        if pid_of(p) in pids and p[1] & 0x40:
+            start = 4 + (1 + p[4] if p[3] & 0x20 else 0)
+            out.append((i * PACKET, pusi_pts(p) if p[start + 7] & 0x80 else None))
+    return out
+
+
+def by_pts(data, base=900000):
+    """Feed points at every PES start, with the wall clock at its PTS (live pacing)."""
+    return [(off, (pts - base) / CLOCK) for off, pts in pes_starts(data)]
+
+
+def by_frame(data, fps=25):
+    """Feed points at every video PES start, with the wall clock at frame index / fps."""
+    return [(off, k / fps) for k, (off, _) in enumerate(pes_starts(data, (fx.VIDEO_PID,)))]
+
+
+def run_at(data, points, **kwargs):
+    """Feed `data` in pieces that start at each (offset, wall) point, the clock at `wall`."""
+    now = [0.0]
+    seg = Segmenter(clock=lambda: now[0], **kwargs)
+    events = []
+    bounds = [0] + [off for off, _ in points] + [len(data)]
+    walls = [0.0] + [wall for _, wall in points]
+    for k in range(len(bounds) - 1):
+        now[0] = walls[k]
+        events += seg.feed(data[bounds[k] : bounds[k + 1]])
+    events += seg.finish()
+    return seg, events
+
+
+def shift_pts(data, from_frame, offset):
+    """Add `offset` ticks to every PES timestamp from video frame `from_frame` on."""
+    out = bytearray(data)
+    frame = -1
+    for i, p in enumerate(split_packets(data)):
+        pid = pid_of(p)
+        if not p[1] & 0x40 or pid not in (fx.VIDEO_PID, fx.AUDIO_PID):
+            continue
+        frame += pid == fx.VIDEO_PID
+        if frame >= from_frame:
+            at = i * PACKET + 4 + (1 + p[4] if p[3] & 0x20 else 0) + 9
+            out[at : at + 5] = fx._pts_bytes(pusi_pts(p) + offset)
+    return bytes(out)
+
+
+def starts_with_idr(body):
+    return b"\x00\x00\x01\x65" in body[:PACKET]
+
+
+def frame_of(pts, base=900000):
+    return pts_delta(base, pts) // FRAME
+
+
 # --- tests ------------------------------------------------------------------------------------
 
 
@@ -242,44 +336,94 @@ class SegmenterTests(unittest.TestCase):
             self.assertLess(delta, TARGET + fx.AUDIO_FRAME_TICKS)
 
     # 3
-    def test_without_rai_falls_back_to_idr_after_six_seconds(self):
-        data = fx.make_stream(20, rai=False)
+    def test_without_rai_cuts_at_idr_access_units_from_the_start(self):
+        whole = fx.make_stream(20, rai=False)
+        # Join mid-GOP: from the PAT at 0.5 s, so frames 13-24 and their audio come first.
+        join = [i * PACKET for i, p in enumerate(split_packets(whole)) if pid_of(p) == 0][1]
+        data = whole[join:]
+        first = pusi_offset(data, fx.VIDEO_PID, 900000 + 25 * FRAME)
+        self.assertIn(fx.AUDIO_PID, [pid_of(p) for p in split_packets(data[:first])])
         _, events = run(data, chunk=4096)
         o = opens(events)
-        self.assertEqual(o[0].first_pts, 900000 + 6 * CLOCK)
-        self.assertEqual(deltas(events), [TARGET] * 6)
+        self.assertEqual(o[0].first_pts, 900000 + CLOCK)
+        self.assertEqual(deltas(events), [TARGET] * 9)
         # Everything before the first keyframe (audio included) is discarded.
-        self.assertEqual(payload(events), data[pusi_offset(data, fx.VIDEO_PID, o[0].first_pts) :])
+        self.assertEqual(payload(events), data[first:])
         for opened, body in segments(events):
-            self.assertIn(b"\x00\x00\x01\x67", body[:PACKET])  # the SPS of an IDR access unit
+            self.assertTrue(starts_with_idr(body))
 
-    def test_nal_fallback_detects_hevc_and_mpeg2_keyframes(self):
+    def test_hevc_and_mpeg2_keyframes_are_detected_without_rai(self):
         for video_type, au in ((0x24, hevc_au), (0x02, mpeg2_au), (0x01, mpeg2_au)):
             with self.subTest(video_type=hex(video_type)):
                 frames = [(900000 + i * FRAME, au(i % 25 == 0), False) for i in range(250)]
                 _, events = run(video_only(frames, video_type=video_type))
-                o = opens(events)
-                self.assertEqual(o[0].first_pts, 900000 + 6 * CLOCK)
-                self.assertEqual(deltas(events), [TARGET] * 1)
+                self.assertEqual(opens(events)[0].first_pts, 900000)
+                self.assertEqual(deltas(events), [TARGET] * 4)
+
+    def test_a_parameter_set_without_a_slice_in_the_first_packet_is_a_keyframe(self):
+        for video_type in (0x1B, 0x24):
+            with self.subTest(video_type=hex(video_type)):
+                frames = [
+                    (900000 + i * FRAME, au_with_sei(video_type, i % 25 == 0), False)
+                    for i in range(250)
+                ]
+                _, events = run(video_only(frames, video_type=video_type))
+                self.assertEqual(deltas(events), [TARGET] * 4)
+
+    def test_open_gop_intra_frames_are_keyframes_with_or_without_rai(self):
+        for rai in (True, False):
+            with self.subTest(rai=rai):
+                frames = [
+                    (900000 + i * FRAME, h264_open_gop_au(i % 25 == 0), rai and i % 25 == 0)
+                    for i in range(250)
+                ]
+                _, events = run(video_only(frames))
+                self.assertEqual(deltas(events), [TARGET] * 4)
+
+    def test_parameter_sets_on_every_frame_do_not_make_keyframes(self):
+        # No RAI, SPS (H.264) or VPS (HEVC) before every frame, an IDR/IRAP every 1.2 s.
+        for video_type, au in ((0x1B, h264_au_with_sps), (0x24, hevc_au_with_vps)):
+            with self.subTest(video_type=hex(video_type)):
+                frames = [(900000 + i * FRAME, au(i % 30 == 0), False) for i in range(300)]
+                _, events = run(video_only(frames, video_type=video_type))
+                starts = [frame_of(e.first_pts) for e in opens(events)]
+                self.assertEqual(starts, [0, 60, 120, 180, 240])
 
     # 4
-    def test_rai_on_every_pes_keeps_the_two_second_minimum(self):
-        frames = [(900000 + i * FRAME, fx.h264_access_unit(i % 25 == 0), True) for i in range(250)]
+    def test_rai_on_every_pes_cuts_only_idr_frames_at_least_two_seconds_apart(self):
+        frames = [(900000 + i * FRAME, fx.h264_access_unit(i % 30 == 0), True) for i in range(300)]
         _, events = run(video_only(frames))
-        self.assertEqual(deltas(events), [TARGET] * 4)
+        self.assertEqual([frame_of(e.first_pts) for e in opens(events)], [0, 60, 120, 180, 240])
+        for opened, body in segments(events):
+            self.assertTrue(starts_with_idr(body))
+
+    def test_once_rai_is_seen_unflagged_idr_frames_are_not_cut_points(self):
+        # IDR every 0.8 s, RAI only on every other one (every 1.6 s).
+        frames = [
+            (900000 + i * FRAME, fx.h264_access_unit(i % 20 == 0), i % 40 == 0) for i in range(250)
+        ]
+        _, events = run(video_only(frames))
+        self.assertEqual([frame_of(e.first_pts) for e in opens(events)], [0, 80, 160, 240])
+
+    def test_joining_mid_gop_with_rai_on_every_pes_starts_at_an_idr(self):
+        frames = [(900000 + i * FRAME, fx.h264_access_unit(i % 30 == 0), True) for i in range(300)]
+        data = video_only(frames)
+        join = [i * PACKET for i, p in enumerate(split_packets(data)) if pid_of(p) == 0][3]  # f36
+        _, events = run(data[join:])
+        self.assertEqual([frame_of(e.first_pts) for e in opens(events)], [60, 120, 180, 240])
+        self.assertTrue(starts_with_idr(segments(events)[0][1]))
 
     def test_rai_on_every_pes_with_b_frame_reordering_is_not_a_discontinuity(self):
-        # Decode order I0 P3 B1 B2 P6 B4 B5 ...: B-frames step back by one or two frames.
+        # Decode order I0 P3 B1 B2 P6 B4 B5 ...: B-frames step back by one or two frames, and
+        # the leading B-frames after each IDR (every 1.2 s) step back from the cut point.
         order = [0]
         for k in range(1, 100):
             order += [3 * k, 3 * k - 2, 3 * k - 1]
-        frames = [(900000 + n * FRAME, fx.h264_access_unit(n == 0), True) for n in order]
+        frames = [(900000 + n * FRAME, fx.h264_access_unit(n % 30 == 0), True) for n in order]
         _, events = run(video_only(frames))
         o = opens(events)
-        self.assertGreaterEqual(len(o), 4)
+        self.assertEqual([frame_of(e.first_pts) for e in o], [0, 60, 120, 180, 240])
         self.assertFalse(any(e.discontinuity for e in o))
-        for delta in deltas(events):
-            self.assertGreaterEqual(delta, TARGET)
 
     # 5
     def test_pts_reset_opens_a_discontinuity(self):
@@ -290,6 +434,42 @@ class SegmenterTests(unittest.TestCase):
         for a, b in zip(o, o[1:]):
             if not b.discontinuity:
                 self.assertGreaterEqual(pts_delta(a.first_pts, b.first_pts), TARGET)
+
+    def test_timestamp_jumps_are_flagged_at_the_next_keyframe(self):
+        # A step at frame 120 (4.8 s, mid-GOP; keyframes every 25 frames) is remembered and
+        # cut at the keyframe at frame 125 with a discontinuity, never at a P-frame. (At 4.8 s
+        # the -1.5 s step leaves the PTS within 1 s of the segment start at 4.0 s.)
+        for name, step in (("+60 s", 60 * CLOCK), ("+5 s", 5 * CLOCK), ("-1.5 s", -135000)):
+            with self.subTest(step=name):
+                data = shift_pts(fx.make_stream(12), 120, step)
+                _, events = run(data)
+                o = opens(events)
+                self.assertEqual([e.discontinuity for e in o].count(True), 1)
+                self.assertTrue(o[3].discontinuity)
+                self.assertEqual(o[3].first_pts, (900000 + 125 * FRAME + step) & MASK)
+                for opened, body in segments(events):
+                    self.assertTrue(starts_with_idr(body))
+                for a, b in zip(o, o[1:]):
+                    if not b.discontinuity:
+                        self.assertEqual(pts_delta(a.first_pts, b.first_pts), TARGET)
+
+    def test_a_pending_discontinuity_is_force_cut_by_wall_time_only(self):
+        # One keyframe only; PTS jumps +60 s at frame 112. The PTS delta must not cut there;
+        # the wall clock does, at 10 s.
+        data = shift_pts(fx.make_stream(20, gop_s=30.0), 112, 60 * CLOCK)
+        _, events = run_at(data, by_frame(data))
+        o = opens(events)
+        self.assertEqual([(e.wall, e.discontinuity) for e in o], [(0.0, False), (10.0, True)])
+        self.assertEqual(o[1].first_pts, 900000 + 250 * FRAME + 60 * CLOCK)
+
+    def test_video_without_pts_keeps_two_second_segments_by_wall_clock(self):
+        frames = [(None, fx.h264_access_unit(i % 25 == 0), i % 25 == 0) for i in range(250)]
+        data = video_only(frames)
+        _, events = run_at(data, by_frame(data))
+        o = opens(events)
+        self.assertEqual([e.wall for e in o], [0.0, 2.0, 4.0, 6.0, 8.0])
+        self.assertEqual([e.discontinuity for e in o], [False, True, True, True, True])
+        self.assertTrue(all(e.first_pts is None for e in o))
 
     # 6
     def test_pts_wrap_keeps_two_second_segments(self):
@@ -323,11 +503,78 @@ class SegmenterTests(unittest.TestCase):
             run(fx.make_stream(3, scrambled=True))
         self.assertEqual(str(raised.exception), "scrambled")
 
+    def test_isolated_scrambling_bits_are_ignored(self):
+        clean = fx.make_stream(6)
+        points = by_pts(clean)
+        wall = {}  # packet index -> wall time of the PES start before it
+        for k, (off, t) in enumerate(points):
+            end = points[k + 1][0] if k + 1 < len(points) else len(clean)
+            for i in range(off // PACKET, end // PACKET):
+                wall[i] = t
+        video = [i for i, p in enumerate(split_packets(clean)) if pid_of(p) == fx.VIDEO_PID]
+        early = [i for i in video if wall.get(i, 0) < 1.9 and not clean[i * PACKET + 1] & 0x40]
+        late = [i for i in video if 4.2 < wall.get(i, 0) < 4.9]  # no keyframe in between
+        cases = {
+            "7 in a row later": (late[:7], False),
+            "8 in a row later": (late[:8], True),
+            "8 apart later": (late[::3][:8], False),
+            "8 apart in the first 2 s": (early[::3][:8], True),
+        }
+        # The PES header of a scrambled packet is unreadable, so even an isolated scrambled
+        # keyframe start is not a cut point: the cut at 2 s moves to the keyframe at 3 s.
+        key = pusi_offset(clean, fx.VIDEO_PID, 900000 + 50 * FRAME) // PACKET
+        cases["a scrambled keyframe start"] = ([key], False)
+        for name, (marked, raises) in cases.items():
+            with self.subTest(name):
+                data = bytearray(clean)
+                for i in marked:
+                    data[i * PACKET + 3] |= 0x80
+                if raises:
+                    with self.assertRaises(Unsupported) as raised:
+                        run_at(bytes(data), points)
+                    self.assertEqual(str(raised.exception), "scrambled")
+                else:
+                    _, events = run_at(bytes(data), points)
+                    expected = [3 * CLOCK, TARGET] if key in marked else [TARGET] * 2
+                    self.assertEqual(deltas(events), expected)
+
     # 10
     def test_gop_longer_than_ten_seconds_is_force_cut_at_ten_seconds(self):
         _, events = run(fx.make_stream(24, gop_s=15.0))
         o = opens(events)
         self.assertEqual([e.first_pts - 900000 for e in o], [0, 10 * CLOCK, 15 * CLOCK])
+        self.assertFalse(any(e.discontinuity for e in o))
+
+    def test_a_silent_video_pid_is_cut_at_the_next_pes_of_any_pid(self):
+        # The video stops at 6 s while audio and tables continue to 20 s.
+        whole = fx.make_stream(20)
+        stop = pusi_offset(whole, fx.VIDEO_PID, 900000 + 150 * FRAME)
+        kept = [p for p in split_packets(whole[stop:]) if pid_of(p) != fx.VIDEO_PID]
+        data = whole[:stop] + b"".join(kept)
+        _, events = run_at(data, by_pts(data))
+        o = opens(events)
+        self.assertEqual(len(o), 4)
+        last = o[3]
+        self.assertIsNone(last.first_pts)
+        self.assertTrue(last.discontinuity)
+        self.assertGreaterEqual(last.wall, 149 * FRAME / CLOCK + 10)
+        self.assertLess(last.wall, 149 * FRAME / CLOCK + 10.05)
+        head = segments(events)[3][1][:PACKET]
+        self.assertEqual((pid_of(head), bool(head[1] & 0x40)), (fx.AUDIO_PID, True))
+        self.assertIsNone(closes(events)[2].next_first_pts)
+
+    def test_a_stalled_source_is_not_a_silent_video_pid(self):
+        # The source stalls for 12 s right after the keyframe at 4 s; audio arrives first after.
+        data = fx.make_stream(8)
+        points = by_pts(data)
+        resume = next(
+            k for k, (off, t) in enumerate(points) if t >= 4.0 and k and points[k - 1][1] >= 4.0
+        )
+        points = points[:resume] + [(off, t + 12) for off, t in points[resume:]]
+        self.assertEqual(pid_of(data[points[resume][0] :]), fx.AUDIO_PID)
+        _, events = run_at(data, points)
+        o = opens(events)
+        self.assertEqual([e.first_pts - 900000 for e in o], [k * TARGET for k in range(4)])
         self.assertFalse(any(e.discontinuity for e in o))
 
     # 11
@@ -452,15 +699,32 @@ class SegmenterTests(unittest.TestCase):
             bytes([0x47, 0xC1, 0x00, 0x90]) + b"\x00" * 184,  # transport error, "scrambled" bits
         ]
         # A PMT moving the video to PID 0x300 right before the 4 s keyframe, with a CRC that does
-        # not match, is ignored (accepting it would lose the cut at 4 s).
+        # not match, is ignored even when repeated, as a valid PMT has been seen (accepting it
+        # would lose the cut at 4 s).
         corrupt = bytearray(fx.pmt(video_pid=0x300, cc=7))
         corrupt[30] ^= 0xFF  # inside the CRC field
         key = pusi_offset(clean, fx.VIDEO_PID, 900000 + 2 * TARGET) // PACKET
-        data = stream[:2] + junk + stream[2:key] + [bytes(corrupt)] + stream[key:]
+        data = stream[:2] + junk + stream[2:key] + [bytes(corrupt)] * 3 + stream[key:]
         seg, events = run(b"".join(data))
         self.assertEqual(seg.video_pid, fx.VIDEO_PID)
         self.assertEqual(
             [e.first_pts for e in opens(events)], [900000 + k * TARGET for k in range(3)]
+        )
+
+    def test_a_repeated_bad_crc_is_tolerated_until_a_valid_table_arrives(self):
+        def bad(cc):
+            pmt = bytearray(fx.pmt(cc=cc))
+            pmt[30] ^= 0xFF  # inside the CRC field; every copy is identical
+            return [bytes(pmt)], (cc + 1) & 0x0F
+
+        data = replace_pid_packets(fx.make_stream(6), fx.PMT_PID, bad)
+        with self.assertLogs("services.live.ts", level="INFO") as logs:
+            seg, events = run(data)
+        self.assertEqual([r.levelname for r in logs.records], ["INFO"])
+        self.assertEqual(seg.video_pid, fx.VIDEO_PID)
+        # Accepted at its third copy, at 1 s (tables every 0.5 s).
+        self.assertEqual(
+            [e.first_pts - 900000 for e in opens(events)], [CLOCK, 3 * CLOCK, 5 * CLOCK]
         )
 
     def test_corrupted_input_raises_nothing_but_unsupported(self):
@@ -472,6 +736,8 @@ class SegmenterTests(unittest.TestCase):
                 i = rng.randrange(len(data))
                 if i % PACKET:  # keep sync bytes so the corruption reaches the parsers
                     data[i] = rng.randrange(256)
+            for i in range(3, len(data), PACKET):
+                data[i] &= 0x3F  # and scrambling bits clear, to get past the scrambling check
             if seed % 4 == 0:  # truncate a few packets as well
                 for _ in range(5):
                     i = rng.randrange(len(data) - PACKET)

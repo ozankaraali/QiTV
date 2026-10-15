@@ -5,6 +5,9 @@ through byte for byte. Each segment is announced with copies of the latest PAT a
 which the consumer prepends so that VLC can start playback at any segment.
 
 Pure logic: no Qt and no I/O, and the wall clock is injected.
+
+Tests: `uv run python -m unittest discover -s tests -p test_ts_segmenter.py` (the module-path
+form cannot import `ts_fixtures`).
 """
 
 from __future__ import annotations
@@ -27,14 +30,22 @@ _PROBE_BYTES = 64 * 1024  # leading input inspected to tell TS from other conten
 _PROBE_RUN = 5  # consecutive sync bytes at one stride that prove a packet size
 _TABLE_LIMIT = 3 * 1024 * 1024  # input allowed before PAT and PMT must be known
 _MAX_SECTION = 1024  # PAT and PMT sections are at most 1024 bytes long
+_CRC_REPEATS = 3  # identical bad-CRC sections accepted while no valid one has been seen
 # Backward PTS steps up to this size are B-frame reordering, not a reset: with RAI on every
 # PES a reordered B-frame must not cut a one-frame "discontinuity" segment.
 _REORDER_TICKS = _CLOCK
+_JUMP_TICKS = 3 * _CLOCK  # a longer forward step between two PES is a timestamp jump
+_SCRAMBLED_PACKETS = 8  # scrambled cut-PID packets that prove scrambling ...
+_SCRAMBLED_WINDOW_S = 2.0  # ... in total within this first wall time, later in a row
+_STALL_S = 5.0  # a longer pause between feeds is a stalled source, not a silent cut PID
 
 _VIDEO_TYPES = (0x1B, 0x24, 0x02, 0x01)  # H.264, HEVC, MPEG-2, MPEG-1
 _AUDIO_TYPES = (0x03, 0x04, 0x0F, 0x11, 0x81, 0x87)  # MPEG audio, AAC, LATM, AC-3, E-AC-3
 _H264 = 0x1B
 _HEVC = 0x24
+_KEY = 1  # results of `_classify`
+_UNDECIDED = 0
+_NOT_KEY = -1
 
 
 class Unsupported(Exception):
@@ -97,23 +108,26 @@ class Segmenter:
         *,
         target_s: float = 2.0,
         forced_s: float = 10.0,
-        rai_fallback_s: float = 6.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._target = round(target_s * _CLOCK)
-        self._jump = 5 * self._target  # a longer forward step is a discontinuity
+        self._target_s = target_s
         self._forced = round(forced_s * _CLOCK)
         self._forced_s = forced_s
-        self._fallback_s = rai_fallback_s
         self._clock = clock
         # Input framing.
         self._buf = b""
         self._pos = 0  # absolute input offset of _buf[0]
         self._searching = True  # the next packet start must be proven by three sync bytes
         self._probe: bytearray | None = bytearray()
+        self._start_wall: float | None = None
+        self._feed_wall: float | None = None
         # Program tables.
         self._sections: dict[int, tuple[list[bytes], bytearray]] = {}  # partial PSI by PID
         self._accepted: dict[int, bytes] = {}  # last parsed section by PID
+        self._crc_valid: set[int] = set()  # PIDs that delivered a section with a valid CRC
+        self._bad_crc: dict[int, tuple[bytes, int]] = {}  # repeated bad-CRC section by PID
+        self._bad_crc_logged = False
         self._program: int | None = None
         self._pmt_pid: int | None = None
         self._pat = b""
@@ -121,12 +135,13 @@ class Segmenter:
         self._video_pid: int | None = None
         self._video_type: int | None = None
         self._cut_pid: int | None = None
-        # Keyframe detection on the cut PID.
+        # The cut PID.
         self._rai_seen = False
-        self._nal_scan = False
-        self._ref_pts: int | None = None
-        self._ref_wall: float | None = None
+        self._last_pts: int | None = None
         self._latest_pts: int | None = None
+        self._pusi_wall = 0.0  # wall time of the last cut-PID PES start (or cut)
+        self._scrambled_total = 0
+        self._scrambled_run = 0
         # The open segment.
         self._seq = 0
         self._open = False
@@ -189,10 +204,18 @@ class Segmenter:
         raise Unsupported("not MPEG-TS")
 
     def _scan(self, data: bytes, wall: float, events: list[Event]) -> None:
+        if self._start_wall is None:
+            self._start_wall = wall
+        if self._feed_wall is not None and wall - self._feed_wall > _STALL_S:
+            self._pusi_wall += wall - self._feed_wall  # a stall does not count as silence
+        self._feed_wall = wall
+        # The cut PID went quiet while other packets flow: cut at the next PES start of any PID.
+        silent = self._open and wall - self._pusi_wall >= self._forced_s
         n = len(data)
         off = 0
         run = 0 if self._open else -1  # start of the packets not yet emitted as Data
         searching = self._searching
+        scrambled = self._scrambled_run
         cut_pid = self._cut_pid
         pmt_pid = self._pmt_pid
         while off + PACKET <= n:
@@ -223,27 +246,49 @@ class Segmenter:
             if pid == cut_pid:
                 if not b1 & 0x80:  # with the transport error flag the header is untrusted
                     if data[off + 3] & 0xC0:
-                        raise Unsupported("scrambled")
-                    if b1 & 0x40:
-                        cut = self._on_pusi(data[off:end], wall)
-                        if cut:
-                            if 0 <= run < off:
-                                events.append(Data(data[run:off]))
-                            events.extend(cut)
-                            run = off
-            elif pid == 0 or pid == pmt_pid:
-                if not b1 & 0x80:
-                    self._on_psi(pid, data[off:end])
-                    cut_pid = self._cut_pid
-                    pmt_pid = self._pmt_pid
-            elif cut_pid is None and self._pos + off >= _TABLE_LIMIT:
-                raise Unsupported("no program tables")
+                        scrambled += 1
+                        self._scrambled_total += 1
+                        self._check_scrambled(scrambled, wall)
+                    else:
+                        scrambled = 0
+                        if b1 & 0x40:
+                            silent = False
+                            cut = self._on_pusi(data[off:end], wall)
+                            if cut:
+                                if 0 <= run < off:
+                                    events.append(Data(data[run:off]))
+                                events.extend(cut)
+                                run = off
+            else:
+                if silent and (b1 & 0xC0) == 0x40:
+                    silent = False
+                    quiet = wall - self._pusi_wall
+                    logger.debug("no PES start on PID %#x for %.1f s; cutting", cut_pid, quiet)
+                    if 0 <= run < off:
+                        events.append(Data(data[run:off]))
+                    events.extend(self._cut(None, wall, True))
+                    run = off
+                if pid == 0 or pid == pmt_pid:
+                    if not b1 & 0x80:
+                        self._on_psi(pid, data[off:end])
+                        cut_pid = self._cut_pid
+                        pmt_pid = self._pmt_pid
+                elif cut_pid is None and self._pos + off >= _TABLE_LIMIT:
+                    raise Unsupported("no program tables")
             off = end
         if 0 <= run < off:
             events.append(Data(data[run:off]))
         self._buf = data[off:]
         self._pos += off
         self._searching = searching
+        self._scrambled_run = scrambled
+
+    def _check_scrambled(self, run: int, wall: float) -> None:
+        """Isolated scrambling bits are corruption; many mean the stream is encrypted."""
+        start = wall if self._start_wall is None else self._start_wall
+        early = wall - start < _SCRAMBLED_WINDOW_S
+        if run >= _SCRAMBLED_PACKETS or (early and self._scrambled_total >= _SCRAMBLED_PACKETS):
+            raise Unsupported("scrambled")
 
     # -- keyframes and cuts ----------------------------------------------------------------
 
@@ -251,49 +296,45 @@ class Segmenter:
         rai, pts, es = _pes_start(pkt)
         if es >= PACKET:
             logger.debug("PES header not readable from its first packet")
-        if pts is not None:
-            self._latest_pts = pts
-            if self._ref_pts is None:
-                self._ref_pts = pts
-        if self._ref_wall is None:
-            self._ref_wall = wall
+        self._pusi_wall = wall
         if rai:
             self._rai_seen = True
+        if pts is not None:
+            last = self._last_pts
+            if last is not None:
+                step = pts_delta(last, pts)
+                if step < -_REORDER_TICKS or step > _JUMP_TICKS:
+                    logger.debug("PTS jumped by %.2f s", step / _CLOCK)
+                    self._pending = True
+            self._last_pts = pts
+            self._latest_pts = pts
         if not self._open:  # the first segment, or the first after finish(), which left a gap
-            if self._is_key(rai, pts, pkt, es, wall):
+            if self._is_key(rai, pts, pkt, es):
                 return self._cut(pts, wall, self._seq > 0)
             return None
         first = self._seg_pts
-        delta = None if pts is None or first is None else pts_delta(first, pts)
-        if delta is None or delta < -_REORDER_TICKS:
-            # PTS missing or reset backwards: cut at the next keyframe, time out by wall clock.
-            if self._is_key(rai, pts, pkt, es, wall) or wall - self._seg_wall >= self._forced_s:
-                return self._cut(pts, wall, True)
-            return None
-        discontinuity = self._pending or delta > self._jump
-        if (discontinuity or delta >= self._target) and self._is_key(rai, pts, pkt, es, wall):
-            return self._cut(pts, wall, discontinuity)
-        if delta >= self._forced:
-            return self._cut(pts, wall, discontinuity)
+        if not self._pending and pts is not None and first is not None:
+            delta = pts_delta(first, pts)
+            if delta >= -_REORDER_TICKS:
+                if delta >= self._target and self._is_key(rai, pts, pkt, es):
+                    return self._cut(pts, wall, False)
+                if delta >= self._forced:
+                    return self._cut(pts, wall, False)
+                return None
+        # A pending discontinuity, no PTS, or PTS drifted backwards: use the wall clock only.
+        elapsed = wall - self._seg_wall
+        due = self._pending or elapsed >= self._target_s
+        if (due and self._is_key(rai, pts, pkt, es)) or elapsed >= self._forced_s:
+            return self._cut(pts, wall, True)
         return None
 
-    def _is_key(self, rai: bool, pts: int | None, pkt: bytes, es: int, wall: float) -> bool:
+    def _is_key(self, rai: bool, pts: int | None, pkt: bytes, es: int) -> bool:
         if self._video_pid is None:  # audio only: every audio PES with a PTS is a cut point
             return pts is not None
-        if rai:
-            return True
-        if self._rai_seen:
-            return False
-        if not self._nal_scan:
-            ref_wall = wall if self._ref_wall is None else self._ref_wall
-            elapsed = wall - ref_wall
-            if pts is not None and self._ref_pts is not None:
-                elapsed = max(elapsed, pts_delta(self._ref_pts, pts) / _CLOCK)
-            if elapsed < self._fallback_s:
-                return False
-            self._nal_scan = True
-            logger.debug("no random access indicator after %.1f s; scanning NAL units", elapsed)
-        return _nal_key(pkt, es, self._video_type)
+        kind = _classify(pkt, es, self._video_type)
+        if rai:  # trust the flag unless the picture is visibly not a keyframe
+            return kind != _NOT_KEY
+        return not self._rai_seen and kind == _KEY
 
     def _cut(self, pts: int | None, wall: float, discontinuity: bool) -> list[Event]:
         events: list[Event] = []
@@ -304,6 +345,7 @@ class Segmenter:
         self._open = True
         self._seg_pts = pts
         self._seg_wall = wall
+        self._pusi_wall = wall
         self._pending = False
         return events
 
@@ -358,8 +400,8 @@ class Segmenter:
             else:
                 self._pmt = b"".join(packets)
             return
-        if _crc32(section) != 0:
-            logger.debug("skipped a PSI section with a bad CRC on PID %#x", pid)
+        crc_ok = _crc32(section) == 0
+        if not crc_ok and not self._tolerate_bad_crc(pid, section):
             return
         if len(section) < 12 or not section[5] & 1:  # truncated, or not yet applicable
             return
@@ -371,6 +413,25 @@ class Segmenter:
             return
         if accepted:
             self._accepted[pid] = section
+            if crc_ok:
+                self._crc_valid.add(pid)
+
+    def _tolerate_bad_crc(self, pid: int, section: bytes) -> bool:
+        """Some muxers write wrong CRCs: until a valid section arrives on this PID, accept a
+        section repeated identically `_CRC_REPEATS` times (as FFmpeg tolerates bad CRCs)."""
+        if pid in self._crc_valid:
+            logger.debug("skipped a PSI section with a bad CRC on PID %#x", pid)
+            return False
+        last, count = self._bad_crc.get(pid, (b"", 0))
+        count = count + 1 if section == last else 1
+        self._bad_crc[pid] = (section, count)
+        if count < _CRC_REPEATS:
+            logger.debug("PSI section with a bad CRC on PID %#x (seen %d times)", pid, count)
+            return False
+        if not self._bad_crc_logged:
+            self._bad_crc_logged = True
+            logger.info("Accepting program tables with a bad CRC repeated %d times", count)
+        return True
 
     def _on_pat(self, section: bytes, packets: list[bytes]) -> bool:
         end = len(section) - 4
@@ -425,9 +486,6 @@ class Segmenter:
                 logger.debug("cut PID moved from %#x to %#x", self._cut_pid, cut_pid)
             self._cut_pid = cut_pid
             self._rai_seen = False
-            self._nal_scan = False
-            self._ref_pts = None
-            self._ref_wall = None
         return True
 
 
@@ -479,22 +537,62 @@ def _pes_start(pkt: bytes) -> tuple[bool, int | None, int]:
     return rai, pts, start + 9 + header_length
 
 
-def _nal_key(pkt: bytes, start: int, video_type: int | None) -> bool:
-    """Whether the elementary stream bytes of this packet begin a keyframe."""
+def _classify(pkt: bytes, start: int, video_type: int | None) -> int:
+    """Whether the picture starting in this packet's ES bytes is a keyframe.
+
+    `_KEY`: an IRAP slice (H.264 IDR 5 or an intra slice 1, which open-GOP encoders use; HEVC
+    16-21), a parameter set (H.264 SPS 7, HEVC VPS 32) without a non-IRAP slice, or an MPEG-1/2
+    sequence header. `_NOT_KEY`: the first slice is not IRAP (H.264 1-4 with P or B slices,
+    HEVC 0-9). `_UNDECIDED`: no slice or parameter set in this packet.
+    """
+    parameter_set = False
     i = pkt.find(_START_CODE, start)
     while 0 <= i < PACKET - 3:
         code = pkt[i + 3]
         if video_type == _H264:
-            if (code & 0x1F) in (5, 7):  # IDR slice, SPS
-                return True
+            nal_type = code & 0x1F
+            if nal_type == 5:
+                return _KEY
+            if nal_type == 1:  # the first slice decides
+                return _KEY if _h264_intra(pkt, i + 4) else _NOT_KEY
+            if 2 <= nal_type <= 4:  # data partitions: never intra-only
+                return _NOT_KEY
+            if nal_type == 7:
+                parameter_set = True
         elif video_type == _HEVC:
             nal_type = (code >> 1) & 0x3F
-            if 16 <= nal_type <= 21 or nal_type == 32:  # IRAP slices, VPS
-                return True
+            if 16 <= nal_type <= 21:
+                return _KEY
+            if nal_type <= 9:
+                return _NOT_KEY
+            if nal_type == 32:
+                parameter_set = True
         elif code == 0xB3:  # MPEG-1/2 sequence header
-            return True
+            return _KEY
         i = pkt.find(_START_CODE, i + 3)
-    return False
+    return _KEY if parameter_set else _UNDECIDED
+
+
+def _h264_intra(pkt: bytes, at: int) -> bool:
+    """Whether the H.264 slice header at `at` is an I or SI slice.
+
+    Reads first_mb_in_slice and slice_type (two Exp-Golomb codes). For the first slice of a
+    picture (first_mb_in_slice 0) both fit in the first byte, before any emulation prevention.
+    """
+    head = pkt[at : at + 4]
+    bits = int.from_bytes(head, "big")
+    left = 8 * len(head)  # bits not read yet
+    value = 0
+    for _ in range(2):
+        zeros = 0
+        while left and not bits >> (left - 1) & 1:
+            zeros += 1
+            left -= 1
+        if left <= zeros:  # truncated
+            return False
+        left -= 1 + zeros
+        value = (1 << zeros) - 1 + (bits >> left & ((1 << zeros) - 1))
+    return value % 5 in (2, 4)  # slice_type: 0 P, 1 B, 2 I, 3 SP, 4 SI (+5: all slices alike)
 
 
 def _crc_table() -> tuple[int, ...]:
