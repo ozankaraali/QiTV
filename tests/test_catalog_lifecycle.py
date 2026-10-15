@@ -350,11 +350,16 @@ class CatalogQueueTests(unittest.TestCase):
 
     def test_previous_provider_jobs_hold_no_slots_of_the_new_provider(self):
         runner = ManualRunner()
-        service, _, factory = self._stb_movies(runner)
-        factory.results["provider_setup"] = {"result": {"name": "S"}}
+        service, providers, factory = self._stb_movies(runner)
+        other = {"name": "T", "type": "STB", "url": "http://other.test/c/"}
+        providers.providers.append(other)
+        factory.results["provider_setup"] = {
+            "result": {"name": "T"},
+            "on_run": lambda: setattr(providers, "current_provider", other),
+        }
         service.request_group("movies", "1")
         service.request_group("movies", "2")  # the previous provider's crawls fill the cap
-        service.select_provider()
+        service.select_provider("T")
         runner.complete(2)  # setup: ready (its EPG load starts)
         for group in "345":
             service.request_group("movies", group)
@@ -368,6 +373,39 @@ class CatalogQueueTests(unittest.TestCase):
         self.assertEqual(started(), ["1", "2", "3", "4"])
         runner.complete(job_indexes(runner, "group")[2])  # group 3 finishes: 5 runs
         self.assertEqual(started(), ["1", "2", "3", "4", "5"])
+
+    def test_a_forced_refresh_never_runs_more_portal_jobs_than_the_cap(self):
+        # The jobs of the provider's previous generation still hit the same portal.
+        runner = ManualRunner()
+        service, _, factory = self._stb_movies(runner)
+        factory.results["provider_setup"] = {"result": {"name": "S"}}
+        service.request_group("movies", "1")
+        service.request_group("movies", "2")
+        service.select_provider(force_refresh=True)  # Settings: the same provider again
+        runner.complete(2)  # setup: ready (its EPG load starts)
+        for group in "345":
+            service.request_group("movies", group)
+
+        def started():
+            return [c[2]["category_id"] for c in factory.calls if c[0] == "stb_list"]
+
+        self.assertEqual(started(), ["1", "2"])  # both slots are still taken
+        runner.complete(0)  # an old job finishes: its slot goes to the newest request
+        self.assertEqual(started(), ["1", "2", "5"])
+        runner.complete(1)
+        self.assertEqual(started(), ["1", "2", "5", "4"])
+        self.assertEqual(service.items("movies", "1"), None)  # the old results are dropped
+
+    def test_reselecting_the_same_provider_keeps_its_old_jobs_in_the_cap(self):
+        runner = ManualRunner()
+        service, _, factory = self._stb_movies(runner)
+        factory.results["provider_setup"] = {"result": {"name": "S"}}
+        service.request_group("movies", "1")
+        service.request_group("movies", "2")
+        service.select_provider("S")  # e.g. the drawer's source row
+        runner.complete(2)
+        service.request_group("movies", "3")
+        self.assertEqual([c[0] for c in factory.calls].count("stb_list"), 2)
 
     def test_is_loading_while_a_setup_runs_or_waits(self):
         runner = ManualRunner()
