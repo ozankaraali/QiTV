@@ -44,6 +44,7 @@ from tests.fixtures.local_provider import (
 )
 from tests.fixtures.local_xtream import XtreamFixture
 from tests.http_fixtures import LocalSource
+from tests.process_fixtures import still_running, terminate
 from tests.test_keymap import resolve_text
 from tests.ts_fixtures import make_stream
 from ui.brand import logo_aspect
@@ -253,6 +254,17 @@ class TVWindowTests(WindowCase):
     def test_hosts_the_options_dialog(self):
         for name in HOST_METHODS + HOST_ATTRIBUTES:
             self.assertTrue(hasattr(self.window, name), name)
+
+    def test_close_cancels_the_catalogs_and_the_librarys_running_jobs(self):
+        # An XMLTV download or an STB crawl held the close for up to 30 s (H10).
+        window = self.window
+        with (
+            mock.patch.object(window.catalog.runner, "cancel_all", create=True) as catalog,
+            mock.patch.object(window.jobs, "cancel_all", create=True) as library,
+        ):
+            self.close_window()
+        catalog.assert_called_once_with()
+        library.assert_called_once_with()
 
     def test_close_saves_the_window_geometry(self):
         self.show()
@@ -846,7 +858,43 @@ print("exec returned", app.exec(), flush=True)
 """
 
 
+HELPER_CHILD_EXIT_SCRIPT = r"""
+import multiprocessing, time
+import ui.tv_window as tw
+
+if __name__ == "__main__":
+    child = multiprocessing.get_context("spawn").Process(target=time.sleep, args=(60,), daemon=True)
+    child.start()
+    print("child", child.pid, flush=True)
+    tw._exit_now()
+"""
+
+
 class StuckWorkerExitTests(unittest.TestCase):
+    def test_the_abandoning_exit_ends_the_helper_processes(self):
+        # os._exit skips multiprocessing's own exit handler, which ends daemon children:
+        # the time-shift helper (with its provider connections) must not outlive QiTV.
+        repo = Path(__file__).resolve().parent.parent
+        directory = tempfile.TemporaryDirectory(prefix="qitv-exit-")
+        self.addCleanup(directory.cleanup)
+        out_path = Path(directory.name) / "out.txt"
+        # Files, not pipes: a child left running would hold a pipe open until it ends.
+        with open(out_path, "w") as out:
+            process = subprocess.Popen(
+                [sys.executable, "-c", HELPER_CHILD_EXIT_SCRIPT],
+                cwd=repo,
+                env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+                stdout=out,
+                stderr=subprocess.STDOUT,
+            )
+            returncode = process.wait(timeout=60)
+        output = out_path.read_text()
+        self.assertEqual(returncode, ABANDONED_EXIT_CODE, output[-2000:])
+        pid = int(output.split("child", 1)[1].split()[0])
+        running = still_running([pid], 5)
+        self.addCleanup(terminate, running)
+        self.assertEqual(running, [])
+
     def test_quits_cleanly_when_a_worker_never_finishes(self):
         # Qt aborts the process if a QThread that still runs is destroyed at exit.
         repo = Path(__file__).resolve().parent.parent

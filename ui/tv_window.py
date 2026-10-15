@@ -19,9 +19,11 @@ from __future__ import annotations
 import atexit
 from datetime import datetime
 import logging
+import multiprocessing
 import os
 import platform
 import sys
+import time
 from typing import Callable, Optional
 
 from PySide6.QtCore import (
@@ -144,10 +146,27 @@ def _exit_now() -> None:
     handlers registered before it never run. The exit code tells whoever started QiTV that
     background work was abandoned.
     """
+    _end_child_processes()
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(ABANDONED_EXIT_CODE)
+
+
+def _end_child_processes(timeout_s: float = 1.0) -> None:
+    """Terminate multiprocessing's children (the time-shift helper), then kill stragglers.
+
+    os._exit skips multiprocessing's own exit handler, which would end daemon children; the
+    helper notices its owner's death too, but only after a while, with its connections open.
+    """
+    children = multiprocessing.active_children()
+    for child in children:
+        child.terminate()
+    deadline = time.monotonic() + timeout_s
+    for child in children:
+        child.join(max(0.0, deadline - time.monotonic()))
+        if child.is_alive():
+            child.kill()
 
 
 def fit_to_area(rect: QRect, margins: QMargins, area: QRect) -> QRect:
@@ -1006,7 +1025,8 @@ class TVWindow(QMainWindow):
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the live pipeline", self.stop_live),
-            ("stop the catalog", self.catalog.shutdown),
+            ("stop the catalog", self.catalog.shutdown),  # and cancel its running jobs
+            ("cancel the Library's jobs", self.jobs.cancel_all),  # its searches
             ("stop the controller", self.controller.shutdown),
             ("stop following the surfaces", self.pip_frame.close),
             ("stop loading logos", self.logos.shutdown),

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import gzip
 import hashlib
+import itertools
 import logging
 import os
 import pickle
@@ -15,6 +16,7 @@ import tzlocal  # the GUI thread's guide lookups use it: loaded with the window
 from services.content_loader import ContentLoader
 from services.epg_store import PackedGuide, read_guide, write_guide
 from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_as
+from services.jobs import Cancelled, cancel_requested
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.provider_api import (
@@ -102,17 +104,25 @@ def xml_to_dict(element):
     return {element.tag: parse_element(element)}
 
 
+_CHUNK = 65536
+
+
 def write_xmltv_body(response, path: str) -> None:
     """Write an XMLTV download to ``path``, unpacking gzip or zip bodies by their bytes.
 
-    Headers are not trusted: feeds are often served as ``application/octet-stream``, and
-    requests has already decoded ``Content-Encoding``. The body is streamed to a temporary
-    ``.download`` file first, which is always removed.
+    `response` is a streamed requests response, or its body's chunks. Headers are not
+    trusted: feeds are often served as ``application/octet-stream``, and requests has
+    already decoded ``Content-Encoding``. The body is streamed to a temporary ``.download``
+    file first, which is always removed. A cancelled job (the window closing) stops between
+    chunks with Cancelled.
     """
+    chunks = response.iter_content(_CHUNK) if hasattr(response, "iter_content") else response
     temp_path = path + ".download"
     try:
         with open(temp_path, "wb") as f:
-            for chunk in response.iter_content(65536):
+            for chunk in chunks:
+                if cancel_requested():
+                    raise Cancelled()
                 f.write(chunk)
         with open(temp_path, "rb") as f:
             magic = f.read(4)
@@ -559,6 +569,8 @@ class EpgManager:
                 verify_ssl=verify_ssl,
             )
             content_loader.run()
+            if cancel_requested():
+                raise Cancelled()  # not a failed source: it is tried again next time
             items = content_loader.items
             if items:
                 break
@@ -583,12 +595,17 @@ class EpgManager:
         try:
             # Fetch the XMLTV data from Xtream endpoint, trying HTTPS first if preferred
             r = None
+            body = None  # the chunks of the first non-empty answer, streamed (cancellable)
             for _url in https_fallback_candidates(xmltv_url, prefer_https):
                 try:
                     r = requests.get(_url, stream=True, timeout=30, verify=verify_ssl)
-                    if r.status_code == 200 and r.content:
-                        xmltv_url = _url
-                        break
+                    if r.status_code == 200:
+                        chunks = r.iter_content(_CHUNK)
+                        first = next(chunks, b"")
+                        if first:
+                            xmltv_url = _url
+                            body = itertools.chain([first], chunks)
+                            break
                 except requests.RequestException:
                     r = None
             if r is None:
@@ -602,7 +619,7 @@ class EpgManager:
                 self._source_failed(provider_hash)
             else:
                 xmltv_file_path = os.path.join(self._cache_dir(), f"{provider_hash}_xtream.xml")
-                write_xmltv_body(r, xmltv_file_path)
+                write_xmltv_body(body if body is not None else iter(()), xmltv_file_path)
 
                 # Parse and index the XMLTV file
                 guide = self._index_programs(xmltv_file_path)
@@ -611,6 +628,8 @@ class EpgManager:
                     self._store_guide(provider_hash, guide)
                 else:
                     self._source_failed(provider_hash)
+        except Cancelled:
+            raise  # not a failed source: it is tried again next time
         except Exception as e:
             logger.error("Error fetching Xtream EPG: %s", safe_exc(e))
             self._source_failed(provider_hash)

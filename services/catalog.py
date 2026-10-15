@@ -417,9 +417,13 @@ class CatalogService(QObject):
     def shutdown(self) -> None:
         """The window is closing: start no more jobs and report nothing more.
 
-        Workers already running finish on their own; their results are dropped.
+        Running jobs are cancelled (an XMLTV download or an STB crawl stops at its next step);
+        what they still report is dropped.
         """
         self._closed = True
+        cancel_all = getattr(self.runner, "cancel_all", None)
+        if cancel_all is not None:
+            cancel_all()
         self._generation += 1  # drops results and deferred emits of everything issued so far
         self._catalog_queue.clear()
         self._pending_setup = None

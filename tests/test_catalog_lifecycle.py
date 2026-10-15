@@ -407,6 +407,15 @@ class CatalogQueueTests(unittest.TestCase):
         service.request_group("movies", "3")
         self.assertEqual([c[0] for c in factory.calls].count("stb_list"), 2)
 
+    def test_shutdown_cancels_the_running_jobs(self):
+        # An XMLTV download or an STB crawl must not hold the window's close (H10).
+        runner = ManualRunner()
+        runner.cancel_all = mock.Mock()
+        service, _, _ = self._stb_movies(runner)
+        service.request_group("movies", "1")
+        service.shutdown()
+        runner.cancel_all.assert_called_once_with()
+
     def test_is_loading_while_a_setup_runs_or_waits(self):
         runner = ManualRunner()
         service, _, factory = self._stb_movies(runner)

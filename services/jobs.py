@@ -14,6 +14,19 @@ FAILED_MESSAGE = "The background task failed"
 NO_RESULT_MESSAGE = "The background task ended without a result"
 
 
+class Cancelled(Exception):
+    """A job stopped early because its runner cancelled it (JobRunner.cancel_all)."""
+
+
+def cancel_requested() -> bool:
+    """True inside a job whose runner asked its jobs to stop (the window is closing).
+
+    Long jobs (an XMLTV download, an STB crawl) check it between steps and raise Cancelled.
+    Always False on the GUI thread.
+    """
+    return QThread.currentThread().isInterruptionRequested()
+
+
 class _WorkerGuard(QObject):
     """Runs a worker and guarantees one terminal signal (finished or error) and a quit.
 
@@ -124,6 +137,11 @@ class JobRunner(QObject):
 
     def _retire(self, thread: QThread) -> None:
         self._jobs.pop(thread, None)
+
+    def cancel_all(self) -> None:
+        """Ask every running job to stop (see cancel_requested); each still reports once."""
+        for thread in list(self._jobs):
+            thread.requestInterruption()
 
     def pending(self) -> int:
         return len(self._jobs)

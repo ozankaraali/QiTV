@@ -6,6 +6,7 @@ from urllib.parse import quote, urlencode
 from PySide6.QtCore import QThread, Signal
 import orjson as json
 
+from services.jobs import cancel_requested
 from services.lazy_import import lazy_module
 from services.redact import safe_exc, safe_traceback
 
@@ -14,6 +15,7 @@ aiohttp = lazy_module("aiohttp")
 asyncio = lazy_module("asyncio")
 
 _HIDDEN = "…"
+_CANCEL_POLL_S = 0.1  # how often a running load looks for a cancel (the window closing)
 
 
 def _debug_header_value(name: str, value: object, raw: bool) -> str:
@@ -95,9 +97,14 @@ class ContentLoader(QThread):
         self.counter_page_not_fetched = 0
         self.verify_ssl = verify_ssl
 
+    def _interrupted(self) -> bool:
+        """Stop asked: of this loader as a thread, or of the job it runs in (StbListWorker,
+        the STB guide) when the window closes."""
+        return self.isInterruptionRequested() or cancel_requested()
+
     async def fetch_page(self, session, page, max_retries=2, timeout=5):
         for attempt in range(max_retries):
-            if self.isInterruptionRequested():
+            if self._interrupted():
                 raise asyncio.CancelledError()
             try:
                 if attempt:
@@ -252,7 +259,7 @@ class ContentLoader(QThread):
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-            if self.isInterruptionRequested():
+            if self._interrupted():
                 return
             if self.counter_page_not_fetched:
                 raise RuntimeError(f"Failed to fetch {self.counter_page_not_fetched} pages")
@@ -269,9 +276,19 @@ class ContentLoader(QThread):
                 }
             )
 
+    async def _load_until_interrupted(self) -> None:
+        """load_content(), cancelled within _CANCEL_POLL_S of a stop: its requests too."""
+        load = asyncio.ensure_future(self.load_content())
+        while not load.done():
+            if self._interrupted():
+                load.cancel()
+                break
+            await asyncio.wait({load}, timeout=_CANCEL_POLL_S)
+        await load
+
     def run(self):
         try:
-            asyncio.run(self.load_content())
+            asyncio.run(self._load_until_interrupted())
         except asyncio.CancelledError:
             pass
         except Exception as e:
