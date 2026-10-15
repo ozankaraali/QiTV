@@ -8,6 +8,11 @@ CI run 38675064690 hung in libvlc_media_player_set_media. So the session ends in
 worker (_PlayerJob), never touches the player's input lock from the GUI thread while one
 runs, and opens the newest media once it has finished. Every platform takes this path:
 the GUI thread also no longer waits up to ~100 ms for a join on each zap.
+
+Mute and volume live on libVLC's audio output, which a stop closes; the next media opens a
+new one once its audio decodes, which can be after the Playing state. Meanwhile libVLC drops
+audio_set_mute and audio_set_volume (measured with 3.0.20), so the session keeps what it was
+asked for and applies it again at the first poll of each media that finds the output.
 """
 
 from __future__ import annotations
@@ -165,6 +170,10 @@ class PlaybackSession(QObject):
         self._start_wanted = False  # open self._url once the job has finished
         self._stop_owed = False  # stop() came during a DETACH: stop once it has finished
         self._rate: Optional[float] = None  # asked for during a job: set before the next play
+        # Asked for by the user (None: never): applied again once each media's audio opens.
+        self._mute_wanted: Optional[bool] = None
+        self._volume_wanted: Optional[int] = None
+        self._audio_due = False  # the wanted mute/volume still to be applied to this media
 
     def _player_free(self) -> bool:
         """The GUI thread may call into libVLC: not released, and no job holds its input lock.
@@ -244,6 +253,7 @@ class PlaybackSession(QObject):
         self._set_seekable(False)
         self._ever_played = False
         self._last_time = -1
+        self._audio_due = self._mute_wanted is not None or self._volume_wanted is not None
         self._set_state(PlaybackState.OPENING)
         self._stop_owed = False
         if self._job is not None:
@@ -362,26 +372,48 @@ class PlaybackSession(QObject):
         self._player.set_rate(float(rate))
 
     # Volume and mute take only the audio output's locks, never the input lock: libVLC lets
-    # interfaces call them from any thread, so they stay live while a job runs.
+    # interfaces call them from any thread, so they stay live while a job runs. Without an
+    # audio output libVLC drops them: what was asked for is applied again (module docstring).
     def volume(self) -> int:
         if self._released:
             return 0
-        return max(0, int(self._player.audio_get_volume()))
+        value = int(self._player.audio_get_volume())
+        if value < 0 and self._volume_wanted is not None:
+            return self._volume_wanted  # no audio output now: what it will get
+        return max(0, value)
 
     def set_volume(self, value: int) -> None:
-        if not self._released:
-            self._player.audio_set_volume(max(0, min(100, int(value))))
+        if self._released:
+            return
+        self._volume_wanted = max(0, min(100, int(value)))
+        self._audio_due = True
+        self._player.audio_set_volume(self._volume_wanted)
 
     def toggle_mute(self) -> bool:
         if self._released:
             return False
-        muted = not bool(self._player.audio_get_mute())
-        self._player.audio_set_mute(muted)
-        return muted
+        muted = self._mute_wanted
+        if muted is None:
+            muted = int(self._player.audio_get_mute()) > 0  # -1: no audio output, not muted
+        self.set_muted(not muted)
+        return not muted
 
     def set_muted(self, muted: bool) -> None:
-        if not self._released:
-            self._player.audio_set_mute(bool(muted))
+        if self._released:
+            return
+        self._mute_wanted = bool(muted)
+        self._audio_due = True
+        self._player.audio_set_mute(self._mute_wanted)
+
+    def _apply_audio(self) -> None:
+        """Apply the wanted mute and volume once this media's audio output is open."""
+        if not self._audio_due or int(self._player.audio_get_mute()) < 0:
+            return
+        self._audio_due = False
+        if self._volume_wanted is not None:
+            self._player.audio_set_volume(self._volume_wanted)
+        if self._mute_wanted is not None:
+            self._player.audio_set_mute(self._mute_wanted)
 
     def audio_tracks(self) -> list[tuple[int, str]]:
         if not self._player_free():
@@ -470,6 +502,8 @@ class PlaybackSession(QObject):
                 self._playing_clock.start()
             self._ever_played = True
         self._set_state(state)
+        if state is PlaybackState.PLAYING:
+            self._apply_audio()
         if state in (PlaybackState.OPENING, PlaybackState.BUFFERING) and not self._ever_played:
             if self._opened.elapsed() > self._open_timeout_ms:
                 self._fail("Timed out opening the stream")

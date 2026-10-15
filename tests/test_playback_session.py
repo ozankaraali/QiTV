@@ -626,7 +626,7 @@ class PlayerJobTests(unittest.TestCase):
         self.assertEqual(self.player.calls, [("release",)])
         self.assertEqual(self.runner.jobs, [])
 
-    def test_set_muted_sets_libvlc_mute_even_while_a_job_runs(self):
+    def test_set_muted_is_safe_to_call_while_a_job_runs(self):
         self.play(A)
         self.play(B)  # a worker joins A's input: mute takes only the audio output's locks
         self.session.set_muted(True)
@@ -687,6 +687,127 @@ class PlayerJobTests(unittest.TestCase):
         self.assertEqual(self.opened(), [A])
         self.runner.finish()
         self.assertEqual(self.opened(), [A, A])
+
+
+class _AudioPlayer(_FakePlayer):
+    """libVLC's audio side, as measured with libVLC 3.0.20 on macOS.
+
+    Mute and volume live on the player's audio output. A stop closes it, and the next media
+    opens a new one only once its audio decodes, which can come after the Playing state.
+    While there is none, libVLC drops audio_set_mute and audio_set_volume and reports -1; a
+    new output comes up with the state the last one had.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.state = vlc.State.Opening
+        self.output = True  # libVLC opens one with the player
+        self.mute, self.level = False, 100
+
+    def get_state(self):
+        self._call("get_state")
+        return self.state
+
+    def stop(self):
+        super().stop()
+        self.output = False
+
+    def open_output(self):
+        self.output = True
+
+    def audio_get_mute(self):
+        return int(self.mute) if self.output else -1
+
+    def audio_set_mute(self, muted):
+        self.calls.append(("audio_set_mute", muted))
+        if self.output:
+            self.mute = bool(muted)
+
+    def audio_get_volume(self):
+        return self.level if self.output else -1
+
+    def audio_set_volume(self, value):
+        self.calls.append(("audio_set_volume", value))
+        if not self.output:
+            return -1
+        self.level = value
+        return 0
+
+
+@unittest.skipIf(vlc is None, "python-vlc's states are needed to poll the player")
+class AudioSettingsTests(unittest.TestCase):
+    """A player keeps the mute and volume it was asked for across stops and new media."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.player = _AudioPlayer()
+        self.runner = _HeldRunner(self.player)
+        self.session = PlaybackSession(
+            _FakeInstance(self.player), runner=self.runner, poll_ms=60_000
+        )
+        self.addCleanup(self.session.release)
+
+    def stopped(self):
+        """A stream played and was stopped: libVLC closed the audio output."""
+        self.session.play(A, kind=PlayKind.LIVE)
+        self.session.stop()
+        self.runner.finish()
+        self.assertFalse(self.player.output)
+
+    def playing(self, url, *, output):
+        self.session.play(url, kind=PlayKind.LIVE)
+        if self.runner.jobs:
+            self.runner.finish()
+        self.player.state = vlc.State.Playing
+        if output:
+            self.player.open_output()
+        self.session._tick()
+
+    def audio_calls(self):
+        return [c for c in self.player.calls if c[0] in ("audio_set_mute", "audio_set_volume")]
+
+    def test_mute_and_volume_asked_for_without_an_audio_output_apply_once_one_opens(self):
+        self.stopped()
+        self.session.set_muted(True)
+        self.session.set_volume(30)
+        self.assertEqual((self.player.mute, self.player.level), (False, 100))  # dropped
+        self.playing(B, output=False)  # Playing before its audio output opened
+        self.assertEqual((self.player.mute, self.player.level), (False, 100))
+        self.player.open_output()
+        self.session._tick()
+        self.assertEqual((self.player.mute, self.player.level), (True, 30))
+
+    def test_they_are_applied_once_for_each_media(self):
+        self.stopped()
+        self.session.set_muted(True)
+        self.playing(B, output=True)
+        self.assertTrue(self.player.mute)
+        self.player.calls.clear()
+        self.session._tick()
+        self.assertEqual(self.audio_calls(), [])
+        self.playing(C, output=True)  # the next channel: applied again
+        self.assertEqual(self.audio_calls(), [("audio_set_mute", True)])
+
+    def test_toggle_mute_follows_what_was_asked_without_an_audio_output(self):
+        self.stopped()
+        self.assertTrue(self.session.toggle_mute())
+        self.assertFalse(self.session.toggle_mute())
+        self.assertTrue(self.session.toggle_mute())
+        self.playing(B, output=True)
+        self.assertTrue(self.player.mute)
+
+    def test_volume_reports_what_was_asked_without_an_audio_output(self):
+        self.stopped()
+        self.session.set_volume(30)
+        self.assertEqual(self.session.volume(), 30)
+
+    def test_a_player_never_asked_is_left_alone(self):
+        self.stopped()
+        self.playing(B, output=True)
+        self.assertEqual(self.audio_calls(), [])
 
 
 class _GuiQueue(QObject):
