@@ -70,6 +70,21 @@ class SeriesViewTests(unittest.TestCase):
         QTest.qWait(400)
         self.assertEqual(got, [ss[2]])
 
+    def test_set_seasons_opens_at_the_given_season_once(self):
+        view = self.make()
+        ss = seasons()
+        view.set_seasons(ss, current=ss[1])
+        self.assertIs(view.current_season(), ss[1])
+        view.move_by(1, 0)  # the user moves on to season 3
+        view.set_seasons(seasons(), current=ss[1])  # a repeated seasonsReady
+        self.assertEqual(view.current_season()["id"], "3")
+
+    def test_set_seasons_ignores_an_unknown_current(self):
+        view = self.make()
+        ss = seasons()
+        view.set_seasons(ss, current={"id": "9"})
+        self.assertIs(view.current_season(), ss[0])
+
     def test_activate_episode(self):
         view = self.make()
         got = []

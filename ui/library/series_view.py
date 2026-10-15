@@ -346,17 +346,22 @@ class SeriesView(QWidget):
             self._posters.request([self._poster_url])
         self._sync()
 
-    def set_seasons(self, seasons: list[dict] | None, error: str | None = None) -> None:
+    def set_seasons(
+        self, seasons: list[dict] | None, error: str | None = None, *, current: dict | None = None
+    ) -> None:
+        """Show the seasons. `current` opens at that season, but only while the view has no
+        season yet for this series: a repeated result never moves the user back."""
         self._seasons = seasons
         self._seasons_error = error
         if seasons:
             keys = [item_key(s) for s in seasons]
-            current = item_key(self._season) if self._season is not None else None
-            if current in keys:
-                self._season_idx = keys.index(current)
+            shown = item_key(self._season) if self._season is not None else None
+            if shown in keys:
+                self._season_idx = keys.index(shown)
             else:
-                self._season_idx = 0
-                self._season = seasons[0]
+                wanted = item_key(current) if current is not None else None
+                self._season_idx = keys.index(wanted) if wanted in keys else 0
+                self._season = seasons[self._season_idx]
                 self._episodes = None
                 self._episodes_error = None
                 self._model.set_episodes([])
