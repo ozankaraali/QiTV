@@ -40,7 +40,9 @@ a = Analysis(
     ['main.py'],
     pathex=[VLC_PATH],
     binaries=[
-        (os.path.join(VLC_PATH, 'vlc/plugins/*'), 'plugins'),
+        # libVLC 3 on Linux looks for plugins in <libvlccore's directory>/vlc/plugins, and
+        # the bundled libvlccore sits at the bundle's top (VLC's own layout under VLC_PATH).
+        (os.path.join(VLC_PATH, 'vlc/plugins/*'), 'vlc/plugins'),
     ],
     datas=[
         ('pyproject.toml', '.'),  # Include pyproject.toml so version can be read

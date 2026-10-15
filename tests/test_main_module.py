@@ -64,6 +64,23 @@ class MainModuleTests(unittest.TestCase):
             hidden = next(k.value for k in analysis.keywords if k.arg == "hiddenimports")
             self.assertLessEqual(wanted, set(ast.literal_eval(hidden)), name)
 
+    def test_the_linux_app_bundles_vlc_plugins_where_its_libvlccore_looks(self):
+        # libVLC 3 on Linux loads plugins from <libvlccore's directory>/vlc/plugins, and the
+        # bundle's libvlccore sits at its top: plugins anywhere else leave libvlc_new NULL.
+        tree = ast.parse((REPO / "qitv-linux.spec").read_text(encoding="utf-8"))
+        analysis = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Analysis"
+        )
+        binaries = next(k.value for k in analysis.keywords if k.arg == "binaries")
+        destinations = [
+            item.elts[1].value
+            for item in binaries.elts
+            if isinstance(item, ast.Tuple) and "plugins" in ast.unparse(item.elts[0])
+        ]
+        self.assertEqual(destinations, ["vlc/plugins"])
+
 
 if __name__ == "__main__":
     unittest.main()
