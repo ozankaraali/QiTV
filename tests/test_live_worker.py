@@ -623,6 +623,8 @@ class OutboxTests(unittest.TestCase):
         # The review's deadlock: a pipe buffers only 8 KiB per direction on macOS. With a
         # blocking send under one lock, a session blocked in send held the lock while the
         # command loop waited for it, and the parent's command sends then blocked as well.
+        # Whether states merge here depends on the runner's pipe buffer and speed, so this
+        # test asserts no merge count (the gated tests below make merging deterministic).
         temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
         self.addCleanup(temporary.cleanup)
         parent, child = multiprocessing.Pipe(duplex=True)
@@ -675,7 +677,6 @@ class OutboxTests(unittest.TestCase):
         closed = [message[1] for message in received if message[0] == "closed"]
         self.assertEqual(closed, [f"s{index:02d}" + "x" * 500 for index in range(40)])
         states = [message for message in received if message[0] == "state"]
-        self.assertLess(len(states), len(queued), "states were not merged")
         self.assertEqual(states[-1][2:4], queued[-1][2:4])
         self.assertEqual(rebuild(states), rebuild(queued))
         parent.send(("shutdown",))
@@ -684,6 +685,32 @@ class OutboxTests(unittest.TestCase):
         helper.shutdown()
         parent.close()
         child.close()
+
+    def test_states_queued_behind_a_blocked_writer_merge_in_order(self):
+        connection = GatedConnection()
+        outbox = worker._Outbox(connection)
+        outbox.put(("hello", "url"))  # the writer takes it and waits at the gate
+        queued = {"a": [], "b": []}
+        for seq in range(200):
+            for sid in ("a", "b"):
+                queued[sid].append(state(sid, seq, max(0, seq - 10)))
+                outbox.put(queued[sid][-1])
+            if seq == 99:
+                outbox.put(("ready", "a"))
+        connection.gate.set()
+        outbox.close(5)
+        self.assertEqual(
+            [message[:2] for message in connection.sent],
+            [("hello", "url"), ("state", "a"), ("state", "b"), ("ready", "a"), ("state", "a")],
+        )
+        a_before, b_all, a_after = connection.sent[1], connection.sent[2], connection.sent[4]
+        self.assertEqual(a_before[2:4], queued["a"][99][2:4])  # merged up to the "ready"
+        self.assertEqual(b_all[2:4], queued["b"][-1][2:4])
+        self.assertEqual(a_after[2:4], queued["a"][-1][2:4])
+        self.assertEqual([item[0] for item in a_after[4]], list(range(189, 200)))
+        for sid in ("a", "b"):
+            sent = [message for message in connection.sent if message[:2] == ("state", sid)]
+            self.assertEqual(rebuild(sent), rebuild(queued[sid]))
 
     def test_queued_states_merge_but_keep_their_order_around_other_messages(self):
         connection = GatedConnection()
@@ -752,13 +779,15 @@ class OutboxTests(unittest.TestCase):
         self.addCleanup(parent.close)
         self.addCleanup(child.close)
         outbox = worker._Outbox(child)
-        outbox.put(("closed", ["unhashable"]))  # no session to track: sent as it is
-        outbox.put(("error", "a", "internal", lambda: None))  # cannot be pickled: dropped
-        outbox.put(("closed", "a"))
         received = []
-        while len(received) < 2 and parent.poll(2):
-            received.append(parent.recv())
+        with self.assertLogs("services.live.worker", "WARNING") as logs:
+            outbox.put(("closed", ["unhashable"]))  # no session to track: sent as it is
+            outbox.put(("error", "a", "internal", lambda: None))  # cannot be pickled: dropped
+            outbox.put(("closed", "a"))
+            while len(received) < 2 and parent.poll(2):
+                received.append(parent.recv())
         self.assertEqual(received, [("closed", ["unhashable"]), ("closed", "a")])
+        self.assertIn("PicklingError", " ".join(logs.output))
         outbox.close(2)
 
     def test_the_final_flush_is_bounded_when_the_parent_never_reads(self):
