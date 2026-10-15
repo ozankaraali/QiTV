@@ -277,6 +277,43 @@ class SavedGuideTests(_GuideCase):
             manager.set_current_epg()
         read.assert_called_once()
 
+    def guide_path(self):
+        return os.path.join(self.config.get_config_dir(), "cache", "epg", f"{self.key}.guide")
+
+    def assert_unreadable_guide_is_fetched_again(self, damage):
+        self.load(self.manager())
+        path = self.guide_path()
+        damage(path)
+        restarted = self.manager()  # a new session reads the damaged file
+        get = patch("services.epg_manager.requests.get", side_effect=serving(xmltv("New")))
+        with get as fetch, self.assertLogs("services.epg_manager", "WARNING") as logged:
+            restarted.set_current_epg()
+        fetch.assert_called_once()  # not an empty guide with no fetch
+        self.assertEqual(len(logged.records), 1)  # logged once, without the path or contents
+        self.assertNotIn(self.config.get_config_dir(), logged.output[0])
+        self.assertEqual(self.titles(restarted), ["New"])
+        self.assertEqual(
+            sorted(epg_store_module.read_guide(path).items())[0][1][0]["title"], {"__text": "New"}
+        )
+        with get as fetch:  # and the next start reads the new file
+            self.manager().set_current_epg()
+        fetch.assert_not_called()
+
+    def test_a_truncated_saved_guide_is_removed_and_fetched_again(self):
+        # Review M5: it stayed unreadable, and the guide stayed empty, until the index expired.
+        def truncate(path):
+            with open(path, "rb+") as f:
+                f.truncate(os.path.getsize(path) // 2)
+
+        self.assert_unreadable_guide_is_fetched_again(truncate)
+
+    def test_a_saved_guide_of_a_future_version_is_removed_and_fetched_again(self):
+        def future(path):
+            with open(path, "wb") as f:
+                pickle.dump((epg_store_module._MAGIC, epg_store_module._VERSION + 1, "packed"), f)
+
+        self.assert_unreadable_guide_is_fetched_again(future)
+
     def test_reindexing_the_guide_unpickles_no_channel(self):
         # Review M4: re-keying a saved guide on the GUI thread read every channel back.
         self.load(self.manager())

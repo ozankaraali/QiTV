@@ -133,6 +133,19 @@ def write_xmltv_body(response, path: str) -> None:
             os.remove(temp_path)
 
 
+# What reading a saved guide raises when the file is damaged or from another format version
+# (not OSError: a file that cannot be opened now may be fine later).
+_UNREADABLE_GUIDE = (
+    ValueError,
+    EOFError,
+    pickle.UnpicklingError,
+    AttributeError,
+    ImportError,
+    IndexError,
+    TypeError,
+)
+
+
 class EpgManager:
     def __init__(self, config_manager, provider_manager):
         self.config_manager = config_manager
@@ -197,11 +210,21 @@ class EpgManager:
             and saved[:2] == (path, stamp)
         )
         if not shown:
-            if legacy:
-                with open(path, "rb") as f:
-                    guide = pickle.load(f)
-            else:
-                guide = read_guide(path)
+            try:
+                if legacy:
+                    with open(path, "rb") as f:
+                        guide = pickle.load(f)
+                else:
+                    guide = read_guide(path)
+            except _UNREADABLE_GUIDE as e:
+                # Damaged, or written by another version: it stays so, so treat it as
+                # missing (the caller fetches the guide and saves a new file).
+                logger.warning("The saved guide is unreadable and was removed: %s", safe_exc(e))
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                return False
             self._publish(cache_key, guide)
             self._saved = (path, stamp, guide)
         self.index[cache_key]["last_access"] = datetime.now().strftime(_INDEX_TIME_FORMAT)
