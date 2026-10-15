@@ -24,9 +24,9 @@ Everything is tested headless.
 - **No PyAV, no FFmpeg, no native builds.** New dependencies are exactly `m3u8==6.0.0` and `pycryptodomex` (the latest version available in `uv`; import namespace `Cryptodome`). `cryptography` is **not** used: from v49 it ships no Intel macOS wheels, so it would build from source there. Add them to `pyproject.toml` and regenerate `uv.lock` and `requirements.txt` the way the repo does: `uv lock` then `uv export --format requirements-txt --no-dev --no-emit-project > requirements.txt` (check the header of `requirements.txt` for the exact command used and reuse it).
 - **Spec values (exact):**
   - segments cut at a keyframe once at least 2.0 s long; forced cut at 10 s;
-  - RAI fallback to NAL scanning after 6 s without RAI;
+  - keyframes by RAI verified by a NAL scan, or by NAL scan alone until a RAI is seen (amended in review; no 6 s fallback);
   - every segment starts with fresh PAT and PMT copies;
-  - discontinuity when the PTS delta is negative, more than 5× the target, or missing;
+  - discontinuity when the step between consecutive cut-PID PTS values is below −1.0 s or above +3.0 s, or PTS is missing (amended in review), latched until the next keyframe;
   - RAM ring 128 MiB per session;
   - disk ring 256 MiB–16 GiB (default 2 GiB) with a 64 MiB free-space reserve;
   - server binds 127.0.0.1 on a random port with a numeric bind and a 128-bit token;
@@ -154,21 +154,21 @@ Everything is tested headless.
     - otherwise audio-only mode, using the first stream type in `{0x03, 0x04, 0x0F, 0x11, 0x81, 0x87}`.
     Keep the PMT packet bytes. A PMT change of the video PID updates `video_pid`.
   - No PAT/PMT within 3 MiB of input raises `Unsupported("no program tables")`.
-- **Scrambling:** non-zero scrambling bits (`(b3 >> 6) & 3`) on a video packet raise `Unsupported("scrambled")`.
+- **Scrambling:** non-zero scrambling bits (`(b3 >> 6) & 3`) on cut-PID packets raise `Unsupported("scrambled")` after 8 such packets within the first 2 s or 8 in a row later (amended in review).
 - **Keyframes** (on the cut PID, PUSI packets only):
   - RAI = adaptation field present with length > 0 and bit `0x40` set.
   - *(Amended in review.)* Before any RAI has been seen, a positively detected keyframe in the PUSI packet's PES payload counts at once:
     - H.264: NAL 5, or NAL 7 with no NAL 1;
     - HEVC: an IRAP 16..21, or a VPS (32) with no non-IRAP slice;
     - MPEG-2: start code `0xB3`.
-  - Once a RAI has been seen, RAI governs, verified by the same NAL scan: a cut is rejected when the scan positively finds only non-IRAP slices; an inconclusive scan accepts the RAI. With RAI set, an H.264 NAL 1 whose slice header says I/SI also counts (open-GOP recovery points).
+  - Once a RAI has been seen, RAI governs, verified by the same NAL scan: a cut is rejected when the scan positively finds only non-IRAP slices; an inconclusive scan accepts the RAI. An H.264 NAL 1 whose slice header says I/SI also counts, with or without RAI (open-GOP recovery points). MPEG-2 with RAI is verified by picture_coding_type. A truncated slice header is inconclusive.
   - Audio-only mode: every audio PUSI with a PTS counts as a cut point.
 - **Cutting:**
   - Before the first cut point, packets are dropped.
   - At a cut point, a segment is opened when none is open. Otherwise the open segment is closed and a new one opened when either:
     - `pts_delta(seg_first_pts, pts)` is at least `target_s × 90000`;
-    - the delta is a discontinuity (negative, more than `5 × target_s × 90000`, PTS missing, or flagged by `discontinuity()`), in which case `Opened.discontinuity=True`.
-  - **Forced cut:** when the open segment exceeds `forced_s` (by PTS, or by wall time when PTS is unusable), it is cut at the next PUSI on the cut PID even without a keyframe.
+    - a discontinuity is pending (consecutive PTS step below −1.0 s or above +3.0 s, PTS missing, or `discontinuity()`), in which case `Opened.discontinuity=True` and the preceding `Closed` has `next_first_pts=None`.
+  - **Forced cut:** when the open segment exceeds `forced_s` (by PTS, or by wall time excluding feed stalls when PTS is unusable or a discontinuity is pending), it is cut at the next PUSI on the cut PID even without a keyframe. A cut PID silent for `forced_s` while other data flows closes the segment at the next PUSI of any PID.
 - **Output:**
   - `Opened.header` = the last PAT packet plus the PMT packets.
   - Every packet from the first cut point onward (any PID, PSI included) goes into `Data` events in input order, coalesced per `feed` call.
@@ -176,7 +176,7 @@ Everything is tested headless.
 - [ ] **Step 1: Write failing tests** with `tests/ts_fixtures.make_stream`:
   1. A 10 s stream with a 1 s GOP gives 5 segments (each a multiple of 2 s by PTS). The first `Opened` comes before any `Data`. The concatenated `Data` payloads equal the input bytes from the first keyframe packet onward.
   2. Audio-only input cuts about every 2 s.
-  3. Input with no RAI (`rai=False`) still cuts after the 6 s fallback, at IDR access units.
+  3. Input with no RAI (`rai=False`) cuts at IDR access units from the start (amended in review).
   4. RAI set on every PES still gives segments of at least 2 s.
   5. A reset at 5 s gives an `Opened` with `discontinuity=True`; durations never go negative.
   6. PTS starting at `2**33 − 90000 × 3` wraps, and segments stay 2 s long.
