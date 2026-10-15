@@ -2,7 +2,7 @@
 
 import logging
 
-from PySide6.QtCore import QEvent, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QLinearGradient, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QAbstractItemView
 
@@ -36,7 +36,14 @@ class ChannelColumn(Overlay):
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
         self._idle.setInterval(idle_ms)
-        self._idle.timeout.connect(self.close)
+        self._idle.timeout.connect(self._on_idle)
+        # Hover keeps the column open once the pointer has moved over it (not a pointer
+        # that was merely resting where the column opened).
+        self._hovering = False
+        self._pointer: QPointF | None = None
+        self.setMouseTracking(True)
+        self._view.viewport().setMouseTracking(True)
+        self._view.viewport().installEventFilter(self)
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
@@ -45,6 +52,7 @@ class ChannelColumn(Overlay):
 
     def open(self, title: str, channels: list[dict], index: int) -> None:
         self._title = title
+        self._hovering, self._pointer = False, None
         self._model.set_channels(channels)
         self._relayout()
         self.show()
@@ -81,7 +89,27 @@ class ChannelColumn(Overlay):
     def eventFilter(self, obj, event):
         if obj is self.parentWidget() and event.type() == QEvent.Resize:
             self._relayout()
+        elif obj is self._view.viewport() and event.type() == QEvent.Type.MouseMove:
+            self._pointer_at(event.globalPosition())
         return False
+
+    def _pointer_at(self, position: QPointF) -> None:
+        if self._pointer is not None and position != self._pointer:
+            self._hovering = True
+            self._idle.start()
+        self._pointer = position
+
+    def _on_idle(self) -> None:
+        if self._hovering and self.underMouse():
+            self._idle.start()  # about to click a row
+            return
+        self.close()
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self._hovering, self._pointer = False, None
+        if self.isVisible():
+            self._idle.start()
+        super().leaveEvent(event)
 
     # ---- mouse: consumed here, so it never reaches the video behind -------------------------
 
@@ -99,6 +127,10 @@ class ChannelColumn(Overlay):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        self._pointer_at(event.globalPosition())
+        event.accept()  # not the video's "show the transport"
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         event.accept()  # the shell turns wheel over the column into zap steps (its filter)
@@ -125,9 +157,7 @@ class ChannelColumn(Overlay):
         grad.setColorAt(0.0, qcolor("rgba(6,9,13,0.94)"))
         grad.setColorAt(0.7, qcolor("rgba(6,9,13,0.94)"))
         grad.setColorAt(1.0, qcolor("rgba(6,9,13,0)"))
-        p.setCompositionMode(QPainter.CompositionMode_Source)
-        p.fillRect(self.rect(), grad)
-        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        p.fillRect(self.rect(), grad)  # over what is behind (a banner shows through the fade)
         units = self._units
         side = units.px(2.4)
         top = units.px(2.6)

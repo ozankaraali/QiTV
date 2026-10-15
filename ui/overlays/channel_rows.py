@@ -15,6 +15,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QFont, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate
 
+from services.zapping import ZapContext
 from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -43,14 +44,29 @@ class ChannelRowsModel(QAbstractListModel):
         self._logos = logos
         self._now_provider = now_provider
         self._items: list[dict] = []
+        self._numbers: list[str | None] | None = None
+        self._rows_by_logo: dict[str, list[int]] = {}
         self._now_cache: dict[int, tuple[str, float]] = {}
-        self._requested: set[str] = set()
         if logos is not None:
             logos.logoReady.connect(self._on_logo_ready)
 
-    def set_channels(self, items: list[dict]) -> None:
+    def set_channels(self, items: list[dict], numbers: list[str | None] | None = None) -> None:
+        """Show `items`; `numbers` gives each row's number (default: their own).
+
+        When no channel has a number, the list position stands in, as on the banner and
+        for number entry (ZapContext.by_number).
+        """
         self.beginResetModel()
         self._items = list(items)
+        if numbers is None and self._items:
+            if not any(ZapContext.number_of(item) for item in self._items):
+                numbers = [str(row + 1) for row in range(len(self._items))]
+        self._numbers = list(numbers) if numbers is not None else None
+        self._rows_by_logo = {}
+        for row, item in enumerate(self._items):
+            url = item.get("logo")
+            if url:
+                self._rows_by_logo.setdefault(url, []).append(row)
         self._now_cache.clear()
         self.endResetModel()
 
@@ -85,7 +101,7 @@ class ChannelRowsModel(QAbstractListModel):
         if role == Qt.DisplayRole:
             return item.get("name", "")
         if role == NumberRole:
-            return item.get("number")
+            return self._numbers[row] if self._numbers is not None else item.get("number")
         if role == NowRole:
             return self._now(row)[0]
         if role == ProgressRole:
@@ -94,17 +110,24 @@ class ChannelRowsModel(QAbstractListModel):
             url = item.get("logo") or ""
             if not url or self._logos is None:
                 return None
-            if url not in self._requested:
-                self._requested.add(url)
+            pixmap = self._logos.pixmap(url)
+            if pixmap is None:
+                # Again after an eviction or a failure: LogoCache drops repeats itself.
                 self._logos.request([url])
-            return self._logos.pixmap(url)
+            return pixmap
         return None
 
     def _on_logo_ready(self, url: str) -> None:
-        for row, item in enumerate(self._items):
-            if item.get("logo") == url:
-                idx = self.index(row)
-                self.dataChanged.emit(idx, idx, [LogoRole])
+        for row in self._rows_by_logo.get(url, ()):
+            idx = self.index(row)
+            self.dataChanged.emit(idx, idx, [LogoRole])
+
+
+def column_focused(widget) -> bool:
+    """Whether a row's list has the focus: the drawer marks its two columns; a list it does
+    not mark (the fast-zap column) counts as focused."""
+    focused = widget.property("columnFocused") if widget is not None else None
+    return True if focused is None else bool(focused)
 
 
 class ChannelRowDelegate(QStyledItemDelegate):
@@ -125,13 +148,16 @@ class ChannelRowDelegate(QStyledItemDelegate):
         u = units.u
         rect = QRectF(option.rect)
         selected = bool(option.state & QStyle.State_Selected)
+        focused = column_focused(option.widget)
         p.save()
         if selected:
             box = rect.adjusted(0.3 * u, 0.2 * u, -0.3 * u, -0.2 * u)
-            fill_round(p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA), 1.0 * u)
+            fill_round(
+                p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA if focused else 0.1), 1.0 * u
+            )
             p.save()
             p.setRenderHint(QPainter.Antialiasing, True)
-            p.setPen(qcolor(PALETTE.accent, 0.7))
+            p.setPen(qcolor(PALETTE.accent, 0.7 if focused else 0.35))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 1.0 * u, 1.0 * u)
             p.restore()

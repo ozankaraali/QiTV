@@ -8,8 +8,14 @@ from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate
 
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
 from services.text_fold import fold
+from services.zapping import ZapContext
 from ui.overlays.base import Overlay
-from ui.overlays.channel_rows import ChannelListView, ChannelRowDelegate, ChannelRowsModel
+from ui.overlays.channel_rows import (
+    ChannelListView,
+    ChannelRowDelegate,
+    ChannelRowsModel,
+    column_focused,
+)
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
@@ -39,6 +45,22 @@ def _is_live_item(nav: NavModel, node: NavNode) -> bool:
     return node.layer == "item" and nav.section_of(node) == "live"
 
 
+def _numbers(group: list[NavNode], shown: list[NavNode]) -> list[str | None]:
+    """The numbers of the `shown` rows of a live group, the filter aside.
+
+    When no channel of the group has a number, its position in the group stands in, as on
+    the banner and for number entry.
+    """
+    channels = [n.payload for n in group if isinstance(n.payload, dict)]
+    if any(ZapContext.number_of(c) for c in channels):
+        return [
+            (ZapContext.number_of(n.payload) or None) if isinstance(n.payload, dict) else None
+            for n in shown
+        ]
+    position = {node: str(row + 1) for row, node in enumerate(group)}
+    return [position.get(node) for node in shown]
+
+
 class _NodeModel(ChannelRowsModel):
     """Channel rows for live items; titles, counts and icons for everything else."""
 
@@ -46,12 +68,14 @@ class _NodeModel(ChannelRowsModel):
         super().__init__(logos, now_provider, parent)
         self._nodes: list[NavNode] = []
 
-    def set_nodes(self, nodes: list[NavNode], live: bool) -> None:
+    def set_nodes(
+        self, nodes: list[NavNode], live: bool, numbers: list[str | None] | None = None
+    ) -> None:
         self._nodes = list(nodes)
         rows = [
             n.payload if live and isinstance(n.payload, dict) else {"name": n.title} for n in nodes
         ]
-        self.set_channels(rows)
+        self.set_channels(rows, numbers if live else [None] * len(rows))
 
     def data(self, index, role=Qt.DisplayRole):
         row = index.row()
@@ -80,7 +104,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         u = units.u
         rect = QRectF(option.rect)
         selected = bool(option.state & QStyle.State_Selected)
-        focused = bool(option.widget.property("columnFocused")) if option.widget else True
+        focused = column_focused(option.widget)
         p.save()
         if selected:
             box = rect.adjusted(0.3 * u, 0.2 * u, -0.3 * u, -0.2 * u)
@@ -403,7 +427,7 @@ class Drawer(Overlay):
         col.rows = {n: i for i, n in enumerate(nodes)}
         live = bool(nodes) and _is_live_item(self._nav, nodes[0])
         col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
-        col.model.set_nodes(nodes, live)
+        col.model.set_nodes(nodes, live, _numbers(children or [], nodes) if live else None)
         if col.side == "left":
             if parent_changed:
                 self._cancel_preview()  # a preview of the old layer must not open

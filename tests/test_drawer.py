@@ -12,6 +12,7 @@ from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import NavModel
 from tests.test_navigation import FakeCatalog
 from ui.overlay_host import OverlayHost
+from ui.overlays.channel_rows import NumberRole
 from ui.overlays.drawer import EMPTY_TEXT, LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
 
 
@@ -173,6 +174,17 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.focus_side, "right")
         self.drawer.activate()
         self.assertEqual(self.catalog.selected, ["Home"])
+
+    def test_unnumbered_rows_show_their_position_in_the_group_even_when_filtered(self):
+        self.catalog.live["10"] = [{"id": i, "name": f"Chan {i}"} for i in range(5)]
+        self.nav.changed.emit()
+        self.drawer.open_drawer()
+        col = self.drawer._columns["right"]
+        numbers = [col.model.index(r).data(NumberRole) for r in range(5)]
+        self.assertEqual(numbers, ["1", "2", "3", "4", "5"])
+        self.drawer.type_text("chan 3")
+        self.assertEqual(col.model.rowCount(), 1)
+        self.assertEqual(col.model.index(0).data(NumberRole), "4")  # its number in the group
 
     def many_groups(self, count=8):
         self.catalog.groups = lambda section: [

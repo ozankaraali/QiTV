@@ -19,6 +19,7 @@ from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
 from ui.keymap import Action
 from ui.overlays.channel_column import ChannelColumn
+from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
@@ -1030,6 +1031,33 @@ class ProviderRetryTests(ControllerTestCase):
         self.assertEqual(self.real_drawer.focus_side, "right")
         self.controller.handle(Action.NAV_ACTIVATE)
         self.assertEqual(self.catalog.selected, [None, "Home"])
+
+
+class UnnumberedChannelTests(ControllerTestCase):
+    """An M3U without numbers: the banner, the column and digits use the list position."""
+
+    def test_the_banner_column_and_digits_agree_on_positions(self):
+        host = QWidget()
+        self.addCleanup(host.close)
+        host.resize(1280, 720)
+        column = ChannelColumn(None, lambda channel: None, parent=host)
+        self.controller = self.make_controller(column)
+        self.controller.start()
+        host.show()
+        plain = [{"id": c["id"], "name": c["name"], "cmd": c["cmd"]} for c in CHANNELS]
+        self.controller.tune(plain[2], group_key="10", channels=plain)
+        self.assertEqual(self.banner.info.number, "3")
+        self.ready()
+        self.controller.handle(Action.DIGIT, "2")
+        self.assertTrue(wait_until(lambda: self.requested()[-1] == "Two"))
+        self.ready()
+        self.clock.now += 5
+        self.controller.handle(Action.CH_NEXT)
+        self.controller.handle(Action.CH_NEXT)  # a burst: the column opens
+        self.assertTrue(column.isVisible())
+        rows = column.findChild(QAbstractItemView).model()
+        shown = [rows.index(r).data(ChannelRowsModel.NumberRole) for r in range(4)]
+        self.assertEqual(shown, ["1", "2", "3", "4"])
 
 
 class BottomOverlayTests(ControllerTestCase):
