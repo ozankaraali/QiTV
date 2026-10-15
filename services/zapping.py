@@ -18,13 +18,20 @@ class ZapContext:
 
     @staticmethod
     def same(a: Optional[dict], b: Optional[dict]) -> bool:
+        """Channel identity: the stream address when both have one, else id, else name.
+
+        M3U ids are list positions, so after a playlist change an id can name another
+        channel; the address survives reordering.
+        """
         if not a or not b:
             return False
-        for key in ("id", "cmd"):
-            if a.get(key) is not None and b.get(key) is not None:
-                return str(a.get(key)) == str(b.get(key))
+        cmd_a, cmd_b = str(a.get("cmd") or "").strip(), str(b.get("cmd") or "").strip()
+        if cmd_a and cmd_b:
+            return cmd_a == cmd_b
+        if a.get("id") is not None and b.get("id") is not None:
+            return str(a.get("id")) == str(b.get("id"))
         # name is only a fallback when neither side has a stable identifier
-        if all(c.get(k) is None for c in (a, b) for k in ("id", "cmd")):
+        if all(c.get(k) in (None, "") for c in (a, b) for k in ("id", "cmd")):
             return a.get("name") is not None and a.get("name") == b.get("name")
         return False
 

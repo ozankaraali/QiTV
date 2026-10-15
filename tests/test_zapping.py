@@ -150,6 +150,25 @@ class ZapControllerTests(unittest.TestCase):
         self.assertTrue(ZapContext.same({"name": "A"}, {"name": "A"}))
         self.assertTrue(ZapContext.same({"id": 1, "name": "A"}, {"id": "1", "name": "B"}))
 
+    def test_same_prefers_cmd_over_positional_ids(self):
+        # Finding I8: M3U ids are list positions, so after a playlist change the id
+        # pointed at another channel. The stream address is the identity when both have it.
+        old = {"id": 3, "name": "News", "cmd": "http://x/news.ts"}
+        self.assertFalse(ZapContext.same(old, {"id": 3, "name": "Kids", "cmd": "http://x/kids.ts"}))
+        self.assertTrue(ZapContext.same(old, {"id": 9, "name": "News", "cmd": "http://x/news.ts"}))
+        self.assertTrue(ZapContext.same({"id": 1, "cmd": ""}, {"id": "1", "cmd": "c"}))
+        self.assertFalse(ZapContext.same({"cmd": "c"}, {"id": 1, "name": "A"}))
+
+    def test_reordered_playlist_keeps_the_tuned_channel(self):
+        playlist = [{"id": i, "name": n, "cmd": f"http://x/{n}"} for i, n in enumerate("ABC")]
+        reordered = [{"id": i, "name": n, "cmd": f"http://x/{n}"} for i, n in enumerate("CAB")]
+        self.zap.set_context(ZapContext("g", playlist))
+        self.zap.tuned(playlist[0])  # A
+        self.zap.set_context(ZapContext("g", reordered))
+        self.assertEqual(self.zap.context.current()["name"], "A")
+        self.zap.step(1)
+        self.assertEqual(self.tunes[-1]["name"], "B")
+
     def test_number_zero_and_duplicates(self):
         ctx = ZapContext(
             "g", [{"id": 1, "number": "00"}, {"id": 2, "number": "5"}, {"id": 3, "number": "5"}]
