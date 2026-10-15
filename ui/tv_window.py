@@ -59,6 +59,7 @@ from services.live.engine import LiveEngine
 from services.live.live_session import LiveSession
 from services.navigation import NavModel
 from services.playback import NullSession, PlaybackSession, Session, create_instance
+from services.redact import safe_message
 from services.sessions import SessionManager, Slot
 from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update
@@ -83,7 +84,7 @@ from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
 from ui.pip import PipFrame
 from ui.settings_dialog import OptionsDialog
-from ui.tv_controller import Overlays, TVController
+from ui.tv_controller import ERROR_MS, Overlays, TVController
 from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
 from ui.video_surface import VideoSurface
@@ -103,6 +104,8 @@ MINI_WIDTH_FRACTION = 0.25
 MINI_MARGIN = 10
 FULLSCREEN_EXIT_MS = 1500  # the longest wait for the platform to finish leaving fullscreen
 FULLSCREEN_SETTLE_MS = 5000  # the longest wait for macOS to report a fullscreen change
+# config.json could not be written (locked by antivirus, read-only, a full disk).
+SAVE_FAILED_TEXT = "Couldn't save the settings; changes will be lost when QiTV closes"
 ABANDONED_EXIT_CODE = 3  # QiTV quit while background work still ran (see _exit_now)
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
@@ -813,7 +816,12 @@ class TVWindow(QMainWindow):
         self.menus.rebuild_providers()
 
     def save_config(self) -> None:
-        self.config_manager.save_config()
+        """Settings → Save: the new settings apply even when config.json cannot be written."""
+        try:
+            self.config_manager.save_config()
+        except Exception as e:
+            logger.warning("Couldn't save the settings: %s", safe_message(e))
+            self.screens.notify(SAVE_FAILED_TEXT, "error", ERROR_MS)
         self.controller.settings_saved()
 
     def set_provider(self, force_update: bool = False) -> None:
@@ -840,6 +848,8 @@ class TVWindow(QMainWindow):
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self.controller.start()
         self.epg_refresh.start()
+        if self.config_manager.save_failed():  # e.g. the defaults patched in at start
+            self.screens.notify(SAVE_FAILED_TEXT, "error", ERROR_MS)
 
     def _fit_restored(self) -> None:
         """Bring the saved geometry onto a screen: its monitor may be gone (Minor 13).

@@ -25,6 +25,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Qt
 
+from services.redact import safe_message
 from services.sessions import PIP_LEVEL, SessionManager, Slot
 from ui.keymap import Action
 from ui.overlays.mixer import MixerRow
@@ -152,7 +153,7 @@ class MixerControls(QObject):
         try:
             self.config.save_config()
         except Exception as e:
-            logger.warning("Couldn't save the picture-in-picture volume (%s)", type(e).__name__)
+            logger.warning("Couldn't save the picture-in-picture volume: %s", safe_message(e))
 
     # ---- the overlay --------------------------------------------------------------------------
 

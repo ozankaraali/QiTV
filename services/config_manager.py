@@ -13,6 +13,7 @@ import tomllib
 import orjson as json
 
 from services.multikeydict import MultiKeyDict
+from services.redact import safe_message
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,9 @@ logger = logging.getLogger(__name__)
 # open: retry briefly before giving up.
 _REPLACE_RETRIES = 5
 _REPLACE_RETRY_DELAY_S = 0.05
+# After a failed save, saves try once without those retries for this long: a file that stays
+# locked must not stall every save (a settled zap's among them) by the whole retry wait.
+SAVE_BACKOFF_S = 30.0
 
 
 def _one_of(choices, default):
@@ -146,6 +150,7 @@ class ConfigManager:
 
     def __init__(self):
         self.config = {}
+        self._save_failed_at: float | None = None  # monotonic time of the last failed save
         self.config_path = self._get_config_path()
         os.makedirs(os.path.dirname(self.config_path) or ".", exist_ok=True)
         self._migrate_old_config()
@@ -186,6 +191,14 @@ class ConfigManager:
 
         return os.path.join(config_dir, "config.json")
 
+    def save_failed(self) -> bool:
+        """True while the last save failed (the window says so when it starts)."""
+        return self._save_failed_at is not None
+
+    def _save_failed_recently(self) -> bool:
+        failed_at = self._save_failed_at
+        return failed_at is not None and time.monotonic() - failed_at < SAVE_BACKOFF_S
+
     def get_config_dir(self):
         return os.path.dirname(self.config_path)
 
@@ -208,7 +221,7 @@ class ConfigManager:
                 self.config = self.default_config()
         except FileNotFoundError, json.JSONDecodeError:
             self.config = self.default_config()
-            self.save_config()
+            self._save_at_start()
 
         if isinstance(self.xmltv_channel_map, list):
             self.xmltv_channel_map = MultiKeyDict.deserialize(self.xmltv_channel_map)
@@ -269,7 +282,17 @@ class ConfigManager:
             need_update = True
 
         if need_update:
+            self._save_at_start()
+
+    def _save_at_start(self) -> None:
+        """Save while starting: a locked or read-only config.json must not stop QiTV.
+
+        The settings apply all the same; save_failed() tells the window to say so.
+        """
+        try:
             self.save_config()
+        except Exception as e:
+            logger.warning("Couldn't save the settings: %s", safe_message(e))
 
     # Simple config properties using factory
     check_updates = _config_property("check_updates", DEFAULT_OPTION_CHECKUPDATE)
@@ -433,7 +456,21 @@ class ConfigManager:
         settings = self.config["window_positions"][window_name]
         window.setGeometry(settings["x"], settings["y"], settings["width"], settings["height"])
 
-    def save_config(self):
+    def save_config(self, *, retry: bool = True):
+        """Write config.json; raises when it cannot (callers on the GUI thread catch it).
+
+        A locked file is retried for up to a quarter of a second, unless `retry` is False
+        (the save after a zap never waits) or a save failed within SAVE_BACKOFF_S.
+        """
+        retries = _REPLACE_RETRIES if retry and not self._save_failed_recently() else 0
+        try:
+            self._write_config(retries)
+        except Exception:
+            self._save_failed_at = time.monotonic()
+            raise
+        self._save_failed_at = None
+
+    def _write_config(self, retries: int) -> None:
         self.xmltv_channel_map = self.xmltv_channel_map.serialize()
         try:
             serialized_config = json.dumps(self.config, option=json.OPT_INDENT_2)
@@ -449,7 +486,7 @@ class ConfigManager:
                 f.write(serialized_config)
             if os.path.exists(self.config_path):
                 shutil.copymode(self.config_path, temporary)
-            self._replace_config(temporary)
+            self._replace_config(temporary, retries)
         except BaseException:
             try:
                 os.remove(temporary)
@@ -457,13 +494,13 @@ class ConfigManager:
                 logger.debug("Could not remove %s: %s", temporary, e)
             raise
 
-    def _replace_config(self, temporary):
-        for attempt in range(_REPLACE_RETRIES + 1):
+    def _replace_config(self, temporary, retries):
+        for attempt in range(retries + 1):
             try:
                 os.replace(temporary, self.config_path)
                 return
             except PermissionError:
-                if attempt == _REPLACE_RETRIES:
+                if attempt == retries:
                     # The exception text names the paths: log only what happened.
                     logger.warning(
                         "Couldn't save the settings: config.json stayed locked (%d tries)",

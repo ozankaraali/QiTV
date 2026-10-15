@@ -10,6 +10,8 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QTimer
 
+from services.redact import safe_message
+
 logger = logging.getLogger(__name__)
 
 RESUME_MIN_MS = 5000
@@ -21,8 +23,9 @@ class WatchState:
 
     With a delay (the TV shell), a play marks the state dirty and a timer saves it once the
     tuning settles, so a burst of zaps writes config.json once, and never on the GUI thread
-    at every tune (a locked file on Windows retries for up to 250 ms). flush() saves at once
-    (on close). Without a delay every play is saved immediately.
+    at every tune. That save tries once: a locked file (Windows) is retried for up to 250 ms
+    only by flush(), which saves at once (on close). Without a delay every play is saved
+    immediately.
     """
 
     def __init__(
@@ -85,7 +88,7 @@ class WatchState:
             return
         if self._save_timer is None:
             self._save_timer = QTimer(singleShot=True, interval=self.save_delay_ms)
-            self._save_timer.timeout.connect(self._save)
+            self._save_timer.timeout.connect(self._save_settled)
         self._save_timer.start()  # restarted: one save once the zapping settles
 
     def resume_position(self, cid: str) -> Optional[int]:
@@ -112,15 +115,22 @@ class WatchState:
     def flush(self) -> None:
         self._save()
 
-    def _save(self) -> None:
+    def _save_settled(self) -> None:
+        """The zapping settled: save once, never waiting for a locked file (flush() will)."""
+        self._save(retry=False)
+
+    def _save(self, *, retry: bool = True) -> None:
         """Write the config; a zap or a close never fails because the file is locked."""
         if self._save_timer is not None:
             self._save_timer.stop()  # this save covers a pending play
         self._last_flush = self._clock()  # a failed write is tried again after the interval
         try:
-            self.config.save_config()
+            if retry:
+                self.config.save_config()
+            else:
+                self.config.save_config(retry=False)
         except Exception as e:
-            logger.warning("Couldn't save the watch state (%s)", type(e).__name__)
+            logger.warning("Couldn't save the watch state: %s", safe_message(e))
             self._dirty = True
             return
         self._dirty = False

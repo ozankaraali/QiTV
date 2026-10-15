@@ -44,7 +44,6 @@ from datetime import datetime
 from functools import partial
 import logging
 from pathlib import Path
-import re
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
@@ -58,7 +57,7 @@ from services.epg_view import Programme, now_next
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
 from services.next_episode import play_context
-from services.redact import safe_traceback
+from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot
 from services.vlc_profile import classify
 from services.zapping import ZapContext
@@ -98,14 +97,6 @@ _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
 _PINNED_TITLES = {FAVORITES_GROUP: "Favorites", RECENT_GROUP: "Recent"}
-_ADDRESS = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S*", re.IGNORECASE)
-_QUERY = re.compile(r"\S*\?\S*=\S*")  # a query string carries "=": "Who?Me" stays
-
-
-def scrub(text: object) -> str:
-    """Drop addresses and query strings from a message: they can carry credentials."""
-    cleaned = _QUERY.sub("…", _ADDRESS.sub("…", str(text)))
-    return " ".join(cleaned.split())
 
 
 @dataclass

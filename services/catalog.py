@@ -18,6 +18,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.epg_view import Programme, programmes_for_channel
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
+from services.redact import safe_message
 from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
 
 logger = logging.getLogger(__name__)
@@ -431,7 +432,7 @@ class CatalogService(QObject):
                 self.config.save_config()
             except Exception as e:
                 # The setup still runs; the choice is saved with the next settings write.
-                logger.warning("Couldn't save the provider choice (%s)", type(e).__name__)
+                logger.warning("Couldn't save the provider choice: %s", safe_message(e))
         target = name if name is not None else self.config.selected_provider_name
         worker = self.factory.provider_setup(self.provider_manager, force_refresh)
         self._state_job = "provider"

@@ -57,6 +57,7 @@ from ui.tv_window import (
     ABANDONED_EXIT_CODE,
     CLOSE_RETRY_MS,
     CLOSING_TEXT,
+    SAVE_FAILED_TEXT,
     WATCH_SAVE_DELAY_MS,
     TVWindow,
     _exit_now,
@@ -292,6 +293,11 @@ class TVWindowTests(WindowCase):
         text = "Couldn't refresh Live TV; showing saved channels"
         self.window.nav.notice.emit(text)
         self.assertEqual(self.toasts.count((text, "info")), 1)
+
+    def test_settings_that_could_not_be_saved_at_start_are_toasted(self):
+        with mock.patch.object(self.config, "save_failed", return_value=True):
+            self.show()
+            self.assertTrue(wait_until(lambda: (SAVE_FAILED_TEXT, "error") in self.toasts))
 
     def test_watch_state_is_saved_off_the_tune_path(self):
         self.assertEqual(self.window.watch.save_delay_ms, WATCH_SAVE_DELAY_MS)
@@ -1691,6 +1697,23 @@ class OptionsDialogTests(WindowCase):
         self.assertEqual(saved.live_latency, "low")
         self.assertEqual(saved.mouse_wheel_action, "channel")
         self.assertTrue(saved.start_with_last_channel)
+
+    def test_a_locked_config_on_save_says_so_and_the_settings_still_apply(self):
+        dialog = self.dialog()
+        dialog.live_latency_combo.setCurrentIndex(dialog.live_latency_combo.findData("stable"))
+
+        def locked(**_kwargs):
+            raise PermissionError(13, "Access is denied", os.path.join(self.config_dir, "c"))
+
+        with (
+            mock.patch.object(self.config, "save_config", side_effect=locked),
+            self.assertLogs("ui.tv_window", "WARNING") as logs,
+        ):
+            dialog.save_settings()  # raised into Qt before, and the dialog stayed open
+        self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
+        self.assertEqual(self.config.live_latency, "stable")  # applies until QiTV closes
+        self.assertIn((SAVE_FAILED_TEXT, "error"), self.toasts)
+        self.assertNotIn(self.config_dir, "\n".join(logs.output))
 
     def test_cache_size_is_read_from_the_config_directory(self):
         cache = Path(self.config_dir) / "cache"

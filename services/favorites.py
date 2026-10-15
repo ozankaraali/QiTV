@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 
+from services.redact import safe_message
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,6 +49,6 @@ def save(config) -> bool:
     try:
         config.save_config()
     except Exception as e:
-        logger.warning("Couldn't save the favorites (%s)", type(e).__name__)
+        logger.warning("Couldn't save the favorites: %s", safe_message(e))
         return False
     return True

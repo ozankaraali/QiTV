@@ -22,7 +22,7 @@ def make_config():
     cfg.add_to_watch_history = lambda item, t, link, p, content_id=None: cfg.history.append(
         (item, t, link, p)
     )
-    cfg.save_config = lambda: setattr(cfg, "saves", cfg.saves + 1)
+    cfg.save_config = lambda retry=True: setattr(cfg, "saves", cfg.saves + 1)
     cfg.save_playback_position = lambda cid, pos, dur: cfg.playback_positions.__setitem__(
         cid, {"position": pos, "duration": dur}
     )
@@ -158,6 +158,15 @@ class DeferredSaveTests(unittest.TestCase):
         WatchState(self.cfg).record_play("P", {"id": 1}, item_type="movie", link="u")
         self.assertEqual(self.cfg.saves, 1)
 
+    def test_a_settled_zap_never_waits_for_a_locked_file(self):
+        # A locked config.json is retried for 250 ms: never on the save after a zap.
+        retries = []
+        self.cfg.save_config = lambda retry=True: retries.append(retry)
+        self.ws.record_play("P", {"id": 1}, item_type="channel", link="u")
+        self.assertTrue(wait_until(lambda: retries))
+        self.ws.flush()  # a close may wait out a transient lock
+        self.assertEqual(retries, [False, True])
+
 
 class LockedConfigTests(unittest.TestCase):
     """config.json can stay locked on Windows: a zap or a close must not raise."""
@@ -180,6 +189,18 @@ class LockedConfigTests(unittest.TestCase):
             self.ws.flush()
         self.assertEqual(self.cfg.last_live_channel["item"], {"id": 1})
         self.assertEqual(self.attempts, 2)
+
+    def test_a_failed_save_logs_a_message_without_the_path(self):
+        def locked():
+            raise PermissionError(13, "Access is denied", "/home/alice/config.json")
+
+        self.cfg.save_config = locked
+        with self.assertLogs("services.watch_state", "WARNING") as logs:
+            self.ws.flush()
+        output = "\n".join(logs.output)
+        self.assertIn("PermissionError", output)
+        self.assertIn("Access is denied", output)
+        self.assertNotIn("alice", output)
 
     def test_a_failed_save_is_retried_after_the_flush_interval(self):
         with self.assertLogs("services.watch_state", "WARNING"):

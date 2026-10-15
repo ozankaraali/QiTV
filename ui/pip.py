@@ -35,6 +35,7 @@ from PySide6.QtGui import QGuiApplication, QMouseEvent
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
 
+from services.redact import safe_message
 from ui.overlays.painting import Units
 
 logger = logging.getLogger(__name__)
@@ -269,7 +270,7 @@ class PipFrame(QObject):
         try:
             self._config.save_config()
         except Exception as e:
-            logger.warning("Couldn't save the picture-in-picture corner (%s)", type(e).__name__)
+            logger.warning("Couldn't save the picture-in-picture corner: %s", safe_message(e))
 
     # ---- mouse --------------------------------------------------------------------------
 

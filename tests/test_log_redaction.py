@@ -15,7 +15,7 @@ import requests
 from services.epg_manager import EpgManager
 from services.jobs import ImmediateRunner
 from services.provider_manager import StbHandshake
-from services.redact import redact_url, safe_exc, safe_traceback
+from services.redact import redact_url, safe_exc, safe_message, safe_traceback
 from services.workers import (
     EpgLoadWorker,
     ProviderSetupWorker,
@@ -65,6 +65,19 @@ class RedactTests(unittest.TestCase):
     def test_safe_exc_names_the_type_and_host_only(self):
         self.assertEqual(safe_exc(refused()), "ConnectionError (http://h/…)")
         self.assertEqual(safe_exc(RuntimeError(CREDENTIAL_URL)), "RuntimeError")
+
+    def test_safe_message_keeps_the_text_without_paths_or_addresses(self):
+        locked = PermissionError(13, "Access is denied", "/home/alice/config.json")
+        self.assertEqual(safe_message(locked), "PermissionError: [Errno 13] Access is denied")
+        self.assertEqual(
+            safe_message(TypeError("Type is not JSON serializable: bytes")),
+            "TypeError: Type is not JSON serializable: bytes",
+        )
+        text = safe_message(RuntimeError(f"Failed for {CREDENTIAL_URL}"))
+        self.assertEqual(text, "RuntimeError: Failed for …")
+        self.assertEqual(safe_message(ValueError()), "ValueError")
+        for secret in SECRETS:
+            self.assertNotIn(secret, safe_message(refused()))
 
     def test_safe_traceback_has_frames_but_no_message(self):
         try:

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from services.config_manager import ConfigManager
+from services.config_manager import SAVE_BACKOFF_S, ConfigManager
 
 
 class TvConfigTests(unittest.TestCase):
@@ -132,6 +132,67 @@ class TvConfigTests(unittest.TestCase):
         self.assertNotIn(path.parent.name, "\n".join(logs.output))  # no paths in the log
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["favorites"], ["Old"])
         self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["config.json"])
+
+    def test_after_a_failed_save_the_next_saves_do_not_retry_for_a_while(self):
+        # A config.json that stays locked (Windows antivirus) cost 250 ms at every save.
+        config, path = self._load({"favorites": ["Old"]})
+        config.favorites = ["New"]
+        replace, calls = self._flaky_replace(100)
+        clock = [1000.0]
+        with (
+            patch("services.config_manager.os.replace", side_effect=replace),
+            patch("services.config_manager.time.monotonic", side_effect=lambda: clock[0]),
+            patch("time.sleep") as sleep,
+            self.assertLogs("services.config_manager", "WARNING"),
+        ):
+            self.assertRaises(PermissionError, config.save_config)
+            self.assertEqual((len(calls), sleep.call_count), (6, 5))
+            self.assertTrue(config.save_failed())
+            clock[0] += SAVE_BACKOFF_S - 1
+            self.assertRaises(PermissionError, config.save_config)
+            self.assertEqual((len(calls), sleep.call_count), (7, 5))  # one try, no wait
+            clock[0] += SAVE_BACKOFF_S + 1  # no failure since: a lock is waited out again
+            self.assertRaises(PermissionError, config.save_config)
+            self.assertEqual((len(calls), sleep.call_count), (13, 10))
+        config.save_config()  # unlocked
+        self.assertFalse(config.save_failed())
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["favorites"], ["New"])
+
+    def test_a_save_without_retries_tries_once(self):
+        config, path = self._load({"favorites": ["Old"]})
+        config.favorites = ["New"]
+        replace, calls = self._flaky_replace(100)
+        with (
+            patch("services.config_manager.os.replace", side_effect=replace),
+            patch("time.sleep") as sleep,
+            self.assertLogs("services.config_manager", "WARNING"),
+            self.assertRaises(PermissionError),
+        ):
+            config.save_config(retry=False)
+        self.assertEqual(len(calls), 1)
+        sleep.assert_not_called()
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["config.json"])
+
+    def test_a_locked_config_does_not_stop_the_start(self):
+        # The startup patch saves the new defaults; a locked file made QiTV fail to start.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "config.json"
+        path.write_text(json.dumps({"favorites": ["Old"]}), encoding="utf-8")
+        replace, _ = self._flaky_replace(100)
+        with (
+            patch.object(ConfigManager, "_get_config_path", return_value=str(path)),
+            patch.object(ConfigManager, "_migrate_old_config"),
+            patch("services.config_manager.os.replace", side_effect=replace),
+            patch("time.sleep"),
+            self.assertLogs("services.config_manager", "WARNING") as logs,
+        ):
+            config = ConfigManager()
+        self.assertTrue(config.save_failed())  # the window says so once it shows
+        self.assertEqual(config.favorites, ["Old"])
+        self.assertTrue(any("Access is denied" in line for line in logs.output))
+        self.assertNotIn(directory.name, "\n".join(logs.output))  # no paths in the log
+        self.assertNotIn("Traceback", "\n".join(logs.output))
 
     def test_one_time_migration_turns_on_logos_and_epg(self):
         config, path = self._load({"channel_logos": False, "channel_epg": False})
