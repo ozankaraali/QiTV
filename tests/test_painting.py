@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from ui.logos import LogoCache
 from ui.overlays import painting
 from ui.overlays.painting import (
+    MIN_FONT_PX,
     Units,
     badge_color,
     draw_icon,
@@ -63,6 +64,13 @@ class PaintingTest(unittest.TestCase):
         self.assertEqual(units.px(2.6), 33)
         self.assertEqual(units.px(0.0), 1)
         self.assertEqual(units.font(2.6).pixelSize(), 33)
+
+    def test_fonts_never_go_below_a_readable_pixel_size(self):
+        mini = Units(360)  # the mini player: u = 3.6 px
+        self.assertEqual(mini.font(1.4).pixelSize(), MIN_FONT_PX)  # was 5 px
+        self.assertGreaterEqual(MIN_FONT_PX, 11)
+        self.assertEqual(mini.px(1.4), 5)  # layout sizes still follow u
+        self.assertEqual(Units(1280).font(1.4).pixelSize(), 18)  # large enough: unchanged
 
     def test_initials(self):
         self.assertEqual(initials("Nature One HD"), "NO")

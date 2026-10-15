@@ -9,6 +9,8 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, Q
 
 from ui.theme import PALETTE, qcolor
 
+MIN_FONT_PX = 11  # overlay text stays readable in the mini player (u is 3.6 px there)
+
 _BADGE_COLORS = [
     "#2f6f7a",
     "#6a5f9e",
@@ -32,8 +34,9 @@ class Units:
         return max(1, round(units * self.u))
 
     def font(self, units: float, weight=QFont.Weight.Normal) -> QFont:
+        """A font `units` tall, but never under MIN_FONT_PX (layout sizes still follow u)."""
         font = QFont()
-        font.setPixelSize(self.px(units))
+        font.setPixelSize(max(MIN_FONT_PX, self.px(units)))
         font.setWeight(weight)
         return font
 
