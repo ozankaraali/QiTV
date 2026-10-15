@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 from services import library
-from services.library import CONTINUE, MY_LIST, NEW, LibraryModel, Sort
+from services.library import CONTINUE, MY_LIST, NEW, LibraryModel, Sort, history_season
 from services.watch_state import WatchState
 
 app = QApplication.instance() or QApplication([])
@@ -33,6 +33,10 @@ class FakeCatalog(QObject):
         self.requests = []
         self.name = "P"
         self.version = 1
+        self.section_list = ["live", "movies", "series"]
+
+    def sections(self):
+        return list(self.section_list)
 
     def current_provider_name(self):
         return self.name
@@ -413,6 +417,86 @@ class FixRoundTests(unittest.TestCase):
         with self.assertLogs("services.library", level="WARNING"):
             model.toggle_favorite(movie(1))
         self.assertEqual(notices, ["Couldn't save your list; it will be lost when QiTV closes"])
+
+
+class SectionAvailabilityTests(unittest.TestCase):
+    def test_a_section_the_provider_lacks_is_empty_without_a_request(self):
+        cat = FakeCatalog({"movies": [("1", "A", 1)]}, {("movies", "1"): [movie(1)]})
+        cat.section_list = ["live"]
+        cfg = make_config()
+        model = LibraryModel(cat, cfg, WatchState(cfg))
+        model.set_section("movies")
+        self.assertEqual(cat.requests, [])
+        self.assertEqual(model.items(), [])
+        self.assertEqual(model.genres(), [])
+
+    def test_provider_ready_skips_a_section_the_new_provider_lacks(self):
+        cat = FakeCatalog({"movies": [("1", "A", 1)]}, {("movies", "1"): [movie(1)]})
+        model, _ = build(cat)
+        cat.requests.clear()
+        cat.name, cat.section_list = "M3U", ["live"]
+        cat.version += 1
+        cat.providerReady.emit("M3U")
+        self.assertEqual(cat.requests, [])
+        self.assertEqual(model.items(), [])
+
+
+class HistorySeasonTests(unittest.TestCase):
+    SEASONS = [{"id": "1", "number": "1"}, {"id": "2", "number": "2"}, {"id": "3", "number": "3"}]
+
+    def entry(self, episode, provider="P", item_type="episode"):
+        return {"item_data": episode, "item_type": item_type, "provider_name": provider}
+
+    def test_newest_matching_entry_names_the_season(self):
+        history = [
+            self.entry({"id": "9", "season_id": "3"}),  # another series
+            self.entry({"id": "7", "season_id": "2", "season": "2"}),
+            self.entry({"id": "7", "season_id": "1"}),
+        ]
+        self.assertIs(history_season(history, "P", {"id": "7"}, self.SEASONS), self.SEASONS[1])
+
+    def test_series_id_and_season_number(self):
+        history = [self.entry({"id": "e5", "series_id": "7", "season": "3"})]
+        self.assertIs(history_season(history, "P", {"id": "7"}, self.SEASONS), self.SEASONS[2])
+
+    def test_unknown(self):
+        series = {"id": "7"}
+        self.assertIsNone(history_season([], "P", series, self.SEASONS))
+        other = [self.entry({"id": "7", "season_id": "2"}, provider="Q")]
+        self.assertIsNone(history_season(other, "P", series, self.SEASONS))
+        movie_entry = [self.entry({"id": "7", "season_id": "2"}, item_type="movie")]
+        self.assertIsNone(history_season(movie_entry, "P", series, self.SEASONS))
+        xtream = [self.entry({"id": "7", "season": "2"})]  # an Xtream episode id, no series
+        self.assertIsNone(history_season(xtream, "P", series, self.SEASONS))
+        gone = [self.entry({"id": "7", "season_id": "8"})]
+        self.assertIsNone(history_season(gone, "P", series, self.SEASONS))
+        self.assertIsNone(history_season([None, "x"], "P", series, self.SEASONS))
+
+
+class LargeGenreTests(unittest.TestCase):
+    def test_opening_a_large_genre_parses_each_added_date_once(self):
+        items = [movie(i, added=str(1700000000 + i)) for i in range(3000)]
+        cat = FakeCatalog(
+            {"movies": [("1", "Big", len(items)), ("2", "Small", 10)]},
+            {("movies", "1"): items, ("movies", "2"): items[:10]},
+        )
+        cfg = make_config()
+        model = LibraryModel(cat, cfg, WatchState(cfg))
+        with mock.patch.object(library, "_added", wraps=library._added) as spy:
+            model.set_section("movies")
+            cat.sectionReady.emit("movies")
+            model.genres()
+            model.select_genre("1")
+            model.available_sorts()
+            model.items()
+            model.letter_index()
+            model.genres("b")
+            self.assertLessEqual(spy.call_count, len(items))
+            model.select_genre("2")
+            model.set_sort(Sort.ADDED)
+            model.items()
+            self.assertLessEqual(spy.call_count, len(items))
+        self.assertEqual(model.items()[0]["id"], "9")
 
 
 if __name__ == "__main__":

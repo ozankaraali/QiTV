@@ -9,7 +9,13 @@ from PySide6.QtCore import QCoreApplication, QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from services.catalog import ALL_GROUP_ID, UNEXPECTED_ANSWER_MESSAGE, CatalogService, Group
+from services.catalog import (
+    ALL_GROUP_ID,
+    SECTION_UNAVAILABLE_MESSAGE,
+    UNEXPECTED_ANSWER_MESSAGE,
+    CatalogService,
+    Group,
+)
 from services.jobs import ImmediateRunner, JobRunner
 
 
@@ -136,6 +142,22 @@ class CatalogServiceTests(unittest.TestCase):
         self.assertEqual(service.sections(), ["live", "movies", "series"])
         service, *_ = make_service({"name": "M", "type": "M3UPLAYLIST", "url": "/tmp/a.m3u"})
         self.assertEqual(service.sections(), ["live"])
+
+    def test_sections_the_provider_lacks_fail_without_loading(self):
+        service, providers, factory, _ = make_service(
+            {"name": "M", "type": "M3UPLAYLIST", "url": "/tmp/a.m3u"}
+        )
+        failed, ready = collect(service.sectionFailed), collect(service.sectionReady)
+        service.request_section("movies")
+        service.request_section("series", force=True)
+        self.pump()
+        self.assertEqual(
+            failed,
+            [("movies", SECTION_UNAVAILABLE_MESSAGE), ("series", SECTION_UNAVAILABLE_MESSAGE)],
+        )
+        self.assertEqual(ready, [])
+        self.assertEqual(factory.calls, [])
+        self.assertNotIn("vod", providers.current_provider_content)
 
     def test_provider_setup_then_epg(self):
         service, _, factory, _ = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})

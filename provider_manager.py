@@ -247,7 +247,14 @@ class ProviderManager(QObject):
         for provider in self.providers:
             name = provider.get("name", "Unknown")
             cache = self._load_provider_cache(provider)
-            content = {key: value for key, value in cache.items() if key != "_cache"}
+            # Playlists offer live channels only; an older catalog may have stored the
+            # playlist again under "vod" or "series".
+            playlist = str(provider.get("type", "")).upper() not in ("STB", "XTREAM")
+            content = {
+                key: value
+                for key, value in cache.items()
+                if key != "_cache" and not (playlist and key in ("vod", "series"))
+            }
             if content:
                 results.append((name, content))
         return results

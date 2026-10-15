@@ -6,9 +6,11 @@ touches the network or the disk itself, apart from ``config.save_config()``.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+import heapq
 import logging
 import math
 import re
@@ -28,6 +30,7 @@ CONTINUE, NEW, MY_LIST = "@continue", "@new", "@mylist"
 PINNED_TITLES = {CONTINUE: "⟲ Continue", NEW: "✦ New", MY_LIST: "★ My list"}
 NEW_LIMIT = 48
 MIN_YEAR = 1800
+MEMO_SIZE = 64
 SAVE_FAILED_NOTICE = "Couldn't save your list; it will be lost when QiTV closes"
 
 
@@ -85,19 +88,25 @@ def _added(item: dict) -> Optional[float]:
     text = str(raw).strip()
     if not text:
         return None
+    if "-" in text[1:] or ":" in text:  # a date: skip the (raising) number attempt
+        return _iso_time(text)
     try:
         value = float(text)
     except ValueError:
-        try:
-            parsed = datetime.fromisoformat(text)
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.timestamp()
+        return _iso_time(text)
     if not math.isfinite(value) or value <= 0:
         return None
     return value / 1000 if value > 1e11 else value
+
+
+def _iso_time(text: str) -> Optional[float]:
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _year(item: dict) -> Optional[int]:
@@ -164,7 +173,10 @@ def _az_key(item: dict) -> list:
 
 
 def _added_key(item: dict) -> tuple:
-    ts = _added(item)
+    return _added_order(_added(item))
+
+
+def _added_order(ts: Optional[float]) -> tuple:
     return (1, 0.0) if ts is None else (0, -ts)
 
 
@@ -196,6 +208,40 @@ def _letter(item: dict) -> str:
     return letter_of(title_of(item))
 
 
+def history_season(history, provider: str, series: dict, seasons: list[dict]) -> Optional[dict]:
+    """The season of the newest watch-history entry for `series`, when it is known.
+
+    `history` is newest first (ConfigManager.watch_history). STB episodes copy the series
+    dict, so their id is the series id, and carry `season_id`; an entry may also name its
+    `series_id`. Xtream episodes carry neither, so their series is unknown.
+    """
+    series_id = str(series.get("id"))
+    for entry in history or []:
+        if not isinstance(entry, dict):
+            continue
+        episode = entry.get("item_data")
+        if (
+            entry.get("provider_name") != provider
+            or entry.get("item_type") != "episode"
+            or not isinstance(episode, dict)
+        ):
+            continue
+        owner = episode.get("series_id")
+        if owner is None and episode.get("season_id") is not None:
+            owner = episode.get("id")
+        if owner is None or str(owner) != series_id:
+            continue
+        season_id, number = episode.get("season_id"), episode.get("season")
+        for season in seasons:
+            if season_id is not None and str(season.get("id")) == str(season_id):
+                return season
+        for season in seasons:
+            if number not in (None, "") and str(season.get("number")) == str(number):
+                return season
+        return None
+    return None
+
+
 class LibraryModel(QObject):
     changed = Signal()
     failed = Signal(str)
@@ -213,7 +259,12 @@ class LibraryModel(QObject):
         self._genre: Optional[str] = None
         self._pinned_sig: tuple = ()
         self._chosen_sort: Optional[Sort] = None
-        self._memo: dict[tuple, Any] = {}
+        self._available = True  # the provider offers the section
+        self._memo: OrderedDict[tuple, Any] = OrderedDict()
+        # Parsed `added` times for the current content version, by item identity (the
+        # item is kept too, so its id cannot be reused while the entry lives).
+        self._added_times: dict[int, tuple[dict, Optional[float]]] = {}
+        self._added_version: Optional[int] = None
         catalog.sectionReady.connect(self._on_section_ready)
         catalog.sectionFailed.connect(self._on_section_failed)
         catalog.groupReady.connect(self._on_group_ready)
@@ -245,10 +296,13 @@ class LibraryModel(QObject):
         self._section = section
         self._provider = self._catalog.current_provider_name()
         self._requested = True
-        self._ready = False
         self._genre = None
         self._memo.clear()
-        self._catalog.request_section(section)
+        # A section the provider lacks (an M3U playlist's movies) is ready and empty.
+        self._available = section in self._catalog.sections()
+        self._ready = not self._available
+        if self._available:
+            self._catalog.request_section(section)
         self.changed.emit()
 
     def _current(self, section: str) -> bool:
@@ -266,8 +320,7 @@ class LibraryModel(QObject):
     def _on_section_ready(self, section: str) -> None:
         if not self._current(section):
             return
-        self._ready = True
-        self._memo.clear()
+        self._ready = True  # memo keys carry the content version: nothing to clear
         pinned = self._pinned_genres()
         groups = self._catalog.groups(self._section)
         if pinned:
@@ -333,11 +386,29 @@ class LibraryModel(QObject):
         return (self._catalog.content_version(), self._favorites(), tuple(hist))
 
     def _memoized(self, key: tuple, build: Callable[[], T]) -> T:
-        if key not in self._memo:
-            if len(self._memo) > 64:
-                self._memo.clear()
+        if key in self._memo:
+            self._memo.move_to_end(key)
+        else:
             self._memo[key] = build()
+            while len(self._memo) > MEMO_SIZE:  # least recently used first
+                self._memo.popitem(last=False)
         return cast(T, self._memo[key])
+
+    def _added_lookup(self) -> Callable[[dict], Optional[float]]:
+        """`_added(item)`, parsed once per content version (look up a batch with one call)."""
+        version = self._catalog.content_version()
+        if version != self._added_version:
+            self._added_times = {}
+            self._added_version = version
+        times = self._added_times
+
+        def lookup(item: dict) -> Optional[float]:
+            entry = times.get(id(item))
+            if entry is None or entry[0] is not item:
+                entry = times[id(item)] = (item, _added(item))
+            return entry[1]
+
+        return lookup
 
     # --- content ids / kinds ----------------------------------------------------------
     def _content_id(self, item: dict, item_type=None) -> str:
@@ -358,6 +429,9 @@ class LibraryModel(QObject):
 
     # --- loaded items / pinned --------------------------------------------------------
     def _loaded_items(self) -> list[dict]:
+        if not self._available:
+            return []
+
         def build() -> list[dict]:
             seen: set[str] = set()
             out: list[dict] = []
@@ -375,10 +449,12 @@ class LibraryModel(QObject):
 
     def _new_items(self) -> list[dict]:
         def build() -> list[dict]:
-            dated = [(_added(i), i) for i in self._loaded_items()]
-            dated = [(ts, i) for ts, i in dated if ts is not None]
-            dated.sort(key=lambda pair: -pair[0])  # type: ignore[operator]
-            return [i for _, i in dated[:NEW_LIMIT]]
+            added = self._added_lookup()
+            dated = [(added(i), i) for i in self._loaded_items()]
+            newest = heapq.nlargest(
+                NEW_LIMIT, ((ts, i) for ts, i in dated if ts is not None), key=lambda p: p[0]
+            )
+            return [i for _, i in newest]
 
         return self._memoized(("new", self._section, self._catalog.content_version()), build)
 
@@ -420,7 +496,7 @@ class LibraryModel(QObject):
 
     # --- genres -----------------------------------------------------------------------
     def genres(self, filter_text: str = "") -> list[Genre]:
-        if not self._requested:
+        if not self._requested or not self._available:
             return []
         needle = fold(filter_text)
 
@@ -470,7 +546,8 @@ class LibraryModel(QObject):
         if items is None:
             return list(Sort)
         key = ("has_added", self._section, self._genre, self._catalog.content_version())
-        has_added = self._memoized(key, lambda: any(_added(i) is not None for i in items))
+        added = self._added_lookup()
+        has_added = self._memoized(key, lambda: any(added(i) is not None for i in items))
         return [s for s in Sort if s != Sort.ADDED or has_added]
 
     def items(self) -> Optional[list[dict]]:
@@ -483,6 +560,9 @@ class LibraryModel(QObject):
         key = ("items", self._section, self._genre, sort, self._catalog.content_version())
 
         def build() -> list[dict]:
+            if sort == Sort.ADDED:  # the parsed times are shared with "New"
+                added = self._added_lookup()
+                return sorted(raw, key=lambda i: _added_order(added(i)))
             return sorted(raw, key=globals()[_SORT_KEYS[sort]])
 
         return list(self._memoized(key, build))

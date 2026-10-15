@@ -1,12 +1,16 @@
 import os
+import tempfile
 import time
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from provider_manager import ProviderManager
 from services import thread_cleanup
 from services.jobs import ImmediateRunner, JobRunner
 from services.search import SearchWorker, build_index, search_caches, search_index
@@ -124,6 +128,34 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(hits, [])
         if not os.environ.get("CI"):
             self.assertLess(elapsed, 0.25)
+
+
+class CachedContentTests(unittest.TestCase):
+    def test_playlists_offer_only_live_channels_to_search(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = SimpleNamespace(
+            get_config_dir=lambda: directory.name,
+            selected_provider_name="List",
+            prefer_https=False,
+            ssl_verify=True,
+        )
+        manager = ProviderManager(config)
+        self.addCleanup(manager._cache_writer.shutdown, wait=True)
+        manager.providers = [
+            {"name": "List", "type": "M3UPLAYLIST", "url": "https://example.test/a"},
+            {"name": "Portal", "type": "XTREAM", "url": "https://example.test/b"},
+        ]
+        content = {
+            "List": {"itv": [{"name": "News"}], "vod": [{"name": "News"}], "series": {}},
+            "Portal": {"itv": [], "vod": [{"name": "Film"}], "series": [{"name": "Show"}]},
+        }
+        with mock.patch.object(
+            manager, "_load_provider_cache", side_effect=lambda p: dict(content[p["name"]])
+        ):
+            cached = dict(manager.get_all_providers_cached_content())
+        self.assertEqual(set(cached["List"]), {"itv"})
+        self.assertEqual(set(cached["Portal"]), {"itv", "vod", "series"})
 
 
 class FakeProviders:

@@ -27,6 +27,7 @@ ALL_GROUP_ID = "*"
 NO_SERIES_MESSAGE = "This provider has no series"
 PROVIDER_LOADING_MESSAGE = "The provider is still loading"
 GROUP_UNAVAILABLE_MESSAGE = "This group isn't available"
+SECTION_UNAVAILABLE_MESSAGE = "This provider doesn't offer this section"
 NO_STREAM_MESSAGE = "This item has no stream address"
 EMPTY_LINK_MESSAGE = "The portal returned an empty link"
 # Catalog network jobs (sections, groups, seasons, episodes) running at once per service:
@@ -45,6 +46,7 @@ _SAFE_MESSAGES = frozenset(
     {
         PROVIDER_LOADING_MESSAGE,
         GROUP_UNAVAILABLE_MESSAGE,
+        SECTION_UNAVAILABLE_MESSAGE,
         NO_SERIES_MESSAGE,
         NO_STREAM_MESSAGE,
         EMPTY_LINK_MESSAGE,
@@ -527,6 +529,11 @@ class CatalogService(QObject):
             return
         if self._setup_active():
             self._fail_later(self.sectionFailed, section, PROVIDER_LOADING_MESSAGE)
+            return
+        if section not in self.sections():
+            # An M3U playlist has no movies or series: loading it as one would store its
+            # channels under that section (and Search would list them there).
+            self._fail_later(self.sectionFailed, section, SECTION_UNAVAILABLE_MESSAGE)
             return
         ct = SECTION_CONTENT_TYPES[section]
         content = self.provider_manager.current_provider_content.get(ct)
