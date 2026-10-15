@@ -106,6 +106,35 @@ class NextEpisodeTests(unittest.TestCase):
         self.assertNotEqual(episode_key(eps1[0]), episode_key(eps2[0]))
 
 
+class NextEpisodeEdgeTests(unittest.TestCase):
+    def test_evicted_current_season_needs_episodes(self):
+        show = {"id": "S1", "name": "Show"}
+        s1 = {"id": "1", "series": [1], "cmd": "C1"}
+        ep = stb_episodes(show, s1, [1])[0]
+        self.assertEqual(resolve([s1], {}, s1, ep), NeedEpisodes(s1))
+
+    def test_key_less_seasons_are_located_by_identity(self):
+        show = {"id": "S1", "name": "Show"}
+        a, b, c = {"cmd": ""}, {"cmd": ""}, {"cmd": ""}
+        for s in (a, b, c):
+            s["name"] = ""
+        loaded = {}
+        eps = {
+            id(a): stb_episodes(show, {"id": "1", "cmd": "A"}, [1]),
+            id(b): stb_episodes(show, {"id": "2", "cmd": "B"}, [1]),
+            id(c): stb_episodes(show, {"id": "3", "cmd": "C"}, [1]),
+        }
+        result = next_episode(
+            [a, b, c],
+            lambda s: eps[id(s)],
+            b,
+            eps[id(b)][0],
+            season_key=item_key,
+            episode_key=episode_key,
+        )
+        self.assertEqual(result, NextUp(c, eps[id(c)][0]))
+
+
 class NextMovieTests(unittest.TestCase):
     def test_middle_and_end(self):
         items = [{"id": "a"}, {"id": "b"}, {"id": "c"}]

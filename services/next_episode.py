@@ -36,6 +36,8 @@ def next_episode(
     episode_key: Key,
 ) -> Union[NextUp, NeedEpisodes, None]:
     current = episodes_of(season)
+    if current is None:
+        return NeedEpisodes(season)  # evicted from the cache: load it again
     if not current:
         return None
     i = _index(current, episode, episode_key)
@@ -43,7 +45,11 @@ def next_episode(
         return None
     if i < len(current) - 1:
         return NextUp(season, current[i + 1])
-    s = _index(seasons, season, season_key)
+    wanted = season_key(season)
+    if wanted in ("", "None"):  # key-less seasons: locate by identity
+        s = next((n for n, candidate in enumerate(seasons) if candidate is season), -1)
+    else:
+        s = _index(seasons, season, season_key)
     if s < 0:
         return None
     for following in seasons[s + 1 :]:

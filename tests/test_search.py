@@ -1,16 +1,17 @@
 import os
+import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 from services import thread_cleanup
 from services.jobs import ImmediateRunner, JobRunner
-from services.search import SearchWorker, search_caches
+from services.search import SearchWorker, build_index, search_caches, search_index
 
-APP = QCoreApplication.instance() or QCoreApplication([])
+APP = QApplication.instance() or QApplication([])
 
 
 def titles(hits, section=None):
@@ -96,6 +97,35 @@ class SearchCachesTests(unittest.TestCase):
         self.assertEqual(search_caches(caches, "  "), [])
 
 
+class IndexTests(unittest.TestCase):
+    def test_non_list_groups_and_contents_are_ignored(self):
+        caches = [
+            ("P", {"vod": {"contents": {"a": 5, "b": None, "c": "x"}}, "itv": {"contents": 7}})
+        ]
+        self.assertEqual(search_caches(caches, "foo"), [])
+        self.assertEqual(build_index(caches), [])
+
+    def test_prebuilt_index_matches_search_caches(self):
+        caches = [
+            ("P", {"vod": [{"id": "1", "name": "İstanbul Film"}, {"id": "1", "name": "dup"}]})
+        ]
+        index = build_index(caches)
+        self.assertEqual(len(index), 1)
+        self.assertEqual(index[0][2], "istanbul film")
+        self.assertEqual(search_index(index, "istanbul"), search_caches(caches, "istanbul"))
+
+    def test_large_index_no_match_is_fast(self):
+        items = [{"id": str(i), "name": f"Night Road Salt Film {i}"} for i in range(75000)]
+        caches = [(f"P{k}", {"vod": items}) for k in range(3)]
+        index = build_index(caches)
+        started = time.perf_counter()
+        hits = search_index(index, "zzz")
+        elapsed = time.perf_counter() - started
+        self.assertEqual(hits, [])
+        if not os.environ.get("CI"):
+            self.assertLess(elapsed, 0.25)
+
+
 class FakeProviders:
     def __init__(self, caches):
         self.caches = caches
@@ -116,7 +146,8 @@ class SearchWorkerTests(unittest.TestCase):
         ImmediateRunner().run_worker(
             SearchWorker(manager, "salt"), lambda ctx, payload: results.append(payload)
         )
-        caches, hits = results[0]
+        caches, index, hits = results[0]
+        self.assertEqual(len(index), 1)
         self.assertEqual(caches, self.caches)
         self.assertEqual(titles(hits), ["Salt Roads"])
         self.assertEqual(manager.calls, 1)
@@ -127,7 +158,18 @@ class SearchWorkerTests(unittest.TestCase):
         ImmediateRunner().run_worker(
             SearchWorker(manager, "salt", self.caches), lambda ctx, payload: results.append(payload)
         )
-        self.assertEqual(titles(results[0][1]), ["Salt Roads"])
+        self.assertEqual(titles(results[0][2]), ["Salt Roads"])
+        self.assertEqual(manager.calls, 0)
+
+    def test_given_index_skips_loader_and_build(self):
+        manager = FakeProviders([])
+        index = build_index(self.caches)
+        results = []
+        ImmediateRunner().run_worker(
+            SearchWorker(manager, "salt", index=index), lambda ctx, payload: results.append(payload)
+        )
+        self.assertIs(results[0][1], index)
+        self.assertEqual(titles(results[0][2]), ["Salt Roads"])
         self.assertEqual(manager.calls, 0)
 
     def test_real_runner_leaves_no_pending_thread(self):
@@ -141,7 +183,8 @@ class SearchWorkerTests(unittest.TestCase):
             if results and not thread_cleanup.has_pending_threads():
                 break
             QTest.qWait(10)
-        self.assertEqual(titles(results[0][1]), ["Salt Roads"])
+        self.assertTrue(results, "SearchWorker delivered no result within 3 s")
+        self.assertEqual(titles(results[0][2]), ["Salt Roads"])
         self.assertFalse(thread_cleanup.has_pending_threads())
 
 
