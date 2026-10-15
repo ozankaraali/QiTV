@@ -1,15 +1,11 @@
 """The Library's top bar: QiTV, Live TV / Movies / Series, and the Search and source pills."""
 
-import logging
-
 from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import QWidget
 
 from ui.overlays.painting import Units, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
-
-logger = logging.getLogger(__name__)
 
 HEIGHT_U = 6.0
 DEFAULT_HOST_WIDTH = 1280
@@ -33,6 +29,7 @@ class TopNav(QWidget):
         self._source = ""
         self._focused = False
         self._focus_item = "live"
+        self._pressed: str | None = None
         if parent is not None:
             parent.installEventFilter(self)
         self._relayout()
@@ -124,15 +121,21 @@ class TopNav(QWidget):
     def _item_at(self, pos) -> str | None:
         u = Units(self._host_width()).u
         for item, rect in self._item_rects().items():
-            hit = rect.adjusted(-0.8 * u, 0, 0.8 * u, 0)
+            # tabs are text-wide, so widen them; pills are already padded and 1u apart
+            hit = rect.adjusted(-0.8 * u, 0, 0.8 * u, 0) if item in ALL_TABS else rect
             if hit.contains(pos):
                 return item
         return None
 
     def mousePressEvent(self, event) -> None:
-        item = self._item_at(event.position())
-        if item is None:
+        self._pressed = self._item_at(event.position())
+        if self._pressed is None:
             super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        item, self._pressed = self._pressed, None
+        if item is None or self._item_at(event.position()) != item:
+            super().mouseReleaseEvent(event)
             return
         self._focus_item = item
         self.update()

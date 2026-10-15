@@ -1,7 +1,5 @@
 """The Library's left genre column: type-to-filter, PINNED and GENRES sections (spec §5.3)."""
 
-import logging
-
 from PySide6.QtCore import (
     QAbstractListModel,
     QEvent,
@@ -19,8 +17,6 @@ from services.library import Genre
 from ui.overlays.channel_rows import ChannelListView
 from ui.overlays.painting import Units, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
-
-logger = logging.getLogger(__name__)
 
 WIDTH_U = 18.0
 FIELD_MARGIN_U = 1.2
@@ -163,6 +159,7 @@ class GenreList(QWidget):
         self._focused = False
         self._current: str | None = None
         self._ids: list[str] = []
+        self._rows_by_id: dict[str, int] = {}
         self._model = _GenreModel(self)
         self._view = ChannelListView(self)
         self._view.setModel(self._model)
@@ -172,7 +169,7 @@ class GenreList(QWidget):
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(PREVIEW_DEBOUNCE_MS)
-        self._preview_timer.timeout.connect(self._flush_preview)
+        self._preview_timer.timeout.connect(self._emit_preview)
         if parent is not None:
             parent.installEventFilter(self)
         self._relayout()
@@ -189,6 +186,11 @@ class GenreList(QWidget):
     def set_genres(self, genres: list[Genre]) -> None:
         self._ids = [g.id for g in genres]
         self._model.set_genres(genres)
+        self._rows_by_id = {
+            self._model.index(i).data(IdRole): i
+            for i in range(self._model.rowCount())
+            if self._model.index(i).data(KindRole) == GENRE
+        }
         if self._current in self._ids:
             self._show_current()
             return
@@ -220,13 +222,16 @@ class GenreList(QWidget):
 
     def page(self, delta: int) -> None:
         row_h = self._view.sizeHintForRow(0)
-        rows = max(1, self._view.height() // row_h - 1) if row_h > 0 else 8
+        headers = self._model.rowCount() - len(self._ids)
+        rows = max(1, self._view.height() // row_h - 1 - headers) if row_h > 0 else 8
         self.move_by(delta * rows)
 
     def activate(self) -> None:
         if self._current is None:
             return
-        self._flush_preview()
+        if self._preview_timer.isActive():
+            self._preview_timer.stop()
+            self._emit_preview()
         self.genreActivated.emit(self._current)
 
     def type_text(self, text: str) -> None:
@@ -258,9 +263,7 @@ class GenreList(QWidget):
         self.update()
         self.filterChanged.emit(self.filter_text)
 
-    def _flush_preview(self) -> None:
-        if self._preview_timer.isActive():
-            self._preview_timer.stop()
+    def _emit_preview(self) -> None:
         if self._current is not None:
             self.genreSelected.emit(self._current)
 
@@ -268,12 +271,7 @@ class GenreList(QWidget):
         self._preview_timer.stop()
 
     def _show_current(self) -> None:
-        row = -1
-        if self._current is not None:
-            for i, label in enumerate(self._model.labels()):
-                if self._model.index(i).data(IdRole) == self._current:
-                    row = i
-                    break
+        row = self._rows_by_id.get(self._current, -1) if self._current is not None else -1
         if row < 0:
             self._view.clearSelection()
             self._view.setCurrentIndex(self._model.index(-1))
@@ -289,6 +287,7 @@ class GenreList(QWidget):
         if genre_id != self._current:
             self._current = genre_id
             self._show_current()
+            self._preview_timer.start()
         self.activate()
 
     # ---- layout and painting ----------------------------------------------------------------

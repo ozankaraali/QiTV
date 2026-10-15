@@ -43,7 +43,8 @@ class GenreListTests(unittest.TestCase):
         self.selected, self.activated = [], []
         self.list.genreSelected.connect(self.selected.append)
         self.list.genreActivated.connect(self.activated.append)
-        self.list._cancel_preview()
+        QTest.qWait(PREVIEW_DEBOUNCE_MS + 150)
+        self.selected.clear()
 
     def test_sections(self):
         self.assertEqual(
@@ -96,6 +97,43 @@ class GenreListTests(unittest.TestCase):
         self.assertEqual(order, [("sel", "action"), ("act", "action")])
         QTest.qWait(PREVIEW_DEBOUNCE_MS + 150)
         self.assertEqual(len(order), 2)
+
+    def test_activate_without_pending_preview_emits_only_activated(self):
+        self.list.move_by(1)
+        QTest.qWait(PREVIEW_DEBOUNCE_MS + 150)
+        self.assertEqual(self.selected, ["new"])
+        self.list.activate()
+        self.assertEqual(self.selected, ["new"])
+        self.assertEqual(self.activated, ["new"])
+
+    def test_click_genre_row_activates_it(self):
+        view = self.list._view
+        row = self.list._rows_by_id["comedy"]
+        pos = view.visualRect(self.list._model.index(row)).center()
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=pos)
+        self.assertEqual(self.list.current_id(), "comedy")
+        self.assertEqual(self.selected, ["comedy"])
+        self.assertEqual(self.activated, ["comedy"])
+
+    def test_click_header_does_nothing(self):
+        view = self.list._view
+        pos = view.visualRect(self.list._model.index(0)).center()
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=pos)
+        self.assertEqual(self.activated, [])
+
+    def test_many_genres_move_and_page(self):
+        many = [Genre(f"g{i}", f"Genre {i}", i) for i in range(150)]
+        self.list.set_genres(many)
+        self.assertEqual(self.list.current_id(), "g0")
+        self.list.move_by(5)
+        self.assertEqual(self.list.current_id(), "g5")
+        self.list.page(1)
+        after = int(self.list.current_id()[1:])
+        self.assertGreater(after, 5)
+        self.list.move_by(1000)
+        self.assertEqual(self.list.current_id(), "g149")
+        self.list.page(-1)
+        self.assertLess(int(self.list.current_id()[1:]), 149)
 
     def test_filtered_list_keeps_current_or_previews_first_match(self):
         self.list.set_current("doc")
@@ -168,6 +206,25 @@ class TopNavTests(unittest.TestCase):
         local = self.nav.mapFromGlobal(self.sources[0])
         self.assertGreaterEqual(local.y(), rect.bottom() - 1)
         self.assertTrue(rect.left() - 1 <= local.x() <= rect.right())
+
+    def test_set_active_unknown_tab_raises(self):
+        with self.assertRaises(ValueError):
+            self.nav.set_active("music")
+
+    def test_activation_happens_on_release(self):
+        pos = self.nav._item_rects()["movies"].center().toPoint()
+        QTest.mousePress(self.nav, Qt.LeftButton, pos=pos)
+        self.assertEqual(self.tabs, [])
+        QTest.mouseRelease(self.nav, Qt.LeftButton, pos=pos)
+        self.assertEqual(self.tabs, ["movies"])
+
+    def test_hit_rects_do_not_overlap(self):
+        rects = self.nav._item_rects()
+        for a in rects:
+            for b in rects:
+                if a < b:
+                    c = rects[a].center()
+                    self.assertEqual(self.nav._item_at(c), a)
 
     def test_click_hidden_tab_area_does_nothing(self):
         self.nav.set_tabs(["live"])
