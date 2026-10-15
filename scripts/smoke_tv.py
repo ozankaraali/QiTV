@@ -14,10 +14,13 @@ parent and the child are the app itself); the fixtures come from the checkout (`
 tests/fixtures/live.ts on 127.0.0.1 as an endless real-time channel (live_source.LiveSource),
 Channel 3 of the playlist, and the app has time-shift consent (its buffer on disk). Down zaps
 to it: it must play from the loopback stream; a 4 s pause leaves it at least 3 s behind live;
-L (Go live) brings the lag under the target + 1.5 s within 6 s; ← moves the position back
-8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live; after the close no
-helper process and nothing in the timeshift directory remain. Lags and positions are the
-LiveSession timeline's (`timelineChanged`), not VLC's.
+L (Go live) is live within 6 s, at most target + 0.75 s (stay-live's band) + the newest
+segment's length (the starts it can land on are a segment apart) + 0.5 s (VLC's open) behind,
+and at the end of the 6 s stay-live is closing in (rate above 1x) or inside the band; ← moves
+the position back 8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live;
+after the close no helper process and nothing in the timeshift directory remain. Lags and
+positions are the LiveSession timeline's (`timelineChanged`), not VLC's. A run killed for a
+hang has its live helper killed too.
 
 Every check is written to <out>/smoke.json as {"name", "ok", "detail"}; any failed check makes
 the exit code non-zero. The overlay gate (spec D4) passes only when every expected "overlay: …"
@@ -44,6 +47,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -143,7 +147,8 @@ PAUSED_LAG_S = 3.0
 STATE_CHANGE_MS = 3_000  # for VLC to pause or play again
 FRESH_TIMELINE_MS = 2_000  # LiveSession emits its timeline every 250 ms
 GO_LIVE_MS = 6_000
-GO_LIVE_MARGIN_S = 1.5
+GO_LIVE_BAND_S = 0.75  # the top of stay-live's band above the target
+GO_LIVE_OPEN_S = 0.5  # VLC opening the reopened stream
 HISTORY_S = 14.0  # buffered behind the position before the seek: 10 s back stays inside it
 HISTORY_TIMEOUT_MS = 20_000
 SEEK_BACK = (8.0, 12.0)  # seconds the position may move back for ← (10 s, segment-aligned)
@@ -155,7 +160,9 @@ RATE_TOLERANCE = 0.01
 TUNED_CHECK = f"{PIPELINE_PREFIX}{LIVE_CHANNEL} plays from the loopback time-shift stream"
 ON_DISK_CHECK = f"{PIPELINE_PREFIX}its buffer is on disk in the timeshift directory"
 PAUSE_CHECK = f"{PIPELINE_PREFIX}a 4 s pause leaves it at least 3 s behind live"
-GO_LIVE_CHECK = f"{PIPELINE_PREFIX}Go live brings the lag under the target + 1.5 s within 6 s"
+GO_LIVE_CHECK = (
+    f"{PIPELINE_PREFIX}Go live is live within 6 s, at most a segment past the band, and closing in"
+)
 SEEK_CHECK = f"{PIPELINE_PREFIX}seeking back 10 s moves the position back 8-12 s"
 SPEED_CHECK = f"{PIPELINE_PREFIX}1.5x is applied while time-shifted"
 LIVE_AGAIN_CHECK = f"{PIPELINE_PREFIX}the speed returns to 1x once back at live"
@@ -288,6 +295,21 @@ def _native_stack(pid: int, out: Path) -> Optional[str]:
     return path.name if path.exists() else None
 
 
+def _kill_helper(report: Report) -> None:
+    """After a hung app was killed: kill its live helper too, if it still runs (best effort)."""
+    facts = report.data.get("pipeline")
+    pid = facts.get("helper_pid") if isinstance(facts, dict) else None
+    if not isinstance(pid, int) or not _process_alive(pid):
+        return
+    try:
+        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))  # Windows: TerminateProcess
+    except OSError as e:
+        logger.warning("Could not kill the hung app's live helper (pid %d): %s", pid, e)
+        return
+    facts["helper_killed"] = True
+    logger.warning("Killed the hung app's live helper (pid %d)", pid)
+
+
 def _frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
@@ -343,6 +365,8 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool) -> int:
     except (OSError, ValueError) as e:
         report.check("the app writes its report", False, f"{e} (exit code {code})")
     report.data["hang_stack"] = hang_stack
+    if code is None:
+        _kill_helper(report)
     stopped = f"stopped after {limit:.0f} s" if code is None else f"exit code {code}"
     if SCENARIO_CHECK not in report.names():  # the app died or hung on the way
         report.check(SCENARIO_CHECK, False, f"{stopped} during: {report.data.get('step')}")
@@ -1027,18 +1051,15 @@ class Driver:
         )
         self._capture(PIPELINE_SCREENSHOTS[0])  # Space shows the transport: the time-shift bar
 
-        # 4. Go live (L): the lag comes back under the target + 1.5 s within 6 s.
+        # 4. Go live (L): live within 6 s, at most a segment past stay-live's band (plus VLC's
+        # open), and closing in by the end of the 6 s. VLC's position jitters by about half a
+        # second, so the lag is judged against bounds, not step by step.
         report.step("pipeline 4. Go live")
         pressed = time.monotonic()
         self._key(Qt.Key.Key_L)
-        state = yield from self._fresh(
-            pressed, lambda s: s["lag"] < s["target"] + GO_LIVE_MARGIN_S, GO_LIVE_MS
-        )
-        report.check(
-            GO_LIVE_CHECK,
-            state is not None,
-            f"{self._describe(state)}; lags since L: {self._lags_since(pressed)}",
-        )
+        segment = self._newest_span()  # what Go live chose among, a moment ago
+        yield GO_LIVE_MS
+        report.check(GO_LIVE_CHECK, *self._judge_go_live(pressed, segment))
 
         # 5. Seek back 10 s (←): the position moves back 8-12 s (segments are about 2 s).
         report.step("pipeline 5. seek back 10 s")
@@ -1111,15 +1132,64 @@ class Driver:
         yield from self._wait(seen, timeout_ms)
         return found[0] if found else None
 
+    def _judge_go_live(self, pressed: float, segment: Optional[float]) -> tuple[bool, str]:
+        """The Go live check over the 6 s after L; records its bound and lag series."""
+        end = pressed + GO_LIVE_MS / 1000
+        window = [(at - pressed, s) for at, s in self.timeline if pressed < at <= end]
+        facts = self.report.data["pipeline"]
+        if not window or segment is None:
+            facts["go_live"] = {"segment": segment, "series": []}
+            return False, f"{len(window)} timeline states after L; newest complete span {segment}"
+        target = float(window[0][1]["target"])
+        bound = target + GO_LIVE_BAND_S + segment + GO_LIVE_OPEN_S
+        landed = next(
+            ((t, s) for t, s in window if s["mode"] == "live" and s["lag"] <= bound), None
+        )
+        last_t, last = window[-1]
+        closing = last["rate"] > 1.0 or last["lag"] <= target + GO_LIVE_BAND_S
+        lags = [round(float(s["lag"]), 3) for _, s in window]
+        lowest = min(lags)
+        facts["go_live"] = {
+            "target": target,
+            "segment": round(segment, 3),
+            "bound": round(bound, 3),
+            "landed_after_s": round(landed[0], 3) if landed is not None else None,
+            "min_lag": round(lowest, 3),
+            "end": {
+                "after_s": round(last_t, 3),
+                "lag": round(last["lag"], 3),
+                "rate": last["rate"],
+                "mode": last["mode"],
+            },
+            "series": [[round(t, 3), round(s["lag"], 3), s["mode"], s["rate"]] for t, s in window],
+        }
+        bounds = (
+            f"bound {bound:.3f} = target {target:g} + band {GO_LIVE_BAND_S:g} + segment "
+            f"{segment:.3f} + open {GO_LIVE_OPEN_S:g}"
+        )
+        if landed is None:
+            arrived = "never live within the bound"
+        else:
+            arrived = f"live at lag {landed[1]['lag']:.3f} after {landed[0]:.2f} s"
+        detail = (
+            f"{arrived} ({bounds}); min lag {lowest:.3f}; after {last_t:.2f} s lag "
+            f"{last['lag']:.3f}, rate {last['rate']}, mode {last['mode']}"
+            f"{'' if closing else ' (not closing in)'}; lags: {lags}"
+        )
+        return landed is not None and closing, detail
+
+    def _newest_span(self) -> Optional[float]:
+        """The newest complete span's length (LiveSession keeps its session id private)."""
+        engine, sid = self.window.engine, getattr(self.window.live_session, "_sid", None)
+        spans = engine.spans(sid) if engine is not None and sid is not None else []
+        return spans[-1].end - spans[-1].start if spans else None
+
     def _history(self) -> float:
         """Seconds buffered behind the latest position."""
         if not self.timeline:
             return 0.0
         state = self.timeline[-1][1]
         return float(state["position"]) - float(state["start"])
-
-    def _lags_since(self, moment: float) -> list[float]:
-        return [round(float(s["lag"]), 3) for at, s in self.timeline if at > moment][:30]
 
     @staticmethod
     def _describe(state: Optional[dict[str, Any]]) -> str:
