@@ -47,7 +47,7 @@ class Action(str, Enum):
     OPEN_FILE = "open_file"
 
 
-CONTEXTS = ("player", "drawer", "library")
+CONTEXTS = ("player", "drawer", "library", "guide")
 
 
 _K = Qt.Key
@@ -106,8 +106,27 @@ _MEDIA_KEYS = {
     _K.Key_MediaNext.value: Action.MEDIA_NEXT,
     _K.Key_MediaPrevious.value: Action.MEDIA_PREV,
 }
-# Shortcuts that work with the drawer open or closed.
-_CTRL_KEYS = {_K.Key_Space.value: Action.PLAY_PAUSE, _K.Key_F.value: Action.FULLSCREEN}
+# Shortcuts that work with the drawer open or closed (and in the guide).
+_CTRL_KEYS = {
+    _K.Key_Space.value: Action.PLAY_PAUSE,
+    _K.Key_F.value: Action.FULLSCREEN,
+    _K.Key_D.value: Action.FAVORITE,
+}
+# The guide (spec §5.1): the drawer's keys but Backspace, G closes it, and the playback keys
+# keep working; nothing types, zaps or enters a number.
+_GUIDE_KEYS = {k: a for k, a in _DRAWER_KEYS.items() if a is not Action.NAV_BACKSPACE}
+_GUIDE_CHARS = {
+    key: _PLAYER_CHARS[key]
+    for key in (
+        _K.Key_Space.value,
+        _K.Key_G.value,
+        _K.Key_F.value,
+        _K.Key_M.value,
+        _K.Key_Plus.value,
+        _K.Key_Equal.value,
+        _K.Key_Minus.value,
+    )
+}
 # The Library (spec §5.4): the drawer's keys plus Home/End. It types like the drawer, so "/"
 # and Ctrl+F search and Ctrl+D toggles My list; fullscreen moves to Ctrl+Meta+F (macOS ⌃⌘F)
 # and F11 because Ctrl+F searches here.
@@ -137,8 +156,9 @@ def resolve(
 ) -> tuple[Action, str] | None:
     """Map a key press to (action, payload); the payload is the digit or the typed text.
 
-    `context` is "player", "drawer" or "library". `drawer_open` is the Phase 1B spelling
-    (True means "drawer", False "player") and is used only when `context` is not given.
+    `context` is "player", "drawer", "library" or "guide". `drawer_open` is the Phase 1B
+    spelling (True means "drawer", False "player") and is used only when `context` is not
+    given.
     """
     if context is None:
         context = "drawer" if drawer_open else "player"
@@ -167,6 +187,12 @@ def resolve(
         if key in _DRAWER_KEYS:
             return _DRAWER_KEYS[key], ""
         return _text(text, mods, windows=platform.startswith("win"))
+    if context == "guide":
+        if key in _GUIDE_KEYS:
+            return _GUIDE_KEYS[key], ""
+        if held or key not in _GUIDE_CHARS:
+            return None
+        return _GUIDE_CHARS[key], ""
     if key in _PLAYER_KEYS:
         return _PLAYER_KEYS[key], ""
     if key in _CHANNEL_KEYS:

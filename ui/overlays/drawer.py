@@ -1,8 +1,12 @@
-"""The two-layer drawer (spec §5.2): the webOS-like layered list over the video."""
+"""The two-layer drawer (spec §5.2): the webOS-like layered list over the video.
+
+A right-click on an item, episode or channel row asks for its context menu
+(`contextRequested`); it leaves the highlight where the keys put it.
+"""
 
 import logging
 
-from PySide6.QtCore import QEvent, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QLinearGradient, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate
 
@@ -22,6 +26,8 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 logger = logging.getLogger(__name__)
 
+_CONTEXT_LAYERS = ("item", "episode")  # rows with a context menu (channels are items)
+_RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 LEFT_FRACTION = 0.25
 RIGHT_FRACTION = 0.58
 FADE_U = 7.0
@@ -161,6 +167,9 @@ class _Column:
         self.simple_delegate = _SimpleRowDelegate(self.view)
         self.view.setItemDelegate(self.simple_delegate)
         self.view.rowClicked.connect(lambda row: drawer._on_row_clicked(side, row))
+        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(lambda pos: drawer._on_row_context(side, pos))
+        self.view.viewport().installEventFilter(drawer)  # a right press must not select
         self.parent: NavNode | None = None
         self.nodes: list[NavNode] = []
         self.rows: dict[NavNode, int] = {}
@@ -171,6 +180,7 @@ class _Column:
 
 class Drawer(Overlay):
     playRequested = Signal(object, object, object)
+    contextRequested = Signal(object, QPoint)  # node, global position
     closed = Signal()
 
     def __init__(self, nav: NavModel, logos, now_provider, parent=None) -> None:
@@ -375,6 +385,13 @@ class Drawer(Overlay):
         self._select(col, row)
         self.activate()
 
+    def _on_row_context(self, side: str, pos: QPoint) -> None:
+        """A right-click at `pos` (viewport coordinates) of a column's list."""
+        col = self._columns[side]
+        row = col.view.indexAt(pos).row()
+        if 0 <= row < len(col.nodes) and col.nodes[row].layer in _CONTEXT_LAYERS:
+            self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
+
     def _on_nav_changed(self) -> None:
         if self.isVisible():
             self._refresh()
@@ -484,9 +501,16 @@ class Drawer(Overlay):
 
     # ---- layout and painting ----------------------------------------------------------------
 
-    def eventFilter(self, obj, event):
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self.parentWidget() and event.type() == QEvent.Resize:
             self._relayout()
+        elif (
+            event.type() in _RIGHT_PRESSES
+            and isinstance(event, QMouseEvent)
+            and event.button() == Qt.MouseButton.RightButton
+            and any(obj is col.view.viewport() for col in self._columns.values())
+        ):
+            return True  # not a selection: the context menu follows, the highlight stays
         return False
 
     def _relayout(self) -> None:

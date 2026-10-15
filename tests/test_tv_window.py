@@ -334,6 +334,20 @@ class TVWindowTests(WindowCase):
         self.assertFalse(self.window.isFullScreen())
         self.assertEqual(triggered, [])
 
+    def test_g_opens_the_guide_which_takes_the_keys_until_g_closes_it(self):
+        self.open_first_channel()
+        guide, zap = self.window.overlays.guide, self.window.zap
+        self.assertTrue(wait_until(lambda: zap.context.current() is not None))  # tuned
+        QTest.keyClick(self.window, Qt.Key.Key_G)
+        self.assertTrue(guide.isVisible())
+        self.assertEqual(guide.current_channel()["name"], "Channel 1")
+        QTest.keyClick(self.window, Qt.Key.Key_Down)  # moves in the guide: no zap
+        self.assertEqual(guide.current_channel()["name"], "Channel 2")
+        self.assertEqual(zap.context.current()["name"], "Channel 1")
+        QTest.keyClick(self.window, Qt.Key.Key_G)
+        self.assertFalse(guide.isVisible())
+        self.assertIsNotNone(self.window.overlays.next_card)
+
     def test_f_and_the_menu_toggle_fullscreen_and_escape_leaves_it(self):
         self.show()
         drawer = self.wait_for_drawer()

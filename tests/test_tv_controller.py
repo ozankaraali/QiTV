@@ -8,16 +8,16 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QPixmap, QWheelEvent
+from PySide6.QtGui import QGuiApplication, QPixmap, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QMenu, QWidget
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
-from services.navigation import NavModel, NavNode
+from services.navigation import FAVORITES_GROUP, NavModel, NavNode
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
@@ -25,6 +25,8 @@ from ui.keymap import Action
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
+from ui.overlays.guide import Guide
+from ui.overlays.next_card import NextCard
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.zap_banner import ZapBanner
@@ -70,9 +72,14 @@ class FakeCatalog(NavCatalog):
         self.epg = {}
         self.loading = False
         self.epg_refreshes = 0
+        self.episode_map = {}  # (series id, season id) -> episodes; missing: not loaded
 
     def provider_names(self):
         return list(self.names)
+
+    def episodes(self, series, season):
+        episodes = self.episode_map.get((series["id"], season["id"]))
+        return None if episodes is None else list(episodes)
 
     def items(self, section, group_id):
         if section == "live" and group_id == "*":
@@ -236,7 +243,12 @@ class FakeColumn(FakeOverlay):
 
 class FakeDrawer(FakeOverlay):
     playRequested = Signal(object, object, object)
+    contextRequested = Signal(object, object)
     closed = Signal()
+    highlight = None
+
+    def highlighted(self):
+        return self.highlight
 
     def open_drawer(self, focus_key=None, focus_side="right"):
         if focus_side == "right":
@@ -287,6 +299,10 @@ class FakeTransport(FakeOverlay):
     goLiveRequested = Signal()
     programmeStartRequested = Signal()
     seekToRequested = Signal(float)
+    nextRequested = Signal()
+
+    def set_next_available(self, available):
+        self.record("set_next_available", available)
 
     def show_vod(self, title, subtitle):
         self.record("show_vod", title, subtitle)
@@ -336,6 +352,61 @@ class FakeToast(FakeOverlay):
 
     def messages(self):
         return [(text, kind) for text, kind, _ms in self.named("show_message")]
+
+
+class FakeGuide(FakeOverlay):
+    tuneRequested = Signal(object)
+    closed = Signal()
+
+    def open_guide(self, channels, current):
+        self.record("open_guide", channels, current)
+        self.visible = True
+
+    def close_guide(self):
+        self.record("close_guide")
+        was_visible, self.visible = self.visible, False
+        if was_visible:
+            self.closed.emit()
+
+    def escape(self):
+        self.close_guide()
+        return True
+
+    def move_by(self, delta):
+        self.record("move_by", delta)
+
+    def page(self, delta):
+        self.record("page", delta)
+
+    def shift(self, delta):
+        self.record("shift", delta)
+
+    def activate(self):
+        self.record("activate")
+
+    def invalidate(self):
+        self.record("invalidate")
+
+
+class FakeNextCard(FakeOverlay):
+    playNow = Signal()
+    cancelled = Signal()
+
+    def show_next(self, title, subtitle, seconds=10, *, kind="episode"):
+        self.record("show_next", title, subtitle, kind)
+        self.visible = True
+
+    def activate(self):
+        if self.visible:
+            self.visible = False
+            self.playNow.emit()
+
+    def escape(self):
+        if not self.visible:
+            return False
+        self.visible = False
+        self.cancelled.emit()
+        return True
 
 
 class FakeLogos(QObject):
@@ -457,6 +528,15 @@ class FakeWatch:
         self.flushes += 1
 
 
+class FakeConfig(SimpleNamespace):
+    """The settings the controller reads; save_config() counts the saves."""
+
+    saves = 0
+
+    def save_config(self):
+        self.saves += 1
+
+
 class FakeExternal:
     def __init__(self, result=(True, "")):
         self.calls = []
@@ -477,7 +557,7 @@ class ControllerTestCase(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.config = SimpleNamespace(
+        self.config = FakeConfig(
             favorites=[],
             watch_history=[],
             last_live_channel=None,
@@ -487,6 +567,8 @@ class ControllerTestCase(unittest.TestCase):
             live_latency="low",
             mouse_wheel_action="channel",
             channel_epg=True,
+            auto_play_episodes=True,
+            auto_play_movies=True,
         )
         self.catalog = FakeCatalog()
         self.nav = NavModel(self.catalog, self.config)
@@ -498,6 +580,7 @@ class ControllerTestCase(unittest.TestCase):
         self.external = FakeExternal()
         self.banner, self.column = FakeBanner(), FakeColumn()
         self.drawer, self.transport, self.toast = FakeDrawer(), FakeTransport(), FakeToast()
+        self.guide, self.next_card = FakeGuide(), FakeNextCard()
         self.controller = self.make_controller(self.column)
 
     def make_controller(self, column, **extra):
@@ -508,7 +591,7 @@ class ControllerTestCase(unittest.TestCase):
             zap=self.zap,
             session=self.session,
             watch=self.watch,
-            overlays=Overlays(self.banner, column, self.drawer, self.transport, self.toast),
+            overlays=self.overlays(column),
             window_actions=self.window,
             external=self.external,
             now=lambda: NOW,
@@ -516,6 +599,17 @@ class ControllerTestCase(unittest.TestCase):
         )
         self.addCleanup(controller.shutdown)  # late zap timers must not reach a dead overlay
         return controller
+
+    def overlays(self, column):
+        return Overlays(
+            self.banner,
+            column,
+            self.drawer,
+            self.transport,
+            self.toast,
+            self.guide,
+            self.next_card,
+        )
 
     def tune(self, index):
         self.controller.tune(CHANNELS[index], group_key="10", channels=CHANNELS)
@@ -816,16 +910,15 @@ class KeyTests(ControllerTestCase):
             [("Volume 55%", "info"), ("Muted", "info"), ("Volume 55%", "info")],
         )
 
-    def test_window_actions_and_placeholders(self):
+    def test_window_actions(self):
         self.controller.handle(Action.FULLSCREEN)
         self.controller.handle(Action.MINI_PLAYER)
         self.controller.video_double_clicked()
         self.assertEqual(
             self.window.calls, ["toggle_fullscreen", "toggle_mini_player", "toggle_fullscreen"]
         )
-        self.controller.handle(Action.GUIDE)
         self.controller.handle(Action.GO_LIVE)  # nothing to do without a time-shifted channel
-        self.assertEqual(self.toast.messages(), [("Coming soon", "info")])
+        self.assertEqual(self.toast.messages(), [])
 
     def test_click_toggles_the_drawer(self):
         self.controller.video_clicked()
@@ -1034,6 +1127,8 @@ class RealOverlayTests(ControllerTestCase):
             Drawer(self.nav, None, now_provider, parent=host),
             Transport(host),
             Toast(host),
+            Guide(None, lambda channel, start, limit: [], lambda: NOW, parent=host),
+            NextCard(host),
         )
         controller = TVController(
             config=self.config,
@@ -1638,7 +1733,7 @@ class LogoTests(ControllerTestCase):
             zap=self.zap,
             session=self.session,
             watch=self.watch,
-            overlays=Overlays(self.banner, self.column, self.drawer, self.transport, self.toast),
+            overlays=self.overlays(self.column),
             window_actions=self.window,
             external=self.external,
             now=lambda: NOW,
@@ -2315,6 +2410,419 @@ class ExternalZapTests(ControllerTestCase):
         self.assertEqual(
             self.external.calls, [("vlc", "http://stream/1"), ("vlc", "http://stream/4")]
         )
+
+
+SERIES = {"id": "s9", "name": "Harbour Lights"}
+SEASON_1 = {"id": "1", "number": "1", "name": "Season 1"}
+SEASON_2 = {"id": "2", "number": "2", "name": "Season 2"}
+
+
+def episode(season, number):
+    sid = season["id"]
+    return {
+        "id": f"e{sid}{number}",
+        "ename": f"Episode {number}",
+        "name": f"Episode {number}",
+        "cmd": f"http://vod/e{sid}{number}.mkv",
+        "season": season["number"],
+        "episode_num": str(number),
+        "number": str(number),
+    }
+
+
+def movie(number):
+    return {
+        "id": f"m{number}",
+        "name": f"Film {number}",
+        "cmd": f"http://vod/m{number}.mkv",
+        "category_id": "5",
+    }
+
+
+def play_context(**values):
+    """What the Library hands to play_vod (LibraryController._context)."""
+    context = {
+        "start_over": False,
+        "series": None,
+        "season": None,
+        "episodes": None,
+        "genre_items": None,
+    }
+    context.update(values)
+    return context
+
+
+class GuideTests(ControllerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.play(1)  # Two, from the group of four
+
+    def test_g_opens_the_guide_on_the_zap_channels_and_a_pick_tunes_and_closes_it(self):
+        self.controller.handle(Action.GUIDE)
+        self.assertEqual(self.guide.named("open_guide"), [(CHANNELS, 1)])
+        self.assertEqual(self.controller.key_context(), "guide")
+        self.guide.tuneRequested.emit(CHANNELS[3])
+        self.assertFalse(self.guide.visible)
+        self.assertEqual(self.requested(), ["Two", "Four"])
+        self.assertEqual(self.zap.context.group_key, "10")
+        self.assertEqual(self.zap.context.channels, CHANNELS)
+        self.assertEqual(self.controller.key_context(), "player")
+
+    def test_keys_go_to_the_open_guide(self):
+        self.controller.handle(Action.GUIDE)
+        for action in (
+            Action.NAV_UP,
+            Action.NAV_DOWN,
+            Action.NAV_PAGE_UP,
+            Action.NAV_PAGE_DOWN,
+            Action.NAV_LEFT,
+            Action.NAV_RIGHT,
+            Action.NAV_ACTIVATE,
+        ):
+            self.controller.handle(action)
+        self.assertEqual(self.guide.named("move_by"), [(-1,), (1,)])
+        self.assertEqual(self.guide.named("page"), [(-1,), (1,)])
+        self.assertEqual(self.guide.named("shift"), [(-1,), (1,)])
+        self.assertEqual(self.guide.named("activate"), [()])
+        self.assertEqual(self.drawer.calls, [])  # nothing reached the drawer behind
+        self.assertEqual(self.requested(), ["Two"])
+        self.controller.handle(Action.GUIDE)  # G again closes it
+        self.assertFalse(self.guide.visible)
+        self.controller.handle(Action.GUIDE)
+        self.controller.handle(Action.ESCAPE)
+        self.assertFalse(self.guide.visible)
+        self.assertEqual(self.window.calls, [])  # Esc closed the guide, not fullscreen
+
+    def test_the_guide_waits_for_live_tv(self):
+        self.controller.play_vod(movie(1), "movie", play_context())
+        self.ready("http://vod/m1.mkv")
+        self.controller.handle(Action.GUIDE)
+        self.assertEqual(self.guide.named("open_guide"), [])
+
+    def test_new_guide_data_reaches_the_open_guide(self):
+        self.controller.handle(Action.GUIDE)
+        self.catalog.epgReady.emit()
+        self.assertEqual(self.guide.named("invalidate"), [()])
+
+
+class AutoplayCase(ControllerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.catalog.season_map["s9"] = [SEASON_1, SEASON_2]
+
+    def play_episode(self, season, number, **values):
+        item = episode(season, number)
+        episodes = self.catalog.episode_map.get(("s9", season["id"]))
+        context = play_context(series=SERIES, season=season, episodes=episodes, **values)
+        self.controller.play_vod(item, "episode", context)
+        self.assertEqual(self.catalog.links[-1][1:], (item, "series", True))
+        self.ready(item["cmd"])
+        return item
+
+    def link_items(self):
+        return [item.get("id") for _, item, _, _ in self.catalog.links]
+
+
+class EpisodeAutoplayTests(AutoplayCase):
+    def setUp(self):
+        super().setUp()
+        self.catalog.episode_map[("s9", "1")] = [episode(SEASON_1, 1), episode(SEASON_1, 2)]
+
+    def test_an_episode_ends_and_play_now_plays_the_next_one_with_resume(self):
+        self.play_episode(SEASON_1, 1)
+        self.assertEqual(self.transport.named("set_next_available"), [(True,)])
+        self.assertEqual(self.transport.named("show_vod"), [("Episode 1", "Harbour Lights")])
+        self.watch.resume["Home:episode:e12"] = 61_000
+        self.session.ended.emit()
+        self.assertEqual(self.next_card.named("show_next"), [("Episode 2", "S1 · E2", "episode")])
+        self.assertNotIn(("Finished", "info"), self.toast.messages())
+        self.next_card.activate()  # Play now
+        self.assertEqual(self.link_items(), ["e11", "e12"])
+        self.ready("http://vod/e12.mkv")
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual((url, kwargs["start_ms"]), ("http://vod/e12.mkv", 61_000))
+        self.assertEqual(self.toast.messages()[-1], ("Resumed at 1:01", "info"))
+        self.assertEqual(self.transport.named("show_vod")[-1], ("Episode 2", "Harbour Lights"))
+
+    def test_enter_plays_now_and_escape_cancels_while_the_card_shows(self):
+        self.play_episode(SEASON_1, 1)
+        self.session.ended.emit()
+        self.controller.handle(Action.OK)
+        self.assertEqual(self.link_items(), ["e11", "e12"])
+        self.assertEqual(self.drawer.named("open_drawer"), [])  # Enter did not open it
+        self.ready("http://vod/e12.mkv")
+        self.session.ended.emit()  # the last episode of a season whose next is unloaded
+        self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
+        self.catalog.episodesReady.emit("s9", "2")
+        self.assertEqual(len(self.next_card.named("show_next")), 2)
+        self.transport.visible = False
+        self.controller.handle(Action.ESCAPE)
+        self.assertFalse(self.next_card.visible)
+        self.assertEqual(self.link_items(), ["e11", "e12"])  # cancelled: nothing more plays
+        self.assertTrue(self.transport.visible)  # on the final frame, with the transport
+        self.assertEqual(self.window.calls, [])
+
+    def test_a_season_boundary_waits_for_the_next_season_then_offers_its_first_episode(self):
+        self.play_episode(SEASON_1, 2)
+        self.session.ended.emit()
+        self.assertIn(("episodes", "s9", "2"), self.catalog.requests)
+        self.assertEqual(self.next_card.named("show_next"), [])  # not until it loads
+        self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1), episode(SEASON_2, 2)]
+        self.catalog.episodesReady.emit("s9", "2")
+        self.assertEqual(self.next_card.named("show_next"), [("Episode 1", "S2 · E1", "episode")])
+        self.next_card.activate()
+        self.assertEqual(self.link_items(), ["e12", "e21"])
+
+    def test_a_failed_next_season_toasts_and_shows_no_card(self):
+        self.play_episode(SEASON_1, 2)
+        self.session.ended.emit()
+        self.catalog.episodesFailed.emit("s9", "2", "Couldn't reach the portal")
+        self.assertEqual(self.toast.messages()[-1], ("Couldn't load the next season", "error"))
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.catalog.episodesReady.emit("s9", "2")  # a late answer changes nothing
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.assertEqual(self.link_items(), ["e12"])
+
+    def test_a_season_still_empty_after_loading_is_not_asked_for_again(self):
+        self.play_episode(SEASON_1, 2)
+        self.session.ended.emit()
+        self.catalog.episodesReady.emit("s9", "2")  # yet the catalog has none for it
+        self.assertEqual(self.catalog.requests.count(("episodes", "s9", "2")), 1)
+        self.assertEqual(self.toast.messages()[-1], ("Couldn't load the next season", "error"))
+        self.assertEqual(self.next_card.named("show_next"), [])
+
+    def test_the_last_episode_of_the_last_season_offers_nothing(self):
+        self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
+        self.play_episode(SEASON_2, 1)
+        self.session.ended.emit()
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
+        self.assertEqual(self.link_items(), ["e21"])
+
+    def test_the_transport_next_plays_at_once_without_the_card(self):
+        self.play_episode(SEASON_1, 1)
+        self.transport.nextRequested.emit()
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.assertEqual(self.link_items(), ["e11", "e12"])
+
+    def test_autoplay_off_only_finishes(self):
+        self.config.auto_play_episodes = False
+        self.play_episode(SEASON_1, 1)
+        self.session.ended.emit()
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
+
+    def test_start_over_plays_from_the_beginning(self):
+        self.watch.resume["Home:episode:e11"] = 90_000
+        self.play_episode(SEASON_1, 1, start_over=True)
+        self.assertEqual(self.session.plays[-1][1]["start_ms"], 0)
+
+    def test_an_episode_without_its_series_has_no_next(self):
+        item = episode(SEASON_1, 1)
+        self.controller.play_vod(item, "episode", play_context())  # Continue in Series
+        self.ready(item["cmd"])
+        self.assertEqual(self.transport.named("set_next_available"), [(False,)])
+        self.session.ended.emit()
+        self.assertEqual(self.next_card.named("show_next"), [])
+
+    def test_external_players_never_autoplay(self):
+        self.config.play_in_vlc = True
+        self.play_episode(SEASON_1, 1)
+        self.assertEqual(self.external.calls, [("vlc", "http://vod/e11.mkv")])
+        self.session.ended.emit()
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.assertEqual(self.link_items(), ["e11"])
+
+    def test_a_drawer_episode_plays_with_its_season_for_autoplay(self):
+        self.nav.reset_to("series")
+        series = NavNode("item", "s9", "Harbour Lights", SERIES)
+        season = NavNode("season", "1", "Season 1", SEASON_1)
+        self.nav.open(NavNode("group", "5", "Drama"))
+        self.nav.open(series)
+        self.nav.open(season)
+        node = NavNode("episode", "e11:1:1", "Episode 1", episode(SEASON_1, 1))
+        self.controller.play_item(node, [node], season)
+        self.ready("http://vod/e11.mkv")
+        self.assertEqual(self.transport.named("show_vod"), [("Episode 1", "Harbour Lights")])
+        self.session.ended.emit()
+        self.assertEqual(self.next_card.named("show_next"), [("Episode 2", "S1 · E2", "episode")])
+
+
+class MovieAutoplayTests(AutoplayCase):
+    def test_a_movie_ends_and_the_card_names_the_next_in_its_genre(self):
+        films = [movie(1), movie(2), movie(3)]
+        self.controller.play_vod(films[1], "movie", play_context(genre_items=films))
+        self.assertEqual(self.catalog.links[-1][2:], ("movies", False))
+        self.ready("http://vod/m2.mkv")
+        self.assertEqual(self.transport.named("set_next_available"), [(True,)])
+        self.session.ended.emit()
+        self.assertEqual(self.next_card.named("show_next"), [("Film 3", "Films", "movie")])
+        self.next_card.activate()
+        self.assertEqual(self.link_items(), ["m2", "m3"])
+
+    def test_auto_play_movies_off_only_finishes(self):
+        self.config.auto_play_movies = False
+        films = [movie(1), movie(2)]
+        self.controller.play_vod(films[0], "movie", play_context(genre_items=films))
+        self.ready("http://vod/m1.mkv")
+        self.session.ended.emit()
+        self.assertEqual(self.next_card.named("show_next"), [])
+        self.assertEqual(self.toast.messages()[-1], ("Finished", "info"))
+
+    def test_a_drawer_movie_offers_the_next_title_of_its_group(self):
+        films = [movie(1), movie(2)]
+        self.catalog.movies["5"] = films
+        self.nav.reset_to("movies", "5")
+        group = self.nav.path[-1]
+        nodes = self.nav.children(group)
+        self.controller.play_item(nodes[0], [nodes[0]], group)
+        self.ready("http://vod/m1.mkv")
+        self.session.ended.emit()
+        self.assertEqual(self.next_card.named("show_next"), [("Film 2", "Films", "movie")])
+
+    def test_play_vod_stops_the_live_channel_through_the_release_gate(self):
+        self.play(0)
+        self.session.holding = True  # libVLC still holds the channel after the stop
+        self.controller.play_vod(movie(1), "movie", play_context())
+        self.ready("http://vod/m1.mkv")
+        self.assertEqual(self.played_urls(), ["http://stream/1"])  # not before the release
+        self.session.let_go()
+        self.assertEqual(self.played_urls(), ["http://stream/1", "http://vod/m1.mkv"])
+
+
+class FavoriteTests(ControllerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.nav.reset_to("live", "10")
+        self.channels = self.nav.children(self.nav.path[-1])
+
+    def test_ctrl_d_toggles_the_highlighted_drawer_channel(self):
+        self.drawer.visible = True
+        self.drawer.highlight = self.channels[2]  # Three
+        self.controller.handle(Action.FAVORITE)
+        self.assertEqual(self.config.favorites, ["Three"])
+        self.assertEqual(self.config.saves, 1)
+        self.assertEqual(self.toast.messages()[-1], ("Added to favorites", "info"))
+        pinned = self.nav.children(self.nav.path[1])[0]
+        self.assertEqual((pinned.key, pinned.count), (FAVORITES_GROUP, 1))
+        self.controller.handle(Action.FAVORITE)
+        self.assertEqual(self.config.favorites, [])
+        self.assertEqual(self.toast.messages()[-1], ("Removed from favorites", "info"))
+
+    def test_ctrl_d_with_the_drawer_closed_toggles_the_current_channel(self):
+        self.play(1)
+        self.controller.handle(Action.FAVORITE)
+        self.assertEqual(self.config.favorites, ["Two"])
+
+    def test_only_live_items_become_favorites_from_the_drawer(self):
+        self.drawer.visible = True
+        self.drawer.highlight = self.nav.path[-1]  # a group
+        self.controller.handle(Action.FAVORITE)
+        self.assertEqual(self.config.favorites, [])
+
+
+class ContextMenuTests(ControllerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.controller.start()
+        self.nav.reset_to("live", "10")
+        self.channels = self.nav.children(self.nav.path[-1])
+        QGuiApplication.clipboard().setText("")
+
+    def menu_for(self, node):
+        shown = []
+        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append((menu, pos))):
+            self.drawer.contextRequested.emit(node, QPoint(40, 50))
+        if not shown:
+            return None
+        menu, pos = shown[0]
+        self.addCleanup(menu.deleteLater)
+        self.assertEqual(pos, QPoint(40, 50))
+        return menu
+
+    @staticmethod
+    def texts(menu):
+        return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+    @staticmethod
+    def choose(menu, text):
+        next(a for a in menu.actions() if a.text() == text).trigger()
+
+    def test_a_channel_offers_favorites_external_players_and_its_link(self):
+        menu = self.menu_for(self.channels[0])
+        self.assertEqual(
+            self.texts(menu), ["Add to favorites", "Play in VLC", "Play in MPV", "Copy stream link"]
+        )
+        self.choose(menu, "Add to favorites")
+        self.assertEqual(self.config.favorites, ["One"])
+        self.assertEqual(self.texts(self.menu_for(self.channels[0]))[0], "Remove from favorites")
+
+    def test_copy_stream_link_sets_the_clipboard_once_the_link_is_ready(self):
+        self.choose(self.menu_for(self.channels[0]), "Copy stream link")
+        self.assertEqual(self.requested(), ["One"])
+        self.assertEqual(QGuiApplication.clipboard().text(), "")
+        self.catalog.linkReady.emit(1, "http://stream/1?token=abc")
+        self.assertEqual(QGuiApplication.clipboard().text(), "http://stream/1?token=abc")
+        self.assertEqual(self.toast.messages()[-1], ("Link copied", "info"))
+        self.assertEqual(self.session.plays, [])  # a link request opens no stream
+
+    def test_link_requests_are_serialized_beside_the_tune(self):
+        self.tune(1)  # Two: the tune's link is in flight
+        self.choose(self.menu_for(self.channels[2]), "Copy stream link")
+        self.choose(self.menu_for(self.channels[3]), "Copy stream link")
+        self.assertEqual(self.requested(), ["Two", "Three"])  # Four waits for Three
+        self.catalog.linkReady.emit(2, "http://stream/3")
+        self.assertEqual(QGuiApplication.clipboard().text(), "http://stream/3")
+        self.assertEqual(self.requested(), ["Two", "Three", "Four"])
+        self.catalog.linkReady.emit(1, "http://stream/2")  # the tune still plays its channel
+        self.assertEqual(self.played_urls(), ["http://stream/2"])
+        self.catalog.linkFailed.emit(3, "No stream")
+        self.assertEqual(self.toast.messages()[-1], ("Four: No stream", "error"))
+
+    def test_play_in_vlc_stops_the_in_app_stream_first(self):
+        self.play(0)
+        stops = self.session.stops
+        self.choose(self.menu_for(self.channels[1]), "Play in VLC")
+        self.catalog.linkReady.emit(2, "http://stream/2")
+        self.assertEqual(self.session.stops, stops + 1)
+        self.assertEqual(self.external.calls, [("vlc", "http://stream/2")])
+
+    def test_play_in_vlc_supersedes_a_tune_on_its_way(self):
+        self.play(0)
+        self.tune(2)  # Three: its link is still on its way
+        self.choose(self.menu_for(self.channels[1]), "Play in VLC")
+        self.catalog.linkReady.emit(3, "http://stream/2")
+        self.catalog.linkReady.emit(2, "http://stream/3")  # too late: VLC plays Two
+        self.assertEqual(self.external.calls, [("vlc", "http://stream/2")])
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+
+    def test_a_failed_external_player_toasts(self):
+        self.external.result = (False, "MPV is not installed\nsearched: /usr/bin")
+        self.choose(self.menu_for(self.channels[1]), "Play in MPV")
+        self.catalog.linkReady.emit(1, "http://stream/2")
+        self.assertEqual(self.external.calls, [("mpv", "http://stream/2")])
+        self.assertEqual(self.toast.messages()[-1], ("MPV is not installed", "error"))
+
+    def test_a_movie_has_no_favorites_entry_and_a_series_no_menu(self):
+        self.nav.reset_to("movies")
+        film = NavNode("item", "m1", "Film 1", movie(1))
+        self.assertEqual(
+            self.texts(self.menu_for(film)), ["Play in VLC", "Play in MPV", "Copy stream link"]
+        )
+        self.nav.reset_to("series")
+        self.assertIsNone(self.menu_for(NavNode("item", "s9", "Harbour Lights", SERIES)))
+
+
+class MouseLayerTests(ControllerTestCase):
+    def test_back_opens_the_closed_drawer(self):
+        self.controller.start()
+        self.controller.mouse_back()
+        self.assertEqual(len(self.drawer.named("open_drawer")), 1)
+        self.controller.mouse_back()
+        self.assertEqual(self.drawer.named("left"), [()])
 
 
 if __name__ == "__main__":

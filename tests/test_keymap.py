@@ -24,6 +24,10 @@ def library(key, text="", mods=NONE):
     return resolve(int(key), mods, text, context="library")
 
 
+def guide(key, text="", mods=NONE):
+    return resolve(int(key), mods, text, context="guide")
+
+
 META = Qt.KeyboardModifier.MetaModifier
 
 
@@ -211,6 +215,35 @@ class LibraryKeymapTests(unittest.TestCase):
         self.assertEqual(library(K.Key_Space, " ", CTRL), (Action.PLAY_PAUSE, ""))
 
 
+class GuideKeymapTests(unittest.TestCase):
+    def test_navigation_keys(self):
+        self.assertEqual(guide(K.Key_Up), (Action.NAV_UP, ""))
+        self.assertEqual(guide(K.Key_Down, mods=KEYPAD), (Action.NAV_DOWN, ""))
+        self.assertEqual(guide(K.Key_PageUp), (Action.NAV_PAGE_UP, ""))
+        self.assertEqual(guide(K.Key_PageDown), (Action.NAV_PAGE_DOWN, ""))
+        self.assertEqual(guide(K.Key_Left), (Action.NAV_LEFT, ""))
+        self.assertEqual(guide(K.Key_Right), (Action.NAV_RIGHT, ""))
+        self.assertEqual(guide(K.Key_Return, "\r"), (Action.NAV_ACTIVATE, ""))
+        self.assertEqual(guide(K.Key_Enter, "\r", KEYPAD), (Action.NAV_ACTIVATE, ""))
+        self.assertEqual(guide(K.Key_Escape, "\x1b"), (Action.ESCAPE, ""))
+
+    def test_g_closes_and_playback_keys_still_work(self):
+        self.assertEqual(guide(K.Key_G, "g"), (Action.GUIDE, ""))
+        self.assertEqual(guide(K.Key_G, "G", SHIFT), (Action.GUIDE, ""))
+        self.assertEqual(guide(K.Key_Space, " "), (Action.PLAY_PAUSE, ""))
+        self.assertEqual(guide(K.Key_M, "m"), (Action.MUTE, ""))
+        self.assertEqual(guide(K.Key_F, "f"), (Action.FULLSCREEN, ""))
+        self.assertEqual(guide(K.Key_Minus, "-"), (Action.VOL_DOWN, ""))
+        self.assertEqual(guide(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))
+
+    def test_no_zapping_typing_or_number_entry(self):
+        self.assertIsNone(guide(K.Key_7, "7"))
+        self.assertIsNone(guide(K.Key_A, "a"))
+        self.assertIsNone(guide(K.Key_Backspace, "\x08"))
+        self.assertIsNone(guide(K.Key_ChannelUp))
+        self.assertIsNone(guide(K.Key_G, "g", CTRL))
+
+
 class ContextTests(unittest.TestCase):
     def test_drawer_open_is_an_alias_of_the_context(self):
         for key, text, mods in (
@@ -236,11 +269,16 @@ class ContextTests(unittest.TestCase):
         self.assertIsNone(closed(K.Key_Slash, "/"))
         self.assertEqual(opened(K.Key_Slash, "/"), (Action.NAV_TEXT, "/"))
         self.assertEqual(opened(K.Key_F, "f", CTRL), (Action.FULLSCREEN, ""))
-        self.assertIsNone(opened(K.Key_D, "d", CTRL))
+
+    def test_ctrl_d_is_favorite_everywhere(self):
+        for context in ("player", "drawer", "guide", "library"):
+            self.assertEqual(
+                resolve(K.Key_D.value, CTRL, "d", context=context), (Action.FAVORITE, "")
+            )
 
     def test_unknown_context(self):
         with self.assertRaises(ValueError):
-            resolve(K.Key_Up.value, NONE, "", context="guide")
+            resolve(K.Key_Up.value, NONE, "", context="menu")
 
     def test_new_actions_exist(self):
         for name in ("SEARCH", "FAVORITE", "NAV_HOME", "NAV_END", "LIBRARY", "GUIDE", "OPEN_FILE"):

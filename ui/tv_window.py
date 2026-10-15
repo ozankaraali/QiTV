@@ -9,6 +9,7 @@ keymap resolves are claimed before any shortcut or native menu key equivalent
 from __future__ import annotations
 
 import atexit
+from datetime import datetime
 import logging
 import os
 import platform
@@ -43,6 +44,8 @@ from ui.logos import LogoCache
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.drawer import Drawer
+from ui.overlays.guide import Guide
+from ui.overlays.next_card import NextCard
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.zap_banner import ZapBanner
@@ -78,6 +81,10 @@ _MOUSE_EVENTS = (
     QEvent.Type.MouseMove,
     QEvent.Type.MouseButtonRelease,
 )
+
+
+def _local_now() -> datetime:
+    return datetime.now().astimezone()
 
 
 def _native_video_handles() -> bool:
@@ -262,6 +269,11 @@ class TVWindow(QMainWindow):
         def now_provider(channel: dict):
             return controller.now_title(channel)
 
+        catalog = self.catalog
+
+        def guide_programmes(channel: dict, start: datetime, limit: int):
+            return catalog.programmes(channel, start, limit=limit)
+
         host = self.host
         self.overlays = Overlays(
             banner=ZapBanner(host),
@@ -269,12 +281,16 @@ class TVWindow(QMainWindow):
             drawer=Drawer(self.nav, self.logos, now_provider, parent=host),
             transport=Transport(host),
             toast=Toast(host),
+            guide=Guide(self.logos, guide_programmes, _local_now, parent=host),
+            next_card=NextCard(host),
         )
         for overlay in (
             self.overlays.banner,
             self.overlays.column,
             self.overlays.drawer,
             self.overlays.transport,
+            self.overlays.guide,
+            self.overlays.next_card,
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
@@ -361,7 +377,7 @@ class TVWindow(QMainWindow):
             event.key(),
             event.modifiers(),
             event.text(),
-            drawer_open=self.overlays.drawer.isVisible(),
+            context=self.controller.key_context(),  # the open guide or drawer takes the keys
         )
 
     def event(self, event: QEvent) -> bool:

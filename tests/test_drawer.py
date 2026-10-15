@@ -380,6 +380,30 @@ class HostedDrawerInputTests(unittest.TestCase):
         QTest.mouseDClick(self.host.windowHandle(), Qt.MouseButton.BackButton, pos=over_rows)
         self.assertEqual(len(backs), 2)  # two presses, not a double-click on a row
 
+    def right_click(self, view, row):
+        rect = view.visualRect(view.model().index(row, 0))
+        point = view.viewport().mapTo(self.host, rect.center())
+        QTest.mouseClick(self.host.windowHandle(), Qt.MouseButton.RightButton, pos=point)
+        return point
+
+    def test_a_right_click_on_a_channel_asks_for_its_context_menu(self):
+        requests = []
+        self.drawer.contextRequested.connect(lambda node, pos: requests.append((node, pos)))
+        before = self.drawer.highlighted()
+        point = self.right_click(self.drawer._columns["right"].view, 3)
+        self.assertEqual([(n.layer, n.title) for n, _ in requests], [("item", "Chan 3")])
+        self.assertEqual(requests[0][1], self.host.mapToGlobal(point))
+        self.assertEqual(self.drawer.highlighted(), before)  # the highlight stays put
+        self.assertEqual(self.events, [])
+        self.assertTrue(self.drawer.isVisible())
+
+    def test_a_right_click_on_a_group_asks_for_nothing(self):
+        requests = []
+        self.drawer.contextRequested.connect(lambda node, pos: requests.append(node))
+        self.right_click(self.drawer._columns["left"].view, 0)
+        self.assertEqual(requests, [])
+        self.assertEqual(self.events, [])
+
 
 if __name__ == "__main__":
     unittest.main()
