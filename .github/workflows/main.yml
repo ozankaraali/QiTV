@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+      - tv/vlc
+  workflow_dispatch:
 
 jobs:
   build-linux:
@@ -20,6 +22,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0
       - name: Sync dependencies
         run: uv sync --frozen --dev
+      - name: Run tests
+        run: uv run python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
       - name: Package App with PyInstaller for Linux
         run: uv run pyinstaller qitv-linux.spec
       - name: Rename binary
@@ -57,6 +63,10 @@ jobs:
         run: choco install vlc -y --cache-location=C:\vlc-cache
       - name: Sync dependencies
         run: uv sync --frozen --dev
+      - name: Run tests
+        run: uv run python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
       - name: Package App with PyInstaller for Windows
         run: uv run pyinstaller qitv-windows.spec
       - name: Rename binary
@@ -93,6 +103,10 @@ jobs:
         run: brew install --cask vlc
       - name: Sync dependencies
         run: uv sync --frozen --dev
+      - name: Run tests
+        run: uv run python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
       - name: Package App with PyInstaller for macOS
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
@@ -131,6 +145,10 @@ jobs:
         run: brew install --cask vlc
       - name: Sync dependencies
         run: uv sync --frozen --dev
+      - name: Run tests
+        run: uv run python -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
       - name: Package App with PyInstaller for macOS (Intel)
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
@@ -145,6 +163,7 @@ jobs:
 
   release:
     needs: [build-linux, build-windows, build-macos-universal, build-macos-intel]
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
