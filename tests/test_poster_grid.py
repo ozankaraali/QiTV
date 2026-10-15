@@ -129,6 +129,29 @@ class PosterGridTests(unittest.TestCase):
     def named(self, name):
         return [v for n, v in self.events if n == name]
 
+    def test_card_titles_are_wrapped_once_per_title_and_width(self):
+        from ui.library import poster_grid
+
+        items = [{"name": f"A fictional film with a long title, part {n}"} for n in range(30)]
+        self.grid.set_sections([("", items)])
+        with mock.patch.object(poster_grid, "_wrap", wraps=poster_grid._wrap) as wrap:
+            self.grid.viewport().grab()
+            first = wrap.call_count
+            self.assertGreater(first, 0)
+            self.grid.viewport().grab()  # the next frame paints the same cards again
+            self.assertEqual(wrap.call_count, first)
+        font = QFont()
+        font.setPixelSize(14)
+        fm = QFontMetricsF(font)
+        title = "The title of a fictional film long enough to wrap onto several lines"
+        self.assertEqual(
+            self.grid._card_lines(fm, font, title, 90.0), poster_grid._wrap(fm, title, 90.0, 4)
+        )
+        with mock.patch.object(poster_grid, "WRAPPED_KEPT", 10):
+            for n in range(40):
+                self.grid._card_lines(fm, font, f"title {n}", 90.0)
+            self.assertLessEqual(len(self.grid._wrapped), 10)
+
     def settle_requests(self):
         """Let the grid's request timer fire: paints restart it, so run the pending ones first."""
         QApplication.processEvents()

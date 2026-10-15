@@ -86,6 +86,7 @@ RAIL_LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MESSAGE_FONT_U = 1.35
 MESSAGE_ALPHA = 0.7
 HOVER_DWELL_MS = 250
+WRAPPED_KEPT = 2048  # card titles' wrapped lines kept (a few screens' worth)
 REQUEST_DELAY_MS = 120  # poster requests wait until the view settles
 
 PLAY, START_OVER, FAVORITE = "play", "start_over", "favorite"
@@ -218,6 +219,7 @@ class PosterGrid(QAbstractScrollArea):
         self._focused = True
         self._details_cache: tuple[int, dict, Details | None] | None = None
         self._progress_cache: dict[int, float | None] = {}
+        self._wrapped: dict[tuple[str, str, float], list[str]] = {}  # see _card_lines
         # layout (see _layout_rows)
         self._cols = MIN_COLUMNS
         self._pad = self._gap = self._pw = self._ph = self._strip_h = 0.0
@@ -1017,7 +1019,7 @@ class PosterGrid(QAbstractScrollArea):
         bottom = margin + ((PROGRESS_H_U + CARD_BAR_CLEARANCE_U) * u if has_progress else 0.0)
         fm = QFontMetricsF(font)
         width = rect.width() - 2 * margin
-        lines = _wrap(fm, title, width, CARD_TITLE_LINES)
+        lines = self._card_lines(fm, font, title, width)
         line_h = fm.lineSpacing()
         y = rect.bottom() - bottom - line_h * len(lines)
         p.setFont(font)
@@ -1028,6 +1030,18 @@ class PosterGrid(QAbstractScrollArea):
             )
             y += line_h
         p.restore()
+
+    def _card_lines(self, fm: QFontMetricsF, font: QFont, title: str, width: float) -> list[str]:
+        """A card title's wrapped lines; each title is measured once per font and width
+        (scrolling paints the same cards frame after frame)."""
+        key = (font.key(), title, width)
+        lines = self._wrapped.get(key)
+        if lines is None:
+            lines = _wrap(fm, title, width, CARD_TITLE_LINES)
+            while self._wrapped and len(self._wrapped) >= WRAPPED_KEPT:
+                del self._wrapped[next(iter(self._wrapped))]  # the oldest
+            self._wrapped[key] = lines
+        return lines
 
     def _paint_focus_ring(self, p: QPainter, rect: QRectF, color: QColor) -> None:
         p.save()
