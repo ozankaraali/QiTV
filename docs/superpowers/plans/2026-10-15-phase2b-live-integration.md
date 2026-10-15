@@ -213,7 +213,7 @@
 ### Task 5: Wire the pipeline into the controller and window
 
 **Files:**
-- Modify: `ui/tv_controller.py`, `ui/tv_window.py`, `main.py`, `qitv-macos.spec`, `qitv-windows.spec`, `qitv-linux.spec`
+- Modify: `ui/tv_controller.py`, `ui/tv_window.py`, `main.py`, `update_checker.py`, `qitv-macos.spec`, `qitv-windows.spec`, `qitv-linux.spec`
 - Test: `tests/test_tv_controller.py` (extend), `tests/test_tv_window.py` (extend)
 
 **Behaviour:**
@@ -222,6 +222,7 @@
   - creates `ConnectionBudget` and `LiveSession(engine, session)`;
   - passes them to the controller.
 - **Window close:** `live_session.stop()`, then `engine.shutdown()`, then the existing teardown.
+- **Windows self-update** (`update_checker._perform_windows_update`) waits for `has_pending_threads()` to become False. The engine's supervisor thread is pending for the whole run, so the update path must call the window's live teardown (`live_session.stop()`, `engine.shutdown()`) before that wait. Add `update_checker.py` to this task's files, with a test.
 - **Controller live tune:**
   1. `budget.request(provider, budget.limit_for(provider, catalog.max_connections()), purpose="main")`.
   2. On `granted`, `live_session.start(url, headers={"User-Agent": ua}, verify_ssl=..., latency=config.live_latency, user_agent=ua, disk=config.timeshift_enabled, max_bytes=(config.timeshift_max_mib if disk else 128) * 1024 * 1024)`.
