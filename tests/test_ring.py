@@ -46,7 +46,7 @@ class RamRingTests(unittest.TestCase):
             ring.complete(seq)
         self.assertLessEqual(ring.charged, 100)
         self.assertEqual(ring.newest_seq, 5)
-        self.assertGreater(ring.oldest_seq, 0)
+        self.assertEqual(ring.oldest_seq, 4)
         self.assertIsNone(ring.lease(0))
         self.assertIsNotNone(ring.lease(5))
 
@@ -58,10 +58,12 @@ class RamRingTests(unittest.TestCase):
         with self.assertRaises(RingError) as caught:
             ring.append(b"b" * 20)
         self.assertEqual(
-            str(caught.exception),
-            "The disk buffer limit cannot fit one keyframe interval or an active read.",
+            str(caught.exception), "The memory buffer cannot fit one keyframe interval."
         )
         self.assertEqual(ring.open_seq, 0)
+        with self.assertRaises(RingError) as latched:
+            ring.append(b"c")
+        self.assertEqual(str(latched.exception), str(caught.exception))
         self.assertEqual(ring.charged, 40)
 
     def test_positive_size_required(self):
@@ -158,6 +160,68 @@ class RamRingTests(unittest.TestCase):
         done.set()
         thread.join(5)
         self.assertEqual(bytes(collected), bytes(expected))
+
+    def test_open_segment_auto_completes_previous_and_notifies_on_empty_header(self):
+        ring = RamRing(1000)
+        ring.open_segment(0, b"a")
+        first = ring.lease(0)
+        woke = []
+        thread = threading.Thread(target=lambda: woke.append(ring.wait_for_seq(1, 5)))
+        thread.start()
+        time.sleep(0.05)
+        ring.open_segment(1, b"")
+        thread.join(2)
+        self.assertEqual(woke, ["open"])
+        self.assertTrue(first.complete)
+        self.assertEqual(ring.open_seq, 1)
+
+    def test_wait_for_seq_open_evicted_closed_and_timeout(self):
+        ring = RamRing(30)
+        self.assertEqual(ring.wait_for_seq(0, 0.02), "timeout")
+        ring.open_segment(0, b"")
+        ring.append(b"a" * 10)
+        ring.open_segment(1, b"")
+        ring.append(b"b" * 10)
+        ring.open_segment(2, b"")
+        ring.append(b"c" * 15)
+        self.assertIsNone(ring.lease(0))
+        self.assertLess(0, ring.oldest_seq)
+        self.assertEqual(ring.wait_for_seq(0, 0.02), "evicted")
+        self.assertEqual(ring.wait_for_seq(2, 0.02), "open")
+        self.assertEqual(ring.wait_for_seq(3, 0.02), "timeout")
+        result = []
+        thread = threading.Thread(target=lambda: result.append(ring.wait_for_seq(9, 5)))
+        thread.start()
+        time.sleep(0.05)
+        ring.close()
+        thread.join(2)
+        self.assertEqual(result, ["closed"])
+
+    def test_public_condition_does_not_deadlock_with_properties(self):
+        ring = RamRing(100)
+        ring.open_segment(0, b"x")
+        with ring.changed:
+            self.assertTrue(ring.changed.wait_for(lambda: ring.newest_seq is not None, 1))
+
+    def test_slow_reader_holding_lease_does_not_block_writer(self):
+        ring = RamRing(10_000)
+        ring.open_segment(0, b"")
+        lease = ring.lease(0)
+        release = threading.Event()
+
+        def slow():
+            ring.read(lease, 0, 1)
+            release.wait(0.2)
+            ring.release(lease)
+
+        thread = threading.Thread(target=slow)
+        thread.start()
+        start = time.monotonic()
+        for _ in range(50):
+            ring.append(b"y" * 10)
+        self.assertLess(time.monotonic() - start, 0.5)
+        thread.join(2)
+        self.assertEqual(ring.bytes, 500)
 
     def test_append_without_open_segment_and_after_close(self):
         ring = RamRing(100)
@@ -319,15 +383,91 @@ class DiskRingTests(unittest.TestCase):
         with self.assertRaisesRegex(RingError, "must be positive"):
             DiskRing(self.directory, session_name(), 0)
 
+    def test_read_failure_raises_fixed_error(self):
+        ring = self.ring()
+        ring.open_segment(0, b"abc")
+        seg = ring.lease(0)
+        (ring._directory / "segment-0.ts").unlink()
+        with self.assertRaises(RingError) as caught:
+            ring.read(seg, 0, 3)
+        self.assertEqual(str(caught.exception), "The temporary buffer could not be read.")
+
+    def test_stop_aborts_manager_lock_wait(self):
+        from PySide6.QtCore import QLockFile
+
+        manager = QLockFile(str(self.directory / ".qitv-timeshift-manager.lock"))
+        manager.setStaleLockTime(0)
+        self.assertTrue(manager.tryLock(0))
+        stop = threading.Event()
+        threading.Timer(0.1, stop.set).start()
+        start = time.monotonic()
+        try:
+            with self.assertRaises(RingError) as caught:
+                DiskRing(self.directory, session_name(), 1024 * 1024, stop)
+        finally:
+            manager.unlock()
+        self.assertEqual(str(caught.exception), "Recording stopped.")
+        self.assertLess(time.monotonic() - start, 1.0)
+
+    def test_finish_failure_latches_ring_error(self):
+        ring = self.ring()
+        ring.open_segment(0, b"a")
+        with patch.object(ring, "_finish", side_effect=OSError("boom")):
+            with self.assertRaises(RingError) as caught:
+                ring.open_segment(1, b"b")
+        self.assertEqual(
+            str(caught.exception), "The temporary disk could not complete a buffer write."
+        )
+        with self.assertRaises(RingError):
+            ring.append(b"x")
+
+    def test_release_unlink_failure_is_logged_and_freed_at_close(self):
+        ring = self.ring()
+        unit = ring._unit
+        ring._max_bytes = 3 * unit
+        ring.open_segment(0, b"a")
+        ring.complete(0)
+        lease = ring.lease(0)
+        ring.open_segment(1, bytes(unit))
+        ring.open_segment(2, bytes(unit))
+        ring.append(b"b")
+        self.assertTrue(lease.retired)
+        with patch.object(ring, "_unlink", side_effect=OSError("busy")):
+            ring.release(lease)
+        directory = ring._directory
+        ring.close()
+        self.assertFalse(directory.exists())
+        self.assertEqual(ring.charged, 0)
+
+    def test_cleanup_session_dir_reclaims_dead_owner(self):
+        name = session_name()
+        dead = self.directory / name
+        dead.mkdir()
+        (dead / "owner").write_text(_OWNER, encoding="ascii")
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os,sys; from PySide6.QtCore import QLockFile; "
+                "lock=QLockFile(sys.argv[1]); assert lock.tryLock(0); os._exit(0)",
+                str(dead / "session.lock"),
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(child.returncode, 0, child.stderr.decode())
+        self.assertTrue(cleanup_session_dir(self.directory, name))
+        self.assertFalse(dead.exists())
+
     def test_cleanup_session_dir_removes_dead_helper_dir(self):
         name = session_name()
         dead = self.directory / name
         dead.mkdir()
         (dead / "owner").write_text(_OWNER, encoding="ascii")
         (dead / "segment-3.ts").write_bytes(b"left over")
-        cleanup_session_dir(self.directory, name)
+        self.assertTrue(cleanup_session_dir(self.directory, name))
         self.assertEqual(list(self.directory.iterdir()), [])
-        cleanup_session_dir(self.directory, name)
+        self.assertTrue(cleanup_session_dir(self.directory, name))
 
     def test_cleanup_session_dir_refuses_unowned_and_symlink(self):
         name = session_name()
@@ -352,13 +492,14 @@ class DiskRingTests(unittest.TestCase):
         child.start()
         try:
             self.assertTrue(ready.wait(20), "child did not take the lock")
-            cleanup_session_dir(self.directory, name)
+            self.assertFalse(cleanup_session_dir(self.directory, name))
             self.assertEqual((live / "segment-0.ts").read_bytes(), b"playing")
             self.assertTrue((live / "owner").exists())
         finally:
             release.set()
             child.join(10)
-        cleanup_session_dir(self.directory, name)
+        self.assertEqual(child.exitcode, 0)
+        self.assertTrue(cleanup_session_dir(self.directory, name))
         self.assertFalse(live.exists())
 
 

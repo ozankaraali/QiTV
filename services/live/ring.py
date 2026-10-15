@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import re
@@ -22,7 +23,6 @@ from typing import BinaryIO
 
 from PySide6.QtCore import QLockFile
 
-_SESSION_PREFIX = ".qitv-timeshift-"
 _SESSION_PATTERN = re.compile(r"\.qitv-timeshift-[0-9a-f]{32}")
 _MEDIA_PATTERN = re.compile(r"segment-[0-9]+\.ts")
 _OWNER = "QiTV temporary time-shift v1\n"
@@ -30,6 +30,9 @@ _RESERVE_BYTES = 64 * 1024 * 1024
 _IO_TIMEOUT = 2.0
 _MANAGER_LOCK = ".qitv-timeshift-manager.lock"
 _Bytes = bytes
+_LOG = logging.getLogger(__name__)
+_READ_FAILED = "The temporary buffer could not be read."
+_STOPPED = "Recording stopped."
 _WRITE_FAILED = "The temporary disk could not complete a buffer write."
 
 
@@ -51,13 +54,15 @@ class Segment:
 class Ring(ABC):
     """Shared eviction, lease and wakeup logic; subclasses own the storage."""
 
+    _LIMIT_TEXT = "The disk buffer limit cannot fit one keyframe interval or an active read."
+
     def __init__(self, max_bytes: int) -> None:
         if max_bytes <= 0:
             raise RingError("The temporary buffer size must be positive.")
         self._max_bytes = max_bytes
         # Lock order: _disk_lock (storage operations) outside _state_lock (metadata).
         self._disk_lock = threading.Lock()
-        self._state_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         self.changed = threading.Condition(self._state_lock)
         self._segments: dict[int, Segment] = {}
         self._completed: deque[Segment] = deque()
@@ -126,16 +131,22 @@ class Ring(ABC):
     def open_segment(self, seq: int, header: _Bytes) -> None:
         with self._disk_lock:
             self._check_writable()
-            if self._open is not None:
-                self._complete_locked(self._open)
-            segment = Segment(seq, header_len=len(header))
             with self._state_lock:
                 if seq in self._segments:
                     raise RingError("The temporary buffer segment already exists.")
+            segment = Segment(seq, header_len=len(header))
+            previous = self._open
+            if previous is not None:
+                self._guard(lambda: self._finish(previous))
             self._guard(lambda: self._create(segment))
-            with self._state_lock:
+            # One atomic step: no reader can see "previous complete, new missing".
+            with self.changed:
+                if previous is not None:
+                    previous.complete = True
+                    self._completed.append(previous)
                 self._segments[seq] = segment
                 self._open = segment
+                self.changed.notify_all()
             self._append_locked(segment, header)
 
     def append(self, data: _Bytes) -> None:
@@ -185,16 +196,14 @@ class Ring(ABC):
         while self._charged + additional > self._max_bytes and self._completed:
             self._retire_oldest_locked()
         if self._charged + additional > self._max_bytes:
-            raise RingError(
-                "The disk buffer limit cannot fit one keyframe interval or an active read."
-            )
+            raise RingError(self._LIMIT_TEXT)
         self._extra_check(segment, additional)
         with self._state_lock:
             self._charged += additional
             segment.charge = charge
 
     def _complete_locked(self, segment: Segment) -> None:
-        self._finish(segment)
+        self._guard(lambda: self._finish(segment))
         with self.changed:
             segment.complete = True
             if self._open is segment:
@@ -222,6 +231,11 @@ class Ring(ABC):
 
     # ---- reader side ------------------------------------------------------------------
     def lease(self, seq: int) -> Segment | None:
+        """Lease a completed or open segment; None if absent, retired or closed.
+
+        None with `seq < oldest_seq` means evicted; otherwise it is not opened yet
+        (use `wait_for_seq`).
+        """
         with self._state_lock:
             segment = self._segments.get(seq)
             if segment is None or segment.retired or self.closed:
@@ -235,7 +249,11 @@ class Ring(ABC):
                 segment.readers -= 1
                 delete = segment.retired and not segment.readers and not self.closed
             if delete:
-                self._delete_locked(segment)
+                try:
+                    self._delete_locked(segment)
+                except OSError:
+                    # Freed (and its charge released) when the ring closes.
+                    _LOG.warning("A retired temporary segment could not be removed yet.")
 
     def read(self, segment: Segment, offset: int, size: int) -> _Bytes:
         """Return up to `size` bytes at `offset`, never beyond what was written."""
@@ -250,8 +268,8 @@ class Ring(ABC):
                 return b""
             try:
                 return self._read(segment, offset, size)
-            except OSError:
-                return b""
+            except OSError, KeyError:
+                raise RingError(_READ_FAILED) from None
 
     def wait_for(self, segment: Segment, offset: int, timeout: float) -> bool:
         def ready() -> bool:
@@ -260,6 +278,26 @@ class Ring(ABC):
         with self.changed:
             self.changed.wait_for(ready, timeout)
             return ready()
+
+    def wait_for_seq(self, seq: int, timeout: float) -> str:
+        """Wait for segment `seq`: "open" (open or complete), "evicted", "closed", "timeout"."""
+
+        def status() -> str:
+            if self.closed:
+                return "closed"
+            segment = self._segments.get(seq)
+            if segment is not None:
+                return "evicted" if segment.retired else "open"
+            oldest = self._completed[0].seq if self._completed else None
+            if oldest is None and self._open is not None:
+                oldest = self._open.seq
+            if oldest is not None and seq < oldest:
+                return "evicted"
+            return "timeout"
+
+        with self.changed:
+            self.changed.wait_for(lambda: status() != "timeout", timeout)
+            return status()
 
     def close(self) -> None:
         with self.changed:
@@ -281,6 +319,8 @@ class Ring(ABC):
 
 
 class RamRing(Ring):
+    _LIMIT_TEXT = "The memory buffer cannot fit one keyframe interval."
+
     def __init__(self, max_bytes: int = 128 * 1024 * 1024) -> None:
         super().__init__(max_bytes)
         self._buffers: dict[int, bytearray] = {}
@@ -383,7 +423,13 @@ def _remove_stale_sessions(root: Path) -> None:
 
 
 class DiskRing(Ring):
-    def __init__(self, root: Path, session_dir_name: str, max_bytes: int) -> None:
+    def __init__(
+        self,
+        root: Path,
+        session_dir_name: str,
+        max_bytes: int,
+        stop: threading.Event | None = None,
+    ) -> None:
         super().__init__(max_bytes)
         if not _SESSION_PATTERN.fullmatch(session_dir_name):
             raise RingError("Cannot lock the temporary playback buffer.")
@@ -394,15 +440,15 @@ class DiskRing(Ring):
         self._file: BinaryIO | None = None
         self._file_seq: int | None = None
         try:
-            self._prepare_directory(self._root / session_dir_name)
+            self._prepare_directory(self._root / session_dir_name, stop)
         except BaseException:
             try:
                 self._free_storage()
-            except OSError:
-                pass
+            except OSError, RingError:
+                _LOG.warning("Cleanup after a failed buffer start was incomplete.")
             raise
 
-    def _prepare_directory(self, directory: Path) -> None:
+    def _prepare_directory(self, directory: Path, stop: threading.Event | None) -> None:
         self._root.mkdir(parents=True, exist_ok=True)
         manager = QLockFile(str(self._root / _MANAGER_LOCK))
         manager.setStaleLockTime(0)
@@ -410,7 +456,11 @@ class DiskRing(Ring):
         while not manager.tryLock(0):
             if time.monotonic() >= deadline:
                 raise RingError("The temporary buffer directory is busy.")
-            time.sleep(0.05)
+            if stop is not None:
+                if stop.wait(0.05):
+                    raise RingError(_STOPPED)
+            else:
+                time.sleep(0.05)
         try:
             _remove_stale_sessions(self._root)
             directory.mkdir(mode=0o700)
@@ -497,8 +547,9 @@ class DiskRing(Ring):
             raise RingError("Some temporary buffer files could not be removed.")
 
 
-def cleanup_session_dir(root: Path, name: str) -> None:
-    """Remove a dead helper's session directory; leave a live owner's untouched."""
+def cleanup_session_dir(root: Path, name: str) -> bool:
+    """Remove a dead helper's session directory; True when removed or absent, False
+    when a live owner still holds it (left untouched)."""
     directory = Path(root) / name
     if not _SESSION_PATTERN.fullmatch(name):
         raise OSError("not a temporary session name")
@@ -510,17 +561,18 @@ def cleanup_session_dir(root: Path, name: str) -> None:
         lock = QLockFile(str(directory / "session.lock"))
         lock.setStaleLockTime(0)
         # A live helper still holds its lock; only a dead owner's can be reclaimed.
-        if lock.tryLock(0):
-            try:
-                files = _owned_files(directory, require_marker=False)
-                if files is None:
-                    raise OSError("temporary session contains unowned files")
-                for item in files:
-                    if item.name != "session.lock":
-                        item.unlink(missing_ok=True)
-            finally:
-                lock.unlock()
-            directory.rmdir()
+        if not lock.tryLock(0):
+            return False
+        try:
+            files = _owned_files(directory, require_marker=False)
+            if files is None:
+                raise OSError("temporary session contains unowned files")
+            for item in files:
+                if item.name != "session.lock":
+                    item.unlink(missing_ok=True)
+        finally:
+            lock.unlock()
+        directory.rmdir()
     # A forced stop may have interrupted directory preparation while the helper held
     # the manager lock. QLockFile only reaps it if its owner died; an active
     # sibling's manager is never unlocked or removed.
@@ -530,3 +582,4 @@ def cleanup_session_dir(root: Path, name: str) -> None:
         manager.setStaleLockTime(0)
         if manager.tryLock(0):
             manager.unlock()
+    return True
