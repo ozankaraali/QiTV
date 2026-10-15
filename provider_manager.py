@@ -159,6 +159,7 @@ class ProviderManager(QObject):
         self.invalidate_provider_cache(self.current_provider["name"])
 
     def set_current_provider(self, progress_callback):
+        """Select the configured provider; False when an STB portal rejects the handshake."""
         progress_callback.emit("Searching for provider...")
         self.current_provider = {}
         # search for provider in the list
@@ -175,17 +176,21 @@ class ProviderManager(QObject):
         progress_callback.emit("Loading provider content...")
         self.current_provider_content = self._load_provider_cache(self.current_provider)
 
+        accepted = True
         if self.current_provider["type"] == "STB":
             progress_callback.emit("Performing handshake...")
             self.token = ""
-            self.do_handshake(
-                self.current_provider["url"],
-                self.current_provider["mac"],
-                serial_number=self.current_provider.get("serial_number", ""),
-                device_id=self.current_provider.get("device_id", ""),
+            accepted = bool(
+                self.do_handshake(
+                    self.current_provider["url"],
+                    self.current_provider["mac"],
+                    serial_number=self.current_provider.get("serial_number", ""),
+                    device_id=self.current_provider.get("device_id", ""),
+                )
             )
 
         progress_callback.emit("Provider setup complete.")
+        return accepted
 
     def get_all_providers_cached_content(self):
         """Return cached content for all configured providers.

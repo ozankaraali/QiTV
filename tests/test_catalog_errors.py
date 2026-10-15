@@ -75,6 +75,7 @@ class FriendlyErrorTests(unittest.TestCase):
             "The portal returned no data",
             "The background task failed",
             "Unknown section: bogus",
+            "The provider rejected this device (check the MAC address or subscription)",
             UNREACHABLE_MESSAGE,
         ):
             self.assertEqual(friendly_error(text), text)

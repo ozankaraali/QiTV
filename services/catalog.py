@@ -18,7 +18,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.epg_view import Programme, programmes_for_channel
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
-from workers import NO_PORTAL_DATA_MESSAGE, find_roman_token
+from workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ _SAFE_MESSAGES = frozenset(
         NO_STREAM_MESSAGE,
         EMPTY_LINK_MESSAGE,
         NO_PORTAL_DATA_MESSAGE,
+        STB_DEVICE_REJECTED_MESSAGE,
         FAILED_MESSAGE,
         NO_RESULT_MESSAGE,
         UNREACHABLE_MESSAGE,

@@ -23,6 +23,9 @@ from services.provider_api import (
 logger = logging.getLogger(__name__)
 
 NO_PORTAL_DATA_MESSAGE = "The portal returned no data"
+STB_DEVICE_REJECTED_MESSAGE = (
+    "The provider rejected this device (check the MAC address or subscription)"
+)
 
 
 def _resolve_xtream_base(server_info: dict, base_url: str, prefer_https: bool) -> str:
@@ -650,7 +653,9 @@ class ProviderSetupWorker(QObject):
 
     def run(self):
         try:
-            self.provider_manager.set_current_provider(self.progress)
+            if self.provider_manager.set_current_provider(self.progress) is False:
+                self.error.emit(STB_DEVICE_REJECTED_MESSAGE)
+                return
             if self.force_refresh:
                 self.provider_manager.clear_current_provider_cache()
             self.finished.emit({"name": self.provider_manager.current_provider.get("name", "")})
