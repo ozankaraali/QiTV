@@ -142,17 +142,17 @@
     - `is_pipeline() -> bool`.
 - **Behaviour:**
   - **Start:**
-    - if `engine.is_available()`: open a session and wait for `sessionReady` for that sid. On ready, play `stream_url(sid, oldest_seq)` with `LIVE_PIPELINE` and set `_base = span(oldest).start` (0.0 when the first segment is still open).
+    - if `engine.is_available()`: open a session (`live_delay` = Low 3 s / Normal 6 s / Stable 12 s from `latency`) and wait for `sessionReady` for that sid. On ready, play `stream_url(sid, oldest_seq)` with `LIVE_PIPELINE` and set `_base = span(oldest).start` (0.0 when the first segment is still open).
     - Otherwise, and on `sessionFailed` or a timeout before ready: close the session if one is open, play `url` directly with `PlayKind.LIVE` and `latency`, emit `notice("Time-shift isn't available for this channel")` and `modeChanged("direct")`.
   - **Tick** (`tick_ms`):
     - compute the position as in spec §6.3 (a wall-clock × rate fallback when `get_time()` deltas disagree by more than 1 s);
     - `lag = live_edge − position`;
-    - `decision = stay_live.update(lag, playback.state() == BUFFERING)`;
+    - `decision = stay_live.update(lag, playback.state() == BUFFERING)`, where the StayLive target used is `max(TARGETS[latency], snapshot["burst_s"])` (HLS delivers in segment-sized bursts; a 1 s target would underrun at every segment);
     - apply a rate change through `playback.set_rate`;
-    - if `reopen_live`, do `go_live()`;
+    - if `reopen_live`, do `go_live()`. `go_live()` always calls `stay_live.user_go_live()`, even when the reopen fails, because StayLive's reopen signal is edge-triggered (Phase 2A ruling);
     - emit `timelineChanged`.
   - **Seeking:**
-    - `seek_to(t)`: `seq = locate(t)`, then reopen at `stream_url(sid, seq)` with `_base = span(seq).start` and the pause intent preserved (main's semantics, port map §8.19); `stay_live.user_seeked_back()` when `t < live_edge − target`.
+    - `seek_to(t)`: `seq = locate(t)` (None when nothing is buffered yet: ignore the seek), then reopen at `stream_url(sid, seq)` with `_base = span(seq).start` and the pause intent preserved (main's semantics, port map §8.19); `stay_live.user_seeked_back()` when `t < live_edge − target`.
     - `go_live()`: reopen at the newest complete segment whose start is at least `target` behind the live edge (else the newest), at rate 1.0, `stay_live.user_go_live()`.
     - `set_speed(rate)`: `playback.set_rate(rate)` plus `stay_live.user_speed(rate)`.
   - **Interruptions:**

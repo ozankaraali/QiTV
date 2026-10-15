@@ -427,7 +427,7 @@ Everything is tested headless.
 - **Messages (helper to parent):**
   - `("hello", base_url)`;
   - `("ready", sid)`: the first segment is open, so playback can start;
-  - `("state", sid, snapshot: dict, first: int | None, additions: list[tuple[int, float, float, bool]])`. The snapshot contains `{"oldest", "newest", "open", "start", "end", "live_edge", "bytes", "ended"}`. `first` and `additions` are ported from main's delta encoding (448–465) and throttled to 0.25 s unless forced.
+  - `("state", sid, snapshot: dict, first: int | None, additions: list[tuple[int, float, float, bool]])`. The snapshot contains `{"oldest", "newest", "open", "start", "end", "live_edge", "bytes", "ended", "burst_s"}` (`burst_s` from `Source.burst_s`: the HLS target duration, 0.0 for raw TS). `first` and `additions` are ported from main's delta encoding (448–465) and throttled to 0.25 s unless forced.
   - `("error", sid, kind, message)`;
   - `("ended", sid)`;
   - `("closed", sid)`.
@@ -464,7 +464,7 @@ Everything is tested headless.
   - signals `available(bool)`, `sessionReady(str)`, `sessionUpdated(str, dict)`, `sessionFailed(str, str, str)` (sid, kind, message), `sessionEnded(str)`, `sessionClosed(str)`;
   - `start()`, which spawns the helper in the background; `available(True)` fires on `hello`;
   - `is_available() -> bool`;
-  - `open_session(url, *, headers, verify_ssl, disk: bool, max_bytes: int) -> str`. The sid is `secrets.token_hex(8)`; for disk sessions the parent picks `dir = ".qitv-timeshift-" + token_hex(16)` and remembers it.
+  - `open_session(url, *, headers, verify_ssl, disk: bool, max_bytes: int, live_delay: float = 6.0) -> str`. The sid is `secrets.token_hex(8)`; for disk sessions the parent picks `dir = ".qitv-timeshift-" + token_hex(16)` and remembers it.
   - `close_session(sid)`;
   - `spans(sid) -> list[Span]`, reconstructed from the deltas;
   - `snapshot(sid) -> dict`;
