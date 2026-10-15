@@ -12,6 +12,7 @@ import multiprocessing
 import operator
 import os
 from pathlib import Path
+import pickle
 import signal
 import socket
 import subprocess
@@ -83,9 +84,8 @@ def session_dirs(root):
     return sorted(path.name for path in root.iterdir() if path.name.startswith(".qitv-timeshift-"))
 
 
-def paced_route(payload, stop, hung_up):
-    """Answers every request (reconnects included) with a body streamed a few times faster
-    than real time until the client hangs up."""
+def paced_body(payload, stop, hung_up):
+    """A close-delimited body streamed a few times faster than real time."""
 
     def body(request):
         try:
@@ -96,7 +96,12 @@ def paced_route(payload, stop, hung_up):
         except OSError:
             hung_up.set()
 
-    return lambda _request, _count: (200, {}, body)
+    return body
+
+
+def paced_route(payload, stop, hung_up):
+    """Answers every request (reconnects included) with a fresh paced body."""
+    return lambda _request, _count: (200, {}, paced_body(payload, stop, hung_up))
 
 
 class StalledUpstream:
@@ -142,6 +147,11 @@ class Unreadable:
 
     def __reduce__(self):
         return (operator.truediv, (1, 0))
+
+
+def silent_helper(conn, root):
+    """A helper that never says hello."""
+    time.sleep(60)
 
 
 def stubborn_helper(conn, root):
@@ -222,9 +232,9 @@ class LiveEngineTests(unittest.TestCase):
         self.root = self.temporary / "timeshift"
         self.stop = threading.Event()
 
-    def source(self):
+    def source(self, routes=None):
         self.hung_up = threading.Event()
-        server = LocalSource({SECRET_PATH: paced_route(PAYLOAD, self.stop, self.hung_up)})
+        server = LocalSource(routes or {SECRET_PATH: paced_route(PAYLOAD, self.stop, self.hung_up)})
         self.addCleanup(server.close)
         self.addCleanup(self.stop.set)  # runs first: paced bodies stop writing
         return server
@@ -495,8 +505,123 @@ class LiveEngineTests(unittest.TestCase):
             failed = signals.wait_for(
                 lambda event: event == ("failed", sid, "internal", INTERNAL), start=mark
             )
-            # The restarted helper reopens the session (its disk notice repeats).
+            # The restarted helper reopens the session in RAM: no second disk notice.
             signals.wait_for(lambda event: event == ("ready", sid), start=failed)
+        self.assertEqual(
+            signals.of("failed", sid, start=mark), [("failed", sid, "internal", INTERNAL)]
+        )
+
+    def test_a_restart_reopens_only_sessions_whose_input_was_still_running(self):
+        def stream_then_refuse(_request, count):
+            # Streams, then refuses the reconnect: an "http" failure after ready.
+            if count == 1:
+                return 200, {}, paced_body(make_stream(6), self.stop, threading.Event())
+            return 404, {}, b""
+
+        paths = {
+            "live": SECRET_PATH,
+            "http": "/user/secret/refused.ts",
+            "unsupported": "/user/secret/page.ts",
+            "ended": "/user/secret/finite.ts",
+        }
+        source = self.source(
+            {
+                paths["live"]: paced_route(PAYLOAD, self.stop, threading.Event()),
+                paths["http"]: stream_then_refuse,
+                paths["unsupported"]: (200, {}, b"<html>not a transport stream</html>" * 2000),
+                paths["ended"]: (200, {}, make_stream(4)),
+            }
+        )
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        sids = {name: self.open(engine, source.url + path) for name, path in paths.items()}
+        signals.wait_for(lambda event: event == ("ready", sids["http"]))
+        signals.wait_for(lambda event: event[:3] == ("failed", sids["http"], "http"))
+        signals.wait_for(lambda event: event[:3] == ("failed", sids["unsupported"], "unsupported"))
+        signals.wait_for(lambda event: event == ("ended", sids["ended"]))
+        signals.wait_for(lambda event: event == ("ready", sids["live"]))
+        requests = dict(source.counts)
+        self.assertEqual(requests[paths["http"]], 2)
+
+        mark = len(signals.events)
+        with self.assertLogs("services.live.engine", "WARNING"):
+            kill(helpers()[0])
+            restarted = signals.wait_for(lambda event: event == ("available", True), start=mark)
+        signals.wait_for(lambda event: event == ("ready", sids["live"]), start=restarted)
+        QTest.qWait(1000)  # time for an unwanted reopen to reach the source
+        for name in ("http", "unsupported", "ended"):
+            self.assertEqual(source.counts[paths[name]], requests[paths[name]], name)
+            self.assertEqual(signals.of("ready", sids[name], start=mark), [], name)
+        self.assertEqual(source.counts[paths["live"]], requests[paths["live"]] + 1)
+        # A source that failed got no new failure; the ended buffer is gone with the helper.
+        self.assertEqual(
+            sorted(signals.of("failed", start=mark)),
+            sorted(
+                [
+                    ("failed", sids["live"], "internal", INTERNAL),
+                    ("failed", sids["ended"], "internal", INTERNAL),
+                ]
+            ),
+        )
+        for sid in sids.values():  # every session is still answered by close
+            engine.close_session(sid)
+        for sid in sids.values():
+            signals.wait_for(lambda event, sid=sid: event == ("closed", sid), start=mark)
+
+    def test_a_helper_that_cannot_start_turns_time_shift_off(self):
+        failure = pickle.PicklingError("frozen build")
+        with patch("multiprocessing.context.SpawnProcess.start", side_effect=failure):
+            with self.assertLogs("services.live.engine", "WARNING") as logs:
+                engine, signals = self.engine()
+                signals.wait_for(lambda event: event == ("available", False))
+        started = [line for line in logs.output if "could not be started (PicklingError)" in line]
+        self.assertEqual(len(started), 2, "one start and one restart")
+        self.assertFalse(engine.is_available())
+        source_url = "http://127.0.0.1:9" + SECRET_PATH
+        sid = self.open(engine, source_url)
+        signals.wait_for(lambda event: event[:3] == ("failed", sid, "internal"))
+        engine.close_session(sid)
+        signals.wait_for(lambda event: event == ("closed", sid))
+        self.assertEqual(helpers(), [])
+        self.assertNotIn(source_url, repr(signals.events))
+
+    def test_a_helper_that_never_says_hello_counts_as_dead(self):
+        with (
+            patch.object(engine_module, "helper_main", silent_helper),
+            patch.object(engine_module, "_HELLO_TIMEOUT", 1.0),
+            self.assertLogs("services.live.engine", "WARNING") as logs,
+        ):
+            engine, signals = self.engine()
+            signals.wait_for(lambda event: event == ("available", False), timeout=30)
+        late = [line for line in logs.output if "did not start in time" in line]
+        self.assertEqual(len(late), 2, "one start and one restart")
+        self.assertEqual(helpers(), [])
+
+    def test_a_closed_disk_session_is_forgotten_once_its_buffer_is_gone(self):
+        cleaned = []
+        cleanup = engine_module.cleanup_session_dir
+
+        def spy(root, name):
+            cleaned.append(name)
+            return cleanup(root, name)
+
+        self.enterContext(patch.object(engine_module, "cleanup_session_dir", spy))
+        engine, signals = self.engine()
+        signals.wait_for(lambda event: event == ("available", True), timeout=60)
+        source = self.source()
+        first = self.open(engine, source.url + SECRET_PATH, disk=True)
+        signals.wait_for(lambda event: event == ("ready", first))
+        [first_dir] = session_dirs(self.root)
+        engine.close_session(first)
+        signals.wait_for(lambda event: event == ("closed", first))
+        self.assertTrue(wait_until(lambda: session_dirs(self.root) == []))
+        second = self.open(engine, source.url + SECRET_PATH, disk=True)
+        signals.wait_for(lambda event: event == ("ready", second))
+        engine.close_session(second)  # its "closed" prunes the first directory
+        signals.wait_for(lambda event: event == ("closed", second))
+        engine.shutdown()
+        self.assertNotIn(first_dir, cleaned, "a removed directory was still tracked")
+        self.assertEqual(session_dirs(self.root), [])
 
     @unittest.skipIf(os.name == "nt", "reads the command line with ps")
     def test_credentials_never_reach_the_helper_command_line(self):

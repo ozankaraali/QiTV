@@ -15,11 +15,26 @@ being reported again, and the join -> terminate -> kill escalation with 0.5 s gr
 Helper death (spec: restart once, then fall back): every session it held gets one
 `sessionFailed(sid, "internal", ...)` (none when that session had already reported a final
 error), its spans are dropped, every buffer directory handed out is removed, and the helper
-is restarted. On its `hello` every session the GUI has not closed is reopened with the same
-arguments (a fresh directory only if the old one could not be removed), and
-`available(True)` follows. `is_available()` is False in between, without a signal. A second
-death emits `available(False)` for the rest of the run, and every later open fails at once.
+is restarted. A helper that sends no `hello` within 30 s counts as dead too, and so does one
+that cannot be started at all. On the new helper's `hello`, the sessions the GUI has not
+closed are reopened with the same arguments: a fresh directory if the old one could not be
+removed, RAM if the disk already failed. Then `available(True)` follows. `is_available()` is
+False in between, without a signal. A second death emits `available(False)` for the rest of
+the run, and every later open fails at once.
+
+A session whose input is over (it ended, or its source failed for good) is not reopened, so
+a restart never opens a second provider connection behind the GUI's back. It stays known
+until `close_session`; after a death, an ended one still gets the "internal" failure, since
+its buffer is gone. Only the helper's own "internal" failure leaves a session reopenable.
 `sessionFailed(sid, "disk", ...)` is the one non-final failure: the session goes on in RAM.
+
+Known limits:
+- Commands are sent with a blocking write, one small command at a time between reads. Only
+  a helper whose command loop hangs while several KiB of commands are unread could block
+  the supervisor; the helper's own sends never block (Task 7's writer thread).
+- The supervisor QThread stays registered with `ThreadCleanup` for the whole run, so
+  `has_pending_threads()` is True until `shutdown()`. Call `shutdown()` before waiting for
+  pending threads (window close, self-update).
 """
 
 from __future__ import annotations
@@ -52,6 +67,8 @@ _IDLE = 0.25  # how long a supervisor without a helper waits for a command
 _STOP_GRACE = 0.5
 _TERMINATE_GRACE = 0.5
 _RESTARTS = 1
+_HELLO_TIMEOUT = 30.0  # a helper that never says hello counts as dead
+_RAM_BYTES = 128 * 1024 * 1024  # what the helper itself falls back to when the disk fails
 _SHUTDOWN_WAIT_MS = 1800  # the escalation takes at most 1.5 s
 _SESSION_PREFIX = ".qitv-timeshift-"
 _INTERNAL = "The live buffer stopped unexpectedly."
@@ -71,6 +88,7 @@ class _Record:
     command: _Command  # ("open", sid, url, headers, verify_ssl, ring, live_delay)
     sent: bool = False  # the current helper has the session
     failed: bool = False  # a final failure was reported for the current or last helper
+    over: bool = False  # its input ended or its source failed for good: never reopened
     closing: bool = False  # "close" was sent; "closed" is due
 
 
@@ -96,6 +114,7 @@ class _Supervisor(QThread):
         self._process: BaseProcess | None = None
         self._conn: Connection | None = None
         self._up = False  # the current helper said hello
+        self._spawned = 0.0  # when the current helper was started
         self._deaths = 0
         self._dead = False  # time-shift is off for this run
         self._records: dict[str, _Record] = {}
@@ -107,11 +126,14 @@ class _Supervisor(QThread):
         self._commands.put(None)  # wakes a supervisor that has no helper
 
     def run(self) -> None:
+        started = False
         try:
-            self._start_helper()
             while not self._stop.is_set():
                 try:
-                    if self._process is None:
+                    if not started:
+                        started = True
+                        self._start_helper()
+                    elif self._process is None:
                         self._serve_without_helper()
                     else:
                         self._step()
@@ -140,6 +162,9 @@ class _Supervisor(QThread):
         except EOFError, OSError:
             # Windows can report the helper's exit from poll's PeekNamedPipe, before recv
             # has an opportunity to translate it into EOF.
+            alive = False
+        if alive and not self._up and time.monotonic() - self._spawned >= _HELLO_TIMEOUT:
+            _LOG.warning("The live helper did not start in time.")
             alive = False
         if not alive:
             self._helper_died()
@@ -189,7 +214,7 @@ class _Supervisor(QThread):
             self._up = True
             assert self._conn is not None
             for waiting in list(self._records.values()):
-                if not waiting.sent:
+                if not waiting.sent and not waiting.over:
                     self._send_open(self._conn, waiting)
             self._relay(("hello", message[1]))
             return
@@ -201,17 +226,33 @@ class _Supervisor(QThread):
             if record.closing:
                 del self._records[sid]
                 self._relay(("closed", sid))
+                self._prune_dirs()
             return
         if record.closing:
             return  # the GUI closed it: only "closed" is still of interest
         if name == "error":
             if len(message) != 4:
                 return
-            if message[2] != "disk":  # the only non-final error: the session goes on in RAM
+            if message[2] == "disk":
+                # The only non-final error: the helper went on in RAM, and so does a reopen.
+                ram = {"kind": "ram", "max_bytes": _RAM_BYTES}
+                record.command = (*record.command[:5], ram, *record.command[6:])
+            else:
                 record.failed = True
-        elif name not in ("state", "ready", "ended"):
+                if message[2] != "internal":
+                    record.over = True  # the source gave up: a reopen would just retry it
+        elif name == "ended":
+            record.over = True
+        elif name not in ("state", "ready"):
             return
         self._relay(message)
+
+    def _prune_dirs(self) -> None:
+        """Forget the directories of closed sessions once their helper removed them."""
+        in_use = {record.command[5].get("dir") for record in self._records.values()}
+        for name in self._dirs - in_use:
+            if not os.path.lexists(self._root / name):
+                self._dirs.discard(name)
 
     def _drain(self) -> None:
         """Receive what a dead helper sent before it went: its failures then count."""
@@ -244,7 +285,7 @@ class _Supervisor(QThread):
                 daemon=True,
             )
             process.start()
-        except (OSError, EOFError, ValueError, RuntimeError) as error:
+        except Exception as error:  # e.g. a PicklingError in a frozen build: a failed start
             _LOG.warning("The live helper could not be started (%s).", type(error).__name__)
             for end in (conn, child):
                 if end is not None:
@@ -252,6 +293,7 @@ class _Supervisor(QThread):
             return False
         child.close()  # the helper's exit now shows up here as EOF
         self._process, self._conn, self._up = process, conn, False
+        self._spawned = time.monotonic()
         return True
 
     def _helper_died(self) -> None:
