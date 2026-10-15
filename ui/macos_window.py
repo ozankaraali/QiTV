@@ -3,7 +3,6 @@
 import ctypes
 import ctypes.util
 import logging
-import platform
 
 from PySide6.QtGui import QGuiApplication
 
@@ -13,7 +12,7 @@ _NS_WINDOW_ABOVE = 1
 
 def attach_child_window(parent, child) -> bool:
     # Only the cocoa platform plugin hands out NSView pointers as winId()
-    if platform.system() != "Darwin" or QGuiApplication.platformName() != "cocoa":
+    if QGuiApplication.platformName() != "cocoa":
         return False
     try:
         objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc") or "libobjc.dylib")

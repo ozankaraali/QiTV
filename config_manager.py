@@ -184,6 +184,8 @@ class ConfigManager:
         return os.path.dirname(self.config_path)
 
     def _migrate_old_config(self):
+        if os.environ.get("QITV_CONFIG_DIR"):
+            return
         try:
             old_config_path = "config.json"
             if os.path.isfile(old_config_path) and not os.path.isfile(self.config_path):

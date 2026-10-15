@@ -5,8 +5,10 @@ import logging
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QRegion
 from PySide6.QtWidgets import QWidget
+from shiboken6 import isValid
 
 from ui.macos_window import attach_child_window
+from ui.pointer import PointerInput
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,11 @@ class OverlayHost(QWidget):
         self._window = window
         self._surface = surface
         self._overlays: list[QWidget] = []
-        self._attached = False
+        self._attached_id = 0
+        self._pointer = PointerInput(self)
+        self._pointer.clicked.connect(self.clicked)
+        self._pointer.doubleClicked.connect(self.doubleClicked)
+        self._pointer.wheelSteps.connect(self.wheelSteps)
         window.installEventFilter(self)
         surface.installEventFilter(self)
 
@@ -49,13 +55,24 @@ class OverlayHost(QWidget):
         widget.setParent(self)
         widget.hide()
         widget.installEventFilter(self)
+        widget.destroyed.connect(lambda _=None, w=widget: self._forget(w))
+
+    def remove_overlay(self, widget: QWidget) -> None:
+        self._forget(widget)
+        if isValid(widget):
+            widget.removeEventFilter(self)
+        self.overlay_changed()
+
+    def _forget(self, widget) -> None:
+        if widget in self._overlays:
+            self._overlays.remove(widget)
 
     def overlay_changed(self) -> None:
         self._update_mask()
         self._update_visibility()
 
     def visible_overlays(self) -> list[QWidget]:
-        return [w for w in self._overlays if w.isVisibleTo(self)]
+        return [w for w in self._overlays if isValid(w) and w.isVisibleTo(self)]
 
     def sync_geometry(self) -> None:
         rect = QRect(self._surface.mapToGlobal(QPoint(0, 0)), self._surface.size())
@@ -78,7 +95,7 @@ class OverlayHost(QWidget):
             self.setMask(region)
 
     def _window_shown(self) -> bool:
-        return self._window.isVisible() and not self._window.isMinimized()
+        return isValid(self._window) and self._window.isVisible() and not self._window.isMinimized()
 
     def _update_visibility(self) -> None:
         wanted = bool(self.visible_overlays()) and self._window_shown()
@@ -87,12 +104,15 @@ class OverlayHost(QWidget):
             if not self.isVisible():
                 self.show()
                 self.raise_()
-                if not self._attached:
-                    self._attached = attach_child_window(self._window, self)
+                native_id = int(self.winId())
+                if native_id != self._attached_id and attach_child_window(self._window, self):
+                    self._attached_id = native_id
         elif self.isVisible():
             self.hide()
 
     def eventFilter(self, obj, event):
+        if not (isValid(self) and isValid(self._window) and isValid(self._surface)):
+            return False
         kind = event.type()
         if obj in (self._window, self._surface) and kind in _TRACKED:
             if self.isVisible():
@@ -104,17 +124,14 @@ class OverlayHost(QWidget):
 
     # Clicks that reach the host itself (on transparent parts of overlays that let them through).
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
+        self._pointer.press(event.button())
 
     def mouseDoubleClickEvent(self, event):
-        self.doubleClicked.emit()
+        self._pointer.double_click()
 
     def mouseMoveEvent(self, event):
         self.mouseMoved.emit()
 
     def wheelEvent(self, event):
-        steps = -int(event.angleDelta().y() / 120)
-        if steps:
-            self.wheelSteps.emit(steps, event.modifiers())
+        self._pointer.wheel(event.angleDelta().y(), event.modifiers())
         event.accept()
