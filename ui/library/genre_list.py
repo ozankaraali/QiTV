@@ -168,6 +168,7 @@ class GenreList(QWidget):
         self._focused = False
         self._current: str | None = None
         self._ids: list[str] = []
+        self._genres: list[Genre] | None = None  # what set_genres last showed
         self._rows_by_id: dict[str, int] = {}
         self._model = _GenreModel(self)
         self._view = ChannelListView(self)
@@ -193,13 +194,15 @@ class GenreList(QWidget):
         return self._current
 
     def set_genres(self, genres: list[Genre]) -> None:
-        self._ids = [g.id for g in genres]
-        self._model.set_genres(genres)
-        self._rows_by_id = {
-            self._model.index(i).data(IdRole): i
-            for i in range(self._model.rowCount())
-            if self._model.index(i).data(KindRole) == GENRE
-        }
+        if genres != self._genres:  # the same genres again (a genre switch): keep the list
+            self._genres = list(genres)
+            self._ids = [g.id for g in genres]
+            self._model.set_genres(genres)
+            self._rows_by_id = {
+                self._model.index(i).data(IdRole): i
+                for i in range(self._model.rowCount())
+                if self._model.index(i).data(KindRole) == GENRE
+            }
         if self._current in self._ids:
             self._show_current()
             return

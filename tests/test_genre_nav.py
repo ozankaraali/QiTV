@@ -69,6 +69,20 @@ class GenreListTests(unittest.TestCase):
         )
         self.assertEqual(self.list.current_id(), "continue")
 
+    def test_the_same_genres_again_keep_the_list(self):
+        # Every genre switch and sort sets the genres again: the list is not rebuilt for that.
+        resets = []
+        self.list._model.modelReset.connect(lambda: resets.append(True))
+        self.list.set_current("comedy")
+        self.list.set_genres(list(GENRES))
+        self.assertEqual(resets, [])
+        self.assertEqual(self.list.current_id(), "comedy")
+        self.list.set_genres([*GENRES[:3], Genre("comedy", "Comedy", 2641), *GENRES[4:]])
+        self.assertEqual(resets, [True])
+        self.assertEqual(self.list.current_id(), "comedy")
+        self.list.set_genres(GENRES[2:])
+        self.assertEqual(self.list.rows()[0], "GENRES · 4")
+
     def test_width_is_18_units(self):
         self.assertEqual(self.list.width(), round(1280 * 0.18))
 
