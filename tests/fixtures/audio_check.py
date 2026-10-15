@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Optional
 
 
@@ -17,3 +18,15 @@ def reading_matches(
     if got is None or got[0] != int(muted):
         return False
     return not check_level or got[1] == level
+
+
+def should_mute(environ: Mapping[str, str]) -> bool:
+    """Does the smoke play to libVLC's dummy audio output? Yes, unless CI set or asked not to.
+
+    QITV_SMOKE_MUTE=1 mutes, 0 plays sound; unset mutes everywhere but CI (a runner has no
+    one to hear it, and the dummy output keeps no volume or mute to read back).
+    """
+    asked = environ.get("QITV_SMOKE_MUTE")
+    if asked in ("0", "1"):
+        return asked == "1"
+    return not environ.get("CI")

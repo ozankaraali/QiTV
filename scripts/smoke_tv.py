@@ -55,10 +55,11 @@ overlays. Nothing here touches the network: Python-level lookups and connections
 machine are refused and recorded as a failure. Logs go to <out>/runner.log and <out>/app.log
 as well (the Windows app has no console).
 
-QITV_SMOKE_MUTE=1 gives libVLC a dummy audio output, so a local run on a desktop someone
-uses stays silent (the fixtures play a tone). CI leaves it unset: the dummy output keeps no
-volume or mute, so the PiP's audio read-backs are only recorded then (as they are on a machine
-where libVLC could open no audio output at all).
+libVLC gets a dummy audio output unless CI is set (QITV_SMOKE_MUTE=1 forces it, =0 plays
+the fixtures' tone), so a local run on a desktop someone uses stays silent. CI plays to
+the real output. The dummy output keeps no volume or mute, so the PiP's audio read-backs are
+only recorded in a muted run (as they are on a machine where libVLC could open no audio
+output at all).
 """
 
 from __future__ import annotations
@@ -114,8 +115,8 @@ from services.provider_manager import ProviderManager  # noqa: E402
 from services.sessions import MAIN_PURPOSE  # noqa: E402
 from services.sessions import PURPOSE as PIP_PURPOSE  # noqa: E402
 from services.vlc_profile import PlayKind  # noqa: E402
-from tests.fixtures.audio_check import reading_matches  # noqa: E402
-from tests.fixtures.live_source import LIVE_TS, LiveSource, peak_of  # noqa: E402
+from tests.fixtures.audio_check import reading_matches, should_mute  # noqa: E402
+from tests.fixtures.live_source import LIVE_TS, LiveSource, opens_in, peak_of  # noqa: E402
 from tests.fixtures.local_provider import (  # noqa: E402
     FIXTURE_DIR,
     channel_urls,
@@ -175,7 +176,7 @@ SCENARIO_CHECK = "the smoke scenario runs to the end"
 # The packaged app only: everything libVLC loaded (libvlc, libvlccore, plugins) is the app's own.
 BUNDLED_VLC_CHECK = "the packaged app plays with its own libVLC and plugins"
 
-MUTE_ENV = "QITV_SMOKE_MUTE"  # "1": libVLC plays audio to a dummy output (local runs)
+MUTE_ENV = "QITV_SMOKE_MUTE"  # "1"/"0": dummy audio output or real sound; unset: dummy unless CI
 
 RUNNER_LOG = "runner.log"
 APP_LOG = "app.log"
@@ -263,6 +264,7 @@ MUTE_HELD_CHECK = (
 )
 SWAP_CHECK = f"{PIP_PREFIX}S makes {LIVE_CHANNEL} large; both play on and neither restarts"
 SWAP_AUDIO_CHECK = f"{PIP_PREFIX}after the swap {LIVE_CHANNEL} is heard and {ZAP_CHANNEL} is muted"
+SWAP_UPSTREAM_CHECK = f"{PIP_PREFIX}the swap opens no new upstream connection on either source"
 SHIFTED_CHECK = (
     f"{PIP_PREFIX}after a 4 s pause and two swaps the large picture is still at least 3 s "
     "behind live"
@@ -322,6 +324,7 @@ def pip_gate_checks(directsound: bool) -> list[str]:
     names += [
         SWAP_CHECK,
         SWAP_AUDIO_CHECK,
+        SWAP_UPSTREAM_CHECK,
         SHIFTED_CHECK,
         LEVELS_CHECK,
         PIP_WINDOW_CHANGE,
@@ -615,6 +618,20 @@ def _judge_sources(report: Report, sources: list[LiveSource], pipeline: bool, pi
             peaks == [1, 1] and both == 2,
             f"peak concurrent connections from the PiP phase on: {LIVE_CHANNEL} {peaks[0]}, "
             f"{ZAP_CHANNEL} {peaks[1]}, both {both}",
+        )
+        window = report.data["pip"].get("swap_window")
+        if not isinstance(window, list) or len(window) != 2:
+            report.check(SWAP_UPSTREAM_CHECK, False, "the swap never happened")
+            return
+        offset = time.time() - time.monotonic()
+        opens = [
+            opens_in(source.events, window[0] - offset, window[1] - offset) for source in sources
+        ]
+        report.check(
+            SWAP_UPSTREAM_CHECK,
+            opens == [0, 0],
+            f"connections opened during the swap: {LIVE_CHANNEL} {opens[0]}, {ZAP_CHANNEL} "
+            f"{opens[1]}",
         )
 
 
@@ -964,7 +981,7 @@ def run_app(
     report.save()
     logger.info("Environment: %s", report.data["environment"])
 
-    if os.environ.get(MUTE_ENV) == "1":
+    if should_mute(os.environ):
         report.data["muted"] = True
 
         def muted(extra_args: Optional[list[str]] = None) -> Any:
@@ -1689,10 +1706,12 @@ class Driver:
         # 3. S: A is large, nothing restarts, and the sound follows it.
         report.step("pip 3. swap")
         before = self._play_counts()
+        swap_from = time.time()
         self._key(Qt.Key.Key_S)
         swapped = yield from self._wait(self._large_is(a_slot), SWAP_TIMEOUT_MS)
         yield SWAP_SETTLE_MS
         after = self._play_counts()
+        facts["swap_window"] = [swap_from, time.time()]  # the parent counts reconnects in it
 
         def both_playing() -> bool:
             return self._slot_playing(a_slot, a_url) and self._slot_playing(b_slot, b_url)
@@ -1785,12 +1804,16 @@ class Driver:
             RELEASE_WAIT_MS,
         )
         frame, label = w.pip_frame, w.pip_label
+        # The large picture must still be on screen: it plays on whichever surface the swap
+        # left it (Batch B C1: closing a swapped PiP blacked it out).
+        surface = w.pip_surface if stays.name == "pip" else w.surface
         alone = (
             closed
             and sessions.large() is stays
             and self._slot_playing(stays, a_url)
             and frame.small_rect().isEmpty()
             and not label.isVisible()
+            and surface.isVisible()
         )
         report.check(
             ONE_SESSION_CHECK,
@@ -1798,7 +1821,8 @@ class Driver:
             f"PiP open {sessions.pip_open()}; {stays.name} ({LIVE_CHANNEL}) "
             f"{stays.playback.state().value}, {closing.name} ({ZAP_CHANNEL}) "
             f"{closing.playback.state().value}; small rect {_rect(frame.small_rect())}, label "
-            f"{'shown' if label.isVisible() else 'hidden'}",
+            f"{'shown' if label.isVisible() else 'hidden'}; {stays.name}'s surface "
+            f"{'visible' if surface.isVisible() else 'HIDDEN'}",
         )
         holders = w.budget.holders(provider)
         report.check(
@@ -1907,7 +1931,7 @@ class Driver:
         """libVLC's read-back only counts where an audio output keeps a volume and a mute."""
         if self.report.data.get("muted"):
             return True, (
-                f"informational ({MUTE_ENV}=1: libVLC's dummy audio output keeps no volume or "
+                f"informational (muted run: libVLC's dummy audio output keeps no volume or "
                 f"mute): {detail}"
             )
         if not ok:

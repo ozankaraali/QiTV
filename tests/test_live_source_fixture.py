@@ -7,7 +7,7 @@ import unittest
 import urllib.error
 import urllib.request
 
-from tests.fixtures.live_source import LIVE_TS, LiveSource, LoopedStream, peak_of
+from tests.fixtures.live_source import LIVE_TS, LiveSource, LoopedStream, opens_in, peak_of
 
 PACKET = 188
 CLOCK = 90_000
@@ -133,6 +133,12 @@ class LiveSourceTests(unittest.TestCase):
         with urllib.request.urlopen(self.source.url, timeout=5) as response:
             response.read(188)
         self.assertEqual(self.source.peak, 1)  # one after the other
+
+    def test_opens_in_counts_only_the_opens_inside_the_window(self):
+        events = [(1.0, 1), (2.0, -1), (3.0, 1), (4.0, -1), (5.0, 1)]
+        self.assertEqual(opens_in(events, 2.5, 4.5), 1)
+        self.assertEqual(opens_in(events, 3.0, 5.0), 1)  # the end is excluded
+        self.assertEqual(opens_in(events, 1.5, 2.5), 0)  # a close is not a reconnect
 
     def test_the_peak_of_events_counts_a_close_before_an_open_at_the_same_moment(self):
         self.assertEqual(peak_of([(1.0, 1), (2.0, 1), (2.0, -1), (3.0, -1)]), 1)

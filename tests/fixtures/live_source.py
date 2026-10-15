@@ -193,6 +193,11 @@ def peak_of(
     return peak if started else current  # it began after the last event before `end`
 
 
+def opens_in(events: list[tuple[float, int]], start: float, end: float) -> int:
+    """How many connections opened in [start, end) in `events` ((when, +1 or -1))."""
+    return sum(1 for at, change in events if change > 0 and start <= at < end)
+
+
 class LiveSource:
     """Serves `LoopedStream(path)` at `url` to every client until `close()`."""
 
