@@ -78,6 +78,10 @@ class PackedGuide(MultiKeyDict):
         self[keys] = default
         return default
 
+    def raw_items(self):
+        """(keys, value) as stored: a channel still pickled stays so (re-keying needs no read)."""
+        return list(self._data.items())
+
     def serialize(self):
         return [list(keys) + [value] for keys, value in self.items()]
 

@@ -11,6 +11,7 @@ from unittest.mock import patch
 import requests
 
 from services import epg_manager as epg_manager_module
+from services import epg_store as epg_store_module
 from services.epg_manager import _INDEX_TIME_FORMAT, EpgManager, _cache_key, _xtream_cache_key
 from services.multikeydict import MultiKeyDict
 
@@ -275,6 +276,27 @@ class SavedGuideTests(_GuideCase):
         with self.reads() as read:
             manager.set_current_epg()
         read.assert_called_once()
+
+    def test_reindexing_the_guide_unpickles_no_channel(self):
+        # Review M4: re-keying a saved guide on the GUI thread read every channel back.
+        self.load(self.manager())
+        manager = self.manager()  # a new session: the guide comes off the disk, still packed
+        manager.set_current_epg()
+        self.assertEqual(manager.epg.packed(), 1)
+        self.config.xmltv_channel_map[("news.test", "extra.id")] = None
+        decodes, real_loads = [], pickle.loads
+
+        def count(blob, *args, **kwargs):
+            decodes.append(len(blob))
+            return real_loads(blob, *args, **kwargs)
+
+        with patch.object(epg_store_module.pickle, "loads", side_effect=count):
+            manager.reindex_programs()
+        self.assertEqual(decodes, [])
+        self.assertEqual(manager.epg.packed(), 1)  # still pickled
+        extra = manager.get_programs_for_channel({"xmltv_id": "extra.id", "name": "Other"}, None, 0)
+        self.assertEqual([p["title"]["__text"] for p in extra], ["Old"])  # under its new keys
+        self.assertEqual(self.titles(manager), ["Old"])
 
     def test_a_guide_saved_by_an_earlier_version_is_read_and_replaced(self):
         guide = MultiKeyDict()

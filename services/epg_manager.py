@@ -13,7 +13,7 @@ import orjson as json
 import tzlocal  # the GUI thread's guide lookups use it: loaded with the window
 
 from services.content_loader import ContentLoader
-from services.epg_store import read_guide, write_guide
+from services.epg_store import PackedGuide, read_guide, write_guide
 from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_as
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
@@ -349,8 +349,16 @@ class EpgManager:
 
     def reindex_programs(self):
         # Reindex existing epg
-        new_epg = MultiKeyDict()
-        for keys, programs in self.epg.items():
+        # Move the stored values to their new keys as they are: a PackedGuide's channels
+        # stay pickled, so this reads none of them (it runs on the GUI thread).
+        old_epg = self.epg
+        if isinstance(old_epg, PackedGuide):
+            new_epg: MultiKeyDict = PackedGuide()
+            entries = old_epg.raw_items()
+        else:
+            new_epg = MultiKeyDict()
+            entries = list(old_epg.items())
+        for keys, programs in entries:
             for key in keys:
                 new_keys = self.config_manager.xmltv_channel_map.get_keys(key)
                 if new_keys:
