@@ -96,6 +96,44 @@ class TimeshiftSettingsTests(base.WindowCase):
         self.assertEqual(dialog.timeshift_4k_estimate.text(), "About 46 min")
 
 
+class EpgExpirationSettingsTests(base.WindowCase):
+    """M6: the guide's update period offers units the guide knows, saved as it reads them."""
+
+    def dialog(self):
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        return dialog
+
+    def units(self, dialog):
+        combo = dialog.epg_expiration_combo
+        return [combo.itemText(i) for i in range(combo.count())]
+
+    def test_it_offers_hours_days_weeks_and_months(self):
+        dialog = self.dialog()
+        self.assertEqual(self.units(dialog), ["Hours", "Days", "Weeks", "Months"])
+        dialog.epg_expiration_spinner.setValue(2)
+        dialog.epg_expiration_combo.setCurrentText("Weeks")
+        dialog.save_settings()
+        saved = ConfigManager()
+        self.assertEqual(saved.epg_expiration_unit, "Weeks")
+        self.assertEqual(saved.epg_expiration, 2 * 7 * 24 * 60 * 60)
+
+    def test_the_old_spelling_opens_as_months_and_saves_so(self):
+        self.config.config["epg_expiration_unit"] = "Monthes"
+        dialog = self.dialog()
+        self.assertEqual(dialog.epg_expiration_combo.currentText(), "Months")
+        dialog.save_settings()
+        self.assertEqual(ConfigManager().config["epg_expiration_unit"], "Months")
+
+    def test_a_saved_minutes_period_is_kept(self):
+        self.config.config["epg_expiration_unit"] = "Minutes"
+        dialog = self.dialog()
+        self.assertEqual(self.units(dialog), ["Minutes", "Hours", "Days", "Weeks", "Months"])
+        self.assertEqual(dialog.epg_expiration_combo.currentText(), "Minutes")
+        dialog.save_settings()
+        self.assertEqual(ConfigManager().epg_expiration_unit, "Minutes")
+
+
 class MaxStreamsTests(base.WindowCase):
     def test_max_streams_round_trips_through_the_provider_editor(self):
         dialog = OptionsDialog(self.window)

@@ -577,8 +577,12 @@ class OptionsDialog(QDialog):
         self.epg_expiration_spinner.setMaximum(9999)
         self.epg_expiration_spinner.setSingleStep(1)
         self.epg_expiration_combo = QComboBox()
-        self.epg_expiration_combo.addItems(["Minutes", "Hours", "Days", "Weeks", "Monthes"])
-        self.epg_expiration_combo.setCurrentText(self.config_manager.epg_expiration_unit)
+        unit = self.config_manager.epg_expiration_unit
+        units = list(ConfigManager.EPG_EXPIRATION_CHOICES)
+        if unit not in units and unit in ConfigManager.EPG_EXPIRATION_SECONDS:
+            units.insert(0, unit)  # "Minutes" from an older version stays as it was
+        self.epg_expiration_combo.addItems(units)
+        self.epg_expiration_combo.setCurrentText(unit)
         self.epg_expiration_layout.addWidget(self.epg_expiration_label)
         self.epg_expiration_layout.addWidget(self.epg_expiration_spinner)
         self.epg_expiration_layout.addWidget(self.epg_expiration_combo)
@@ -860,8 +864,8 @@ class OptionsDialog(QDialog):
             self.epg_settings_modified = True
         if self.config_manager.epg_expiration_value != self.epg_expiration_spinner.value():
             self.config_manager.epg_expiration_value = self.epg_expiration_spinner.value()
-        if self.config_manager.epg_expiration_unit != self.epg_expiration_combo.currentText():
-            self.config_manager.epg_expiration_unit = self.epg_expiration_combo.currentText()
+        # Always: an old "Monthes" reads as "Months" and is saved so.
+        self.config_manager.epg_expiration_unit = self.epg_expiration_combo.currentText()
 
         self.config_manager.selected_provider_name = self.selected_provider_name
 

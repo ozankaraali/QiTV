@@ -122,6 +122,14 @@ class ConfigManager:
     DEFAULT_OPTION_EPG_FILE = ""
     DEFAULT_OPTION_EPG_EXPIRATION_VALUE = 2
     DEFAULT_OPTION_EPG_EXPIRATION_UNIT = "Hours"
+    EPG_EXPIRATION_SECONDS = {  # the guide's update period, per unit
+        "Minutes": 60,  # no longer offered, still read
+        "Hours": 60 * 60,
+        "Days": 24 * 60 * 60,
+        "Weeks": 7 * 24 * 60 * 60,
+        "Months": 30 * 24 * 60 * 60,  # approximate month as 30 days
+    }
+    EPG_EXPIRATION_CHOICES = ("Hours", "Days", "Weeks", "Months")  # what Settings offers
     DEFAULT_OPTION_PREFER_HTTPS = False
     DEFAULT_OPTION_SSL_VERIFY = True
     DEFAULT_OPTION_LIVE_LATENCY = "normal"
@@ -314,22 +322,19 @@ class ConfigManager:
         "epg_expiration_value", DEFAULT_OPTION_EPG_EXPIRATION_VALUE
     )
     epg_expiration_unit = _config_property(
-        "epg_expiration_unit", DEFAULT_OPTION_EPG_EXPIRATION_UNIT
+        "epg_expiration_unit",
+        DEFAULT_OPTION_EPG_EXPIRATION_UNIT,
+        # Settings spelled it "Monthes" until 2.0: read and saved as "Months".
+        coerce=lambda unit: "Months" if unit == "Monthes" else unit,
     )
 
     @property
     def epg_expiration(self):
-        # Get expiration in seconds
-        if self.epg_expiration_unit == "Months":
-            return self.epg_expiration_value * 30 * 24 * 60 * 60  # Approximate month as 30 days
-        elif self.epg_expiration_unit == "Days":
-            return self.epg_expiration_value * 24 * 60 * 60
-        elif self.epg_expiration_unit == "Hours":
-            return self.epg_expiration_value * 60 * 60
-        elif self.epg_expiration_unit == "Minutes":
-            return self.epg_expiration_value * 60
-        else:
+        """The guide's update period in seconds."""
+        seconds = ConfigManager.EPG_EXPIRATION_SECONDS.get(self.epg_expiration_unit)
+        if seconds is None:
             raise ValueError(f"Unsupported expiration unit: {self.epg_expiration_unit}")
+        return self.epg_expiration_value * seconds
 
     xmltv_channel_map = _config_property("xmltv_channel_map", MultiKeyDict())
 

@@ -264,6 +264,44 @@ class TvConfigTests(unittest.TestCase):
         self.assertEqual(ConfigManager().last_live_channel, record)
 
 
+class EpgExpirationTests(unittest.TestCase):
+    """M6: Settings offered "Weeks" and "Monthes", which epg_expiration did not know: every
+    guide refresh failed."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "config.json"
+        for p in (
+            patch.object(ConfigManager, "_get_config_path", return_value=str(path)),
+            patch.object(ConfigManager, "_migrate_old_config"),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        self.config = ConfigManager()
+
+    def test_each_unit_in_seconds(self):
+        hour = 60 * 60
+        for unit, seconds in (
+            ("Minutes", 60),  # no longer offered, still read
+            ("Hours", hour),
+            ("Days", 24 * hour),
+            ("Weeks", 7 * 24 * hour),
+            ("Months", 30 * 24 * hour),
+            ("Monthes", 30 * 24 * hour),  # the old spelling
+        ):
+            with self.subTest(unit):
+                self.config.config["epg_expiration_unit"] = unit
+                self.config.epg_expiration_value = 2
+                self.assertEqual(self.config.epg_expiration, 2 * seconds)
+
+    def test_the_old_spelling_reads_and_saves_as_months(self):
+        self.config.config["epg_expiration_unit"] = "Monthes"
+        self.assertEqual(self.config.epg_expiration_unit, "Months")
+        self.config.epg_expiration_unit = "Monthes"
+        self.assertEqual(self.config.config["epg_expiration_unit"], "Months")
+
+
 class ConfigDirTests(unittest.TestCase):
     """Resolving the config path touches nothing; the manager creates the directory."""
 
