@@ -8,11 +8,12 @@ this pipeline never uses.
 
 Every request goes through one ``requests.Session`` per source, so cookies persist,
 cross-origin redirects drop ``Authorization`` and the SSL setting applies on every hop and
-nested resource. ``close()`` may be called from any thread, never blocks, and interrupts a
-TLS handshake, header read, body read or backoff wait at once. A DNS lookup
-(``getaddrinfo``) is not bounded at all, and a TCP connect is bounded only by the 60 s
-connect timeout per address. Credentials never reach error texts or log lines: all
-``SourceError`` messages are fixed strings.
+nested resource. Connecting and each response's headers and first body byte may take 60 s;
+after that, 10 s without a byte breaks the connection. ``close()`` may be called from any
+thread, never blocks, and interrupts a TLS handshake, header read, body read or backoff
+wait at once. A DNS lookup (``getaddrinfo``) is not bounded at all, and a TCP connect is
+bounded only by the 60 s connect timeout per address. Credentials never reach error texts
+or log lines: all ``SourceError`` messages are fixed strings.
 
 Platforms: on macOS and Linux, ``close()`` shuts down a duplicate descriptor of each live
 connection, which wakes any call blocked on it, and never closes a descriptor from another
@@ -56,7 +57,10 @@ from services.vlc_profile import DEFAULT_USER_AGENT
 
 log = logging.getLogger(__name__)
 
-_TIMEOUT = 60.0
+_TIMEOUT = 60.0  # connect, and a response's headers and first body byte
+# Once a body has sent bytes, this long without one is a broken connection: a provider that
+# stops sending but keeps the connection open is reconnected (raw TS) or skipped (HLS).
+_STALL_TIMEOUT = 10.0
 _MANIFEST_LIMIT = 2 * 1024 * 1024
 _READ_SIZE = 64 * 1024
 _SNIFF_SIZE = 10
@@ -418,7 +422,18 @@ def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnec
             finally:
                 self.ssl_context = None
 
-        namespace = {"_new_conn": new_conn, "close": close, "connect": connect}
+        def getresponse(self: HTTPConnection) -> Any:
+            sock = self.sock  # http.client drops it at once for a close-delimited body
+            response = base.getresponse(self)
+            response.qitv_socket = sock  # the reader shortens its timeout (`_Http.read`)
+            return response
+
+        namespace = {
+            "_new_conn": new_conn,
+            "close": close,
+            "connect": connect,
+            "getresponse": getresponse,
+        }
         return cast("type[HTTPConnection]", type(base.__name__, (base,), namespace))
 
     def pool_class(base: type[HTTPConnectionPool], connection: type[HTTPConnection]) -> Any:
@@ -509,6 +524,7 @@ class _Http:
         self._lock = threading.Lock()
         self._closed_event = threading.Event()
         self._response: Any = None
+        self._flowing: Any = None  # the latest response whose body sent bytes
         self._owner: int | None = None
         self._verify_ssl = verify_ssl
         self._stop = stop
@@ -589,6 +605,9 @@ class _Http:
             raise _ReadError("timeout" if timeout else "network") from None
         if self.closed:
             raise _Closed()
+        if data and response is not self._flowing:
+            self._flowing = response
+            _shorten_read_timeout(response)
         return data or b""
 
     def read_prefix(self, response: Any) -> bytes:
@@ -677,6 +696,22 @@ class _Http:
         if response is not None:
             _quietly(response.close, "response")
         _quietly(self.session.close, "session")
+
+
+def _shorten_read_timeout(response: Any) -> None:
+    """Media flowed: from now on a silence of `_STALL_TIMEOUT` breaks the connection.
+
+    Called on the reading thread, the only one that may touch a TLS socket. On Windows a
+    sliced TLS socket keeps the value as its deadline over the slices. A response from a
+    pool this module did not build (a SOCKS proxy) keeps the full read timeout.
+    """
+    sock = getattr(response.raw, "qitv_socket", None)
+    if sock is None:
+        return
+    try:
+        sock.settimeout(min(_STALL_TIMEOUT, _TIMEOUT))
+    except OSError as error:  # closed under the reader: its next read fails anyway
+        log.debug("A read timeout could not be shortened (%s).", type(error).__name__)
 
 
 def _guarded(

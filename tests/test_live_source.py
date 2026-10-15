@@ -5,7 +5,7 @@ sources yield raw TS bytes, so every decode assertion became a byte assertion. F
 synthetic (tests/ts_fixtures.py) and every server is local.
 """
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import gzip
 import logging
 import ntpath
@@ -951,6 +951,49 @@ high.m3u8
         self.assertTrue(logs)
         self.assertFalse(any("secret" in line or "127.0.0.1" in line for line in logs))
 
+    def test_a_raw_ts_body_that_stalls_after_data_reconnects_at_the_stall_timeout(self):
+        # Once media flowed, a silent connection is broken after the stall timeout (10 s in
+        # production) instead of the 60 s read timeout. The first byte keeps the full timeout.
+        head = self.video[: 188 * 50]
+        rest = self.video[188 * 50 :]
+        cases = [(False, False), (False, True)]
+        if shutil.which("openssl"):
+            cases += [(True, False), (True, True)]
+        else:  # the plain cases still run
+            warnings.warn("openssl is missing: the TLS stall cases were skipped", stacklevel=1)
+        for tls, keep_alive in cases:
+            release = threading.Event()
+            marks = {}
+
+            def live(_request, count, release=release, marks=marks, keep_alive=keep_alive):
+                if count > 1:
+                    marks.setdefault("reconnected", time.monotonic())
+                    return 200, {"Content-Length": str(len(rest))}, rest
+
+                def stalled(request):
+                    time.sleep(0.6)  # a first byte slower than the stall timeout
+                    request.wfile.write(head)
+                    request.wfile.flush()
+                    marks["stalled"] = time.monotonic()
+                    release.wait(3)  # then the connection stays open, silent
+
+                headers = {"Content-Length": str(1 << 30)} if keep_alive else {}
+                return 200, headers, stalled
+
+            with self.subTest(tls=tls, keep_alive=keep_alive), ExitStack() as stack:
+                context = stack.enter_context(self.tls_context()) if tls else None
+                stack.enter_context(insecure())
+                stack.callback(release.set)
+                server = self.server({"/live.ts": live}, tls=context, keep_alive=keep_alive)
+                fast = {"_STALL_TIMEOUT": 0.3, "_RECONNECT_DELAYS": FAST_RETRIES}
+                with patch.multiple(source_module, **fast):
+                    parts = media(server.url + "/live.ts", verify_ssl=not tls)
+                self.assertEqual(parts, [head, Discontinuity(), rest])
+                self.assertEqual(server.counts["/live.ts"], 2)
+                waited = marks["reconnected"] - marks["stalled"]
+                self.assertGreaterEqual(waited, 0.25)
+                self.assertLess(waited, 1.3, "the stalled connection was kept too long")
+
     def test_raw_ts_reconnect_gives_up_after_six_tries(self):
         half = len(self.video) // 2 // 188 * 188
 
@@ -1280,6 +1323,42 @@ high.m3u8
         finally:
             release.set()
         self.assertEqual(parts, [self.video + head, Discontinuity(), self.next_video + self.video])
+
+    def test_a_segment_that_stalls_after_data_is_skipped_at_the_stall_timeout(self):
+        release = threading.Event()
+        head = self.video[: 188 * 100]
+        marks = {}
+
+        def stalled(request):
+            request.wfile.write(head)
+            request.wfile.flush()
+            marks["stalled"] = time.monotonic()
+            release.wait(3)
+
+        def next_segment(_request, _count):
+            marks.setdefault("skipped", time.monotonic())
+            return 200, {}, self.next_video
+
+        def playlist(_request, count):
+            return 200, {}, hls(count, [f"s{count}.ts"], ended=count >= 4)
+
+        server = self.server(
+            {
+                "/live.m3u8": playlist,
+                "/s1.ts": (200, {}, self.video),
+                "/s2.ts": (200, {"Content-Length": str(len(self.video))}, stalled),
+                "/s3.ts": next_segment,
+                "/s4.ts": (200, {}, self.video),
+            }
+        )
+        try:
+            with patch.object(source_module, "_STALL_TIMEOUT", 0.3):
+                parts = media(server.url + "/live.m3u8", live_delay=1.0)
+        finally:
+            release.set()
+        self.assertEqual(parts, [self.video + head, Discontinuity(), self.next_video + self.video])
+        # The skip comes at the stall timeout; s3 then waits for the next reload (1 s).
+        self.assertLess(marks["skipped"] - marks["stalled"], 2.0)
 
     def test_a_frozen_live_playlist_times_out(self):
         server = self.server(
@@ -1674,6 +1753,9 @@ class WindowsInterruptModeTests(SourceTestCase):
     )
     test_tls_waits_longer_than_a_slice_keep_the_overall_timeout = (
         LiveSourceTests.test_tls_waits_longer_than_a_slice_keep_the_overall_timeout
+    )
+    test_a_raw_ts_body_that_stalls_after_data_reconnects_at_the_stall_timeout = (
+        LiveSourceTests.test_a_raw_ts_body_that_stalls_after_data_reconnects_at_the_stall_timeout
     )
 
 
