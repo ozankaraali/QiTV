@@ -715,7 +715,7 @@ class PlaybackMixin:
                 # STB uses simple episode numbers
                 if isinstance(ep, int):
                     episode_list.append(self._build_stb_episode_item(ep, season_data))
-                elif isinstance(ep, str) and ep.strip().isdigit():
+                elif isinstance(ep, str) and ep.strip().isdecimal():
                     episode_list.append(self._build_stb_episode_item(int(ep), season_data))
                 elif isinstance(ep, dict):
                     ep_num = ep.get("episode_num") or ep.get("series") or 1

@@ -155,5 +155,15 @@ class ExportLinkSchemeTests(unittest.TestCase):
         self.assertEqual(stb_portal_base("http://portal.test/c/", True), "https://portal.test")
 
 
+class StbEpisodeStringTests(unittest.TestCase):
+    def test_non_decimal_digit_strings_are_skipped_not_crashing(self):
+        host = _host(PlaybackMixin, {"type": "STB"}, False)
+        built = []
+        host._build_stb_episode_item = lambda num, season: built.append(num) or {"n": num}
+        items = host._build_episode_list_from_season({"series": ["1", " 2 ", "\u00b2", 3]})
+        self.assertEqual(built, [1, 2, 3])
+        self.assertEqual(len(items), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
