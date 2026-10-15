@@ -152,6 +152,11 @@ class Source(Protocol):
 
     def close(self) -> None: ...
 
+    def wait_closed(self, timeout: float) -> bool:
+        """After ``close()``: wait up to ``timeout`` until the upstream connection is closed
+        (on Windows a TLS reader closes it within one 0.25 s slice); True once it is."""
+        ...
+
 
 class _Closed(Exception):
     """The source was closed or stopped; iteration ends quietly."""
@@ -528,6 +533,7 @@ class _Http:
         self._closed_event = threading.Event()
         self._response: Any = None
         self._flowing: Any = None  # the latest response whose body sent bytes
+        self._released = threading.Event()  # close() has closed the response and session
         self._owner: int | None = None
         self._verify_ssl = verify_ssl
         self._stop = stop
@@ -695,10 +701,16 @@ class _Http:
                 daemon=True,
             ).start()
 
+    def wait_closed(self, timeout: float) -> bool:
+        return self._released.wait(timeout)
+
     def _release_all(self, response: Any) -> None:
-        if response is not None:
-            _quietly(response.close, "response")
-        _quietly(self.session.close, "session")
+        try:
+            if response is not None:
+                _quietly(response.close, "response")
+            _quietly(self.session.close, "session")
+        finally:
+            self._released.set()
 
 
 def _shorten_read_timeout(response: Any) -> None:
@@ -759,6 +771,9 @@ class TsSource:
 
     def close(self) -> None:
         self._http.close()
+
+    def wait_closed(self, timeout: float) -> bool:
+        return self._http.wait_closed(timeout)
 
     def _run(self) -> Iterator[bytes | Discontinuity]:
         http, response, prefix = self._http, self._response, self._prefix
@@ -821,6 +836,9 @@ class LocalTsSource(TsSource):
             file, self._file = self._file, None
         if file is not None:
             file.close()
+
+    def wait_closed(self, timeout: float) -> bool:
+        return True  # no connection: close() is immediate
 
 
 def _video_compatible(variant):
@@ -1083,6 +1101,9 @@ class HlsSource:
 
     def close(self) -> None:
         self._http.close()
+
+    def wait_closed(self, timeout: float) -> bool:
+        return self._http.wait_closed(timeout)
 
     def _mark(self) -> None:
         # A break before the first segment needs no marker.

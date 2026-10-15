@@ -22,11 +22,13 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import urlopen
+import warnings
 
-from http_fixtures import LocalSource, leaf
+from http_fixtures import LocalSource, leaf, tls_server_context
 from ts_fixtures import PMT_PID, make_stream
+from urllib3.exceptions import InsecureRequestWarning
 
-from services.live import worker
+from services.live import source as source_module, worker
 from services.live.worker import helper_main
 
 REPO = Path(__file__).resolve().parents[1]
@@ -800,6 +802,87 @@ class OutboxTests(unittest.TestCase):
         outbox.close(0.3)
         self.assertLess(time.monotonic() - started, 0.5)
         connection.gate.set()
+
+
+class InProcessHelper:
+    """A `_Helper` command loop on a thread, with the parent's end of its pipe."""
+
+    def __init__(self, test):
+        temporary = tempfile.TemporaryDirectory(prefix="qitv-live-worker-test-")
+        test.addCleanup(temporary.cleanup)
+        self.parent, child = multiprocessing.Pipe(duplex=True)
+        self.helper = worker._Helper(child, temporary.name)
+        self.loop = threading.Thread(target=self.helper.run, daemon=True)
+        self.loop.start()
+        self.messages = []
+        test.addCleanup(child.close)  # cleanups run last-in first-out: after `stop`
+        test.addCleanup(self.stop)
+        self.base_url = self.wait_for(lambda message: message[0] == "hello")[1]
+
+    def wait_for(self, predicate, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            if self.parent.poll(min(remaining, 0.05)):
+                message = self.parent.recv()
+                self.messages.append(message)
+                if predicate(message):
+                    return message
+        raise AssertionError(f"no matching helper message among {self.messages!r}")
+
+    def stop(self):
+        self.parent.send(("shutdown",))
+        self.loop.join(5)
+        self.helper.shutdown()
+        self.parent.close()
+
+
+class ClosedAfterReleaseTests(unittest.TestCase):
+    """The connection budget takes "closed" for "the old stream is closed" (spec §4.2)."""
+
+    def test_closed_follows_the_close_of_a_windows_tls_upstream(self):
+        # Forced Windows mode: a TLS socket is never touched from another thread, so its
+        # reader notices the close within one 0.25 s slice and only then closes it.
+        created = []
+        sliced = source_module._sliced_tls_socket
+
+        def recording(interrupter):
+            base = sliced(interrupter)
+
+            class Recorded(base):
+                @classmethod
+                def _create(cls, *args, **kwargs):
+                    sock = super()._create(*args, **kwargs)
+                    created.append(sock)
+                    return sock
+
+            return Recorded
+
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def stalled(request):
+            request.wfile.write(make_stream(4))
+            request.wfile.flush()
+            release.wait(10)  # the connection stays open, silent
+
+        context = self.enterContext(tls_server_context())
+        upstream = LocalSource({SECRET_PATH: (200, {}, stalled)}, tls=context)
+        self.addCleanup(upstream.close)
+        self.enterContext(patch.object(source_module, "_INTERRUPT_OWNERS", True))
+        self.enterContext(patch.object(source_module, "_sliced_tls_socket", recording))
+        self.enterContext(warnings.catch_warnings())
+        warnings.simplefilter("ignore", InsecureRequestWarning)
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "tls", upstream.url + SECRET_PATH, {}, False, RAM, 6.0))
+        helper.wait_for(lambda message: message == ("ready", "tls"))
+        time.sleep(0.3)  # the reader now waits in a TLS slice
+        started = time.monotonic()
+        helper.parent.send(("close", "tls"))
+        helper.wait_for(lambda message: message == ("closed", "tls"))
+        still_open = [sock for sock in created if sock.fileno() != -1]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(still_open, [], '"closed" came before the upstream connection closed')
+        self.assertLess(time.monotonic() - started, 1.0)
 
 
 class StuckSessionTests(unittest.TestCase):

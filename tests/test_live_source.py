@@ -14,7 +14,6 @@ import re
 import shutil
 import socket
 import ssl
-import subprocess
 import tempfile
 import threading
 import time
@@ -24,7 +23,7 @@ import warnings
 
 from Cryptodome.Cipher import AES
 from Cryptodome.Util.Padding import pad
-from http_fixtures import LocalSource, leaf
+from http_fixtures import LocalSource, leaf, tls_server_context
 import requests
 import ts_fixtures
 from urllib3.exceptions import InsecureRequestWarning
@@ -134,34 +133,7 @@ class SourceTestCase(unittest.TestCase):
 
     @contextmanager
     def tls_context(self):
-        openssl = shutil.which("openssl")
-        if not openssl:
-            self.skipTest("openssl is required to generate a local test certificate")
-        with tempfile.TemporaryDirectory(prefix="qitv-source-tls-") as directory:
-            key = Path(directory) / "key.pem"
-            certificate = Path(directory) / "cert.pem"
-            subprocess.run(
-                [
-                    openssl,
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "rsa:2048",
-                    "-nodes",
-                    "-days",
-                    "1",
-                    "-subj",
-                    "/CN=localhost",
-                    "-keyout",
-                    str(key),
-                    "-out",
-                    str(certificate),
-                ],
-                check=True,
-                capture_output=True,
-            )
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(certificate, key)
+        with tls_server_context() as context:  # skips the test without openssl
             yield context
 
     @contextmanager

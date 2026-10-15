@@ -8,13 +8,62 @@ accepted.
 """
 
 from collections import Counter
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+import shutil
 import ssl
+import subprocess
+import tempfile
 import threading
+import unittest
 
 from services.live.server import LoopbackHTTPServer, ThreadingLoopbackHTTPServer
 
-__all__ = ["LocalSource", "LoopbackHTTPServer", "ThreadingLoopbackHTTPServer", "leaf"]
+__all__ = [
+    "LocalSource",
+    "LoopbackHTTPServer",
+    "ThreadingLoopbackHTTPServer",
+    "leaf",
+    "tls_server_context",
+]
+
+
+@contextmanager
+def tls_server_context():
+    """A server TLS context with a fresh self-signed certificate for localhost.
+
+    Raises ``unittest.SkipTest`` without an ``openssl`` binary to generate it.
+    """
+    openssl = shutil.which("openssl")
+    if not openssl:
+        raise unittest.SkipTest("openssl is required to generate a local test certificate")
+    with tempfile.TemporaryDirectory(prefix="qitv-source-tls-") as directory:
+        key = Path(directory) / "key.pem"
+        certificate = Path(directory) / "cert.pem"
+        subprocess.run(
+            [
+                openssl,
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-keyout",
+                str(key),
+                "-out",
+                str(certificate),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certificate, key)
+        yield context
 
 
 def leaf(*segments, ended=True, extra=""):

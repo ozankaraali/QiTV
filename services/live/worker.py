@@ -10,7 +10,8 @@ Commands (parent to helper):
 - `("open", sid, url, headers, verify_ssl, ring, live_delay)`, where `ring` is
   `{"kind": "ram", "max_bytes": n}` or `{"kind": "disk", "root": path, "dir": name,
   "max_bytes": n}` (`root` defaults to the helper's own root);
-- `("close", sid)`, always answered by `("closed", sid)`;
+- `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
+  connection is closed but at most 0.5 s later;
 - `("shutdown",)`.
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
@@ -31,9 +32,12 @@ the pipe buffers a few KiB, and a parent that stops reading for a while must nev
 the command loop or a session. Queued states of one session merge (see `_Outbox`).
 
 Each session runs source, segmenter, ring and timeline on its own thread. `close` never
-waits for that thread: a DNS lookup or TCP connect cannot be interrupted, so a closed
-session's thread may linger up to the 60 s connect timeout. Once cancelled it sends
-nothing and touches no ring except to tear its own down.
+blocks the command loop: a short-lived thread sends "closed" once the session's thread has
+released its source (on Windows a TLS reader notices the close within one 0.25 s slice and
+only then closes its socket), waiting at most 0.5 s. It never waits for a DNS lookup or a
+TCP connect, which cannot be interrupted: a closed session's thread may linger up to the
+60 s connect timeout. Once cancelled it sends nothing and touches no ring except to tear
+its own down.
 
 This module stays import-light so that spawn starts fast: the source (requests), the
 ring and the server (Qt's QLockFile) are imported only inside the helper.
@@ -68,6 +72,7 @@ _NOTIFY_INTERVAL = 0.25
 # The parent terminates the helper 0.5 s after "shutdown"; both waits are usually instant.
 _SHUTDOWN_GRACE = 0.25  # for session threads to remove their disk buffers
 _FLUSH_GRACE = 0.25  # for the writer to deliver what is queued
+_RELEASE_WAIT = 0.5  # for a closed session to close its upstream before "closed" is sent
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # as the stream server requires
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNSUPPORTED = "The channel's stream cannot be time-shifted."
@@ -204,6 +209,7 @@ class _Session:
         # is queued, so nothing from this session follows its "closed".
         self.cancelled = False
         self.lock = threading.Lock()
+        self.released = threading.Event()  # the session holds no upstream connection anymore
         self._helper = helper
         self._url = url
         self._headers = headers
@@ -243,7 +249,10 @@ class _Session:
                 with contextlib.suppress(_Cancelled):
                     self._fail("crashed", _INTERNAL)
             finally:
-                self._close_source()
+                try:
+                    self._close_source()
+                finally:
+                    self.released.set()
             # Keep serving the buffer until the parent closes the session.
             self.stop.wait()
         finally:
@@ -457,6 +466,8 @@ class _Session:
             source = self._source
         if source is not None:
             source.close()  # a finished or failed session holds no upstream connection
+            if not source.wait_closed(_RELEASE_WAIT):
+                _LOG.info("A live upstream connection is still closing.")
 
     def _teardown(self) -> None:
         with self.lock:
@@ -537,10 +548,22 @@ class _Helper:
 
     def _close(self, sid: str) -> None:
         session = self._sessions.pop(sid, None)
-        if session is not None:
-            session.cancel()
-            self.server.remove_session(sid)  # ends that session's loopback responses
-        self.send(("closed", sid))
+        if session is None:
+            self.send(("closed", sid))
+            return
+        session.cancel()
+        self.server.remove_session(sid)  # ends that session's loopback responses
+        if session.released.is_set():
+            self.send(("closed", sid))
+            return
+        threading.Thread(
+            target=self._closed_once_released, args=(session,), name="qitv-live-close", daemon=True
+        ).start()
+
+    def _closed_once_released(self, session: _Session) -> None:
+        """The budget opens the next stream on "closed": first let this one close (spec §4.2)."""
+        session.released.wait(_RELEASE_WAIT)
+        self.send(("closed", session.sid))
 
     def fail_all(self) -> None:
         """The command loop failed: cancel every session, silently, before exiting.
