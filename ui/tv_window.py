@@ -187,12 +187,12 @@ class TVWindow(QMainWindow):
         # second is remembered on entry, for an exit the window did not ask for (the green
         # button), after which the platform may restore another frame.
         self._fullscreen_restore: Optional[QRect] = None
+        self._pre_fullscreen: Optional[QRect] = None
         self._exit_watch = _FullscreenExitWatch(self, self._fit_to_screen)
         self._fit_fallback = QTimer(self, singleShot=True, interval=FULLSCREEN_EXIT_MS)
         self._fit_fallback.timeout.connect(self._fit_to_screen)
         self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
         self._dragged = False  # the last press on the video moved the mini player
-        self._pre_fullscreen: Optional[QRect] = None
         self._pressed = False  # the left button is down on the video
         self._click_on_release = False  # a click that came while the button was still down
 
@@ -400,13 +400,13 @@ class TVWindow(QMainWindow):
             self._leave_mini()
         if self.isFullScreen():
             self._fullscreen_restore = self.normalGeometry()
+        else:
+            self._pre_fullscreen = None  # remembered afresh as fullscreen begins
         self.setWindowState(self.windowState() ^ Qt.WindowState.WindowFullScreen)
 
     def leave_fullscreen(self) -> None:
         if self.isFullScreen() and not self._closing:
             self._fullscreen_restore = self.normalGeometry()
-        else:
-            self._pre_fullscreen = None  # remembered afresh as fullscreen begins
             self.setWindowState(self.windowState() & ~Qt.WindowState.WindowFullScreen)
 
     def toggle_mini_player(self) -> None:
@@ -589,17 +589,12 @@ class TVWindow(QMainWindow):
     def _start(self) -> None:
         if self._closing:
             return
+        self._fit_restored()
         self._bind_video()
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self.controller.start()
         self.epg_refresh.start()
 
-        self._fit_restored()
-    def _bind_video(self) -> None:
-        """Hand libVLC the surface's native window; again only if its id changed.
-
-        On macOS a window flag change (the mini player) keeps the same view.
-        """
     def _fit_restored(self) -> None:
         """Bring the saved geometry onto a screen: its monitor may be gone (Minor 13).
 
@@ -621,6 +616,11 @@ class TVWindow(QMainWindow):
             logger.info("Moved the restored window onto the screen: %s", fitted.getRect())
             self.setGeometry(fitted)
 
+    def _bind_video(self) -> None:
+        """Hand libVLC the surface's native window; again only if its id changed.
+
+        On macOS a window flag change (the mini player) keeps the same view.
+        """
         if not _native_video_handles():
             if self._bound_handle is None:
                 self._bound_handle = 0

@@ -712,9 +712,6 @@ class GeometryRestoreTests(WindowCase):
         self.assertEqual(geometry.getRect(), (140, 90, 1024, 576))
 
 
-class FitToAreaTests(unittest.TestCase):
-    AREA = QRect(0, 25, 1024, 743)  # a 1024×768 display below the macOS menu bar
-    TITLE = QMargins(0, 28, 0, 0)
 class OffScreenRestoreTests(WindowCase):
     """A geometry saved on a monitor that is gone (Minor 13)."""
 
@@ -732,6 +729,9 @@ class OffScreenRestoreTests(WindowCase):
         self.assertEqual(window.size().toTuple(), (640, 400))
 
 
+class FitToAreaTests(unittest.TestCase):
+    AREA = QRect(0, 25, 1024, 743)  # a 1024×768 display below the macOS menu bar
+    TITLE = QMargins(0, 28, 0, 0)
 
     def test_a_window_that_fits_stays_put(self):
         rect = QRect(60, 103, 800, 450)
@@ -773,9 +773,6 @@ class FullscreenExitTests(WindowCase):
         )
         self.assertTrue(area.contains(window.frameGeometry()), window.frameGeometry())
 
-    def test_a_window_that_fits_comes_back_unchanged(self):
-        self.show()
-        window = self.window
     def test_an_exit_the_window_did_not_ask_for_returns_to_the_geometry_from_before(self):
         # The green button: the platform leaves fullscreen itself and may restore another
         # frame (macOS 26 restored the size first asked for).
@@ -792,6 +789,9 @@ class FullscreenExitTests(WindowCase):
             wait_until(lambda: window.geometry() == before, 4000), f"{window.geometry()}"
         )
 
+    def test_a_window_that_fits_comes_back_unchanged(self):
+        self.show()
+        window = self.window
         area = window.screen().availableGeometry()
         window.setGeometry(area.x() + 40, area.y() + 40, area.width() // 2, area.height() // 2)
         before = window.geometry()
