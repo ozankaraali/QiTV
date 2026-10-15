@@ -34,7 +34,14 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
-from ui.pip_controls import ALREADY_LARGE, NO_PREVIOUS, OPEN_PIP_FIRST, PIP_LIVE_ONLY
+from ui.pip_controls import (
+    ALREADY_LARGE,
+    NO_PREVIOUS,
+    OPEN_PIP_FIRST,
+    PIP_LIVE_ONLY,
+    SWITCHING,
+    SWITCHING_MS,
+)
 from ui.tv_controller import Overlays, TVController, scrub
 
 NOW = datetime(2026, 10, 15, 20, 30, tzinfo=timezone.utc)
@@ -3724,6 +3731,40 @@ class PipTests(PipCase):
         self.assertFalse(self.sessions.pip_open())
         self.assertEqual(self.pip_live.calls[-1], ("stop",))
 
+    def test_an_external_play_closes_the_small_picture_first(self):
+        # Review M6: external players are outside the budget; the PiP gives its slot back.
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.config.play_in_vlc = True
+        self.play(2)
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.pip_live.calls[-1], ("stop",))
+
+    def test_play_in_vlc_from_the_menu_closes_the_small_picture_first(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.nav.reset_to("live", "10")
+        node = self.nav.children(self.nav.path[-1])[2]
+        shown = []
+        with mock.patch.object(QMenu, "popup", lambda menu, pos, *a: shown.append(menu)):
+            self.drawer.contextRequested.emit(node, QPoint(40, 50))
+        self.addCleanup(shown[0].deleteLater)
+        next(a for a in shown[0].actions() if a.text() == "Play in VLC").trigger()
+        self.ready("http://stream/3")
+        self.assertFalse(self.sessions.pip_open())
+
+    def test_a_full_provider_says_so_before_asking_for_a_link(self):
+        # Review M7: an STB portal mints a link per request; its one stream is taken.
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB"}
+        self.start_large(0)
+        self.start_large(1)
+        links = len(self.catalog.links)
+        self.controller.handle(Action.PIP)
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(
+            self.toast.messages()[-1], ("Your provider allows 1 stream at a time", "error")
+        )
+
     def test_a_provider_setup_while_the_pips_link_is_on_its_way_asks_again(self):
         # Review I1: a setup drops every link request; the PiP's must not stay stuck.
         self.catalog.providerReady.emit("Home")
@@ -3769,6 +3810,9 @@ class PipTests(PipCase):
         self.assertEqual(self.live.calls[-1], ("stop",))
         self.controller.handle(Action.SWAP)
         self.assertIs(self.sessions.large(), self.main_slot)  # nothing swapped
+        self.assertEqual(self.toast.messages()[-1], (SWITCHING, "info"))  # review M1
+        self.frame.swapRequested.emit()  # a click on the PiP says so too
+        self.assertEqual(self.toast.named("show_message")[-1], (SWITCHING, "info", SWITCHING_MS))
         self.live.released.emit()
         self.assertTrue(wait_until(lambda: self.live.named("start")[-1][0] == "http://stream/3"))
         self.controller.handle(Action.SWAP)

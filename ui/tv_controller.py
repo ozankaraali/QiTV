@@ -79,7 +79,7 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import BannerInfo, ZapBanner
-from ui.pip_controls import OPEN_PIP_FIRST, PipControls
+from ui.pip_controls import OPEN_PIP_FIRST, SWITCHING, SWITCHING_MS, PipControls
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
 
@@ -277,13 +277,14 @@ class TVController(QObject):
                 catalog=catalog,
                 config=config,
                 lanes=self._lanes,
+                budget=self.budget,
                 live_start=self._live_controls.live_start,
                 previous=self._previous_channel,
                 large_channel=lambda: self._channel,
                 vod=self.vod_current,
                 closed=lambda: self._closed,
                 toast=self._toast,
-                swap=self.swap,
+                swap=self._user_swap,
                 mixer=self._mixer.open_small,
                 parent=self,
             )
@@ -845,6 +846,7 @@ class TVController(QObject):
         self._audio_id = self._subtitle_id = None
         self._live_controls.new_target()  # the old channel's ticks and held notice
         if launcher is not None:
+            self._close_pip()  # an external player is outside the budget: the PiP gives way
             if target.live and target.zapped:
                 # Each zap step would start a player: only the one zapping settles on does.
                 self._external_pending = (target, url)
@@ -1002,7 +1004,14 @@ class TVController(QObject):
         if not sessions.pip_open():
             self._toast(OPEN_PIP_FIRST)
             return
-        self.swap()
+        self._user_swap()
+
+    def _user_swap(self) -> bool:
+        """S or a click on the PiP: a swap that has to wait says so."""
+        swapped = self.swap()
+        if not swapped and self.sessions is not None and self.sessions.pip_open():
+            self._toast(SWITCHING, "info", SWITCHING_MS)
+        return swapped
 
     def open_pip(self, channel: dict, *, group_key: str, channels: list[dict]) -> None:
         """Open `channel` small (the drawer's menu or Ctrl/⌘+P), or show it in the PiP."""
@@ -1530,6 +1539,7 @@ class TVController(QObject):
         if self._closed:
             return
         self._cancel_external()
+        self._close_pip()  # an external player is outside the budget: the PiP gives way
         self._autoplay.drop()
         self._lanes.drop_tune()  # e.g. an STB retry still on its way would open in-app
 

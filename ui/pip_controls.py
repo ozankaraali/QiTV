@@ -27,7 +27,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import QObject, Signal
 
 from services.live.stay_live import TARGETS
-from services.sessions import SessionManager, Slot, limit_message
+from services.sessions import PURPOSE, SessionManager, Slot, limit_message
 from services.zapping import ZapContext
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
@@ -40,6 +40,8 @@ PIP_LIVE_ONLY = "Picture-in-picture is for live TV"
 NO_PREVIOUS = "No previous channel yet"
 OPEN_PIP_FIRST = "Open picture-in-picture first (P)"
 ALREADY_LARGE = "This channel is already playing"
+SWITCHING = "Switching…"  # a swap asked for while the large picture's channel opens
+SWITCHING_MS = 1500
 SHIFTED_MARGIN_S = 1.0  # the label says "−MM:SS" once the lag is this far beyond the target
 ERROR_MS = 6000
 
@@ -66,6 +68,7 @@ class PipControls(QObject):
         catalog,
         config,
         lanes: LinkLanes,
+        budget,
         live_start: Callable[[Target, str], LiveStart],
         previous: Callable[[], tuple[Optional[dict], Optional[ZapContext]]],
         large_channel: Callable[[], Optional[dict]],
@@ -78,7 +81,7 @@ class PipControls(QObject):
     ) -> None:
         """`frame` is the PipFrame and `label` the PipLabel (None in tests without them).
 
-        `live_start(target, url)` is a main tune's LiveStart; `previous()` the channel tuned
+        `budget` is the ConnectionBudget; `live_start(target, url)` a main tune's LiveStart; `previous()` the channel tuned
         before the large picture's, with its zap group; `large_channel()` what the large
         picture plays; `vod()` whether a movie or an episode is current; `swap()` the
         shell's swap; `mixer()` opens the mixer on the PiP's row.
@@ -91,6 +94,7 @@ class PipControls(QObject):
         self.catalog = catalog
         self.config = config
         self._lanes = lanes
+        self._budget = budget
         self._live_start = live_start
         self._previous = previous
         self._large_channel = large_channel
@@ -184,6 +188,8 @@ class PipControls(QObject):
             return
         if self.small_showing(channel) is not None:
             return  # already small
+        if self._limit_reached():
+            return
         title = str(channel.get("name") or "")
         group = context.group_key if context is not None else ""
         target = Target(channel, "live", title, group_key=group)
@@ -204,6 +210,20 @@ class PipControls(QObject):
             self._request(wanted[0])
         else:
             self._wanted = None
+
+    def _limit_reached(self) -> bool:
+        """The provider's limit leaves no stream for a small picture: say so before asking
+        for a link (an STB portal mints one per request, and allows one stream)."""
+        provider = self.catalog.current_provider()
+        limit = self._budget.limit_for(provider, self.catalog.max_connections())
+        if limit is None:
+            return False
+        name = str(provider.get("name", ""))
+        others = [p for p in self._budget.holders(name) if p != PURPOSE]  # its own go back
+        if limit > 0 and len(others) < limit:
+            return False
+        self._toast(limit_message(limit), "error", ERROR_MS)
+        return True
 
     def close(self) -> None:
         """Close the small picture, or forget the one waiting to open."""
