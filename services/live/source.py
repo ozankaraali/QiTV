@@ -13,21 +13,32 @@ TLS handshake, header read, body read or backoff wait at once. A DNS lookup
 (``getaddrinfo``) is not bounded at all, and a TCP connect is bounded only by the 60 s
 connect timeout per address. Credentials never reach error texts or log lines: all
 ``SourceError`` messages are fixed strings.
+
+Platforms: on macOS and Linux, ``close()`` shuts down a duplicate descriptor of each live
+connection, which wakes any call blocked on it, and never closes a descriptor from another
+thread. On Windows a ``shutdown()`` wakes nothing blocked in Winsock (on a duplicate or on
+the original handle); only closing the handle the call waits on does. There ``close()``
+closes the owning socket objects themselves (plain sockets from creation, TLS sockets
+before their handshake), so the reader's own later close is a no-op.
 """
 
 from __future__ import annotations
 
+import _socket
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 import logging
 import os
 import socket
+import ssl
+import sys
 import threading
 import time
 from typing import Any, BinaryIO, Protocol, TypeVar, cast
 from urllib.parse import urljoin, urlsplit
 from urllib.request import url2pathname
+import weakref
 
 from Cryptodome.Cipher import AES
 from Cryptodome.Util.Padding import unpad
@@ -37,6 +48,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import ReadTimeoutError
+from urllib3.util.ssl_ import create_urllib3_context, resolve_cert_reqs, resolve_ssl_version
 
 from services.vlc_profile import DEFAULT_USER_AGENT
 
@@ -65,6 +77,9 @@ _SEGMENT_FAILURES = 3
 _SKIPPABLE_STATUS = (404, 410)
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _IDENTITY = {"Accept-Encoding": "identity"}
+_WINDOWS = sys.platform == "win32"
+# Interrupt through the owning socket objects instead of duplicates (see the docstring).
+_INTERRUPT_OWNERS = _WINDOWS
 
 _OPEN_FAILED = "The channel could not be opened for time-shift."
 _HTTP_FAILED = "The channel could not be reached over HTTP."
@@ -208,20 +223,58 @@ def _shutdown(sock: socket.socket) -> None:
         pass  # already closed or never connected: nothing left to interrupt
 
 
-class _Interrupter:
-    """A duplicate descriptor per live connection, so another thread can shut it down.
+def _abort(sock: socket.socket) -> None:
+    """Interrupt a call blocked on ``sock`` (an owning socket object) from another thread.
 
-    The duplicate shares the kernel socket: shutting it down wakes a TLS handshake, header
-    read or body read blocked on the original descriptor. Duplicates are only closed under
-    the lock, so a recycled descriptor number is never touched.
+    The shutdown bypasses ``SSLSocket.shutdown``, which would drop the reader's TLS state.
+    On Windows only, the handle is then closed: nothing else wakes a blocked Winsock call.
+    The C-level close marks the object's descriptor invalid under the GIL before releasing
+    the handle, so the reader's later calls fail and its own close does nothing. POSIX
+    never closes here: on macOS a close right after the shutdown can swallow its wakeup.
+    """
+    try:
+        _socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except OSError:
+        pass  # not connected or already closed
+    if not _WINDOWS:
+        return
+    try:
+        _socket.socket.close(sock)
+    except OSError:
+        pass  # the peer already reset it; the handle is released either way
+
+
+class _Interrupter:
+    """Lets another thread interrupt every live connection of one source.
+
+    macOS and Linux: a duplicate descriptor per connection. It shares the kernel socket,
+    so shutting it down wakes a TLS handshake, header read or body read blocked on the
+    original descriptor. Duplicates are only closed under the lock, so a recycled
+    descriptor number is never touched.
+
+    Windows: the owning socket objects (held weakly). Only closing a handle wakes a call
+    blocked on it there; see ``_abort``. (Tests force this mode elsewhere, where the
+    shutdown alone wakes the reader.)
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._handles: dict[int, socket.socket] = {}
+        self._owners: weakref.WeakSet[socket.socket] = weakref.WeakSet()
         self._interrupted = False
 
+    def adopt(self, sock: socket.socket) -> None:
+        """Windows: a socket object that owns its handle (plain, or TLS before its handshake)."""
+        with self._lock:
+            if not self._interrupted:
+                self._owners.add(sock)
+                return
+        _abort(sock)  # the source closed while this connection was being made
+
     def track(self, connection: object, sock: socket.socket) -> None:
+        if _INTERRUPT_OWNERS:
+            self.adopt(sock)
+            return
         with self._lock:
             if not self._interrupted:
                 self._forget_locked(connection)
@@ -248,9 +301,35 @@ class _Interrupter:
                 _shutdown(handle)
                 handle.close()
             self._handles.clear()
+            for owner in list(self._owners):
+                _abort(owner)
+
+
+def _tls_context(connection: Any, socket_class: type[ssl.SSLSocket]) -> ssl.SSLContext:
+    """The context urllib3 builds for a connection without one, plus ``socket_class``."""
+    context = create_urllib3_context(
+        ssl_version=resolve_ssl_version(connection.ssl_version),
+        ssl_minimum_version=connection.ssl_minimum_version,
+        ssl_maximum_version=connection.ssl_maximum_version,
+        cert_reqs=resolve_cert_reqs(connection.cert_reqs),
+    )
+    # urllib3 loads the system roots itself only into a context it built (requests always
+    # passes its CA bundle when verifying, so this matters only without verification).
+    if not (connection.ca_certs or connection.ca_cert_dir or connection.ca_cert_data):
+        context.load_default_certs()
+    context.sslsocket_class = socket_class
+    return context
 
 
 def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnectionPool]]:
+    def do_handshake(self: ssl.SSLSocket, block: bool = False) -> None:
+        interrupter.adopt(self)  # before the handshake can block
+        ssl.SSLSocket.do_handshake(self, block)
+
+    tls_socket = cast(
+        "type[ssl.SSLSocket]", type("SSLSocket", (ssl.SSLSocket,), {"do_handshake": do_handshake})
+    )
+
     def connection_class(base: type[HTTPConnection]) -> type[HTTPConnection]:
         def new_conn(self: HTTPConnection) -> socket.socket:
             sock = base._new_conn(self)
@@ -263,10 +342,23 @@ def _interruptible_pools(interrupter: _Interrupter) -> dict[str, type[HTTPConnec
             finally:
                 interrupter.forget(self)
 
-        return cast(
-            "type[HTTPConnection]",
-            type(base.__name__, (base,), {"_new_conn": new_conn, "close": close}),
-        )
+        def connect(self: Any) -> None:
+            # Windows needs the TLS socket object itself, which exists only inside
+            # urllib3's wrap_socket: hand urllib3 its usual context with a tracked class.
+            if not (_INTERRUPT_OWNERS and isinstance(self, HTTPSConnection)):
+                base.connect(self)
+                return
+            if self.ssl_context is not None:
+                base.connect(self)  # a caller's own context: left as it is
+                return
+            self.ssl_context = _tls_context(self, tls_socket)
+            try:
+                base.connect(self)
+            finally:
+                self.ssl_context = None
+
+        namespace = {"_new_conn": new_conn, "close": close, "connect": connect}
+        return cast("type[HTTPConnection]", type(base.__name__, (base,), namespace))
 
     def pool_class(base: type[HTTPConnectionPool], connection: type[HTTPConnection]) -> Any:
         return type(base.__name__, (base,), {"ConnectionCls": connection_class(connection)})

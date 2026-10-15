@@ -112,7 +112,9 @@ def source_logs():
         logger.setLevel(level)
 
 
-class LiveSourceTests(unittest.TestCase):
+class SourceTestCase(unittest.TestCase):
+    """Fixtures shared by the source tests (no tests of its own)."""
+
     @classmethod
     def setUpClass(cls):
         cls.video = ts_fixtures.make_stream(4)
@@ -130,6 +132,40 @@ class LiveSourceTests(unittest.TestCase):
         self.servers.append(server)
         return server
 
+    @contextmanager
+    def tls_context(self):
+        openssl = shutil.which("openssl")
+        if not openssl:
+            self.skipTest("openssl is required to generate a local test certificate")
+        with tempfile.TemporaryDirectory(prefix="qitv-source-tls-") as directory:
+            key = Path(directory) / "key.pem"
+            certificate = Path(directory) / "cert.pem"
+            subprocess.run(
+                [
+                    openssl,
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-nodes",
+                    "-days",
+                    "1",
+                    "-subj",
+                    "/CN=localhost",
+                    "-keyout",
+                    str(key),
+                    "-out",
+                    str(certificate),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certificate, key)
+            yield context
+
+
+class LiveSourceTests(SourceTestCase):
     def test_direct_transport_stream_uses_one_request_with_the_provider_user_agent(self):
         server = self.server(
             {
@@ -547,38 +583,6 @@ high.m3u8
         self.assertEqual(server.counts["/live.m3u8"], 4)
         self.assertEqual(server.counts["/b.ts"], 2)
 
-    @contextmanager
-    def tls_context(self):
-        openssl = shutil.which("openssl")
-        if not openssl:
-            self.skipTest("openssl is required to generate a local test certificate")
-        with tempfile.TemporaryDirectory(prefix="qitv-source-tls-") as directory:
-            key = Path(directory) / "key.pem"
-            certificate = Path(directory) / "cert.pem"
-            subprocess.run(
-                [
-                    openssl,
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "rsa:2048",
-                    "-nodes",
-                    "-days",
-                    "1",
-                    "-subj",
-                    "/CN=localhost",
-                    "-keyout",
-                    str(key),
-                    "-out",
-                    str(certificate),
-                ],
-                check=True,
-                capture_output=True,
-            )
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(certificate, key)
-            yield context
-
     def test_tls_verification_default_rejects_and_explicit_opt_out_decodes(self):
         with self.tls_context() as context:
             server = self.server({"/user/secret.ts": (200, {}, self.video)}, tls=context)
@@ -714,15 +718,17 @@ high.m3u8
     def test_close_from_another_thread_aborts_a_stalled_body_read(self):
         # Close-delimited bodies are woken by the response's socket shutdown; keep-alive
         # bodies (sized, connection still pooled) by the connection's duplicate descriptor.
-        release = threading.Event()
+        # On Windows both are woken by closing the owning socket object.
         head = self.video[: 188 * 50]
 
-        def stalled(request):
-            request.wfile.write(head)
-            request.wfile.flush()
-            release.wait(10)
-
         for keep_alive in (False, True):
+            release = threading.Event()  # per subtest: the keep-alive server must stall too
+
+            def stalled(request, release=release):
+                request.wfile.write(head)
+                request.wfile.flush()
+                release.wait(10)
+
             with self.subTest(keep_alive=keep_alive):
                 headers = {"Content-Length": str(1 << 30)} if keep_alive else {}
                 server = self.server(
@@ -1487,6 +1493,49 @@ high.m3u8
                         self.assertEqual(source.burst_s, burst)
                     finally:
                         source.close()
+
+
+class WindowsInterruptModeTests(SourceTestCase):
+    """The Windows interrupt mode (owning socket objects, no duplicates), forced here.
+
+    Off Windows the mode only shuts the owning sockets down (a close right after can lose
+    the wakeup on macOS), which wakes the reader on POSIX. These tests therefore prove that
+    every phase hands its owning socket to the interrupter: plain sockets, TLS sockets
+    before their handshake and sockets behind a close-delimited body. They also prove
+    that TLS verification is unchanged by the TLS context this mode supplies. Waking by
+    closing the handle is Winsock behaviour, which only the Windows CI run can check.
+    """
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(source_module, "_INTERRUPT_OWNERS", True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    test_close_from_another_thread_aborts_a_stalled_body_read = (
+        LiveSourceTests.test_close_from_another_thread_aborts_a_stalled_body_read
+    )
+    test_close_aborts_an_hls_segment_stalled_before_its_headers = (
+        LiveSourceTests.test_close_aborts_an_hls_segment_stalled_before_its_headers
+    )
+    test_stop_aborts_an_open_stalled_mid_header_or_mid_handshake = (
+        LiveSourceTests.test_stop_aborts_an_open_stalled_mid_header_or_mid_handshake
+    )
+    test_tls_verification_default_rejects_and_explicit_opt_out_decodes = (
+        LiveSourceTests.test_tls_verification_default_rejects_and_explicit_opt_out_decodes
+    )
+    test_http_redirect_to_tls_obeys_verification_setting = (
+        LiveSourceTests.test_http_redirect_to_tls_obeys_verification_setting
+    )
+    test_nested_hls_tls_is_verified_without_enabling_file_protocol = (
+        LiveSourceTests.test_nested_hls_tls_is_verified_without_enabling_file_protocol
+    )
+    test_redirect_connections_close_while_the_source_is_still_open = (
+        LiveSourceTests.test_redirect_connections_close_while_the_source_is_still_open
+    )
+    test_keep_alive_connections_are_reused_for_reloads_and_segments = (
+        LiveSourceTests.test_keep_alive_connections_are_reused_for_reloads_and_segments
+    )
 
 
 if __name__ == "__main__":
