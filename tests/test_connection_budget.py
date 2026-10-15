@@ -110,6 +110,74 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(lf({"type": "M3UPLAYLIST", "max_streams": 2}, None), 2)
         self.assertEqual(lf({"type": "STB", "max_streams": 0}, None), 1)
 
+    def test_release_of_queued_ticket_drops_it(self):
+        a = self.b.request("p", 1, purpose="main")
+        self.pump()
+        q = self.b.request("p", 1, purpose="pip")
+        self.b.release(q)
+        self.b.release(a)
+        self.pump()
+        self.assertEqual(self.got, [a])
+        self.assertEqual(self.b.in_use("p"), 0)
+
+    def test_double_release_is_noop(self):
+        a = self.b.request("p", 1, purpose="main")
+        self.pump()
+        self.b.release(a)
+        self.b.release(a)
+        self.assertEqual(self.b.in_use("p"), 0)
+
+    def test_grant_order_is_fifo_by_newest_request(self):
+        a = self.b.request("p", 1, purpose="main")
+        self.pump()
+        x = self.b.request("p", 1, purpose="x")
+        y = self.b.request("p", 1, purpose="y")
+        x2 = self.b.request("p", 1, purpose="x")  # replaces x, moves behind y
+        self.b.release(a)
+        self.pump()
+        self.assertEqual(self.got, [a, y])
+        self.b.release(y)
+        self.pump()
+        self.assertEqual(self.got, [a, y, x2])
+        self.assertNotIn(x, self.got)
+
+    def test_replacement_grant_counts_one(self):
+        a = self.b.request("p", 1, purpose="main")
+        self.pump()
+        self.b.request("p", 1, purpose="zap")
+        z = self.b.request("p", 1, purpose="zap")
+        self.b.release(a)
+        self.pump()
+        self.assertEqual(self.got[-1], z)
+        self.assertEqual(self.b.in_use("p"), 1)
+
+    def test_other_provider_queue_not_promoted(self):
+        a = self.b.request("a", 1, purpose="main")
+        b = self.b.request("b", 1, purpose="main")
+        self.pump()
+        qb = self.b.request("b", 1, purpose="zap")
+        self.b.release(a)
+        self.pump()
+        self.assertNotIn(qb, self.got)
+        self.assertEqual(self.b.in_use("b"), 1)
+        self.b.release(b)
+        self.pump()
+        self.assertIn(qb, self.got)
+
+    def test_denied_release_cancel_ignored(self):
+        self.b.release(DENIED)
+        self.b.cancel(DENIED)
+        self.assertEqual(self.b.in_use("p"), 0)
+
+    def test_limit_for_edge_cases(self):
+        lf = self.b.limit_for
+        self.assertIsNone(lf({"type": "XTREAM"}, 0))
+        self.assertIsNone(lf({"type": "XTREAM"}, -2))
+        self.assertEqual(lf({"type": "STB", "max_streams": "2"}, None), 2)
+        self.assertEqual(lf({"type": "STB", "max_streams": "abc"}, None), 1)
+        self.assertEqual(lf({"type": "STB", "max_streams": -1}, None), 1)
+        self.assertEqual(lf({"type": "STB", "max_streams": None}, None), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,10 @@ Design notes:
   between. A ticket cancelled or released before the deferred emit never fires.
 * Only the newest queued request per ``(provider, purpose)`` is kept: this is
   exactly what zapping needs.
+* Grant order across purposes is FIFO by each purpose's newest request (a
+  replacing request moves behind the others). Each waiter keeps the ``limit``
+  it was requested with (a snapshot); the head of the queue decides whether a
+  slot is free.
 * PiP must never wait behind the main stream. A caller passes ``queue=False``;
   when no slot is free, ``request`` returns :data:`DENIED` and queues nothing.
 """
@@ -27,6 +31,8 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+# Returned (never a valid ticket) by request(queue=False) when no slot is free.
+# release()/cancel() ignore it, so callers may pass it back unchecked.
 DENIED = -1  # returned by request(queue=False) when no slot is free
 
 
@@ -52,7 +58,7 @@ class ConnectionBudget(QObject):
         """Streams allowed at once; None means unlimited."""
         try:
             override = int(provider.get("max_streams") or 0)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             override = 0
         if override > 0:
             return override
@@ -93,19 +99,31 @@ class ConnectionBudget(QObject):
         return ticket
 
     def release(self, ticket: int) -> None:
+        """Give a slot back, or drop the request if it is still queued.
+
+        Unknown tickets and ``DENIED`` are ignored.
+        """
         entry = self._active.pop(ticket, None)
+        if entry is None:
+            self.cancel(ticket)
+            return
         self._pending_emit.discard(ticket)
-        if entry is not None:
-            self._promote(entry[0])
+        self._promote(entry[0])
 
     def cancel(self, ticket: int) -> None:
-        """Drop a queued request, or release a held one."""
-        for provider, waiting in self._waiting.items():
+        """Drop a queued request, or release a held one. ``DENIED`` is ignored."""
+        if ticket == DENIED:
+            return
+        for provider in list(self._waiting):
+            waiting = self._waiting[provider]
             for w in waiting:
                 if w.ticket == ticket:
                     waiting.remove(w)
+                    if not waiting:
+                        del self._waiting[provider]
                     return
-        self.release(ticket)
+        if ticket in self._active:
+            self.release(ticket)
 
     def _take(self, ticket: int, provider_name: str, purpose: str) -> None:
         self._active[ticket] = (provider_name, purpose)
