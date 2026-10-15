@@ -619,6 +619,11 @@ class PlaybackMixin:
         """Cancel auto-play dialog."""
         self._autoplay_dialog = None
 
+    @staticmethod
+    def _season_episode_entries(season: Dict[str, Any]) -> List[Any]:
+        """Xtream seasons list episode dicts under 'episodes'; STB seasons list numbers under 'series'."""
+        return season.get("episodes") or season.get("series") or []
+
     def _get_next_episode(self) -> Optional[Dict[str, Any]]:
         """Get the next episode in the current season."""
         if self._current_episode_index < 0 or not self._current_episode_list:
@@ -649,28 +654,16 @@ class PlaybackMixin:
         if next_season_idx >= len(self._current_seasons_list):
             return None
 
-        # Load next season's episodes
         next_season = self._current_seasons_list[next_season_idx]
-        episodes = next_season.get("episodes", [])
-        if not episodes:
+        episode_list = self._build_episode_list_from_season(next_season)
+        if not episode_list:
             return None
 
-        # Build episode item from first episode
-        first_ep = episodes[0]
-        provider_type = self.provider_manager.current_provider.get("type", "").upper()
-
-        if provider_type == "XTREAM":
-            episode_item = self._build_xtream_episode_item(first_ep)
-        else:
-            # STB episodes
-            episode_item = self._build_stb_episode_item(first_ep, next_season)
-
-        # Update current season for playback context
+        # Update playback context to the new season
         self.current_season = next_season
-        self._current_episode_list = self._build_episode_list_from_season(next_season)
+        self._current_episode_list = episode_list
         self._current_episode_index = 0
-
-        return episode_item
+        return episode_list[0]
 
     def _build_xtream_episode_item(self, episode_data: dict) -> Dict[str, Any]:
         """Build an episode item dict for Xtream provider."""
@@ -711,7 +704,7 @@ class PlaybackMixin:
 
     def _build_episode_list_from_season(self, season_data: dict) -> List[Dict[str, Any]]:
         """Build a list of episode items from season data."""
-        episodes = season_data.get("episodes", [])
+        episodes = self._season_episode_entries(season_data)
         provider_type = self.provider_manager.current_provider.get("type", "").upper()
 
         episode_list = []
@@ -722,6 +715,8 @@ class PlaybackMixin:
                 # STB uses simple episode numbers
                 if isinstance(ep, int):
                     episode_list.append(self._build_stb_episode_item(ep, season_data))
+                elif isinstance(ep, str) and ep.strip().isdigit():
+                    episode_list.append(self._build_stb_episode_item(int(ep), season_data))
                 elif isinstance(ep, dict):
                     ep_num = ep.get("episode_num") or ep.get("series") or 1
                     episode_list.append(self._build_stb_episode_item(int(ep_num), season_data))
