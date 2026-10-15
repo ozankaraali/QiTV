@@ -279,7 +279,16 @@ class PlaybackSession(QObject):
             self.stateChanged.emit(state.value)
 
     def _fail(self, message: str) -> None:
+        # Stop libVLC too: after an open timeout it keeps connecting, and would otherwise
+        # play behind the error and hold one of the provider's connections.
         self._poll.stop()
+        self._cancel_pending()
+        try:
+            self._player.stop()
+            self._player.set_media(None)
+        except Exception as e:
+            logger.debug("Stopping the failed media failed: %s", e)
+        self._set_seekable(False)
         self._set_state(PlaybackState.ERROR)
         self.errorOccurred.emit(message)
 

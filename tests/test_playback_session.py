@@ -1,5 +1,8 @@
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -8,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from services.playback import PlaybackSession, PlaybackState, create_instance
+from services.playback import PlaybackSession, PlaybackState, create_instance, vlc
 from services.vlc_profile import PlayKind
 
 FIXTURE = Path(__file__).parent / "fixtures" / "smoke.mp4"
@@ -160,6 +163,45 @@ class PlaybackSessionTests(unittest.TestCase):
         self.session.play("http://127.0.0.1:9/missing.ts", kind=PlayKind.LIVE)
         self.assertTrue(wait_for(lambda: self.session.state() is PlaybackState.ERROR, 6000))
         self.assertTrue(errors)
+
+    def test_open_timeout_stops_the_player(self):
+        # Finding I1: the session reported a timeout but libVLC kept opening, then played
+        # behind the error and held the provider connection.
+        data = FIXTURE.read_bytes()
+
+        class SlowProvider(BaseHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(1.5)  # the first byte arrives after the open timeout
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except OSError:
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowProvider)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        session = PlaybackSession(INSTANCE, poll_ms=50, open_timeout_ms=500)
+        self.addCleanup(session.release)
+        errors = []
+        session.errorOccurred.connect(errors.append)
+        session.play(f"http://127.0.0.1:{server.server_address[1]}/live.ts", kind=PlayKind.LIVE)
+        self.assertTrue(wait_for(lambda: session.state() is PlaybackState.ERROR, 4000))
+        self.assertEqual(errors, ["Timed out opening the stream"])
+        QTest.qWait(2500)  # the slow answer has arrived by now
+        self.assertIsNone(session._player.get_media())
+        self.assertNotIn(
+            session._player.get_state(), (vlc.State.Opening, vlc.State.Playing, vlc.State.Buffering)
+        )
+        self.assertEqual(session.time_ms(), 0)
+        self.assertIs(session.state(), PlaybackState.ERROR)
 
     def test_ended_before_playing_is_an_error(self):
         errors = []
