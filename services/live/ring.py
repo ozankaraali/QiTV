@@ -1,8 +1,8 @@
 """Bounded segment rings for the live time-shift pipeline: RAM (default) and disk.
 
 One writer thread appends keyframe-aligned MPEG-TS segments; several reader threads
-lease segments, read them progressively (including the still-open one) and wait for
-more data. Eviction removes the oldest *completed* segments first; the open segment
+read them progressively (including the still-open one), lease-free with `read_at` or
+under a lease, and wait for more data. Eviction removes the oldest *completed* segments first; the open segment
 and leased segments are never removed while in use. Error texts are fixed strings.
 """
 
@@ -279,6 +279,30 @@ class Ring(ABC):
                 return b""
             try:
                 return self._read(segment, offset, size)
+            except OSError, KeyError:
+                raise RingError(_READ_FAILED) from None
+
+    def read_at(self, seq: int, offset: int, size: int) -> tuple[_Bytes, bool, int] | None:
+        """Lease-free read: `(data, complete, header_len)`, or None if `seq` is absent,
+        retired or the ring is closed.
+
+        Lookup and read both happen under the disk lock, the only place segments are
+        retired, deleted or grown, so nothing is pinned against eviction and no deleted or
+        half-written byte is returned. `complete` describes the segment at the time of the
+        read: when True, empty `data` means the segment was read to its end. A `size` of
+        zero (or an offset at the end) returns no data without touching storage.
+        """
+        with self._disk_lock:
+            with self._state_lock:
+                segment = self._segments.get(seq)
+                if segment is None or segment.retired or self.closed:
+                    return None
+                complete, header_len = segment.complete, segment.header_len
+                size = min(size, segment.size - offset) if offset >= 0 else 0
+            if size <= 0:
+                return b"", complete, header_len
+            try:
+                return self._read(segment, offset, size), complete, header_len
             except OSError, KeyError:
                 raise RingError(_READ_FAILED) from None
 

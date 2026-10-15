@@ -35,6 +35,61 @@ def session_name(character=None):
     return ".qitv-timeshift-" + (character * 32 if character else secrets.token_hex(16))
 
 
+DRAIN_HEADER = b"h" * 376
+DRAIN_CHUNK = 4096
+DRAIN_SEGMENT = len(DRAIN_HEADER) + 16 * DRAIN_CHUNK
+
+
+def drain_oldest(ring, stop, outcome):
+    """Re-read the oldest segment forever, like a stream response lagging behind eviction."""
+    seq, offset = None, 0
+    try:
+        while not stop.is_set():
+            oldest = ring.oldest_seq
+            if oldest is None:
+                continue
+            if seq != oldest:
+                seq, offset = oldest, 0
+            result = ring.read_at(seq, offset, 1024)
+            if result is None:
+                seq = None
+                continue
+            outcome["reads"] += 1
+            data = result[0]
+            offset = offset + len(data) if data else 0
+    except Exception as error:  # surfaced by write_while_draining
+        outcome["error"] = error
+
+
+def write_while_draining(ring, segments):
+    """Count writes that evicted more than one segment while a reader drains the oldest."""
+    stop = threading.Event()
+    outcome = {"reads": 0, "error": None}
+    reader = threading.Thread(target=drain_oldest, args=(ring, stop, outcome), daemon=True)
+    over_evictions = 0
+    try:
+        for seq in range(segments):
+            before = ring.oldest_seq
+            ring.open_segment(seq, DRAIN_HEADER)
+            if before is not None and ring.oldest_seq - before > 1:
+                over_evictions += 1
+            if seq == 0:
+                reader.start()
+            for _ in range(16):
+                before = ring.oldest_seq
+                ring.append(b"x" * DRAIN_CHUNK)
+                if ring.oldest_seq - before > 1:
+                    over_evictions += 1
+    finally:
+        stop.set()
+        if reader.is_alive():
+            reader.join(5)
+    if outcome["error"] is not None:
+        raise outcome["error"]
+    assert outcome["reads"] > segments, "the reader barely ran"
+    return over_evictions
+
+
 class RamRingTests(unittest.TestCase):
     def test_charged_never_exceeds_cap_and_oldest_completed_go_first(self):
         ring = RamRing(100)
@@ -257,6 +312,52 @@ class RamRingTests(unittest.TestCase):
             ring.append(b"x")
         self.assertEqual(ring.charged, 0)
 
+    def test_read_at_returns_data_completion_and_header_length_without_a_lease(self):
+        ring = RamRing(1000)
+        ring.open_segment(0, b"hh")
+        ring.append(b"abc")
+        self.assertEqual(ring.read_at(0, 0, 100), (b"hhabc", False, 2))
+        self.assertEqual(ring.read_at(0, 2, 2), (b"ab", False, 2))
+        self.assertEqual(ring.read_at(0, 5, 10), (b"", False, 2))
+        self.assertEqual(ring.read_at(0, 0, 0), (b"", False, 2))
+        self.assertIsNone(ring.read_at(1, 0, 10))  # not opened yet
+        ring.complete(0)
+        self.assertEqual(ring.read_at(0, 4, 10), (b"c", True, 2))
+        segment = ring.lease(0)
+        self.assertEqual(segment.readers, 1)  # read_at took no lease
+        ring.release(segment)
+
+    def test_read_at_returns_none_for_retired_evicted_and_closed_segments(self):
+        ring = RamRing(25)
+        ring.open_segment(0, b"")
+        ring.append(b"a" * 10)
+        ring.open_segment(1, b"")
+        ring.append(b"b" * 10)
+        held = ring.lease(0)  # a legacy reader keeps segment 0 retired but stored
+        ring.open_segment(2, b"")
+        ring.append(b"c" * 10)
+        self.assertTrue(held.retired)
+        self.assertIsNone(ring.read_at(0, 0, 10))  # retired
+        self.assertIsNone(ring.read_at(1, 0, 10))  # evicted
+        self.assertEqual(ring.read(held, 0, 10), b"a" * 10)  # the legacy path still works
+        ring.release(held)
+        self.assertIsNone(ring.read_at(0, 0, 10))  # deleted
+        self.assertEqual(ring.read_at(2, 0, 10), (b"c" * 10, False, 0))
+        ring.close()
+        self.assertIsNone(ring.read_at(2, 0, 10))  # closed
+
+    def test_draining_reader_never_causes_over_eviction(self):
+        ring = RamRing(DRAIN_SEGMENT * 5 // 2)
+        # A lease-based reader over-evicts several times per 1000 segments.
+        over_evictions = write_while_draining(ring, segments=1000)
+        self.assertEqual(over_evictions, 0, "a reader pinned an evicted segment")
+
+    def test_draining_reader_never_makes_a_tight_ram_ring_fail(self):
+        # One completed segment plus the open one: a pinned segment would not fit.
+        ring = RamRing(DRAIN_SEGMENT * 3 // 2)
+        self.assertEqual(write_while_draining(ring, segments=1000), 0)
+        self.assertLessEqual(ring.charged, DRAIN_SEGMENT * 3 // 2)
+
 
 class DiskRingTests(unittest.TestCase):
     def setUp(self):
@@ -406,6 +507,16 @@ class DiskRingTests(unittest.TestCase):
             DiskRing(self.directory, "bad", 1024)
         with self.assertRaisesRegex(RingError, "must be positive"):
             DiskRing(self.directory, session_name(), 0)
+
+    def test_read_at_on_disk_never_pins_and_maps_failures_to_ring_error(self):
+        ring = self.ring(max_bytes=DRAIN_SEGMENT * 5 // 2 + 4 * 4096)
+        self.assertEqual(write_while_draining(ring, segments=60), 0)
+        self.assertEqual(ring.read_at(59, 0, 3), (b"hhh", False, len(DRAIN_HEADER)))
+        ring.complete(59)  # closes the writer handle so Windows can unlink
+        (ring._directory / "segment-59.ts").unlink()
+        with self.assertRaises(RingError) as caught:
+            ring.read_at(59, 0, 3)
+        self.assertEqual(str(caught.exception), "The temporary buffer could not be read.")
 
     def test_read_failure_raises_fixed_error(self):
         ring = self.ring()

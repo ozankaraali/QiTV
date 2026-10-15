@@ -5,6 +5,7 @@ progressive close-delimited stream across ring segments.
 """
 
 import contextlib
+import errno
 import io
 import logging
 import os
@@ -28,11 +29,12 @@ PATTERN = bytes(range(251)) * 4200  # about 1 MiB; 251 is prime, so offsets neve
 # macOS autotunes loopback receive buffers to about 0.5 MiB even when SO_RCVBUF is set,
 # so a paused reader only blocks mid-segment when segments and backlogs are larger.
 SEGMENT = 2 * 1024 * 1024
+LIVE = 0.6  # appends reach a reader waiting at the live edge within this many seconds
 APPEND = 64 * 1024
 BACKLOG = 4 * 1024 * 1024
-# A reader leases one segment while it copies a chunk, so the cap leaves room for that
-# segment plus the open one; a lease held across a blocked write would pin it for good.
-CAP = SEGMENT * 5 // 2
+# One completed segment plus the open one: a segment pinned by a reader would not fit, so
+# any pin makes the writer raise.
+CAP = SEGMENT * 3 // 2
 
 
 def header(seq):
@@ -43,6 +45,19 @@ def header(seq):
 def payload(seq, start, size):
     offset = (seq * 31 + start) % 251
     return PATTERN[offset : offset + size]
+
+
+def fails_after_first_check(error):
+    """An `is_ended` that answers once, so the response starts, then raises `error`."""
+    calls = []
+
+    def is_ended():
+        calls.append(None)
+        if len(calls) > 1:
+            raise error
+        return False
+
+    return is_ended
 
 
 class Writer:
@@ -117,7 +132,7 @@ class Client:
         self.received += len(chunk)
         self.buffer += chunk
 
-    def read(self, size, timeout=0.6):
+    def read(self, size, timeout=2.0):
         """Exactly `size` body bytes within `timeout`, or a TimeoutError."""
         deadline = time.monotonic() + timeout
         while len(self.buffer) < size and not self.eof:
@@ -197,6 +212,8 @@ class StreamServerTests(unittest.TestCase):
         self.assert_not_found(valid.replace("/stream/2.ts", "/stream/x.ts"))
         self.assert_not_found(valid.replace("/stream/2.ts", "/segment/2.ts"))
         self.assert_not_found(valid + "?x=1")
+        with patch.object(writer.ring, "read_at", return_value=None):
+            self.assert_not_found(valid)  # evicted before the first byte: 404, not 200
         client = self.client(valid)
         self.assertEqual(client.status, 200)
         self.assertEqual(client.read(len(writer.stream(2))), writer.stream(2))
@@ -216,19 +233,29 @@ class StreamServerTests(unittest.TestCase):
         self.assertEqual(client.headers["connection"], "close")
         self.assertNotIn("content-length", client.headers)
         self.assertNotIn("transfer-encoding", client.headers)
+        latencies = []
+
+        def arrive(size):
+            started = time.monotonic()
+            data = client.read(size, LIVE)
+            latencies.append(time.monotonic() - started)
+            return data
+
         received = client.read(len(writer.stream(0)))
         time.sleep(0.05)  # the response now waits on the open segment
-        received += client.read(len(writer.append(500)))
+        received += arrive(len(writer.append(500)))
         writer.open()  # completes segment 1; segment 2's header is not resent
-        received += client.read(len(writer.append(700)))
+        received += arrive(len(writer.append(700)))
         writer.append(100)
         writer.ring.complete(2)
-        received += client.read(100)
+        received += arrive(100)
         time.sleep(0.05)  # the response now waits for the next segment to open
         writer.open()
-        received += client.read(len(writer.append(300)))
+        received += arrive(len(writer.append(300)))
         self.assertEqual(received, writer.stream(0))
         self.assertFalse(client.eof)
+        # Well under the 0.5 s wait: appends wake the response instead of being polled.
+        self.assertLess(max(latencies), 0.25, "appends were polled, not delivered on wakeup")
 
     def test_response_ends_after_the_last_segment_of_an_ended_session(self):
         server = self.start_server()
@@ -245,12 +272,13 @@ class StreamServerTests(unittest.TestCase):
         writer.ring.complete(1)
         ended.set()
         started = time.monotonic()
-        received += client.read_to_eof(1.5)
-        self.assertLess(time.monotonic() - started, 1.0)
+        received += client.read_to_eof(3.0)
+        # One 0.5 s wait (the end is not notified) plus scheduling; never an endless wait.
+        self.assertLess(time.monotonic() - started, 1.5)
         self.assertEqual(received, writer.stream(0))
-        # A session that already ended serves what is left and closes at once.
+        # A session that already ended serves what is left and closes without any wait.
         started = time.monotonic()
-        self.assertEqual(self.client(server.stream_url("s", 1)).read_to_eof(1.0), writer.stream(1))
+        self.assertEqual(self.client(server.stream_url("s", 1)).read_to_eof(2.0), writer.stream(1))
         self.assertLess(time.monotonic() - started, 0.5)
 
     def test_ended_session_with_an_unfinished_last_segment_still_closes(self):
@@ -264,7 +292,7 @@ class StreamServerTests(unittest.TestCase):
         received = client.read(len(writer.stream(0)))
         writer.append(10)
         ended.set()
-        received += client.read_to_eof(1.5)
+        received += client.read_to_eof(3.0)
         self.assertEqual(received, writer.stream(0))
 
     def test_a_gap_in_sequence_numbers_neither_spins_nor_skips_ahead(self):
@@ -278,18 +306,19 @@ class StreamServerTests(unittest.TestCase):
         writer.ring.complete(0)
         writer.open(2)  # segment 1 never exists
         writer.append(1000)
-        leases = []
-        original = writer.ring.lease
+        reads = []
+        original = writer.ring.read_at
         with patch.object(
-            writer.ring, "lease", side_effect=lambda seq: leases.append(seq) or original(seq)
+            writer.ring, "read_at", side_effect=lambda *args: reads.append(args) or original(*args)
         ):
             time.sleep(1.0)
-        self.assertLessEqual(len(leases), 6, "the response polled in a busy loop")
+        # Two or three 0.5 s waits; a busy loop reads tens of thousands of times.
+        self.assertLessEqual(len(reads), 6, "the response polled in a busy loop")
         with self.assertRaises(TimeoutError):
             client.read(1, timeout=0.2)
         self.assertEqual(received, writer.stream(0)[: len(received)])
 
-    def check_paused_reader_falls_behind(self, ring):
+    def check_paused_reader_falls_behind(self, ring, budget):
         server = self.start_server()
         self.small_send_buffer(server)
         writer = Writer(ring)
@@ -297,39 +326,49 @@ class StreamServerTests(unittest.TestCase):
         for _ in range(SEGMENT // APPEND):
             writer.append(APPEND)
         server.add_session("slow", ring, lambda: False)
+        # Responses read with the lease-free read_at; a lease would pin the segment it reads.
+        lease = patch.object(ring, "lease", wraps=ring.lease).start()
+        self.addCleanup(patch.stopall)
         client = self.client(server.stream_url("slow", 0), rcvbuf=4096)
         self.assertEqual(client.status, 200)
         paused = time.monotonic()
         time.sleep(0.3)  # the response fills the socket buffers and blocks mid-segment 0
         durations = []
-        for _ in range(12 * SEGMENT // APPEND):  # 24 MiB through a 5 MiB ring
+        for _ in range(12 * SEGMENT // APPEND):  # 24 MiB through a 3 MiB ring
             if len(writer.written[writer.seq]) >= SEGMENT:
                 writer.open()
             started = time.monotonic()
-            writer.append(APPEND)  # never raises: no lease pins a segment
+            writer.append(APPEND)  # never raises: the paused response pins nothing
             durations.append(time.monotonic() - started)
         windows = [sum(durations[index : index + 50]) for index in range(len(durations) - 49)]
-        self.assertLess(max(windows), 0.5, "the paused reader slowed the writer")
+        self.assertLess(max(windows), budget, "the paused reader slowed the writer")
         self.assertLessEqual(ring.charged, CAP)
         self.assertGreaterEqual(ring.oldest_seq, 3)
-        pinned = [segment.seq for segment in ring._segments.values() if segment.retired]
-        self.assertEqual(pinned, [], "the paused response pinned an evicted segment")
+        retained = sum(
+            len(header(seq)) + len(writer.written[seq])
+            for seq in range(ring.oldest_seq, ring.newest_seq + 1)
+        )
+        self.assertEqual(ring.bytes, retained, "an evicted segment is still held")
         time.sleep(max(0.0, 2.0 - (time.monotonic() - paused)))
         body = client.read_to_eof(5.0)
         expected = writer.stream(0)
         self.assertTrue(client.eof)
         self.assertTrue(expected.startswith(body), "served bytes not in the original stream")
         self.assertLess(len(body), len(header(0)) + SEGMENT, "the reader was never blocked")
+        lease.assert_not_called()
 
     def test_paused_reader_is_cut_off_cleanly_and_never_blocks_the_ram_writer(self):
-        self.check_paused_reader_falls_behind(RamRing(CAP))
+        self.check_paused_reader_falls_behind(RamRing(CAP), budget=0.5)
 
     def test_paused_reader_is_cut_off_cleanly_and_never_blocks_the_disk_writer(self):
         with tempfile.TemporaryDirectory() as directory:
             name = ".qitv-timeshift-" + secrets.token_hex(16)
             ring = DiskRing(Path(directory), name, CAP)
             try:
-                self.check_paused_reader_falls_behind(ring)
+                # Disk appends write a file and query free space each time; 50 of them can
+                # near 0.5 s on a slow Windows runner. A writer blocked by the paused reader
+                # would stall for the whole 2 s pause, so 1.0 s still detects it.
+                self.check_paused_reader_falls_behind(ring, budget=1.0)
                 self.assertLessEqual(len(list((Path(directory) / name).iterdir())), 5)
             finally:
                 ring.close()
@@ -421,6 +460,18 @@ class StreamServerTests(unittest.TestCase):
         server.add_session("s", writer.ring, lambda: False)
         server.add_session("other", other.ring, lambda: False)
         url = server.stream_url("s", 0)
+        waiting_on = []  # the ring of every response currently waiting for data
+        real_wait = server_module._wait
+
+        def tracked_wait(session, before):
+            waiting_on.append(session.ring)
+            try:
+                real_wait(session, before)
+            finally:
+                waiting_on.remove(session.ring)
+
+        patch.object(server_module, "_wait", tracked_wait).start()
+        self.addCleanup(patch.stopall)
         paused = self.client(url, rcvbuf=4096)
         waiting = self.client(url)
         waiting.read(len(writer.stream(0)), 5.0)
@@ -428,35 +479,59 @@ class StreamServerTests(unittest.TestCase):
         kept.read(len(other.stream(0)))
         started = time.monotonic()
         server.remove_session("s")
-        waiting.read_to_eof(1.0)
+        waiting.read_to_eof(2.0)
         self.assertLess(time.monotonic() - started, 0.6)
-        deadline = time.monotonic() + 0.2
-        while writer.ring.changed._waiters and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertFalse(writer.ring.changed._waiters, "a removed session's response still waits")
         paused.read_to_eof(2.0)
+        # Removal wakes the waiting response at once instead of after its 0.5 s wait.
+        deadline = time.monotonic() + 0.3
+        while writer.ring in waiting_on and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertNotIn(writer.ring, waiting_on, "a removed session's response still waits")
+        # And no response of the removed session reads the ring again.
+        reads = []
+        original = writer.ring.read_at
+        with patch.object(
+            writer.ring, "read_at", side_effect=lambda *args: reads.append(args) or original(*args)
+        ):
+            for _ in range(5):
+                writer.append(1000)
+            time.sleep(0.2)
+        self.assertEqual(reads, [])
         self.assert_not_found(url)
         data = other.append(100)
         self.assertEqual(kept.read(len(data)), data)
 
-    def test_buffer_read_failure_ends_only_that_response_quietly(self):
+    def test_buffer_read_failures_end_only_that_response_quietly(self):
         server = self.start_server()
         writer = Writer(RamRing())
         writer.open(0)
-        writer.append(1000)
+        writer.append(100_000)  # two 64 KiB chunks
         server.add_session("s", writer.ring, lambda: False)
         url = server.stream_url("s", 0)
         failure = RingError("The temporary buffer could not be read.")
-        with patch.object(writer.ring, "read", side_effect=failure):
-            with self.assertLogs(server_module.__name__, "DEBUG") as logs:
+        with patch.object(writer.ring, "read_at", side_effect=failure):
+            with self.assertLogs(server_module.__name__, "DEBUG") as before_status:
+                client = self.client(url)
+                self.assertEqual(client.status, 503)  # before the status line: no 200
+                self.assertEqual(client.headers.get("content-length"), "0")
+                self.assertEqual(client.read_to_eof(2.0), b"")
+        original = writer.ring.read_at
+        calls = []
+
+        def fail_after_first_chunk(*args):
+            calls.append(args)
+            if len(calls) > 1:
+                raise failure
+            return original(*args)
+
+        with patch.object(writer.ring, "read_at", side_effect=fail_after_first_chunk):
+            with self.assertLogs(server_module.__name__, "DEBUG") as mid_stream:
                 client = self.client(url)
                 self.assertEqual(client.status, 200)
-                self.assertEqual(client.read_to_eof(1.0), b"")
-        self.assertEqual([record.levelno for record in logs.records], [logging.DEBUG])
-        self.assertNotIn(server.token, logs.output[0])
-        segment = writer.ring.lease(0)
-        self.assertEqual(segment.readers, 1)  # the failed read released its lease
-        writer.ring.release(segment)
+                self.assertEqual(client.read_to_eof(2.0), writer.stream(0)[: 64 * 1024])
+        for logs in (before_status, mid_stream):
+            self.assertEqual([record.levelno for record in logs.records], [logging.DEBUG])
+            self.assertNotIn(server.token, logs.output[0])
         self.assertEqual(self.client(url).read(len(writer.stream(0))), writer.stream(0))
 
     def test_client_resets_and_aborts_are_silent_and_leave_the_server_serving(self):
@@ -494,16 +569,31 @@ class StreamServerTests(unittest.TestCase):
         writer.open(0)
         writer.append(1000)
 
-        def broken():
-            raise RuntimeError("unexpected")
-
-        server.add_session("s", writer.ring, broken)
+        server.add_session("s", writer.ring, fails_after_first_check(RuntimeError("unexpected")))
         errors = io.StringIO()
         with contextlib.redirect_stderr(errors):
-            client = self.client(server.stream_url("s", 0))
-            self.assertEqual(client.status, 200)
-            self.assertEqual(client.read_to_eof(1.0), b"")
+            with self.assertLogs(server_module.__name__, "DEBUG") as logs:
+                client = self.client(server.stream_url("s", 0))
+                self.assertEqual(client.status, 200)
+                self.assertEqual(client.read_to_eof(2.0), writer.stream(0))
         self.assertEqual(errors.getvalue(), "")
+        self.assertEqual([record.levelno for record in logs.records], [logging.DEBUG])
+        self.assertIn("RuntimeError", logs.output[0])
+        self.assertNotIn(server.token, logs.output[0])
+        self.assertNotIn("/stream/", logs.output[0])
+
+    def test_macos_send_during_reset_is_swallowed_like_a_reset(self):
+        server = self.start_server()
+        writer = Writer(RamRing())
+        writer.open(0)
+        writer.append(1000)
+        prototype = OSError(errno.EPROTOTYPE, "Protocol wrong type for socket")
+        server.add_session("s", writer.ring, fails_after_first_check(prototype))
+        handle_error = patch.object(server_module._HTTPServer, "handle_error").start()
+        self.addCleanup(patch.stopall)
+        client = self.client(server.stream_url("s", 0))
+        self.assertEqual(client.read_to_eof(2.0), writer.stream(0))
+        handle_error.assert_not_called()
 
     def test_session_ids_must_be_url_safe(self):
         server = self.start_server()

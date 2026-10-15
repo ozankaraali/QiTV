@@ -4,23 +4,25 @@
 stream: segment `seq` from its PAT/PMT header, then every later segment without its
 header (so the bytes stay the original stream), following the open segment as it grows.
 
-A paused player stops reading and the response write then blocks indefinitely, so a
-lease is only held while one chunk is copied out of the ring, never across socket I/O:
-eviction can always proceed and the writer never waits for a reader. A reader that falls
-behind eviction has its response ended. Handler errors are silent because request paths
-carry the session token.
+A paused player stops reading and the response write then blocks indefinitely, so chunks
+are copied out with the lease-free `Ring.read_at`: nothing is held across socket I/O and
+no segment is pinned against eviction, so the writer never waits for a reader. A reader
+that falls behind eviction has its response ended. Handler errors are silent because
+request paths carry the session token.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import errno
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import logging
 import re
 import secrets
 import socket
 from socketserver import TCPServer, ThreadingMixIn
+import sys
 import threading
 from typing import Any
 
@@ -63,16 +65,29 @@ def _wake(ring: Ring) -> None:
         ring.changed.notify_all()
 
 
-def _wait(session: _Session, ready: Callable[[], bool]) -> None:
-    """Wait up to `_WAIT` for `ready()`, the ring closing, or the session's removal.
+_Snapshot = tuple[int, int | None, int | None]
+
+
+def _snapshot(ring: Ring) -> _Snapshot:
+    """Differs after every append (more bytes, or an eviction), completion or new segment.
+
+    Call it holding `changed` for a consistent view; only read-only properties are read
+    (the ring's documented rule).
+    """
+    return ring.bytes, ring.oldest_seq, ring.open_seq
+
+
+def _wait(session: _Session, before: _Snapshot) -> None:
+    """Wait up to `_WAIT` for the ring to change from `before`, close, or lose the session.
 
     `Ring.wait_for` and `Ring.wait_for_seq` re-check only their own predicate after a
-    notify, so a removal could not end them early. Under `changed` only segment fields
-    and the ring's read-only properties are read (the ring's documented rule).
+    notify, so a removal could not end them early.
     """
     ring = session.ring
     with ring.changed:
-        ring.changed.wait_for(lambda: session.removed or ring.closed or ready(), _WAIT)
+        ring.changed.wait_for(
+            lambda: session.removed or ring.closed or _snapshot(ring) != before, _WAIT
+        )
 
 
 def _shutdown(client: socket.socket) -> None:
@@ -205,8 +220,8 @@ class _HTTPServer(ThreadingLoopbackHTTPServer):
         super().close_request(request)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
-        # Request paths carry the session token; never print them.
-        pass
+        # Request paths carry the session token: log only the exception type.
+        _LOG.debug("A stream request failed: %s", type(sys.exception()).__name__)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -220,76 +235,82 @@ class _Handler(BaseHTTPRequestHandler):
             super().handle()
         except _QUIET:
             pass
+        except OSError as error:
+            # macOS reports a send racing the peer's reset as EPROTOTYPE.
+            if error.errno != errno.EPROTOTYPE:
+                raise
 
     def do_GET(self) -> None:
         owner = self.server.owner
         attached = owner._attach(self.path, self.connection)
         if attached is None:
-            self._not_found()
+            self._empty(404)
             return
         session, seq = attached
         try:
-            segment = session.ring.lease(seq)
-            if segment is None:
-                # Evicted (older than the oldest) or not opened yet.
-                self._not_found()
-                return
-            session.ring.release(segment)
-            # Body writes block without a timeout: a paused player resumes later.
-            self.connection.settimeout(None)
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mp2t")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self._stream(session, seq)
+            status = self._stream(session, seq)
+            if status:
+                self._empty(status)
         finally:
             owner._detach(session, self.connection)
 
-    def _not_found(self) -> None:
-        self.send_response(404)
+    def _empty(self, status: int) -> None:
+        self.send_response(status)
         self.send_header("Content-Length", "0")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
 
-    def _stream(self, session: _Session, seq: int) -> None:
+    def _start(self) -> None:
+        # Body writes block without a timeout: a paused player resumes later.
+        self.connection.settimeout(None)
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp2t")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _stream(self, session: _Session, seq: int) -> int:
+        """Stream from segment `seq`; returns the status to send when nothing was sent."""
         ring = session.ring
-        number, offset, fresh = seq, 0, False  # fresh: skip the next segment's header
+        number, offset, started = seq, 0, False
         while not session.removed:
+            # Before the read, so any later append, completion or eviction ends the wait.
+            with ring.changed:
+                before = _snapshot(ring)
             # Read before the data: an ended session never appends after this.
             ended = session.is_ended()
-            segment = ring.lease(number)
-            if segment is None:
-                return  # evicted under a slow reader, or the ring closed
             try:
-                if fresh:
-                    offset, fresh = segment.header_len, False
-                # Read before the data: once complete, an empty read means fully sent.
-                complete = segment.complete
-                data = ring.read(segment, offset, _CHUNK)
+                result = ring.read_at(number, offset, _CHUNK)
             except RingError:
                 _LOG.debug("A stream response ended because the buffer could not be read.")
-                return
-            finally:
-                ring.release(segment)
+                return 0 if started else 503
+            if result is None:
+                # Evicted (under a slow reader, or before the first byte), not opened yet,
+                # or the ring closed.
+                return 0 if started else 404
+            data, complete, _ = result
+            if not started:
+                started = True
+                self._start()
             if data:
-                # No lease is held here: this write blocks while the player is paused.
+                # Nothing is held here: this write blocks while the player is paused.
                 self.wfile.write(data)
                 offset += len(data)
                 continue
             if not complete:
                 if ended:
-                    return
-                sent = offset
-                _wait(session, lambda: segment.size > sent or segment.complete)
+                    return 0
+                _wait(session, before)
                 continue
-            # Captured before the status check, so a segment opened in between still wakes.
-            newest = ring.newest_seq
             status = ring.wait_for_seq(number + 1, 0.0)
             if status == "open":
-                number, offset, fresh = number + 1, 0, True
+                following = ring.read_at(number + 1, 0, 0)  # header length; reads no storage
+                if following is None:
+                    return 0  # evicted since
+                number, offset = number + 1, following[2]
             elif status != "timeout" or ended:
-                return  # the next segment was evicted, the ring closed, or the session ended
+                return 0  # the next segment was evicted, the ring closed, or the session ended
             else:
-                _wait(session, lambda: ring.newest_seq != newest)
+                _wait(session, before)
+        return 0 if started else 404
