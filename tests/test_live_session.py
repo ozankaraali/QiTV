@@ -417,6 +417,41 @@ class StartTests(LiveSessionCase):
         self.assertEqual(self.live.position(), 14.0)
         self.assertEqual(self.live.buffered_range(), (14.0, 20.5))
 
+    def test_low_and_normal_play_the_oldest_segment_at_once(self):
+        for latency in ("low", "normal"):
+            with self.subTest(latency=latency):
+                self.live = self.make()
+                sid = self.ready(segments(0, 1), live_edge=2.5, open_seq=1, latency=latency)
+                url = self.engine.stream_url(sid, 0)  # 2.5 s behind: no wait for zapping
+                self.assertEqual(self.playback.plays, [(url, PlayKind.LIVE_PIPELINE, latency)])
+
+    def test_stable_waits_until_the_buffer_holds_its_target(self):
+        sid = self.start(latency="stable")
+        self.engine.buffer(sid, segments(0, 1), live_edge=2.5, open_seq=1)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual((self.playback.plays, self.modes), ([], []))
+        self.engine.buffer(sid, segments(0, 2), live_edge=5.0, open_seq=2)
+        self.assertEqual(self.playback.plays, [])  # 5.5 s once VLC opened: under 5.75
+        self.engine.buffer(sid, segments(0, 2), live_edge=5.5, open_seq=2)
+        stable = (self.engine.stream_url(sid, 0), PlayKind.LIVE_PIPELINE, "stable")
+        self.assertEqual(self.playback.plays, [stable])  # 6.0 s: on target
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertEqual(self.engine.closed, [])
+
+    def test_stable_starts_at_its_target_when_the_buffer_holds_more(self):
+        sid = self.ready(segments(0, 6), live_edge=12.0, burst=6.0, latency="stable")
+        # A burst just landed: from 2.0 the mean lag is 7.5 s once playing, from 4.0 5.5 s.
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 1))
+
+    def test_stables_wait_for_its_cushion_is_bounded_by_the_ready_timeout(self):
+        self.live = self.make(ready_timeout_ms=50)
+        sid = self.ready(segments(0, 1), live_edge=2.5, open_seq=1, latency="stable")
+        self.assertEqual(self.playback.plays, [])
+        self.wait_until(lambda: self.playback.plays)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 0))
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertEqual((self.engine.closed, self.notices), ([], []))
+
     def test_live_delay_follows_the_latency_setting(self):
         for latency, delay in (("low", 3.0), ("normal", 6.0), ("stable", 12.0)):
             with self.subTest(latency=latency):
@@ -696,8 +731,9 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 5))
 
     def test_go_live_takes_the_most_buffer_when_none_is_far_enough_behind(self):
-        sid = self.ready(segments(5, 2, start=10.0), live_edge=14.0, latency="stable")
-        self.live.go_live()  # 4 s and 2 s behind, both under the 5.75 s floor: the oldest
+        sid = self.ready(segments(5, 2, start=10.0), live_edge=14.0)
+        self.live.set_latency("stable")
+        self.live.go_live()  # 4.5 s and 2.5 s once playing, both under 5.75 s: the oldest
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 5))
 
     def test_raw_ts_go_live_lands_within_stay_lives_band(self):
@@ -838,7 +874,8 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["mode"], "shifted")
 
     def test_speed_at_live_is_ignored(self):
-        self.ready(segments(0, 2), live_edge=4.0, latency="stable")
+        self.ready(segments(0, 2), live_edge=4.0)
+        self.live.set_latency("stable")  # 6 s: stay-live leaves the rate alone at 4 s
         self.playback.set_state(PlaybackState.PLAYING)
         self.live.set_speed(1.5)
         self.assertEqual(self.playback.rates, [])
@@ -1152,7 +1189,8 @@ class StallTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), plays)
 
     def test_a_frozen_vlc_clock_counts_as_buffering(self):
-        sid = self.ready(segments(0, 2), live_edge=4.0, latency="stable")
+        sid = self.ready(segments(0, 2), live_edge=4.0)
+        self.live.set_latency("stable")
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(0.25)  # 3.75 s behind a 6 s target: nothing to do
         self.step(0.25, media=0)

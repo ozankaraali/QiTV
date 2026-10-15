@@ -2,7 +2,10 @@
 
 `LiveSession` lives on the GUI thread. `start()` opens a `LiveEngine` session (also before
 the helper's first hello: the engine queues it) and waits for its `sessionReady`; then VLC
-plays the loopback stream from the oldest buffered segment with the pipeline profile.
+plays the loopback stream from the oldest buffered segment with the pipeline profile, so a
+zap starts at once. Stable (the cushion for jittery providers) waits until the buffer holds
+its target and starts where Go live would; if that takes longer than `ready_timeout_ms`
+from the start, it plays from the oldest segment then.
 
 Falling back (spec §9) never overlaps two upstream connections: the session is closed and
 the provider URL plays directly (`PlayKind.LIVE`) once the engine confirms the close, or
@@ -224,6 +227,7 @@ class LiveSession(QObject):
         self._clock_moved = 0.0  # when VLC's clock last moved (or was not expected to)
         self._open_s = _OPEN_SEED_S  # VLC's open time, averaged over this object's opens
         self._opened_at: Optional[float] = None  # a pipeline play() not yet Playing
+        self._ready_seen = False  # the session is ready: Stable may still wait for its cushion
         # Bursty sources: (estimate, correction, when, position) at the last tick.
         self._smoothed: Optional[tuple[float, float, float, float]] = None
         self._wire_engine(engine, connect=True)
@@ -438,6 +442,7 @@ class LiveSession(QObject):
             self._url, **self._open_args, live_delay=LIVE_DELAY[self._latency]
         )
         self._phase = _Phase.WAITING
+        self._ready_seen = False
         self._ready_timer.start()
 
     def _close(self, sid: str) -> None:
@@ -537,16 +542,8 @@ class LiveSession(QObject):
         if sid != self._sid:
             return
         if self._phase is _Phase.WAITING:
-            seq = self._oldest_seq()
-            if seq is None:
-                return  # not playable yet: the timeout still runs
-            self._ready_timer.stop()
-            self._phase = _Phase.PIPELINE
-            self._mode = "pipeline"
-            self._tick_timer.start()
-            if not self._open_at(seq):
-                self._retry = _Retry.RESUME
-            self.modeChanged.emit(self._mode)
+            self._ready_seen = True
+            self._play_first()
         elif self._phase is _Phase.RECOVERING:
             self._recovery_timer.stop()
             self._phase = _Phase.PIPELINE
@@ -557,6 +554,9 @@ class LiveSession(QObject):
         if sid != self._sid:
             return
         self._since_edge_moved(snapshot)  # when a burst lands, to the update
+        if self._phase is _Phase.WAITING and self._ready_seen:
+            self._play_first()  # Stable's cushion may be buffered now
+            return
         if self._deferred is not None and self._phase is _Phase.PIPELINE:
             self._deferred = None  # the spans now describe the RAM ring
             seek, self._after_update = self._after_update, None
@@ -566,8 +566,30 @@ class LiveSession(QObject):
                 self.seek_to(seek)
 
     def _on_ready_timeout(self) -> None:
-        if self._phase is _Phase.WAITING:
+        if self._phase is not _Phase.WAITING:
+            return
+        if self._ready_seen and self._oldest_seq() is not None:
+            self._play_first(cushion=False)  # Stable's cushion did not fill in time
+        else:
             self._fall_back(UNAVAILABLE)
+
+    def _play_first(self, *, cushion: bool = True) -> None:
+        """The tune's first play: from the oldest segment, so zapping is quick; for Stable,
+        once the buffer holds its target, from the start Go live would pick (`cushion`).
+        """
+        if cushion and self._latency == "stable":
+            seq = self._live_seq(cushion=True)
+        else:
+            seq = self._oldest_seq()
+        if seq is None:
+            return  # not playable yet, or no cushion yet: the ready timeout still runs
+        self._ready_timer.stop()
+        self._phase = _Phase.PIPELINE
+        self._mode = "pipeline"
+        self._tick_timer.start()
+        if not self._open_at(seq):
+            self._retry = _Retry.RESUME
+        self.modeChanged.emit(self._mode)
 
     def _on_recovery_timeout(self) -> None:
         if self._phase is _Phase.RECOVERING:
@@ -861,11 +883,12 @@ class LiveSession(QObject):
         # The open segment starts where the closed ones end (0.0 for the very first).
         return _number(self._snapshot().get("end"))
 
-    def _live_seq(self) -> Optional[int]:
+    def _live_seq(self, *, cushion: bool = False) -> Optional[int]:
+        """The start Go live picks; with `cushion`, None while none is far enough behind."""
         assert self._sid is not None
         spans = self._engine.spans(self._sid)
         if not spans:
-            return self._oldest_seq()
+            return None if cushion else self._oldest_seq()
         snapshot = self._snapshot()
         edge, target = self._live_edge(snapshot), self._target(snapshot)
         # Every start, the open segment's too (where the closed ones end; on a bursty source
@@ -883,7 +906,7 @@ class LiveSession(QObject):
         # target (ties: the newer start) within stay-live's band, else the nearest above.
         safe = [mean for mean in means if mean[0] >= target - _BELOW_TARGET_S]
         if not safe:
-            return means[-1][1]  # a short buffer: all of it
+            return None if cushion else means[-1][1]  # a short buffer: all of it
         band = [mean for mean in safe if mean[0] <= target + _NUDGE_S]
         if band:
             return min(band, key=lambda mean: (abs(mean[0] - target), mean[0]))[1]
