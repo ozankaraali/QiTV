@@ -486,6 +486,11 @@ class LiveEngine(QObject):
         self._supervisor, self._cleanup = supervisor, cleanup
         supervisor.start()
 
+    @property
+    def root_dir(self) -> Path:
+        """Where the disk buffers live (the helper's root)."""
+        return self._root
+
     def is_available(self) -> bool:
         return self._available
 
