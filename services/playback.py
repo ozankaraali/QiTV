@@ -379,6 +379,10 @@ class PlaybackSession(QObject):
         self._player.audio_set_mute(muted)
         return muted
 
+    def set_muted(self, muted: bool) -> None:
+        if not self._released:
+            self._player.audio_set_mute(bool(muted))
+
     def audio_tracks(self) -> list[tuple[int, str]]:
         if not self._player_free():
             return []
@@ -596,6 +600,8 @@ class Session(Protocol):
 
     def toggle_mute(self) -> bool: ...
 
+    def set_muted(self, muted: bool) -> None: ...
+
     def audio_tracks(self) -> list[tuple[int, str]]: ...
 
     def set_audio_track(self, track_id: int) -> None: ...
@@ -680,6 +686,9 @@ class NullSession(QObject):
 
     def toggle_mute(self) -> bool:
         return False
+
+    def set_muted(self, muted: bool) -> None:
+        pass
 
     def audio_tracks(self) -> list[tuple[int, str]]:
         return []

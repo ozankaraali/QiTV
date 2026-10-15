@@ -626,6 +626,20 @@ class PlayerJobTests(unittest.TestCase):
         self.assertEqual(self.player.calls, [("release",)])
         self.assertEqual(self.runner.jobs, [])
 
+    def test_set_muted_sets_libvlc_mute_even_while_a_job_runs(self):
+        self.play(A)
+        self.play(B)  # a worker joins A's input: mute takes only the audio output's locks
+        self.session.set_muted(True)
+        self.session.set_muted(False)
+        mutes = [call for call in self.player.calls if call[0] == "audio_set_mute"]
+        self.assertEqual(mutes, [("audio_set_mute", True), ("audio_set_mute", False)])
+
+    def test_set_muted_after_release_leaves_libvlc_alone(self):
+        self.session.release()
+        self.player.calls.clear()
+        self.session.set_muted(True)
+        self.assertEqual(self.player.calls, [])
+
     def test_a_failure_stops_libvlc_off_the_gui_thread(self):
         self.play(A)
         self.session._fail("Timed out opening the stream")
