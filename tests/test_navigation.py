@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
-from services.catalog import Group
+from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
 
 
@@ -35,9 +35,13 @@ class FakeCatalog(QObject):
         self.ptype = "STB"
         self.items_calls = 0
         self.loaded = True
+        self.loading = False  # a provider setup is under way
 
     def provider_type(self):
         return self.ptype
+
+    def is_loading(self):
+        return self.loading
 
     def content_version(self):
         # Changes whenever the fake's content does (tests mutate it directly).
@@ -364,6 +368,42 @@ class NavModelTests(unittest.TestCase):
         self.assertIsNone(self.nav.load_error(section))
         self.assertIn("10", [n.key for n in self.nav.children(section)])
         self.assertEqual(self.nav.children(self.nav.children(section)[-1])[0].title, "One")
+
+    def test_still_loading_is_not_a_failed_refresh(self):
+        # While the next provider sets up, the catalog still holds the previous provider's
+        # groups. "Still loading" is not a failed refresh: no notice, and the old groups
+        # are not shown as a ready section of the new provider.
+        notices = []
+        self.nav.notice.connect(notices.append)
+        self.nav.reset_to("live")
+        section = self.nav.path[-1]
+        self.catalog.loading = True
+        self.catalog.sectionFailed.emit("live", PROVIDER_LOADING_MESSAGE)
+        self.assertEqual(notices, [])
+        self.assertEqual(self.nav.load_error(section), PROVIDER_LOADING_MESSAGE)
+        self.assertEqual(self.nav.children(section), [])
+        # providerReady clears it, and the shell's reset_to asks for the section again.
+        self.catalog.loading = False
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")
+        before = self.catalog.requests.count(("section", "live"))
+        self.nav.reset_to("live")
+        self.assertEqual(self.catalog.requests.count(("section", "live")), before + 1)
+        section = self.nav.path[-1]
+        self.assertIsNone(self.nav.load_error(section))
+        self.catalog.sectionReady.emit("live")
+        self.assertIn("10", [n.key for n in self.nav.children(section)])
+        self.assertEqual(notices, [])
+
+    def test_a_failure_while_the_provider_loads_is_not_a_failed_refresh(self):
+        notices = []
+        self.nav.notice.connect(notices.append)
+        self.nav.reset_to("live")
+        section = self.nav.path[-1]
+        self.catalog.loading = True
+        self.catalog.sectionFailed.emit("live", "Couldn't reach the provider")
+        self.assertEqual(notices, [])
+        self.assertEqual(self.nav.children(section), [])
 
     def test_failed_refresh_resolves_a_pending_group_from_the_saved_catalog(self):
         self.catalog.loaded = False

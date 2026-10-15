@@ -9,6 +9,8 @@ from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, Signal
 
+from services.catalog import PROVIDER_LOADING_MESSAGE
+
 logger = logging.getLogger(__name__)
 
 SECTION_TITLES = {"live": "Live TV", "movies": "Movies", "series": "Series"}
@@ -389,7 +391,10 @@ class NavModel(QObject):
         self.changed.emit()
 
     def _on_section_failed(self, section: str, message: str) -> None:
-        if self.catalog.groups(section):
+        # While a provider sets up, the catalog still holds the previous provider's groups:
+        # that is not a failed refresh. It stays an error until providerReady clears it.
+        loading = message == PROVIDER_LOADING_MESSAGE or self.catalog.is_loading()
+        if not loading and self.catalog.groups(section):
             # A saved catalog could not be refreshed: keep showing it as a loaded
             # section, and say so instead of hiding it behind an error row.
             logger.info("Refreshing section %s failed; showing the saved catalog", section)
