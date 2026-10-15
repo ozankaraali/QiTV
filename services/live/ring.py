@@ -63,6 +63,8 @@ class Ring(ABC):
         # Lock order: _disk_lock (storage operations) outside _state_lock (metadata).
         self._disk_lock = threading.Lock()
         self._state_lock = threading.RLock()
+        # While holding `changed` only wait/notify, the read-only properties and `lease`
+        # are safe; read/release/append/close take the disk lock first (lock order).
         self.changed = threading.Condition(self._state_lock)
         self._segments: dict[int, Segment] = {}
         self._completed: deque[Segment] = deque()
@@ -138,7 +140,16 @@ class Ring(ABC):
             previous = self._open
             if previous is not None:
                 self._guard(lambda: self._finish(previous))
-            self._guard(lambda: self._create(segment))
+            try:
+                self._guard(lambda: self._create(segment))
+            except RingError:
+                if previous is not None:
+                    with self.changed:
+                        previous.complete = True
+                        self._completed.append(previous)
+                        self._open = None
+                        self.changed.notify_all()
+                raise
             # One atomic step: no reader can see "previous complete, new missing".
             with self.changed:
                 if previous is not None:

@@ -204,24 +204,48 @@ class RamRingTests(unittest.TestCase):
             self.assertTrue(ring.changed.wait_for(lambda: ring.newest_seq is not None, 1))
 
     def test_slow_reader_holding_lease_does_not_block_writer(self):
-        ring = RamRing(10_000)
+        ring = RamRing(300)
         ring.open_segment(0, b"")
+        ring.append(b"z" * 100)
+        ring.complete(0)
         lease = ring.lease(0)
-        release = threading.Event()
+        got = []
 
         def slow():
-            ring.read(lease, 0, 1)
-            release.wait(0.2)
+            got.append(ring.read(lease, 0, 100))
+            time.sleep(1.0)
+            got.append(ring.read(lease, 0, 100))
             ring.release(lease)
 
         thread = threading.Thread(target=slow)
         thread.start()
+        time.sleep(0.05)
         start = time.monotonic()
-        for _ in range(50):
+        ring.open_segment(1, b"")
+        for _ in range(10):
             ring.append(b"y" * 10)
-        self.assertLess(time.monotonic() - start, 0.5)
-        thread.join(2)
-        self.assertEqual(ring.bytes, 500)
+        ring.complete(1)
+        ring.open_segment(2, b"")
+        for _ in range(15):
+            ring.append(b"w" * 10)
+        self.assertLess(time.monotonic() - start, 0.3)
+        self.assertTrue(lease.retired)
+        self.assertIsNone(ring.lease(0))
+        thread.join(5)
+        self.assertEqual(got, [b"z" * 100, b"z" * 100])
+        self.assertLessEqual(ring.charged, 300)
+        self.assertEqual(ring.bytes, ring.charged)
+        self.assertNotIn(0, ring._segments)
+
+    def test_create_failure_still_completes_and_notifies_previous(self):
+        ring = RamRing(1000)
+        ring.open_segment(0, b"a")
+        previous = ring.lease(0)
+        with patch.object(ring, "_create", side_effect=OSError("x")):
+            with self.assertRaises(RingError):
+                ring.open_segment(1, b"b")
+        self.assertTrue(previous.complete)
+        self.assertIsNone(ring.open_seq)
 
     def test_append_without_open_segment_and_after_close(self):
         ring = RamRing(100)
@@ -387,6 +411,7 @@ class DiskRingTests(unittest.TestCase):
         ring = self.ring()
         ring.open_segment(0, b"abc")
         seg = ring.lease(0)
+        ring.complete(0)  # closes the writer handle so Windows can unlink
         (ring._directory / "segment-0.ts").unlink()
         with self.assertRaises(RingError) as caught:
             ring.read(seg, 0, 3)
