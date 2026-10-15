@@ -6,8 +6,14 @@ A right-click on an item, episode or channel row asks for its context menu
 Some rows leave the drawer when chosen (Enter, →, a click), and only then: the sources
 column's Settings and Add provider rows (`actionRequested`), and the Movies and Series
 sections, which the Library shows (`libraryRequested`). Highlighting them previews nothing.
+
+The left column's top row starts with ‹ (a layer up, as ← on the left column; hidden on the
+sources), then names where the left column is, each a link: a name shows its node's children
+in the left column, and the provider's name shows the sources, the provider highlighted, to
+pick another. A head cut short ("…") goes a layer up. ↻ (refresh) and ⚙ (Settings) end it.
 """
 
+from dataclasses import dataclass
 import logging
 
 from PySide6.QtCore import (
@@ -72,6 +78,11 @@ FILTER_H_U = 3.4
 GEAR_U = 1.9  # the header row's buttons (refresh, Settings) at its right end, this wide
 GEAR_GAP_U = 0.7
 REFRESH_ACTION = "refresh"  # the header's refresh button: the provider's channels and guide
+BACK_BUTTON = "back"  # the header's ‹: a layer up
+_CRUMB = "crumb:"  # a name in the header, by its path index ("crumb:up": the elided head)
+SEPARATOR = " › "
+BACK_TOOLTIP = "Back"
+PROVIDER_TOOLTIP = "Choose another provider"
 CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
 LOADING_TEXT = "Loading…"
@@ -106,6 +117,39 @@ def _draw_refresh(p: QPainter, rect: QRectF, color: QColor) -> None:
     p.setBrush(color)
     p.drawPath(head)
     p.restore()
+
+
+def _draw_back(p: QPainter, rect: QRectF, color: QColor) -> None:
+    """‹: a chevron, drawn like the refresh arrow (a unit box, round caps)."""
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.translate(rect.x(), rect.y())
+    p.scale(rect.width(), rect.height())
+    pen = QPen(color, 0.12)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    chevron = QPainterPath(QPointF(0.62, 0.2))
+    chevron.lineTo(0.34, 0.5)
+    chevron.lineTo(0.62, 0.8)
+    p.drawPath(chevron)
+    p.restore()
+
+
+@dataclass(frozen=True)
+class _Header:
+    """The left column's top row (drawer coordinates)."""
+
+    back: QRectF  # empty on the top layer (the sources)
+    names: list[tuple[int | None, str, QRectF]]  # (path index or None: the elided head, …)
+    text: QRectF  # all the names
+    refresh: QRectF
+    gear: QRectF
+
+
+def _crumb_key(index: int | None) -> str:
+    return f"{_CRUMB}{'up' if index is None else index}"
 
 
 def _leaves_drawer(node: NavNode) -> bool:
@@ -386,6 +430,31 @@ class Drawer(Overlay):
             self.filter_text = self.filter_text[:-1]
             self._refresh()
 
+    def go_up(self) -> None:
+        """‹ (or the elided head): a layer up, as ← does with the focus on the left column."""
+        self.focus_side = "left"
+        self._cancel_preview()
+        self._left_choice = None
+        if not self._nav.up():
+            self._refresh()
+
+    def show_crumb(self, index: int) -> None:
+        """A name in the header: the left column lists the children of the path's `index`-th
+        node, the next one on the path highlighted. The provider's name (index 0) shows the
+        sources instead, with that provider highlighted."""
+        path = self._nav.path
+        if not 0 <= index < len(path):
+            return
+        self.focus_side = "left"
+        self._cancel_preview()
+        self._left_choice = None
+        if index == 0 and path[0].layer == "source":
+            self._nav.focus_source(path[0].key)
+            return
+        while len(self._nav.path) > index + 2 and self._nav.up():
+            pass
+        self._refresh()
+
     def escape(self) -> bool:
         if self.filter_text:
             self.filter_text = ""
@@ -595,7 +664,13 @@ class Drawer(Overlay):
         event.accept()
         button = self._header_button_at(event.position())
         if event.button() == Qt.LeftButton and button is not None:
-            self.actionRequested.emit(button)
+            if button in (SETTINGS_ROW, REFRESH_ACTION):
+                self.actionRequested.emit(button)
+            elif button in (BACK_BUTTON, _crumb_key(None)):
+                self.go_up()
+            else:
+                self.show_crumb(int(button.removeprefix(_CRUMB)))
+            self._hover_at(event.position())  # the row changed under the pointer
             return
         in_fade = event.position().x() > self._columns["right"].rect.right()
         if event.button() == Qt.LeftButton and in_fade:
@@ -611,12 +686,15 @@ class Drawer(Overlay):
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        over = self._header_button_at(event.position())
+        self._hover_at(event.position())
+        event.ignore()  # the host still hears the pointer move (the transport, the cursor)
+
+    def _hover_at(self, point: QPointF) -> None:
+        over = self._header_button_at(point)
         if over != self._hover:
             self._hover = over
             self.setCursor(Qt.PointingHandCursor if over else Qt.ArrowCursor)
             self.update()
-        event.ignore()  # the host still hears the pointer move (the transport, the cursor)
 
     def leaveEvent(self, event: QEvent) -> None:
         if self._hover is not None:
@@ -633,16 +711,27 @@ class Drawer(Overlay):
                 QToolTip.showText(event.globalPos(), f"Settings ({keys})", self)
             elif button == REFRESH_ACTION:
                 QToolTip.showText(event.globalPos(), "Refresh channels and guide", self)
+            elif button == BACK_BUTTON:
+                QToolTip.showText(event.globalPos(), BACK_TOOLTIP, self)
+            elif button == _crumb_key(0):
+                QToolTip.showText(event.globalPos(), PROVIDER_TOOLTIP, self)
             else:
                 QToolTip.hideText()
             return True
         return super().event(event)
 
     def _header_button_at(self, point: QPointF) -> str | None:
-        if self.settings_gear_rect().contains(point):
+        """What of the header row is at `point`: a button, a name (_crumb_key), or None."""
+        header = self._header()
+        if header.gear.contains(point):
             return SETTINGS_ROW
-        if self.refresh_rect().contains(point):
+        if header.refresh.contains(point):
             return REFRESH_ACTION
+        if header.back.contains(point):
+            return BACK_BUTTON
+        for index, _text, rect in header.names:
+            if rect.contains(point):
+                return _crumb_key(index)
         return None
 
     def wheelEvent(self, event: QWheelEvent) -> None:
@@ -704,10 +793,11 @@ class Drawer(Overlay):
         for col in (left, right):
             self._paint_column(p, col, units)
 
-    def _crumb_layout(self) -> tuple[QRectF, str, str, QRectF, QRectF]:
-        """The breadcrumb row of the left column: (the text's rect, its dimmed head, its last
-        part, the refresh button's rect, the Settings gear's rect). The two buttons sit at the
-        row's right end, the gear last; the text elides before it reaches them."""
+    def _header(self) -> _Header:
+        """The left column's top row: ‹ at its left (but on the sources), then the names of
+        the left column's path, then the refresh button and the Settings gear at its right
+        end. The names elide before they reach the buttons: the last one at its end, the
+        others ("the head") from their start, into one name that goes a layer up."""
         units = self._units
         col = self._columns["left"]
         side = units.px(PAD_SIDE_U)
@@ -718,49 +808,94 @@ class Drawer(Overlay):
             units.px(CRUMB_H_U),
         )
         size, gap = units.px(GEAR_U), units.px(GEAR_GAP_U)
-        room = max(0.0, row.width() - 2 * size - 2 * gap)  # never under the buttons
-        fm = QFontMetrics(units.font(CRUMB_FONT_U))
-        parts = [n.title for n in self._nav.path[:-1]]
-        head = last = ""
-        if parts:
-            last = fm.elidedText(parts[-1], Qt.ElideRight, int(room))
-            head = " › ".join(parts[:-1]) + (" › " if len(parts) > 1 else "")
-            head = fm.elidedText(head, Qt.ElideLeft, max(0, int(room - fm.horizontalAdvance(last))))
-        width = fm.horizontalAdvance(head) + fm.horizontalAdvance(last)
-        text = QRectF(row.x(), row.y(), width, row.height())
         top = row.center().y() - size / 2
         gear = QRectF(row.right() - size, top, size, size)
         refresh = QRectF(gear.left() - gap - size, top, size, size)
-        return text, head, last, refresh, gear
+        path = self._nav.path
+        back = QRectF(row.x(), top, size, size) if len(path) > 1 else QRectF()
+        x = back.right() + gap if not back.isEmpty() else row.x()
+        room = max(0.0, refresh.left() - gap - x)  # never under the buttons
+        fm = QFontMetrics(units.font(CRUMB_FONT_U))
+        titles = [n.title for n in path[:-1]]
+        names: list[tuple[int | None, str, QRectF]] = []
+        start = x
+        if titles:
+            last = fm.elidedText(titles[-1], Qt.ElideRight, int(room))
+            last_w = fm.horizontalAdvance(last)
+            sep_w = fm.horizontalAdvance(SEPARATOR)
+            head = titles[:-1]
+            if sum(fm.horizontalAdvance(t) + sep_w for t in head) <= room - last_w:
+                for index, title in enumerate(head):
+                    width = fm.horizontalAdvance(title)
+                    names.append((index, title, QRectF(x, row.y(), width, row.height())))
+                    x += width + sep_w
+            elif head:
+                cut = fm.elidedText(
+                    SEPARATOR.join(head) + SEPARATOR, Qt.ElideLeft, max(0, int(room - last_w))
+                )
+                width = fm.horizontalAdvance(cut)
+                if cut:
+                    names.append((None, cut, QRectF(x, row.y(), width, row.height())))
+                x += width
+            names.append((len(titles) - 1, last, QRectF(x, row.y(), last_w, row.height())))
+            x += last_w
+        text = QRectF(start, row.y(), x - start, row.height())
+        return _Header(back, names, text, refresh, gear)
 
     def breadcrumb_text_rect(self) -> QRectF:
-        return self._crumb_layout()[0]
+        """Where the header's names are (drawer coordinates)."""
+        return self._header().text
+
+    def breadcrumb_parts(self) -> list[tuple[int | None, str, QRectF]]:
+        """The header's names as shown: (the path index each names, or None for an elided
+        head that goes a layer up; its text; where it takes clicks)."""
+        return self._header().names
+
+    def back_rect(self) -> QRectF:
+        """‹ at the left end of the header row; empty on the sources (the top layer)."""
+        return self._header().back
 
     def refresh_rect(self) -> QRectF:
         """The refresh button (the provider's channels and guide), left of the gear."""
-        return self._crumb_layout()[3]
+        return self._header().refresh
 
     def settings_gear_rect(self) -> QRectF:
         """The Settings gear at the right end of the header row (drawer coordinates)."""
-        return self._crumb_layout()[4]
+        return self._header().gear
 
     def _paint_breadcrumb(self, p: QPainter, col: _Column) -> None:
-        text, head, last, refresh, gear = self._crumb_layout()
-        if head or last:
-            p.setFont(self._units.font(CRUMB_FONT_U))
-            fm = p.fontMetrics()
-            p.setPen(qcolor(PALETTE.text, 0.6))
-            p.drawText(text, Qt.AlignLeft | Qt.AlignVCenter, head)
-            p.setPen(qcolor(PALETTE.accent))
-            p.drawText(
-                text.adjusted(fm.horizontalAdvance(head), 0, 0, 0),
-                Qt.AlignLeft | Qt.AlignVCenter,
-                last,
-            )
-        for key, rect in ((REFRESH_ACTION, refresh), (SETTINGS_ROW, gear)):
+        header = self._header()
+        align = Qt.AlignLeft | Qt.AlignVCenter
+        last = header.names[-1] if header.names else None
+        for name in header.names:
+            index, text, rect = name
+            hovered = self._hover == _crumb_key(index)
+            font = self._units.font(CRUMB_FONT_U)
+            font.setUnderline(hovered)  # a link
+            p.setFont(font)
+            if name is last:
+                p.setPen(qcolor(PALETTE.accent))
+            else:
+                p.setPen(qcolor(PALETTE.text, 1.0 if hovered else 0.6))
+            p.drawText(rect, align, text)
+            if index is not None and name is not last:  # " › " (an elided head ends with it)
+                p.setFont(self._units.font(CRUMB_FONT_U))
+                p.setPen(qcolor(PALETTE.text, 0.6))
+                after = header.text.right() - rect.right()
+                p.drawText(QRectF(rect.right(), rect.y(), after, rect.height()), align, SEPARATOR)
+        buttons = (
+            (BACK_BUTTON, header.back),
+            (REFRESH_ACTION, header.refresh),
+            (SETTINGS_ROW, header.gear),
+        )
+        for key, rect in buttons:
+            if rect.isEmpty():
+                continue
             tone = qcolor(PALETTE.accent) if self._hover == key else qcolor(PALETTE.text, 0.55)
             if key == SETTINGS_ROW:
                 draw_icon(p, "gear", rect, tone)
+            elif key == BACK_BUTTON:
+                _draw_back(p, rect, tone)
             else:
                 _draw_refresh(p, rect, tone)
 

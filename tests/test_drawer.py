@@ -331,7 +331,82 @@ class DrawerTests(unittest.TestCase):
         self.click(self.drawer.settings_gear_rect().center())
         self.assertEqual(self.actions, [SETTINGS_ROW])
 
-    def test_a_click_on_the_name_opens_nothing(self):
+    # ---- the header row's left end: ‹ back and the names (owner, 2.0.1) ----------------------
+
+    def crumb(self, index):
+        """The header's name for the path's `index`-th node (None: the elided head)."""
+        return next(rect for i, _text, rect in self.drawer.breadcrumb_parts() if i == index)
+
+    def test_back_is_hidden_on_the_sources_and_goes_a_layer_up_elsewhere(self):
+        self.drawer.open_drawer("1")  # Home › Live TV, the groups on the left
+        self.record_hand_offs()
+        back, text = self.drawer.back_rect(), self.drawer.breadcrumb_text_rect()
+        self.assertFalse(back.isEmpty())
+        self.assertLessEqual(back.right(), text.left())  # at the row's left, before the names
+        self.assertAlmostEqual(back.center().y(), text.center().y(), delta=1)
+        self.click(back.center())  # as ← with the focus on the left column
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section"])
+        self.assertEqual(self.drawer.focus_side, "left")
+        self.assertEqual(self.drawer.highlighted().title, "Live TV")
+        self.click(self.drawer.back_rect().center())
+        self.assertEqual([n.layer for n in self.nav.path], ["source"])  # the sources
+        self.assertEqual(self.drawer.highlighted().title, "Home")
+        self.assertTrue(self.drawer.back_rect().isEmpty())  # the top layer
+        self.assertEqual(self.drawer.breadcrumb_parts(), [])
+        self.assertEqual(self.actions, [])
+
+    def test_a_click_on_the_providers_name_shows_the_sources_to_switch_provider(self):
+        self.drawer.open_drawer("1")
+        self.record_hand_offs()
+        self.assertEqual([t for _i, t, _r in self.drawer.breadcrumb_parts()], ["Home", "Live TV"])
+        self.click(self.crumb(0).center())
+        self.assertEqual([(n.layer, n.key) for n in self.nav.path], [("source", "Home")])
+        self.assertEqual(self.drawer.focus_side, "left")
+        self.assertEqual(self.drawer.highlighted().title, "Home")  # the current provider
+        self.drawer.move_by(1)
+        self.drawer.activate()  # another one is picked
+        self.assertEqual(self.catalog.selected, ["Backup"])
+        self.assertEqual(self.actions, [])
+
+    def test_a_click_on_the_sections_name_shows_its_groups(self):
+        self.drawer.open_drawer("1")  # the focus on the channels
+        self.click(self.crumb(1).center())
+        self.assertEqual(self.drawer.focus_side, "left")
+        left = self.drawer._columns["left"]
+        self.assertEqual(left.nodes, self.nav.children(self.nav.path[1]))  # Live TV's groups
+        self.assertEqual(self.drawer.highlighted().title, "News")
+        self.assertEqual(self.nav.path[-1].key, "10")  # its channels stay on the right
+
+    def test_a_click_on_a_name_further_up_shows_that_layer(self):
+        self.catalog.movies = {"5": [{"id": "s1", "name": "Show"}]}
+        self.nav.reset_to("series", "5")
+        self.nav.open(self.nav.children(self.nav.path[-1])[0])  # Home › Series › Films › Show
+        self.drawer.open_drawer()
+        self.assertEqual(
+            [t for _i, t, _r in self.drawer.breadcrumb_parts()], ["Home", "Series", "Films"]
+        )
+        self.click(self.crumb(1).center())  # Series: its groups on the left, Films chosen
+        self.assertEqual([n.title for n in self.nav.path], ["Home", "Series", "Films"])
+        self.assertEqual(self.drawer.highlighted().title, "Films")
+
+    def test_the_names_never_run_under_the_buttons_and_an_elided_head_goes_up(self):
+        self.catalog.provider = "A provider whose name is far too long for the column"
+        self.nav.reset_to("live", "10")
+        self.drawer.open_drawer("1")
+        d = self.drawer
+        back, refresh, text = d.back_rect(), d.refresh_rect(), d.breadcrumb_text_rect()
+        self.assertLessEqual(back.right(), text.left())
+        self.assertLessEqual(text.right(), refresh.left())
+        parts = d.breadcrumb_parts()
+        self.assertEqual([i for i, _t, _r in parts], [None, 1])  # the head is elided
+        self.assertTrue(parts[0][1].startswith("…"), parts[0][1])
+        self.assertEqual(parts[1][1], "Live TV")
+        for _i, _t, rect in parts:
+            self.assertTrue(text.contains(rect), rect)
+        self.click(parts[0][2].center())  # a layer up
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section"])
+
+    def test_a_click_on_a_name_hands_nothing_to_the_shell(self):
         self.drawer.open_drawer("1")
         self.record_hand_offs()
         self.click(self.drawer.breadcrumb_text_rect().center())
@@ -605,18 +680,43 @@ class HostedDrawerInputTests(unittest.TestCase):
         # moves on, so the host still hears them (the cursor, the player's controls).
         moved = []
         self.host.mouseMoved.connect(lambda: moved.append(True))
-        refresh = self.drawer.mapTo(self.host, self.drawer.refresh_rect().center().toPoint())
-        for count, point in enumerate((QPoint(330, 400), QPoint(100, 30), refresh), start=1):
-            self.move(point)  # the padding, the header's name, then a header button
+        drawer = self.drawer
+
+        def on_host(rect):
+            return drawer.mapTo(self.host, rect.center().toPoint())
+
+        name = drawer.breadcrumb_parts()[0][2]
+        points = (
+            QPoint(330, 400),  # the padding
+            on_host(name),  # the header's provider name
+            on_host(drawer.back_rect()),
+            on_host(drawer.refresh_rect()),
+        )
+        for count, point in enumerate(points, start=1):
+            self.move(point)
             self.assertEqual(len(moved), count, point)
 
     def test_hovering_a_header_button_shows_the_pointing_hand(self):
         drawer = self.drawer
-        for rect in (drawer.refresh_rect(), drawer.settings_gear_rect()):
+        names = [rect for _i, _t, rect in drawer.breadcrumb_parts()]
+        for rect in (
+            drawer.refresh_rect(),
+            drawer.settings_gear_rect(),
+            drawer.back_rect(),
+            *names,
+        ):
             self.move(QPoint(330, 400))
             self.assertEqual(drawer.cursor().shape(), Qt.CursorShape.ArrowCursor)
             self.move(drawer.mapTo(self.host, rect.center().toPoint()))
             self.assertEqual(drawer.cursor().shape(), Qt.CursorShape.PointingHandCursor)
+
+    def test_hovering_a_name_brightens_and_underlines_it(self):
+        drawer = self.drawer
+        name = drawer.breadcrumb_parts()[0][2]
+        self.move(QPoint(330, 400))
+        plain = drawer.grab(name.toAlignedRect()).toImage()
+        self.move(drawer.mapTo(self.host, name.center().toPoint()))
+        self.assertNotEqual(drawer.grab(name.toAlignedRect()).toImage(), plain)
 
     def right_click(self, view, row):
         rect = view.visualRect(view.model().index(row, 0))
