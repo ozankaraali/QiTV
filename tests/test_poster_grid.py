@@ -327,6 +327,8 @@ class PosterGridTests(unittest.TestCase):
         self.assertFalse(self.grid.grab().isNull())
 
     def test_wrap_elides_long_words_and_extra_lines(self):
+        # Only font-independent properties: the CI's Windows offscreen platform has no fonts,
+        # so every glyph there is a box as wide as the pixel size.
         font = QFont()
         font.setPixelSize(14)
         fm = QFontMetricsF(font)
@@ -336,8 +338,16 @@ class PosterGridTests(unittest.TestCase):
         title = "The long and winding road that leads to your door " * 3
         lines = _wrap(fm, title, 100, 4)
         self.assertEqual(len(lines), 4)
-        self.assertTrue(lines[0].startswith("The long"))
-        self.assertTrue(lines[-1].endswith("…"))
+        self.assertTrue(all(fm.horizontalAdvance(line) <= 100 for line in lines))
+        words = title.split()
+        taken = 0
+        for line in lines[:-1]:  # greedy from the start: as many whole words as fit
+            count = len(line.split())
+            self.assertEqual(line.split(), words[taken : taken + count])
+            self.assertGreater(fm.horizontalAdvance(f"{line} {words[taken + count]}"), 100)
+            taken += count
+        self.assertTrue(lines[-1].endswith("…"))  # the rest of the title, elided
+        self.assertTrue(" ".join(words[taken:]).startswith(lines[-1][:-1]))
         self.assertEqual(_wrap(fm, "One two three", 1000, 1), ["One two three"])
         self.assertEqual(len(_wrap(fm, title, 100, 1)), 1)
         self.assertEqual(_wrap(fm, "", 100, 2), [])
