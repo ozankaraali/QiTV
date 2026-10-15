@@ -1352,6 +1352,73 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertTrue(window.controller.vod_current())
 
 
+class LibraryReturnTests(WindowCase):
+    """Esc back to the Library and the mini player (review findings)."""
+
+    MOVIE = {"id": "m1", "name": "Quiet Pier", "cmd": "http://127.0.0.1:9/movie/1.mp4"}
+
+    def held_links(self):
+        """The catalog keeps every link request open: the test settles them."""
+        ids = []
+
+        def request_link(item, *, section, is_episode=False):
+            ids.append(len(ids) + 1000)
+            return ids[-1]
+
+        patcher = mock.patch.object(self.window.catalog, "request_link", side_effect=request_link)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return ids
+
+    def play_from_the_library(self):
+        self.show()
+        self.wait_for_drawer()
+        screens = self.window.screens
+        screens.open_library("movies")
+        screens.play(self.MOVIE, "movie", {})
+        self.assertFalse(screens.library_shown())
+
+    def test_esc_while_the_link_is_pending_returns_and_drops_it(self):
+        ids = self.held_links()
+        plays = []
+        self.window.session.play = lambda url, **kwargs: plays.append(url)
+        self.play_from_the_library()
+        self.assertEqual(len(ids), 1)  # asked for, not answered yet
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertTrue(self.window.screens.library_shown())
+        self.window.catalog.linkReady.emit(ids[0], self.MOVIE["cmd"])
+        QTest.qWait(20)
+        self.assertEqual(plays, [])  # the link came too late: dropped, never opened
+
+    def test_esc_after_the_link_failed_returns(self):
+        ids = self.held_links()
+        self.play_from_the_library()
+        self.window.catalog.linkFailed.emit(ids[0], "Couldn't reach the provider")
+        self.assertTrue(any(kind == "error" for _text, kind in self.toasts))
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertTrue(self.window.screens.library_shown())
+
+    def test_a_live_channel_chosen_after_the_movie_keeps_esc(self):
+        ids = self.held_links()
+        self.play_from_the_library()
+        channel = self.window.catalog.items("live", "*")[0]
+        self.window.controller.tune(channel, group_key="*", channels=[channel])
+        self.window.overlays.banner.dismiss()  # Esc closes what is open first
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertFalse(self.window.screens.library_shown())  # live TV now: no way back
+        self.assertFalse(self.window.controller.overlay_open())
+
+    def test_the_library_leaves_the_mini_player_first(self):
+        self.show()
+        self.wait_for_drawer()
+        self.mini()
+        self.assertTrue(self.window.mini_player_active())
+        QTest.keyClick(self.window, Qt.Key.Key_2, Qt.KeyboardModifier.ControlModifier)
+        self.assertTrue(self.window.screens.library_shown())
+        self.assertFalse(self.window.mini_player_active())
+        self.assertFalse(self.window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+
+
 class DrawerSettingsTests(WindowCase):
     def test_the_drawer_reaches_settings_and_add_provider_with_arrows_and_enter(self):
         self.show()

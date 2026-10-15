@@ -461,6 +461,15 @@ class TVController(QObject):
         current = self._current
         return current is not None and not current.live
 
+    def vod_chosen(self) -> bool:
+        """The newest choice is not a live channel: a movie, an episode or a file playing or on
+        its way, or nothing (its link failed)."""
+        pending = self._lanes.pending()
+        if pending is not None and not self._is_stay(pending):
+            return not pending.live
+        current = self._current
+        return current is None or not current.live
+
     def handle(self, action: Action, payload: str = "") -> None:
         if self._closed:
             return

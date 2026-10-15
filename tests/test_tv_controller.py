@@ -3233,6 +3233,17 @@ class LibraryTests(AutoplayCase):
         self.session.positionChanged.emit(5_000, 60_000)
         self.assertEqual(self.transport.calls[-1], ("update_position", 5_000, 60_000))
 
+    def test_vod_chosen_follows_the_newest_choice(self):
+        self.controller.stop_for_library()
+        self.assertTrue(self.controller.vod_chosen())  # nothing current: no live channel
+        self.controller.play_vod(movie(1), "movie", play_context())
+        self.assertTrue(self.controller.vod_chosen())  # its link is on its way
+        self.tune(0)  # a channel chosen meanwhile (queued behind the movie's link)
+        self.assertFalse(self.controller.vod_chosen())
+        self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Portal down")
+        self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Portal down")
+        self.assertTrue(self.controller.vod_chosen())  # both failed: nothing plays
+
     def test_overlay_open_names_what_esc_would_close_first(self):
         self.controller.play_vod(movie(1), "movie", play_context())
         self.ready("http://vod/m1.mkv")

@@ -83,9 +83,11 @@ class TVPages(QObject):
         self.library_controller.open_search()
 
     def _enter_library(self) -> None:
+        window = self._window
+        window.leave_mini_player()  # the Library is a full window: never inside the corner
         self._return_to_library = False
-        self._window.controller.stop_for_library()
-        self._show_page(self._window.library_page)
+        window.controller.stop_for_library()
+        self._show_page(window.library_page)
 
     def play(self, item: dict, kind: str, context: dict) -> None:
         """A movie or an episode from the Library: Esc brings the Library back."""
@@ -117,8 +119,10 @@ class TVPages(QObject):
     def escape_to_library(self) -> bool:
         """Esc on a movie from the Library, with nothing open on the player: back to it.
 
-        Not in fullscreen (Esc leaves it first) nor in the mini player. The Library keeps its
-        genre, title and scroll: it is shown again, not opened again.
+        Also while its link is on its way (it is dropped) or after it failed: never a black
+        page without a way back. Not once a live channel was chosen since, not in fullscreen
+        (Esc leaves it first) nor in the mini player. The Library keeps its genre, title and
+        scroll: it is shown again, not opened again.
         """
         window = self._window
         controller = window.controller
@@ -127,7 +131,7 @@ class TVPages(QObject):
             or self.library_shown()
             or window.mini_player_active()
             or window.fullscreen_heading()
-            or not controller.vod_current()
+            or not controller.vod_chosen()
             or controller.overlay_open()
         ):
             return False

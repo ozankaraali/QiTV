@@ -391,6 +391,10 @@ class TVWindow(QMainWindow):
     def mini_player_active(self) -> bool:
         return self._mini_restore is not None
 
+    def leave_mini_player(self) -> None:
+        """Back to the normal window (nothing when it is not the mini player)."""
+        self._leave_mini()
+
     # ---- input --------------------------------------------------------------------------------
 
     def _key_context(self) -> str:
