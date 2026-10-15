@@ -1,12 +1,14 @@
 """The Library's wrapping poster grid: inline detail strip, A–Z rail and sort chips (spec §5.4).
 
-Everything is painted: only the visible rows are drawn, and only they (plus one row ahead) ask
-the poster cache for images. 1 u = 1% of the parent (Library screen) width.
+Everything is painted: only the visible rows are drawn. Once the view has settled, only they
+(plus one row ahead) ask the poster cache for images. 1 u = 1% of the parent (Library screen)
+width.
 """
 
 from bisect import bisect_right
 from collections.abc import Callable
 import logging
+import time
 from typing import NamedTuple
 import zlib
 
@@ -22,9 +24,9 @@ from PySide6.QtGui import (
     QPixmap,
     QTransform,
 )
-from PySide6.QtWidgets import QAbstractScrollArea, QFrame, QWidget
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QFrame, QWidget
 
-from services.library import Details
+from services.library import Details, letter_of, title_of
 from services.text_fold import fold
 from ui.overlays.painting import Units, draw_icon, draw_progress, elided, fill_round, fmt_duration
 from ui.theme import PALETTE, RADIUS_CARD, qcolor
@@ -52,14 +54,15 @@ CARD_SATURATION = 0.45
 CARD_VALUE_TOP = 0.42
 CARD_VALUE_BOTTOM = 0.18
 CARD_BAR_CLEARANCE_U = 0.6  # the card title sits this far above a progress bar
+CARD_TITLE_LINES = 4
 PROGRESS_H_U = 0.45
 PROGRESS_INSET_U = 0.8
 PROGRESS_TRACK_ALPHA = 0.25
 LIFT_U = 0.3  # the focused poster is drawn this much larger
 FOCUS_RING_PX = 1.5
-STRIP_H_U = 13.0
+STRIP_H_U = 11.0
 STRIP_PAD_U = 2.0
-STRIP_TINT_ALPHA = 0.12
+STRIP_TINT_ALPHA = 0.2
 STRIP_TITLE_U = 2.2
 STRIP_META_U = 1.1
 STRIP_META_ALPHA = 0.6
@@ -80,6 +83,7 @@ RAIL_LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MESSAGE_FONT_U = 1.35
 MESSAGE_ALPHA = 0.7
 HOVER_DWELL_MS = 250
+REQUEST_DELAY_MS = 120  # poster requests wait until the view settles
 
 PLAY, START_OVER, FAVORITE = "play", "start_over", "favorite"
 _ACCENT, _RAISED, _SQUARE = "accent", "raised", "square"
@@ -98,30 +102,26 @@ def poster_url(item: dict) -> str:
     return str(item.get("logo") or item.get("screenshot_uri") or item.get("cover") or "")
 
 
-def _title(item: dict) -> str:
-    return str(item.get("name") or item.get("title") or "")
-
-
-def _letter_key(letter: str) -> str:
-    first = fold(letter)[:1]
-    return first if "a" <= first <= "z" else "#"
-
-
 def _wrap(fm: QFontMetricsF, text: str, width: float, max_lines: int) -> list[str]:
-    """Greedy word wrap into at most `max_lines` lines; the last line is elided."""
+    """Greedy word wrap from the start into at most `max_lines` lines.
+
+    Every line is elided to `width` (so is a word longer than the line), and the last allowed
+    line takes the rest of the text, elided.
+    """
     words = text.split()
     lines: list[str] = []
     line = ""
+    start = 0  # the index of the first word on the current line
     for k, word in enumerate(words):
         candidate = f"{line} {word}" if line else word
-        if not line or fm.horizontalAdvance(candidate) <= width:
+        if line and fm.horizontalAdvance(candidate) > width:
+            if len(lines) + 1 >= max_lines:
+                lines.append(fm.elidedText(" ".join(words[start:]), Qt.ElideRight, width))
+                return lines
+            lines.append(fm.elidedText(line, Qt.ElideRight, width))
+            line, start = word, k
+        else:
             line = candidate
-            continue
-        lines.append(line)
-        if len(lines) == max_lines - 1:
-            rest = " ".join(words[k:])
-            return lines + [fm.elidedText(rest, Qt.ElideRight, width)]
-        line = word
     if line:
         lines.append(fm.elidedText(line, Qt.ElideRight, width))
     return lines
@@ -209,6 +209,7 @@ class PosterGrid(QAbstractScrollArea):
         self._message: str | None = None
         self._letters: dict[str, int] = {}
         self._details_provider: Callable[[dict], Details | None] | None = None
+        self._poster_url: Callable[[dict], str] = poster_url
         self._progress_provider: Callable[[dict], float | None] | None = None
         self._details_cache: tuple[int, dict, Details | None] | None = None
         self._progress_cache: dict[int, float | None] = {}
@@ -223,9 +224,12 @@ class PosterGrid(QAbstractScrollArea):
         self._base_height = 0.0
         self._cur = -1
         self._cur_line = -1
-        # posters on demand
-        self._requested: set[str] = set()
+        # posters on demand: requested once the view has settled
         self._visible_urls: set[str] = set()
+        self._request_timer = QTimer(self)
+        self._request_timer.setSingleShot(True)
+        self._request_timer.setInterval(REQUEST_DELAY_MS)
+        self._request_timer.timeout.connect(self._request_posters)
         # mouse
         self._hover = -1
         self._hover_timer = QTimer(self)
@@ -234,6 +238,8 @@ class PosterGrid(QAbstractScrollArea):
         self._hover_timer.timeout.connect(self._on_hover_dwell)
         self._pressed = -1
         self._press_activated = False
+        # The last mouse activation: (target, time.monotonic()), target ("poster", i) or a button.
+        self._last_activation: tuple[object, float] = (None, float("-inf"))
         if posters is not None:
             posters.logoReady.connect(self._on_poster_ready)
         if parent is not None:
@@ -251,8 +257,16 @@ class PosterGrid(QAbstractScrollArea):
         self._active_sort = active
         self._header.update()
 
-    def set_sections(self, sections: list[tuple[str, list[dict]]]) -> None:
-        """Show titles; [("", items)] in normal mode, titled sections in search mode."""
+    def set_sections(
+        self, sections: list[tuple[str, list[dict]]], *, keep_current: bool = False
+    ) -> None:
+        """Show titles: [("", items)] in normal mode, titled sections in search mode.
+
+        By default the first title becomes current and the view returns to the top (a new
+        genre, sort or search). With `keep_current` (a refresh of the same genre and sort,
+        such as after ★), the current title stays current when it is still listed (found by
+        identity) and the view keeps its place; otherwise the first title becomes current.
+        """
         old_index = self._cur
         old_item = self.item(old_index)
         items: list[dict] = []
@@ -265,12 +279,11 @@ class PosterGrid(QAbstractScrollArea):
         self._sections = kept
         self._details_cache = None
         self._progress_cache.clear()
-        self._requested.clear()
         self._cancel_hover()
         current = -1
         if items:
             current = 0
-            if old_item is not None:
+            if keep_current and old_item is not None:
                 if old_index < len(items) and items[old_index] is old_item:
                     current = old_index
                 else:
@@ -278,10 +291,10 @@ class PosterGrid(QAbstractScrollArea):
         self._cur = current
         self._layout_rows()
         same = current >= 0 and items[current] is old_item
-        if same and current != old_index:
-            self._reveal()
-        elif not same:
+        if not (keep_current and same):
             self.verticalScrollBar().setValue(0)
+        elif current != old_index:
+            self._reveal()
         self.viewport().update()
         if current != old_index or (current >= 0 and not same):
             self.focusChanged.emit(current)
@@ -289,6 +302,11 @@ class PosterGrid(QAbstractScrollArea):
     def set_details_provider(self, fn: Callable[[dict], Details | None]) -> None:
         self._details_provider = fn
         self._details_cache = None
+        self.viewport().update()
+
+    def set_poster_url_provider(self, fn: Callable[[dict], str]) -> None:
+        """How a title's poster URL is found; `poster_url` by default."""
+        self._poster_url = fn
         self.viewport().update()
 
     def set_progress_provider(self, fn: Callable[[dict], float | None]) -> None:
@@ -386,7 +404,7 @@ class PosterGrid(QAbstractScrollArea):
 
     def jump_to_letter(self, letter: str) -> None:
         """Make the first title of `letter` current, when the letter index has it."""
-        index = self._letters.get(_letter_key(letter))
+        index = self._letters.get(letter_of(letter))
         if index is not None:
             self.set_current_index(index)
 
@@ -418,6 +436,10 @@ class PosterGrid(QAbstractScrollArea):
             if rect.contains(point):
                 return name
         return None
+
+    def button_labels(self) -> list[tuple[str, str]]:
+        """The current title's strip buttons left to right, as (name, label)."""
+        return [(name, label) for name, label, _style in _button_specs(self._details())]
 
     def strip_rect(self) -> QRect:
         """The detail strip in viewport coordinates; null when nothing is current."""
@@ -641,25 +663,31 @@ class PosterGrid(QAbstractScrollArea):
             self._progress_cache[i] = value
         return self._progress_cache[i]
 
-    def _request_posters(self, first_line: int, last_line: int) -> None:
-        """Ask the cache for the posters of the painted rows and one item row ahead."""
-        if self._posters is None or first_line < 0:
+    def _request_posters(self) -> None:
+        """Ask the cache for the missing posters of the visible rows and one item row ahead.
+
+        Runs once the view has settled (paints and scrolls restart the timer) and replaces
+        the cache's queue, so rows scrolled past never delay the ones on screen. A poster that
+        is still missing is asked for again on a later pass; the cache bounds the retries.
+        """
+        if self._posters is None or self._message is not None or not self.isVisible():
             return
-        last = last_line + 1
+        first, last = self._visible_lines()
+        if first < 0:
+            return
+        last += 1
         while last < len(self._lines) and self._lines[last].start < 0:
             last += 1
-        wanted: list[str] = []
-        for line in self._lines[first_line : last + 1]:
+        wanted: dict[str, None] = {}  # ordered and de-duplicated
+        for line in self._lines[first : last + 1]:
             for i in range(line.start, line.start + line.size):
-                url = poster_url(self._items[i])
-                if url and url not in self._requested and self._posters.pixmap(url) is None:
-                    self._requested.add(url)
-                    wanted.append(url)
+                url = self._poster_url(self._items[i])
+                if url and url not in wanted and self._posters.pixmap(url) is None:
+                    wanted[url] = None
         if wanted:
-            self._posters.request(wanted)
+            self._posters.request(list(wanted), replace_pending=True)
 
     def _on_poster_ready(self, url: str) -> None:
-        self._requested.discard(url)  # an evicted poster may be requested again later
         if url in self._visible_urls:
             self.viewport().update()
 
@@ -687,6 +715,16 @@ class PosterGrid(QAbstractScrollArea):
             self._hover = i
             self._hover_timer.start()
 
+    def _mouse_activate(self, target: object, signal, index: int) -> None:
+        """Emit an activation from the mouse, unless it repeats the previous one within the
+        double-click interval: the third click of a triple-click must not activate again."""
+        now = time.monotonic()
+        last_target, last_time = self._last_activation
+        if target == last_target and (now - last_time) * 1000 < QApplication.doubleClickInterval():
+            return
+        self._last_activation = (target, now)
+        signal.emit(index)
+
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.LeftButton:
             super().mousePressEvent(event)
@@ -700,13 +738,12 @@ class PosterGrid(QAbstractScrollArea):
             self.jump_to_letter(letter)
             return
         button = self.button_at(pos)
+        if button == FAVORITE:
+            self.favoriteToggled.emit(self._cur)
+            return
         if button is not None:
-            signal = {
-                PLAY: self.activated,
-                START_OVER: self.startOverRequested,
-                FAVORITE: self.favoriteToggled,
-            }[button]
-            signal.emit(self._cur)
+            signal = self.activated if button == PLAY else self.startOverRequested
+            self._mouse_activate((button, self._cur), signal, self._cur)
             return
         i = self.index_at(pos)
         if i < 0:
@@ -714,7 +751,7 @@ class PosterGrid(QAbstractScrollArea):
         self._pressed = i
         if i == self._cur:
             self._press_activated = True
-            self.activated.emit(i)
+            self._mouse_activate(("poster", i), self.activated, i)
         else:
             self.set_current_index(i)
 
@@ -725,7 +762,7 @@ class PosterGrid(QAbstractScrollArea):
             return
         if self._pressed >= 0 and self._pressed == self._cur and not self._press_activated:
             self._press_activated = True
-            self.activated.emit(self._cur)
+            self._mouse_activate(("poster", self._cur), self.activated, self._cur)
 
     def wheelEvent(self, event) -> None:
         self._cancel_hover()
@@ -733,18 +770,28 @@ class PosterGrid(QAbstractScrollArea):
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         self.viewport().update()  # the rail does not scroll, so no blitting
+        self._request_timer.start()
 
     # ---- painting ---------------------------------------------------------------------------
 
     def _chip_rects(self) -> list[tuple[str, str, QRectF]]:
+        """Right-aligned sort chips; only the active one when the row does not fit."""
         fm = QFontMetricsF(self._units.font(CHIP_FONT_U))
         height = self._units.px(HEADER_H_U)
         sep_w = fm.horizontalAdvance(SEPARATOR)
-        widths = [fm.horizontalAdvance(label) for _value, label in self._sorts]
-        total = sum(widths) + sep_w * max(0, len(widths) - 1)
-        x = self.width() - self._pad - total
+        available = self.width() - 2 * self._pad
+
+        def total(sorts: list[tuple[str, str]]) -> float:
+            widths = sum(fm.horizontalAdvance(label) for _value, label in sorts)
+            return widths + sep_w * max(0, len(sorts) - 1)
+
+        sorts = self._sorts
+        if total(sorts) > available:
+            sorts = [(value, label) for value, label in sorts if value == self._active_sort]
+        widths = [fm.horizontalAdvance(label) for _value, label in sorts]
+        x = max(self._pad, self.width() - self._pad - total(sorts))
         out = []
-        for (value, label), width in zip(self._sorts, widths):
+        for (value, label), width in zip(sorts, widths):
             out.append((value, label, QRectF(x, 0, width, height)))
             x += width + sep_w
         return out
@@ -804,33 +851,24 @@ class PosterGrid(QAbstractScrollArea):
         scroll = self.verticalScrollBar().value()
         y0, y1 = float(scroll), float(scroll + view.height())
         visible: set[str] = set()
-        first = last = -1
         focus: QRectF | None = None
         title_font = self._units.font(SECTION_FONT_U, QFont.Weight.Bold)
         card_font = self._units.font(CARD_TITLE_U, QFont.Weight.Bold)
         p.translate(0, -scroll)
-        k = max(0, bisect_right(self._line_tops, self._content_to_base(y0)) - 1)
-        while k < len(self._lines):
+        first, last = self._visible_lines()
+        for k in range(first, last + 1) if first >= 0 else ():
             top = self._line_top(k)
-            if top >= y1:
-                break
             line = self._lines[k]
-            if top + line.height > y0:
-                first = k if first < 0 else first
-                last = k
-                if line.start < 0:
-                    self._paint_section_title(p, line.title, top, line.height, title_font)
+            if line.start < 0:
+                self._paint_section_title(p, line.title, top, line.height, title_font)
+                continue
+            for col in range(line.size):
+                i = line.start + col
+                rect = QRectF(self._pad + col * (self._pw + self._gap), top, self._pw, self._ph)
+                if i == self._cur:
+                    focus = rect
                 else:
-                    for col in range(line.size):
-                        i = line.start + col
-                        rect = QRectF(
-                            self._pad + col * (self._pw + self._gap), top, self._pw, self._ph
-                        )
-                        if i == self._cur:
-                            focus = rect
-                        else:
-                            self._paint_poster(p, i, rect, card_font, visible)
-            k += 1
+                    self._paint_poster(p, i, rect, card_font, visible)
         if self._cur >= 0:
             strip_top = self._strip_top()
             if strip_top < y1 and strip_top + self._strip_h > y0:
@@ -845,12 +883,28 @@ class PosterGrid(QAbstractScrollArea):
         if self._rail_visible():
             self._paint_rail(p)
         self._visible_urls = visible
-        self._request_posters(first, last)
+        self._request_timer.start()  # request the visible posters once the view settles
 
     def _content_to_base(self, y: float) -> float:
         if self._cur_line < 0 or y < self._strip_top():
             return y
         return max(self._strip_top(), y - self._strip_extra())
+
+    def _visible_lines(self) -> tuple[int, int]:
+        """The first and last line that intersect the viewport, else (-1, -1)."""
+        scroll = self.verticalScrollBar().value()
+        y0, y1 = float(scroll), float(scroll + self.viewport().height())
+        first = last = -1
+        k = max(0, bisect_right(self._line_tops, self._content_to_base(y0)) - 1)
+        while k < len(self._lines):
+            top = self._line_top(k)
+            if top >= y1:
+                break
+            if top + self._lines[k].height > y0:
+                first = k if first < 0 else first
+                last = k
+            k += 1
+        return first, last
 
     def _paint_message(self, p: QPainter, view: QRectF) -> None:
         u = self._units.u
@@ -875,7 +929,7 @@ class PosterGrid(QAbstractScrollArea):
         self, p: QPainter, i: int, rect: QRectF, card_font: QFont, visible: set[str]
     ) -> None:
         item = self._items[i]
-        url = poster_url(item)
+        url = self._poster_url(item)
         pixmap: QPixmap | None = None
         if url:
             visible.add(url)
@@ -885,7 +939,7 @@ class PosterGrid(QAbstractScrollArea):
         if pixmap is not None and not pixmap.isNull():
             self._paint_cover(p, rect, pixmap)
         else:
-            self._paint_card(p, rect, _title(item), card_font, progress is not None)
+            self._paint_card(p, rect, title_of(item), card_font, progress is not None)
         if progress is not None:
             u = self._units.u
             inset = PROGRESS_INSET_U * u
@@ -923,13 +977,18 @@ class PosterGrid(QAbstractScrollArea):
         u = self._units.u
         margin = CARD_MARGIN_U * u
         bottom = margin + ((PROGRESS_H_U + CARD_BAR_CLEARANCE_U) * u if has_progress else 0.0)
+        fm = QFontMetricsF(font)
+        width = rect.width() - 2 * margin
+        lines = _wrap(fm, title, width, CARD_TITLE_LINES)
+        line_h = fm.lineSpacing()
+        y = rect.bottom() - bottom - line_h * len(lines)
         p.setFont(font)
         p.setPen(qcolor(PALETTE.text))
-        p.drawText(
-            rect.adjusted(margin, margin, -margin, -bottom),
-            Qt.AlignLeft | Qt.AlignBottom | Qt.TextWordWrap,
-            title,
-        )
+        for line in lines:
+            p.drawText(
+                QRectF(rect.left() + margin, y, width, line_h), Qt.AlignLeft | Qt.AlignVCenter, line
+            )
+            y += line_h
         p.restore()
 
     def _paint_focus_ring(self, p: QPainter, rect: QRectF) -> None:
@@ -981,7 +1040,7 @@ class PosterGrid(QAbstractScrollArea):
         right = (buttons[0][3].left() if buttons else rect.right()) - STRIP_PAD_U * u
         width = max(0.0, right - left)
         item = self._items[self._cur]
-        title = details.title if details is not None else _title(item)
+        title = details.title if details is not None else title_of(item)
         title_font = units.font(STRIP_TITLE_U, QFont.Weight.Bold)
         meta_font = units.font(STRIP_META_U)
         plot_font = units.font(STRIP_PLOT_U)
@@ -1103,7 +1162,7 @@ class PosterGrid(QAbstractScrollArea):
                 best, current = index, key
         p.setFont(self._units.font(RAIL_FONT_U))
         for k, letter in enumerate(RAIL_LETTERS):
-            key = _letter_key(letter)
+            key = letter_of(letter)
             if key == current:
                 p.setPen(qcolor(PALETTE.accent))
             else:

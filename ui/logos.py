@@ -61,9 +61,19 @@ class ImageCache(QObject):
         if self._loader is not None:
             self._loader.cancel()
 
-    def request(self, urls: list[str]) -> None:
+    def request(self, urls: list[str], replace_pending: bool = False) -> None:
+        """Queue `urls` for loading.
+
+        With `replace_pending`, URLs still waiting in the queue are dropped first (the batch
+        in flight keeps loading), so a view that scrolled on does not wait behind rows it
+        has already left. Dropped URLs may be requested again later.
+        """
         if self._closed or not self._enabled():
             return
+        if replace_pending:
+            for url in self._queue:
+                self._seen.discard(url)
+            self._queue.clear()
         for url in urls:
             if url and url not in self._seen:
                 self._seen.add(url)

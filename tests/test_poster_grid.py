@@ -1,17 +1,27 @@
 import os
 import time
 import unittest
+from unittest import mock
 import zlib
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QWheelEvent
+from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from services.library import Details
-from ui.library.poster_grid import FAVORITE, PLAY, START_OVER, PosterGrid, card_hue
+from ui.library.poster_grid import (
+    FAVORITE,
+    PLAY,
+    REQUEST_DELAY_MS,
+    START_OVER,
+    PosterGrid,
+    _wrap,
+    card_hue,
+)
+from ui.logos import PosterCache
 
 GENRE_U = 18.0  # the Library's genre column, left of the grid
 NAV_U = 6.0  # the Library's top navigation, above the grid
@@ -23,9 +33,11 @@ class FakePosters(QObject):
     def __init__(self):
         super().__init__()
         self.requested = []
+        self.replace = []
 
-    def request(self, urls):
+    def request(self, urls, replace_pending=False):
         self.requested.append(list(urls))
+        self.replace.append(replace_pending)
 
     def pixmap(self, url):
         return None
@@ -84,12 +96,12 @@ class PosterGridTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def make(self, width=1280, height=720):
+    def make(self, width=1280, height=720, posters=None):
         host = QWidget()
         host.resize(width, height)
         self.addCleanup(host.deleteLater)
         self.addCleanup(host.close)
-        posters = FakePosters()
+        posters = FakePosters() if posters is None else posters
         grid = PosterGrid(posters, host)
         u = width / 100
         left, top = round(GENRE_U * u), round(NAV_U * u)
@@ -114,6 +126,14 @@ class PosterGridTests(unittest.TestCase):
 
     def named(self, name):
         return [v for n, v in self.events if n == name]
+
+    def settle_requests(self):
+        QTest.qWait(REQUEST_DELAY_MS + 60)
+
+    def visible_rows(self, grid, count):
+        cols = grid.columns()
+        view = grid.viewport().rect()
+        return sorted({i // cols for i in range(count) if grid.item_rect(i).intersects(view)})
 
     def buttons(self):
         """The strip buttons left to right, each with a point inside it, found via button_at."""
@@ -251,12 +271,76 @@ class PosterGridTests(unittest.TestCase):
         self.assertEqual(self.named("activated"), [])
         QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
         self.assertEqual(self.named("activated"), [3])
+        QTest.qWait(QApplication.doubleClickInterval() + 50)
         point = self.grid.item_rect(5).center()
         # A real double-click is press, release, then the double-click event (no second press).
         QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
         QTest.mouseDClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
         self.assertEqual(self.grid.current_index(), 5)
         self.assertEqual(self.named("activated"), [3, 5])
+
+    def test_a_third_click_does_not_activate_again(self):
+        self.grid.set_sections([("", titles(30))])
+        point = self.grid.item_rect(0).center()
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        QTest.mouseDClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        self.assertEqual(self.named("activated"), [0])
+        QTest.qWait(QApplication.doubleClickInterval() + 50)
+        QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+        self.assertEqual(self.named("activated"), [0, 0])
+        self.grid.set_details_provider(lambda item: details())
+        play = dict(self.buttons())[PLAY]
+        QTest.qWait(QApplication.doubleClickInterval() + 50)
+        for _ in range(2):
+            QTest.mouseClick(self.grid.viewport(), Qt.LeftButton, Qt.NoModifier, play)
+        self.assertEqual(self.named("activated"), [0, 0, 0])
+
+    def test_button_labels(self):
+        self.grid.set_sections([("", titles(3))])
+        self.grid.set_details_provider(lambda item: details("series", None))
+        self.assertEqual(self.grid.button_labels(), [(FAVORITE, ""), (PLAY, "Episodes")])
+        self.grid.set_details_provider(lambda item: details())
+        self.assertEqual(
+            self.grid.button_labels(),
+            [(START_OVER, "Start over"), (FAVORITE, ""), (PLAY, "Resume")],
+        )
+        self.grid.set_details_provider(lambda item: details(resume_ms=None))
+        self.assertEqual(self.grid.button_labels(), [(FAVORITE, ""), (PLAY, "Play")])
+
+    def test_narrow_header_keeps_the_active_chip_inside(self):
+        sorts = [("added", "Recently added"), ("az", "A–Z"), ("year", "Year"), ("rating", "Rating")]
+        self.grid.set_header(
+            "A very long genre title for a narrow grid", "1,284 titles", sorts, "az"
+        )
+        wide = [self.grid.chip_rect(value) for value, _ in sorts]
+        self.assertFalse(any(rect.isNull() for rect in wide))
+        self.grid.setGeometry(self.grid.x(), self.grid.y(), 260, self.grid.height())
+        self.assertTrue(self.grid.chip_rect("added").isNull())
+        active = self.grid.chip_rect("az")
+        self.assertFalse(active.isNull())
+        self.assertGreaterEqual(active.left(), 0)
+        self.assertLessEqual(active.right(), self.grid.width())
+        self.assertFalse(self.grid.grab().isNull())
+        self.grid.setGeometry(self.grid.x(), self.grid.y(), 60, self.grid.height())
+        self.assertGreaterEqual(self.grid.chip_rect("az").left(), 0)
+        self.assertFalse(self.grid.grab().isNull())
+
+    def test_wrap_elides_long_words_and_extra_lines(self):
+        font = QFont()
+        font.setPixelSize(14)
+        fm = QFontMetricsF(font)
+        lines = _wrap(fm, "Supercalifragilisticexpialidocious and more", 60, 4)
+        self.assertTrue(lines[0].endswith("…"))
+        self.assertTrue(all(fm.horizontalAdvance(line) <= 60 for line in lines))
+        title = "The long and winding road that leads to your door " * 3
+        lines = _wrap(fm, title, 100, 4)
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(lines[0].startswith("The long"))
+        self.assertTrue(lines[-1].endswith("…"))
+        self.assertEqual(_wrap(fm, "One two three", 1000, 1), ["One two three"])
+        self.assertEqual(len(_wrap(fm, title, 100, 1)), 1)
+        self.assertEqual(_wrap(fm, "", 100, 2), [])
 
     def test_wheel_scrolls(self):
         self.grid.set_sections([("", titles(200))])
@@ -326,6 +410,10 @@ class PosterGridTests(unittest.TestCase):
 
     # 7
     def test_twenty_thousand_titles_paint_fast_and_request_only_visible_posters(self):
+        self.grid.set_sections([("", titles(30, "Warm"))])
+        self.grid.grab()  # load the fonts before timing
+        self.settle_requests()
+        self.posters.requested.clear()
         many = titles(20_000)
         start = time.perf_counter()
         self.grid.set_sections([("", many)])
@@ -333,13 +421,73 @@ class PosterGridTests(unittest.TestCase):
         elapsed = time.perf_counter() - start
         self.assertFalse(image.isNull())
         self.assertLess(elapsed, 0.150)
+        self.assertEqual(self.posters.requested, [])  # requests wait for the view to settle
+        self.settle_requests()
         cols = self.grid.columns()
-        view = self.grid.viewport().rect()
-        rows = {i // cols for i in range(200) if self.grid.item_rect(i).intersects(view)}
-        requested = [url for call in self.posters.requested for url in call]
+        rows = self.visible_rows(self.grid, 200)
+        self.assertEqual(len(self.posters.requested), 1)
+        self.assertEqual(self.posters.replace, [True, True])
+        requested = self.posters.requested[0]
         self.assertEqual(len(requested), len(set(requested)))  # de-duplicated
-        self.assertLessEqual(len(requested), (len(rows) + 1) * cols)
+        self.assertEqual(len(requested), (len(rows) + 1) * cols)
+        ahead = (rows[-1] + 1) * cols  # the first title of the row after the visible ones
         self.assertIn(many[0]["logo"], requested)
+        self.assertIn(many[ahead]["logo"], requested)
+        self.assertIn(many[ahead + cols - 1]["logo"], requested)
+        self.assertNotIn(many[ahead + cols]["logo"], requested)
+
+    def test_fast_scroll_queues_only_the_final_viewport(self):
+        cache = PosterCache(mock.Mock(), mock.Mock(channel_logos=True, ssl_verify=True))
+        cache._loader = mock.Mock()  # a batch is in flight, so new requests wait in the queue
+        self.addCleanup(cache.shutdown)
+        _host, grid, _ = self.make(posters=cache)
+        many = titles(20_000)
+        grid.set_sections([("", many)])
+        bar = grid.verticalScrollBar()
+        for step in range(1, 41):
+            bar.setValue(bar.maximum() * step // 50)
+            grid.grab()
+            if step % 10 == 0:
+                self.settle_requests()  # a pause long enough to request mid-scroll
+        self.settle_requests()
+        cols = grid.columns()
+        rows = self.visible_rows(grid, len(many))
+        allowed = {
+            many[i]["logo"] for i in range(rows[0] * cols, min(len(many), (rows[-1] + 2) * cols))
+        }
+        fully_visible = {
+            many[i]["logo"]
+            for i in range(rows[0] * cols, (rows[-1] + 1) * cols)
+            if grid.viewport().rect().contains(grid.item_rect(i))
+        }
+        self.assertTrue(fully_visible)
+        self.assertLessEqual(set(cache._queue), allowed)
+        self.assertLessEqual(fully_visible, set(cache._queue))
+        self.assertLessEqual(len(cache._queue), (len(rows) + 1) * cols)
+
+    def test_missing_posters_are_requested_again_on_a_later_pass(self):
+        self.grid.set_sections([("", titles(30))])
+        self.grid.grab()
+        self.settle_requests()
+        first = self.posters.requested[-1]
+        self.grid.viewport().repaint()
+        self.settle_requests()
+        self.assertEqual(len(self.posters.requested), 2)
+        self.assertEqual(self.posters.requested[-1], first)  # the cache bounds the retries
+
+    def test_poster_url_provider(self):
+        items = [
+            dict(item, screenshot_uri=f"http://stb.invalid/{i}.jpg")
+            for i, item in enumerate(titles(3))
+        ]
+        self.grid.set_poster_url_provider(lambda item: item.get("screenshot_uri", ""))
+        self.grid.set_sections([("", items)])
+        self.grid.grab()
+        self.settle_requests()
+        self.assertEqual(
+            self.posters.requested,
+            [["http://stb.invalid/0.jpg", "http://stb.invalid/1.jpg", "http://stb.invalid/2.jpg"]],
+        )
 
     def test_poster_ready_repaints_only_when_visible(self):
         many = titles(500)
@@ -381,18 +529,29 @@ class PosterGridTests(unittest.TestCase):
         )
         self.assertFalse(self.grid.grab().isNull())
 
-    def test_set_sections_keeps_the_current_title(self):
+    def test_set_sections_keeps_the_current_title_when_asked(self):
         items = titles(30)
         self.grid.set_sections([("", items)])
         self.grid.set_current_index(12)
         focus_events = len(self.named("focusChanged"))
-        self.grid.set_sections([("", list(items))])
+        self.grid.set_sections([("", list(items))], keep_current=True)
         self.assertEqual(self.grid.current_index(), 12)
         self.assertEqual(len(self.named("focusChanged")), focus_events)
-        self.grid.set_sections([("", list(reversed(items)))])
+        self.grid.set_sections([("", list(reversed(items)))], keep_current=True)
         self.assertIs(self.grid.item(self.grid.current_index()), items[12])
-        self.grid.set_sections([("", titles(30, "Other"))])
+        self.assertTrue(self.grid.viewport().rect().contains(self.grid.strip_rect()))
+        self.grid.set_sections([("", titles(30, "Other"))], keep_current=True)
         self.assertEqual(self.grid.current_index(), 0)
+
+    def test_set_sections_starts_at_the_top_by_default(self):
+        items = titles(200)
+        self.grid.set_sections([("", items)])
+        self.grid.set_current_index(120)
+        self.assertGreater(self.grid.verticalScrollBar().value(), 0)
+        self.grid.set_sections([("", list(items))])
+        self.assertEqual(self.grid.current_index(), 0)
+        self.assertEqual(self.grid.verticalScrollBar().value(), 0)
+        self.assertEqual(self.named("focusChanged")[-1], 0)
 
     # 9
     def test_message_paints_without_items(self):

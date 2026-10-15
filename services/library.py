@@ -69,8 +69,12 @@ class Details:
 
 
 # --- field parsing ------------------------------------------------------------------------
-def _title(item: dict) -> str:
+def title_of(item: dict) -> str:
+    """The display title of a catalog item: its name, else its title."""
     return str(item.get("name") or item.get("title") or "")
+
+
+_title = title_of  # the earlier private name
 
 
 def _added(item: dict) -> Optional[float]:
@@ -182,9 +186,14 @@ _SORT_KEYS = {
 }
 
 
-def _letter(item: dict) -> str:
-    first = fold(_title(item))[:1]
+def letter_of(title: str) -> str:
+    """The A–Z rail letter of a title: its folded first character when a–z, else '#'."""
+    first = fold(title)[:1]
     return first if "a" <= first <= "z" else "#"
+
+
+def _letter(item: dict) -> str:
+    return letter_of(title_of(item))
 
 
 class LibraryModel(QObject):

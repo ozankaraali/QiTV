@@ -130,6 +130,26 @@ class ImageCacheTest(unittest.TestCase):
             self.settle(cache)
         self.assertEqual(FakeLoader.batches, [["bad"]] * 3)  # first try + 2 retries
 
+    def test_queued_urls_accumulate_by_default(self):
+        cache = self.make()
+        cache.request(["a"])  # in flight until its cleanup runs on the event loop
+        cache.request(["b"])
+        cache.request(["c"])
+        self.settle(cache)
+        self.assertEqual(FakeLoader.batches, [["a"], ["b", "c"]])
+
+    def test_replace_pending_drops_queued_urls_but_not_the_batch_in_flight(self):
+        cache = self.make()
+        cache.request(["a"])  # in flight
+        cache.request(["b", "c"])  # queued behind it
+        cache.request(["d", "b"], replace_pending=True)
+        self.assertEqual(cache._queue, ["d", "b"])
+        self.settle(cache)
+        self.assertEqual(FakeLoader.batches, [["a"], ["d", "b"]])
+        cache.request(["c"])  # dropped before it loaded, so it may be requested again
+        self.settle(cache)
+        self.assertEqual(FakeLoader.batches, [["a"], ["d", "b"], ["c"]])
+
     def test_late_progress_after_shutdown_is_ignored(self):
         cache = self.make()
         cache._batch = ["u"]

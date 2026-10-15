@@ -345,6 +345,18 @@ class FixRoundTests(unittest.TestCase):
             model.letter_index()
             self.assertEqual(spy.call_count, 0)
 
+    def test_shared_title_and_letter_helpers(self):
+        self.assertEqual(library.title_of({"name": "Éclair", "title": "x"}), "Éclair")
+        self.assertEqual(library.title_of({"title": 1917}), "1917")
+        self.assertEqual(library.title_of({}), "")
+        self.assertEqual(library.letter_of("Éclair"), "e")
+        self.assertEqual(library.letter_of("İstanbul"), "i")
+        self.assertEqual(library.letter_of("1917"), "#")
+        self.assertEqual(library.letter_of("#"), "#")
+        self.assertEqual(library.letter_of(""), "#")
+        self.assertIs(library._title, library.title_of)
+        self.assertEqual(library._letter({"name": "Zorro"}), "z")
+
     def test_parsing_edge_cases(self):
         self.assertEqual(library._minutes({"duration_secs": 0, "duration": "42"}), 42)
         self.assertIsNone(library._year({"year": "0000", "name": "X (1700)"}))
