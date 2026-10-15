@@ -1,14 +1,16 @@
-import asyncio
 import logging
 import os
 import random
 from urllib.parse import quote, urlencode
 
 from PySide6.QtCore import QThread, Signal
-import aiohttp
 import orjson as json
 
+from services.lazy_import import lazy_module
+
 logger = logging.getLogger(__name__)
+aiohttp = lazy_module("aiohttp")
+asyncio = lazy_module("asyncio")
 
 
 class ContentLoader(QThread):

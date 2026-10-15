@@ -85,6 +85,12 @@ a = Analysis(
         'services.live.worker',
         'm3u8',
         'Cryptodome.Cipher.AES',
+        # Loaded on first use (services/lazy_import.py): no import statement names them.
+        'aiohttp',
+        'asyncio',
+        'requests',
+        'tzlocal',
+        'urlobject',
     ],
     hookspath=[],
     hooksconfig={},

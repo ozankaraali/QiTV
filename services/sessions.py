@@ -42,7 +42,7 @@ from PySide6.QtCore import QObject, Signal, SignalInstance
 from services.budgeted_stream import RELEASE_CAP_MS, BudgetedStream
 from services.connection_budget import DENIED, ConnectionBudget
 from services.live.live_session import LiveSession
-from services.live.source import REFUSALS
+from services.live.refusals import REFUSALS
 from services.playback import Session
 from services.zapping import ZapContext
 

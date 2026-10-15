@@ -54,6 +54,7 @@ from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import ReadTimeoutError
 from urllib3.util.ssl_ import create_urllib3_context, resolve_cert_reqs, resolve_ssl_version
 
+from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
 from services.vlc_profile import DEFAULT_USER_AGENT
 
 log = logging.getLogger(__name__)
@@ -116,10 +117,6 @@ _ENCRYPTION = "The HLS channel uses an unsupported encryption method."
 _UNDECRYPTABLE = "The HLS channel could not be decrypted."
 _NOT_TS = "The HLS channel's segments are not MPEG-TS."
 _FROZEN = "The channel's HLS playlist stopped advancing."
-# Shown in place of an "http" failure's message when the provider refused for its limit.
-STREAM_LIMIT = "The provider refused the stream: its connection limit is reached."
-STREAM_REFUSED = "The provider refused the stream: it may limit connections."  # a plain 403
-REFUSALS = (STREAM_LIMIT, STREAM_REFUSED)
 
 _DEFAULT_MESSAGES = {
     "unsupported": _OPEN_FAILED,

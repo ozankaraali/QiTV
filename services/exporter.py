@@ -13,14 +13,15 @@ import threading
 from typing import Any, Optional
 
 from PySide6.QtCore import QObject, Signal
-import requests
 
 from services.export import save_m3u_content, save_stb_content
+from services.lazy_import import lazy_module
 from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
 from services.redact import safe_exc
 from services.search import iter_items
 
 logger = logging.getLogger(__name__)
+requests = lazy_module("requests")
 
 SECTION_KEYS = {"live": "itv", "movies": "vod", "series": "series"}
 REQUEST_TIMEOUT = (10, 30)

@@ -5,9 +5,8 @@ import re
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import QObject, Qt, Signal
-import requests
-from urlobject import URLObject
 
+from services.lazy_import import lazy_module
 from services.m3u import decode_playlist, parse_m3u
 from services.provider_api import (
     base_from_url,
@@ -22,6 +21,8 @@ from services.provider_manager import HANDSHAKE_UNEXPECTED, HANDSHAKE_UNREACHABL
 from services.redact import safe_exc, safe_traceback
 
 logger = logging.getLogger(__name__)
+requests = lazy_module("requests")
+urlobject = lazy_module("urlobject")
 
 NO_PORTAL_DATA_MESSAGE = "The portal returned no data"
 STB_DEVICE_REJECTED_MESSAGE = (
@@ -34,7 +35,7 @@ def _resolve_xtream_base(server_info: dict, base_url: str, prefer_https: bool) -
     resolved_base = xtream_choose_resolved_base(server_info, base_url, prefer_https=prefer_https)
     if resolved_base:
         return resolved_base
-    url_obj = URLObject(base_url)
+    url_obj = urlobject.URLObject(base_url)
     return f"{url_obj.scheme or 'http'}://{url_obj.netloc or url_obj}".rstrip("/")
 
 

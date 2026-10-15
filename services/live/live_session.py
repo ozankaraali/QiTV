@@ -96,7 +96,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.live.source import REFUSALS, STREAM_LIMIT
+from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import TARGETS, Mode, StayLive
 from services.live.timeline import Span
 from services.playback import PlaybackState, Session

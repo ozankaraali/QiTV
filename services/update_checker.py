@@ -18,12 +18,13 @@ import weakref
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
 from packaging.version import parse
-import requests
 
 from services.config_manager import ConfigManager, get_app_version
+from services.lazy_import import lazy_module
 from services.thread_cleanup import ThreadCleanup, has_pending_threads
 
 logger = logging.getLogger(__name__)
+requests = lazy_module("requests")
 
 # Platform-specific asset name patterns
 ASSET_PATTERNS = {

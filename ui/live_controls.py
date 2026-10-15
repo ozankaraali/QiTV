@@ -25,7 +25,7 @@ from PySide6.QtGui import QPixmap
 
 from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE, LiveSession
-from services.live.source import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
+from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner

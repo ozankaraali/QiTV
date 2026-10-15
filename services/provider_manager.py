@@ -11,14 +11,15 @@ from urllib.parse import urlencode
 
 from PySide6.QtCore import QObject, Signal
 import orjson as json
-import requests
-import tzlocal
-from urlobject import URLObject
 
+from services.lazy_import import lazy_module
 from services.provider_api import provider_prefers_https
 from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
+requests = lazy_module("requests")
+tzlocal = lazy_module("tzlocal")
+urlobject = lazy_module("urlobject")
 
 # Why an STB handshake failed (StbHandshake.failure); the setup worker words it for the user.
 HANDSHAKE_UNREACHABLE = "unreachable"  # DNS, connection, timeout or a server error
@@ -481,7 +482,7 @@ class StbHandshake:
 
     @staticmethod
     def create_headers(url, mac, token, serial_number="", device_id=""):
-        url = URLObject(url)
+        url = urlobject.URLObject(url)
         # Use a robust string representation of local timezone
         try:
             timezone = str(tzlocal.get_localzone())
