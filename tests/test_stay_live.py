@@ -92,6 +92,12 @@ class StayLiveTests(unittest.TestCase):
         self.assertIs(sl.mode, Mode.SHIFTED)
         self.assertEqual(sl.update(100, False), Decision(0.5))
 
+    def test_pause_from_catching_up_is_shifted_at_normal_speed(self):
+        sl = make(Mode.CATCHING_UP)
+        sl.user_paused()
+        self.assertIs(sl.mode, Mode.SHIFTED)
+        self.assertEqual(sl.update(100, False), Decision(1.0))
+
     def test_buffering_in_shifted(self):
         sl = make(Mode.SHIFTED)
         self.assertEqual(sl.update(50, True), Decision(1.0))

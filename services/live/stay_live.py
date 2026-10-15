@@ -41,7 +41,9 @@ class StayLive:
         self.target = TARGETS[name]
 
     def user_paused(self) -> None:
-        self._leave_live()
+        """A pause leaves LIVE, and a catch-up too: it resumes time-shifted at 1x."""
+        self.mode = Mode.SHIFTED
+        self._user_rate = 1.0
 
     def user_seeked_back(self) -> None:
         self._leave_live()

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 import services.live.live_session as live_session
 from services.live.live_session import LiveSession
+from services.live.stay_live import TARGETS
 from services.live.timeline import Span
 from services.playback import PlaybackState
 from services.vlc_profile import PlayKind
@@ -650,14 +651,11 @@ class SeekTests(LiveSessionCase):
     def test_go_live_with_bursts_aims_the_mean_lag_at_the_target(self):
         sid = self.ready(segments(0, 10), live_edge=20.0, burst=6.0)
         # A burst just landed: the mean lag is the current one less half a burst. Starts
-        # 10 and 12 give means of 7 and 5 around the 6 s target: neither at the target yet.
+        # 10 and 12 give means of 7 and 5: 5 is under the 5.75 s floor, and 7 is the
+        # nearest above stay-live's band (5.75-6.75): "behind live" for a moment.
         self.live.go_live()
-        self.assertEqual(len(self.playback.plays), 1)
-        self.step(0.5)
-        self.assertEqual(len(self.playback.plays), 1)
-        self.step(0.25)  # start 12 now gives 5.75: at the target, less a quarter second
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 6))
-        self.clock.now += 2.25  # halfway to the next burst: the current lag is the mean
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 5))
+        self.clock.now += 3.0  # halfway to the next burst: the current lag is the mean
         self.live.go_live()
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 7))  # 6.0: at once
 
@@ -703,6 +701,44 @@ class SeekTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["mode"], "catching_up")
         self.assertEqual(self.timelines[-1]["rate"], 1.5)
         self.assertEqual(self.playback.rates, [1.5])
+
+    def test_a_pause_ends_a_catch_up_at_normal_speed(self):
+        self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.set_speed(1.5)
+        self.step(0.25, media=0.375)
+        self.assertEqual(self.timelines[-1]["mode"], "catching_up")
+        self.live.toggle_pause()
+        self.assertEqual(self.playback.rates, [1.5, 1.0])
+        self.step(0.25, media=0)
+        self.assertEqual((self.timelines[-1]["mode"], self.timelines[-1]["rate"]), ("shifted", 1.0))
+        self.live.toggle_pause()  # resumes at 1x, time-shifted
+        self.step(0.25)
+        self.assertEqual(self.playback.rates, [1.5, 1.0])
+        self.assertEqual((self.timelines[-1]["mode"], self.timelines[-1]["rate"]), ("shifted", 1.0))
+
+    def test_a_pause_while_waiting_applies_once_it_plays(self):
+        sid = self.start()
+        self.live.toggle_pause()
+        self.engine.buffer(sid, segments(0, 3), live_edge=6.0)
+        self.engine.sessionReady.emit(sid)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused, [True])
+        self.assertIs(self.playback.current, PlaybackState.PAUSED)
+        self.step(0.25, media=0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        self.assertTrue(self.timelines[-1]["paused"])
+
+    def test_a_pause_and_resume_while_waiting_plays(self):
+        sid = self.start()
+        self.live.toggle_pause()
+        self.live.toggle_pause()
+        self.engine.buffer(sid, segments(0, 3), live_edge=6.0)
+        self.engine.sessionReady.emit(sid)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertEqual(self.playback.paused, [])
 
     def test_speed_at_live_is_ignored(self):
         self.ready(segments(0, 2), live_edge=4.0, latency="stable")
@@ -773,15 +809,18 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(rates, sorted(rates, reverse=True))  # only ever down, if at all
         self.assertGreater(min(feed.before[-4:]), 2.0)
 
-    def go_live_at_every_phase(self, burst, latency, step=0.5):
-        """Go live at points through a burst (2 s GOPs, the newest open); per phase: the
-        largest reported lag after Go live less the target, the least lag before a burst,
-        the rates set and the plays after Go live."""
+    def go_live_at_every_phase(self, burst, latency, *, step=0.5, jitter=0.0, seconds=60.0):
+        """Go live at points through a burst (GOPs as long as a burst, the newest open).
+
+        Per phase: the seconds the transport would show "behind live" (lag at least the
+        target plus 1 s), the least lag before a burst, the rates set, the plays after Go
+        live, and the target.
+        """
         rows = []
         for phase in [i * step for i in range(int(burst / step))]:
             self.live = self.make()
             sid = self.start(latency=latency)
-            feed = Feed(self, sid, burst=burst).ready()
+            feed = Feed(self, sid, burst=burst, gop=burst, jitter=jitter).ready()
             feed.run(0.25)
             self.live.seek_to(20.0)
             feed.run(3 * burst + phase)
@@ -793,52 +832,46 @@ class StayLiveTests(LiveSessionCase):
             arrivals = len(feed.before)
             self.live.go_live()
             feed.sync()
-            feed.run(60.0)
+            feed.run(seconds)
             target = self.timelines[-1]["target"]
+            after = self.timelines[timelines:]
             rows.append(
                 (
                     phase,
-                    max(t["lag"] for t in self.timelines[timelines:]) - target,
+                    0.25 * sum(1 for t in after if t["lag"] >= target + 1.0),
                     min(feed.before[arrivals:]),
                     self.playback.rates[rates:],
                     len(self.playback.plays) - plays,
+                    target,
                 )
             )
             self.live.stop()
             self.engine.answer()
         return rows
 
-    def test_go_live_on_bursts_shows_live_at_every_phase(self):
-        for burst in (2.0, 6.0):
+    def test_go_live_on_bursts_keeps_the_buffer_at_every_phase(self):
+        """GOPs of 2-6 s arriving whole: never below the target less a quarter second."""
+        for burst in (2.0, 3.0, 4.0, 6.0):
             for latency in ("low", "normal", "stable"):
-                self.assert_go_live_lands_live(burst, latency)
+                rows = self.go_live_at_every_phase(burst, latency)
+                for phase, behind, before, rates, plays, target in rows:
+                    with self.subTest(burst=burst, latency=latency, phase=phase):
+                        self.assertGreaterEqual(before, max(0.5, target - burst / 2 - 0.25))
+                        self.assertEqual(plays, 1)
+                        self.assertLessEqual(reversals(rates), 1)
 
-    def assert_go_live_lands_live(self, burst, latency):
-        for phase, over, before, rates, plays in self.go_live_at_every_phase(burst, latency):
-            with self.subTest(burst=burst, latency=latency, phase=phase):
-                self.assertLess(over, 1.0)  # never "behind live"
-                self.assertGreaterEqual(before, 1.0)  # a second of headroom per burst
-                self.assertEqual(rates, [])  # landed at the target: nothing to correct
-                self.assertEqual(plays, 1)
-
-    def test_go_live_waits_for_a_burst_phase_with_headroom(self):
-        # 2 s bursts at Normal, 0.5 s after one landed: the open segment would leave 0.5 s
-        # before the next burst, the closed one before it would show "behind live".
-        # Waiting until the open segment gives the target less a quarter second fixes both.
-        sid = self.ready(segments(0, 29), live_edge=60.0, open_seq=29, burst=2.0)
-        self.playback.set_state(PlaybackState.PLAYING)
-        self.live.seek_to(20.0)
-        self.clock.now += 0.5
-        plays = len(self.playback.plays)
-        self.live.go_live()
-        self.assertEqual(len(self.playback.plays), plays)  # waits three quarters of a second
-        self.playback.errorOccurred.emit("The stream could not be played")
-        self.assertEqual(len(self.playback.plays), plays)  # the pending Go live reopens
-        self.step(0.5)
-        self.assertEqual(len(self.playback.plays), plays)
-        self.step(0.25)  # the open segment now gives 2.25 s: the target less a quarter
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 29))
-        self.assertEqual(self.timelines[-1]["mode"], "live")
+    def test_go_live_on_jittery_bursts_never_stalls(self):
+        """Arrivals up to a second early or late: the landing leaves room for them."""
+        for burst in (2.0, 3.0, 4.0, 6.0):
+            for latency in ("low", "normal", "stable"):
+                if max(TARGETS[latency], burst) - burst / 2 - 0.25 <= 1.0:
+                    continue  # Low at 2 s bursts: its target leaves under a second
+                rows = self.go_live_at_every_phase(
+                    burst, latency, step=1.0, jitter=1.0, seconds=120.0
+                )
+                for phase, _, before, _, _, _ in rows:
+                    with self.subTest(burst=burst, latency=latency, phase=phase):
+                        self.assertGreater(before, 0.0)
 
     def test_go_live_can_start_at_the_open_segment(self):
         sid = self.ready(segments(0, 10), live_edge=23.0, open_seq=10, burst=2.0)
@@ -1302,6 +1335,22 @@ class HelperDeathTests(LiveSessionCase):
         self.engine.sessionReady.emit(sid)
         self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
         self.assertEqual(self.notices, [])
+
+    def test_a_pause_during_recovery_is_kept_after_the_reopen(self):
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.die(sid)
+        self.live.toggle_pause()  # nothing plays: remembered
+        self.engine.up = True
+        self.engine.available.emit(True)
+        self.engine.buffer(sid, segments(0, 5), live_edge=10.0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 3))
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.assertIs(self.playback.current, PlaybackState.PAUSED)
+        self.step(0.25, media=0)
+        self.assertEqual(self.timelines[-1]["mode"], "shifted")
+        self.assertTrue(self.timelines[-1]["paused"])
 
     def test_recovery_is_bounded(self):
         self.patch("_RECOVERY_MS", 50)
