@@ -3,7 +3,8 @@
 ``LoopbackHTTPServer`` and ``ThreadingLoopbackHTTPServer`` are an early copy of main's
 ``services/timeshift_source.py`` (numeric bind, no reverse DNS); the stream server task
 replaces them with an import from ``services/live/server.py``. ``leaf`` and ``LocalSource``
-are ported verbatim from main's ``tests/test_timeshift_source.py``.
+are ported from main's ``tests/test_timeshift_source.py``; ``LocalSource`` gained a
+keep-alive mode (no ``Connection: close``) and counts the TCP connections it accepted.
 """
 
 from collections import Counter
@@ -36,11 +37,14 @@ def leaf(*segments, ended=True, extra=""):
 
 
 class LocalSource:
-    def __init__(self, routes, tls=None):
+    def __init__(self, routes, tls=None, keep_alive=False):
         self.routes = routes
         self.requests = []
         self.counts = Counter()
+        self.connections = 0
+        self.keep_alive = keep_alive
         self.stop = threading.Event()
+        lock = threading.Lock()
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -48,6 +52,11 @@ class LocalSource:
 
             def log_message(self, *_args):
                 pass
+
+            def setup(self):
+                super().setup()
+                with lock:
+                    owner.connections += 1
 
             def do_GET(self):
                 owner.requests.append((self.path, dict(self.headers)))
@@ -59,7 +68,8 @@ class LocalSource:
                 self.send_response(status)
                 if not callable(body):
                     self.send_header("Content-Length", str(len(body)))
-                self.send_header("Connection", "close")
+                if not owner.keep_alive:
+                    self.send_header("Connection", "close")
                 for name, value in headers.items():
                     self.send_header(name, value)
                 self.end_headers()

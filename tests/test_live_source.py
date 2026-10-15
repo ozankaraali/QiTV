@@ -39,6 +39,13 @@ def encrypt(data, iv, key=KEY):
     return AES.new(key, AES.MODE_CBC, iv=iv).encrypt(pad(data, 16))
 
 
+def hls(sequence, names, *, target=1, ended=False, extra=""):
+    """A media playlist whose segments each last ``target`` seconds."""
+    text = f"#EXTM3U\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:{sequence}\n{extra}"
+    text += "".join(f"#EXTINF:{target},\n{name}\n" for name in names)
+    return (text + ("#EXT-X-ENDLIST\n" if ended else "")).encode()
+
+
 def drain(source):
     """Every item from ``chunks()``, with adjacent byte blocks joined."""
     parts = []
@@ -53,9 +60,13 @@ def drain(source):
     return parts
 
 
-def media(url, *, headers=None, verify_ssl=True, stop=None):
+def media(url, *, headers=None, verify_ssl=True, stop=None, **options):
     source = open_source(
-        url, headers=headers or {}, verify_ssl=verify_ssl, stop=stop or threading.Event()
+        url,
+        headers=headers or {},
+        verify_ssl=verify_ssl,
+        stop=stop or threading.Event(),
+        **options,
     )
     return drain(source)
 
@@ -100,8 +111,8 @@ class LiveSourceTests(unittest.TestCase):
         for server in self.servers:
             server.close()
 
-    def server(self, routes, tls=None):
-        server = LocalSource(routes, tls=tls)
+    def server(self, routes, tls=None, keep_alive=False):
+        server = LocalSource(routes, tls=tls, keep_alive=keep_alive)
         self.servers.append(server)
         return server
 
@@ -465,8 +476,8 @@ high.m3u8
             if count == 1:
                 text = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:10\n"
                 return 200, {}, (text + "#EXTINF:2,\nten.ts\n").encode()
-            text = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:13\n"
-            return 200, {}, (text + "#EXTINF:2,\nthirteen.ts\n#EXT-X-ENDLIST\n").encode()
+            text = "#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXT-X-MEDIA-SEQUENCE:13\n"
+            return 200, {}, (text + "#EXTINF:3,\nthirteen.ts\n#EXT-X-ENDLIST\n").encode()
 
         server = self.server(
             {
@@ -475,8 +486,12 @@ high.m3u8
                 "/thirteen.ts": (200, {}, self.next_video),
             }
         )
-        parts = media(server.url + "/live.m3u8")
-        self.assertEqual(parts, [self.video, Discontinuity(), self.next_video])
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        self.assertEqual(source.burst_s, 2.0)
+        self.assertEqual(drain(source), [self.video, Discontinuity(), self.next_video])
+        self.assertEqual(source.burst_s, 3.0)  # follows the reloaded target duration
         self.assertEqual(server.counts["/live.m3u8"], 2)
 
     def test_discontinuity_tag_yields_a_marker_between_segments(self):
@@ -683,6 +698,8 @@ high.m3u8
                 self.assertFalse(any("secret" in line for line in logs))
 
     def test_close_from_another_thread_aborts_a_stalled_body_read(self):
+        # Close-delimited bodies are woken by the response's socket shutdown; keep-alive
+        # bodies (sized, connection still pooled) by the connection's duplicate descriptor.
         release = threading.Event()
         head = self.video[: 188 * 50]
 
@@ -691,39 +708,52 @@ high.m3u8
             request.wfile.flush()
             release.wait(10)
 
-        server = self.server({"/user/secret/live.ts": (200, {}, stalled)})
-        try:
-            source = open_source(
-                server.url + "/user/secret/live.ts",
-                headers={},
-                verify_ssl=True,
-                stop=threading.Event(),
-            )
-            items, errors = [], []
-            received, finished = threading.Event(), threading.Event()
+        for keep_alive in (False, True):
+            with self.subTest(keep_alive=keep_alive):
+                headers = {"Content-Length": str(1 << 30)} if keep_alive else {}
+                server = self.server(
+                    {"/user/secret/live.ts": (200, headers, stalled)}, keep_alive=keep_alive
+                )
+                source = open_source(
+                    server.url + "/user/secret/live.ts",
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                )
+                items, errors = [], []
+                received, finished = threading.Event(), threading.Event()
 
-            def consume():
+                def consume():
+                    try:
+                        for item in source.chunks():
+                            items.append(item)
+                            received.set()
+                    except Exception as error:
+                        errors.append(error)
+                    finally:
+                        finished.set()
+
+                close = requests.Response.close
+
+                def slow_close(response):
+                    time.sleep(0.5)  # like a close waiting for the reader's buffer lock
+                    close(response)
+
                 try:
-                    for item in source.chunks():
-                        items.append(item)
-                        received.set()
-                except Exception as error:
-                    errors.append(error)
+                    threading.Thread(target=consume, daemon=True).start()
+                    self.assertTrue(received.wait(5))
+                    time.sleep(0.2)  # the consumer is now blocked waiting for more body bytes
+                    started = time.monotonic()
+                    with patch.object(requests.Response, "close", slow_close):
+                        source.close()
+                    self.assertLess(time.monotonic() - started, 0.2, "close() blocked its caller")
+                    self.assertTrue(finished.wait(1.0), "close() did not abort the blocked read")
+                    self.assertLess(time.monotonic() - started, 1.0)
+                    self.assertEqual(errors, [])
+                    self.assertEqual(b"".join(items), head)
+                    self.assertEqual(server.counts["/user/secret/live.ts"], 1)
                 finally:
-                    finished.set()
-
-            threading.Thread(target=consume, daemon=True).start()
-            self.assertTrue(received.wait(5))
-            time.sleep(0.2)  # the consumer is now blocked waiting for more body bytes
-            started = time.monotonic()
-            source.close()
-            self.assertTrue(finished.wait(1.0), "close() did not abort the blocked read")
-            self.assertLess(time.monotonic() - started, 1.0)
-            self.assertEqual(errors, [])
-            self.assertEqual(b"".join(items), head)
-            self.assertEqual(server.counts["/user/secret/live.ts"], 1)
-        finally:
-            release.set()
+                    release.set()
 
     def test_close_aborts_an_hls_segment_stalled_before_its_headers(self):
         release = threading.Event()
@@ -846,27 +876,454 @@ high.m3u8
                 for item in source.chunks():
                     received.append(item)
         self.assertEqual(raised.exception.kind, "network")
+        self.assertIsNone(raised.exception.status)
         self.assertNotIn("secret", str(raised.exception))
         self.assertEqual(b"".join(received), self.video[:half])
         self.assertEqual(server.counts["/user/secret/live.ts"], 7)
 
-    def test_local_paths_and_file_urls_read_the_file(self):
+    def test_local_paths_and_file_urls_need_allow_local(self):
         with tempfile.TemporaryDirectory(prefix="qitv-source-local-") as directory:
             path = Path(directory) / "local.ts"
             path.write_bytes(self.video)
-            self.assertEqual(media(str(path)), [self.video])
-            self.assertEqual(media(path.as_uri()), [self.video])
+            for url in (str(path), path.as_uri()):
+                with self.subTest(url=url[:5]):
+                    self.assertEqual(media(url, allow_local=True), [self.video])
+                    with self.assertRaises(SourceError) as raised:
+                        media(url)
+                    self.assertEqual(raised.exception.kind, "unsupported")
+                    self.assertNotIn(directory, str(raised.exception))
 
     def test_windows_drive_letters_are_paths_and_other_schemes_are_unsupported(self):
         with patch("os.path.splitdrive", ntpath.splitdrive):
             self.assertEqual(_scheme(r"C:\media\channel.ts"), "")
             self.assertEqual(_scheme("c:/media/channel.ts"), "")
             self.assertEqual(_scheme("HTTP://example.invalid/live.ts"), "http")
-        with self.assertRaises(SourceError) as raised:
-            open_source(
-                "rtsp://example.invalid/live", headers={}, verify_ssl=True, stop=threading.Event()
-            )
-        self.assertEqual(raised.exception.kind, "unsupported")
+        for url in (
+            "rtsp://example.invalid/live",
+            "http://[::1/user/secret/live.ts",
+            "http://example.invalid:secret/live.ts",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(SourceError) as raised:
+                    open_source(url, headers={}, verify_ssl=True, stop=threading.Event())
+                self.assertEqual(raised.exception.kind, "unsupported")
+                self.assertNotIn("secret", str(raised.exception))
+                self.assertIsNone(raised.exception.__context__)
+
+    # ---- raw TS reconnect policy ---------------------------------------------------------
+
+    def test_a_flapping_server_does_not_refill_the_reconnect_budget(self):
+        head = self.video[: 188 * 20]
+
+        def flapping(_request, count):
+            if count > 20:  # ends a regression that reconnects forever
+                return 200, {}, self.video
+
+            def broken(request):
+                request.wfile.write(head)
+
+            return 200, {"Content-Length": str(1 << 30)}, broken
+
+        server = self.server({"/live.ts": flapping})
+        source = open_source(
+            server.url + "/live.ts", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        items = []
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            with self.assertRaises(SourceError) as raised:
+                for item in source.chunks():
+                    items.append(item)
+        self.assertEqual(raised.exception.kind, "network")
+        self.assertEqual(server.counts["/live.ts"], 7)
+        self.assertEqual(items.count(Discontinuity()), 6)
+
+    def test_the_reconnect_budget_refills_after_data_flows_again(self):
+        drops = 9  # more than the six-try budget
+
+        def live(_request, count):
+            if count > drops:
+                return 200, {}, self.video
+
+            def broken(request):
+                request.wfile.write(self.video[: 188 * 20])
+
+            return 200, {"Content-Length": str(1 << 30)}, broken
+
+        server = self.server({"/live.ts": live})
+        healthy = {"_HEALTHY_SECONDS": 0.0, "_HEALTHY_BYTES": 188 * 20}
+        with patch.multiple(source_module, _RECONNECT_DELAYS=FAST_RETRIES, **healthy):
+            parts = media(server.url + "/live.ts")
+        self.assertEqual(parts.count(Discontinuity()), drops)
+        self.assertEqual(parts[-1], self.video)
+        self.assertEqual(server.counts["/live.ts"], drops + 1)
+
+    def test_close_delimited_eof_is_a_disconnect_but_delimited_bodies_are_finite(self):
+        half = len(self.video) // 2 // 188 * 188
+
+        def close_delimited(_request, count):
+            if count == 1:
+
+                def first(request):
+                    request.wfile.write(self.video[:half])  # then a clean FIN
+
+                return 200, {}, first
+            return 200, {}, self.video[half:]
+
+        def chunked(_request, _count):
+            def body(request):
+                for start in range(0, len(self.video), 4096):
+                    block = self.video[start : start + 4096]
+                    request.wfile.write(b"%x\r\n%s\r\n" % (len(block), block))
+                request.wfile.write(b"0\r\n\r\n")
+
+            return 200, {"Transfer-Encoding": "chunked"}, body
+
+        server = self.server(
+            {
+                "/fin.ts": close_delimited,
+                "/chunked.ts": chunked,
+                "/sized.ts": (200, {}, self.video),
+            }
+        )
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            parts = media(server.url + "/fin.ts")
+            self.assertEqual(parts, [self.video[:half], Discontinuity(), self.video[half:]])
+            self.assertEqual(media(server.url + "/chunked.ts"), [self.video])
+            self.assertEqual(media(server.url + "/sized.ts"), [self.video])
+        self.assertEqual(server.counts, {"/fin.ts": 2, "/chunked.ts": 1, "/sized.ts": 1})
+
+    def test_http_errors_carry_their_status_and_429_is_never_retried(self):
+        def limited(_request, _count):
+            return 429, {}, b""
+
+        server = self.server(
+            {
+                "/full.ts": limited,
+                "/channel.m3u8": (200, {}, leaf("a.ts", "b.ts")),
+                "/a.ts": (200, {}, self.video),
+                "/b.ts": limited,
+            }
+        )
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            for path in ("/full.ts", "/channel.m3u8"):
+                with self.subTest(path=path):
+                    with self.assertRaises(SourceError) as raised:
+                        media(server.url + path)
+                    self.assertEqual(raised.exception.kind, "http")
+                    self.assertEqual(raised.exception.status, 429)
+        self.assertEqual(server.counts["/full.ts"], 1)
+        self.assertEqual(server.counts["/b.ts"], 1)
+
+    # ---- live HLS --------------------------------------------------------------------------
+
+    def test_live_hls_starts_live_delay_seconds_before_the_end(self):
+        names = [f"s{number}.ts" for number in range(6)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/live.m3u8"] = (200, {}, hls(0, names, target=2))
+        for delay, first in ((6.0, 3), (3.0, 4), (0.0, 5), (100.0, 0)):
+            with self.subTest(live_delay=delay):
+                server = self.server(routes)
+                stop = threading.Event()
+                timer = threading.Timer(0.5, stop.set)  # before the first reload
+                timer.start()
+                media(server.url + "/live.m3u8", stop=stop, live_delay=delay)
+                timer.join()
+                fetched = [path[1:] for path, _headers in server.requests if path.endswith(".ts")]
+                self.assertEqual(fetched, names[first:])
+
+    def test_a_media_sequence_restart_resumes_at_the_new_live_start(self):
+        cases = {
+            "new segment names": (
+                hls(100, ["s100.ts", "s101.ts", "s102.ts"]),
+                hls(0, ["r0.ts", "r1.ts", "r2.ts"]),
+                hls(1, ["r1.ts", "r2.ts", "r3.ts"], ended=True),
+                ["s102.ts", "r2.ts", "r3.ts"],
+            ),
+            "new discontinuity sequence": (
+                hls(100, ["x.ts", "y.ts", "z.ts"], extra="#EXT-X-DISCONTINUITY-SEQUENCE:0\n"),
+                hls(5, ["y.ts", "z.ts", "n.ts"], extra="#EXT-X-DISCONTINUITY-SEQUENCE:1\n"),
+                hls(
+                    6,
+                    ["z.ts", "n.ts", "m.ts"],
+                    ended=True,
+                    extra="#EXT-X-DISCONTINUITY-SEQUENCE:1\n",
+                ),
+                ["z.ts", "n.ts", "m.ts"],
+            ),
+        }
+        for name, (first, second, third, fetched) in cases.items():
+            with self.subTest(name):
+                copies = [first, second, third]
+
+                def playlist(_request, count, copies=copies):
+                    return 200, {}, copies[min(count, 3) - 1]
+
+                data = dict(zip(fetched, (self.video, self.next_video, self.video)))
+                routes = {f"/{segment}": (200, {}, body) for segment, body in data.items()}
+                routes["/live.m3u8"] = playlist
+                server = self.server(routes)
+                parts = media(server.url + "/live.m3u8", live_delay=1.0)
+                self.assertEqual(parts, [self.video, Discontinuity(), self.next_video + self.video])
+                requested = [path[1:] for path, _headers in server.requests if path.endswith(".ts")]
+                self.assertEqual(requested, fetched)
+
+    def test_a_stale_playlist_copy_is_waited_out(self):
+        copies = [
+            hls(10, ["a.ts", "b.ts", "c.ts"]),
+            hls(9, ["z.ts", "a.ts", "b.ts"]),  # an older CDN copy: lags behind, overlaps
+            hls(11, ["b.ts", "c.ts", "d.ts"], ended=True),
+        ]
+
+        def playlist(_request, count):
+            return 200, {}, copies[min(count, 3) - 1]
+
+        routes = {f"/{name}.ts": (200, {}, self.video) for name in "abcz"}
+        routes["/d.ts"] = (200, {}, self.next_video)
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        parts = media(server.url + "/live.m3u8", live_delay=100.0)
+        self.assertEqual(parts, [self.video * 3 + self.next_video])
+        requested = [path[1:] for path, _headers in server.requests if path.endswith(".ts")]
+        self.assertEqual(requested, ["a.ts", "b.ts", "c.ts", "d.ts"])
+        self.assertEqual(server.counts["/live.m3u8"], 3)
+
+    def test_a_frozen_live_playlist_times_out(self):
+        server = self.server(
+            {"/live.m3u8": (200, {}, hls(5, ["a.ts"])), "/a.ts": (200, {}, self.video)}
+        )
+        stop = threading.Event()
+        timer = threading.Timer(5.0, stop.set)  # ends a regression that reloads forever
+        timer.start()
+        self.addCleanup(timer.cancel)
+        source = open_source(server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=stop)
+        items = []
+        with patch.object(source_module, "_FROZEN_TIMEOUT", 1.5):
+            with self.assertRaises(SourceError) as raised:
+                for item in source.chunks():
+                    items.append(item)
+        self.assertEqual(raised.exception.kind, "timeout")
+        self.assertEqual(b"".join(items), self.video)
+        self.assertGreaterEqual(server.counts["/live.m3u8"], 2)
+
+    def test_missing_and_gap_segments_are_skipped_with_a_marker(self):
+        text = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n"
+            "#EXTINF:4,\na.ts\n#EXTINF:4,\ngone.ts\n#EXTINF:4,\nb.ts\n"
+            "#EXT-X-GAP\n#EXTINF:4,\nhole.ts\n#EXTINF:4,\nc.ts\n"
+            "#EXTINF:4,\nexpired.ts\n#EXTINF:4,\nd.ts\n#EXT-X-ENDLIST\n"
+        )
+        server = self.server(
+            {
+                "/channel.m3u8": (200, {}, text.encode()),
+                "/a.ts": (200, {}, self.video),
+                "/b.ts": (200, {}, self.next_video),
+                "/hole.ts": (200, {}, self.video),
+                "/c.ts": (200, {}, self.video),
+                "/expired.ts": (410, {}, b""),
+                "/d.ts": (200, {}, self.next_video),
+            }
+        )  # gone.ts is not routed: 404
+        parts = media(server.url + "/channel.m3u8")
+        mark = Discontinuity()
+        self.assertEqual(
+            parts,
+            [self.video, mark, self.next_video, mark, self.video, mark, self.next_video],
+        )
+        self.assertEqual(server.counts["/gone.ts"], 1)
+        self.assertEqual(server.counts["/expired.ts"], 1)
+        self.assertEqual(server.counts["/hole.ts"], 0)
+
+    def test_bad_segments_after_the_first_delivery_are_skipped(self):
+        zero = "IV=0x" + "0" * 32
+        text = (
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n"
+            "#EXTINF:4,\na.ts\n#EXTINF:4,\npage.ts\n#EXTINF:4,\nb.ts\n"
+            f'#EXT-X-KEY:METHOD=AES-128,URI="short.key",{zero}\n#EXTINF:4,\nlocked.ts\n'
+            f'#EXT-X-KEY:METHOD=AES-128,URI="good.key",{zero}\n#EXTINF:4,\nc.ts\n'
+            "#EXTINF:4,\ncut.ts\n#EXTINF:4,\nd.ts\n#EXT-X-ENDLIST\n"
+        )
+        server = self.server(
+            {
+                "/channel.m3u8": (200, {}, text.encode()),
+                "/a.ts": (200, {}, self.video),
+                "/page.ts": (200, {}, b"<html>busy</html>" * 20),
+                "/b.ts": (200, {}, self.next_video),
+                "/short.key": (200, {}, KEY[:8]),
+                "/locked.ts": (200, {}, encrypt(self.video, bytes(16))),
+                "/good.key": (200, {}, KEY),
+                "/c.ts": (200, {}, encrypt(self.video, bytes(16))),
+                "/cut.ts": (200, {}, encrypt(self.next_video, bytes(16))[:-5]),
+                "/d.ts": (200, {}, encrypt(self.next_video, bytes(16))),
+            }
+        )
+        parts = media(server.url + "/channel.m3u8")
+        mark = Discontinuity()
+        self.assertEqual(parts[:4], [self.video, mark, self.next_video, mark])
+        self.assertTrue(parts[4].startswith(self.video))  # c, then what cut.ts gave
+        self.assertEqual(parts[5:], [mark, self.next_video])
+
+    def test_three_consecutive_segment_failures_end_the_session(self):
+        page = (200, {}, b"<html>busy</html>" * 20)
+        for name, routes, kind, status in (
+            ("missing", {}, "http", 404),
+            ("not ts", {"/x.ts": page, "/y.ts": page, "/z.ts": page}, "unsupported", None),
+        ):
+            with self.subTest(name):
+                routes = dict(routes)
+                routes["/channel.m3u8"] = (200, {}, leaf("a.ts", "x.ts", "y.ts", "z.ts", "b.ts"))
+                routes["/a.ts"] = (200, {}, self.video)
+                routes["/b.ts"] = (200, {}, self.next_video)
+                server = self.server(routes)
+                source = open_source(
+                    server.url + "/channel.m3u8",
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                )
+                items = []
+                with self.assertRaises(SourceError) as raised:
+                    for item in source.chunks():
+                        items.append(item)
+                self.assertEqual((raised.exception.kind, raised.exception.status), (kind, status))
+                self.assertEqual(b"".join(i for i in items if isinstance(i, bytes)), self.video)
+                self.assertEqual(server.counts["/b.ts"], 0)
+
+    # ---- audio renditions, headers and resources -------------------------------------------
+
+    def test_audio_follows_the_default_rendition(self):
+        def master(renditions):
+            return (
+                "#EXTM3U\n"
+                + "".join(
+                    f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",{rendition}\n'
+                    for rendition in renditions
+                )
+                + '#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="aac"\nvideo.m3u8\n'
+            ).encode()
+
+        muxed = 'NAME="English",LANGUAGE="eng"'
+        french = 'NAME="French",LANGUAGE="fra",URI="audio/fr.m3u8"'
+        cases = (
+            ("muxed default", [muxed + ",DEFAULT=YES", french], True),
+            ("muxed first", [muxed, french], True),
+            ("external first", [french, muxed], False),
+        )
+        for name, renditions, accepted in cases:
+            with self.subTest(name):
+                server = self.server(
+                    {
+                        "/master.m3u8": (200, {}, master(renditions)),
+                        "/video.m3u8": (200, {}, leaf("video.ts")),
+                        "/video.ts": (200, {}, self.video),
+                    }
+                )
+                with source_logs() as logs:
+                    if accepted:
+                        self.assertEqual(media(server.url + "/master.m3u8"), [self.video])
+                    else:
+                        with self.assertRaises(SourceError) as raised:
+                            media(server.url + "/master.m3u8")
+                        self.assertEqual(raised.exception.kind, "unsupported")
+                self.assertEqual(server.counts["/audio/fr.m3u8"], 0)
+                if accepted:
+                    self.assertTrue(any("French" in line for line in logs), logs)
+
+    def test_only_the_user_agent_reaches_other_origins_and_referer_stays_with_the_entry(self):
+        cdn = self.server({"/segment/a.ts": (200, {}, self.video)})
+        hop = self.server({"/live.m3u8": (200, {}, leaf(cdn.url + "/segment/a.ts"))})
+        entry = self.server({"/play": (302, {"Location": hop.url + "/live.m3u8"}, b"")})
+        headers = {
+            "User-Agent": "Provider/3.0",
+            "Referer": "http://portal.invalid/",
+            "X-Token": "secret",
+            "Cookie": "session=secret",
+            "Authorization": "Bearer secret",
+            "Host": "evil.invalid",
+            "Range": "bytes=0-1",
+            "Connection": "close",
+            "Content-Length": "5",
+        }
+        self.assertEqual(media(entry.url + "/play", headers=headers), [self.video])
+        for server in (entry, hop, cdn):
+            for _path, received in server.requests:
+                self.assertEqual(received["User-Agent"], "Provider/3.0")
+                for name in ("X-Token", "Cookie", "Authorization", "Range", "Content-Length"):
+                    self.assertNotIn(name, received)
+                self.assertTrue(received["Host"].startswith("127.0.0.1:"))
+                self.assertNotEqual(received.get("Connection"), "close")
+        # The entry request and its redirect hops carry the Referer; other origins do not.
+        self.assertEqual(entry.requests[0][1].get("Referer"), "http://portal.invalid/")
+        self.assertEqual(hop.requests[0][1].get("Referer"), "http://portal.invalid/")
+        self.assertNotIn("Referer", cdn.requests[0][1])
+
+    def test_keep_alive_connections_are_reused_for_reloads_and_segments(self):
+        def playlist(_request, count):
+            return 200, {}, hls(0, ["a.ts"]) if count == 1 else hls(0, ["a.ts", "b.ts"], ended=True)
+
+        server = self.server(
+            {
+                "/live.m3u8": playlist,
+                "/a.ts": (200, {}, self.video),
+                "/b.ts": (200, {}, self.next_video),
+            },
+            keep_alive=True,
+        )
+        self.assertEqual(media(server.url + "/live.m3u8"), [self.video + self.next_video])
+        self.assertEqual(len(server.requests), 4)
+        self.assertEqual(server.connections, 1)
+
+    def test_http_resources_close_and_consumer_errors_keep_their_identity(self):
+        server = self.server({"/video.ts": (200, {}, self.video)})
+        session = requests.Session()
+        responses = []
+        get = session.get
+
+        def capture(*args, **kwargs):
+            response = get(*args, **kwargs)
+            responses.append(response)
+            return response
+
+        failure = ValueError("consumer mux failure")
+        with patch("services.live.source.requests.Session", return_value=session):
+            with patch.object(session, "get", side_effect=capture):
+                with patch.object(session, "close", wraps=session.close) as close:
+                    source = open_source(
+                        server.url + "/video.ts",
+                        headers={},
+                        verify_ssl=True,
+                        stop=threading.Event(),
+                    )
+                    with self.assertRaises(ValueError) as raised:
+                        try:
+                            for item in source.chunks():
+                                self.assertEqual(item[:1], b"\x47")
+                                raise failure
+                        finally:
+                            source.close()
+                    self.assertIs(raised.exception, failure)
+                    close.assert_called_once()
+        self.assertTrue(responses[0].raw.closed)
+
+    def test_burst_is_the_hls_target_duration_and_zero_for_raw_ts(self):
+        server = self.server(
+            {"/video.ts": (200, {}, self.video), "/channel.m3u8": (200, {}, leaf("video.ts"))}
+        )
+        with tempfile.TemporaryDirectory(prefix="qitv-source-burst-") as directory:
+            path = Path(directory) / "local.ts"
+            path.write_bytes(self.video)
+            for url, burst in (
+                (server.url + "/video.ts", 0.0),
+                (server.url + "/channel.m3u8", 4.0),
+                (str(path), 0.0),
+            ):
+                with self.subTest(url=url[-9:]):
+                    source = open_source(
+                        url, headers={}, verify_ssl=True, stop=threading.Event(), allow_local=True
+                    )
+                    try:
+                        self.assertEqual(source.burst_s, burst)
+                    finally:
+                        source.close()
 
 
 if __name__ == "__main__":

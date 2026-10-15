@@ -8,14 +8,16 @@ this pipeline never uses.
 
 Every request goes through one ``requests.Session`` per source, so cookies persist,
 cross-origin redirects drop ``Authorization`` and the SSL setting applies on every hop and
-nested resource. ``close()`` may be called from any thread and interrupts a TLS handshake,
-header read, body read or backoff wait at once; a DNS lookup or TCP connect in progress is
-bounded only by the 60 s connect timeout. Credentials never reach error texts or log lines:
-all ``SourceError`` messages are fixed strings.
+nested resource. ``close()`` may be called from any thread, never blocks, and interrupts a
+TLS handshake, header read, body read or backoff wait at once. A DNS lookup
+(``getaddrinfo``) is not bounded at all, and a TCP connect is bounded only by the 60 s
+connect timeout per address. Credentials never reach error texts or log lines: all
+``SourceError`` messages are fixed strings.
 """
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 import logging
@@ -47,12 +49,21 @@ _SNIFF_SIZE = 10
 _PACKET = 188
 _BLOCK = 16
 _RECONNECT_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
+# Spent reconnect tries come back only once a new connection has carried this much.
+_HEALTHY_SECONDS = 2.0
+_HEALTHY_BYTES = 256 * 1024
 _STOP_POLL = 0.1
-# Like FFmpeg (main's player), a live playlist starts three segments from its end.
-_LIVE_START_SEGMENTS = 3
 _PLAYLIST_HOPS = 4
 _KEY_CACHE = 16
 _KEY_LIMIT = 1024
+# A live playlist without a new segment for this long is frozen.
+_FROZEN_TIMEOUT = 60.0
+# An older playlist copy that overlaps recent segments is waited out this many targets.
+_STALE_TARGETS = 3
+_RECENT_SEGMENTS = 10
+_SEGMENT_FAILURES = 3
+_SKIPPABLE_STATUS = (404, 410)
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 _IDENTITY = {"Accept-Encoding": "identity"}
 
 _OPEN_FAILED = "The channel could not be opened for time-shift."
@@ -70,6 +81,7 @@ _SEPARATE_AUDIO = "The HLS channel carries its audio in a separate playlist."
 _ENCRYPTION = "The HLS channel uses an unsupported encryption method."
 _UNDECRYPTABLE = "The HLS channel could not be decrypted."
 _NOT_TS = "The HLS channel's segments are not MPEG-TS."
+_FROZEN = "The channel's HLS playlist stopped advancing."
 
 _DEFAULT_MESSAGES = {
     "unsupported": _OPEN_FAILED,
@@ -86,14 +98,15 @@ class SourceError(Exception):
     """A source failure whose kind and message are safe to show: never a URL or credential.
 
     ``kind`` is ``"unsupported"`` (play directly instead), ``"network"``, ``"tls"``,
-    ``"timeout"`` or ``"http"``.
+    ``"timeout"`` or ``"http"``; ``status`` is the HTTP status of an ``"http"`` failure.
     """
 
-    def __init__(self, kind: str, message: str = "") -> None:
+    def __init__(self, kind: str, message: str = "", status: int | None = None) -> None:
         if kind not in _DEFAULT_MESSAGES:
             raise ValueError(f"unknown source error kind {kind!r}")
-        super().__init__(kind, message or _DEFAULT_MESSAGES[kind])
+        super().__init__(kind, message or _DEFAULT_MESSAGES[kind], status)
         self.kind = kind
+        self.status = status
 
     def __str__(self) -> str:
         return str(self.args[1])
@@ -106,6 +119,11 @@ class Discontinuity:
 
 class Source(Protocol):
     user_agent: str
+
+    @property
+    def burst_s(self) -> float:
+        """How many seconds of media typically arrive at once: an HLS segment, or 0."""
+        ...
 
     def chunks(self) -> Iterator[bytes | Discontinuity]: ...
 
@@ -128,9 +146,35 @@ class _NotPlaylist(Exception):
     """A playlist URL answered with something else: unsupported at open, retried on reload."""
 
 
+class _BadSegment(Exception):
+    """One segment's content is unusable (not TS, undecryptable, a bad key or IV)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 def _scheme(url: str) -> str:
     # A Windows drive letter ("C:\\...") is a path, not the URL scheme "c".
     return "" if os.path.splitdrive(url)[0] else urlsplit(url).scheme.lower()
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """Scheme, host and port (defaults filled in); raises ValueError for a malformed URL."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    return scheme, (parts.hostname or "").lower(), parts.port or _DEFAULT_PORTS.get(scheme)
+
+
+def _status(error: requests.exceptions.HTTPError) -> int | None:
+    return error.response.status_code if error.response is not None else None
+
+
+def _delimited(response: Any) -> bool:
+    """Whether the body has a declared end (a Content-Length or chunked framing)."""
+    headers = response.headers  # case-insensitive names
+    framing = str(headers.get("Transfer-Encoding", "")).lower()
+    return "Content-Length" in headers or "chunked" in framing
 
 
 def _close_redirect_body(response, **_kwargs):
@@ -246,15 +290,15 @@ def _retryable(error: Exception) -> bool:
     if isinstance(error, requests.exceptions.SSLError):
         return False
     if isinstance(error, requests.exceptions.HTTPError):
-        status = error.response.status_code if error.response is not None else 0
-        return status >= 500 or status in (408, 429)
+        status = _status(error) or 0
+        return status >= 500 or status == 408  # never 429: retrying deepens a rate limit
     return isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
 
 
 def _translate(error: BaseException) -> SourceError:
     """A fresh, context-free error: nothing from a URL-bearing exception survives."""
     if isinstance(error, SourceError):
-        return SourceError(error.kind, str(error))
+        return SourceError(error.kind, str(error), error.status)
     if isinstance(error, requests.exceptions.SSLError):
         return SourceError("tls")
     if isinstance(error, requests.exceptions.Timeout):
@@ -265,37 +309,56 @@ def _translate(error: BaseException) -> SourceError:
         return SourceError("network", _RECEIVE_FAILED)
     if isinstance(error, _NotPlaylist):
         return SourceError("unsupported", _INVALID_PLAYLIST)
+    if isinstance(error, _BadSegment):
+        return SourceError("unsupported", error.message)
     if isinstance(error, requests.exceptions.HTTPError):
-        return SourceError("http")
+        return SourceError("http", status=_status(error))
     if isinstance(error, requests.exceptions.RequestException):
         return SourceError("network")
     log.warning("A live source failed unexpectedly (%s).", type(error).__name__)
     return SourceError("unsupported")
 
 
+class _Backoff:
+    """The reconnect schedule; the caller refills it once data flows again."""
+
+    def __init__(self) -> None:
+        self.used = 0
+
+    def next_delay(self) -> float | None:
+        if self.used >= len(_RECONNECT_DELAYS):
+            return None
+        self.used += 1
+        return _RECONNECT_DELAYS[self.used - 1]
+
+    def reset(self) -> None:
+        self.used = 0
+
+
 class _Http:
     """One Session per source, interruptible from any thread by ``close()`` or ``stop``."""
 
-    def __init__(self, headers: Mapping[str, str], verify_ssl: bool, stop: threading.Event):
+    def __init__(
+        self, url: str, headers: Mapping[str, str], verify_ssl: bool, stop: threading.Event
+    ) -> None:
         self._interrupter = _Interrupter()
         self._lock = threading.Lock()
         self._closed_event = threading.Event()
         self._response: Any = None
+        self._owner: int | None = None
         self._verify_ssl = verify_ssl
         self._stop = stop
         self.closed = False
-        agent = next(
-            (value for name, value in headers.items() if name.lower() == "user-agent" and value),
-            DEFAULT_USER_AGENT,
-        )
-        self.user_agent = agent
+        provided = {name.lower(): value for name, value in headers.items() if value}
+        self.user_agent = provided.get("user-agent") or DEFAULT_USER_AGENT
+        self._referer = provided.get("referer")
+        self._entry = _origin(url)
         self.session = requests.Session()
         adapter = _InterruptibleAdapter(self._interrupter)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         self.session.hooks["response"].append(_close_redirect_body)
-        self.session.headers.update(headers)
-        self.session.headers["User-Agent"] = agent
+        self.session.headers["User-Agent"] = self.user_agent
         threading.Thread(target=self._watch, name="qitv-live-source-stop", daemon=True).start()
 
     def _watch(self) -> None:
@@ -310,13 +373,17 @@ class _Http:
             raise SourceError("unsupported", _NON_HTTP)
         if self.closed:
             raise _Closed()
+        self._owner = threading.get_ident()
+        sent = dict(headers or {})
+        if self._referer and _origin(url) == self._entry:
+            sent["Referer"] = self._referer  # requests keeps it across this request's hops
         try:
             response = self.session.get(
                 url,
                 stream=True,
                 timeout=(_TIMEOUT, _TIMEOUT),
                 verify=self._verify_ssl,
-                headers=headers,
+                headers=sent,
             )
         except Exception:
             if self.closed:
@@ -344,6 +411,7 @@ class _Http:
         _quietly(response.close, "response")
 
     def read(self, response: Any) -> bytes:
+        self._owner = threading.get_ident()
         try:
             data = response.raw.read1(_READ_SIZE, decode_content=True)
         except Exception as error:
@@ -378,9 +446,11 @@ class _Http:
         """Sleep, waking early (True) when the source closes."""
         return self._closed_event.wait(max(0.0, seconds))
 
-    def retry(self, attempt: Callable[[], _T]) -> _T:
-        """Repeat ``attempt`` after each reconnect delay; give up after the last one."""
-        for number, delay in enumerate(_RECONNECT_DELAYS, 1):
+    def retry(self, attempt: Callable[[], _T], backoff: _Backoff | None = None) -> _T:
+        """Repeat ``attempt`` after each remaining reconnect delay; then give up."""
+        if backoff is None:
+            backoff = _Backoff()
+        while (delay := backoff.next_delay()) is not None:
             if self.wait(delay):
                 raise _Closed()
             try:
@@ -392,7 +462,7 @@ class _Http:
                     raise
                 log.info(
                     "Live source retry %d of %d failed (%s).",
-                    number,
+                    backoff.used,
                     len(_RECONNECT_DELAYS),
                     type(error).__name__,
                 )
@@ -416,12 +486,24 @@ class _Http:
                 return
             self.closed = True
             response, self._response = self._response, None
+            owner = self._owner
         self._closed_event.set()
         self._interrupter.interrupt()
         if response is not None:
-            # Shut the socket first: closing a response whose body another thread is
-            # reading would otherwise wait for that read to finish.
             _quietly(response.raw.shutdown, "response socket")
+        if owner in (None, threading.get_ident()):
+            self._release_all(response)
+        else:
+            # The reader may hold the response's buffer lock until its read wakes up.
+            threading.Thread(
+                target=self._release_all,
+                args=(response,),
+                name="qitv-live-source-close",
+                daemon=True,
+            ).start()
+
+    def _release_all(self, response: Any) -> None:
+        if response is not None:
             _quietly(response.close, "response")
         _quietly(self.session.close, "session")
 
@@ -455,6 +537,10 @@ class TsSource:
         self._response = response
         self._prefix = prefix
 
+    @property
+    def burst_s(self) -> float:
+        return 0.0
+
     def chunks(self) -> Iterator[bytes | Discontinuity]:
         return _guarded(self._http, self._run())
 
@@ -466,19 +552,33 @@ class TsSource:
         self._response, self._prefix = None, b""
         if response is None:
             return
+        backoff = _Backoff()
+        connected, received, reconnected = time.monotonic(), 0, False
         if prefix:
             yield prefix
         while True:
             try:
                 while block := http.read(response):
+                    if reconnected:
+                        reconnected = False
+                        yield Discontinuity()
+                    received += len(block)
+                    if (
+                        received >= _HEALTHY_BYTES
+                        and time.monotonic() - connected >= _HEALTHY_SECONDS
+                    ):
+                        backoff.reset()
                     yield block
-                return  # a finite stream ended
+                if _delimited(response):
+                    return  # a finite body reached its declared end
+                # A close-delimited body has no declared end: its EOF is a disconnect.
+                log.info("The channel closed its stream; reconnecting.")
             except _ReadError as error:
                 log.info("The channel connection broke off (%s); reconnecting.", error.kind)
             finally:
                 http.release(response)
-            response = http.retry(lambda: http.get(self._url))
-            yield Discontinuity()
+            response = http.retry(lambda: http.get(self._url), backoff)
+            connected, received, reconnected = time.monotonic(), 0, True
 
 
 class LocalTsSource(TsSource):
@@ -569,8 +669,15 @@ def _is_playlist(prefix: bytes) -> bool:
 
 def _resolve(base: str, uri: str | None) -> str:
     """``uri`` relative to the playlist's final (redirected) URL; only HTTP(S) is allowed."""
-    target = urljoin(base, uri or "")
-    if urlsplit(target).scheme.lower() not in ("http", "https"):
+    try:
+        target = urljoin(base, uri or "")
+        scheme = _origin(target)[0]
+    except ValueError:
+        scheme = ""
+        target = ""
+    if not target:
+        raise SourceError("unsupported", _INVALID_PLAYLIST)
+    if scheme not in ("http", "https"):
         raise SourceError("unsupported", _NON_HTTP)
     return target
 
@@ -597,18 +704,39 @@ def _check_media(playlist: Any, base: str) -> None:
             raise SourceError("unsupported", _ENCRYPTION)
 
 
+def _check_audio(playlist: Any) -> None:
+    """Only the default AUDIO rendition matters: it must be muxed into the video."""
+    audio = [item for item in playlist.media if item.type == "AUDIO"]
+    if not audio:
+        return
+    default = next((item for item in audio if item.default == "YES"), audio[0])
+    if default.uri:  # a TS-only fetcher cannot mux a separate audio playlist
+        raise SourceError("unsupported", _SEPARATE_AUDIO)
+    dropped = [item.name or item.language or "unnamed" for item in audio if item.uri]
+    if dropped:
+        log.info("Alternate audio renditions are not time-shifted: %s.", ", ".join(dropped))
+
+
+def _sniff(http: _Http, response: Any) -> tuple[bytes, bytes | None]:
+    """The first bytes, and the whole playlist when the body starts with ``#EXTM3U``."""
+    prefix = http.read_prefix(response)
+    if not _is_playlist(prefix):
+        return prefix, None
+    content = http.read_all(response, prefix, _MANIFEST_LIMIT)
+    if len(content) > _MANIFEST_LIMIT:
+        raise SourceError("unsupported", _TOO_LARGE)
+    return prefix, content
+
+
 def _load_playlist(http: _Http, url: str) -> tuple[bytes, str]:
     response = http.get(url)
     try:
-        prefix = http.read_prefix(response)
-        if not _is_playlist(prefix):
-            raise _NotPlaylist()
-        content = http.read_all(response, prefix, _MANIFEST_LIMIT)
+        _prefix, content = _sniff(http, response)
         final = str(response.url)
     finally:
         http.release(response)
-    if len(content) > _MANIFEST_LIMIT:
-        raise SourceError("unsupported", _TOO_LARGE)
+    if content is None:
+        raise _NotPlaylist()
     return content, final
 
 
@@ -619,9 +747,7 @@ def _media_playlist(http: _Http, content: bytes, url: str) -> tuple[Any, str]:
         if not playlist.is_variant:
             _check_media(playlist, url)
             return playlist, url
-        # A TS-only fetcher cannot mux a separate audio playlist into the video.
-        if any(item.type == "AUDIO" and item.uri for item in playlist.media):
-            raise SourceError("unsupported", _SEPARATE_AUDIO)
+        _check_audio(playlist)
         content, url = _load_playlist(http, _resolve(url, playlist.playlists[0].uri))
     raise SourceError("unsupported", _INVALID_PLAYLIST)
 
@@ -634,7 +760,7 @@ def _iv(key: Any, sequence: int) -> bytes:
     except ValueError:
         value = -1
     if not 0 <= value < 1 << 128:
-        raise SourceError("unsupported", _UNDECRYPTABLE)
+        raise _BadSegment(_UNDECRYPTABLE)
     return value.to_bytes(_BLOCK, "big")
 
 
@@ -656,17 +782,17 @@ class _Decryptor:
 
     def finish(self) -> bytes:
         if len(self._held) != _BLOCK:
-            raise SourceError("unsupported", _UNDECRYPTABLE)
+            raise _BadSegment(_UNDECRYPTABLE)
         try:
             return unpad(self._cipher.decrypt(self._held), _BLOCK)
         except ValueError:
             pass
-        raise SourceError("unsupported", _UNDECRYPTABLE)
+        raise _BadSegment(_UNDECRYPTABLE)
 
 
 def _require_ts(data: bytes) -> None:
     if data[0] != 0x47 or (len(data) > _PACKET and data[_PACKET] != 0x47):
-        raise SourceError("unsupported", _NOT_TS)
+        raise _BadSegment(_NOT_TS)
 
 
 def _checked_ts(blocks: Iterator[bytes]) -> Iterator[bytes]:
@@ -690,17 +816,34 @@ def _checked_ts(blocks: Iterator[bytes]) -> Iterator[bytes]:
 
 
 class HlsSource:
-    """HLS of MPEG-TS segments: live reloads, AES-128 and discontinuity markers."""
+    """HLS of MPEG-TS segments: live reloads, AES-128 and discontinuity markers.
 
-    def __init__(self, http: _Http, playlist: Any, url: str) -> None:
+    Live failures are survived where a player would survive them: a missing (404/410),
+    gap-tagged or damaged segment is skipped with a marker (three failures in a row end the
+    session), a stale playlist copy is waited out and a media-sequence restart resumes at
+    the new live start. A playlist without a new segment for 60 s times out.
+    """
+
+    def __init__(self, http: _Http, playlist: Any, url: str, live_delay: float) -> None:
         self.user_agent = http.user_agent
         self._http = http
         self._playlist = playlist
         self._url = url
+        self._live_delay = live_delay
         self._loaded = time.monotonic()
+        self._burst = float(playlist.target_duration or 0)
         self._keys: dict[str, bytes] = {}
-        self._started = False
-        self._pending = False
+        self._recent: deque[str] = deque(maxlen=_RECENT_SEGMENTS)
+        self._discontinuity_sequence = playlist.discontinuity_sequence
+        self._failures = 0
+        self._started = False  # bytes were yielded
+        self._delivered = False  # a segment arrived whole
+        self._pending = False  # a Discontinuity is due before the next bytes
+
+    @property
+    def burst_s(self) -> float:
+        """The media playlist's target duration, updated on every reload."""
+        return self._burst
 
     def chunks(self) -> Iterator[bytes | Discontinuity]:
         return _guarded(self._http, self._run())
@@ -712,42 +855,95 @@ class HlsSource:
         # A break before the first segment needs no marker.
         self._pending = self._pending or self._started
 
+    def _start(self, playlist: Any) -> int:
+        """The first segment to fetch: ``live_delay`` seconds from a live playlist's end."""
+        if playlist.is_endlist:
+            return 0
+        total = 0.0
+        for index in range(len(playlist.segments) - 1, -1, -1):
+            total += float(playlist.segments[index].duration or 0)
+            if total >= self._live_delay:
+                return index
+        return 0
+
+    def _restarted(self, playlist: Any, base: str, stalled: float) -> bool:
+        """For a playlist whose newest segment is older than the last one fetched: whether
+        the stream restarted (True) or a lagging server sent a stale copy (False)."""
+        if playlist.discontinuity_sequence != self._discontinuity_sequence:
+            return True
+        names = {_resolve(base, segment.uri) for segment in playlist.segments}
+        if names.isdisjoint(self._recent):
+            return True
+        return stalled >= _STALE_TARGETS * float(playlist.target_duration or 1)
+
     def _run(self) -> Iterator[bytes | Discontinuity]:
         http, playlist, url = self._http, self._playlist, self._url
-        loaded = self._loaded
+        loaded = progress = self._loaded
         next_sequence: int | None = None
         while True:
             first = playlist.media_sequence or 0
+            newest = first + len(playlist.segments) - 1
+            stale = False
             if next_sequence is None:
-                skip = 0
-                if not playlist.is_endlist:
-                    skip = max(0, len(playlist.segments) - _LIVE_START_SEGMENTS)
-                next_sequence = first + skip
+                next_sequence = first + self._start(playlist)
             elif first > next_sequence:
                 log.info("The HLS playlist skipped %d segments.", first - next_sequence)
                 self._mark()
                 next_sequence = first
+            elif newest < next_sequence - 1:
+                stale = not self._restarted(playlist, url, loaded - progress)
+                if not stale:
+                    log.info("The HLS media sequence restarted.")
+                    self._mark()
+                    next_sequence = first + self._start(playlist)
+            if not stale:
+                self._discontinuity_sequence = playlist.discontinuity_sequence
+            if newest >= next_sequence:
+                progress = loaded
             for index, segment in enumerate(playlist.segments):
                 sequence = first + index
                 if sequence < next_sequence:
                     continue
+                next_sequence = sequence + 1
                 if segment.discontinuity:
                     self._mark()
+                if segment.gap_tag:
+                    log.info("Skipped an HLS segment tagged as a gap.")
+                    self._mark()
+                    continue
                 yield from self._segment(segment, sequence, url)
-                next_sequence = sequence + 1
             if playlist.is_endlist:
                 return
+            if time.monotonic() - progress >= _FROZEN_TIMEOUT:
+                raise SourceError("timeout", _FROZEN)
             interval = max(1.0, float(playlist.target_duration or 0) / 2)
             if http.wait(interval - (time.monotonic() - loaded)):
                 raise _Closed()
             loaded = time.monotonic()
             content, final = http.fetch(lambda: _load_playlist(http, url))
             playlist, url = _media_playlist(http, content, final)
+            self._burst = float(playlist.target_duration or 0)
 
     def _segment(self, segment: Any, sequence: int, base: str) -> Iterator[bytes | Discontinuity]:
         uri = _resolve(base, segment.uri)
-        decryptor = self._decryptor(segment.key, sequence, base)
-        response = self._http.fetch(lambda: self._http.get(uri, headers=_IDENTITY))
+        self._recent.append(uri)
+        try:
+            decryptor = self._decryptor(segment.key, sequence, base)
+        except _BadSegment as error:
+            self._skip(SourceError("unsupported", error.message), content=True)
+            return
+        status: int | None = None
+        try:
+            response = self._http.fetch(lambda: self._http.get(uri, headers=_IDENTITY))
+        except requests.exceptions.HTTPError as error:
+            status = _status(error)
+            if status not in _SKIPPABLE_STATUS:
+                raise
+        if status is not None:
+            self._skip(SourceError("http", status=status))
+            return
+        failure: SourceError | None = None
+        content = False
         try:
             if self._pending:
                 self._pending = False
@@ -756,10 +952,25 @@ class HlsSource:
                 self._started = True
                 yield block
         except _ReadError as error:
-            log.info("An HLS segment broke off (%s); continuing with the next.", error.kind)
-            self._mark()
+            failure = _translate(error)
+        except _BadSegment as error:
+            failure, content = SourceError("unsupported", error.message), True
         finally:
             self._http.release(response)
+        if failure is None:
+            self._failures = 0
+            self._delivered = True
+        else:
+            self._skip(failure, content=content)
+
+    def _skip(self, failure: SourceError, *, content: bool = False) -> None:
+        """Skip a segment with a marker, or end the session: on bad content before any
+        segment arrived whole (it is unsupported), and on a third failure in a row."""
+        self._failures += 1
+        if (content and not self._delivered) or self._failures >= _SEGMENT_FAILURES:
+            raise failure
+        log.info("Skipped an HLS segment (%s %s).", failure.kind, failure.status or "")
+        self._mark()
 
     def _blocks(self, response: Any, decryptor: _Decryptor | None) -> Iterator[bytes]:
         while block := self._http.read(response):
@@ -786,7 +997,7 @@ class HlsSource:
         finally:
             self._http.release(response)
         if len(secret) != _BLOCK:
-            raise SourceError("unsupported", _UNDECRYPTABLE)
+            raise _BadSegment(_UNDECRYPTABLE)
         return secret
 
 
@@ -799,42 +1010,60 @@ def _open_local(url: str, scheme: str) -> Source:
     raise SourceError("unsupported")
 
 
-def _open_http(http: _Http, url: str) -> Source:
+def _open_http(http: _Http, url: str, live_delay: float) -> Source:
     response = http.get(url)
     try:
-        prefix = http.read_prefix(response)
-        if not _is_playlist(prefix):
+        prefix, content = _sniff(http, response)
+        if content is None:
             return TsSource(http, url, response, prefix)  # it now owns the response
-        content = http.read_all(response, prefix, _MANIFEST_LIMIT)
         final = str(response.url)
     except BaseException:
         http.release(response)
         raise
     http.release(response)
-    if len(content) > _MANIFEST_LIMIT:
-        raise SourceError("unsupported", _TOO_LARGE)
     playlist, base = _media_playlist(http, content, final)
-    return HlsSource(http, playlist, base)
+    return HlsSource(http, playlist, base, live_delay)
 
 
 def open_source(
-    url: str, *, headers: Mapping[str, str], verify_ssl: bool, stop: threading.Event
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    verify_ssl: bool,
+    stop: threading.Event,
+    live_delay: float = 6.0,
+    allow_local: bool = False,
 ) -> Source:
     """Open ``url`` (one request), sniff it, and return a TS or HLS source.
 
+    Provider ``headers``: only ``User-Agent`` (default ``VLC/3.0.20``) and ``Referer`` are
+    used. The User-Agent goes with every request. The Referer goes only with requests to
+    the entry URL's origin (scheme, host and port) and those requests' redirect hops.
+    Every other provider header (Host, Range, Connection, Content-Length, Cookie,
+    Authorization, ...) is dropped.
+
+    A live HLS session starts at the first segment from which the playlist's remaining
+    EXTINF durations add up to at least ``live_delay`` seconds (at least one segment).
+    Local paths and ``file://`` URLs are refused unless ``allow_local`` (tests only).
+
     Blocks while connecting. Setting ``stop`` (polled every 0.1 s) or calling ``close()`` on
-    the result from another thread interrupts a handshake, read or wait; DNS lookups and TCP
-    connects end within the 60 s connect timeout. An interrupted open raises
-    ``SourceError("network")``; an interrupted ``chunks()`` simply ends.
+    the result from another thread interrupts a TLS handshake, read or wait; a DNS lookup
+    is not bounded and a TCP connect ends within the 60 s timeout per address. An
+    interrupted open raises ``SourceError("network")``; an interrupted ``chunks()`` ends.
     """
-    scheme = _scheme(url)
-    if scheme in ("", "file"):
+    try:
+        scheme = _scheme(url)
+        if scheme in ("http", "https"):
+            _origin(url)  # validates the host and port
+    except ValueError:
+        scheme = "malformed"
+    if scheme in ("", "file") and allow_local:
         return _open_local(url, scheme)
     if scheme not in ("http", "https"):
         raise SourceError("unsupported")
-    http = _Http(headers, verify_ssl, stop)
+    http = _Http(url, headers, verify_ssl, stop)
     try:
-        return _open_http(http, url)
+        return _open_http(http, url, live_delay)
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:
