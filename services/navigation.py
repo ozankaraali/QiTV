@@ -62,6 +62,7 @@ class NavModel(QObject):
         self._path: list[NavNode] = []
         self._pending: set[tuple] = set()
         self._errors: dict[tuple, str] = {}
+        self._ready_sections: set[str] = set()
         self._pending_group: Optional[tuple[str, str]] = None
         self._memo: dict[str, Any] = {}
         self._fingerprint: Optional[tuple] = None
@@ -69,6 +70,7 @@ class NavModel(QObject):
         catalog.groupReady.connect(self._on_group_ready)
         catalog.seasonsReady.connect(self._on_seasons_ready)
         catalog.episodesReady.connect(self._on_episodes_ready)
+        catalog.sectionFailed.connect(self._on_section_failed)
         catalog.groupFailed.connect(self._on_group_failed)
         catalog.seasonsFailed.connect(self._on_seasons_failed)
         catalog.episodesFailed.connect(self._on_episodes_failed)
@@ -101,6 +103,8 @@ class NavModel(QObject):
                 for s in self.catalog.sections()
             ]
         if parent.layer == "section":
+            if ("section", parent.key) in self._errors:
+                return []
             pinned = self._pinned_groups() if parent.key == "live" else []
             groups = [
                 NavNode("group", g.id, g.title, g, g.count) for g in self.catalog.groups(parent.key)
@@ -138,6 +142,8 @@ class NavModel(QObject):
         items = self.catalog.items(section, group.key)
         if items is None:
             key = self._node_key(group)
+            if key and key[0] == "section" and section in self._ready_sections:
+                return []  # the section loaded and still has no such group items
             if key and key[0] == "group":
                 return self._load(key, lambda: self.catalog.request_group(section, group.key))
             return self._load(("section", section), lambda: self.catalog.request_section(section))
@@ -152,6 +158,8 @@ class NavModel(QObject):
         return None
 
     def _node_key(self, node: NavNode) -> Optional[tuple]:
+        if node.layer == "section":
+            return ("section", node.key)
         if node.layer == "group":
             section = self.section_of(node) or "live"
             if self.catalog.provider_type() == "STB":
@@ -307,15 +315,24 @@ class NavModel(QObject):
     def _settled(self, key: tuple) -> None:
         self._memo.clear()
         self._pending.discard(key)
+        self._errors.pop(key, None)
         self.changed.emit()
 
     def _on_section_ready(self, section: str) -> None:
         self._memo.clear()
+        self._ready_sections.add(section)
         self._pending.discard(("section", section))
+        self._errors.pop(("section", section), None)
         if self._pending_group and self._pending_group[0] == section:
-            if self._resolve_group(*self._pending_group):
-                self._pending_group = None
+            if not self._resolve_group(*self._pending_group):
+                logger.debug("Group %s not found in section %s", self._pending_group[1], section)
+            self._pending_group = None
         self.changed.emit()
+
+    def _on_section_failed(self, section: str, message: str) -> None:
+        if self._pending_group and self._pending_group[0] == section:
+            self._pending_group = None
+        self._fail(("section", section), message)
 
     def _on_group_ready(self, section: str, group_id: str) -> None:
         self._settled(("group", section, group_id))
@@ -345,6 +362,7 @@ class NavModel(QObject):
         self._memo.clear()
         self._pending.clear()
         self._errors.clear()
+        self._ready_sections.clear()
         self._pending_group = None
         if not self._path or self._path[0].key != name:
             self._path = [self._source()]

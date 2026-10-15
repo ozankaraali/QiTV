@@ -17,6 +17,7 @@ class FakeCatalog(QObject):
     groupReady = Signal(str, str)
     seasonsReady = Signal(str)
     episodesReady = Signal(str, str)
+    sectionFailed = Signal(str, str)
     groupFailed = Signal(str, str, str)
     seasonsFailed = Signal(str, str)
     episodesFailed = Signal(str, str, str)
@@ -263,6 +264,57 @@ class NavModelTests(unittest.TestCase):
         self.config.favorites = []
         groups = self.nav.children(live)
         self.assertNotIn(FAVORITES_GROUP, [n.key for n in groups])
+
+    def test_section_failure_stops_loading_and_retry_requests_again(self):
+        self.catalog.ptype = "XTREAM"
+        self.nav.reset_to("movies")
+        section = self.nav.path[-1]
+        changes = []
+        self.nav.changed.connect(lambda: changes.append(1))
+        self.catalog.sectionFailed.emit("movies", "down")
+        self.assertEqual(changes, [1])
+        self.assertEqual(self.nav.load_error(section), "down")
+        self.assertEqual(self.nav.children(section), [])
+        count = self.catalog.requests.count(("section", "movies"))
+        self.nav.children(section)
+        self.assertEqual(self.catalog.requests.count(("section", "movies")), count)
+        self.nav.retry(section)
+        self.assertIsNone(self.nav.load_error(section))
+        self.assertTrue(self.nav.children(section))
+
+    def test_reset_to_with_failing_section_does_not_hang(self):
+        self.catalog.loaded = False
+        self.nav.reset_to("live", "10")
+        self.catalog.sectionFailed.emit("live", "down")
+        self.catalog.loaded = True
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section"])
+
+    def test_non_stb_group_without_items_after_ready_does_not_loop(self):
+        self.catalog.ptype = "XTREAM"
+        self.nav.reset_to("movies")
+        films = [n for n in self.nav.children(self.nav.path[-1]) if n.key == "5"][0]
+        self.catalog.sectionReady.emit("movies")
+        before = self.catalog.requests.count(("section", "movies"))
+        self.assertEqual(self.nav.children(films), [])
+        self.assertEqual(self.catalog.requests.count(("section", "movies")), before)
+
+    def test_missing_pending_group_is_dropped(self):
+        self.catalog.loaded = False
+        self.nav.reset_to("live", "nope")
+        self.catalog.loaded = True
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section"])
+        self.catalog.sectionReady.emit("live")
+        self.assertEqual(len(self.nav.path), 2)
+
+    def test_ready_clears_stale_error(self):
+        series = self._series_nav()
+        self.nav.children(series)
+        self.catalog.seasonsFailed.emit("s1", "boom")
+        self.catalog.season_map["s1"] = [{"id": "a", "name": "S1"}]
+        self.catalog.seasonsReady.emit("s1")
+        self.assertIsNone(self.nav.load_error(series))
 
 
 if __name__ == "__main__":
