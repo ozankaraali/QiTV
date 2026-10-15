@@ -5,7 +5,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Qt, QThread, Slot
 
-from services.redact import safe_traceback
+from services.redact import safe_exc, safe_traceback
 from services.thread_cleanup import ThreadCleanup
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,9 @@ class _Relay(QObject):
         try:
             if callback is not None:
                 callback(self._context, value)
-        except Exception:
-            logger.exception("Job callback raised")
+        except Exception as e:
+            # The message can name a provider URL: the type and the frames only.
+            logger.error("Job callback raised %s:\n%s", safe_exc(e), safe_traceback(e))
         finally:
             self._done(self)
 

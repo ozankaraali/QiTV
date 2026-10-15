@@ -59,7 +59,7 @@ from services.live.engine import LiveEngine
 from services.live.live_session import LiveSession
 from services.navigation import NavModel
 from services.playback import NullSession, PlaybackSession, Session, create_instance
-from services.redact import safe_message
+from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
 from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update
@@ -1019,8 +1019,10 @@ class TVWindow(QMainWindow):
         for what, step in steps:
             try:
                 step()
-            except Exception:
-                logger.exception("Could not %s", what)
+            except Exception as e:
+                # The message can name a provider URL: a scrubbed one, and the frames only.
+                logger.error("Could not %s: %s", what, safe_message(e))
+                logger.debug("Could not %s:\n%s", what, safe_traceback(e))
 
     def _save_geometry(self) -> None:
         self.config_manager.save_window_settings(_Geometry(self._normal_geometry()), WINDOW_NAME)

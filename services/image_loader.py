@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QImage, QImageReader
 
 from services.lazy_import import lazy_module
+from services.redact import redact_url, safe_exc
 
 logger = logging.getLogger(__name__)
 aiohttp = lazy_module("aiohttp")
@@ -82,7 +83,7 @@ class ImageLoader(QThread):
             if cache_path:
                 return self._result(image_rank, cache_path)
         except Exception as e:
-            logger.warning(f"Error fetching image {image_url}: {e}")
+            logger.warning("Error fetching image %s: %s", redact_url(image_url), safe_exc(e))
             raise
         return None
 
@@ -133,7 +134,7 @@ class ImageLoader(QThread):
                             image_item = await completion
                         except Exception as e:
                             image_item = None
-                            logger.info(f"Image task failed: {e}")
+                            logger.info("Image task failed: %s", safe_exc(e))
                         if self.isInterruptionRequested():
                             return
                         self.progress_updated.emit(current, image_count, image_item or {})
@@ -153,4 +154,4 @@ class ImageLoader(QThread):
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.warning(f"Error in image loading: {e}")
+            logger.warning("Error in image loading: %s", safe_exc(e))

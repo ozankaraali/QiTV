@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QImage, QPixmap
 
 from services.image_loader import ImageLoader, read_scaled
+from services.redact import redact_url
 from services.thread_cleanup import ThreadCleanup
 
 logger = logging.getLogger(__name__)
@@ -131,7 +132,7 @@ class ImageCache(QObject):
         else:
             image = read_scaled(path, self._side())  # a loader that does not decode
         if not isinstance(image, QImage) or image.isNull():
-            logger.info("Unreadable cached image for %s", url)
+            logger.info("Unreadable cached image for %s", redact_url(url))
             return
         self._store(url, QPixmap.fromImage(image))  # GUI thread only
         self.logoReady.emit(url)

@@ -33,6 +33,7 @@ from services.config_manager import ConfigManager
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.provider_manager import StbHandshake
+from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from ui.update_dialogs import check_for_updates
 
@@ -72,8 +73,9 @@ class ProviderVerificationWorker(QObject):
                     prefer_https=self.prefer_https,
                     verify_ssl=self.ssl_verify,
                 )
-        except Exception:
-            logging.getLogger(__name__).exception("Provider verification failed")
+        except Exception as e:
+            # requests exceptions name the URL, credentials and all: the type and host only.
+            logging.getLogger(__name__).warning("Provider verification failed: %s", safe_exc(e))
         finally:
             self.result.emit(self.request_id, self.provider, verified)
             self.finished.emit()
@@ -95,7 +97,7 @@ class ProviderVerificationWorker(QObject):
                         continue
                 return False
             except Exception as e:
-                logging.getLogger(__name__).warning(f"Error verifying URL: {e}")
+                logging.getLogger(__name__).warning("Error verifying URL: %s", safe_exc(e))
                 return False
         else:
             return os.path.isfile(url)

@@ -7,6 +7,7 @@ from PySide6.QtCore import QThread, Signal
 import orjson as json
 
 from services.lazy_import import lazy_module
+from services.redact import safe_exc, safe_traceback
 
 logger = logging.getLogger(__name__)
 aiohttp = lazy_module("aiohttp")
@@ -141,7 +142,8 @@ class ContentLoader(QThread):
                 json.JSONDecodeError,
                 asyncio.TimeoutError,
             ) as e:
-                logger.warning(f"Error fetching page {page}: {e}")
+                # aiohttp errors name the request URL: the type and host only.
+                logger.warning("Error fetching page %s: %s", page, safe_exc(e))
                 if attempt == max_retries - 1:
                     self.counter_page_not_fetched += 1
                     return [], 0, 0
@@ -273,5 +275,6 @@ class ContentLoader(QThread):
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.exception(f"Error in content loading: {e}")
+            logger.error("Error in content loading: %s", safe_exc(e))
+            logger.debug("Content loading failure:\n%s", safe_traceback(e))
             self.error.emit(str(e))

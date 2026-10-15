@@ -10,6 +10,7 @@ import threading
 import orjson as json
 
 from services.lazy_import import lazy_module
+from services.redact import safe_exc
 
 logger = logging.getLogger(__name__)
 aiohttp = lazy_module("aiohttp")
@@ -71,7 +72,7 @@ class ImageManager:
                         logger.warning(f"Error writing image to cache: {e}")
                         return None
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.info(f"Error fetching image: {e}")
+                logger.info("Error fetching image: %s", safe_exc(e))  # e names the URL
                 if attempt == max_retries - 1:
                     break
                 wait_time = (2**attempt) + random.uniform(0, 1)

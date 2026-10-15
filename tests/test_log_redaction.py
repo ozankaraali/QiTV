@@ -206,6 +206,142 @@ class LogPathTests(unittest.TestCase):
                 self.assertNoSecrets(logs.output)
 
 
+class RawUrlLogTests(unittest.TestCase):
+    """The remaining log lines that named a URL, or an exception text naming one (H5)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def assertNoSecrets(self, output):
+        text = "\n".join(output)
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+
+    def test_content_loader_page_and_load_failures(self):
+        import asyncio
+
+        import aiohttp
+
+        from services.content_loader import ContentLoader
+
+        class Session:
+            def get(self, *args, **kwargs):
+                raise aiohttp.ClientError(f"Cannot connect for {CREDENTIAL_URL}")
+
+        loader = ContentLoader("http://h/server/load.php", {}, "vod")
+        with self.assertLogs(level="DEBUG") as logs:
+            asyncio.run(loader.fetch_page(Session(), 1, max_retries=1, timeout=1))
+        self.assertIn("ClientError", "\n".join(logs.output))
+        self.assertNoSecrets(logs.output)
+
+        async def boom():
+            raise RuntimeError(f"failed for {CREDENTIAL_URL}")
+
+        loader.load_content = boom
+        with self.assertLogs(level="DEBUG") as logs:
+            loader.run()
+        self.assertIn("RuntimeError", "\n".join(logs.output))
+        self.assertNoSecrets(logs.output)
+
+    def test_image_download_failures(self):
+        import asyncio
+
+        import aiohttp
+
+        from services.image_loader import ImageLoader
+        from services.image_manager import ImageManager
+
+        directory = tempfile.TemporaryDirectory(prefix="qitv-redact-")
+        self.addCleanup(directory.cleanup)
+        manager = ImageManager(SimpleNamespace(get_config_dir=lambda: directory.name))
+
+        class Session:
+            def get(self, *args, **kwargs):
+                raise aiohttp.ClientError(f"Cannot connect for {CREDENTIAL_URL}")
+
+        with self.assertLogs(level="DEBUG") as logs:
+            asyncio.run(manager.cache_image_from_url(Session(), CREDENTIAL_URL, True, 1))
+        self.assertNoSecrets(logs.output)
+
+        async def refuse(*args, **kwargs):
+            raise RuntimeError(f"failed for {CREDENTIAL_URL}")
+
+        manager.cache_image_from_url = refuse
+        loader = ImageLoader([CREDENTIAL_URL], manager)
+        with self.assertLogs(level="DEBUG") as logs:
+            loader.run()  # the download, the batch and the loader each log it
+        self.assertGreaterEqual(len(logs.output), 2)
+        self.assertNoSecrets(logs.output)
+
+    def test_an_unreadable_logo(self):
+        from PySide6.QtGui import QImage
+
+        from ui.logos import ImageCache
+
+        cache = ImageCache(None, SimpleNamespace(ssl_verify=True))
+        cache._batch = [CREDENTIAL_URL]
+        with self.assertLogs("ui.logos", "INFO") as logs:
+            cache._on_progress(1, 1, {"rank": 0, "cache_path": "/x.png", "image": QImage()})
+        self.assertNoSecrets(logs.output)
+
+    def test_a_url_base_that_cannot_be_parsed(self):
+        from services.provider_api import base_from_url
+
+        with self.assertLogs("services.provider_api", "WARNING") as logs:
+            base_from_url(CREDENTIAL_URL.encode())  # not text: find() raises
+        self.assertNoSecrets(logs.output)
+
+    def test_provider_verification_failures(self):
+        from ui.settings_dialog import ProviderVerificationWorker
+
+        stb = {"type": "STB", "url": "http://h/c/", "mac": MAC}
+        worker = ProviderVerificationWorker(1, stb, False, True)
+        with (
+            patch("ui.settings_dialog.StbHandshake.run", side_effect=refused()),
+            self.assertLogs(level="DEBUG") as logs,
+        ):
+            worker.run()
+        self.assertNoSecrets(logs.output)
+        with (
+            patch("ui.settings_dialog.requests.head", side_effect=ValueError(CREDENTIAL_URL)),
+            self.assertLogs(level="DEBUG") as logs,
+        ):
+            self.assertFalse(ProviderVerificationWorker.verify_url(CREDENTIAL_URL))
+        self.assertNoSecrets(logs.output)
+
+    def test_a_job_callback_that_raises(self):
+        from services.jobs import JobRunner
+        from tests.test_catalog_service import FakeWorker
+
+        def callback(context, payload):
+            raise RuntimeError(f"failed for {CREDENTIAL_URL}")
+
+        runner = JobRunner()
+        done = []
+        with self.assertLogs(level="DEBUG") as logs:
+            runner.run_worker(FakeWorker({}), lambda c, p: (done.append(p), callback(c, p)))
+            deadline = __import__("time").monotonic() + 10
+            while not done and __import__("time").monotonic() < deadline:
+                self.app.processEvents()
+        self.assertTrue(done)
+        self.assertIn("RuntimeError", "\n".join(logs.output))
+        self.assertNoSecrets(logs.output)
+
+    def test_a_failed_close_step(self):
+        from ui.tv_window import TVWindow
+
+        def step():
+            raise RuntimeError(f"failed for {CREDENTIAL_URL}")
+
+        with self.assertLogs("ui.tv_window", "DEBUG") as logs:
+            TVWindow._run_steps(("stop the catalog", step))
+        self.assertIn("stop the catalog", "\n".join(logs.output))
+        self.assertNoSecrets(logs.output)
+
+
 class DebugCurlTests(unittest.TestCase):
     """QITV_DEBUG_CURL prints the STB EPG request as curl: the device and token stay masked."""
 

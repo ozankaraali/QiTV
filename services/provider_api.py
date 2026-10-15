@@ -2,6 +2,8 @@ import logging
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlencode, urlsplit
 
+from services.redact import redact_url, safe_exc
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,7 +19,7 @@ def base_from_url(url: str) -> str:
         netloc = rest.split("/", 1)[0]
         return f"{scheme}://{netloc}"
     except Exception as e:
-        logger.warning("Failed to parse base from URL %s: %s", url, e)
+        logger.warning("Failed to parse base from URL %s: %s", redact_url(url), safe_exc(e))
         return url
 
 
