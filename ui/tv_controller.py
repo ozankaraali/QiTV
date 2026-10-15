@@ -213,7 +213,7 @@ class TVController(QObject):
             request=self._request,
             has_media=self._has_media,
             links_busy=lambda: self._lanes.busy(),
-            drop_links=lambda: self._lanes.drop(),
+            drop_links=lambda: self._drop_links(ask_again=False),
             tune=lambda channel, key, channels: self.tune(
                 channel, group_key=key, channels=channels
             ),
@@ -1159,7 +1159,7 @@ class TVController(QObject):
         pending = self._lanes.pending()
         if self._is_stay(pending):
             pending = None  # the playing channel was the newest choice: nothing to ask again
-        self._lanes.drop()
+        self._drop_links(ask_again=not provider_changed)
         if provider_changed:
             self.zap.reset()
             self._channel = None
@@ -1168,6 +1168,12 @@ class TVController(QObject):
             self._guide.close()  # its channels are the old provider's
             self._close_pip()  # the small picture's channel and stream are too
         return pending
+
+    def _drop_links(self, *, ask_again: bool) -> None:
+        """Forget every link request; the PiP's asks again when `ask_again`."""
+        self._lanes.drop()
+        if self._pip is not None:
+            self._pip.links_dropped(ask_again)
 
     def _live_section_loaded(self) -> None:
         context = self.zap.context

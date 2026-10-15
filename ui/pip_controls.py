@@ -187,9 +187,25 @@ class PipControls(QObject):
         self._wanted = (target, context if context is not None else ZapContext())
         self._request(target)
 
+    def links_dropped(self, ask_again: bool) -> None:
+        """The shell dropped every link request (a provider setup or failure): none comes.
+
+        `ask_again`: the provider is the same, so the channel waiting to open asks anew;
+        else it is forgotten.
+        """
+        self._link = None
+        wanted = self._wanted
+        if wanted is None:
+            return
+        if ask_again and not self._closed():
+            self._request(wanted[0])
+        else:
+            self._wanted = None
+
     def close(self) -> None:
         """Close the small picture, or forget the one waiting to open."""
         self._wanted = None
+        self._link = None  # a late link for it is ignored (it is no longer `_link`)
         sessions = self.sessions
         if sessions.pip_open() or sessions.pip_opening():
             sessions.close_pip()

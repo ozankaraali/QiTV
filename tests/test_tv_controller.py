@@ -3710,6 +3710,44 @@ class PipTests(PipCase):
         self.assertFalse(self.sessions.pip_open())
         self.assertEqual(self.pip_live.calls[-1], ("stop",))
 
+    def test_a_provider_setup_while_the_pips_link_is_on_its_way_asks_again(self):
+        # Review I1: a setup drops every link request; the PiP's must not stay stuck.
+        self.catalog.providerReady.emit("Home")
+        self.start_large(0)
+        self.start_large(1)
+        self.controller.handle(Action.PIP)
+        self.assertEqual(self.requested()[-1], "One")
+        links = len(self.catalog.links)
+        self.catalog.providerReady.emit("Home")  # a refresh: the same provider
+        self.assertEqual(len(self.catalog.links), links + 1)  # asked again
+        self.assertEqual(self.requested()[-1], "One")
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(self.sessions.pip_open))
+
+    def test_after_another_provider_pip_still_opens(self):
+        self.catalog.providerReady.emit("Home")
+        self.start_large(0)
+        self.start_large(1)
+        self.controller.handle(Action.PIP)  # its link is on its way…
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")  # …and dropped with the old provider
+        links = len(self.catalog.links)
+        self.assertEqual(len(self.catalog.links), links)  # the old channel is not asked again
+        self.start_large(2)
+        self.controller.open_pip(CHANNELS[3], group_key="10", channels=CHANNELS)
+        self.assertEqual(self.requested()[-1], "Four")
+        self.ready("http://stream/4")
+        self.assertTrue(wait_until(self.sessions.pip_open))
+
+    def test_a_provider_failure_forgets_the_pips_link_and_p_works_again(self):
+        self.start_large(0)
+        self.start_large(1)
+        self.controller.handle(Action.PIP)
+        self.catalog.providerFailed.emit("Home", "Portal down")
+        links = len(self.catalog.links)
+        self.controller.handle(Action.PIP)  # nothing was open: P asks again
+        self.assertEqual(len(self.catalog.links), links + 1)
+
     def test_a_swap_waits_for_nothing_while_the_large_pictures_stream_opens(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])
