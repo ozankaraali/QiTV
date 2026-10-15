@@ -39,8 +39,9 @@ sends nothing for a burst plus 2 s (raw TS: 2 s) has stalled: the timeline says 
 to there only, and StayLive takes it as buffering, as it does a VLC whose clock stood still
 for 0.5 s while it reports Playing (libVLC 3 does when starved): no rate change, no reopen,
 and the easing starts afresh once the edge moves again. Go live picks
-among every segment start, the open one included, by the lag it would give (for a bursty
-source its mean; see `_live_seq`): never below the target less a quarter second, since
+among every segment start, the open one included, by the lag it would give once VLC plays
+it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 s; for a bursty
+source the mean; see `_live_seq`): never below the target less a quarter second, since
 stay-live cannot slow down to win buffer back; the nearest the target within stay-live's
 band; else the nearest above it ("behind live" for a moment while stay-live catches up).
 
@@ -117,6 +118,9 @@ _BELOW_TARGET_S = 0.25  # Go live never lands a mean lag further below the targe
 _NUDGE_S = 0.75  # StayLive nudges the rate beyond the target plus this
 _STALL_S = 2.0  # an edge this much later than a burst (raw TS: at all) is a stalled source
 _FROZEN_S = 0.5  # a VLC clock standing still this long while Playing is starved
+_OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measured
+_OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
+_OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -218,6 +222,8 @@ class LiveSession(QObject):
         self._edge_seen: Optional[float] = None  # the live edge last seen
         self._edge_moved = 0.0  # when it last moved (for bursts: when the last one landed)
         self._clock_moved = 0.0  # when VLC's clock last moved (or was not expected to)
+        self._open_s = _OPEN_SEED_S  # VLC's open time, averaged over this object's opens
+        self._opened_at: Optional[float] = None  # a pipeline play() not yet Playing
         # Bursty sources: (estimate, correction, when, position) at the last tick.
         self._smoothed: Optional[tuple[float, float, float, float]] = None
         self._wire_engine(engine, connect=True)
@@ -635,6 +641,10 @@ class LiveSession(QObject):
     def _on_state(self, state: str) -> None:
         if self._phase is not _Phase.PIPELINE:
             return
+        if state == _PLAYING and self._opened_at is not None:
+            took = min(self._clock() - self._opened_at, _OPEN_MAX_S)
+            self._open_s += _OPEN_WEIGHT * (took - self._open_s)
+            self._opened_at = None
         if state in (_PLAYING, _PAUSED):
             self._failing_since = None
         if state == _PLAYING and self._paused:
@@ -859,13 +869,14 @@ class LiveSession(QObject):
         snapshot = self._snapshot()
         edge, target = self._live_edge(snapshot), self._target(snapshot)
         # Every start, the open segment's too (where the closed ones end; on a bursty source
-        # the newest GOP stays open until the next burst), by the lag it would give: for a
-        # bursty source the mean over a burst (`_lag`), for raw TS the lag itself.
+        # the newest GOP stays open until the next burst), by the lag it would give once VLC
+        # plays it (the edge moves on while VLC opens): for a bursty source the mean over a
+        # burst (`_lag`), for raw TS the lag itself.
         starts = [(span.start, span.seq) for span in spans]
         open_seq = snapshot.get("open")
         if isinstance(open_seq, int):
             starts.append((_number(snapshot.get("end")), open_seq))
-        shift = self._burst_shift(snapshot)
+        shift = self._burst_shift(snapshot) + self._open_s
         means = sorted((edge - start + shift, seq) for start, seq in starts)
         # Stay-live never slows down, so a landing below the target would keep its smaller
         # buffer for good: none below a quarter second short of it. Then the nearest the
@@ -905,7 +916,7 @@ class LiveSession(QObject):
             return False
         self._base, self._elapsed = self._start_of(seq), 0.0
         self._last_ms, self._last_wall = 0, self._clock()
-        self._clock_moved = self._last_wall
+        self._clock_moved = self._opened_at = self._last_wall
         self._smoothed = None  # the old average says nothing about the new position
         self._retry = None
         self._opening = True

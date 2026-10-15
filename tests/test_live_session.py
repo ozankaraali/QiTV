@@ -653,30 +653,31 @@ class SeekTests(LiveSessionCase):
         self.playback.set_state(PlaybackState.PLAYING)
         self.live.seek_to(4.0)
         self.live.seek_to(18.0)  # within the 2.5 s target of the edge
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 8))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 9))
         self.step(0.25)
         self.assertEqual(self.timelines[-1]["mode"], "live")
         self.live.seek_to(4.0)
         self.live.seek_relative(30.0)  # past the edge
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 8))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 9))
         self.step(0.25)
         self.assertEqual(self.timelines[-1]["mode"], "live")
 
-    def test_go_live_picks_the_newest_segment_at_least_the_target_behind(self):
+    def test_go_live_picks_the_start_nearest_the_target_once_vlc_plays(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.live.seek_to(3.0)
         self.live.set_speed(1.5)
         self.assertEqual(self.playback.rates, [1.5])
         self.live.go_live()
-        # Normal: 2.5 s behind 20.0 is 17.5; segment 8 starts at 16, segment 9 at 18.
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 8))
+        # Normal (2.5 s): segment 9 starts 2.0 s behind 20.0, about 2.35 s once VLC opened
+        # it (the instant open above brought its open time from 0.5 to 0.35 s); 8: 4.35 s.
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 9))
         self.assertEqual(self.playback.rates, [1.5, 1.0])
-        self.assertEqual(self.live.position(), 16.0)
+        self.assertEqual(self.live.position(), 18.0)
         self.playback.set_state(PlaybackState.PLAYING)
-        self.step(0.25)  # back in LIVE: stay-live nudges the 3.75 s lag
+        self.step(0.25)  # back in LIVE, on target: no nudge
         self.assertEqual(self.timelines[-1]["mode"], "live")
-        self.assertEqual(self.playback.rates, [1.5, 1.0, 1.05])
+        self.assertEqual(self.playback.rates, [1.5, 1.0])
 
     def test_go_live_with_bursts_aims_the_mean_lag_at_the_target(self):
         sid = self.ready(segments(0, 10), live_edge=20.0, burst=6.0)
@@ -709,12 +710,52 @@ class SeekTests(LiveSessionCase):
         self.live.go_live()
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 10))
 
+    def test_go_live_counts_vlcs_open_time_seeded_at_half_a_second(self):
+        # The edge moves on while VLC opens: from 18.0, 2.0 s behind 20.0 now, 2.5 s once
+        # playing (on target); without the open time, 16.0 (4.5 s) would win.
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.live.go_live()
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 9))
+
+    def test_go_live_learns_how_long_vlc_takes_to_open(self):
+        sid = self.ready(segments(0, 10), live_edge=21.2, open_seq=10)
+        for _ in range(10):  # every open takes 1.5 s from play() to Playing
+            self.live.go_live()
+            self.clock.now += 1.5
+            self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.buffer(sid, segments(0, 10), live_edge=21.2, open_seq=10)
+        self.live.go_live()
+        # From 20.0: 1.2 s behind now, about 2.7 s once it plays; from 18.0 it would be 4.7.
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 10))
+
+    def test_a_resume_is_no_open(self):
+        sid = self.ready(segments(0, 10), live_edge=21.0, open_seq=10)
+        self.clock.now += 0.5
+        self.playback.set_state(PlaybackState.PLAYING)  # the open took the seed's 0.5 s
+        for _ in range(10):  # Playing again 30 s after each pause: not an open
+            self.live.toggle_pause()
+            self.clock.now += 30.0
+            self.live.toggle_pause()
+        self.live.go_live()
+        # From 20.0 (1.0 s): 1.5 s once playing, under the floor; from 18.0: 3.5 s.
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 9))
+
+    def test_a_slow_open_counts_for_two_seconds_at_most(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0, open_seq=10)
+        for _ in range(10):  # a stalled source: Playing a minute after play()
+            self.live.go_live()
+            self.clock.now += 60.0
+            self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.buffer(sid, segments(0, 10), live_edge=20.0, open_seq=10)
+        self.live.go_live()  # 2.0 + 2 s: 18.0 lands 4 s behind, not 20.0 for a minute's open
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 9))
+
     def test_a_seek_near_live_keeps_the_pause(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.live.toggle_pause()
         self.live.seek_to(19.0)
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 8))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 9))
         self.playback.set_state(PlaybackState.PLAYING)
         self.assertEqual(self.playback.paused, [True, True])  # paused again at the edge
         self.step(0.25, media=0)
@@ -728,7 +769,7 @@ class SeekTests(LiveSessionCase):
         self.live.go_live()
         self.playback.set_state(PlaybackState.PLAYING)
         self.assertEqual(self.playback.paused, [True])  # not paused again
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 8))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 9))
         self.step(0.25)
         self.assertFalse(self.timelines[-1]["paused"])
 
@@ -1030,7 +1071,7 @@ class StayLiveTests(LiveSessionCase):
         sid = self.ready(segments(0, 20), live_edge=40.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(0.25)  # lag 39.75 > 2.5 + 20
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 18))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 19))
         self.playback.set_state(PlaybackState.PLAYING)
         for _ in range(8):
             self.step(0.25)
@@ -1306,7 +1347,7 @@ class InterruptionTests(LiveSessionCase):
         self.playback.errorOccurred.emit("The stream could not be played")  # cut off
         self.assertEqual(self.engine.closed, [])
         self.engine.buffer(sid, segments(10, 3, start=20.0), live_edge=26.0)
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 11))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 12))
 
     def test_the_disk_deferral_waits_a_burst_for_hls(self):
         self.live = self.make(ready_timeout_ms=1000)
@@ -1342,7 +1383,7 @@ class InterruptionTests(LiveSessionCase):
         self.live.go_live()
         self.assertEqual(len(self.playback.plays), 2)
         self.engine.buffer(sid, segments(10, 3, start=20.0), live_edge=26.0)
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 11))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 12))
 
     def test_the_source_giving_up_before_the_ram_ring_reports_falls_back(self):
         sid = self.ready(segments(0, 10), live_edge=20.0)
@@ -1572,7 +1613,7 @@ class HelperDeathTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), 1)
         self.engine.buffer(sid, segments(0, 5), live_edge=10.0)  # the reopened session
         self.engine.sessionReady.emit(sid)
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 3))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 4))
         self.assertEqual(self.engine.closed, [])
         self.assertEqual(self.modes, ["pipeline"])
 
@@ -1597,7 +1638,7 @@ class HelperDeathTests(LiveSessionCase):
         self.engine.available.emit(True)
         self.engine.buffer(sid, segments(0, 5), live_edge=10.0)
         self.engine.sessionReady.emit(sid)
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 3))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 4))
 
     def test_internal_before_ready_waits_for_the_reopen(self):
         sid = self.start()
@@ -1644,7 +1685,7 @@ class HelperDeathTests(LiveSessionCase):
         self.engine.available.emit(True)
         self.engine.buffer(sid, segments(0, 5), live_edge=10.0)
         self.engine.sessionReady.emit(sid)
-        self.assertEqual(self.playback.plays[-1], self.stream(sid, 3))
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 4))
         self.playback.set_state(PlaybackState.PLAYING)
         self.assertIs(self.playback.current, PlaybackState.PAUSED)
         self.step(0.25, media=0)
