@@ -19,7 +19,8 @@ during that wait applies once the tune starts.
 A direct play (`open(direct=True)`: a channel the pipeline cannot read, a movie, an
 episode) holds a "main" slot too (a `HeldSlot`, the selected provider's), from its start
 until libVLC let go of its stream, so a PiP sees the slot taken. It never waits for one:
-this gate already orders the main player's streams.
+this gate already orders the main player's streams. A local file (`local=True`) is no
+provider's stream: it is stopped and waited for like a direct play, but holds no slot.
 """
 
 from __future__ import annotations
@@ -78,6 +79,7 @@ class LiveTuner(QObject):
         self._held = HeldSlot(self.budget, PURPOSE)  # that stream's slot, until VLC let go
         self._action: Optional[Callable[[], None]] = None  # an open waiting for the release
         self._action_direct = False
+        self._action_slot = False  # that open plays a provider stream: it holds a slot
         self._input_cap = QTimer(self, singleShot=True, interval=RELEASE_CAP_MS)
         self._input_cap.timeout.connect(self._on_input_cap)
         session.inputEnded.connect(self._on_input_ended)
@@ -89,14 +91,17 @@ class LiveTuner(QObject):
 
     # ---- opening ------------------------------------------------------------------------------
 
-    def open(self, action: Callable[[], None], *, direct: bool = False) -> None:
+    def open(
+        self, action: Callable[[], None], *, direct: bool = False, local: bool = False
+    ) -> None:
         """Stop what plays, then run `action` once it is released: now when nothing waits.
 
         `direct`: `action` plays a provider URL in the session, whose input the next open
-        then waits for.
+        then waits for. `local`: it plays a local file instead, which takes no provider slot.
         """
         self.stop()
-        self._action, self._action_direct = action, direct
+        self._action, self._action_direct = action, direct or local
+        self._action_slot = direct and not local
         self._proceed()
 
     def tune(self, start: LiveStart, provider: str, limit: Optional[int]) -> None:
@@ -143,7 +148,7 @@ class LiveTuner(QObject):
         if self._action is not None:
             action, self._action = self._action, None
             self._direct = self._action_direct
-            if self._direct:
+            if self._action_slot:
                 self._held.take(str(getattr(self.config, "selected_provider_name", "") or ""))
             action()
         elif self._pending is not None and stream is not None and stream.is_granted():

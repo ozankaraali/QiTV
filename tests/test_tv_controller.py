@@ -3250,6 +3250,17 @@ class LibraryTests(AutoplayCase):
         self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Portal down")
         self.assertTrue(self.controller.vod_chosen())  # both failed: nothing plays
 
+    def test_a_local_file_takes_no_provider_slot(self):
+        self.config.selected_provider_name = "Home"
+        self.play(0)  # a direct channel holds the main slot
+        budget = self.controller.budget
+        self.assertEqual(budget.holders("Home"), ["main"])
+        self.controller.play_file("/videos/clip.mp4")
+        self.assertEqual(self.played_urls()[-1], "file:///videos/clip.mp4")
+        self.assertEqual(budget.holders("Home"), [])  # no provider stream: a PiP may use it
+        self.play(1)  # the next channel takes it again
+        self.assertEqual(budget.holders("Home"), ["main"])
+
     def test_overlay_open_names_what_esc_would_close_first(self):
         self.controller.play_vod(movie(1), "movie", play_context())
         self.ready("http://vod/m1.mkv")

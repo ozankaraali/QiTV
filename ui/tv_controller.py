@@ -393,7 +393,7 @@ class TVController(QObject):
             self.session.play(url, kind=classify(url, False), start_ms=0)
             self._reset_speed()
 
-        self._tuner.open(self._guarded(target, open_file), direct=True)
+        self._tuner.open(self._guarded(target, open_file), local=True)  # no provider slot
         self.overlays.banner.dismiss()
         self.overlays.transport.set_next_available(False)
         self.overlays.transport.show_vod(title, "")
