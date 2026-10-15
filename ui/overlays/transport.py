@@ -9,6 +9,8 @@ while the source has stalled). The bar and the Go live chip show only when the v
 Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
 TV while the window offers picture in picture the second channel (P), then "Open in external
 player" (the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
+Left of the audio track (♪) a speaker opens the volume mixer on the large picture's row; it
+shows whether that picture is muted.
 At a small width the Stay live indicator's text is shortened, or the indicator left out, so it
 never runs under the play button.
 """
@@ -60,6 +62,7 @@ TOOLTIPS = {
     "mini": "Mini player (Alt+P)",
     "fullscreen": "Fullscreen (F)",
     "external": "Open in external player",
+    "volume": "Volume (+/−, M)",
 }
 _ICONS = {"mini": "mini_player", "pip": "pip"}  # button name -> painting icon, if they differ
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
@@ -136,6 +139,7 @@ class Transport(Overlay):
     # "Open in external player": the shell's menu opens from this point (the button's
     # top-left, global coordinates).
     externalRequested = Signal(QPoint)
+    volumeRequested = Signal()  # the speaker: the mixer, on the large picture's row
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
     def __init__(
@@ -160,6 +164,7 @@ class Transport(Overlay):
         self._next_available = False
         self._pip_available = False  # the window can open a second channel
         self._pip_open = False
+        self._muted = False  # the large picture's mute: the speaker shows it
         self._timeline: _Timeline | None = None
         self._claimed: tuple[object, ...] = ()  # what hole_claims() covered last
         self._ticks: list[tuple[float, str]] = []
@@ -266,6 +271,12 @@ class Transport(Overlay):
             self._pip_available, self._pip_open = available, open_
             self.update()
             self._controls_changed()
+
+    def set_muted(self, muted: bool) -> None:
+        """Whether the large picture is muted: its speaker shows it."""
+        if muted != self._muted:
+            self._muted = muted
+            self.update()
 
     def hole_claims(self) -> QRegion:
         """Over the PiP, the clicks this keeps (host coordinates): its buttons and its bar."""
@@ -468,7 +479,7 @@ class Transport(Overlay):
         if not bar:
             put("play", big, un.px(1.5))
             x = float(right)
-            for name in self._right_buttons("subtitles", "audio"):
+            for name in self._right_buttons("subtitles", "audio", "volume"):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
                 x -= un.px(1.8)
@@ -505,7 +516,7 @@ class Transport(Overlay):
             chip_w = un.px(3.6)
             rects["speed"] = QRectF(x, cy - un.px(1.1), chip_w, un.px(2.2))
             x = float(right)
-            for name in self._right_buttons("audio", "subtitles"):
+            for name in self._right_buttons("audio", "volume", "subtitles"):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
                 x -= un.px(1.8)
@@ -580,12 +591,11 @@ class Transport(Overlay):
             self._paint_timeshift(p, un, rects, text)
         else:
             self._paint_vod(p, un, rects, text)
-        for name in ("subtitles", "audio", "external", "pip", "mini", "fullscreen"):
+        for name in ("subtitles", "audio", "volume", "external", "pip", "mini", "fullscreen"):
             if name in rects:
                 lit = name == "pip" and self._pip_open
-                draw_icon(
-                    p, _ICONS.get(name, name), rects[name], qcolor(PALETTE.accent) if lit else text
-                )
+                icon = "mute" if name == "volume" and self._muted else _ICONS.get(name, name)
+                draw_icon(p, icon, rects[name], qcolor(PALETTE.accent) if lit else text)
         p.end()
 
     def _paint_scrims(self, p: QPainter) -> None:
@@ -899,6 +909,8 @@ class Transport(Overlay):
                 self.fullscreenRequested.emit()
             elif name == "audio":
                 self.audioRequested.emit()
+            elif name == "volume":
+                self.volumeRequested.emit()
             elif name == "subtitles":
                 self.subtitleRequested.emit()
             elif name == "pip":

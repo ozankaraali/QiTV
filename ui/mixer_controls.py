@@ -1,13 +1,13 @@
 """The TV shell's volume: the volume keys, mute and the wheel, shown on the mixer (Phase 4).
 
 Every volume action (+/-, the media volume keys, M, ↑/↓ and the wheel during a movie) acts on
-the large picture and shows the mixer (`ui/overlays/mixer.py`): one row ("Main") without
-picture in picture, two with it ("Main", the large picture, and "PiP", the small one). While
-it shows, the keys act on its selected row: ↑/↓ (and +/-) change it by 5, ←/→ or Tab select
-the other row, M mutes it and Esc hides the mixer. The PiP label's speaker mutes or unmutes
-the small picture without showing the mixer (one that shows follows). The arrows are the arrow
-keys only (a remote's Ch± and PageUp/PageDown still zap), and ←/→ and Tab are the mixer's only
-with two rows (else they still seek).
+the large picture and shows the mixer (`ui/overlays/mixer.py`), as the transport's speaker
+does: one row ("Main") without picture in picture, two with it ("Main", the large picture,
+and "PiP", the small one). While it shows, the keys act on its selected row: ↑/↓ (and +/-)
+change it by 5, ←/→ or Tab select the other row, M mutes it and Esc hides the mixer. The PiP
+label's speaker mutes or unmutes the small picture without showing the mixer (one that shows
+follows). The arrows are the arrow keys only (a remote's Ch± and PageUp/PageDown still zap),
+and ←/→ and Tab are the mixer's only with two rows (else they still seek).
 
 Levels and mutes belong to the streams (SessionManager): a swap moves each with its stream,
 so the rows trade values. Raising the small picture's level makes it audible; lowering a
@@ -55,7 +55,8 @@ class MixerControls(QObject):
     ) -> None:
         """`mixer` is the overlay (None: toasts); `session()` the large picture's player;
         `names()` the large and the small picture's channel names; `audio_changed()` runs
-        after any level or mute change (the PiP label's speaker follows)."""
+        after any level or mute change, and after PiP opened, closed or swapped (the PiP
+        label's and the transport's speakers follow)."""
         super().__init__(parent)
         self._overlay = mixer
         self.sessions = sessions
@@ -100,6 +101,8 @@ class MixerControls(QObject):
         if self.sessions is None and self._overlay is None:
             session = self._session()
             muted = session.toggle_mute()
+            self._main_muted = bool(muted)
+            self._audio_changed()
             self._toast("Muted" if muted else f"Volume {session.volume()}%")
             return
         muted = not self._muted(row)
@@ -129,6 +132,17 @@ class MixerControls(QObject):
             return False
         return True
 
+    def open_main(self) -> None:
+        """The transport's speaker: the mixer on the large picture's row, changing nothing."""
+        if self._overlay is None:
+            muted = self._muted(MAIN_ROW)
+            self._toast("Muted" if muted else f"Volume {self._level(MAIN_ROW)}%")
+        self._show(MAIN_ROW)
+
+    def main_muted(self) -> bool:
+        """Whether the large picture is muted."""
+        return self._muted(MAIN_ROW)
+
     def toggle_small_mute(self) -> None:
         """The PiP label's speaker: mute or unmute the small picture (its label follows, and
         the mixer while it shows)."""
@@ -137,13 +151,15 @@ class MixerControls(QObject):
         if sessions is None or small is None:
             return
         sessions.set_muted(small.name, not sessions.muted(small.name))
-        self._audio_changed()
         self.refresh()
 
     def refresh(self) -> None:
-        """PiP opened, closed or swapped: the rows follow while the mixer shows."""
+        """PiP opened, closed or swapped: the speakers follow, and the rows while the mixer
+        shows."""
         if self.visible():
             self._show(self._row)
+        else:
+            self._audio_changed()
 
     def hide(self) -> None:
         if self._overlay is not None:

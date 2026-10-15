@@ -306,6 +306,10 @@ class FakeTransport(FakeOverlay):
     pipRequested = Signal()
     miniPlayerRequested = Signal()
     externalRequested = Signal(QPoint)
+    volumeRequested = Signal()
+
+    def set_muted(self, muted):
+        self.record("set_muted", muted)
 
     def set_next_available(self, available):
         self.record("set_next_available", available)
@@ -1045,10 +1049,18 @@ class KeyTests(ControllerTestCase):
         self.controller.handle(Action.VOL_UP)
         self.assertEqual(self.session.level, 55)
         self.controller.handle(Action.MUTE)
+        self.assertEqual(self.transport.named("set_muted")[-1], (True,))  # its speaker
         self.controller.handle(Action.MUTE)
+        self.assertEqual(self.transport.named("set_muted")[-1], (False,))
+        self.transport.volumeRequested.emit()  # the transport's speaker, without a mixer
         self.assertEqual(
-            self.toast.messages()[-3:],
-            [("Volume 55%", "info"), ("Muted", "info"), ("Volume 55%", "info")],
+            self.toast.messages()[-4:],
+            [
+                ("Volume 55%", "info"),
+                ("Muted", "info"),
+                ("Volume 55%", "info"),
+                ("Volume 55%", "info"),  # the transport's speaker says it too
+            ],
         )
 
     def test_window_actions(self):

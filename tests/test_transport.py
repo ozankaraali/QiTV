@@ -168,12 +168,69 @@ class TransportCase(unittest.TestCase):
             self.assertEqual(t.tooltip_at(t.button_rect(name).center()), text)
         self.assertEqual(t.tooltip_at(QPointF(640, 300)), "")
 
+    def modes(self, t):
+        """Live, a movie, then time-shifted live (the bar): each lays its buttons out."""
+        t.show_live("One", "")
+        yield "live"
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        yield "movie"
+        t.show_timeshift("One", "")
+        t.update_timeline(
+            {
+                "start": 0.0,
+                "end": 60.0,
+                "position": 30.0,
+                "live_edge": 60.0,
+                "lag": 30.0,
+                "mode": "shifted",
+                "rate": 1.0,
+                "paused": False,
+            },
+            [],
+        )
+        yield "shifted"
+
+    def test_the_volume_button_sits_left_of_the_audio_track_button(self):
+        # Owner (2.0.1): ♪ picks the audio track; nothing opened the volume mixer.
+        t = self.make()
+        t.set_pip_state(True, False)
+        for mode in self.modes(t):
+            with self.subTest(mode=mode):
+                rects = t._layout()
+                volume = rects["volume"]
+                right = [(r.left(), n) for n, r in rects.items() if r.left() >= volume.right()]
+                self.assertEqual(min(right)[1], "audio")  # its neighbour on the right
+                self.assertEqual(t.tooltip_at(volume.center()), "Volume (+/−, M)")
+                spy = QSignalSpy(t.volumeRequested)
+                self.click(t, volume.center().toPoint())
+                self.assertEqual(spy.count(), 1)
+
+    def test_the_volume_button_shows_whether_the_picture_is_heard(self):
+        t = self.make()
+        t.show_live("One", "")
+        volume = t.button_rect("volume").toAlignedRect()
+        heard = t.grab().toImage().copy(volume)
+        t.set_muted(True)
+        self.assertNotEqual(t.grab().toImage().copy(volume), heard)
+        t.set_muted(False)
+        self.assertEqual(t.grab().toImage().copy(volume), heard)
+
     def test_over_the_pip_only_its_controls_keep_the_clicks(self):
         t = self.make()
         t.show_live("One", "")
         t.set_pip_state(True, False)
         claims = t.hole_claims()
-        for name in ("play", "fullscreen", "mini", "pip", "external", "audio", "subtitles"):
+        for name in (
+            "play",
+            "fullscreen",
+            "mini",
+            "pip",
+            "external",
+            "audio",
+            "volume",
+            "subtitles",
+        ):
             self.assertTrue(claims.contains(t.button_rect(name).center().toPoint()), name)
         self.assertFalse(claims.contains(QPoint(640, 300)))  # the scrim
         self.assertFalse(claims.contains(t.button_rect("live").center().toPoint()))  # a label
@@ -549,6 +606,7 @@ class SmallWidthLayoutTests(unittest.TestCase):
                         for name, rect in t._layout().items()
                         if name not in ("seek", "times")  # the rows above the buttons
                     }
+                    self.assertIn("volume", rects)
                     names = list(rects)
                     for i, a in enumerate(names):
                         self.assertGreaterEqual(rects[a].left(), 0, a)

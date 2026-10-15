@@ -176,7 +176,7 @@ Watch a second channel in a small picture in the bottom-right corner:
 - <kbd>P</kbd> (or the player controls' second-channel button) opens the channel you watched before, small; press <kbd>P</kbd> again to close it;
 - in the channel list, right-click a channel and choose **Open in picture-in-picture**, or highlight it and press <kbd>Ctrl/⌘+P</kbd>;
 - click the small picture or its **⇄**, or press <kbd>S</kbd>, to swap the two: the small one becomes big;
-- the sound follows the big picture. The speaker on the small picture turns its sound on or off. <kbd>+</kbd> and <kbd>-</kbd> show the mixer, which sets each picture's volume (<kbd>Tab</kbd> moves to the other row) and hides after a few seconds; without picture-in-picture it shows only the main volume;
+- the sound follows the big picture. The speaker on the small picture turns its sound on or off. <kbd>+</kbd> and <kbd>-</kbd> (or the speaker in the player controls, beside ♪) show the mixer, which sets each picture's volume (<kbd>Tab</kbd> moves to the other row) and hides after a few seconds; without picture-in-picture it shows only the main volume;
 - the **×** on the small picture closes it.
 
 Picture-in-picture is for live TV, and it needs a provider that allows two streams at a time.

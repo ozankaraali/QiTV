@@ -260,7 +260,7 @@ class TVController(QObject):
             config=config,
             toast=self._toast,
             names=self._picture_names,
-            audio_changed=self._refresh_pip_label,
+            audio_changed=self._on_audio_changed,
             parent=self,
         )
         self._pip: Optional[PipControls] = None
@@ -341,6 +341,7 @@ class TVController(QObject):
         transport.miniPlayerRequested.connect(self.window_actions.toggle_mini_player)
         transport.externalRequested.connect(self._on_external_requested)
         transport.audioRequested.connect(self._cycle_audio)
+        transport.volumeRequested.connect(self._mixer.open_main)
         transport.subtitleRequested.connect(self._cycle_subtitles)
         self._live_controls.wire()
         self._mixer.wire()
@@ -1478,7 +1479,10 @@ class TVController(QObject):
         target = pip.view(small.name).target if pip is not None and small is not None else None
         return large, target.title if target is not None else ""
 
-    def _refresh_pip_label(self) -> None:
+    def _on_audio_changed(self) -> None:
+        """A level or mute changed, or the pictures swapped: the PiP label's speaker and the
+        transport's follow."""
+        self.overlays.transport.set_muted(self._mixer.main_muted())
         if self._pip is not None:
             self._pip.refresh_label()
 

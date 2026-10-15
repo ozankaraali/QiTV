@@ -772,6 +772,25 @@ class MixerTests(PipCase):
         self.assertTrue(self.label.audible)
         self.assertFalse(self.sessions.muted("pip"))  # the large picture is heard too
 
+    def test_the_transports_speaker_shows_the_mixer_on_the_main_row(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.transport.volumeRequested.emit()
+        self.assertEqual(
+            self.mixer.shown(), ([("Main", "One", 100, False), ("PiP", "Two", 30, True)], 0)
+        )
+        self.controller.handle(Action.CH_NEXT, key=DOWN)  # its keys: ↓ is quieter now
+        self.assertEqual(self.sessions.level("main"), 95)
+
+    def test_the_transports_speaker_shows_whether_the_large_picture_is_heard(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.MUTE)
+        self.assertEqual(self.transport.named("set_muted")[-1], (True,))
+        self.label.muteRequested.emit()  # the small picture is heard: a swap keeps mutes
+        self.controller.handle(Action.SWAP)
+        self.assertEqual(self.transport.named("set_muted")[-1], (False,))  # Two, heard
+
     def test_raising_the_pip_row_from_zero_unmutes_the_small_picture(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])
