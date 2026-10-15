@@ -7,7 +7,6 @@ import logging
 import os
 import random
 
-from PySide6.QtGui import QIcon, QPixmap
 import aiohttp
 import orjson as json
 
@@ -101,8 +100,10 @@ class ImageManager:
     def _touch_cache_entry(self, key_hash, cache_path):
         # Update cache metadata without creating GUI objects
         size = os.path.getsize(cache_path)
-        entry = self.cache.get(key_hash, {}) or {}
+        entry = self.cache.get(key_hash) or {}
+        self.current_cache_size += size - entry.get("size", 0)
         entry["size"] = size
+        entry["ext"] = os.path.splitext(cache_path)[1].lstrip(".")
         entry["last_access"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.cache[key_hash] = entry
         # maintain LRU order
@@ -118,16 +119,18 @@ class ImageManager:
         # Save empty cache index
         self.save_index()
 
+    def _entry_paths(self, key_hash, entry):
+        """Files an entry may own; entries from older indexes did not record their extension."""
+        exts = [entry["ext"]] if entry and entry.get("ext") else ["png", "jpg"]
+        return [os.path.join(self.cache_dir, f"{key_hash}.{ext}") for ext in exts]
+
     def remove_icon_from_cache(self, url):
-        ext = "png"
-        url_hash = self._hash_string(url + ext)
-        if url_hash in self.cache:
-            cache_path = os.path.join(self.cache_dir, f"{url_hash}.{ext}")
-            if os.path.exists(cache_path):
-                file_size = os.path.getsize(cache_path)
-                os.remove(cache_path)
-                self.current_cache_size -= file_size
-            self.cache.pop(url_hash)
+        url_hash = self._hash_string(url + "png")
+        entry = self.cache.pop(url_hash, None)
+        self.current_cache_size -= (entry or {}).get("size", 0)
+        path = os.path.join(self.cache_dir, f"{url_hash}.png")
+        if os.path.exists(path):
+            os.remove(path)
 
     def _hash_string(self, url):
         return hashlib.sha256(url.encode("utf-8")).hexdigest()
@@ -142,44 +145,32 @@ class ImageManager:
                 except (json.JSONDecodeError, IOError) as e:
                     logger.warning(f"Error loading index file: {e}")
 
-        # Add missing keys to the cache
+        # Index files that exist on disk but not in the index (metadata only)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for filename in os.listdir(self.cache_dir):
-            if filename.endswith(".png") or filename.endswith(".jpg"):
-                image_hash = filename.split(".")[0]
-                if image_hash not in self.cache:
-                    iconified = filename.endswith(".png")
-                    image_type = "qicon" if iconified else "qpixmap"
-                    cache_path = os.path.join(self.cache_dir, filename)
-                    image = QPixmap(cache_path, "PNG" if iconified else "JPG")
-                    if iconified:
-                        image = QIcon(image)
-                    self.cache[image_hash] = {
-                        image_type: image,
-                        "size": os.path.getsize(cache_path),
-                        "last_access": now,
-                    }
+            image_hash, ext = os.path.splitext(filename)
+            if ext in (".png", ".jpg") and not self.cache.get(image_hash):
+                self.cache[image_hash] = {
+                    "size": os.path.getsize(os.path.join(self.cache_dir, filename)),
+                    "ext": ext.lstrip("."),
+                    "last_access": now,
+                }
 
-        self.current_cache_size = sum(entry["size"] for entry in self.cache.values() if entry)
+        self.current_cache_size = sum(
+            entry.get("size", 0) for entry in self.cache.values() if entry
+        )
 
     def save_index(self):
-        index_data = {
-            url: (
-                {k: v for k, v in data.items() if k not in ["qicon", "qpixmap"]} if data else None
-            )
-            for url, data in self.cache.items()
-        }
         with open(self.index_file, "w", encoding="utf-8") as f:
-            f.write(json.dumps(index_data, option=json.OPT_INDENT_2).decode("utf-8"))
+            f.write(json.dumps(dict(self.cache), option=json.OPT_INDENT_2).decode("utf-8"))
 
     def _manage_cache_size(self):
-        # Remove oldest accessed items until cache size is within limits
-        while self.current_cache_size > self.max_cache_size:
-            # Pick the oldest accessed item (reminder: cache is an ordered dict where last accessed items are at the end)
+        # Evict least recently used entries; always keep the entry just touched.
+        while self.current_cache_size > self.max_cache_size and len(self.cache) > 1:
             oldest_hash, oldest_data = self.cache.popitem(last=False)
-            ext = "png" if "qicon" in oldest_data else "jpg"
-            cache_path = os.path.join(self.cache_dir, f"{oldest_hash}.{ext}")
-            if os.path.exists(cache_path):
-                file_size = os.path.getsize(cache_path)
-                os.remove(cache_path)
-                self.current_cache_size -= file_size
+            self.current_cache_size -= (oldest_data or {}).get("size", 0)
+            for path in self._entry_paths(oldest_hash, oldest_data):
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
