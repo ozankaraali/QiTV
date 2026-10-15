@@ -118,7 +118,20 @@ Timeline + StayLive tick at 4 Hz ─► Transport/latency indicator; set_rate / 
 - The GUI thread does UI only. Catalog, EPG and image work keeps using the existing QThread workers and `ThreadCleanup`.
 - **One long-lived live worker process** (multiprocessing *spawn*) starts in the background at app launch. It hosts every live session, so zapping never pays a process start. It is ported from main's supervisor, including its owner-death watchdog, Windows pipe-EOF handling and the bootstrap IPC that keeps credentials out of argv. Frozen builds call `multiprocessing.freeze_support()`.
 - Inside the worker: one reader thread per session plus a threaded loopback HTTP server. All parsing runs off the GUI process's GIL.
-- If the worker dies, the supervisor restarts it once and reopens the current sessions. A second failure in the same playback falls back to direct VLC.
+- If the worker dies, the supervisor restarts it once and reopens the sessions whose input was still running. A second death in the same app run, or a dead worker that cannot be stopped, turns time-shift off for the rest of the run: channels then play directly in VLC.
+
+### 4.4 Live session failures
+`LiveEngine.sessionFailed(sid, kind, message)` carries a fixed message, and each kind has one meaning:
+
+| Kind | Meaning | Final |
+|---|---|---|
+| `disk` | The disk ring failed; the session goes on in RAM | no (a notice) |
+| `unsupported`, `network`, `tls`, `timeout`, `http` | The input ended for good: the stream cannot be time-shifted, or the source gave up | yes |
+| `crashed` | The worker failed this session unexpectedly while staying up | yes |
+| `internal` | Only for a worker death, after the engine became unavailable. The session is reopened once `available(True)` follows; otherwise `available(False)` follows | no |
+| `unavailable` | Time-shift is off for this run (after `available(False)`): an open after that, or a session that had not reached a worker yet | yes |
+
+After a final failure or `sessionEnded`, only `sessionClosed` follows. A session whose input is over is never reopened.
 
 ## 5. User interface
 
@@ -215,27 +228,28 @@ Other tokens: radius 10 px (cards) and 14 px (panels); system UI font. Focus is 
 - **HLS:**
   - Playlists are parsed with `m3u8`. The highest-bandwidth compatible variant is chosen (ported from main), and media playlists are reloaded live.
   - Segments are fetched in order; AES-128 is decrypted with `pycryptodomex` (prebuilt wheels on all four targets; `cryptography` ≥ 49 has no Intel macOS wheel). Only TS segments are supported; fMP4/byte-range segments mean *unsupported*.
-- **Reconnects:** exponential backoff (0.5 s → 8 s, up to 6 tries) while VLC plays from the ring. If they all fail, the session reports an error.
+- **Reconnects:** exponential backoff (0.5 s → 8 s, up to 6 tries) while VLC plays from the ring. If they all fail, the session reports an error. Connecting and each response's first byte may take 60 s; once media has flowed, 10 s without a byte counts as a broken connection (raw TS reconnects, a stalled HLS segment is skipped). A raw TS body ends the input only at a declared Content-Length; any other end reconnects.
 
 ### 6.2 TS segmentation (`ts.py`): no remuxing
 - Resync on `0x47` every 188 bytes, and parse PAT, then the PMT of the first program.
 - Video PID types: 0x1B H.264, 0x24 HEVC, 0x02 MPEG-2. Audio and subtitle PIDs are kept as-is.
 - Keyframe detection:
-  - The adaptation field `random_access_indicator` on a video PUSI packet.
-  - Fallback if no RAI is seen within 6 s: scan the PES payload start for H.264 NAL 5/7, HEVC NAL 16–21/32, or the MPEG-2 sequence header.
+  - The adaptation field `random_access_indicator` on a video PUSI packet, verified by a scan of the PES payload start: a cut is rejected when the scan finds only non-key pictures.
+  - From the start, and again after each discontinuity, until a RAI is seen: the scan alone, for H.264 NAL 5/7 or an intra slice (open GOP), HEVC NAL 16–21/32, or the MPEG-2 sequence header or I picture.
 - PTS (33-bit, wrap-aware) is read from video PES headers. Audio-only streams cut on audio PES boundaries.
 - A segment is cut at a keyframe once it is ≥ 2.0 s long, with a forced cut at 10 s. Every segment starts with fresh PAT and PMT copies, so any segment is a valid start point for VLC.
 
 ### 6.3 Timeline (`timeline.py`)
 - A segment's duration is the PTS delta between consecutive segment-start keyframes.
-- **Discontinuity:** a negative delta, a delta > 5× target, or a missing PTS. The wall-clock arrival delta is used instead, so the timeline stays continuous and monotonic.
-- **Live edge** = end of the last complete segment + the open segment's PTS progress.
+- **Discontinuity:** a step between consecutive video PTS values below −1 s or above +3 s (and above twice the stream's own frame cadence, for slideshows), or a missing PTS; the segment is cut at the next keyframe. Across a PTS jump the closing segment is sized by the media it holds: the old content up to its last frame's end, plus the new content up to the cut.
+- A PTS duration is accepted up to the forced cut plus a 1 s margin (an NTSC forced cut lands at 10.01 s). Beyond that, or without PTS, the wall-clock arrival delta is used instead, on a clock with source stalls (pauses over 5 s) removed, so the timeline stays continuous and monotonic.
+- **Live edge** = end of the last complete segment + the open segment's PTS progress (on the segment's own PTS axis across a jump).
 - **Playback position** = start of the opened segment + the elapsed play time measured from VLC's `get_time()` deltas. If those jump by more than 1 s compared with wall clock × rate, wall clock × rate is used instead.
 
 ### 6.4 Rings (`ring.py`)
 - **RAM ring (default, no consent):** 128 MiB per session, about 2 min at 8 Mb/s. Enough for pause, short rewind and stay-live.
-- **Disk ring (after consent in Settings):** 256 MiB–16 GiB slider, default 2 GiB. Ported from main: session directories, owner markers and QLockFile, stale-session cleanup, allocation-unit accounting, a 64 MiB free-space reserve, and reader leases.
-- Eviction is oldest-first by bytes. Leased segments are deleted when released. Closing a session frees its ring asynchronously.
+- **Disk ring (after consent in Settings):** 256 MiB–16 GiB slider, default 2 GiB. Ported from main: session directories, owner markers and QLockFile, stale-session cleanup, allocation-unit accounting and a 64 MiB free-space reserve. Buffers a crashed run left behind are swept once at startup.
+- Eviction is oldest-first by bytes, and an evicted segment is freed at once: readers hold no lease (each read looks the segment up under the ring's lock). Closing a session frees its ring asynchronously.
 
 ### 6.5 Loopback server (`server.py`)
 - Binds 127.0.0.1 on a random port, with numeric bind (no reverse DNS; ported fix). Paths include a random 128-bit token.
