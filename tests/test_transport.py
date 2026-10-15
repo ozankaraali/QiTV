@@ -78,12 +78,16 @@ class TransportCase(unittest.TestCase):
     def test_next_button_only_when_available(self):
         t = self.make()
         t.show_vod("A", "b")
-        self.assertNotIn("next", t._layout())
+        base = {k: v for k, v in t._layout().items()}
+        self.assertNotIn("next", base)
         t.set_next_available(True)
         spy = QSignalSpy(t.nextRequested)
         self.click(t, t.button_rect("next").center().toPoint())
         self.assertEqual(spy.count(), 1)
+        self.assertGreater(t.button_rect("next").x(), t.button_rect("fwd10").right() - 1)
+        self.assertLess(t.button_rect("next").right(), t.button_rect("speed").x() + 1)
         t.set_next_available(False)
+        self.assertEqual(t._layout(), base)
         self.assertNotIn("next", t._layout())
         t.set_next_available(True)
         t.show_live("104", "Nature")

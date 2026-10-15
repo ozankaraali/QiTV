@@ -1,16 +1,12 @@
 """Next-episode card: countdown with Play now / Cancel, bottom-right over the video."""
 
-import logging
-
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QMouseEvent, QPainter, QPaintEvent, QRegion
+from PySide6.QtGui import QFont, QMouseEvent, QPainter, QPainterPath, QPaintEvent
 from PySide6.QtWidgets import QWidget
 
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_progress, elided, fill_round
+from ui.overlays.painting import Units, elided, fill_round
 from ui.theme import PALETTE, RADIUS_PANEL, qcolor
-
-logger = logging.getLogger(__name__)
 
 
 class NextCard(Overlay):
@@ -24,6 +20,7 @@ class NextCard(Overlay):
         self._title = ""
         self._subtitle = ""
         self._total = 10
+        self._kind = "episode"
         self._remaining = 0
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
@@ -34,7 +31,10 @@ class NextCard(Overlay):
 
     # ---- public API ---------------------------------------------------------------------
 
-    def show_next(self, title: str, subtitle: str, seconds: int = 10) -> None:
+    def show_next(
+        self, title: str, subtitle: str, seconds: int = 10, *, kind: str = "episode"
+    ) -> None:
+        self._kind = kind
         self._title = title
         self._subtitle = subtitle
         self._total = max(1, seconds)
@@ -63,10 +63,15 @@ class NextCard(Overlay):
     def remaining(self) -> int:
         return self._remaining
 
+    def label(self) -> str:
+        what = "Next" if self._kind == "movie" else "Next episode"
+        return f"{what} in {self._remaining} s"
+
     # ---- internals ----------------------------------------------------------------------
 
     def _finish(self) -> None:
         self._timer.stop()
+        self._remaining = 0
         self.hide()
 
     def _tick(self) -> None:
@@ -81,8 +86,10 @@ class NextCard(Overlay):
         self._timer.stop()
         super().hideEvent(event)
 
-    def _units(self) -> Units:
-        return Units(self.width() if self.width() > 1 else 1280)
+    def showEvent(self, event) -> None:
+        if self._remaining > 0:  # re-shown with the parent mid-countdown: resume
+            self._timer.start()
+        super().showEvent(event)
 
     def _host_size(self) -> tuple[int, int]:
         parent = self.parentWidget()
@@ -102,12 +109,6 @@ class NextCard(Overlay):
             if not self.isHidden():
                 self._place()
         return False
-
-    def body_rect(self) -> QRectF:
-        return QRectF(self.rect())
-
-    def mask_region(self) -> QRegion:
-        return QRegion(self.geometry())
 
     def button_rect(self, name: str) -> QRectF:
         un = Units(self._host_size()[0] or 1280)
@@ -135,7 +136,7 @@ class NextCard(Overlay):
         p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         pad = un.px(1.6)
         inner = self.width() - 2 * pad
-        label = f"Next episode in {self._remaining} s"
+        label = self.label()
         p.setFont(un.font(1.0))
         p.setPen(qcolor(PALETTE.text, 0.6))
         p.drawText(QRectF(pad, un.px(1.2), inner, un.px(1.6)), Qt.AlignVCenter, label)
@@ -157,13 +158,12 @@ class NextCard(Overlay):
         self._paint_button(p, un, "cancel", "Cancel", False)
         bar_h = max(2.0, un.px(0.35))
         frac = self._remaining / self._total
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, radius, radius)
         p.save()
-        p.setClipRect(QRectF(0, self.height() - bar_h, self.width(), bar_h))
-        draw_progress(
-            p,
-            QRectF(0, self.height() - bar_h, self.width() * 1.0, bar_h * 2),
-            frac,
-            track_alpha=0.0,
+        p.setClipPath(clip)
+        p.fillRect(
+            QRectF(0, self.height() - bar_h, self.width() * frac, bar_h), qcolor(PALETTE.accent)
         )
         p.restore()
         p.end()

@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -68,32 +68,58 @@ class NextCardCase(unittest.TestCase):
         self.assertFalse(card.isVisible())
 
     def test_click_buttons(self):
-        host, card = self.make()
-        clicks = QSignalSpy(host.clicked)
+        _, card = self.make()
         play = QSignalSpy(card.playNow)
         card.show_next("Ep 2", "S1 E2", seconds=10)
-        QTest.mouseClick(
-            card, Qt.LeftButton, Qt.NoModifier, card.button_rect("play").center().toPoint()
-        )
+        pos = card.button_rect("play").center().toPoint()
+        QTest.mouseClick(card, Qt.LeftButton, Qt.NoModifier, pos)
         self.assertEqual(play.count(), 1)
         self.assertFalse(card.isVisible())
         cancelled = QSignalSpy(card.cancelled)
         card.show_next("Ep 3", "S1 E3", seconds=10)
-        QTest.mouseClick(
-            card, Qt.LeftButton, Qt.NoModifier, card.button_rect("cancel").center().toPoint()
-        )
+        pos = card.button_rect("cancel").center().toPoint()
+        QTest.mouseClick(card, Qt.LeftButton, Qt.NoModifier, pos)
         self.assertEqual(cancelled.count(), 1)
         self.assertFalse(card.isVisible())
-        self.assertEqual(clicks.count(), 0)
 
-    def test_body_click_is_consumed(self):
+    def click_host(self, host, pos):
+        # Through the host's window, so Qt hit-tests to the child under the point.
+        QTest.mouseClick(host.windowHandle(), Qt.LeftButton, Qt.NoModifier, pos)
+        QTest.qWait(QApplication.doubleClickInterval() + 150)
+
+    def test_clicks_on_card_do_not_reach_host(self):
         host, card = self.make()
+        card.show_next("Ep 2", "S1 E2", seconds=30)
         clicks = QSignalSpy(host.clicked)
-        card.show_next("Ep 2", "S1 E2", seconds=10)
-        QTest.mouseClick(card, Qt.LeftButton, Qt.NoModifier, card.body_rect().center().toPoint())
+        # Through the host at the card's position: the card is the widget hit.
+        body = card.geometry().center()
+        self.assertIs(host.childAt(body), card)
+        self.click_host(host, body)
         self.assertEqual(clicks.count(), 0)
         self.assertTrue(card.isVisible())
-        self.assertEqual(card.mask_region().boundingRect(), card.geometry())
+        # Positive control: a click on the host outside the card does emit.
+        self.click_host(host, QPoint(20, 20))
+        self.assertEqual(clicks.count(), 1)
+
+    def test_label_kinds(self):
+        _, card = self.make()
+        card.show_next("Ep 2", "S1 E2", seconds=10)
+        self.assertEqual(card.label(), "Next episode in 10 s")
+        card.show_next("Movie 2", "2024", seconds=7, kind="movie")
+        self.assertEqual(card.label(), "Next in 7 s")
+
+    def test_resumes_when_parent_reshown(self):
+        host, card = self.make()
+        play = QSignalSpy(card.playNow)
+        card.show_next("Ep 2", "S1 E2", seconds=1)
+        card.parentWidget().hide()
+        self.assertFalse(card._timer.isActive())
+        QTest.qWait(1300)
+        self.assertEqual(play.count(), 0)
+        card.parentWidget().show()
+        self.assertTrue(card._timer.isActive())
+        self.wait_for(lambda: play.count() > 0)
+        self.assertEqual(play.count(), 1)
 
 
 if __name__ == "__main__":
