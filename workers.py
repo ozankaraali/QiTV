@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QTreeWidgetItem
 import requests
 from urlobject import URLObject
 
-from services.m3u import parse_m3u
+from services.m3u import decode_playlist, parse_m3u
 from services.provider_api import (
     base_from_url,
     https_fallback_candidates,
@@ -88,7 +88,7 @@ class M3ULoaderWorker(QObject):
     def run(self):
         try:
             if not self.url.startswith(("http://", "https://")):
-                with open(self.url, encoding="utf-8") as file:
+                with open(self.url, encoding="utf-8-sig", errors="replace") as file:
                     self.finished.emit(parse_m3u(file.read(), categorize=True))
                 return
             last_exc = None
@@ -96,7 +96,7 @@ class M3ULoaderWorker(QObject):
                 try:
                     response = requests.get(u, timeout=10, verify=self.verify_ssl)
                     response.raise_for_status()
-                    self.finished.emit(parse_m3u(response.text, categorize=True))
+                    self.finished.emit(parse_m3u(decode_playlist(response), categorize=True))
                     return
                 except requests.RequestException as e:
                     last_exc = e

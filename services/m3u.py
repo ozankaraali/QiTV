@@ -3,6 +3,18 @@ from typing import Dict, List
 from urllib.parse import urlparse
 
 
+def decode_playlist(response) -> str:
+    """Decode an HTTP playlist response.
+
+    When the server declares no charset, ``response.text`` would fall back to ISO-8859-1 and
+    mangle UTF-8 names; decode the bytes as UTF-8 (dropping any BOM) instead.
+    """
+    content_type = response.headers.get("Content-Type", "") or ""
+    if "charset" in content_type.lower():
+        return response.text
+    return response.content.decode("utf-8-sig", errors="replace")
+
+
 def parse_m3u(data: str, categorize: bool = False):
     """Parse M3U playlist.
 
@@ -15,7 +27,7 @@ def parse_m3u(data: str, categorize: bool = False):
         If categorize=False: List of items
         If categorize=True: Dict with 'categories', 'contents', 'sorted_channels'
     """
-    lines = data.lstrip("﻿").splitlines()
+    lines = re.split(r"\r\n|\r|\n", data.lstrip("\ufeff"))
     items = []
     item = {}
     id_counter = 0
@@ -49,7 +61,7 @@ def parse_m3u(data: str, categorize: bool = False):
             item["user_agent"] = user_agent
 
         elif line.startswith("http"):
-            # Round-trip through urlparse: it drops stray tabs/CR/LF (e.g. CRLF playlists).
+            # Round-trip through urlparse: it drops stray tabs and other control whitespace.
             item["cmd"] = urlparse(line).geturl()
             items.append(item)
 
