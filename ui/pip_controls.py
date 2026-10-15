@@ -258,8 +258,8 @@ class PipControls(QObject):
             self._views.pop(closed.name, None)
             self._timelines.pop(closed.name, None)
             if frame is not None:
-                frame.hide_pip()  # the main surface large: the picture that stayed may not be
-                frame.set_large(sessions.large().name)
+                frame.set_large(sessions.large().name)  # the picture that stayed (as it was)
+                frame.hide_pip()
             if label is not None:
                 label.hide()
         self._transport.set_pip_state(True, open_)

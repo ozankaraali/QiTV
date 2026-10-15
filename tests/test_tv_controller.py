@@ -3311,7 +3311,7 @@ class FakeFrame(QObject):
 
     def hide_pip(self):
         self.calls.append(("hide_pip",))
-        self.shown, self.large = False, "main"
+        self.shown = False
 
     def set_large(self, name):
         self.calls.append(("set_large", name))
@@ -3485,7 +3485,7 @@ class PipTests(PipCase):
         self.controller.handle(Action.PIP)
         self.assertFalse(self.sessions.pip_open())
         self.assertEqual(self.pip_live.calls[-1], ("stop",))
-        self.assertEqual(self.frame.calls[-2:], [("hide_pip",), ("set_large", "main")])
+        self.assertEqual(self.frame.calls[-2:], [("set_large", "main"), ("hide_pip",)])
         self.assertFalse(self.label.visible)
         self.assertEqual(self.transport.named("set_pip_state")[-1], (True, False))
         self.pip_live.released.emit()
@@ -3628,7 +3628,7 @@ class PipTests(PipCase):
         self.assertEqual(self.live.calls[-1], ("stop",))
         self.assertEqual(self.counts()[3:], large)  # Five plays on, large
         self.assertIs(self.controller.session, self.pip_session)
-        self.assertEqual(self.frame.calls[-2:], [("hide_pip",), ("set_large", "pip")])
+        self.assertEqual(self.frame.calls[-2:], [("set_large", "pip"), ("hide_pip",)])
         self.live.released.emit()
         self.assertEqual(self.budget.holders("Home"), ["main"])  # Five's, as the large one
         self.controller.handle(Action.CH_NEXT)  # zapping goes on in Five's group

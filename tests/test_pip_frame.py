@@ -147,15 +147,33 @@ class PipFrameTests(FrameCase):
         with self.assertRaises(ValueError):
             frame.set_large("other")
 
-    def test_hide_pip_leaves_the_main_surface_large(self):
+    def test_hide_pip_leaves_the_large_surface_large(self):
+        frame = self.make()
+        frame.show_pip()
+        frame.hide_pip()
+        self.assertTrue(frame.small_rect().isEmpty())
+        self.assertTrue(self.pip.isHidden())
+        self.assertTrue(self.main.isVisible())
+        self.assertEqual(self.main.geometry(), self.container.rect())
+
+    def test_after_a_swap_closing_keeps_the_large_picture_on_screen(self):
+        # Review C1: the picture left after closing a swapped PiP went black (both hidden).
         frame = self.make()
         frame.show_pip()
         frame.set_large("pip")
         frame.hide_pip()
-        self.assertTrue(frame.small_rect().isEmpty())
+        self.assertTrue(self.pip.isVisible())
+        self.assertEqual(self.pip.geometry(), self.container.rect())
+        self.assertTrue(self.main.isHidden())
+        frame.set_large("pip")  # what the controller asks for: the same, still on screen
+        self.assertTrue(self.pip.isVisible())
+        frame.show_pip()  # opened again: the other surface is small this time
+        self.assertTrue(self.pip.isVisible() and self.main.isVisible())
+        self.assertEqual(frame.small_rect(), self.main.geometry())
+        frame.set_large("main")
+        frame.hide_pip()
+        self.assertTrue(self.main.isVisible())
         self.assertTrue(self.pip.isHidden())
-        self.assertFalse(self.main.isHidden())
-        self.assertEqual(self.main.geometry(), self.container.rect())
 
     def test_drag_to_the_top_left_quadrant_snaps_to_tl_and_saves_it(self):
         frame = self.make()

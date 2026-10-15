@@ -1183,6 +1183,7 @@ class LivePipelineWindowTests(WindowCase):
         self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == ["main"]))
         self.assertTrue(playing(pip, pip_live)())  # Channel 1 plays on, large
         self.assertEqual(window.pip_surface.geometry(), page)
+        self.assertTrue(window.pip_surface.isVisible())  # on screen, not black (review C1)
         self.assertFalse(window.surface.isVisible())
         self.assertFalse(label.isVisible())
 

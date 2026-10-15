@@ -110,9 +110,9 @@ class PipFrame(QObject):
         self._layout()
 
     def hide_pip(self) -> None:
-        """Hide the PiP surface; the main one fills the player (as SessionManager.close_pip)."""
+        """Hide the small surface; the large one fills the player (as SessionManager.close_pip,
+        which stops the small picture: after a swap the large surface is the "pip" one)."""
         self._shown = False
-        self._large = "main"
         self._layout()
 
     def set_large(self, name: str) -> None:
@@ -167,7 +167,9 @@ class PipFrame(QObject):
     def _layout(self) -> None:
         if self._press is not None:
             self._press.void = True  # its release neither swaps nor snaps
-        self._surfaces[self._large].setGeometry(self._container.rect())
+        large = self._surfaces[self._large]
+        large.setGeometry(self._container.rect())
+        large.show()  # it may have been the small one, hidden with PiP closed
         small = self._small()
         if self._shown:
             small.setGeometry(corner_rect(self._container.size(), self._corner))
