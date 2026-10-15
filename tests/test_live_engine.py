@@ -28,6 +28,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from http_fixtures import LocalSource
+from process_fixtures import still_running, terminate
 from ts_fixtures import make_stream
 
 from services.live import engine as engine_module
@@ -56,6 +57,25 @@ while not multiprocessing.active_children():
     time.sleep(0.01)
 print(multiprocessing.active_children()[0].pid, flush=True)
 time.sleep(60)
+"""
+# The owner plays a disk session, then leaves like TVWindow's _exit_now: os._exit, with no
+# atexit handler and no engine shutdown.
+OWNER_EXIT = """
+import multiprocessing, os, sys, time
+from PySide6.QtCore import QCoreApplication
+from services.live.engine import LiveEngine
+app = QCoreApplication([])
+engine = LiveEngine(sys.argv[2])
+ready = []
+engine.sessionReady.connect(ready.append)
+engine.start()
+engine.open_session(sys.argv[1], headers={}, verify_ssl=True, disk=True, max_bytes=1 << 28)
+deadline = time.monotonic() + 60
+while not ready and time.monotonic() < deadline:
+    app.processEvents()
+    time.sleep(0.01)
+print(multiprocessing.active_children()[0].pid if ready else "", flush=True)
+os._exit(3)
 """
 
 
@@ -754,7 +774,6 @@ class LiveEngineTests(unittest.TestCase):
                 text=True,
             )
             helper_pid = None
-            closed = False
             try:
                 with listener.accept()[0] as peer:
                     request = b""
@@ -772,17 +791,39 @@ class LiveEngineTests(unittest.TestCase):
                         # Windows reports a reset when the helper's socket closes.
                         remaining = b""
                     self.assertEqual(remaining, b"", "an orphaned helper kept its upstream")
-                    closed = True
+                self.assertEqual(still_running([helper_pid], 3), [], "the orphan kept running")
             finally:
                 if owner.poll() is None:
                     owner.kill()
                     owner.wait(5)
-                if helper_pid is not None and not closed:
-                    try:
-                        os.kill(helper_pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+                terminate(still_running([helper_pid], 0))
                 owner.stdout.close()
+
+    def test_an_owner_leaving_with_os_exit_leaves_no_helper_or_buffer(self):
+        # TVWindow's _exit_now ends the GUI with os._exit when its close gives up waiting.
+        source = self.source()
+        owner = subprocess.Popen(
+            [sys.executable, "-c", OWNER_EXIT, source.url + SECRET_PATH, str(self.root)],
+            cwd=REPO,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        helper_pid = None
+        try:
+            line = owner.stdout.readline().strip()
+            self.assertTrue(line, "the owner's session never became ready")
+            helper_pid = int(line)
+            self.assertEqual(owner.wait(10), 3)
+            self.assertEqual(still_running([helper_pid], 3), [], "the helper outlived its owner")
+            self.assertTrue(self.hung_up.wait(2), "the helper kept its upstream connection")
+            self.assertEqual(session_dirs(self.root), [], "the disk buffer was left behind")
+        finally:
+            if owner.poll() is None:
+                owner.kill()
+                owner.wait(5)
+            terminate(still_running([helper_pid], 0))
+            owner.stdout.close()
 
 
 if __name__ == "__main__":

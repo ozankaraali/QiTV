@@ -4,7 +4,15 @@
 per-recording child (`services/timeshift.py`, `_record_process`): the provider URL and
 headers arrive over the pipe, never in argv; fds 1 and 2 point at devnull because native
 code and library loggers can print URLs (no logging handler is installed here either);
-and a watchdog exits the process when its owner dies, which closes every upstream socket.
+and a watchdog stops the helper when its owner dies.
+
+The process ends with `os._exit` on every path (after "shutdown", once the owner closed
+the pipe or died, after a failure), once its shutdown closed the upstream connections and
+removed the disk buffers; after the owner died, within `_OWNER_GRACE` even when that
+shutdown is stuck. So nothing keeps a helper running behind the GUI's back with provider
+connections: neither a thread that is not a daemon (any imported module's, or one started
+by a parent's unguarded `__main__` module, which spawn runs again in the child) nor the
+interpreter's own teardown.
 
 Commands (parent to helper):
 - `("open", sid, url, headers, verify_ssl, ring, live_delay)`, where `ring` is
@@ -73,6 +81,7 @@ _NOTIFY_INTERVAL = 0.25
 _SHUTDOWN_GRACE = 0.25  # for session threads to remove their disk buffers
 _FLUSH_GRACE = 0.25  # for the writer to deliver what is queued
 _RELEASE_WAIT = 0.5  # for a closed session to close its upstream before "closed" is sent
+_OWNER_GRACE = 1.0  # after the owner died: for the shutdown to remove the disk buffers
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")  # as the stream server requires
 _INTERNAL = "The live buffer stopped unexpectedly."
 _UNSUPPORTED = "The channel's stream cannot be time-shifted."
@@ -482,12 +491,17 @@ class _Helper:
     It never blocks except while waiting for the next command.
     """
 
-    def __init__(self, conn: Connection, root: str) -> None:
+    def __init__(
+        self, conn: Connection, root: str, owner_gone: threading.Event | None = None
+    ) -> None:
         from services.live.server import StreamServer
 
         self.root = root
         self.server: StreamServer = StreamServer()
         self._conn = conn
+        # Set by the watchdog: the owner died, though the pipe may still be open (another
+        # process can hold a copy of its end).
+        self._owner_gone = owner_gone or threading.Event()
         self._outbox = _Outbox(conn)
         self._sessions: dict[str, _Session] = {}
 
@@ -496,9 +510,9 @@ class _Helper:
         self._outbox.put(message, session)
 
     def run(self) -> None:
-        """Serve commands until "shutdown" or until the owner closes the pipe."""
+        """Serve commands until "shutdown", or until the owner closes the pipe or dies."""
         self.send(("hello", self.server.start()))
-        while True:
+        while not self._owner_gone.is_set():
             try:
                 if not self._conn.poll(_POLL):
                     continue
@@ -589,26 +603,35 @@ class _Helper:
         self._outbox.close(_FLUSH_GRACE)
 
 
-def _exit_with_owner() -> None:
+def _exit_with_owner(owner_gone: threading.Event) -> None:
     parent = multiprocessing.parent_process()
     if parent is not None:
         wait_for_connection([parent.sentinel])
-        # A crashed owner cannot close a stalled upstream connection. Close all
-        # sockets now; the next helper safely reaps this owned stale session.
+        owner_gone.set()  # the command loop stops; its shutdown removes the disk buffers
+        time.sleep(_OWNER_GRACE)
+        # A crashed owner cannot close a stalled upstream connection, and the shutdown
+        # leaves one stuck in DNS or a TCP connect: exiting closes every socket. The next
+        # helper safely reaps a buffer left behind.
         os._exit(0)
 
 
 def helper_main(conn: Connection, root: str) -> None:
-    """Spawn entry point: arguments travel through multiprocessing IPC, not argv."""
+    """Spawn entry point: arguments travel through multiprocessing IPC, not argv.
+
+    It never returns: the process ends with `os._exit` once the helper has shut down.
+    """
     helper: _Helper | None = None
+    owner_gone = threading.Event()
     try:
         # Python loggers can be silenced, but native libraries and urllib3 diagnostics may
         # write URL-bearing text straight to fd 1 or 2.
         with open(os.devnull, "wb") as discard:
             os.dup2(discard.fileno(), 1)
             os.dup2(discard.fileno(), 2)
-        threading.Thread(target=_exit_with_owner, name="qitv-live-owner", daemon=True).start()
-        helper = _Helper(conn, root)
+        threading.Thread(
+            target=_exit_with_owner, args=(owner_gone,), name="qitv-live-owner", daemon=True
+        ).start()
+        helper = _Helper(conn, root, owner_gone)
         helper.run()
     except BaseException:
         # No traceback crosses IPC: it could disclose provider URLs.
@@ -617,6 +640,8 @@ def helper_main(conn: Connection, root: str) -> None:
     finally:
         try:
             if helper is not None:
-                helper.shutdown()
+                helper.shutdown()  # sessions stopped, buffers removed, the server closed
         finally:
-            conn.close()
+            # Not the interpreter's exit: it waits for every thread that is not a daemon,
+            # which could keep this process and its upstream sockets alive for good.
+            os._exit(0)

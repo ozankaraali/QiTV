@@ -125,8 +125,10 @@ class LocalSource:
         if tls:
             self.server.socket = tls.wrap_socket(self.server.socket, server_side=True)
         self.url = f"{'https' if tls else 'http'}://127.0.0.1:{self.server.server_port}"
+        # A daemon: a test run interrupted before close(), or a probe that crashed, must
+        # still exit instead of waiting for this thread at interpreter shutdown forever.
         self.thread = threading.Thread(
-            target=self.server.serve_forever, kwargs={"poll_interval": 0.02}
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
         )
         self.thread.start()
 

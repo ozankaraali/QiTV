@@ -5,12 +5,12 @@ promptly without exposing credentials, stopping one recording leaves its sibling
 and owner death closes the upstream socket) to one long-lived helper with many sessions.
 """
 
+import json
 import multiprocessing
 import os
 from pathlib import Path
 import secrets
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -25,6 +25,7 @@ from urllib.request import urlopen
 import warnings
 
 from http_fixtures import LocalSource, leaf, tls_server_context
+from process_fixtures import still_running, terminate
 from ts_fixtures import PMT_PID, make_stream
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -57,16 +58,49 @@ conn.send(("open", "owned", sys.argv[1], {}, True, {"kind": "ram", "max_bytes": 
 print(process.pid, holder.pid, flush=True)
 time.sleep(60)
 """
+# An owner of one helper per plan (variant -> [url or None, ring]) that dies with them all
+# running: it prints {variant: [pid, base_url]} once every session is ready.
+OWNER_OF_MANY = """
+import json, multiprocessing, sys, time
+from services.live.worker import helper_main
+context = multiprocessing.get_context("spawn")
+plans = json.loads(sys.argv[1])
+helpers = {}
+for variant in plans:
+    conn, child = context.Pipe(duplex=True)
+    process = context.Process(target=helper_main, args=(child, sys.argv[2]), daemon=True)
+    process.start()
+    child.close()
+    helpers[variant] = conn, process
+report = {}
+for variant, (url, ring) in plans.items():
+    conn, process = helpers[variant]
+    base_url = conn.recv()[1]
+    if url:
+        conn.send(("open", "s", url, {}, True, ring, 6.0))
+        while conn.recv()[:2] != ("ready", "s"):
+            pass
+    report[variant] = [process.pid, base_url]
+print(json.dumps(report), flush=True)
+time.sleep(60)
+"""
+
+
+def helper_with_a_lingering_thread(conn, root):
+    """The real helper in a process that also runs a non-daemon thread, as any imported
+    module could start, or a parent's unguarded __main__ module that spawn runs again."""
+    threading.Thread(target=threading.Event().wait, name="lingering").start()
+    helper_main(conn, root)
 
 
 class Helper:
     """One spawned helper and the parent's end of its pipe; every message is kept."""
 
-    def __init__(self, root):
+    def __init__(self, root, target=helper_main):
         context = multiprocessing.get_context("spawn")
         self.conn, child = context.Pipe(duplex=True)
         self.process = context.Process(
-            target=helper_main, args=(child, str(root)), name="qitv-live-test", daemon=True
+            target=target, args=(child, str(root)), name="qitv-live-test", daemon=True
         )
         self.process.start()
         child.close()
@@ -250,10 +284,42 @@ class LiveWorkerTests(unittest.TestCase):
         self.addCleanup(self.stop.set)  # runs first: paced bodies stop writing
         return server
 
-    def helper(self):
-        helper = Helper(self.root)
+    def helper(self, target=helper_main):
+        helper = Helper(self.root, target)
         self.addCleanup(helper.stop)
         return helper
+
+    def plan(self, variant):
+        """[url, ring] for a session in `variant` (a streaming one buffers on disk), and an
+        event set once that session's upstream connection is closed."""
+        if variant == "idle":
+            nothing = threading.Event()
+            nothing.set()
+            return [None, RAM], nothing
+        if variant == "stalled":
+            # It sends a few seconds of stream, then nothing: the session waits in a read.
+            head = b"HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n"
+            upstream = StalledUpstream(head + make_stream(3))
+            self.addCleanup(upstream.close)
+            return [upstream.url, RAM], upstream.hung_up
+        hung_up = threading.Event()
+        source = self.source({SECRET_PATH: paced_route(make_stream(60), self.stop, hung_up)})
+        directory = ".qitv-timeshift-" + secrets.token_hex(16)
+        ring = {"kind": "disk", "root": str(self.root), "dir": directory, "max_bytes": 1 << 30}
+        return [source.url + SECRET_PATH, ring], hung_up
+
+    def pause_a_reader(self, url):
+        """A player that read the stream's start and then stopped reading."""
+        response = urlopen(url, timeout=10)
+        self.addCleanup(response.close)
+        self.assertEqual(len(response.read(188)), 188)
+
+    def assert_released(self, variant, plan, hung_up):
+        """The session's upstream connection is closed and its disk buffer removed."""
+        self.assertTrue(hung_up.wait(2), f"the {variant} session kept its upstream connection")
+        ring = plan[1]
+        if ring["kind"] == "disk":
+            self.assertFalse((self.root / ring["dir"]).exists(), f"the {variant} buffer was left")
 
     def assert_no_credentials(self, helper):
         for message in helper.messages:
@@ -540,7 +606,6 @@ class LiveWorkerTests(unittest.TestCase):
                 text=True,
             )
             helper_pid = holder_pid = None
-            closed = False
             try:
                 with listener.accept()[0] as peer:
                     peer.settimeout(5)
@@ -558,18 +623,71 @@ class LiveWorkerTests(unittest.TestCase):
                         # socket, rather than an orderly TCP EOF.
                         remaining = b""
                     self.assertEqual(remaining, b"", "the orphaned helper kept its socket")
-                    closed = True
+                self.assertEqual(still_running([helper_pid], 3), [], "the orphan kept running")
             finally:
                 if owner.poll() is None:
                     owner.kill()
                     owner.wait(5)
-                for pid in (holder_pid, None if closed else helper_pid):
-                    if pid:
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                        except OSError:
-                            pass  # already gone
+                terminate(still_running([holder_pid, helper_pid], 0))
                 owner.stdout.close()
+
+    def test_the_helper_exits_at_once_when_its_owner_closes_the_pipe(self):
+        # Whatever the helper was doing, and whatever thread its process runs besides,
+        # it must end: a helper left behind keeps its provider connections (two at most
+        # per provider) and its disk buffer.
+        for variant in ("idle", "streaming", "stalled", "reader", "lingering thread"):
+            with self.subTest(variant=variant):
+                lingering = variant == "lingering thread"
+                plan, hung_up = self.plan("idle" if lingering else variant)
+                helper = self.helper(helper_with_a_lingering_thread if lingering else helper_main)
+                url, ring = plan
+                if url:
+                    sid = helper.open(url, ring=ring)
+                    helper.wait_for(lambda message, sid=sid: message == ("ready", sid))
+                    if variant == "reader":
+                        self.pause_a_reader(helper.stream_url(sid, 0))
+                    time.sleep(0.2)  # the stalled session now waits in its read
+                started = time.monotonic()
+                helper.conn.close()
+                helper.process.join(3)
+                self.assertEqual(helper.process.exitcode, 0, "the helper outlived its pipe")
+                self.assertLess(time.monotonic() - started, 3.0)
+                self.assert_released(variant, plan, hung_up)
+
+    def test_the_helper_exits_soon_after_its_owner_dies(self):
+        # The GUI crashed or was force-quit: its pipe end closes, and the watchdog sees it go.
+        variants = ("idle", "streaming", "stalled", "reader")
+        planned = {variant: self.plan(variant) for variant in variants}
+        plans = {variant: plan for variant, (plan, _hung_up) in planned.items()}
+        owner = subprocess.Popen(
+            [sys.executable, "-c", OWNER_OF_MANY, json.dumps(plans), str(self.root)],
+            cwd=REPO,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        pids = []
+        try:
+            line = owner.stdout.readline()
+            self.assertTrue(line, "the owner failed before its sessions were ready")
+            report = json.loads(line)
+            pids = [pid for pid, _base_url in report.values()]
+            self.pause_a_reader(f"{report['reader'][1]}/s/stream/0.ts")
+            time.sleep(0.2)  # the stalled session now waits in its read
+            owner.kill()
+            owner.wait(5)
+            running = still_running(pids, 3)
+            survivors = [variant for variant, (pid, _) in report.items() if pid in running]
+            self.assertEqual(survivors, [], "these helpers outlived their owner")
+            for variant, (plan, hung_up) in planned.items():
+                with self.subTest(variant=variant):
+                    self.assert_released(variant, plan, hung_up)
+        finally:
+            if owner.poll() is None:
+                owner.kill()
+                owner.wait(5)
+            terminate(still_running(pids, 0))
+            owner.stdout.close()
 
     def test_the_helper_discards_its_standard_output_and_error(self):
         # Native code and library loggers can print provider URLs straight to fd 1 or 2.
@@ -601,6 +719,21 @@ class SpawnTargetTests(unittest.TestCase):
             [sys.executable, "-c", probe], cwd=REPO, capture_output=True, check=True, timeout=30
         )
         self.assertEqual(result.stdout.decode().strip(), "[]")
+
+
+class LocalSourceTests(unittest.TestCase):
+    def test_a_process_that_never_closes_its_local_source_still_exits(self):
+        # A probe that crashed or a test run that was interrupted skips close(). A
+        # non-daemon server thread then held its process at interpreter exit for good, an
+        # orphan once its shell went away, together with the helper it owned.
+        probe = "import sys; sys.path[:0] = ['tests']; from http_fixtures import LocalSource; "
+        probe += "LocalSource({})"
+        try:
+            subprocess.run(
+                [sys.executable, "-c", probe], cwd=REPO, capture_output=True, check=True, timeout=20
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("an unclosed LocalSource kept its process running")
 
 
 class GatedConnection:
