@@ -10,9 +10,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from provider_manager import ProviderManager
 from services import thread_cleanup
 from services.jobs import ImmediateRunner, JobRunner
+from services.provider_manager import ProviderManager
 from services.search import SearchWorker, build_index, search_caches, search_index
 
 APP = QApplication.instance() or QApplication([])

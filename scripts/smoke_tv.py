@@ -77,12 +77,12 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 import qdarktheme  # noqa: E402
 
-from config_manager import ConfigManager  # noqa: E402
-from epg_manager import EpgManager  # noqa: E402
-from image_manager import ImageManager  # noqa: E402
-from provider_manager import ProviderManager  # noqa: E402
 from services import playback, thread_cleanup  # noqa: E402
+from services.config_manager import ConfigManager  # noqa: E402
+from services.epg_manager import EpgManager  # noqa: E402
+from services.image_manager import ImageManager  # noqa: E402
 from services.playback import VLC_LOG_ENV, PlaybackSession, PlaybackState  # noqa: E402
+from services.provider_manager import ProviderManager  # noqa: E402
 from services.vlc_profile import PlayKind  # noqa: E402
 from tests.fixtures.live_source import LIVE_TS, LiveSource, peak_of  # noqa: E402
 from tests.fixtures.local_provider import (  # noqa: E402

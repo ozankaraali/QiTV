@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import requests
 
-from epg_manager import _INDEX_TIME_FORMAT, EpgManager, _cache_key, _xtream_cache_key
-from multikeydict import MultiKeyDict
+from services.epg_manager import _INDEX_TIME_FORMAT, EpgManager, _cache_key, _xtream_cache_key
+from services.multikeydict import MultiKeyDict
 
 CHANNEL = {"xmltv_id": "news.test", "name": "News"}
 
@@ -88,7 +88,7 @@ class EpgRefreshTests(unittest.TestCase):
         return [p["title"]["__text"] for p in programmes]
 
     def load(self, manager, title="Old"):
-        with patch("epg_manager.requests.get", side_effect=serving(xmltv(title))):
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv(title))):
             manager.set_current_epg()
         self.assertEqual(self.titles(manager), [title])
 
@@ -108,7 +108,7 @@ class EpgRefreshTests(unittest.TestCase):
             seen.append(self.titles(manager))  # what the GUI shows mid-reload
             return _Response(xmltv("New"))
 
-        with patch("epg_manager.requests.get", side_effect=slow_download):
+        with patch("services.epg_manager.requests.get", side_effect=slow_download):
             manager.set_current_epg()
         self.assertEqual(seen, [["Old"]])
         self.assertEqual(self.titles(manager), ["New"])
@@ -122,7 +122,7 @@ class EpgRefreshTests(unittest.TestCase):
             seen.append(self.titles(manager))
             return _Response(xmltv("New"))
 
-        with patch("epg_manager.requests.get", side_effect=slow_download):
+        with patch("services.epg_manager.requests.get", side_effect=slow_download):
             manager.force_refresh_current_epg()
         self.assertEqual(seen, [["Old"]])
         self.assertEqual(self.titles(manager), ["New"])
@@ -173,7 +173,7 @@ class EpgRefreshTests(unittest.TestCase):
         for name, (fake_get, refresh) in cases.items():
             with self.subTest(name):
                 self.expire(manager)
-                with patch("epg_manager.requests.get", side_effect=fake_get):
+                with patch("services.epg_manager.requests.get", side_effect=fake_get):
                     refresh()
                 self.assertEqual(self.titles(manager), ["Old"])
                 self.assertIsNotNone(manager.index[self.key])  # not marked unavailable
@@ -194,7 +194,7 @@ class EpgRefreshTests(unittest.TestCase):
                 self.items = [guide] if guide else []
 
         manager = self.manager()
-        with patch("epg_manager.ContentLoader", Loader):
+        with patch("services.epg_manager.ContentLoader", Loader):
             manager.set_current_epg()
             manager.force_refresh_current_epg()  # the portal answers with nothing
         self.assertEqual(manager.get_programs_for_channel({"id": "7"}, None, 0), [programme])
@@ -205,7 +205,7 @@ class EpgRefreshTests(unittest.TestCase):
         self.load(first)
         self.expire(first)
         restarted = self.manager()  # a new session: nothing in memory, the guide on disk
-        with patch("epg_manager.requests.get", side_effect=failing):
+        with patch("services.epg_manager.requests.get", side_effect=failing):
             restarted.set_current_epg()
         self.assertEqual(self.titles(restarted), ["Old"])
         self.assertIsNotNone(restarted.index[self.key])
@@ -213,7 +213,7 @@ class EpgRefreshTests(unittest.TestCase):
     # --- unchanged: no previous guide, or another source -----------------------------------
     def test_a_failure_without_any_guide_marks_the_source_unavailable(self):
         manager = self.manager()
-        with patch("epg_manager.requests.get", side_effect=failing):
+        with patch("services.epg_manager.requests.get", side_effect=failing):
             manager.set_current_epg()
         self.assertIsNone(manager.index[self.key])
         self.assertEqual(self.titles(manager), [])
@@ -222,7 +222,7 @@ class EpgRefreshTests(unittest.TestCase):
         manager = self.manager()
         self.load(manager)
         self.providers.current_provider = dict(self.providers.current_provider, url="http://o")
-        with patch("epg_manager.requests.get", side_effect=failing):
+        with patch("services.epg_manager.requests.get", side_effect=failing):
             manager.set_current_epg()
         self.assertEqual(self.titles(manager), [])
 

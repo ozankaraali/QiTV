@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-import image_loader
+from services import image_loader
 from services.thread_cleanup import has_pending_threads
 from ui import logos
 from ui.logos import LogoCache, PosterCache

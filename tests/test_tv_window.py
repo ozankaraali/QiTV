@@ -26,13 +26,13 @@ from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from config_manager import ConfigManager, get_app_version
-from epg_manager import EpgManager
-from image_manager import ImageManager
 import main as qitv_main
-from options import OptionsDialog
-from provider_manager import ProviderManager
+from services import update_checker
+from services.config_manager import ConfigManager, get_app_version
+from services.epg_manager import EpgManager
+from services.image_manager import ImageManager
 from services.playback import NO_VLC_MESSAGE, PlaybackState, create_instance
+from services.provider_manager import ProviderManager
 from services.thread_cleanup import has_pending_threads
 from services.vlc_profile import PlayKind
 from tests.fixtures import local_xtream
@@ -50,6 +50,7 @@ from ui.brand import logo_aspect
 from ui.keymap import SHORTCUTS, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
+from ui.settings_dialog import OptionsDialog
 from ui.shortcuts_dialog import ShortcutsDialog, table_rows
 from ui.tv_menus import ISSUES_URL, AboutDialog
 from ui.tv_window import (
@@ -62,7 +63,6 @@ from ui.tv_window import (
     fit_to_area,
     frame_margins as frame_margins_of,
 )
-import update_checker
 
 INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--quiet"])
 HOST_METHODS = ("save_config", "set_provider", "reload_epg")
@@ -794,10 +794,10 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["QITV_CONFIG_DIR"] = tempfile.mkdtemp(prefix="qitv-stuck-")
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication
-from config_manager import ConfigManager
-from epg_manager import EpgManager
-from image_manager import ImageManager
-from provider_manager import ProviderManager
+from services.config_manager import ConfigManager
+from services.epg_manager import EpgManager
+from services.image_manager import ImageManager
+from services.provider_manager import ProviderManager
 from tests.fixtures.local_provider import seed_channels, write_local_provider
 import ui.tv_window as tw
 
@@ -1083,7 +1083,7 @@ class LivePipelineWindowTests(WindowCase):
         self.show()
         self.assertTrue(wait_until(self.window.engine.is_available))
         with (
-            mock.patch("update_checker.subprocess") as process,
+            mock.patch("services.update_checker.subprocess") as process,
             mock.patch.object(self.app, "closeAllWindows") as close_all,
         ):
             update_checker._perform_windows_update("C:/Downloads/qitv.exe", "https://release")
@@ -1100,9 +1100,9 @@ class LivePipelineWindowTests(WindowCase):
         self.assertTrue(wait_until(lambda: modes == ["pipeline"]))
         first = window.engine
         with (
-            mock.patch("update_checker.subprocess") as process,
-            mock.patch("update_checker.QMessageBox"),
-            mock.patch("update_checker._polish_msgbox"),
+            mock.patch("services.update_checker.subprocess") as process,
+            mock.patch("services.update_checker.QMessageBox"),
+            mock.patch("services.update_checker._polish_msgbox"),
             mock.patch.object(self.app, "closeAllWindows") as close_all,
         ):
             process.Popen.side_effect = OSError("not a valid application")

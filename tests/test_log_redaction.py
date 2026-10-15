@@ -12,11 +12,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Signal
 import requests
 
-from epg_manager import EpgManager
-from provider_manager import StbHandshake
+from services.epg_manager import EpgManager
 from services.jobs import ImmediateRunner
+from services.provider_manager import StbHandshake
 from services.redact import redact_url, safe_exc, safe_traceback
-from workers import EpgLoadWorker, ProviderSetupWorker, XtreamLoaderWorker, XtreamSeriesInfoWorker
+from services.workers import (
+    EpgLoadWorker,
+    ProviderSetupWorker,
+    XtreamLoaderWorker,
+    XtreamSeriesInfoWorker,
+)
 
 USERNAME, PASSWORD, MAC = "quser7", "qpass9", "00:1A:79:12:34:56"
 CREDENTIAL_URL = f"http://h/player_api.php?username={USERNAME}&password={PASSWORD}"
@@ -94,7 +99,7 @@ class LogPathTests(unittest.TestCase):
 
         worker = XtreamLoaderWorker("http://h", USERNAME, PASSWORD, "itv")
         with (
-            patch("workers.requests.Session", return_value=Session()),
+            patch("services.workers.requests.Session", return_value=Session()),
             self.assertLogs(level="DEBUG") as logs,
         ):
             worker.run()
@@ -106,7 +111,7 @@ class LogPathTests(unittest.TestCase):
         errors = []
         worker.error.connect(errors.append)
         with (
-            patch("workers.requests.get", side_effect=refused()),
+            patch("services.workers.requests.get", side_effect=refused()),
             self.assertLogs(level="DEBUG") as logs,
         ):
             worker.run()
@@ -129,7 +134,7 @@ class LogPathTests(unittest.TestCase):
     def test_xtream_epg_failure(self):
         manager = self._epg_manager()
         with (
-            patch("epg_manager.requests.get", side_effect=refused()),
+            patch("services.epg_manager.requests.get", side_effect=refused()),
             self.assertLogs(level="DEBUG") as logs,
         ):
             manager._fetch_epg_from_xtream("http://h", USERNAME, PASSWORD)
@@ -139,7 +144,7 @@ class LogPathTests(unittest.TestCase):
         manager = self._epg_manager()
         response = _Response(status_code=500, content=b"busy")
         with (
-            patch("epg_manager.requests.get", return_value=response),
+            patch("services.epg_manager.requests.get", return_value=response),
             self.assertLogs(level="DEBUG") as logs,
         ):
             manager._fetch_epg_from_xtream("http://h", USERNAME, PASSWORD)
@@ -149,7 +154,7 @@ class LogPathTests(unittest.TestCase):
     def test_stb_handshake_failure(self):
         profile = f"http://h/portal.php?type=stb&action=get_profile&metrics=%7B%22mac%22%3A%22{MAC}"
         with (
-            patch("provider_manager.requests.get", side_effect=refused(profile)),
+            patch("services.provider_manager.requests.get", side_effect=refused(profile)),
             self.assertLogs(level="DEBUG") as logs,
         ):
             self.assertFalse(StbHandshake().run("http://h", MAC))

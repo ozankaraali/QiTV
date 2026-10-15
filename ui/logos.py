@@ -11,7 +11,7 @@ import logging
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QImage, QPixmap
 
-from image_loader import ImageLoader, read_scaled
+from services.image_loader import ImageLoader, read_scaled
 from services.thread_cleanup import ThreadCleanup
 
 logger = logging.getLogger(__name__)

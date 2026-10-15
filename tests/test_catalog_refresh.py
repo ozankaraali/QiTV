@@ -12,9 +12,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
-from provider_manager import ProviderManager
 from services.catalog import CatalogService
 from services.jobs import ImmediateRunner
+from services.provider_manager import ProviderManager
 from tests.test_catalog_service import FakeFactory, make_service
 from tests.test_series_view import FakePosters
 from ui.library.series_view import SeriesView
@@ -42,11 +42,13 @@ class ProviderCacheTests(unittest.TestCase):
 
     def test_category_save_does_not_extend_catalog_freshness(self):
         manager = self.manager
-        with patch("provider_manager.time.time", return_value=1000):
+        with patch("services.provider_manager.time.time", return_value=1000):
             manager.current_provider_content = {"itv": {"categories": []}}
             manager.mark_content_fresh("itv")
             manager.save_provider()
-        with patch("provider_manager.time.time", return_value=1000 + manager.CONTENT_CACHE_TTL - 1):
+        with patch(
+            "services.provider_manager.time.time", return_value=1000 + manager.CONTENT_CACHE_TTL - 1
+        ):
             manager.current_provider_content["itv"]["contents"] = {"news": []}
             manager.current_provider_content["series"] = {"categories": []}
             manager.mark_content_fresh("series")
@@ -54,7 +56,9 @@ class ProviderCacheTests(unittest.TestCase):
             manager.set_current_provider(self.progress)
             self.assertFalse(manager.is_content_stale("itv"))
         manager._cache_writer.submit(lambda: None).result(timeout=5)
-        with patch("provider_manager.time.time", return_value=1000 + manager.CONTENT_CACHE_TTL):
+        with patch(
+            "services.provider_manager.time.time", return_value=1000 + manager.CONTENT_CACHE_TTL
+        ):
             manager.set_current_provider(self.progress)
             self.assertTrue(manager.is_content_stale("itv"))
             self.assertFalse(manager.is_content_stale("series"))
@@ -135,13 +139,13 @@ class CatalogFreshnessTests(unittest.TestCase):
 
     def test_a_section_is_reloaded_only_after_six_hours(self):
         self.assertEqual(ProviderManager.CONTENT_CACHE_TTL, 6 * 60 * 60)
-        with patch("provider_manager.time.time", return_value=1000):
+        with patch("services.provider_manager.time.time", return_value=1000):
             self.request_live()
         self.assertEqual(len(self.loads()), 1)
-        with patch("provider_manager.time.time", return_value=1000 + 6 * 60 * 60 - 1):
+        with patch("services.provider_manager.time.time", return_value=1000 + 6 * 60 * 60 - 1):
             self.request_live()
         self.assertEqual(len(self.loads()), 1)
-        with patch("provider_manager.time.time", return_value=1000 + 6 * 60 * 60):
+        with patch("services.provider_manager.time.time", return_value=1000 + 6 * 60 * 60):
             self.request_live()
         self.assertEqual(len(self.loads()), 2)
 

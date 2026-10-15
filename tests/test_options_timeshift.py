@@ -3,9 +3,9 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from config_manager import ConfigManager
-from options import OptionsDialog
+from services.config_manager import ConfigManager
 from tests import test_tv_window as base
+from ui.settings_dialog import OptionsDialog
 
 
 class TimeshiftSettingsTests(base.WindowCase):

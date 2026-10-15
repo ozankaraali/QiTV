@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QMainWindow
 
-from config_manager import ConfigManager
+from services.config_manager import ConfigManager
 
 
 class WindowConfigMigrationTests(unittest.TestCase):

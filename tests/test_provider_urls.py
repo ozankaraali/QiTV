@@ -19,8 +19,8 @@ from PySide6.QtWidgets import QApplication
 from services.export import save_stb_content
 from services.exporter import ExportKind, ExportWorker
 from services.provider_api import provider_prefers_https, stb_portal_base
+from services.workers import LinkCreatorWorker
 from tests.test_catalog_service import make_service
-from workers import LinkCreatorWorker
 
 ITEMS = [{"name": "One", "cmd": "ffmpeg http://localhost/ch/123_"}]
 
@@ -75,7 +75,7 @@ class CreateLinkHttpsTests(unittest.TestCase):
             calls.append(url)
             return _Response({"js": {"cmd": "ffmpeg http://stream.test/1.ts"}})
 
-        with patch("workers.requests.get", side_effect=fake_get):
+        with patch("services.workers.requests.get", side_effect=fake_get):
             worker.run()
         self.assertEqual(links, [{"link": "http://stream.test/1.ts"}])
         return calls[0]
@@ -144,7 +144,7 @@ class StbExportBaseTests(unittest.TestCase):
 
 class ProviderCacheIdentityTests(unittest.TestCase):
     def _identity(self, provider, global_https):
-        from provider_manager import ProviderManager
+        from services.provider_manager import ProviderManager
 
         manager = ProviderManager.__new__(ProviderManager)
         manager.config_manager = SimpleNamespace(prefer_https=global_https, ssl_verify=True)

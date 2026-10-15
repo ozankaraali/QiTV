@@ -6,10 +6,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import requests
 
-from config_manager import ConfigManager
-from provider_manager import ProviderManager, StbHandshake
 from services.catalog import UNEXPECTED_ANSWER_MESSAGE, UNREACHABLE_MESSAGE
-from workers import STB_DEVICE_REJECTED_MESSAGE, ProviderSetupWorker
+from services.config_manager import ConfigManager
+from services.provider_manager import ProviderManager, StbHandshake
+from services.workers import STB_DEVICE_REJECTED_MESSAGE, ProviderSetupWorker
 
 PREHASH = "2614ddf9829ba9d284f389d88e8c669d81f6a5c2"
 
@@ -51,7 +51,7 @@ class StbHandshakeTests(unittest.TestCase):
                 return _Response({"js": {"token": "TOKEN"}})
             return _Response({"js": {"id": 1, "name": "Fixture"}})
 
-        with patch("provider_manager.requests.get", side_effect=fake_get):
+        with patch("services.provider_manager.requests.get", side_effect=fake_get):
             self.assertTrue(StbHandshake().run("http://portal.test", "00:1A:79:00:00:01"))
 
         profile = next(url for url in calls if "action=get_profile" in url)
@@ -79,7 +79,7 @@ class ProviderSetupWorkerTests(unittest.TestCase):
         outcome = []
         worker.finished.connect(lambda payload: outcome.append(("ok", payload)))
         worker.error.connect(lambda message: outcome.append(("error", message)))
-        with patch("provider_manager.requests.get", side_effect=fake_get):
+        with patch("services.provider_manager.requests.get", side_effect=fake_get):
             worker.run()
         return outcome
 
@@ -87,7 +87,7 @@ class ProviderSetupWorkerTests(unittest.TestCase):
         class Refused(_Response):
             status_code = 403
 
-        with self.assertLogs("provider_manager", "WARNING"):
+        with self.assertLogs("services.provider_manager", "WARNING"):
             outcome = self.run_setup(lambda url, **kwargs: Refused({}))
         self.assertEqual(outcome, [("error", STB_DEVICE_REJECTED_MESSAGE)])
         self.assertEqual(
@@ -99,7 +99,7 @@ class ProviderSetupWorkerTests(unittest.TestCase):
         self.assertEqual(self.run_setup(_accepting), [("ok", {"name": "S"})])
 
     def assertSetupFails(self, fake_get, message):
-        with self.assertLogs("provider_manager", "WARNING"):
+        with self.assertLogs("services.provider_manager", "WARNING"):
             outcome = self.run_setup(fake_get)
         self.assertEqual(outcome, [("error", message)])
 
@@ -171,7 +171,7 @@ class FailedSetupSessionTests(unittest.TestCase):
             {"type": "STB", "name": "B", "url": "http://b.test/c/"},  # malformed: no mac
         ]
         manager.config_manager.selected_provider_name = "A"
-        with patch("provider_manager.requests.get", side_effect=_accepting):
+        with patch("services.provider_manager.requests.get", side_effect=_accepting):
             self.assertTrue(manager.set_current_provider(self.progress))
         self.assertIn("00:1A:79:AA:AA:AA", manager.headers["Cookie"])
         self.assertEqual(manager.token, "TOKEN")

@@ -12,7 +12,7 @@ from PySide6.QtCore import QObject
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-import update_checker
+from services import update_checker
 
 
 class Holder(QObject):
@@ -113,7 +113,7 @@ class WindowsUpdateTests(unittest.TestCase):
         holder = Holder(self.calls, self.pending)
         update_checker.call_before_update(broken.stop_live)
         update_checker.call_before_update(holder.stop_live)
-        with self.assertLogs("update_checker", "ERROR"):
+        with self.assertLogs("services.update_checker", "ERROR"):
             self.update()
         self.assertEqual(self.calls, ["stop_live"])
 

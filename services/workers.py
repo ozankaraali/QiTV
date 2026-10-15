@@ -8,7 +8,6 @@ from PySide6.QtCore import QObject, Qt, Signal
 import requests
 from urlobject import URLObject
 
-from provider_manager import HANDSHAKE_UNEXPECTED, HANDSHAKE_UNREACHABLE
 from services.m3u import decode_playlist, parse_m3u
 from services.provider_api import (
     base_from_url,
@@ -19,6 +18,7 @@ from services.provider_api import (
     xtream_choose_resolved_base,
     xtream_player_api_url,
 )
+from services.provider_manager import HANDSHAKE_UNEXPECTED, HANDSHAKE_UNREACHABLE
 from services.redact import safe_exc, safe_traceback
 
 logger = logging.getLogger(__name__)
@@ -594,7 +594,7 @@ class StbListWorker(QObject):
         self.loader_kwargs = loader_kwargs
 
     def run(self):
-        from content_loader import ContentLoader
+        from services.content_loader import ContentLoader
 
         results: list = []
         errors: list = []

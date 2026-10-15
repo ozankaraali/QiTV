@@ -12,7 +12,7 @@ import tomllib
 
 import orjson as json
 
-from multikeydict import MultiKeyDict
+from services.multikeydict import MultiKeyDict
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +79,9 @@ def get_app_version() -> str:
     except Exception:
         pass
 
-    # 2) Try reading pyproject.toml from common locations (repo root / CWD)
+    # 2) Try reading pyproject.toml from common locations (repo root, beside main.py / CWD)
     candidates = [
         Path(__file__).resolve().parent.parent / "pyproject.toml",
-        Path(__file__).resolve().parent / "pyproject.toml",
         Path.cwd() / "pyproject.toml",
     ]
 
@@ -158,8 +157,8 @@ class ConfigManager:
             # Running as compiled executable (PyInstaller)
             program_dir = os.path.dirname(sys.executable)
         else:
-            # Running as script
-            program_dir = os.path.dirname(os.path.abspath(__file__))
+            # Running as script: the program directory holds main.py, one above services/
+            program_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
         portable_flag = os.path.join(program_dir, "portable.txt")
 

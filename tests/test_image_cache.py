@@ -9,7 +9,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from image_manager import ImageManager
+from services.image_manager import ImageManager
 
 
 def _data_url(payload: bytes) -> str:

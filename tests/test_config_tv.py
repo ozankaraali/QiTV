@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from config_manager import ConfigManager
+from services.config_manager import ConfigManager
 
 
 class TvConfigTests(unittest.TestCase):
@@ -79,12 +79,12 @@ class TvConfigTests(unittest.TestCase):
                 raise OSError("disk full")
 
         config.favorites = ["Lost"]
-        with patch("config_manager.json.dumps", return_value=Exploding()):
+        with patch("services.config_manager.json.dumps", return_value=Exploding()):
             with self.assertRaises((OSError, TypeError)):
                 config.save_config()
         self.assertEqual(path.read_text(encoding="utf-8"), before)
         self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["config.json"])
-        from multikeydict import MultiKeyDict
+        from services.multikeydict import MultiKeyDict
 
         self.assertIsInstance(config.xmltv_channel_map, MultiKeyDict)
         config.save_config()
@@ -108,7 +108,7 @@ class TvConfigTests(unittest.TestCase):
         config.favorites = ["New"]
         replace, calls = self._flaky_replace(5)
         with (
-            patch("config_manager.os.replace", side_effect=replace),
+            patch("services.config_manager.os.replace", side_effect=replace),
             patch("time.sleep") as sleep,
         ):
             config.save_config()
@@ -122,9 +122,9 @@ class TvConfigTests(unittest.TestCase):
         config.favorites = ["New"]
         replace, calls = self._flaky_replace(100)
         with (
-            patch("config_manager.os.replace", side_effect=replace),
+            patch("services.config_manager.os.replace", side_effect=replace),
             patch("time.sleep"),
-            self.assertLogs("config_manager", "WARNING") as logs,
+            self.assertLogs("services.config_manager", "WARNING") as logs,
             self.assertRaises(PermissionError),
         ):
             config.save_config()
@@ -173,6 +173,29 @@ class ConfigDirTests(unittest.TestCase):
             self.assertTrue(path.startswith(home), path)
             self.assertFalse(os.path.exists(os.path.dirname(path)))
             self.assertEqual(os.listdir(home), [])
+
+    def _portable_path(self, program_dir, **sys_values):
+        """The config path when portable.txt sits in `program_dir` (and nowhere else)."""
+        flag = os.path.join(program_dir, "portable.txt")
+        exists = os.path.exists
+        with (
+            patch.dict(os.environ, {"QITV_CONFIG_DIR": ""}),
+            patch("os.path.exists", side_effect=lambda path: path == flag or exists(path)),
+            patch.multiple("sys", create=True, **sys_values),
+        ):
+            return ConfigManager._get_config_path(ConfigManager.__new__(ConfigManager))
+
+    def test_portable_source_run_keeps_the_config_beside_main_py(self):
+        root = str(Path(__file__).resolve().parents[1])  # where main.py is
+        self.assertTrue(os.path.isfile(os.path.join(root, "main.py")))
+        path = self._portable_path(root, frozen=False)
+        self.assertEqual(path, os.path.join(root, "config.json"))
+
+    def test_portable_frozen_app_keeps_the_config_beside_the_executable(self):
+        with tempfile.TemporaryDirectory() as program_dir:
+            executable = os.path.join(program_dir, "qitv.exe")
+            path = self._portable_path(program_dir, frozen=True, executable=executable)
+        self.assertEqual(path, os.path.join(program_dir, "config.json"))
 
     def test_the_manager_creates_its_directory(self):
         with tempfile.TemporaryDirectory() as root:

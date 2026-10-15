@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from packaging.version import parse
 import requests
 
-from config_manager import ConfigManager, get_app_version
+from services.config_manager import ConfigManager, get_app_version
 from services.thread_cleanup import ThreadCleanup, has_pending_threads
 
 logger = logging.getLogger(__name__)

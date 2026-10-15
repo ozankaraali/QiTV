@@ -3,7 +3,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from epg_manager import EpgManager, normalize_programme_stop
+from services.epg_manager import EpgManager, normalize_programme_stop
 
 XMLTV = """<?xml version="1.0" encoding="UTF-8"?>
 <tv>

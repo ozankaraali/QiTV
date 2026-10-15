@@ -12,15 +12,16 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 import orjson
 
-from config_manager import ConfigManager
-from provider_manager import ProviderManager
 from services.catalog import (
     MAX_CATALOG_JOBS,
     PROVIDER_LOADING_MESSAGE,
     UNEXPECTED_ANSWER_MESSAGE,
     CatalogService,
 )
+from services.config_manager import ConfigManager
 from services.navigation import NavModel
+from services.provider_manager import ProviderManager
+from services.workers import ProviderSetupWorker
 from tests.test_catalog_service import (
     XTREAM_PAYLOAD,
     FakeFactory,
@@ -29,7 +30,6 @@ from tests.test_catalog_service import (
     collect,
     make_service,
 )
-from workers import ProviderSetupWorker
 
 A_LIVE = {
     "categories": [{"id": "1", "title": "A-News"}],
@@ -88,7 +88,7 @@ class ProviderSwitchRaceTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"QITV_CONFIG_DIR": directory.name})
         env.start()
         self.addCleanup(env.stop)
-        portal = mock.patch("provider_manager.requests.get", side_effect=_fake_portal)
+        portal = mock.patch("services.provider_manager.requests.get", side_effect=_fake_portal)
         portal.start()
         self.addCleanup(portal.stop)
         config = ConfigManager()

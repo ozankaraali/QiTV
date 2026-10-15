@@ -285,7 +285,7 @@ class LifetimeTests(HostCase):
 
 class ConfigDirOverrideTests(unittest.TestCase):
     def test_env_override(self):
-        from config_manager import ConfigManager
+        from services.config_manager import ConfigManager
 
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -295,7 +295,7 @@ class ConfigDirOverrideTests(unittest.TestCase):
         self.assertEqual(path, os.path.join(directory, "config.json"))
 
     def test_unset_or_empty_override_is_ignored(self):
-        from config_manager import ConfigManager
+        from services.config_manager import ConfigManager
 
         for value in (None, ""):
             env = {} if value is None else {"QITV_CONFIG_DIR": value}
@@ -307,7 +307,7 @@ class ConfigDirOverrideTests(unittest.TestCase):
             self.assertNotEqual(os.path.dirname(path), "")
 
     def test_override_skips_legacy_migration(self):
-        from config_manager import ConfigManager
+        from services.config_manager import ConfigManager
 
         with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as directory:
             old = os.getcwd()

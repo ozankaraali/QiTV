@@ -18,7 +18,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from services.epg_view import Programme, programmes_for_channel
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
-from workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
+from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
 
 logger = logging.getLogger(__name__)
 
@@ -238,24 +238,24 @@ class WorkerFactory:
     """Creates the real workers; tests substitute a fake with the same method names."""
 
     def provider_setup(self, provider_manager, force_refresh) -> QObject:
-        from workers import ProviderSetupWorker
+        from services.workers import ProviderSetupWorker
 
         return ProviderSetupWorker(provider_manager, force_refresh)
 
     def epg(self, epg_manager, force_refresh) -> QObject:
-        from workers import EpgLoadWorker
+        from services.workers import EpgLoadWorker
 
         return EpgLoadWorker(epg_manager, force_refresh)
 
     def m3u(self, url, verify_ssl, prefer_https) -> QObject:
-        from workers import M3ULoaderWorker
+        from services.workers import M3ULoaderWorker
 
         return M3ULoaderWorker(url, verify_ssl=verify_ssl, prefer_https=prefer_https)
 
     def xtream(
         self, base_url, username, password, content_type, verify_ssl, prefer_https
     ) -> QObject:
-        from workers import XtreamLoaderWorker
+        from services.workers import XtreamLoaderWorker
 
         return XtreamLoaderWorker(
             base_url,
@@ -267,24 +267,24 @@ class WorkerFactory:
         )
 
     def stb_categories(self, url, headers, content_type, verify_ssl, prefer_https) -> QObject:
-        from workers import STBCategoriesWorker
+        from services.workers import STBCategoriesWorker
 
         return STBCategoriesWorker(
             url, headers, content_type, verify_ssl=verify_ssl, prefer_https=prefer_https
         )
 
     def stb_list(self, **loader_kwargs) -> QObject:
-        from workers import StbListWorker
+        from services.workers import StbListWorker
 
         return StbListWorker(**loader_kwargs)
 
     def xtream_series(self, **kwargs) -> QObject:
-        from workers import XtreamSeriesInfoWorker
+        from services.workers import XtreamSeriesInfoWorker
 
         return XtreamSeriesInfoWorker(**kwargs)
 
     def link(self, **kwargs) -> QObject:
-        from workers import LinkCreatorWorker
+        from services.workers import LinkCreatorWorker
 
         return LinkCreatorWorker(**kwargs)
 

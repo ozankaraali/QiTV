@@ -13,8 +13,8 @@ import orjson as json
 import requests
 import tzlocal
 
-from content_loader import ContentLoader
-from multikeydict import MultiKeyDict
+from services.content_loader import ContentLoader
+from services.multikeydict import MultiKeyDict
 from services.provider_api import (
     base_from_url,
     https_fallback_candidates,

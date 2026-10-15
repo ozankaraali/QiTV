@@ -81,13 +81,13 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
     import qdarktheme
 
-    from config_manager import ConfigManager, get_app_version
-    from epg_manager import EpgManager
-    from image_manager import ImageManager
-    from provider_manager import ProviderManager
-    from sleep_manager import allow_sleep, prevent_sleep
+    from services.config_manager import ConfigManager, get_app_version
+    from services.epg_manager import EpgManager
+    from services.image_manager import ImageManager
+    from services.provider_manager import ProviderManager
+    from services.sleep_manager import allow_sleep, prevent_sleep
+    from services.update_checker import check_for_updates
     from ui.tv_window import TVWindow
-    from update_checker import check_for_updates
 
     # Basic logging configuration (tweak level as needed)
     logging.basicConfig(

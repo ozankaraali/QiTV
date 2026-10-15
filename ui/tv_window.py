@@ -48,7 +48,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from options import OptionsDialog
 from services import thread_cleanup
 from services.catalog import CatalogService
 from services.connection_budget import ConnectionBudget
@@ -58,6 +57,7 @@ from services.live.live_session import LiveSession
 from services.navigation import NavModel
 from services.playback import NullSession, PlaybackSession, Session, create_instance
 from services.thread_cleanup import has_pending_threads
+from services.update_checker import call_before_update
 from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui.export_flow import ExportFlow
@@ -73,11 +73,11 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
+from ui.settings_dialog import OptionsDialog
 from ui.tv_controller import Overlays, TVController
 from ui.tv_menus import TVMenus
 from ui.tv_pages import TVPages
 from ui.video_surface import VideoSurface
-from update_checker import call_before_update
 
 logger = logging.getLogger(__name__)
 

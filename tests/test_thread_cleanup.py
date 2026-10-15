@@ -199,7 +199,7 @@ def run_child(scenario, playlist):
         case.assertEqual(worker_destroyed_on, [threading.get_ident()])
     elif scenario == "content-loading":
         from services.catalog import ALL_GROUP_ID, CatalogService, WorkerFactory
-        from workers import M3ULoaderWorker
+        from services.workers import M3ULoaderWorker
 
         class Providers:
             """The ProviderManager surface CatalogService reads; the playlist is never fresh."""

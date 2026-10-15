@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 import zipfile
 
-from epg_manager import write_xmltv_body
+from services.epg_manager import write_xmltv_body
 
 XML = b'<?xml version="1.0" encoding="UTF-8"?>\n<tv><channel id="news.test"/></tv>\n'
 
