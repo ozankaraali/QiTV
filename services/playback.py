@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 import logging
 import platform
-from typing import Optional
+from typing import Any, Optional, Protocol
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
@@ -25,6 +25,7 @@ _RESTART_DELAY_MS = 300
 _RESUME_GIVE_UP_MS = 3000
 _RESUME_END_MARGIN_MS = 1000
 _STALL_BUDGET_RESET_MS = 30000  # healthy playback after a stall refills the retry budget
+NO_VLC_MESSAGE = "Video needs VLC: install it from videolan.org and restart QiTV"
 
 
 class PlaybackState(str, Enum):
@@ -388,3 +389,153 @@ class PlaybackSession(QObject):
         if self._released or self._url is None:
             return
         self._start_media()
+
+
+class Session(Protocol):
+    """What the TV shell uses of a playback session: PlaybackSession or NullSession."""
+
+    stateChanged: Any
+    positionChanged: Any
+    errorOccurred: Any
+    ended: Any
+    seekableChanged: Any
+
+    @property
+    def url(self) -> Optional[str]: ...
+
+    @property
+    def kind(self) -> Optional[PlayKind]: ...
+
+    def state(self) -> PlaybackState: ...
+
+    def time_ms(self) -> int: ...
+
+    def length_ms(self) -> int: ...
+
+    def is_seekable(self) -> bool: ...
+
+    def set_window(self, win_id: int) -> None: ...
+
+    def play(
+        self,
+        url: str,
+        *,
+        kind: PlayKind,
+        latency: str = "normal",
+        user_agent: Optional[str] = None,
+        start_ms: Optional[int] = None,
+    ) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def toggle_pause(self) -> None: ...
+
+    def set_paused(self, paused: bool) -> None: ...
+
+    def seek(self, ms: int) -> None: ...
+
+    def seek_relative(self, ms: int) -> None: ...
+
+    def set_rate(self, rate: float) -> None: ...
+
+    def volume(self) -> int: ...
+
+    def set_volume(self, value: int) -> None: ...
+
+    def toggle_mute(self) -> bool: ...
+
+    def audio_tracks(self) -> list[tuple[int, str]]: ...
+
+    def set_audio_track(self, track_id: int) -> None: ...
+
+    def subtitle_tracks(self) -> list[tuple[int, str]]: ...
+
+    def set_subtitle_track(self, track_id: int) -> None: ...
+
+    def release(self) -> None: ...
+
+
+class NullSession(QObject):
+    """A Session without libVLC: nothing plays, and every play explains why."""
+
+    stateChanged = Signal(str)
+    positionChanged = Signal(int, int)
+    errorOccurred = Signal(str)
+    ended = Signal()
+    seekableChanged = Signal(bool)
+
+    @property
+    def url(self) -> Optional[str]:
+        return None
+
+    @property
+    def kind(self) -> Optional[PlayKind]:
+        return None
+
+    def state(self) -> PlaybackState:
+        return PlaybackState.IDLE
+
+    def time_ms(self) -> int:
+        return 0
+
+    def length_ms(self) -> int:
+        return 0
+
+    def is_seekable(self) -> bool:
+        return False
+
+    def set_window(self, win_id: int) -> None:
+        pass
+
+    def play(
+        self,
+        url: str,
+        *,
+        kind: PlayKind,
+        latency: str = "normal",
+        user_agent: Optional[str] = None,
+        start_ms: Optional[int] = None,
+    ) -> None:
+        self.errorOccurred.emit(NO_VLC_MESSAGE)
+
+    def stop(self) -> None:
+        pass
+
+    def toggle_pause(self) -> None:
+        pass
+
+    def set_paused(self, paused: bool) -> None:
+        pass
+
+    def seek(self, ms: int) -> None:
+        pass
+
+    def seek_relative(self, ms: int) -> None:
+        pass
+
+    def set_rate(self, rate: float) -> None:
+        pass
+
+    def volume(self) -> int:
+        return 0
+
+    def set_volume(self, value: int) -> None:
+        pass
+
+    def toggle_mute(self) -> bool:
+        return False
+
+    def audio_tracks(self) -> list[tuple[int, str]]:
+        return []
+
+    def set_audio_track(self, track_id: int) -> None:
+        pass
+
+    def subtitle_tracks(self) -> list[tuple[int, str]]:
+        return []
+
+    def set_subtitle_track(self, track_id: int) -> None:
+        pass
+
+    def release(self) -> None:
+        pass

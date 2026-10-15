@@ -6,6 +6,7 @@ import platform
 import shutil
 import sys
 import time
+from typing import Mapping, Optional
 import warnings
 
 from PySide6 import QtGui
@@ -20,6 +21,17 @@ from provider_manager import ProviderManager
 from sleep_manager import allow_sleep, prevent_sleep
 from ui.tv_window import TVWindow
 from update_checker import check_for_updates
+
+
+def qt_platform_override(system: str, environ: Mapping[str, str]) -> Optional[str]:
+    """The QT_QPA_PLATFORM to set before Qt starts, or None to leave Qt's choice.
+
+    libVLC embeds its video and the overlay host stays glued only on X11. Qt 6 picks
+    Wayland in Wayland sessions, so Linux prefers XWayland when an X display exists.
+    """
+    if system == "Linux" and not environ.get("QT_QPA_PLATFORM") and environ.get("DISPLAY"):
+        return "xcb;wayland"
+    return None
 
 
 def handle_replace_flag():
@@ -73,6 +85,9 @@ def main() -> int:
     warnings.filterwarnings("ignore", category=SyntaxWarning, module="vlc")
     # Reduce Qt info logs that are not actionable
     QLoggingCategory.setFilterRules("qt.accessibility.*=false\nqt.qpa.fonts.*=false")
+    qt_platform = qt_platform_override(platform.system(), os.environ)
+    if qt_platform:
+        os.environ["QT_QPA_PLATFORM"] = qt_platform
     app = QApplication(sys.argv)
 
     # Optional: capture Qt warnings to help debug thread/timer issues

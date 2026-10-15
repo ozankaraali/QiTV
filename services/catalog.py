@@ -346,6 +346,7 @@ class CatalogService(QObject):
             "episodes": (self._on_episodes_loaded, self._on_episodes_error),
         }
         self._link_ids = itertools.count(1)
+        self._closed = False  # shutdown(): nothing starts or reports any more
 
     # --- providers -------------------------------------------------------------------
     def provider_names(self) -> list[str]:
@@ -368,6 +369,8 @@ class CatalogService(QObject):
         return self._content_version
 
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
+        if self._closed:
+            return
         # Only one setup runs at a time; the generation bumps now so results of anything
         # issued for the previous provider are ignored, and queued catalog requests and a
         # queued EPG load (both for the previous provider) are dropped.
@@ -389,6 +392,17 @@ class CatalogService(QObject):
         providerReady.
         """
         return self._setup_active()
+
+    def shutdown(self) -> None:
+        """The window is closing: start no more jobs and report nothing more.
+
+        Workers already running finish on their own; their results are dropped.
+        """
+        self._closed = True
+        self._generation += 1  # drops results and deferred emits of everything issued so far
+        self._catalog_queue.clear()
+        self._pending_setup = None
+        self._pending_epg = None
 
     def _setup_active(self) -> bool:
         """True while a provider setup is running or waiting to run."""
@@ -417,6 +431,8 @@ class CatalogService(QObject):
         if self._state_job == "provider":
             self._content_version += 1  # the setup has finished replacing the content
         self._state_job = None
+        if self._closed:
+            return True  # nothing starts, and the finished job's result is not wanted
         if self._pending_setup is not None:
             pending, self._pending_setup = self._pending_setup, None
             self._start_setup(*pending)
@@ -455,7 +471,7 @@ class CatalogService(QObject):
         self._request_epg(force)
 
     def _request_epg(self, force: bool) -> None:
-        if self._setup_active():
+        if self._closed or self._setup_active():
             return
         if self._state_job is not None:  # an EPG load is running: load once more after it
             self._pending_epg = bool(force or self._pending_epg)
@@ -505,6 +521,8 @@ class CatalogService(QObject):
         return None  # M3U entries may be live or on demand
 
     def request_section(self, section: str, *, force: bool = False) -> None:
+        if self._closed:
+            return
         if self._setup_active():
             self._fail_later(self.sectionFailed, section, PROVIDER_LOADING_MESSAGE)
             return
@@ -627,6 +645,8 @@ class CatalogService(QObject):
         return None
 
     def request_group(self, section: str, group_id: str) -> None:
+        if self._closed:
+            return
         if self._setup_active():
             self._fail_later(self.groupFailed, section, group_id, PROVIDER_LOADING_MESSAGE)
             return
@@ -688,6 +708,8 @@ class CatalogService(QObject):
         return list(cached) if isinstance(cached, list) else None
 
     def request_seasons(self, series: dict) -> None:
+        if self._closed:
+            return
         series_id = str(series.get("id"))
         if self._setup_active():
             self._fail_later(self.seasonsFailed, series_id, PROVIDER_LOADING_MESSAGE)
@@ -760,6 +782,8 @@ class CatalogService(QObject):
         return list(cached) if isinstance(cached, list) else None
 
     def request_episodes(self, series: dict, season: dict) -> None:
+        if self._closed:
+            return
         series_id, season_id = str(series.get("id")), str(season.get("id"))
         if self._setup_active():
             self._fail_later(self.episodesFailed, series_id, season_id, PROVIDER_LOADING_MESSAGE)
@@ -833,6 +857,8 @@ class CatalogService(QObject):
     def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
         """Resolve a playable URL. STB portals mint a fresh link; others play `cmd` directly."""
         request_id = next(self._link_ids)
+        if self._closed:
+            return request_id
         if self._setup_active():
             self._fail_later(self.linkFailed, request_id, PROVIDER_LOADING_MESSAGE)
             return request_id
@@ -891,7 +917,8 @@ class CatalogService(QObject):
 
     def _pump_catalog(self) -> None:
         while (
-            self._catalog_queue
+            not self._closed
+            and self._catalog_queue
             and self._catalog_running < MAX_CATALOG_JOBS
             and not self._setup_active()
         ):

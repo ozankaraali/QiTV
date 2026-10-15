@@ -373,5 +373,81 @@ class CatalogServiceTests(unittest.TestCase):
         self.assertEqual(factory.calls, [])
 
 
+SIGNALS = (
+    "providerReady",
+    "providerFailed",
+    "sectionReady",
+    "sectionFailed",
+    "groupReady",
+    "groupFailed",
+    "epgReady",
+    "seasonsReady",
+    "seasonsFailed",
+    "episodesReady",
+    "episodesFailed",
+    "linkReady",
+    "linkFailed",
+)
+
+
+class CatalogShutdownTests(unittest.TestCase):
+    """The window is closing: start no more jobs and report nothing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def stb_service(self):
+        runner = ManualRunner()
+        provider = {"name": "S", "type": "STB", "url": "http://portal/c/"}
+        service, providers, factory, _ = make_service(provider, runner=runner)
+        providers.current_provider_content["vod"] = {"categories": [], "contents": {}}
+        factory.results["provider_setup"] = {"result": {"name": "S"}}
+        factory.results["epg"] = {"result": {}}
+        factory.results["stb_list"] = {"result": {"items": [{"id": 1}]}}
+        factory.results["link"] = {"result": {"link": "http://stream/1"}}
+        seen = []
+        for name in SIGNALS:
+            getattr(service, name).connect(lambda *_args, n=name: seen.append(n))
+        return service, runner, seen
+
+    def test_a_running_setup_finishing_after_shutdown_starts_nothing(self):
+        service, runner, seen = self.stb_service()
+        service.select_provider()
+        service.select_provider("Other")  # queued behind the running setup
+        service.shutdown()
+        runner.complete(0)
+        self.assertEqual(len(runner.jobs), 1)  # neither the queued setup nor an EPG load
+        self.assertEqual(seen, [])
+
+    def test_requests_after_shutdown_do_nothing(self):
+        service, runner, seen = self.stb_service()
+        service.shutdown()
+        service.select_provider()
+        service.refresh_epg(force=True)
+        service.request_section("live")
+        service.request_group("movies", "5")
+        service.request_seasons({"id": 1})
+        service.request_episodes({"id": 1}, {"id": 2})
+        service.request_link({"cmd": "ffrt x"}, section="live")
+        QTest.qWait(20)
+        self.assertEqual(runner.jobs, [])
+        self.assertEqual(seen, [])
+
+    def test_running_jobs_report_nothing_and_the_queue_stops(self):
+        service, runner, seen = self.stb_service()
+        for group in ("5", "6", "7"):  # two run, one waits for a slot
+            service.request_group("movies", group)
+        link = service.request_link({"cmd": "ffrt x"}, section="live")
+        self.assertIsInstance(link, int)
+        self.assertEqual(len(runner.jobs), 3)
+        service.shutdown()
+        for index in range(3):
+            runner.complete(index)
+        QTest.qWait(20)
+        self.assertEqual(len(runner.jobs), 3)  # the waiting group never starts
+        self.assertEqual(seen, [])
+
+
 if __name__ == "__main__":
     unittest.main()

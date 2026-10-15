@@ -12,39 +12,46 @@ import logging
 import platform
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QGuiApplication, QKeyEvent, QKeySequence
-from PySide6.QtWidgets import QMainWindow, QMenu
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QGuiApplication,
+    QKeyEvent,
+    QKeySequence,
+    QMouseEvent,
+)
+from PySide6.QtWidgets import QApplication, QMainWindow, QMenu
 
 from options import OptionsDialog
 from services.catalog import CatalogService
 from services.navigation import NavModel
-from services.playback import PlaybackSession, PlaybackState, create_instance
+from services.playback import NullSession, PlaybackSession, Session, create_instance
 from services.thread_cleanup import has_pending_threads
 from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui.keymap import Action, resolve
 from ui.logos import LogoCache
-from ui.macos_window import attach_child_window
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.drawer import Drawer
 from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.zap_banner import ZapBanner
-from ui.tv_controller import INFO_MS, Overlays, TVController
+from ui.tv_controller import Overlays, TVController
 from ui.video_surface import VideoSurface
 
 logger = logging.getLogger(__name__)
 
 WINDOW_NAME = "tv_window"
-NO_VIDEO_TEXT = "Video needs VLC: install it from videolan.org and restart QiTV"
 CLOSING_TEXT = "Closing after background requests finish…"
 CLOSE_RETRY_MS = 50
-CLOSING_NOTICE_AFTER = 10  # close retries (half a second) before telling the user why
+CLOSING_NOTICE_AFTER = 10  # close retries (half a second) between showings of the notice
+CLOSING_NOTICE_MS = 60_000  # re-shown long before it would time out
 EPG_REFRESH_MS = 2 * 60 * 60 * 1000
 MINI_WIDTH_FRACTION = 0.25
 MINI_MARGIN = 10
+FULLSCREEN_EXIT_MS = 1500  # the mini player waits at most this long for fullscreen to end
 _SHORTCUT_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier
     | Qt.KeyboardModifier.AltModifier
@@ -52,57 +59,16 @@ _SHORTCUT_MODIFIERS = (
 )
 # The Qt platform whose window ids libVLC can draw into (NSView, HWND, X11 window).
 _NATIVE_PLATFORMS = {"Darwin": "cocoa", "Windows": "windows", "Linux": "xcb"}
+_DRAG_EVENTS = (
+    QEvent.Type.MouseButtonPress,
+    QEvent.Type.MouseMove,
+    QEvent.Type.MouseButtonRelease,
+)
 
 
 def _native_video_handles() -> bool:
     """False on Qt platforms without real window ids (offscreen, Wayland): libVLC would crash."""
     return QGuiApplication.platformName() == _NATIVE_PLATFORMS.get(platform.system())
-
-
-class _NoVideo(QObject):
-    """Stands in for PlaybackSession when libVLC is missing: every play explains why."""
-
-    stateChanged = Signal(str)
-    positionChanged = Signal(int, int)
-    errorOccurred = Signal(str)
-    ended = Signal()
-    seekableChanged = Signal(bool)
-
-    url: Optional[str] = None
-    kind = None
-
-    def play(self, url: str, **_options: Any) -> None:
-        self.errorOccurred.emit(NO_VIDEO_TEXT)
-
-    def state(self) -> PlaybackState:
-        return PlaybackState.IDLE
-
-    def volume(self) -> int:
-        return 0
-
-    def toggle_mute(self) -> bool:
-        return False
-
-    def is_seekable(self) -> bool:
-        return False
-
-    def time_ms(self) -> int:
-        return 0
-
-    def length_ms(self) -> int:
-        return 0
-
-    def audio_tracks(self) -> list[tuple[int, str]]:
-        return []
-
-    def subtitle_tracks(self) -> list[tuple[int, str]]:
-        return []
-
-    def _ignore(self, *_args: Any) -> None:
-        pass
-
-    set_window = stop = toggle_pause = set_paused = seek = seek_relative = _ignore
-    set_rate = set_volume = set_audio_track = set_subtitle_track = release = _ignore
 
 
 class _Geometry:
@@ -137,16 +103,20 @@ class TVWindow(QMainWindow):
         self._closing = False
         self._close_retries = 0
         self._video_released = False
+        self._closed = False
         self._bound_handle: Optional[int] = None
-        self._mini_restore: Optional[tuple[QRect, Qt.WindowType]] = None
+        # (normal geometry, window flags, maximized) to restore when the mini player ends
+        self._mini_restore: Optional[tuple[QRect, Qt.WindowType, bool]] = None
+        self._mini_waiting = False  # for the fullscreen exit before entering the mini player
+        self._drag: Optional[tuple[QPoint, QPoint]] = None  # (press, window position)
+        self._dragged = False
 
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.surface = VideoSurface(self)
         self.setCentralWidget(self.surface)
-        self.host = OverlayHost(self, self.surface)
-        self.host.installEventFilter(self)
         self.surface.installEventFilter(self)
+        self.host = OverlayHost(self, self.surface)
         self.logos = LogoCache(image_manager, config_manager, self)
 
         self.catalog = CatalogService(config_manager, provider_manager, epg_manager, parent=self)
@@ -154,9 +124,10 @@ class TVWindow(QMainWindow):
         self.zap = ZapController(parent=self)
         self._instance = vlc_instance if vlc_instance is not None else create_instance()
         self._owns_instance = vlc_instance is None and self._instance is not None
+        self.session: Session
         if self._instance is None:
             logger.warning("libVLC is unavailable: channels cannot play")
-            self.session: Any = _NoVideo(self)
+            self.session = NullSession(self)
         else:
             self.session = PlaybackSession(self._instance, self)
         self.watch = WatchState(config_manager)
@@ -174,16 +145,14 @@ class TVWindow(QMainWindow):
             transport=Transport(host),
             toast=Toast(host),
         )
-        self._raised_overlays = (
+        for overlay in (
             self.overlays.banner,
             self.overlays.column,
             self.overlays.drawer,
             self.overlays.transport,
-        )
-        for overlay in self._raised_overlays:
+            self.overlays.toast,
+        ):
             host.add_overlay(overlay)
-            overlay.installEventFilter(self)  # each raises itself on show: the toast follows
-        host.add_overlay(self.overlays.toast)
         controller = TVController(
             config=config_manager,
             catalog=self.catalog,
@@ -198,12 +167,10 @@ class TVWindow(QMainWindow):
         )
         self.controller = controller
         for source in (self.surface, self.host):
-            source.clicked.connect(controller.video_clicked)
+            source.clicked.connect(self._on_video_clicked)
             source.doubleClicked.connect(controller.video_double_clicked)
             source.mouseMoved.connect(controller.mouse_moved)
             source.wheelSteps.connect(controller.wheel)
-        self.logos.logoReady.connect(self._on_logo_ready)
-        self.nav.notice.connect(self._on_notice)
         self.epg_refresh = QTimer(self, interval=EPG_REFRESH_MS)  # the guide keeps moving
         self.epg_refresh.timeout.connect(lambda: self.catalog.refresh_epg())
 
@@ -255,7 +222,7 @@ class TVWindow(QMainWindow):
     def _handler(self, action: Action) -> Callable[[], None]:
         return lambda: self.controller.handle(action)
 
-    # ---- keys ---------------------------------------------------------------------------------
+    # ---- input --------------------------------------------------------------------------------
 
     def _resolve(self, event: QKeyEvent):
         return resolve(
@@ -266,69 +233,136 @@ class TVWindow(QMainWindow):
         )
 
     def event(self, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.ShortcutOverride and isinstance(event, QKeyEvent):
-            if self._resolve(event) is not None:
-                event.accept()  # deliver it as a key press: keyPressEvent handles it once
-                return True
+        if (
+            event.type() == QEvent.Type.ShortcutOverride
+            and isinstance(event, QKeyEvent)
+            and not self._closing
+            and self._resolve(event) is not None
+        ):
+            event.accept()  # deliver it as a key press: keyPressEvent handles it once
+            return True
         return super().event(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        resolved = self._resolve(event)
-        if resolved is None or self._closing:
+        resolved = None if self._closing else self._resolve(event)
+        if resolved is None:
             super().keyPressEvent(event)
             return
         action, payload = resolved
         self.controller.handle(action, payload)
         event.accept()
 
-    def _on_notice(self, text: str) -> None:
-        self.overlays.toast.show_message(text, "info", INFO_MS)
-
-    def _on_logo_ready(self, url: str) -> None:
-        """Repaint the banner when its channel's logo arrives (the rows refresh themselves)."""
-        banner = self.overlays.banner
-        info = banner.info
-        if not banner.isVisible() or info is None or info.logo is not None:
+    def _on_video_clicked(self) -> None:
+        if self._dragged:  # the press moved the mini player
+            self._dragged = False
             return
-        channel = next(
-            (
-                c
-                for c in self.zap.context.channels  # a tuned channel is always in the context
-                if c.get("logo") == url and str(c.get("name") or "") == info.name
-            ),
-            None,
-        )
-        if channel is not None:
-            banner.show_info(self.controller.banner_info(channel))
+        self.controller.video_clicked()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            watched is self.surface
+            and self._mini_restore is not None
+            and event.type() in _DRAG_EVENTS
+            and isinstance(event, QMouseEvent)
+        ):
+            self._drag_mini(event)
+        elif (
+            self._mini_waiting
+            and watched is self.windowHandle()
+            and event.type() == QEvent.Type.WindowStateChange
+            and event.spontaneous()
+            and not self.isFullScreen()
+        ):
+            # The platform reports the end of the fullscreen exit (after its animation).
+            QTimer.singleShot(0, self, self._enter_mini_after_fullscreen)
+        return super().eventFilter(watched, event)
+
+    def _drag_mini(self, event: QMouseEvent) -> None:
+        """Dragging the video moves the frameless mini player (the press still counts)."""
+        kind, position = event.type(), event.globalPosition().toPoint()
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._drag = (position, self.pos())
+            self._dragged = False
+        elif kind == QEvent.Type.MouseMove and self._drag is not None:
+            if not event.buttons() & Qt.MouseButton.LeftButton:
+                self._drag = None
+                return
+            start, origin = self._drag
+            delta = position - start
+            if self._dragged or delta.manhattanLength() >= QApplication.startDragDistance():
+                self._dragged = True
+                self.move(origin + delta)
+        elif kind == QEvent.Type.MouseButtonRelease:
+            self._drag = None
 
     # ---- window actions (the controller's window_actions) -------------------------------------
 
     def toggle_fullscreen(self) -> None:
+        if self._closing:
+            return
         if self._mini_restore is not None:
-            self.toggle_mini_player()
+            self._leave_mini()
         self.setWindowState(self.windowState() ^ Qt.WindowState.WindowFullScreen)
 
     def leave_fullscreen(self) -> None:
-        if self.isFullScreen():
+        if self.isFullScreen() and not self._closing:
             self.setWindowState(self.windowState() & ~Qt.WindowState.WindowFullScreen)
 
     def toggle_mini_player(self) -> None:
         """Frameless and on top, a quarter of the screen wide in the bottom-right corner."""
-        if self._mini_restore is None:
-            restore = self._normal_geometry()
+        if self._closing or self._mini_waiting:
+            return
+        if self._mini_restore is not None:
+            self._leave_mini()
+        elif self.isFullScreen():
+            # Enter once the fullscreen exit has finished (an animation on macOS): the flags
+            # and the corner geometry need a normal window and the normal screen area.
+            self._mini_waiting = True
             self.leave_fullscreen()
-            self._mini_restore = (restore, self.windowFlags())
-            self.setWindowFlags(
-                self.windowFlags()
-                | Qt.WindowType.FramelessWindowHint
-                | Qt.WindowType.WindowStaysOnTopHint
-            )
-            self.setGeometry(self._mini_rect())
+            handle = self.windowHandle()
+            if handle is not None:
+                handle.installEventFilter(self)  # after the synchronous state change
+            QTimer.singleShot(FULLSCREEN_EXIT_MS, self, self._enter_mini_after_fullscreen)
         else:
-            geometry, flags = self._mini_restore
-            self._mini_restore = None
-            self.setWindowFlags(flags)
-            self.setGeometry(geometry)
+            self._enter_mini()
+
+    def _enter_mini_after_fullscreen(self) -> None:
+        if not self._mini_waiting:
+            return
+        self._mini_waiting = False
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.removeEventFilter(self)
+        if not self._closing and not self.isFullScreen():
+            self._enter_mini()
+
+    def _enter_mini(self) -> None:
+        maximized = self.isMaximized()
+        restore = self.normalGeometry() if maximized else self.geometry()
+        self._mini_restore = (restore, self.windowFlags(), maximized)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setWindowState(Qt.WindowState.WindowNoState)
+        self.setGeometry(self._mini_rect())
+        self._show_again()
+
+    def _leave_mini(self) -> None:
+        if self._mini_restore is None:
+            return
+        geometry, flags, maximized = self._mini_restore
+        self._mini_restore = None
+        self._drag = None
+        self.setWindowFlags(flags)
+        self.setGeometry(geometry)
+        if maximized:
+            self.setWindowState(Qt.WindowState.WindowMaximized)
+        self._show_again()
+
+    def _show_again(self) -> None:
+        """setWindowFlags hides the window: show it again and keep the video bound."""
         self._update_menu_bar()
         self.show()
         self._bind_video()
@@ -354,31 +388,6 @@ class TVWindow(QMainWindow):
         if not bar.isNativeMenuBar():  # the macOS menu bar is outside the window
             bar.setVisible(not self.isFullScreen() and self._mini_restore is None)
 
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched is self.host and event.type() == QEvent.Type.Show:
-            # macOS drops a child window from its parent when the child is ordered out, and
-            # the host only attaches once: attach again after every show.
-            QTimer.singleShot(0, self, self._attach_host)
-        elif watched is self.surface and event.type() == QEvent.Type.Resize:
-            self._size_hidden_host()
-        elif event.type() == QEvent.Type.ZOrderChange and watched in self._raised_overlays:
-            self.overlays.toast.raise_()  # messages stay readable above the drawer and bars
-        return super().eventFilter(watched, event)
-
-    def _size_hidden_host(self) -> None:
-        """Keep a hidden host at the surface's size.
-
-        Toasts and the banner lay themselves out from the host's size when they show; the
-        host follows the surface only while visible, so its first overlay would be laid
-        out for a stale size.
-        """
-        if not self.host.isVisible():
-            self.host.sync_geometry()
-
-    def _attach_host(self) -> None:
-        if self.host.isVisible():
-            attach_child_window(self, self.host)
-
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
             self._update_menu_bar()
@@ -387,7 +396,8 @@ class TVWindow(QMainWindow):
     # ---- OptionsDialog host -------------------------------------------------------------------
 
     def options_dialog(self) -> None:
-        OptionsDialog(self).exec()
+        if not self._closing:
+            OptionsDialog(self).exec()
 
     def save_config(self) -> None:
         self.config_manager.save_config()
@@ -400,6 +410,10 @@ class TVWindow(QMainWindow):
 
     def refresh_content_list_size(self) -> None:
         """Rows size themselves to the video area; nothing to do."""
+
+    def reload_epg(self) -> None:
+        """The EPG settings changed: reload the guide in the background (it repaints when ready)."""
+        self.catalog.refresh_epg(force=True)
 
     # ---- lifecycle ----------------------------------------------------------------------------
 
@@ -414,13 +428,15 @@ class TVWindow(QMainWindow):
         if self._closing:
             return
         self._bind_video()
-        self._size_hidden_host()
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self.controller.start()
         self.epg_refresh.start()
 
     def _bind_video(self) -> None:
-        """Hand libVLC the surface's native window (again, if a flag change recreated it)."""
+        """Hand libVLC the surface's native window; again only if its id changed.
+
+        On macOS a window flag change (the mini player) keeps the same view.
+        """
         if not _native_video_handles():
             if self._bound_handle is None:
                 self._bound_handle = 0
@@ -437,25 +453,37 @@ class TVWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         """Close in steps, each after the event loop ran again.
 
-        libVLC removes its video view on the main run loop after a stop (macOS), and closing
-        the window before that crashes; running QThreads must finish without blocking the GUI.
+        1. Stop: the catalog starts no more jobs, playback stops, the geometry is saved.
+        2. Wait for running QThreads (never block the GUI), with a notice after half a second.
+        3. Save the image and EPG indexes and release libVLC. On macOS libVLC removes its
+           video view on the run loop after a stop, and closing before that crashes.
+        4. Close.
         """
+        if self._closed:  # a late retry
+            event.accept()
+            return
         if not self._closing:
             self._closing = True
-            self._shut_down()  # stops playback
+            self._mini_waiting = False
+            self._shut_down()
             self._close_later(event)
             return
         if has_pending_threads():
             self._close_retries += 1
-            if self._close_retries == CLOSING_NOTICE_AFTER:
-                self.overlays.toast.show_message(CLOSING_TEXT, "info", 60_000)
+            if self._close_retries % CLOSING_NOTICE_AFTER == 0:
+                self.overlays.toast.show_message(CLOSING_TEXT, "info", CLOSING_NOTICE_MS)
             self._close_later(event)
             return
         if not self._video_released:
             self._video_released = True
-            self._release_video()
+            self._run_steps(
+                ("save the image cache index", self.image_manager.save_index),
+                ("save the EPG index", self.epg_manager.save_index),
+                ("release the video", self._release_video),
+            )
             self._close_later(event)
             return
+        self._closed = True
         event.accept()
         self.app.quit()
 
@@ -465,13 +493,15 @@ class TVWindow(QMainWindow):
 
     def _shut_down(self) -> None:
         self.epg_refresh.stop()
-        steps: tuple[tuple[str, Callable[[], None]], ...] = (
+        self._run_steps(
+            ("stop the catalog", self.catalog.shutdown),
             ("stop the controller", self.controller.shutdown),
             ("stop loading logos", self.logos.shutdown),
-            ("save the image cache index", self.image_manager.save_index),
-            ("save the EPG index", self.epg_manager.save_index),
             ("save the window geometry", self._save_geometry),
         )
+
+    @staticmethod
+    def _run_steps(*steps: tuple[str, Callable[[], None]]) -> None:
         for what, step in steps:
             try:
                 step()

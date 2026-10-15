@@ -763,8 +763,12 @@ class OptionsDialog(QDialog):
         if current_provider_changed or force_provider_refresh:
             self.parent().set_provider(force_update=force_provider_refresh)
         elif self.epg_settings_modified:
-            self.epg_manager.set_current_epg()
-            self.parent().refresh_channels()
+            reload_epg = getattr(self.parent(), "reload_epg", None)
+            if reload_epg is not None:
+                reload_epg()  # in the background (TV window); the guide repaints when ready
+            else:
+                self.epg_manager.set_current_epg()
+                self.parent().refresh_channels()
         elif self.xmltv_mapping_modified:
             if self.config_manager.epg_source != "STB":
                 self.epg_manager.reindex_programs()

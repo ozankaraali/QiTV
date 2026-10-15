@@ -117,6 +117,32 @@ class BannerTest(Base):
         self.assertEqual((b.width(), b.height()), (800, round(400 * 0.48)))
 
 
+class HiddenHostTest(Base):
+    """An overlay shown while its host is hidden lays out again when the host resizes."""
+
+    def hidden_host(self):
+        host = QWidget()
+        host.resize(400, 300)  # a stale size: the real one arrives before the host shows
+        self.addCleanup(host.close)
+        return host
+
+    def test_toast_relayouts_when_the_hidden_host_is_resized(self):
+        host = self.hidden_host()
+        t = Toast(host)
+        t.show_message("Add a provider in Settings to start watching")
+        host.resize(1280, 720)  # pending until shown, then sent before the host is visible
+        host.show()
+        self.assertAlmostEqual(t.geometry().center().x(), 640, delta=2)
+
+    def test_banner_relayouts_when_the_hidden_host_is_resized(self):
+        host = self.hidden_host()
+        b = ZapBanner(host)
+        b.show_info(info())
+        host.resize(1280, 720)
+        host.show()
+        self.assertEqual((b.width(), b.height()), (1280, round(720 * 0.48)))
+
+
 class ToastTest(Base):
     def test_hides(self):
         t = Toast(self.host)
@@ -140,6 +166,9 @@ class ToastTest(Base):
         t.show_message("w" * 500)
         self.assertGreaterEqual(t.x(), 0)
         self.assertLessEqual(t.width(), self.host.width())
+
+    def test_stays_on_top(self):
+        self.assertTrue(Toast.stays_on_top)
 
     def test_width_grows_with_text(self):
         t = Toast(self.host)

@@ -51,11 +51,13 @@ class OverlayHost(QWidget):
         surface.installEventFilter(self)
 
     def add_overlay(self, widget: QWidget) -> None:
+        """Host an overlay; one with `stays_on_top` (the toast) stays above the others."""
         self._overlays.append(widget)
         widget.setParent(self)
         widget.hide()
         widget.installEventFilter(self)
         widget.destroyed.connect(lambda _=None, w=widget: self._forget(w))
+        self._raise_on_top()
 
     def remove_overlay(self, widget: QWidget) -> None:
         self._forget(widget)
@@ -66,6 +68,11 @@ class OverlayHost(QWidget):
     def _forget(self, widget) -> None:
         if widget in self._overlays:
             self._overlays.remove(widget)
+
+    def _raise_on_top(self) -> None:
+        for widget in self._overlays:
+            if isValid(widget) and getattr(widget, "stays_on_top", False):
+                widget.raise_()
 
     def overlay_changed(self) -> None:
         self._update_mask()
@@ -104,8 +111,10 @@ class OverlayHost(QWidget):
             if not self.isVisible():
                 self.show()
                 self.raise_()
+                # On every show: macOS drops a child window from its parent when the child
+                # is ordered out.
                 native_id = int(self.winId())
-                if native_id != self._attached_id and attach_child_window(self._window, self):
+                if attach_child_window(self._window, self):
                     self._attached_id = native_id
         elif self.isVisible():
             self.hide()
@@ -120,6 +129,12 @@ class OverlayHost(QWidget):
             self._update_visibility()
         elif obj in self._overlays and kind in (QEvent.Type.Resize, QEvent.Type.Move):
             self._update_mask()
+        elif (
+            obj in self._overlays
+            and kind == QEvent.Type.ZOrderChange
+            and not getattr(obj, "stays_on_top", False)
+        ):
+            self._raise_on_top()  # an overlay raised itself over the toast
         return False
 
     # Clicks that reach the host itself (on transparent parts of overlays that let them through).

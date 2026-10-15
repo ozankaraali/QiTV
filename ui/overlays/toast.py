@@ -10,6 +10,8 @@ from ui.theme import PALETTE, qcolor
 
 
 class Toast(Overlay):
+    stays_on_top = True  # OverlayHost keeps messages above the drawer and bars
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -55,7 +57,9 @@ class Toast(Overlay):
         self.setGeometry((host_w - width) // 2, units.px(2.4), width, height)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if obj is self.parentWidget() and event.type() == QEvent.Type.Resize and self.isVisible():
+        # Not isVisible(): shown while the host is hidden, the host's resize comes first.
+        parent_resized = obj is self.parentWidget() and event.type() == QEvent.Type.Resize
+        if parent_resized and not self.isHidden():
             self._layout()
         return False
 

@@ -1,34 +1,37 @@
 import os
 from pathlib import Path
+import sys
 import tempfile
+import threading
 from typing import Optional
 import unittest
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.*=false")
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QLoggingCategory, QPoint, Qt, qInstallMessageHandler
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from config_manager import ConfigManager
 from epg_manager import EpgManager
 from image_manager import ImageManager
+import main as qitv_main
 from options import OptionsDialog
 from provider_manager import ProviderManager
-from services.playback import PlaybackState, create_instance
+from services.playback import NO_VLC_MESSAGE, PlaybackState, create_instance
 from services.thread_cleanup import has_pending_threads
 from tests.fixtures.local_provider import channel_urls, seed_channels, write_local_provider
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.tv_controller import WELCOME_TEXT
-from ui.tv_window import NO_VIDEO_TEXT, TVWindow
+from ui.tv_window import CLOSING_TEXT, TVWindow
 
 INSTANCE = create_instance(["--vout=dummy", "--aout=dummy", "--quiet"])
-NEEDS_VLC = unittest.skipIf(INSTANCE is None, "libVLC is not available")
 HOST_METHODS = ("save_config", "set_provider", "refresh_channels", "refresh_content_list_size")
 HOST_ATTRIBUTES = ("config_manager", "provider_manager", "epg_manager", "image_manager")
+_OFFSCREEN_NOISE = "This plugin does not support"
 
 
 def wait_until(predicate, timeout_ms=10000):
@@ -40,24 +43,42 @@ def wait_until(predicate, timeout_ms=10000):
 
 
 class WindowCase(unittest.TestCase):
-    """A TVWindow over the local fixture provider in a temporary QITV_CONFIG_DIR."""
+    """A TVWindow over the local fixture provider in a temporary QITV_CONFIG_DIR.
+
+    Without libVLC (NullSession) unless a subclass passes a real instance.
+    """
+
+    vlc_instance = None
 
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        QLoggingCategory.setFilterRules("qt.qpa.*=false")
+        previous = None
+
+        def quiet(mode, context, message):  # the offscreen platform's unsupported features
+            if message.startswith(_OFFSCREEN_NOISE):
+                return
+            if previous is not None:
+                previous(mode, context, message)
+            else:
+                sys.stderr.write(f"{message}\n")
+
+        previous = qInstallMessageHandler(quiet)
+        cls.addClassCleanup(qInstallMessageHandler, previous)
 
     def provider_list(self) -> Optional[list[dict]]:
         return None  # the fixture provider
 
     def make_window(self) -> TVWindow:
-        return TVWindow(
-            self.app,
-            self.config,
-            self.provider_manager,
-            self.image_manager,
-            self.epg_manager,
-            vlc_instance=INSTANCE,
-        )
+        args = (self.app, self.config, self.provider_manager, self.image_manager, self.epg_manager)
+        if self.vlc_instance is not None:
+            return TVWindow(*args, vlc_instance=self.vlc_instance)
+        with (
+            mock.patch("ui.tv_window.create_instance", return_value=None),
+            self.assertLogs("ui.tv_window", "WARNING"),
+        ):
+            return TVWindow(*args)
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -69,6 +90,7 @@ class WindowCase(unittest.TestCase):
         providers = self.provider_list()
         provider = write_local_provider(self.config_dir, providers)
         self.config = ConfigManager()
+        self.prepare_config()
         self.provider_manager = ProviderManager(self.config)
         self.addCleanup(self.provider_manager._cache_writer.shutdown, wait=True)
         if providers is None:
@@ -86,6 +108,9 @@ class WindowCase(unittest.TestCase):
 
         toast.show_message = spy
         self.addCleanup(self.close_window)
+
+    def prepare_config(self) -> None:
+        """Change the configuration before the window is built."""
 
     def close_window(self):
         # The close runs in steps (stop, threads, release); close() returns True once accepted.
@@ -117,49 +142,18 @@ class WindowCase(unittest.TestCase):
         self.assertEqual(drawer.highlighted().title, "Channel 1")
         QTest.keyClick(self.window, Qt.Key.Key_Return)
 
+    def menu_actions(self):
+        return {a.text(): a for m in self.window.menuBar().actions() for a in m.menu().actions()}
 
-@NEEDS_VLC
+    def mini(self):
+        QTest.keyClick(self.window, Qt.Key.Key_P, Qt.KeyboardModifier.AltModifier)
+
+
 class TVWindowTests(WindowCase):
-    def session_on(self, url, states=(PlaybackState.OPENING, PlaybackState.PLAYING)):
-        session = self.window.session
-        return lambda: session.url == url and session.state() in states
-
     def test_constructs_and_shows_with_the_overlay_host(self):
         self.show()
         self.assertIsInstance(self.window.host, OverlayHost)
         self.assertIs(self.window.centralWidget(), self.window.surface)
-
-    def test_drawer_opens_and_enter_starts_the_first_channel(self):
-        self.open_first_channel()
-        self.assertTrue(wait_until(self.session_on(channel_urls()[0])))
-        overlays = self.window.overlays
-        self.assertFalse(overlays.drawer.isVisible())
-        self.assertTrue(overlays.banner.isVisible())
-        self.assertEqual(overlays.banner.info.name, "Channel 1")
-        self.assertTrue(self.window.host.isVisible())
-
-    def test_down_tunes_the_second_channel(self):
-        self.open_first_channel()
-        self.assertTrue(wait_until(self.session_on(channel_urls()[0])))
-        QTest.keyClick(self.window, Qt.Key.Key_Down)
-        self.assertTrue(wait_until(self.session_on(channel_urls()[1])))
-        self.assertEqual(self.window.zap.context.current()["name"], "Channel 2")
-
-    def test_navigation_notices_are_toasted(self):
-        text = "Couldn't refresh Live TV; showing saved channels"
-        self.window.nav.notice.emit(text)
-        self.assertEqual(self.toasts, [(text, "info")])
-
-    def test_the_guide_is_refreshed_every_two_hours(self):
-        timer = self.window.epg_refresh
-        self.assertEqual(timer.interval(), 2 * 60 * 60 * 1000)
-        self.show()
-        self.assertTrue(wait_until(timer.isActive))
-        with mock.patch.object(self.window.catalog, "refresh_epg") as refresh_epg:
-            timer.timeout.emit()
-        refresh_epg.assert_called_once_with()
-        self.close_window()
-        self.assertFalse(timer.isActive())
 
     def test_hosts_the_options_dialog(self):
         for name in HOST_METHODS + HOST_ATTRIBUTES:
@@ -173,23 +167,42 @@ class TVWindowTests(WindowCase):
         saved = ConfigManager().config["window_positions"]["tv_window"]
         self.assertEqual(saved, {"x": 150, "y": 120, "width": 960, "height": 540})
 
-    def test_close_stops_then_releases_vlc_before_the_window_closes(self):
-        # On macOS libVLC removes its video view on the run loop after a stop; closing the
-        # window in the same call crashed.
+    def test_without_libvlc_playing_explains_why(self):
+        self.open_first_channel()
+        self.assertTrue(
+            wait_until(
+                lambda: any(
+                    kind == "error" and NO_VLC_MESSAGE in text for text, kind in self.toasts
+                )
+            )
+        )
+
+    def test_notices_are_toasted_once_by_the_started_controller(self):
         self.show()
         self.wait_for_drawer()
-        session = self.window.session
-        self.addCleanup(session.release)
-        calls = []
-        with (
-            mock.patch.object(session, "stop", side_effect=lambda: calls.append("stop")),
-            mock.patch.object(session, "release", side_effect=lambda: calls.append("release")),
-        ):
-            self.assertFalse(self.window.close())
-            self.assertEqual(calls, ["stop"])
-            self.assertTrue(self.window.isVisible())
-            self.assertTrue(wait_until(lambda: not self.window.isVisible()))
-        self.assertEqual(calls, ["stop", "release"])
+        text = "Couldn't refresh Live TV; showing saved channels"
+        self.window.nav.notice.emit(text)
+        self.assertEqual(self.toasts.count((text, "info")), 1)
+
+    def test_the_guide_is_refreshed_every_two_hours(self):
+        timer = self.window.epg_refresh
+        self.assertEqual(timer.interval(), 2 * 60 * 60 * 1000)
+        self.show()
+        self.assertTrue(wait_until(timer.isActive))
+        with mock.patch.object(self.window.catalog, "refresh_epg") as refresh_epg:
+            timer.timeout.emit()
+        refresh_epg.assert_called_once_with()
+        self.close_window()
+        self.assertFalse(timer.isActive())
+
+    def test_video_is_not_bound_without_native_window_ids(self):
+        # libVLC crashes drawing into the offscreen platform's fake window ids.
+        with mock.patch.object(self.window.session, "set_window") as set_window:
+            self.show()
+            self.wait_for_drawer()
+        set_window.assert_not_called()
+
+    # ---- menus and keys -----------------------------------------------------------------------
 
     def test_menus_list_the_tv_actions_with_their_shortcuts(self):
         menus = {action.text(): action.menu() for action in self.window.menuBar().actions()}
@@ -218,9 +231,6 @@ class TVWindowTests(WindowCase):
             )
             self.assertEqual(context, expected, text)
 
-    def menu_actions(self):
-        return {a.text(): a for m in self.window.menuBar().actions() for a in m.menu().actions()}
-
     def test_keys_reach_the_open_drawer_and_never_trigger_menu_actions(self):
         triggered = []
         for text, action in self.menu_actions().items():
@@ -240,42 +250,6 @@ class TVWindowTests(WindowCase):
         self.assertFalse(self.window.isFullScreen())
         self.assertEqual(triggered, [])
 
-    def test_host_is_attached_again_every_time_it_shows(self):
-        # macOS drops a child window from its parent when the child is ordered out.
-        with mock.patch("ui.tv_window.attach_child_window", return_value=True) as attach:
-            self.show()
-            self.wait_for_drawer()
-            self.assertTrue(wait_until(lambda: attach.call_count == 1))
-            QTest.keyClick(self.window, Qt.Key.Key_Escape)
-            self.assertFalse(self.window.host.isVisible())
-            QTest.keyClick(self.window, Qt.Key.Key_Return)  # the drawer again
-            self.assertTrue(wait_until(lambda: attach.call_count == 2))
-        attach.assert_called_with(self.window, self.window.host)
-
-    def test_video_is_not_bound_without_native_window_ids(self):
-        # libVLC crashes drawing into the offscreen platform's fake window ids.
-        with mock.patch.object(self.window.session, "set_window") as set_window:
-            self.show()
-            self.wait_for_drawer()
-        set_window.assert_not_called()
-
-    def test_banner_shows_a_logo_that_arrives_later(self):
-        self.open_first_channel()
-        banner = self.window.overlays.banner
-        self.assertTrue(wait_until(lambda: banner.info is not None and banner.isVisible()))
-        self.assertIsNone(banner.info.logo)
-        url = "http://logos.invalid/one.png"
-        self.window.zap.context.channels[0]["logo"] = url
-        logo = QPixmap(8, 8)
-        with mock.patch.object(
-            self.window.logos, "pixmap", side_effect=lambda u: logo if u == url else None
-        ):
-            self.window.logos.logoReady.emit("http://logos.invalid/other.png")
-            self.assertIsNone(banner.info.logo)
-            self.window.logos.logoReady.emit(url)
-        self.assertIs(banner.info.logo, logo)
-        self.assertEqual(banner.info.name, "Channel 1")
-
     def test_f_and_the_menu_toggle_fullscreen_and_escape_leaves_it(self):
         self.show()
         drawer = self.wait_for_drawer()
@@ -291,12 +265,9 @@ class TVWindowTests(WindowCase):
         actions["Channel list"].trigger()
         self.assertTrue(drawer.isVisible())
 
-    def test_mini_player_shrinks_to_the_corner_and_restores(self):
-        self.show()
-        self.window.setGeometry(100, 100, 960, 540)
-        self.assertTrue(wait_until(lambda: self.window.geometry().width() == 960))
-        before = self.window.geometry()
-        QTest.keyClick(self.window, Qt.Key.Key_P, Qt.KeyboardModifier.AltModifier)
+    # ---- mini player --------------------------------------------------------------------------
+
+    def assert_mini(self):
         flags = self.window.windowFlags()
         self.assertTrue(flags & Qt.WindowType.FramelessWindowHint)
         self.assertTrue(flags & Qt.WindowType.WindowStaysOnTopHint)
@@ -308,13 +279,221 @@ class TVWindowTests(WindowCase):
         self.assertTrue(available.contains(mini))
         self.assertLessEqual(available.right() - mini.right(), 20)
         self.assertLessEqual(available.bottom() - mini.bottom(), 20)
-        QTest.keyClick(self.window, Qt.Key.Key_P, Qt.KeyboardModifier.AltModifier)
+
+    def assert_not_mini(self):
         self.assertFalse(self.window.windowFlags() & Qt.WindowType.FramelessWindowHint)
         self.assertFalse(self.window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+
+    def test_mini_player_shrinks_to_the_corner_and_restores(self):
+        self.show()
+        self.window.setGeometry(100, 100, 960, 540)
+        self.assertTrue(wait_until(lambda: self.window.geometry().width() == 960))
+        before = self.window.geometry()
+        self.mini()
+        self.assert_mini()
+        self.mini()
+        self.assert_not_mini()
         self.assertTrue(wait_until(lambda: self.window.geometry() == before))
 
+    def test_mini_player_from_fullscreen_waits_for_the_fullscreen_exit(self):
+        self.show()
+        self.window.setGeometry(100, 100, 960, 540)
+        self.assertTrue(wait_until(lambda: self.window.geometry().width() == 960))
+        QTest.keyClick(self.window, Qt.Key.Key_F)
+        self.assertTrue(wait_until(self.window.isFullScreen))
+        self.mini()
+        self.assertFalse(self.window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        self.assertTrue(
+            wait_until(lambda: self.window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        )
+        self.assertFalse(self.window.isFullScreen())
+        self.assert_mini()
+        self.mini()
+        self.assert_not_mini()
+        self.assertTrue(wait_until(lambda: self.window.geometry().width() == 960))
 
-@NEEDS_VLC
+    def test_mini_player_gives_a_maximized_window_back_maximized(self):
+        self.show()
+        self.window.showMaximized()
+        self.assertTrue(wait_until(self.window.isMaximized))
+        self.mini()
+        self.assertFalse(self.window.isMaximized())
+        self.assert_mini()
+        self.mini()
+        self.assertTrue(wait_until(self.window.isMaximized))
+        self.assert_not_mini()
+
+    def test_mini_player_moves_when_the_video_is_dragged(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.mini()
+        self.assert_mini()
+        start = self.window.pos()
+        surface = self.window.surface
+        QTest.mousePress(surface, Qt.MouseButton.LeftButton, pos=QPoint(40, 40))
+        QTest.mouseMove(surface, QPoint(10, 20))
+        QTest.mouseRelease(surface, Qt.MouseButton.LeftButton, pos=QPoint(10, 20))
+        self.assertEqual(self.window.pos(), start + QPoint(-30, -20))
+        QTest.qWait(QApplication.doubleClickInterval() + 100)
+        self.assertFalse(drawer.isVisible())  # the drag is not a click on the video
+
+    # ---- closing ------------------------------------------------------------------------------
+
+    def test_close_stops_the_catalog_before_new_jobs_can_start(self):
+        # A provider setup still running when the close begins must not start an EPG load.
+        catalog = self.window.catalog
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        create_setup = catalog.factory.provider_setup
+
+        def held_setup(*args):
+            worker = create_setup(*args)
+            run = worker.run
+            worker.run = lambda: (gate.wait(5), run())
+            return worker
+
+        started = []
+        run_worker = catalog.runner.run_worker
+
+        def record(*args, **kwargs):
+            started.append(self.window.isVisible() and closing)
+            return run_worker(*args, **kwargs)
+
+        closing = False
+        with (
+            mock.patch.object(catalog.factory, "provider_setup", side_effect=held_setup),
+            mock.patch.object(catalog.runner, "run_worker", side_effect=record),
+        ):
+            self.show()
+            self.assertTrue(wait_until(lambda: len(started) == 1))  # the setup
+            closing = True
+            self.assertFalse(self.window.close())
+            gate.set()
+            self.close_window()
+        self.assertEqual(started, [False])
+
+    def test_close_stops_then_saves_and_releases_vlc_while_still_visible(self):
+        # On macOS libVLC removes its video view on the run loop after a stop; closing the
+        # window in the same call crashed. The indexes are saved after the thread wait.
+        self.show()
+        self.wait_for_drawer()
+        window, calls = self.window, []
+        waits = iter([True, True, False])
+
+        def pending():
+            calls.append("wait")
+            return next(waits, False)
+
+        with (
+            mock.patch.object(window.catalog, "shutdown", side_effect=lambda: calls.append("x")),
+            mock.patch.object(window.session, "stop", side_effect=lambda: calls.append("stop")),
+            mock.patch.object(
+                window.session,
+                "release",
+                side_effect=lambda: calls.append(("release", window.isVisible())),
+            ),
+            mock.patch.object(
+                self.image_manager, "save_index", side_effect=lambda: calls.append("images")
+            ),
+            mock.patch.object(
+                self.epg_manager, "save_index", side_effect=lambda: calls.append("epg")
+            ),
+            mock.patch("ui.tv_window.has_pending_threads", side_effect=pending),
+        ):
+            self.assertFalse(window.close())
+            self.assertEqual(calls, ["x", "stop"])
+            self.assertTrue(window.isVisible())
+            self.assertTrue(wait_until(lambda: not window.isVisible()))
+        self.assertEqual(
+            calls,
+            ["x", "stop", "wait", "wait", "wait", "images", "epg", ("release", True), "wait"],
+        )  # the last check is the final step's, just before the window closes
+
+    def test_closing_notice_stays_visible_for_the_whole_wait(self):
+        self.show()
+        self.wait_for_drawer()
+        toast = self.window.overlays.toast
+        waiting = [True]
+        with mock.patch("ui.tv_window.has_pending_threads", side_effect=lambda: waiting[0]):
+            self.assertFalse(self.window.close())
+            self.assertTrue(wait_until(lambda: (CLOSING_TEXT, "info") in self.toasts, 3000))
+            for _ in range(3):  # stays up while the wait lasts
+                QTest.qWait(400)
+                self.assertTrue(toast.isVisible())
+                self.assertEqual(self.toasts[-1], (CLOSING_TEXT, "info"))
+            # Shown again and again, so its timer never runs out however long the wait.
+            self.assertGreaterEqual(self.toasts.count((CLOSING_TEXT, "info")), 3)
+            waiting[0] = False
+            self.assertTrue(wait_until(lambda: not self.window.isVisible()))
+
+    def test_a_late_close_retry_after_closing_does_nothing(self):
+        self.show()
+        self.close_window()
+        with mock.patch("ui.tv_window.has_pending_threads") as pending:
+            self.assertTrue(self.window.close())
+        pending.assert_not_called()
+
+    def test_input_is_ignored_while_closing(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.assertFalse(drawer.isVisible())
+        waiting = [True]
+        with (
+            mock.patch("ui.tv_window.has_pending_threads", side_effect=lambda: waiting[0]),
+            mock.patch("ui.tv_window.OptionsDialog") as dialog,
+        ):
+            self.assertFalse(self.window.close())
+            self.menu_actions()["Settings…"].trigger()
+            QTest.keyClick(self.window, Qt.Key.Key_F)
+            QTest.keyClick(self.window, Qt.Key.Key_Return)
+            self.window.toggle_fullscreen()
+            self.window.toggle_mini_player()
+            QTest.qWait(50)
+            dialog.assert_not_called()
+            self.assertFalse(self.window.isFullScreen())
+            self.assert_not_mini()
+            self.assertFalse(drawer.isVisible())
+            waiting[0] = False
+            self.assertTrue(wait_until(lambda: not self.window.isVisible()))
+
+
+class GeometryRestoreTests(WindowCase):
+    def prepare_config(self):
+        positions = self.config.config["window_positions"]
+        positions["tv_window"] = {"x": 140, "y": 90, "width": 1024, "height": 576}
+
+    def test_restores_the_saved_geometry_at_construction(self):
+        geometry = self.window.geometry()
+        self.assertEqual(geometry.getRect(), (140, 90, 1024, 576))
+
+
+@unittest.skipIf(INSTANCE is None, "libVLC is not available")
+class VlcWindowTests(WindowCase):
+    vlc_instance = INSTANCE
+
+    def session_on(self, url, states=(PlaybackState.OPENING, PlaybackState.PLAYING)):
+        session = self.window.session
+        return lambda: session.url == url and session.state() in states
+
+    def test_drawer_opens_and_enter_starts_the_first_channel(self):
+        self.open_first_channel()
+        self.assertTrue(wait_until(self.session_on(channel_urls()[0])))
+        overlays = self.window.overlays
+        self.assertFalse(overlays.drawer.isVisible())
+        self.assertTrue(overlays.banner.isVisible())
+        self.assertEqual(overlays.banner.info.name, "Channel 1")
+        self.assertTrue(self.window.host.isVisible())
+
+    def test_down_tunes_the_second_channel(self):
+        self.open_first_channel()
+        self.assertTrue(wait_until(self.session_on(channel_urls()[0])))
+        QTest.keyClick(self.window, Qt.Key.Key_Down)
+        self.assertTrue(wait_until(self.session_on(channel_urls()[1])))
+        self.assertEqual(self.window.zap.context.current()["name"], "Channel 2")
+
+
 class NoProviderTests(WindowCase):
     def provider_list(self):
         return []
@@ -330,7 +509,6 @@ class NoProviderTests(WindowCase):
         self.assertAlmostEqual(toast.geometry().center().x(), host.width() / 2, delta=2)
 
 
-@NEEDS_VLC
 class FailingProviderTests(WindowCase):
     def provider_list(self):
         missing = Path(self.config_dir) / "missing.m3u"
@@ -348,37 +526,17 @@ class FailingProviderTests(WindowCase):
         self.assertGreater(stack.index(toast), stack.index(drawer))  # the error stays readable
 
 
-class NoVlcTests(WindowCase):
-    def make_window(self):
-        with (
-            mock.patch("ui.tv_window.create_instance", return_value=None),
-            self.assertLogs("ui.tv_window", "WARNING"),
-        ):
-            return TVWindow(
-                self.app,
-                self.config,
-                self.provider_manager,
-                self.image_manager,
-                self.epg_manager,
-            )
-
-    def test_without_libvlc_playing_explains_why(self):
-        self.open_first_channel()
-        self.assertTrue(
-            wait_until(
-                lambda: any(kind == "error" and NO_VIDEO_TEXT in text for text, kind in self.toasts)
-            )
-        )
-
-
-@NEEDS_VLC
 class OptionsDialogTests(WindowCase):
+    def dialog(self):
+        dialog = OptionsDialog(self.window)
+        self.addCleanup(dialog.deleteLater)
+        return dialog
+
     def test_settings_load_and_save_the_tv_options(self):
         self.config.live_latency = "stable"
         self.config.mouse_wheel_action = "volume"
         self.config.start_with_last_channel = False
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
+        dialog = self.dialog()
         self.assertFalse(hasattr(dialog, "keyboard_remote_checkbox"))
         self.assertEqual(dialog.live_latency_combo.currentData(), "stable")
         self.assertEqual(dialog.mouse_wheel_combo.currentData(), "volume")
@@ -403,9 +561,31 @@ class OptionsDialogTests(WindowCase):
         (cache / "probe.bin").write_bytes(b"x" * 1024 * 1024)
         self.provider_manager._cache_writer.submit(lambda: None).result(timeout=5)
         expected = sum(f.stat().st_size for f in cache.rglob("*") if f.is_file()) / (1024 * 1024)
-        dialog = OptionsDialog(self.window)
-        self.addCleanup(dialog.deleteLater)
-        self.assertAlmostEqual(dialog.get_cache_size(), expected, places=3)
+        self.assertAlmostEqual(self.dialog().get_cache_size(), expected, places=3)
+
+    def test_an_epg_change_reloads_the_guide_in_the_background(self):
+        dialog = self.dialog()
+        dialog.epg_url_input.setText("http://epg.invalid/guide.xml")
+        with (
+            mock.patch.object(self.window.catalog, "refresh_epg") as refresh_epg,
+            mock.patch.object(self.epg_manager, "set_current_epg") as set_current_epg,
+        ):
+            dialog.save_settings()
+        refresh_epg.assert_called_once_with(force=True)
+        set_current_epg.assert_not_called()  # never on the GUI thread
+
+
+class QtPlatformTests(unittest.TestCase):
+    def test_linux_with_an_x_display_prefers_xwayland(self):
+        environ = {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}
+        self.assertEqual(qitv_main.qt_platform_override("Linux", environ), "xcb;wayland")
+
+    def test_an_explicit_choice_or_no_x_display_is_left_alone(self):
+        override = qitv_main.qt_platform_override
+        self.assertIsNone(override("Linux", {"DISPLAY": ":0", "QT_QPA_PLATFORM": "wayland"}))
+        self.assertIsNone(override("Linux", {"WAYLAND_DISPLAY": "wayland-0"}))
+        self.assertIsNone(override("Darwin", {"DISPLAY": ":0"}))
+        self.assertIsNone(override("Windows", {}))
 
 
 if __name__ == "__main__":

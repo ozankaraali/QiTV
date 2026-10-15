@@ -11,7 +11,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from services.playback import PlaybackSession, PlaybackState, create_instance, vlc
+from services.playback import (
+    NO_VLC_MESSAGE,
+    NullSession,
+    PlaybackSession,
+    PlaybackState,
+    create_instance,
+    vlc,
+)
 from services.vlc_profile import PlayKind
 
 FIXTURE = Path(__file__).parent / "fixtures" / "smoke.mp4"
@@ -229,6 +236,36 @@ class PlaybackSessionTests(unittest.TestCase):
         self.session.play(missing, kind=PlayKind.LIVE)
         self.assertTrue(wait_for(lambda: self.session.state() is PlaybackState.ERROR, 6000))
         self.assertTrue(errors)
+
+
+def _public(cls) -> set[str]:
+    return {name for name in vars(cls) if not name.startswith("_")}
+
+
+class NullSessionTests(unittest.TestCase):
+    """Runs without libVLC."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_shares_the_playback_session_api(self):
+        self.assertLessEqual(_public(PlaybackSession), _public(NullSession))
+
+    def test_play_explains_that_vlc_is_needed(self):
+        session = NullSession()
+        errors = []
+        session.errorOccurred.connect(errors.append)
+        session.play("file:///clip.mp4", kind=PlayKind.VOD_FILE)
+        self.assertEqual(errors, [NO_VLC_MESSAGE])
+        self.assertIs(session.state(), PlaybackState.IDLE)
+        self.assertIsNone(session.url)
+        self.assertEqual(
+            (session.volume(), session.toggle_mute(), session.audio_tracks()), (0, False, [])
+        )
+        session.stop()
+        session.release()
+        session.release()
 
 
 if __name__ == "__main__":

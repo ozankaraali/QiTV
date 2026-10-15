@@ -181,6 +181,32 @@ class LifetimeTests(HostCase):
             QTest.qWait(20)
         self.assertGreaterEqual(len(calls), 1)
 
+    def test_attaches_again_after_every_show(self):
+        # macOS drops a child window from its parent when the child is ordered out.
+        calls = []
+        with patch("ui.overlay_host.attach_child_window", lambda p, c: calls.append(c) or True):
+            self.panel.show()
+            QTest.qWait(20)
+            self.panel.hide()
+            QTest.qWait(20)
+            self.panel.show()
+            QTest.qWait(20)
+        self.assertEqual(calls, [self.host, self.host])
+
+    def test_stays_on_top_overlays_stay_above_raised_overlays(self):
+        top = Overlay()
+        top.stays_on_top = True
+        self.host.add_overlay(top)
+        later = Overlay()  # created and added after: would cover the top overlay
+        self.host.add_overlay(later)
+        stack = self.host.children()
+        self.assertGreater(stack.index(top), stack.index(later))
+        top.show()
+        self.panel.show()
+        self.panel.raise_()
+        stack = self.host.children()
+        self.assertGreater(stack.index(top), stack.index(self.panel))
+
 
 class ConfigDirOverrideTests(unittest.TestCase):
     def test_env_override(self):

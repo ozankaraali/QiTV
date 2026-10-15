@@ -113,7 +113,9 @@ class ZapBanner(Overlay):
         self.setGeometry(0, parent.height() - height, parent.width(), height)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if obj is self.parentWidget() and event.type() == QEvent.Type.Resize and self.isVisible():
+        # Not isVisible(): shown while the host is hidden, the host's resize comes first.
+        parent_resized = obj is self.parentWidget() and event.type() == QEvent.Type.Resize
+        if parent_resized and not self.isHidden():
             self._layout()
         return False
 
