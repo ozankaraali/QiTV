@@ -170,6 +170,9 @@ class SessionManager(QObject):
             self._tuners[slot.name] = tuner
             tuner.released.connect(self._proceed)  # a slot let go: a waiting open may go on
             stream.granted.connect(self._on_granted)
+        # A wanted level makes PlaybackSession apply it on every media it opens; without one
+        # the main player takes whatever level its audio output opens at.
+        main.playback.set_volume(self._levels[main.name])
         main.live.failed.connect(self._on_main_failed)
         pip.live.failed.connect(self._on_pip_failed)
         main.live.timelineChanged.connect(self._on_main_timeline)

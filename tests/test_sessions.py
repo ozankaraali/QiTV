@@ -12,7 +12,7 @@ from timer_fixtures import elapse
 from services.budgeted_stream import RELEASE_CAP_MS, BudgetedStream
 from services.connection_budget import ConnectionBudget
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
-from services.sessions import PIP_FAILED, PIP_LEVEL, SessionManager, Slot, limit_message
+from services.sessions import MAIN_LEVEL, PIP_FAILED, PIP_LEVEL, SessionManager, Slot, limit_message
 
 app = QApplication.instance() or QApplication([])
 
@@ -188,7 +188,15 @@ class SessionManagerTests(_Fixture):
         self.assertIsNone(self.manager.small())
         self.assertFalse(self.manager.pip_open())
         self.assertFalse(self.manager.swap())
-        self.assertEqual(self.log, [])
+        # Only the main player is given its wanted level (see the next test).
+        self.assertEqual(self.log, [("main", "player", "set_volume", MAIN_LEVEL)])
+
+    def test_the_main_player_is_given_its_level_so_it_never_inherits_the_pips(self):
+        # Review I1: VLC 3 starts every new audio output at the last level any player set
+        # (volume-save). A player with no wanted level took the PiP's 30 on its next media.
+        # With a wanted level PlaybackSession applies it again on every media it opens.
+        self.assertEqual(self.calls("main", "player"), [("set_volume", MAIN_LEVEL)])
+        self.assertEqual(self.manager.level("main"), MAIN_LEVEL)
 
     def test_opening_starts_the_pip_live_session_muted_once_granted(self):
         self.hold_main(2)
@@ -208,7 +216,7 @@ class SessionManagerTests(_Fixture):
         self.assertIs(self.manager.large(), self.main)
         self.assertIs(self.manager.small(), self.pip)
         self.assertEqual(sorted(self.budget.holders(PROVIDER)), ["main", "pip"])
-        self.assertEqual(self.calls("main"), [])
+        self.assertEqual(self.calls("main"), [("player", "set_volume", MAIN_LEVEL)])  # only its own
 
     def test_a_limit_held_by_main_denies_pip_and_queues_nothing(self):
         ticket = self.hold_main(1)

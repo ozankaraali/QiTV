@@ -65,7 +65,10 @@ class PlaybackState(str, Enum):
 
 def default_args() -> list[str]:
     """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one."""
-    args = ["--no-video-title-show"]
+    # VLC 3's volume-save keeps the last level set on any audio output in the process's
+    # config, and every output opened later starts there: the PiP player's 30 became the
+    # large picture's. Each player is given its own level instead (SessionManager).
+    args = ["--no-video-title-show", "--no-volume-save"]
     if platform.system() == "Windows":
         # VLC 3's default Windows output, mmdevice, sets volume and mute on the process's
         # audio session (ISimpleAudioVolume), which every player's stream joins: the main

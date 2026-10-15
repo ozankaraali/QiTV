@@ -936,20 +936,33 @@ def _on(system):
 class DefaultArgsTests(unittest.TestCase):
     def test_quiet_unless_a_log_file_is_named(self):
         with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Darwin"):
-            self.assertEqual(default_args(), ["--no-video-title-show", "--quiet"])
+            self.assertEqual(
+                default_args(), ["--no-video-title-show", "--no-volume-save", "--quiet"]
+            )
 
     def test_windows_plays_audio_through_directsound(self):
         # mmdevice sets volume and mute on the process's audio session: main and PiP would
         # mute and level each other. DirectSound sets them on each player's own buffer.
         with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Windows"):
             quiet = default_args()
-        self.assertEqual(quiet, ["--no-video-title-show", "--aout=directsound", "--quiet"])
+        self.assertEqual(
+            quiet, ["--no-video-title-show", "--no-volume-save", "--aout=directsound", "--quiet"]
+        )
         with (
             mock.patch.dict(os.environ, {VLC_LOG_ENV: "/tmp/smoke/libvlc.log"}),
             _on("Windows"),
             self.assertLogs("services.playback", "WARNING"),
         ):
             self.assertIn("--aout=directsound", default_args())
+
+    def test_no_player_inherits_the_last_level_another_one_set(self):
+        # Review I1: VLC 3's volume-save keeps the last level set on any audio output in the
+        # process's config, and every output opened later starts there. The PiP's 30 became
+        # the large picture's (verified with a real output on macOS; the dummy output keeps
+        # no volume, so only the argument can be asserted here).
+        for system in ("Darwin", "Linux", "Windows"):
+            with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on(system):
+                self.assertIn("--no-volume-save", default_args())
 
     def test_other_platforms_keep_libvlcs_audio_output(self):
         for system in ("Darwin", "Linux"):

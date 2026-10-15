@@ -114,6 +114,7 @@ from services.provider_manager import ProviderManager  # noqa: E402
 from services.sessions import MAIN_PURPOSE  # noqa: E402
 from services.sessions import PURPOSE as PIP_PURPOSE  # noqa: E402
 from services.vlc_profile import PlayKind  # noqa: E402
+from tests.fixtures.audio_check import reading_matches  # noqa: E402
 from tests.fixtures.live_source import LIVE_TS, LiveSource, peak_of  # noqa: E402
 from tests.fixtures.local_provider import (  # noqa: E402
     FIXTURE_DIR,
@@ -1946,8 +1947,8 @@ class Driver:
             readings[slot_name] = got
             manager_ok = manager_ok and sessions.muted(slot_name) == muted
             manager_ok = manager_ok and (level is None or sessions.level(slot_name) == level)
-            vlc_ok = vlc_ok and got is not None and got[0] == int(muted)
-            vlc_ok = vlc_ok and (level is None or got is not None and got[1] == level)
+            # libVLC's level is the manager's, whether or not the check names one (Review I1)
+            vlc_ok = vlc_ok and reading_matches(muted, sessions.level(slot_name), got)
             parts.append(
                 f"{slot_name}: wanted {'muted' if muted else 'unmuted'}"
                 + ("" if level is None else f" at {level}")
