@@ -2,11 +2,12 @@
 
 import logging
 
-from PySide6.QtCore import QEvent, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QLinearGradient, QPainter
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate
 
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode
+from services.text_fold import fold
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import ChannelListView, ChannelRowDelegate, ChannelRowsModel
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
@@ -21,6 +22,7 @@ PAD_TOP_U = 2.4
 PAD_SIDE_U = 1.6
 CRUMB_H_U = 2.2
 FILTER_H_U = 3.4
+PREVIEW_DEBOUNCE_MS = 200
 LOADING_TEXT = "Loading…"
 EMPTY_TEXT = "Nothing here"
 ERROR_TEXT = "Couldn't load — press Enter to retry"
@@ -135,6 +137,7 @@ class _Column:
         self.view.rowClicked.connect(lambda row: drawer._on_row_clicked(side, row))
         self.parent: NavNode | None = None
         self.nodes: list[NavNode] = []
+        self.rows: dict[NavNode, int] = {}
         self.current: NavNode | None = None
         self.message: str | None = None
         self.rect = QRect()
@@ -158,6 +161,12 @@ class Drawer(Overlay):
         self.filter_text = ""
         self._filter_key: tuple | None = None
         self._pending_key: str | None = None
+        self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
+        self._preview_node: NavNode | None = None
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(PREVIEW_DEBOUNCE_MS)
+        self._preview_timer.timeout.connect(self._flush_preview)
         nav.changed.connect(self._on_nav_changed)
         if parent is not None:
             parent.installEventFilter(self)
@@ -170,6 +179,7 @@ class Drawer(Overlay):
         self.filter_text = ""
         self._filter_key = None
         self._pending_key = focus_key
+        self._cancel_preview()
         self._columns["right"].parent = None  # force the highlight to be re-chosen
         self._relayout()
         self._refresh()
@@ -177,6 +187,7 @@ class Drawer(Overlay):
         self.raise_()
 
     def close_drawer(self) -> None:
+        self._flush_preview()
         was_visible = self.isVisible()
         self.hide()
         if was_visible:
@@ -184,37 +195,38 @@ class Drawer(Overlay):
 
     def highlighted(self) -> NavNode | None:
         col = self._columns[self.focus_side]
-        return col.current if col.current in col.nodes else None
+        return col.current if col.current in col.rows else None
 
     def message_for(self, side: str) -> str | None:
         return self._columns[side].message
 
-    def move(self, delta: int) -> None:  # type: ignore[override]  # name fixed by the brief
+    def move_by(self, delta: int) -> None:
         col = self._columns[self.focus_side]
         if not col.nodes:
             return
         self._pending_key = None
-        try:
-            row = col.nodes.index(col.current)  # type: ignore[arg-type]
-        except ValueError:
-            row = -1 if delta > 0 else len(col.nodes)
+        row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))  # type: ignore[arg-type]
         self._select(col, min(len(col.nodes) - 1, max(0, row + delta)))
 
     def page(self, delta: int) -> None:
         col = self._columns[self.focus_side]
         row_h = col.view.sizeHintForRow(0)
         rows = max(1, col.view.height() // row_h - 1) if row_h > 0 else 8
-        self.move(delta * rows)
+        self.move_by(delta * rows)
 
     def left(self) -> None:
         if self.focus_side == "right":
             self.focus_side = "left"
+            self._left_choice = None
             self._refresh()
         else:
+            self._cancel_preview()
+            self._left_choice = None
             self._nav.up()
 
     def right(self) -> None:
         if self.focus_side == "left":
+            self._commit_left()
             self.focus_side = "right"
             self._refresh()
             return
@@ -268,16 +280,44 @@ class Drawer(Overlay):
 
     def _select(self, col: _Column, row: int) -> None:
         node = col.nodes[row]
-        if col.side == "left":
-            if node != col.current:
-                self._nav.open(node)  # the preview; _refresh re-highlights via nav.changed
-            return
         col.current = node
+        if col.side == "left":
+            self._left_choice = node
+            self._schedule_preview(node)
         self._show_current(col)
 
+    def _schedule_preview(self, node: NavNode) -> None:
+        path = self._nav.path
+        if node.layer == "source" or (path and node == path[-1]):
+            self._cancel_preview()  # sources only highlight; Right/Enter opens them
+            return
+        self._preview_node = node
+        self._preview_timer.start()
+
+    def _cancel_preview(self) -> None:
+        self._preview_timer.stop()
+        self._preview_node = None
+
+    def _flush_preview(self) -> None:
+        node = self._preview_node
+        self._cancel_preview()
+        if node is not None:
+            self._left_choice = None
+            self._nav.open(node)
+
+    def _commit_left(self) -> None:
+        """Open the left highlight (flushing a pending preview) before focus moves right."""
+        self._flush_preview()
+        node = self._left_choice
+        self._left_choice = None
+        path = self._nav.path
+        if node is not None and not (path and node == path[-1]):
+            self._nav.open(node)
+
     def _show_current(self, col: _Column) -> None:
-        if col.current in col.nodes:
-            idx = col.model.index(col.nodes.index(col.current))
+        row = col.rows.get(col.current) if col.current is not None else None
+        if row is not None:
+            idx = col.model.index(row)
             col.view.setCurrentIndex(idx)
             col.view.scrollTo(idx, QAbstractItemView.EnsureVisible)
         else:
@@ -298,9 +338,6 @@ class Drawer(Overlay):
         if self.isVisible():
             self._refresh()
 
-    def _matches(self, node: NavNode) -> bool:
-        return self.filter_text.casefold() in node.title.casefold()
-
     def _refresh(self) -> None:
         (left_parent, left_children), (right_parent, right_children) = self._nav.columns()
         focused_parent = left_parent if self.focus_side == "left" else right_parent
@@ -308,9 +345,9 @@ class Drawer(Overlay):
         if key != self._filter_key:
             self._filter_key = key
             self.filter_text = ""
-        path = self._nav.path
-        self._fill(self._columns["left"], left_parent, left_children, path[-1] if path else None)
-        self._fill(self._columns["right"], right_parent, right_children, None)
+        needle = fold(self.filter_text)
+        self._fill(self._columns["left"], left_parent, left_children, needle)
+        self._fill(self._columns["right"], right_parent, right_children, needle)
         for side, col in self._columns.items():
             col.view.setProperty("columnFocused", side == self.focus_side)
             col.view.viewport().update()
@@ -321,7 +358,7 @@ class Drawer(Overlay):
         col: _Column,
         parent: NavNode | None,
         children: list[NavNode] | None,
-        current: NavNode | None,
+        needle: str,
     ) -> None:
         parent_changed = parent != col.parent
         col.parent = parent
@@ -332,26 +369,42 @@ class Drawer(Overlay):
         else:
             col.message = None
         nodes = children or []
-        if col.side == self.focus_side and self.filter_text:
-            nodes = [n for n in nodes if self._matches(n)]
+        if col.side == self.focus_side and needle:
+            nodes = [n for n in nodes if needle in fold(n.title)]
         if col.message is None and not nodes:
             col.message = EMPTY_TEXT
         col.nodes = nodes
+        col.rows = {n: i for i, n in enumerate(nodes)}
         live = bool(nodes) and _is_live_item(self._nav, nodes[0])
         col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
         col.model.set_nodes(nodes, live)
-        if current is not None:
-            col.current = current
-        elif self._pending_key is not None and col.side == "right":
-            match = next((n for n in nodes if n.key == self._pending_key), None)
-            if match is not None:
-                col.current = match
-                self._pending_key = None
-            elif parent_changed or col.current not in nodes:
+        if col.side == "left":
+            self._choose_left(col, nodes)
+        else:
+            if self._pending_key is not None:
+                match = next((n for n in nodes if n.key == self._pending_key), None)
+                if match is not None:
+                    col.current = match
+                    self._pending_key = None
+            if parent_changed or col.current not in col.rows:
                 col.current = nodes[0] if nodes else None
-        elif parent_changed or col.current not in nodes:
-            col.current = nodes[0] if nodes else None
+            if children is not None:
+                self._pending_key = None  # a stale focus key must not outlive the first fill
         self._show_current(col)
+
+    def _choose_left(self, col: _Column, nodes: list[NavNode]) -> None:
+        path = self._nav.path
+        end = path[-1] if path else None
+        if self._left_choice in col.rows:
+            col.current = self._left_choice
+        elif end in col.rows:
+            col.current = end
+        elif col.side == self.focus_side and self.filter_text and nodes:
+            col.current = nodes[0]  # auto-highlight the first match and preview it
+            self._left_choice = nodes[0]
+            self._schedule_preview(nodes[0])
+        else:
+            col.current = None
 
     # ---- layout and painting ----------------------------------------------------------------
 
