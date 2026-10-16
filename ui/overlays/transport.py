@@ -70,6 +70,8 @@ TOOLTIPS = {
     "pip": "Second channel (P)",
     "mini": "Mini player (Alt+P)",
     "fullscreen": "Fullscreen (F)",
+    "mini_back": "Back to the full window (Alt+P)",
+    "fullscreen_back": "Exit fullscreen (F)",
     "external": "Open in external player",
     "volume": "Volume (+/−, M)",
     "audio": "Audio track",
@@ -229,6 +231,7 @@ class Transport(Overlay):
         self._pip_open = False
         self._pip_rect = QRect()  # the small picture: the shades leave it alone
         self._muted = False  # the large picture's mute: the speaker shows it
+        self._mini = self._fullscreen = False  # their buttons then show the way back
         self._favorite = False  # the live channel is a favorite: its star is lit
         self._library = False  # the title came from the Library: ‹ Library shows
         self._hand = False  # the pointer is over the title row's controls
@@ -364,6 +367,22 @@ class Transport(Overlay):
             self._muted = muted
             self.update()
 
+    def set_window_mode(self, *, mini: bool, fullscreen: bool) -> None:
+        """In the mini player or fullscreen, its button shows the way back."""
+        if (mini, fullscreen) != (self._mini, self._fullscreen):
+            self._mini, self._fullscreen = mini, fullscreen
+            self.update()
+
+    def icon(self, name: str) -> str:
+        """The icon a button paints now (ui.overlays.painting.draw_icon's name)."""
+        if name == "volume" and self._muted:
+            return "mute"
+        if name == "mini" and self._mini:
+            return "full_window"
+        if name == "fullscreen" and self._fullscreen:
+            return "exit_fullscreen"
+        return _ICONS.get(name, name)
+
     def set_library_available(self, available: bool) -> None:
         """The "‹ Library" button: shown during a movie or an episode when `available` (it was
         played from the Library); never on live TV."""
@@ -449,6 +468,8 @@ class Transport(Overlay):
             return key_hint(what, FAVORITE_KEY)
         if name in KEY_HINTS:
             return key_hint(*KEY_HINTS[name])
+        if (name == "mini" and self._mini) or (name == "fullscreen" and self._fullscreen):
+            return TOOLTIPS[f"{name}_back"]
         return TOOLTIPS.get(name, "")
 
     def poke(self) -> None:
@@ -761,8 +782,7 @@ class Transport(Overlay):
         for name in _ICON_BUTTONS:
             if name in rects:
                 lit = name == "pip" and self._pip_open
-                icon = "mute" if name == "volume" and self._muted else _ICONS.get(name, name)
-                draw_icon(p, icon, rects[name], qcolor(PALETTE.accent) if lit else text)
+                draw_icon(p, self.icon(name), rects[name], qcolor(PALETTE.accent) if lit else text)
         p.end()
 
     def _paint_scrims(self, p: QPainter) -> None:

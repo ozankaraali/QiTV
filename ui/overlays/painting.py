@@ -270,6 +270,15 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
                 brackets.lineTo(sx, sy)
                 brackets.lineTo(sx, sy + dy)
             line(brackets)
+        elif name == "exit_fullscreen":  # leave fullscreen: the corners turned inwards
+            brackets = QPainterPath()
+            for sx, sy in ((0.15, 0.15), (0.85, 0.15), (0.15, 0.85), (0.85, 0.85)):
+                vx = 0.37 if sx < 0.5 else 0.63
+                vy = 0.37 if sy < 0.5 else 0.63
+                brackets.moveTo(sx, vy)
+                brackets.lineTo(vx, vy)
+                brackets.lineTo(vx, sy)
+            line(brackets)
         elif name == "subtitles":
             line(_rrect(0.12, 0.22, 0.76, 0.56, 0.1))
             lines = QPainterPath(QPointF(0.26, 0.45))
@@ -361,6 +370,13 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             arrow.lineTo(0.46, 0.56)
             line(arrow)
             fill(_poly([(0.5, 0.6), (0.34, 0.58), (0.48, 0.44)]))
+        elif name == "full_window":  # back from the corner: mini_player's arrow turned out
+            line(_rrect(0.08, 0.2, 0.84, 0.6, 0.08))
+            fill(_rrect(0.56, 0.52, 0.28, 0.2, 0.04))
+            arrow = QPainterPath(QPointF(0.48, 0.54))
+            arrow.lineTo(0.26, 0.34)
+            line(arrow)
+            fill(_poly([(0.2, 0.3), (0.36, 0.32), (0.22, 0.46)]))
         elif name == "external":  # open in another player: a box with an arrow out of it
             box = QPainterPath(QPointF(0.44, 0.2))
             box.lineTo(0.2, 0.2)

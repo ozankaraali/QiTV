@@ -4,14 +4,24 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QMouseEvent, QPixmap
+from PySide6.QtCore import (
+    QCoreApplication,
+    QEvent,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QMouseEvent, QPainter, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, timeline, wait_until
 
 from ui.keymap import key_hint
-from ui.overlays.painting import Units, badge_color
+from ui.overlays.painting import Units, badge_color, draw_icon
 from ui.overlays.transport import Transport
 
 
@@ -211,6 +221,27 @@ class TransportCase(unittest.TestCase):
         ):
             self.assertEqual(t.tooltip_at(t.button_rect(name).center()), text)
         self.assertEqual(t.tooltip_at(QPointF(640, 300)), "")
+
+    def test_in_the_mini_player_and_fullscreen_their_buttons_show_the_way_back(self):
+        t = self.make()
+        t.show_live("One", "")
+        self.assertEqual((t.icon("mini"), t.icon("fullscreen")), ("mini_player", "fullscreen"))
+        t.set_window_mode(mini=True, fullscreen=False)
+        self.assertEqual(t.icon("mini"), "full_window")
+        mini = t.button_rect("mini").center()
+        self.assertEqual(t.tooltip_at(mini), "Back to the full window (Alt+P)")
+        t.set_window_mode(mini=False, fullscreen=True)
+        self.assertEqual((t.icon("mini"), t.icon("fullscreen")), ("mini_player", "exit_fullscreen"))
+        full = t.button_rect("fullscreen").center()
+        self.assertEqual(t.tooltip_at(full), "Exit fullscreen (F)")
+        for name in ("full_window", "exit_fullscreen"):  # both are drawn
+            image = QImage(32, 32, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            draw_icon(painter, name, QRectF(0, 0, 32, 32), QColor("white"))
+            painter.end()
+            alphas = (image.pixelColor(x, y).alpha() for x in range(32) for y in range(32))
+            self.assertTrue(any(alphas), name)
 
     def modes(self, t):
         """Live, a movie, then time-shifted live (the bar): each lays its buttons out."""

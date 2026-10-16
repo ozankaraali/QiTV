@@ -627,10 +627,13 @@ class TVWindowTests(WindowCase):
         self.window.setGeometry(100, 100, 960, 540)
         self.assertTrue(wait_until(lambda: self.window.geometry().width() == 960))
         before = self.window.geometry()
+        transport = self.window.overlays.transport
         self.mini()
         self.assert_mini()
+        self.assertEqual(transport.icon("mini"), "full_window")  # its button goes back
         self.mini()
         self.assert_not_mini()
+        self.assertEqual(transport.icon("mini"), "mini_player")
         self.assertTrue(wait_until(lambda: self.window.geometry() == before))
 
     def test_mini_player_from_fullscreen_waits_for_the_fullscreen_exit(self):
@@ -639,6 +642,7 @@ class TVWindowTests(WindowCase):
         self.assertTrue(wait_until(lambda: self.window.geometry().width() == 960))
         QTest.keyClick(self.window, Qt.Key.Key_F)
         self.assertTrue(wait_until(self.window.isFullScreen))
+        self.assertEqual(self.window.overlays.transport.icon("fullscreen"), "exit_fullscreen")
         self.mini()
         self.assertFalse(self.window.windowFlags() & Qt.WindowType.FramelessWindowHint)
         self.assertTrue(
