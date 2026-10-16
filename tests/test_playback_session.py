@@ -936,14 +936,15 @@ class DefaultArgsTests(unittest.TestCase):
     def test_quiet_unless_a_log_file_is_named(self):
         with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Darwin"):
             self.assertEqual(
-                default_args(), ["--no-video-title-show", "--no-volume-save", "--quiet"]
+                default_args(hardware_decoding=True),  # decoding: tests/test_video_decoding.py
+                ["--no-video-title-show", "--no-volume-save", "--quiet"],
             )
 
     def test_windows_plays_audio_through_directsound(self):
         # mmdevice sets volume and mute on the process's audio session: main and PiP would
         # mute and level each other. DirectSound sets them on each player's own buffer.
         with mock.patch.dict(os.environ, {VLC_LOG_ENV: ""}), _on("Windows"):
-            quiet = default_args()
+            quiet = default_args(hardware_decoding=True)
         self.assertEqual(
             quiet, ["--no-video-title-show", "--no-volume-save", "--aout=directsound", "--quiet"]
         )
