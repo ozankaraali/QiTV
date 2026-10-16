@@ -97,8 +97,6 @@ class LiveControls(QObject):
         self._show_transport = show_transport
         self._logo = logo
         self._ticks: list[tuple[float, str]] = []
-        self._unavailable_noticed: set[tuple[str, str]] = set()  # (provider, channel) this run
-        self._held_notice: Optional[tuple[str, str]] = None  # shown once the channel plays
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
         self._reopen_due: Optional[tuple[Target, str, PlayKind]] = None  # after the back-off
@@ -145,8 +143,7 @@ class LiveControls(QObject):
     # ---- tuning -------------------------------------------------------------------------------
 
     def new_target(self) -> None:
-        """A new target plays: the old channel's ticks, held notice and reopen are gone."""
-        self._held_notice = None
+        """A new target plays: the old channel's ticks and reopen are gone."""
         self._ticks = []
         self._reconnects = 0
         self._cancel_reopen()
@@ -255,7 +252,6 @@ class LiveControls(QObject):
 
     def retry(self, current: Target) -> None:
         logger.info("Making the link of %s again after a playback failure", current.title)
-        self._held_notice = None
         self.stop_tune()  # it failed: its slot goes back, also if the new link does not come
         self._request(replace(current, retried=True))
 
@@ -296,27 +292,14 @@ class LiveControls(QObject):
     def _on_live_notice(self, text: str) -> None:
         if self._closed():
             return
-        if text == UNAVAILABLE:  # once per channel and run
-            current = self._current()
-            item = current.item if current is not None else {}
-            channel = str(item.get("cmd") or item.get("id") or item.get("name") or "")
-            key = (self.catalog.current_provider_name(), channel)
-            if key in self._unavailable_noticed:
-                return
-            if self.may_retry(current):
-                # An expired STB token fails the pipeline too: say it only once the direct
-                # play works, so a link made again does not use up the notice.
-                self._held_notice = key
-                return
-            self._unavailable_noticed.add(key)
+        if text == UNAVAILABLE:
+            # Said when it matters, not at every tune: a rewind on a channel that plays
+            # directly says it (the owner found the toast on load noise on slow channels).
+            return
         self._toast(text)
 
     def on_playing(self) -> None:
-        """The player plays: a notice held back while a fresh link was made shows now."""
-        key, self._held_notice = self._held_notice, None
-        if key is not None and key not in self._unavailable_noticed:
-            self._unavailable_noticed.add(key)
-            self._toast(UNAVAILABLE)
+        """The player plays (kept for the controller's call; nothing is held back now)."""
 
     def _on_live_failed(self, message: str) -> None:
         """Playback of the live channel failed for good (LiveSession recovered what it could)."""

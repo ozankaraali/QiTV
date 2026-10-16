@@ -35,6 +35,8 @@ instead of using others' distributions, which may have malware.**
 
 ## Fixes
 
+- **No more "Time-shift isn't available" pop-up when a channel loads.** A channel that can't be
+  time-shifted just plays; the message shows only if you try to rewind it.
 - **macOS:** after a click on the picture, the arrow keys no longer make the "can't do that"
   sound.
 - **Library:** hovering its top bar no longer fails to show the tooltips.

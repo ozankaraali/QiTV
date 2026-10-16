@@ -2509,24 +2509,19 @@ class PipelineControlTests(PipelineCase):
 
 
 class PipelineErrorTests(PipelineCase):
-    def test_the_unavailable_notice_shows_once_per_channel(self):
-        self.catalog.ptype = "M3UPLAYLIST"  # no link to make again
+    def test_the_unavailable_notice_is_silent_on_load(self):
+        # A rewind says it (test_a_direct_fallback_keeps_play_pause_but_has_no_rewind); a
+        # tune that falls back does not: on slow channels it was noise at every first tune.
+        self.catalog.ptype = "M3UPLAYLIST"
         self.start_channel(0)
         self.live.notice.emit(UNAVAILABLE)
         self.live.notice.emit("Rewound past the buffer")
         self.start_channel(1)
         self.live.notice.emit(UNAVAILABLE)
-        self.start_channel(0)
-        self.live.notice.emit(UNAVAILABLE)  # One again: already said
         self.live.notice.emit("Rewound past the buffer")  # other notices every time
         self.assertEqual(
             self.toast.messages(),
-            [
-                (UNAVAILABLE, "info"),
-                ("Rewound past the buffer", "info"),
-                (UNAVAILABLE, "info"),
-                ("Rewound past the buffer", "info"),
-            ],
+            [("Rewound past the buffer", "info"), ("Rewound past the buffer", "info")],
         )
 
     def test_pipeline_playback_errors_are_left_to_the_live_session(self):
@@ -2589,7 +2584,7 @@ class PipelineErrorTests(PipelineCase):
         self.assertTrue(wait_until(lambda: len(self.starts()) == 2))
         self.live.notice.emit(UNAVAILABLE)  # it really cannot time-shift
         self.live.play_direct()
-        self.assertEqual(self.toast.messages(), [(UNAVAILABLE, "info")])
+        self.assertEqual(self.toast.messages(), [])  # silent on load; a rewind says it
 
     def test_a_held_notice_shows_once_the_direct_play_works(self):
         self.start_channel(0)
@@ -2598,7 +2593,7 @@ class PipelineErrorTests(PipelineCase):
         self.assertEqual(self.toast.messages(), [])
         self.session.stateChanged.emit("playing")
         self.session.stateChanged.emit("playing")
-        self.assertEqual(self.toast.messages(), [(UNAVAILABLE, "info")])
+        self.assertEqual(self.toast.messages(), [])  # silent on load; a rewind says it
 
     def test_a_failure_after_the_user_moved_on_is_not_retried(self):
         self.start_pipeline(0)
