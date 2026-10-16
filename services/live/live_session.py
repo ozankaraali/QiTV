@@ -54,18 +54,21 @@ burst left when a burst lands (the player would meet the edge just before each o
 it is a burst (`StayLive`; not while paused, time-shifted or at a chosen speed). On some
 channels VLC cannot play at any rate but 1x: its position crawls. While stay-live's rate is
 not 1x, VLC's progress is checked against rate x wall time (`RateHealth`), counted only while
-VLC plays (from a second after it opened) with more than `_AHEAD_S` of media ahead, so a
-starved VLC is not taken for a slow one. Under 70% of it over 3 s, the rate goes back to 1x at
-once and stay-live changes it no more on that channel (`StayLive.lock_rate`). On some HLS
-channels VLC crawls through the pipeline even at 1x (measured, 2.0.2), while its own HLS
-plays them smoothly: at 1x, with at least `_CRAWL_AHEAD_S` buffered ahead, under 70% progress
+VLC plays and at least `_MEASURE_AHEAD_S` of media is ahead at both ends of a tick, and from
+`_RATE_GRACE_S` after an opened stream plays or after VLC was at the live edge (within
+`_EDGE_S`, BUFFERING, or the source stalled): a starved VLC, and its restart once data comes
+again (it refills its caching while its clock stands still), are not taken for a slow one.
+Under 70% of it over 3 s, the rate goes back to 1x at once and stay-live changes it no more
+on that channel (`StayLive.lock_rate`). On some HLS channels VLC crawls through the pipeline
+even at 1x (measured, 2.0.2), while its own HLS plays them smoothly: counted the same way at
+1x, under 70% progress
 over `_CRAWL_WINDOW_S` makes the channel play directly ("Plays without rewind for smoother
 playback", `CRAWLING`), and the channel's next tune plays directly at once (for a day: see
 `services.live.tuning`). A raw TS channel never does.
 
 "Auto" latency (2.0.2, `AutoTarget`) learns the target per channel instead of keeping the
 setting's: it starts at Normal's and rises 1.5 s with each starvation of VLC at the live
-edge (BUFFERING, or its clock standing still while Playing, within `_AHEAD_S` of the edge)
+edge (BUFFERING, or its clock standing still while Playing, within `_EDGE_S` of the edge)
 and each stall, while stay-live is LIVE; trouble again within `_CALM_S` is the same one. Only
 trouble that ran out a cushion counts: the lag had reached the current target (less
 `_BELOW_TARGET_S`) since the tune. A tune starts from the oldest buffered point, often with
@@ -173,11 +176,11 @@ _FROZEN_S = 0.5  # a VLC clock standing still this long while Playing is starved
 _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measured
 _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
 _OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
-_AHEAD_S = 1.0  # rate health counts only time with more media than this ahead of VLC
-_RATE_GRACE_S = 1.0  # and only from this long after an opened stream plays (VLC's clock starts)
+_EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its restart after)
+_MEASURE_AHEAD_S = 3.0  # rate health counts only ticks with this much ahead at both ends
+_RATE_GRACE_S = 2.0  # and only from this long after an open plays or VLC was at the edge
 _CALM_S = 1.0  # Auto: trouble again within this is the same starvation (VLC refills, starves)
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x this long (counted) plays directly
-_CRAWL_AHEAD_S = 3.0  # counted only with this much buffered ahead (not starved)
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -297,7 +300,8 @@ class LiveSession(QObject):
         # Rate health: VLC's progress at stay-live's rates other than 1x (see _check_rate).
         self._health = RateHealth()
         self._crawl = RateHealth(_CRAWL_WINDOW_S)  # an HLS channel's progress at 1x
-        self._rate_mark: Optional[tuple[float, float]] = None  # (wall, position) last tick
+        # (wall, position, media ahead) at the last tick
+        self._rate_mark: Optional[tuple[float, float, float]] = None
         self._rate_from: Optional[float] = None  # counted from here (after an open plays)
         # Auto latency: the channel's target, the last tick it heard of, the last trouble.
         self._auto: Optional[AutoTarget] = None
@@ -907,19 +911,25 @@ class LiveSession(QObject):
     def _starved(self, snapshot: Mapping[str, Any], position: float) -> bool:
         """VLC met the live edge and waits there (libVLC 3 says Playing, its clock stands still)."""
         waiting = self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
-        return waiting and self._live_edge(snapshot) - position <= _AHEAD_S
+        return waiting and self._live_edge(snapshot) - position <= _EDGE_S
 
     def _check_rate(self, snapshot: Mapping[str, Any], position: float) -> None:
         """Rate health: since the last tick, did VLC play at the rate set?
 
-        Counted only while stay-live is LIVE (not paused), VLC plays, and from
-        `_RATE_GRACE_S` after an opened stream plays. At a rate other than 1x that stay-live
-        set, with more than `_AHEAD_S` of media ahead, a crawl locks the rate at 1x at once
-        for the channel. At 1x, an HLS channel with at least `_CRAWL_AHEAD_S` ahead that
-        still crawls plays directly (`CRAWLING`). The caller returns if it fell back.
+        Counted only while stay-live is LIVE (not paused), VLC plays, at least
+        `_MEASURE_AHEAD_S` is ahead at both ends of the tick, and from `_RATE_GRACE_S` after
+        an opened stream plays or VLC was at the live edge (its restart after running dry is
+        no crawl). At a rate other than 1x that stay-live set, a crawl locks the rate at 1x
+        at once for the channel. At 1x, an HLS channel that still crawls plays directly
+        (`CRAWLING`). The caller returns if it fell back.
         """
         now = self._clock()
-        mark, self._rate_mark = self._rate_mark, (now, position)
+        ahead = self._live_edge(snapshot) - position
+        state = self._playback.state()
+        at_edge = ahead <= _EDGE_S or state is PlaybackState.BUFFERING
+        if self._rate_from is not None and (at_edge or self._stalled(snapshot)):
+            self._rate_from = max(self._rate_from, now + _RATE_GRACE_S)
+        mark, self._rate_mark = self._rate_mark, (now, position, ahead)
         counted = (
             mark is not None
             and self._stay.mode is Mode.LIVE
@@ -927,14 +937,14 @@ class LiveSession(QObject):
             and not self._ended
             and self._rate_from is not None
             and mark[0] >= self._rate_from
-            and self._playback.state() is PlaybackState.PLAYING
+            and state is PlaybackState.PLAYING
+            and min(mark[2], ahead) >= _MEASURE_AHEAD_S
         )
         if not counted or mark is None:
             return
         wall, played = now - mark[0], position - mark[1]
-        ahead = self._live_edge(snapshot) - position
         if self._rate != 1.0:
-            if self._stay.rate_locked or ahead <= _AHEAD_S:
+            if self._stay.rate_locked:
                 return
             if self._health.add(wall, played, self._rate):
                 self._stay.lock_rate()
@@ -944,7 +954,7 @@ class LiveSession(QObject):
                     100 * self._health.share,
                 )
                 self._learn()
-        elif snapshot.get("hls") is True and ahead >= _CRAWL_AHEAD_S:
+        elif snapshot.get("hls") is True:
             if self._crawl.add(wall, played, 1.0):
                 _LOG.info(
                     "VLC played this HLS channel at %.0f%% speed through the time-shift buffer "

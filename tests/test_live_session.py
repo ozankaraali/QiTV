@@ -233,7 +233,9 @@ class Feed:
     libVLC 3 keeps reporting PLAYING with its clock standing still). With `crawl` it cannot
     play at any rate but 1x, as on a real channel (2.0.2): at another rate its clock stands
     still and moves a quarter second every two seconds, while it reports PLAYING; with
-    `crawl_1x` it crawls so at 1x too (measured on an HLS channel through the pipeline). While
+    `crawl_1x` it crawls so at 1x too (measured on an HLS channel through the pipeline). With
+    `recover`, VLC needs that long to restart after it ran dry (it refills its caching: its
+    clock stands still while it says Playing; the 2.0.2 review's model). While
     `stalled` the source sends nothing: the edge stands still and no state arrives.
     LiveSession ticks every 0.25 s.
     """
@@ -257,11 +259,13 @@ class Feed:
         crawl=False,
         crawl_1x=False,
         hls=False,
+        recover=0.0,
     ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
         self.crawl, self.crawled = crawl, 0.0  # wall seconds at another rate since a step
         self.crawl_1x = crawl_1x
         self.hls = hls
+        self.recover, self.frozen_until, self.dry, self.recoveries = recover, -1.0, False, 0
         self.meter = worker.BurstMeter() if metered else None
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
         self.jitter, self.rng = jitter, random.Random(seed)
@@ -327,11 +331,17 @@ class Feed:
                     if self.crawled >= every - 1e-9:
                         self.crawled -= every
                         wanted = media
+                if self.dry and self.edge - self.position > 1e-6:  # data again: restart
+                    self.dry, self.frozen_until = False, now + self.recover
+                    self.recoveries += 1
+                if now < self.frozen_until:
+                    wanted = 0.0
                 advance = max(0.0, min(wanted, self.edge - self.position))
                 state = PlaybackState.PLAYING
                 if advance < wanted - 1e-9:
                     state = self.starved
                     self.starved_s += self.DT
+                    self.dry = True
                 if state is not playback.current:
                     playback.set_state(state)
                 self.position += advance
@@ -1377,8 +1387,8 @@ class StayLiveTests(LiveSessionCase):
 
 class RateHealthTests(LiveSessionCase):
     """2.0.2: on some channels VLC cannot play at any rate but 1x; its position crawls (4.5 s
-    of media in 37 s, measured). Stay-live sees it within its window (3 s counted, from a
-    second after VLC plays) and keeps that channel at 1x: no rate change and no jump after."""
+    of media in 37 s, measured). Stay-live sees it within its window (3 s counted, from two
+    seconds after VLC plays) and keeps that channel at 1x: no rate change and no jump after."""
 
     def test_a_bursty_channel_that_cannot_slow_down_plays_at_normal_speed(self):
         # The measured channel: 10 s segments and 8 s buffered at the start, so stay-live
@@ -1388,7 +1398,7 @@ class RateHealthTests(LiveSessionCase):
             feed = Feed(self, sid, burst=10.0, edge=8.0, crawl=True).ready().run(8.0)
             self.assertEqual(self.playback.rates, [0.95, 1.0])
             slowed = [state for state in self.timelines if state["rate"] != 1.0]
-            self.assertLessEqual(len(slowed) * 0.25, 1.0 + 3.0 + 0.25)  # within the window
+            self.assertLessEqual(len(slowed) * 0.25, 2.0 + 3.0 + 0.25)  # grace, then 3 s
             feed.run(120.0)
         self.assertEqual(self.playback.rates, [0.95, 1.0])  # never changed again
         self.assertEqual(len(self.playback.plays), 1)  # and no jump to live
@@ -1449,6 +1459,36 @@ class HlsRateTests(LiveSessionCase):
         Feed(self, sid, burst=6.0, edge=12.0, hls=True, crawl=True).ready().run(30.0)
         self.assertEqual(self.playback.rates[-1], 1.0)
         self.assertTrue(self.live._stay.rate_locked)
+
+
+class RestartTests(LiveSessionCase):
+    """2.0.2 review (I1): after VLC ran dry at the live edge it needs a moment to restart: it
+    refills its caching while its clock stands still and libVLC 3 says Playing. That restart
+    is no crawl: it never locks 1x or plays directly, on jittery raw TS or HLS."""
+
+    def test_a_frozen_restart_after_running_dry_is_no_crawl(self):
+        sources = ((False, 2.0, 1.0), (True, 6.0, 3.5), (True, 4.0, 2.5))
+        for hls, burst, jitter in sources:
+            for recover in (0.8, 1.6):
+                for seed in (1, 2):
+                    with self.subTest(hls=hls, burst=burst, recover=recover, seed=seed):
+                        self.live = self.make(tuning=LiveTuning(None))
+                        sid = self.start(channel="A")
+                        feed = Feed(
+                            self,
+                            sid,
+                            burst=burst,
+                            edge=1.0,
+                            jitter=jitter,
+                            seed=seed,
+                            hls=hls,
+                            starved=PlaybackState.PLAYING,
+                            recover=recover,
+                        ).ready()
+                        feed.run(300.0)
+                        self.assertGreaterEqual(feed.recoveries, 1)  # it ran dry, restarted
+                        self.assertFalse(self.live._stay.rate_locked)
+                        self.assertNotIn("direct", self.modes)
 
 
 class CrawlFallbackTests(LiveSessionCase):
