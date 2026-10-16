@@ -6,7 +6,7 @@ import time
 import unittest
 
 from PySide6.QtCore import QModelIndex, QObject, QPoint, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem, QWidget
 from timer_fixtures import elapse, timeline, wait_until
@@ -17,7 +17,9 @@ from ui.overlays.channel_rows import (
     ChannelListView,
     ChannelRowDelegate,
     ChannelRowsModel,
+    number_column_width,
 )
+from ui.overlays.painting import Units
 
 
 class FakeLogos(QObject):
@@ -130,6 +132,16 @@ class ModelTests(unittest.TestCase):
         model.set_channels([{"name": "A", "number": "7"}, {"name": "B"}])
         numbers = [model.index(r).data(ChannelRowsModel.NumberRole) for r in range(2)]
         self.assertEqual(numbers, ["7", None])  # as ZapContext.by_number
+
+    def test_the_number_column_fits_the_longest_number(self):
+        # Four-digit numbers (a provider's 9521…) lost their first digit in a 3-digit column.
+        model = ChannelRowsModel(None, now_provider)
+        model.set_channels([{"name": n, "number": str(n)} for n in (7, 9521, 12)])
+        self.assertEqual(model.number_digits, 4)
+        units = Units(1280)
+        width = number_column_width(units, model.number_digits)
+        self.assertGreaterEqual(width, QFontMetrics(units.font(1.5)).horizontalAdvance("9521"))
+        self.assertEqual(number_column_width(units, 2), 3.4 * units.u)  # short ones: as before
 
     def test_given_numbers_are_shown_for_filtered_rows(self):
         model = ChannelRowsModel(None, now_provider)

@@ -12,7 +12,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QFont, QMouseEvent, QPainter, QPixmap
+from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate
 
 from services.zapping import ZapContext
@@ -23,6 +23,18 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 logger = logging.getLogger(__name__)
 
 NumberRole = Qt.UserRole + 1
+NUMBER_W_U = 3.4  # the number column: room for three digits, wider for longer numbers
+
+
+def number_column_width(units, digits: int) -> float:
+    """The channel number column's width for numbers of up to `digits` digits."""
+    width = NUMBER_W_U * units.u
+    if digits > 3:
+        advance = QFontMetrics(units.font(1.5)).horizontalAdvance("0" * digits)
+        width = max(width, advance + 0.2 * units.u)
+    return width
+
+
 LogoRole = Qt.UserRole + 2
 NowRole = Qt.UserRole + 3
 ProgressRole = Qt.UserRole + 4
@@ -45,6 +57,7 @@ class ChannelRowsModel(QAbstractListModel):
         self._now_provider = now_provider
         self._items: list[dict] = []
         self._numbers: list[str | None] | None = None
+        self.number_digits = 0  # the longest number shown (the number column's width)
         self._rows_by_logo: dict[str, list[int]] = {}
         self._now_cache: dict[int, tuple[str, float]] = {}
         if logos is not None:
@@ -62,6 +75,11 @@ class ChannelRowsModel(QAbstractListModel):
             if not any(ZapContext.number_of(item) for item in self._items):
                 numbers = [str(row + 1) for row in range(len(self._items))]
         self._numbers = list(numbers) if numbers is not None else None
+        shown = (
+            self._numbers if self._numbers is not None else [i.get("number") for i in self._items]
+        )
+        # The number column fits the longest number shown (a provider's 9521 has four digits).
+        self.number_digits = max((len(str(n)) for n in shown if n is not None), default=0)
         self._rows_by_logo = {}
         for row, item in enumerate(self._items):
             url = item.get("logo")
@@ -166,7 +184,7 @@ class ChannelRowDelegate(QStyledItemDelegate):
         right = rect.right() - 1.0 * u - 0.3 * u
         # number
         number = index.data(NumberRole)
-        num_w = 3.4 * u
+        num_w = number_column_width(units, getattr(index.model(), "number_digits", 0))
         p.setFont(units.font(1.5))
         p.setPen(qcolor(PALETTE.text, 0.6))
         if number is not None:
