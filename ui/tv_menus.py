@@ -5,8 +5,9 @@ keyPressEvent handles those keys through ui.keymap. Modifier combinations are ap
 shortcuts, which the keymap leaves to the menus (a test checks that no screen claims them).
 The player's keys are disabled while the Library shows. The Providers menu is an exclusive
 group of the configured providers, rebuilt when a provider becomes ready or fails and after
-Settings closes. The drawer's Settings and Add provider rows open the same dialogs, its Open
-file row the same file dialog, and its header's ⌕ the same search.
+Settings closes. The drawer's Settings and Add provider rows open the same dialogs, its Free
+channels row the free-channels menu, its Open file row the same file dialog, and its header's
+⌕ the same search.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLay
 
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
-from services.navigation import ADD_PROVIDER_ROW, OPEN_FILE_ROW, SETTINGS_ROW
+from services.navigation import ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW, SETTINGS_ROW
 from ui.brand import logo_pixmap
 from ui.keymap import Action
 from ui.overlays.drawer import REFRESH_ACTION, SEARCH_ACTION
@@ -223,12 +224,15 @@ class TVMenus(QObject):
         QDesktopServices.openUrl(QUrl(ISSUES_URL))
 
     def on_drawer_action(self, row: str) -> None:
-        """The drawer's Settings, Add provider and Open file rows, and its header's ⌕ and
-        refresh buttons."""
+        """The drawer's Settings, Add provider, Free channels and Open file rows, and its
+        header's ⌕ and refresh buttons."""
         if row == SETTINGS_ROW:
             self._window.options_dialog()
         elif row == ADD_PROVIDER_ROW:
             self._window.add_provider()
+        elif row == FREE_CHANNELS_ROW:
+            drawer = self._window.overlays.drawer
+            self._window.show_free_channels(drawer.row_anchor(row))
         elif row == OPEN_FILE_ROW:
             self._window.screens.open_file()
         elif row == SEARCH_ACTION:

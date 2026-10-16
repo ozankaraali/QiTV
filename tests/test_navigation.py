@@ -11,6 +11,7 @@ from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
+    FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
     RECENT_GROUP,
     SETTINGS_ROW,
@@ -138,6 +139,7 @@ class NavModelTests(unittest.TestCase):
                 ("source", "Backup", "Backup"),
                 ("action", SETTINGS_ROW, "Settings"),  # icons are painted, not glyphs
                 ("action", ADD_PROVIDER_ROW, "Add provider"),
+                ("action", FREE_CHANNELS_ROW, "Free channels…"),
                 ("action", OPEN_FILE_ROW, "Open file"),
             ],
         )

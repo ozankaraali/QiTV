@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services import thread_cleanup
+from services import free_channels, thread_cleanup
 from services.catalog import CatalogService
 from services.connection_budget import ConnectionBudget
 from services.jobs import JobRunner
@@ -70,6 +70,7 @@ from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui.bottom_band import BottomBand
 from ui.export_flow import ExportFlow
+from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
@@ -493,6 +494,7 @@ class TVWindow(QMainWindow):
         # The Library's ⛶: the menu bar, with View → Fullscreen, hides in fullscreen.
         self.library_page.nav.fullscreenRequested.connect(self.toggle_fullscreen)
         self.overlays.welcome.addRequested.connect(self.add_provider)
+        self.overlays.welcome.freeRequested.connect(self.show_free_channels)
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
         # A Windows self-update waits for background threads: the engine's must stop first,
         # and start again if the update cannot launch.
@@ -864,6 +866,36 @@ class TVWindow(QMainWindow):
         dialog.start_new_provider()
         dialog.exec()
         self.menus.rebuild_providers()
+
+    def show_free_channels(self, global_pos: QPoint) -> None:
+        """The Free channels… menu under `global_pos` (the welcome card's and the drawer's)."""
+        if not self._closing:
+            show_free_channels_menu(self, global_pos, self.add_free_channels)
+
+    def add_free_channels(self, code: Optional[str]) -> None:
+        """Add iptv-org's list (all countries, or `code`'s) and load it, as Settings → Save does
+        for a new selected provider; a provider with that URL is only switched to."""
+        if self._closing:
+            return
+        entry = free_channels.provider_entry(code)
+        providers = self.provider_manager.providers
+        existing = next((p for p in providers if p.get("url") == entry["url"]), None)
+        if existing is not None:
+            name = existing.get("name", "")
+        else:
+            taken = {p.get("name") for p in providers}
+            name, number = entry["name"], 2
+            while name in taken:
+                name = f"{entry['name']} ({number})"
+                number += 1
+            entry["name"] = name
+            providers.append(entry)
+            self.provider_manager.save_providers()
+        self.config_manager.selected_provider_name = name
+        self.save_config()
+        self.menus.rebuild_providers()
+        if existing is None or name != self.catalog.current_provider_name():
+            self.set_provider()
 
     def save_config(self) -> None:
         """Settings → Save: the new settings apply even when config.json cannot be written."""

@@ -23,6 +23,7 @@ SECTION_TITLES = {"live": "Live TV", "movies": "Movies", "series": "Series"}
 LIBRARY_SECTIONS = frozenset({"movies", "series"})  # chosen in the drawer, shown by the Library
 SETTINGS_ROW = "settings"
 ADD_PROVIDER_ROW = "add_provider"
+FREE_CHANNELS_ROW = "free_channels"  # iptv-org's free lists, in a menu at the row
 OPEN_FILE_ROW = "open_file"  # File → Open File… without the menu bar (fullscreen hides it)
 FAVORITES_GROUP = "@favorites"
 RECENT_GROUP = "@recent"
@@ -48,6 +49,7 @@ class NavNode:
 ACTION_ROWS = (  # the drawer paints their icons (a gear, a plus, a file)
     NavNode("action", SETTINGS_ROW, "Settings"),
     NavNode("action", ADD_PROVIDER_ROW, "Add provider"),
+    NavNode("action", FREE_CHANNELS_ROW, "Free channels…"),
     NavNode("action", OPEN_FILE_ROW, "Open file"),
 )
 

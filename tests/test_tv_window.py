@@ -1858,8 +1858,8 @@ class DrawerSettingsTests(WindowCase):
         with mock.patch("ui.tv_pages.QFileDialog.getOpenFileName", return_value=("", "")) as dialog:
             for key in (Qt.Key.Key_Left, Qt.Key.Key_Left):
                 QTest.keyClick(self.window, key)  # the sources column
-            for _ in range(3):
-                QTest.keyClick(self.window, Qt.Key.Key_Down)  # ⚙, ＋, then Open file
+            for _ in range(4):
+                QTest.keyClick(self.window, Qt.Key.Key_Down)  # ⚙, ＋, ＋ free, Open file
             self.assertEqual(drawer.highlighted().title, "Open file")
             QTest.keyClick(self.window, Qt.Key.Key_Return)
         dialog.assert_called_once()

@@ -45,6 +45,7 @@ from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QT
 from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
+    FREE_CHANNELS_ROW,
     LIBRARY_SECTIONS,
     OPEN_FILE_ROW,
     RECENT_GROUP,
@@ -98,7 +99,12 @@ NodeRole = Qt.UserRole + 10
 CountRole = Qt.UserRole + 11
 IconRole = Qt.UserRole + 12
 _PINNED_ICONS = {FAVORITES_GROUP: "star", RECENT_GROUP: "recent"}
-_ACTION_ICONS = {SETTINGS_ROW: "gear", ADD_PROVIDER_ROW: "plus", OPEN_FILE_ROW: "file"}
+_ACTION_ICONS = {
+    SETTINGS_ROW: "gear",
+    ADD_PROVIDER_ROW: "plus",
+    FREE_CHANNELS_ROW: "plus",
+    OPEN_FILE_ROW: "file",
+}
 _HEADER_TOOLTIPS = {  # the header's buttons: what they do, and their key
     SEARCH_ACTION: key_hint("Search", "Ctrl+F"),
     REFRESH_ACTION: key_hint("Refresh channels and guide", "Ctrl+R"),
@@ -563,6 +569,16 @@ class Drawer(Overlay):
             self._refresh()
         self._select(col, row)
         self.activate()
+
+    def row_anchor(self, key: str) -> QPoint:
+        """The global point under the sources column's row `key` (where its menu opens)."""
+        col = self._columns["left"]
+        node = next((n for n in col.nodes if n.key == key), None)
+        view = col.view
+        if node is None or node not in col.rows:
+            return view.mapToGlobal(QPoint(0, 0))
+        rect = view.visualRect(col.model.index(col.rows[node], 0))
+        return view.viewport().mapToGlobal(rect.bottomLeft())
 
     def _on_row_context(self, side: str, pos: QPoint) -> None:
         """A right-click at `pos` (viewport coordinates) of a column's list."""

@@ -1,11 +1,13 @@
 """Welcome card: shown while no provider is configured (spec §8), centred over the video.
 
-The QiTV logo sits above the title. Its one control is the accent Add provider button,
-focused: a click on it, or Enter (OK on a remote, routed by the TV shell), emits
-`addRequested`, and the window opens provider setup. 1 u = 1% of the overlay host's width.
+The QiTV logo sits above the title. Its controls are the accent Add provider button, focused:
+a click on it, or Enter (OK on a remote, routed by the TV shell), emits `addRequested` and the
+window opens provider setup; and the plain Free channels… button beside it, whose click emits
+`freeRequested` with the global point under it, where the window pops up its menu.
+1 u = 1% of the overlay host's width.
 """
 
-from PySide6.QtCore import QEvent, QObject, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -18,6 +20,7 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, RADIUS_CARD, RADIUS_PANEL, qcolo
 TITLE_TEXT = "Welcome to QiTV"
 BODY_TEXT = "Add your IPTV provider (STB portal, Xtream or M3U playlist) to start watching."
 BUTTON_TEXT = "Add provider"
+FREE_TEXT = "Free channels…"
 WIDTH_U = 44.0
 TITLE_U = 2.4
 BODY_U = 1.2
@@ -28,6 +31,8 @@ LOGO_GAP_U = 1.6
 GAP_U = 1.4
 BUTTON_GAP_U = 2.4
 BUTTON_H_U = 4.0
+BUTTON_MIN_PX = 28  # a target a pointer can hit at small window widths
+BUTTONS_GAP_U = 1.6  # between the two buttons
 BUTTON_PAD_U = 2.4
 BUTTON_FONT_U = 1.3
 RING_GAP_U = 0.4  # between the button and its focus ring
@@ -38,6 +43,7 @@ _TEXT_FLAGS = Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap
 
 class WelcomeCard(Overlay):
     addRequested = Signal()
+    freeRequested = Signal(QPoint)  # the global point under the Free channels… button
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -85,12 +91,32 @@ class WelcomeCard(Overlay):
         return QRectF(pad, top, self.width() - 2 * pad, title_h)
 
     def button_rect(self) -> QRectF:
-        units = self._units()
+        """Add provider: the left button of the centred pair."""
+        return self._buttons()[0]
+
+    def free_button_rect(self) -> QRectF:
+        """Free channels…: the right button, the same height."""
+        return self._buttons()[1]
+
+    def _button_h(self, units: Units) -> int:
+        return max(BUTTON_MIN_PX, units.px(BUTTON_H_U))
+
+    def _button_widths(self, units: Units) -> tuple[int, int]:
         metrics = QFontMetrics(self._button_font(units))
-        width = metrics.horizontalAdvance(BUTTON_TEXT) + 2 * units.px(BUTTON_PAD_U)
-        height = units.px(BUTTON_H_U)
+        pad = 2 * units.px(BUTTON_PAD_U)
+        return (
+            metrics.horizontalAdvance(BUTTON_TEXT) + pad,
+            metrics.horizontalAdvance(FREE_TEXT) + pad,
+        )
+
+    def _buttons(self) -> tuple[QRectF, QRectF]:
+        units = self._units()
+        first, second = self._button_widths(units)
+        gap = units.px(BUTTONS_GAP_U)
+        height = self._button_h(units)
         top = self.height() - units.px(PAD_U) - height
-        return QRectF((self.width() - width) / 2, top, width, height)
+        left = (self.width() - (first + gap + second)) / 2
+        return QRectF(left, top, first, height), QRectF(left + first + gap, top, second, height)
 
     # ---- layout -----------------------------------------------------------------------------
 
@@ -124,8 +150,10 @@ class WelcomeCard(Overlay):
         if parent is None:
             return
         units = Units(parent.width())
-        width = units.px(WIDTH_U)
         pad = units.px(PAD_U)
+        first, second = self._button_widths(units)
+        # Wide enough for both buttons (their text has a floor size on a small host).
+        width = max(units.px(WIDTH_U), first + units.px(BUTTONS_GAP_U) + second + 2 * pad)
         title_h, body_h = self._text_heights(units, width - 2 * pad)
         logo_h = units.px(LOGO_U) + units.px(LOGO_GAP_U) if logo_available() else 0
         height = (
@@ -135,7 +163,7 @@ class WelcomeCard(Overlay):
             + units.px(GAP_U)
             + body_h
             + units.px(BUTTON_GAP_U)
-            + units.px(BUTTON_H_U)
+            + self._button_h(units)
             + pad
         )
         self.setGeometry(
@@ -178,6 +206,7 @@ class WelcomeCard(Overlay):
         body_top = title.bottom() + units.px(GAP_U)
         p.drawText(QRectF(pad, body_top, inner, body_h), _TEXT_FLAGS, BODY_TEXT)
         self._paint_button(p, units)
+        self._paint_free_button(p, units)
         p.end()
 
     def _paint_button(self, p: QPainter, units: Units) -> None:
@@ -196,6 +225,17 @@ class WelcomeCard(Overlay):
         p.setPen(qcolor(PALETTE.canvas))
         p.drawText(button, Qt.AlignCenter, BUTTON_TEXT)
 
+    def _paint_free_button(self, p: QPainter, units: Units) -> None:
+        """The secondary button: a quiet fill and outline, the text colour."""
+        button = self.free_button_rect()
+        fill_round(p, button, qcolor(PALETTE.text, 0.1), float(RADIUS_CARD))
+        p.setPen(QPen(qcolor(PALETTE.text, 0.22), 1.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(button.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS_CARD, RADIUS_CARD)
+        p.setFont(self._button_font(units))
+        p.setPen(qcolor(PALETTE.text))
+        p.drawText(button, Qt.AlignCenter, FREE_TEXT)
+
     # ---- input: consumed here, so nothing reaches the video behind -------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -203,8 +243,13 @@ class WelcomeCard(Overlay):
             event.ignore()  # Back/Forward go on to the host
             return
         event.accept()
-        if event.button() == Qt.LeftButton and self.button_rect().contains(event.position()):
+        if event.button() != Qt.LeftButton:
+            return
+        if self.button_rect().contains(event.position()):
             self.activate()
+        elif self.free_button_rect().contains(event.position()):
+            below = self.free_button_rect().bottomLeft().toPoint()
+            self.freeRequested.emit(self.mapToGlobal(below))
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         event.accept()

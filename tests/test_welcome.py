@@ -98,6 +98,32 @@ class WelcomeCardTests(unittest.TestCase):
         QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=button.center().toPoint())
         self.assertEqual(self.added, [True])
 
+    def test_the_free_channels_button_sits_beside_the_first_and_asks_with_a_position(self):
+        self.card.show_card()
+        first, free = self.card.button_rect(), self.card.free_button_rect()
+        self.assertFalse(first.intersects(free))
+        self.assertLess(first.right(), free.left())
+        self.assertEqual((first.top(), first.height()), (free.top(), free.height()))
+        self.assertGreaterEqual(free.height(), 28)
+        self.assertTrue(QRectF(self.card.rect()).contains(free))
+        pair_centre = (first.left() + free.right()) / 2
+        self.assertAlmostEqual(pair_centre, self.card.width() / 2, delta=1)
+        asked = []
+        self.card.freeRequested.connect(asked.append)
+        QTest.mouseClick(self.card, Qt.MouseButton.LeftButton, pos=free.center().toPoint())
+        self.assertEqual(self.added, [])  # not Add provider
+        below = self.card.mapToGlobal(free.bottomLeft().toPoint())
+        self.assertEqual(asked, [below])
+
+    def test_both_buttons_fit_the_card_at_small_widths(self):
+        self.host.resize(320, 240)
+        self.card.show_card()
+        card = QRectF(self.card.rect())
+        self.assertTrue(card.contains(self.card.button_rect()))
+        self.assertTrue(card.contains(self.card.free_button_rect()))
+        self.assertGreaterEqual(self.card.button_rect().height(), 28)
+        self.assertFalse(self.card.button_rect().intersects(self.card.free_button_rect()))
+
     def test_enter_activates_the_button_only_while_shown(self):
         self.assertFalse(self.card.activate())
         self.card.show_card()

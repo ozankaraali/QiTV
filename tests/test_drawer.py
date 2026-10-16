@@ -12,7 +12,13 @@ from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
-from services.navigation import ADD_PROVIDER_ROW, OPEN_FILE_ROW, SETTINGS_ROW, NavModel
+from services.navigation import (
+    ADD_PROVIDER_ROW,
+    FREE_CHANNELS_ROW,
+    OPEN_FILE_ROW,
+    SETTINGS_ROW,
+    NavModel,
+)
 from tests.test_navigation import FakeCatalog
 from ui.keymap import key_hint
 from ui.overlay_host import OverlayHost
@@ -498,6 +504,7 @@ class DrawerTests(unittest.TestCase):
                 ("Backup", None),
                 ("Settings", "gear"),
                 ("Add provider", "plus"),
+                ("Free channels…", "plus"),
                 ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (owner, 2.0.1)
             ],
         )
@@ -506,7 +513,7 @@ class DrawerTests(unittest.TestCase):
     def test_a_click_on_open_file_asks_for_it(self):
         column = self.open_on_the_sources()
         path = self.nav.path
-        self.drawer._on_row_clicked("left", 4)
+        self.drawer._on_row_clicked("left", 5)
         self.assertEqual(self.actions, [OPEN_FILE_ROW])
         self.assertEqual(column.current.key, OPEN_FILE_ROW)
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
@@ -528,6 +535,20 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.focus_side, "left")
         self.assertEqual(self.drawer.highlighted().key, ADD_PROVIDER_ROW)
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
+
+    def test_free_channels_sits_under_add_provider_and_asks_with_a_row_anchor(self):
+        column = self.open_on_the_sources()
+        self.assertEqual(
+            [n.key for n in column.nodes[2:]],
+            [SETTINGS_ROW, ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW],
+        )
+        self.drawer._on_row_clicked("left", 4)
+        self.assertEqual(self.actions, [FREE_CHANNELS_ROW])
+        self.assertTrue(self.drawer.isVisible())  # the menu opens over it
+        # The menu opens right under the row, in the column.
+        anchor = self.drawer.row_anchor(FREE_CHANNELS_ROW)
+        rect = column.view.visualRect(column.model.index(4, 0))
+        self.assertEqual(column.view.viewport().mapFromGlobal(anchor), rect.bottomLeft())
 
     def test_a_click_on_settings_asks_for_it(self):
         column = self.open_on_the_sources()
