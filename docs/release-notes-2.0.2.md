@@ -34,8 +34,8 @@ instead of using others' distributions, which may have malware.**
   longer sees a broken stream at every segment join.
 - **A few channels whose streams can't be time-shifted smoothly play without rewind.** Some
   channels still crawl through the time-shift buffer while the player plays them smoothly on its
-  own. QiTV notices this by itself after about 20 seconds, plays the channel without rewind ("Plays
-  without rewind for smoother playback", which a rewind there says too), and tries the
+  own. QiTV notices this by itself within about half a minute, plays the channel without rewind
+  ("Plays without rewind for smoother playback", which a rewind there says too), and tries the
   time-shift again a day later.
 - **Channels that can't change speed play at normal speed.** To stay near live, QiTV plays a
   little faster or slower (1.05×, 1.1× or 0.95×). On some channels the player can't do that
