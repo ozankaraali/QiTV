@@ -987,12 +987,14 @@ class LiveSession(QObject):
         return max(0.0, self._lag(snapshot, position))
 
     def _emit_timeline(self) -> None:
-        """The timeline's state. Under Auto latency `auto` is True and `adjusted` says the
-        target is not the one Auto starts with (it learned another, or the burst is larger)."""
+        """The timeline's state. Under Auto latency `auto` is True and `adjusted` says what
+        the channel taught moved its target: not where Auto starts it (Normal's, or the
+        burst when that is larger, as under any latency)."""
         snapshot = self._snapshot()
         edge = self._live_edge(snapshot)
         position = min(self._base + self._elapsed, edge)
-        target = self._target(snapshot)
+        target, auto = self._target(snapshot), self._auto
+        fresh = max(auto.start, _number(snapshot.get("burst_s"))) if auto is not None else target
         self.timelineChanged.emit(
             {
                 "start": self._buffer_start(snapshot),
@@ -1006,8 +1008,8 @@ class LiveSession(QObject):
                 "ended": self._ended,
                 "target": target,
                 "stalled": self._stalled(snapshot),
-                "auto": self._auto is not None,
-                "adjusted": self._auto is not None and target != self._auto.start,
+                "auto": auto is not None,
+                "adjusted": target != fresh,
             }
         )
 
