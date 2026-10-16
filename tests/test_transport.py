@@ -567,6 +567,34 @@ class OnScreenKeysTests(unittest.TestCase):
         golive = t.button_rect("golive")
         self.assertEqual(t.tooltip_at(golive.center()), key_hint("Go live", "L"))
 
+    def double_click(self, t, point):
+        """As a mouse does it: press, release, then a press that is a double-click."""
+        QTest.mouseDClick(t.windowHandle(), Qt.LeftButton, Qt.NoModifier, point.toPoint())
+
+    def test_a_quick_second_click_counts_once_on_toggles_and_jumps(self):
+        # 2.0.1 review M1: ★ would toggle twice and ⟲ zap back again, ⛶ go in and out.
+        t = self.make()
+        t.set_pip_state(True, False)
+        t.show_live("One", "")
+        for name, signal, rect in (
+            ("favorite", t.favoriteRequested, t.title_rects()["favorite"]),
+            ("previous", t.previousRequested, t.button_rect("previous")),
+            ("fullscreen", t.fullscreenRequested, t.button_rect("fullscreen")),
+            ("pip", t.pipRequested, t.button_rect("pip")),
+        ):
+            with self.subTest(name=name):
+                spy = QSignalSpy(signal)
+                self.double_click(t, rect.center())
+                self.assertEqual(spy.count(), 1)
+
+    def test_a_quick_second_click_repeats_a_step(self):
+        t = self.make()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        spy = QSignalSpy(t.seekRelativeRequested)
+        self.double_click(t, t.button_rect("back10").center())
+        self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [-10_000, -10_000])
+
     def test_the_channels_name_shows_its_info(self):
         t = self.make()
         t.show_live("Nature One", "Wild rivers")

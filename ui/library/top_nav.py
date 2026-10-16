@@ -169,6 +169,12 @@ class TopNav(QWidget):
         if self._pressed is None:
             super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self._item_at(event.position()) == "fullscreen":
+            event.accept()  # a quick second click: not in and straight out again
+            return
+        super().mouseDoubleClickEvent(event)  # one more press
+
     def mouseReleaseEvent(self, event) -> None:
         item, self._pressed = self._pressed, None
         if item is None or self._item_at(event.position()) != item:

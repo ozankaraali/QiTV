@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QFileDialog, QWidget
 from services.exporter import ExportKind
 from services.library import LibraryModel
 from ui.library_controller import LibraryController
+from ui.pointer import SecondClickGuard
 from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class TVPages(QObject):
         super().__init__(parent)
         self._window = window
         self._return_to_library = False  # the movie playing came from the Library
+        self._second_click = SecondClickGuard(self)  # after ‹ Library: see back_to_library
         self.library_model = LibraryModel(window.catalog, window.config_manager, window.watch, self)
         self.library_controller = LibraryController(
             config=window.config_manager,
@@ -147,10 +149,12 @@ class TVPages(QObject):
 
         Esc first closes what is open on the player and leaves fullscreen; a click on the
         button goes back at once, also from fullscreen or the mini player (which the Library
-        leaves).
+        leaves). A double-click's second click would land on the Library under the pointer
+        (a click on an episode plays it): it reaches nothing.
         """
         if not self._window.closing() and self._can_return():
             self._enter_library()
+            self._second_click.arm()
 
     def _can_return(self) -> bool:
         """The title playing, on its way or failed came from the Library, and no live channel

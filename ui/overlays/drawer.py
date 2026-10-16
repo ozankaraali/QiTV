@@ -693,6 +693,10 @@ class Drawer(Overlay):
             event.ignore()
             return
         event.accept()  # never the video's fullscreen toggle
+        point = event.position()
+        if event.button() == Qt.LeftButton and self._header_button_at(point) == BACK_BUTTON:
+            self.go_up()  # as the guide's ‹ ›: a quick second click goes up again
+            self._hover_at(point)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         event.accept()

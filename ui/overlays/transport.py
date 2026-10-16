@@ -89,6 +89,9 @@ FAVORITE_KEY = "Ctrl+D"
 # button name -> painting icon, if they differ
 _ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
+# A quick second click (a double-click) repeats these steps; on any other control it counts
+# once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further.
+_REPEATS = ("back10", "fwd10", "fwd60", "speed", "audio", "subtitles")
 _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",
@@ -966,6 +969,29 @@ class Transport(Overlay):
                 self.update()
                 return
         self._click(rects, pos)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """The second press of a quick double-click: a step again, else nothing more."""
+        if event.button() == Qt.LeftButton and self._control_at(event.position()) not in (
+            *_REPEATS,
+            "seek",
+        ):
+            event.accept()  # never the video's fullscreen toggle either
+            self.poke()
+            return
+        self.mousePressEvent(event)  # as Qt's own: one more press
+
+    def _control_at(self, pos: QPointF) -> str | None:
+        """The control under `pos`: a title row's, a button's, or None (the bar by its hit area)."""
+        for name, rect in self.title_rects().items():
+            if rect.contains(pos):
+                return name
+        for name, rect in self._layout().items():
+            if name == "seek":
+                rect = rect.adjusted(0, -rect.height(), 0, rect.height())
+            if name not in _LABELS and rect.contains(pos):
+                return name
+        return None
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = event.position()

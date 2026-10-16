@@ -270,6 +270,19 @@ class TopNavTests(unittest.TestCase):
         self.assertEqual(fullscreens, [True])
         self.assertEqual((self.tabs, self.sources, self.searches), ([], [], []))
 
+    def double_click(self, point):
+        """As a mouse does it: press, release, then a press that is a double-click."""
+        self.nav.show()  # made after its host showed: shown for the window's events
+        host = self.host.windowHandle()
+        QTest.mouseDClick(host, Qt.LeftButton, Qt.NoModifier, self.nav.mapTo(self.host, point))
+
+    def test_a_quick_second_click_on_fullscreen_asks_once(self):
+        # 2.0.1 review M1: not into fullscreen and straight out again.
+        fullscreens = []
+        self.nav.fullscreenRequested.connect(lambda: fullscreens.append(True))
+        self.double_click(self.nav._item_rects()["fullscreen"].center().toPoint())
+        self.assertEqual(fullscreens, [True])
+
     def test_hovering_shows_the_tooltip(self):
         # A real tooltip event: QHelpEvent has pos(), not position().
         button = self.nav._item_rects()["fullscreen"].center().toPoint()

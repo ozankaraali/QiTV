@@ -14,8 +14,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.*=false")
 
 from PySide6.QtCore import (
+    QEvent,
     QLoggingCategory,
     QMargins,
+    QObject,
     QPoint,
     QRect,
     Qt,
@@ -1345,7 +1347,8 @@ def library_button(window):
 
 
 def click_library_button(case, window):
-    """Move the pointer (the player controls show), then click ‹ Library as a mouse does."""
+    """Move the pointer (the player controls show), then click ‹ Library as a mouse does;
+    return where (global)."""
     transport = window.overlays.transport
     case.assertTrue(wait_until(lambda: library_button(window) is not None, LIBRARY_WAIT_MS))
     window.controller.mouse_moved()
@@ -1353,6 +1356,27 @@ def click_library_button(case, window):
     host = transport.window()
     point = transport.mapTo(host, library_button(window).center().toPoint())
     QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+    return host.mapToGlobal(point)
+
+
+class MouseHeard(QObject):
+    """The mouse presses, double-clicks and releases that reach `widget`."""
+
+    KINDS = (
+        QEvent.Type.MouseButtonPress,
+        QEvent.Type.MouseButtonDblClick,
+        QEvent.Type.MouseButtonRelease,
+    )
+
+    def __init__(self, widget):
+        super().__init__(widget)
+        self.events = []
+        widget.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() in self.KINDS:
+            self.events.append(event.type())
+        return False
 
 
 class TwoProviderCase(WindowCase):
@@ -1567,11 +1591,18 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertEqual(episode["name"], "Low Tide")
         QTest.keyClick(window, Qt.Key.Key_Return)
         self.assertTrue(wait_until(lambda: len(plays) == 1, LIBRARY_WAIT_MS))
-        click_library_button(self, window)
+        at = click_library_button(self, window)
         self.assertIs(window.pages.currentWidget(), window.library_page)
         self.assertEqual(window.library_controller.mode, "series")
         self.assertIs(series.current_season(), season)
         self.assertIs(series.current_episode(), episode)
+        # A double-click's second click lands on the Library under the pointer (an episode
+        # there would play): it reaches nothing (2.0.1 review M1).
+        point = window.mapFromGlobal(at)
+        heard = MouseHeard(window.childAt(point))
+        QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+        self.assertEqual(heard.events, [])
+        self.assertEqual(len(plays), 1)
         self.wait_idle()
 
     def test_a_posters_right_click_menu_copies_its_link_and_says_so_on_the_library(self):

@@ -415,6 +415,14 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.breadcrumb_parts(), [])
         self.assertEqual(self.actions, [])
 
+    def test_a_quick_second_click_on_back_goes_up_again(self):
+        # 2.0.1 review M1: as the guide's ‹ ›, a double-click on ‹ counts twice: two layers.
+        self.drawer.open_drawer("1")
+        back = self.drawer.mapTo(self.host, self.drawer.back_rect().center().toPoint())
+        QTest.mouseDClick(self.host.windowHandle(), Qt.LeftButton, Qt.NoModifier, back)
+        self.assertEqual([n.layer for n in self.nav.path], ["source"])
+        self.assertEqual(self.drawer.highlighted().title, "Home")
+
     def test_a_click_on_the_providers_name_shows_the_sources_to_switch_provider(self):
         self.drawer.open_drawer("1")
         self.record_hand_offs()

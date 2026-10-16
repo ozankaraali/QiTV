@@ -1,9 +1,12 @@
-"""Shared click/double-click/wheel interpretation for the video surface and overlay host."""
+"""Shared click/double-click/wheel interpretation for the video surface and overlay host, and
+a guard for the second click of a double-click whose first click showed another page."""
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QMouseEvent, QWindow
 from PySide6.QtWidgets import QApplication
 
 NAV_BUTTONS = (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton)
+_SECOND_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 
 
 class PointerInput(QObject):
@@ -40,3 +43,55 @@ class PointerInput(QObject):
         if steps:
             self._wheel_accumulator -= steps * 120
             self.wheelSteps.emit(-steps, modifiers)  # scroll down = next
+
+
+class SecondClickGuard(QObject):
+    """Swallows the second click of a double-click whose first click showed another page.
+
+    "‹ Library" shows the Library at once, so a quick second click would land on whatever the
+    Library shows under the pointer, and a click on an episode plays it. `arm()` right after
+    such a click: for the double-click interval, the next left press (Qt may report it as a
+    press or as a double-click) and its release reach no window. Only that one click.
+    """
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._open = QTimer(self, singleShot=True)  # the double-click interval
+        self._open.timeout.connect(self._disarm)
+        self._held = False  # its press was swallowed: its release goes too
+        self._installed = False
+
+    def arm(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        if not self._installed:
+            app.installEventFilter(self)
+            self._installed = True
+        self._open.start(QApplication.doubleClickInterval())
+
+    def _disarm(self) -> None:
+        """Done: its release came, or the interval passed (a release after that, of a press
+        held that long, goes on: a release alone does nothing)."""
+        self._open.stop()
+        self._held = False
+        if self._installed:
+            self._installed = False
+            app = QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        # A window's events, before it hands them to a widget.
+        if not isinstance(watched, QWindow) or not isinstance(event, QMouseEvent):
+            return False
+        if event.button() != Qt.MouseButton.LeftButton or not self._open.isActive():
+            return False
+        kind = event.type()
+        if kind in _SECOND_PRESSES:
+            self._held = True
+            return True
+        if kind == QEvent.Type.MouseButtonRelease and self._held:
+            self._disarm()
+            return True
+        return False
