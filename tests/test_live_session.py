@@ -1551,21 +1551,19 @@ class BackOffTests(LiveSessionCase):
             (self.timelines[-1]["auto"], self.timelines[-1]["adjusted"]), (False, False)
         )
 
-    def test_a_burst_alone_is_no_adjustment(self):
+    def test_adjusted_means_the_channels_auto_target_moved_not_a_burst(self):
         # Most HLS channels' segments are longer than Normal's 2.5 s: their target is the
-        # burst from the start, under any latency. Adjusted means Auto moved it beyond that.
+        # burst from the start, under any latency, and that is no adjustment. Auto's own
+        # target moving is, also while the burst is still the larger.
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=6.0, edge=20.0).ready().run(1.0)
         self.assertEqual(self.timelines[-1]["target"], 6.0)
         self.assertFalse(self.timelines[-1]["adjusted"])
-        for _ in range(3):  # Auto's own target: 4.0, 5.5, 7.0
-            feed.stalled = True
-            feed.run(9.0)
-            feed.stalled = False
-            feed.run(10.0)
-            if self.timelines[-1]["target"] > 6.0:
-                break
-        self.assertEqual(self.timelines[-1]["target"], 7.0)
+        feed.stalled = True
+        feed.run(9.0)  # a stall (the burst plus 2 s) after a full cushion: Auto's 2.5 -> 4.0
+        feed.stalled = False
+        feed.run(10.0)
+        self.assertEqual(self.timelines[-1]["target"], 6.0)
         self.assertTrue(self.timelines[-1]["adjusted"])
 
     def test_auto_opens_the_buffer_as_normal_does(self):

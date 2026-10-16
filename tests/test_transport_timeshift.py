@@ -240,18 +240,19 @@ class TimeShiftCase(unittest.TestCase):
         t.show_live_edge(0.9, False)
         self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.9 s behind source"))
 
-    def test_auto_names_its_target_and_says_when_it_was_adjusted(self):
-        # 2.0.2: under Auto latency the row names the channel's target, not the lag.
+    def test_auto_shows_the_lag_and_says_when_its_target_was_adjusted(self):
+        # 2.0.2: under Auto latency the row shows the measured lag, and "adjusted" once the
+        # channel's Auto target moved from where Auto starts it.
         t = self.make()
         t.show_timeshift("104", "Nature")
         auto = {"auto": True, "target": 2.5, "adjusted": False}
         t.update_timeline(dict(at_edge(lag=2.6), **auto), PROGRAMME)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 2.5 s behind"))
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 2.6 s behind"))
         auto = {"auto": True, "target": 4.5, "adjusted": True}
-        t.update_timeline(dict(at_edge(lag=4.9), **auto), PROGRAMME)
-        self.assertEqual(t.texts()[1], "Stay live ● 4.5 s behind · adjusted")
+        t.update_timeline(dict(at_edge(lag=7.2), **auto), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● 7.2 s behind · adjusted")
         t.update_timeline(dict(at_edge(lag=7.0, rate=1.05), **auto), PROGRAMME)
-        self.assertEqual(t.texts()[1], "Stay live ● 4.5 s behind · adjusted · catching up 1.05×")
+        self.assertEqual(t.texts()[1], "Stay live ● 7.0 s behind · adjusted · catching up 1.05×")
         t.update_timeline(dict(at_edge(lag=4.9), stalled=True, **auto), PROGRAMME)
         self.assertEqual(t.texts()[1], "Stay live ● Reconnecting…")
         t.update_timeline(dict(at_edge(lag=2.6), target=2.5), PROGRAMME)  # a fixed latency

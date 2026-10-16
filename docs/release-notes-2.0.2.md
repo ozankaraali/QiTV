@@ -19,9 +19,9 @@ instead of using others' distributions, which may have malware.**
   can't change speed.
 - **Channels are remembered.** What Auto learns is kept per channel, so the next time you watch
   one, it starts where it left off.
-- **You can see it.** At the live edge the player controls read, for example, "Stay live ● 4.5 s
-  behind · adjusted": how far behind Auto keeps this channel, and that Auto moved it for this
-  channel.
+- **You can see it.** At the live edge the player controls read, for example, "Stay live ● 7.2 s
+  behind · adjusted": how far behind live the channel plays, and that Auto has moved it further
+  back for this channel.
 - **Your setting stays.** If you used 2.0.0 or 2.0.1, your latency stays as it was (Normal, unless
   you changed it). Choose **Auto (recommended)** in Settings to use it. Low, Normal and Stable keep
   the same distance on every channel, as before.
