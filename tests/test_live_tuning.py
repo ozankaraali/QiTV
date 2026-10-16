@@ -214,6 +214,41 @@ class LiveTuningTests(unittest.TestCase):
         self.clock.now += tuning.DIRECT_S - 10
         self.assertEqual(store.get("a"), Tuning(direct=True))
 
+    def test_a_time_in_the_future_counts_as_expired(self):
+        # The computer's clock was set back: a lock or direct play set "later" is not kept
+        # until the clock passes it again (2.0.2 review, M2).
+        store = self.store()
+        store.remember("a", Tuning(rate_locked=True, direct=True))
+        self.clock.now -= 3600
+        self.assertEqual(store.get("a"), Tuning())
+        store.remember("a", Tuning(rate_locked=True, direct=True))  # learned again: from now
+        self.clock.now += tuning.RATE_LOCK_S - 10
+        self.assertEqual(store.get("a"), Tuning(rate_locked=True, direct=True))
+
+    def test_an_unexpected_write_error_is_logged_without_the_address(self):
+        store = self.store()
+        failure = ValueError("cannot serialise http://provider.example/user/secret/1.ts")
+        with (
+            mock.patch("services.live.tuning.json.dumps", side_effect=failure),
+            self.assertLogs("services.live.tuning", "WARNING") as logs,
+        ):
+            store.remember("a", Tuning(extra=1.5))
+            store.flush()
+        self.assertNotIn("secret", "\n".join(logs.output))
+        self.assertIn("ValueError", "\n".join(logs.output))
+
+    def test_a_file_of_another_version_is_ignored(self):
+        channels = {"a": {"extra": 1.5, "used": self.clock.now}}
+        for version in (2, None, "1"):
+            with self.subTest(version=version):
+                data = {"channels": channels}
+                if version is not None:
+                    data["version"] = version
+                self.path.write_text(json.dumps(data))
+                self.assertEqual(self.store().get("a"), Tuning())
+        self.path.write_text(json.dumps({"version": 1, "channels": channels}))
+        self.assertEqual(self.store().get("a"), Tuning(extra=1.5))
+
     def test_without_a_file_it_remembers_for_the_run(self):
         store = LiveTuning(None)
         store.remember("a", Tuning(rate_locked=True))

@@ -10,12 +10,13 @@ A lock is kept with when it was set: from `RATE_LOCK_S` (a day) later it reads a
 so the channel's next tune tries other rates again, and rate health locks it again if VLC
 still crawls (a new day from then). Playing directly is kept the same way (`DIRECT_S`): a
 day later the next tune tries the pipeline again. A later lesson (Auto's extra moving)
-keeps their times.
+keeps their times; a time in the future (the clock was set back) counts as expired.
 
 `LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
 most `MAX_ENTRIES` (the least recently learned go first). The file is read once; each change
 writes it on one background thread, the newest state only, through a temporary file swapped
-in. A missing, unreadable or corrupt file counts as empty, and a bad entry is left out.
+in. A missing, unreadable or corrupt file, or one of another version, counts as empty, and
+a bad entry is left out. A write that fails is logged (without its path or any address).
 """
 
 from __future__ import annotations
@@ -119,8 +120,8 @@ class LiveTuning:
         if entry is None:
             return Tuning()
         now = self._now()
-        locked = entry["rate_locked"] and now - entry["locked_at"] < RATE_LOCK_S
-        direct = entry.get("direct", False) and now - entry["direct_at"] < DIRECT_S
+        locked = entry["rate_locked"] and 0 <= now - entry["locked_at"] < RATE_LOCK_S
+        direct = entry.get("direct", False) and 0 <= now - entry["direct_at"] < DIRECT_S
         return Tuning(entry["extra"], locked, direct)
 
     def remember(self, key: str, tuning: Tuning) -> None:
@@ -145,7 +146,7 @@ class LiveTuning:
             ):
                 if entry[flag]:
                     entry[at] = now
-                    if old is not None and old.get(flag) and now - old[at] < lasts:
+                    if old is not None and old.get(flag) and 0 <= now - old[at] < lasts:
                         entry[at] = old[at]
             self._entries[key] = entry
             self._trim()
@@ -172,6 +173,9 @@ class LiveTuning:
         channels = data.get("channels") if isinstance(data, dict) else None
         if not isinstance(channels, dict):
             _LOG.info("Ignoring the saved live tuning: it is not QiTV's")
+            return {}
+        if data.get("version") != _VERSION:
+            _LOG.info("Ignoring the saved live tuning: it is of another version")
             return {}
         entries = {}
         for key, value in channels.items():
@@ -215,7 +219,7 @@ class LiveTuning:
                 f.write(json.dumps(snapshot))
             os.replace(temporary, path)
             temporary = None
-        except (OSError, TypeError) as e:
+        except Exception as e:  # anything else would stay in the Future, unseen
             _LOG.warning("Couldn't save the live tuning: %s", safe_message(e))
         finally:
             if temporary is not None:
