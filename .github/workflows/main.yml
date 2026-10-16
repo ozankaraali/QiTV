@@ -7,7 +7,34 @@ on:
       - tv/vlc
   workflow_dispatch:
 
+# A newer push to tv/vlc replaces a running check; a release from main always finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
+  # The unit tests run once, on Linux, beside the builds; each build still smoke-tests its
+  # packaged app (real playback with the bundled libVLC) on its own platform.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: '3.14'
+          enable-cache: true
+      - name: Install VLC
+        run: sudo apt-get update && sudo apt-get install -y vlc libxcb-cursor0
+      - name: Sync dependencies
+        run: uv sync --frozen --dev
+      - name: Run tests
+        timeout-minutes: 15
+        run: uv run python -m unittest discover -s tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -26,41 +53,8 @@ jobs:
       - name: Sync dependencies
         id: sync
         run: uv sync --frozen --dev
-      - name: Run tests
-        timeout-minutes: 20
-        id: tests
-        run: uv run python -m unittest discover -s tests -v
-        env:
-          QT_QPA_PLATFORM: offscreen
-      - name: Smoke test
-        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        # openbox handles fullscreen and minimize; xcompmgr makes the overlays translucent.
-        run: |
-          xvfb-run -a -s "-screen 0 1920x1080x24" sh -c '
-            openbox &
-            xcompmgr &
-            for i in $(seq 50); do
-              xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id" && break
-              sleep 0.2
-            done
-            if ! xprop -root _NET_SUPPORTING_WM_CHECK | grep -q "window id"; then
-              echo "openbox did not start"
-              exit 1
-            fi
-            uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
-          '
-        timeout-minutes: 8
-        env:
-          QT_QPA_PLATFORM: xcb
-      - name: Upload smoke results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: smoke-linux
-          path: smoke-out/
       - name: Package App with PyInstaller for Linux
         id: package
-        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: uv run pyinstaller qitv-linux.spec
       - name: Rename binary
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
@@ -154,32 +148,8 @@ jobs:
       - name: Sync dependencies
         id: sync
         run: uv sync --frozen --dev
-      - name: Run tests
-        timeout-minutes: 20
-        id: tests
-        # Qt's offscreen plugin on Windows reads fonts only from QT_QPA_FONTDIR (the PySide6
-        # wheel ships none), so without it every glyph is a box as wide as the pixel size.
-        run: |
-          $fonts = @(Get-ChildItem -Path $env:QT_QPA_FONTDIR -Filter *.ttf -ErrorAction Stop)
-          if ($fonts.Count -eq 0) { throw "No TrueType fonts in $env:QT_QPA_FONTDIR" }
-          Write-Host "$($fonts.Count) TrueType fonts in $env:QT_QPA_FONTDIR"
-          uv run python -m unittest discover -s tests -v
-        env:
-          QT_QPA_PLATFORM: offscreen
-          QT_QPA_FONTDIR: C:\Windows\Fonts
-      - name: Smoke test
-        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
-        timeout-minutes: 8
-      - name: Upload smoke results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: smoke-windows
-          path: smoke-out/
       - name: Package App with PyInstaller for Windows
         id: package
-        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: uv run pyinstaller qitv-windows.spec
       - name: Rename binary
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
@@ -250,26 +220,8 @@ jobs:
       - name: Sync dependencies
         id: sync
         run: uv sync --frozen --dev
-      - name: Run tests
-        timeout-minutes: 20
-        id: tests
-        run: uv run python -m unittest discover -s tests -v
-        env:
-          QT_QPA_PLATFORM: offscreen
-          QITV_GUI_TESTS: '1'  # tests that show real windows (a GUI session)
-      - name: Smoke test
-        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
-        timeout-minutes: 8
-      - name: Upload smoke results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: smoke-macos-arm
-          path: smoke-out/
       - name: Package App with PyInstaller for macOS
         id: package
-        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
@@ -350,26 +302,8 @@ jobs:
       - name: Sync dependencies
         id: sync
         run: uv sync --frozen --dev
-      - name: Run tests
-        timeout-minutes: 20
-        id: tests
-        run: uv run python -m unittest discover -s tests -v
-        env:
-          QT_QPA_PLATFORM: offscreen
-          QITV_GUI_TESTS: '1'  # tests that show real windows (a GUI session)
-      - name: Smoke test
-        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
-        run: uv run python scripts/smoke_tv.py --out smoke-out --pipeline --pip
-        timeout-minutes: 8
-      - name: Upload smoke results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: smoke-macos-intel
-          path: smoke-out/
       - name: Package App with PyInstaller for macOS (Intel)
         id: package
-        if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
         run: uv run pyinstaller qitv-macos.spec
       - name: Ad-Hoc Sign the app
         if: ${{ !cancelled() && steps.package.outcome == 'success' }}
@@ -424,7 +358,7 @@ jobs:
           path: dist/qitv-macos-intel.zip
 
   release:
-    needs: [build-linux, build-windows, build-macos-universal, build-macos-intel]
+    needs: [tests, build-linux, build-windows, build-macos-universal, build-macos-intel]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
