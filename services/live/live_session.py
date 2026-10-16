@@ -56,12 +56,7 @@ channels VLC cannot play at any rate but 1x: its position crawls. While stay-liv
 not 1x, VLC's progress is checked against rate x wall time (`RateHealth`), counted only while
 VLC plays (from a second after it opened) with more than `_AHEAD_S` of media ahead, so a
 starved VLC is not taken for a slow one. Under 70% of it over 3 s, the rate goes back to 1x at
-once and stay-live changes it no more on that channel (`StayLive.lock_rate`). On an HLS
-source (the helper's state says `hls`) VLC crawls once its rate was changed at all, even
-back at 1x and across reopens (measured, 2.0.2): stay-live never changes its rate
-(`StayLive.keep_1x`), so the player's set_rate is never called for it, not even with 1x.
-It is corrected only by its target (Auto's back-off) and the reopen at live when far
-behind. A speed the user chooses while time-shifted still applies: that is the user's call.
+once and stay-live changes it no more on that channel (`StayLive.lock_rate`).
 
 "Auto" latency (2.0.2, `AutoTarget`) learns the target per channel instead of keeping the
 setting's: it starts at Normal's and rises 1.5 s with each starvation of VLC at the live
@@ -844,7 +839,6 @@ class LiveSession(QObject):
             self._back_off(snapshot, position, stalled, lag)
             self._stay.target = self._target(snapshot)
             self._stay.burst = _number(snapshot.get("burst_s"))
-            self._stay.keep_1x = snapshot.get("hls") is True
             auto = self._auto
             self._stay.build = auto.target if auto is not None and auto.adjusted else 0.0
             buffering = (

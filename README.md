@@ -172,7 +172,7 @@ Live streams arrive a little behind the broadcast. Settings → **Live latency**
 - **Auto** (recommended, and the default for new installs) finds it for each channel. A channel starts about 2.5 seconds behind; each time it runs dry or stalls although it had that much room (not right after you switch to it), QiTV plays it 1.5 seconds further behind (up to about 10 seconds; for a channel that arrives in bursts, up to a burst plus 2 seconds), and after every 5 minutes without trouble it comes half a second closer again. QiTV remembers this per channel for the next time. At the live edge the player controls show how far behind the channel plays, with "adjusted" once Auto has moved it, for example "Stay live ● 7.2 s behind · adjusted".
 - **Low** (about 1 second, starts sooner), **Normal** (about 2.5 seconds) or **Stable** (about 6 seconds, for unreliable streams) keep the same distance on every channel. A setting you chose before 2.0.2 stays as it was.
 
-QiTV gently speeds playback up or down to stay there, on streams that handle it (never on HLS streams, which VLC plays smoothly only at normal speed). On a channel where that does not play smoothly, QiTV notices within a few seconds, plays it at normal speed only and remembers that for a day; then it tries again. Channels that cannot be time-shifted play directly; under Auto they play as with Normal.
+QiTV gently speeds playback up or down to stay there. On a channel where that does not play smoothly, QiTV notices within a few seconds, plays it at normal speed only and remembers that for a day; then it tries again. Channels that cannot be time-shifted play directly; under Auto they play as with Normal.
 
 ### Picture-in-picture
 

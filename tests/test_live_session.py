@@ -1425,64 +1425,27 @@ class RateHealthTests(LiveSessionCase):
 
 
 class HlsRateTests(LiveSessionCase):
-    """2.0.2 ruling: on an HLS source VLC crawls once its rate was changed, even back at 1x
-    and across reopens (measured on a public channel). LiveSession never calls the player's
-    set_rate for one: stay-live corrects it only by its target (Auto's back-off) and the
-    single Go live when far behind. A speed the user chooses is the user's call."""
+    """2.0.2: an HLS source changes speed as any other (the measured crawl was not the rate;
+    rate health still guards it), and a speed the user chooses applies."""
 
-    def test_behind_the_target_it_never_changes_the_rate(self):
+    def test_behind_the_target_it_catches_up(self):
         sid = self.start()
-        Feed(self, sid, burst=6.0, edge=12.0, hls=True).ready().run(120.0)  # raw TS: 1.05x
-        self.assertEqual(self.playback.rates, [])  # not even a 1.0
+        Feed(self, sid, burst=6.0, edge=12.0, hls=True).ready().run(120.0)
+        self.assertIn(1.05, self.playback.rates)
+        self.assertEqual(self.playback.rates[-1], 1.0)
         self.assertEqual(len(self.playback.plays), 1)
-        self.assertTrue(all(state["rate"] == 1.0 for state in self.timelines))
 
-    def test_short_of_its_room_it_never_slows_down(self):
+    def test_short_of_its_room_it_slows_down_to_build_it(self):
         # The measured channel's shape: 10 s segments and 8 s buffered at the start.
         sid = self.start(latency=AUTO)
-        feed = Feed(self, sid, burst=10.0, edge=8.0, hls=True).ready().run(120.0)
-        self.assertEqual(self.playback.rates, [])  # raw TS: 0.95x
-        self.assertEqual(len(self.playback.plays), 1)
-        self.assertGreater(min(feed.before[-3:]), 0.0)  # it plays on, the room as it is
-
-    def test_far_behind_it_goes_live_once_and_still_never_changes_the_rate(self):
-        sid = self.start()
-        Feed(self, sid, burst=6.0, edge=60.0, hls=True).ready().run(120.0)
-        self.assertEqual(len(self.playback.plays), 2)  # one Go live, no loop
-        self.assertEqual(self.playback.rates, [])
-
-    def test_auto_still_backs_off_on_hls(self):
-        sid = self.start(latency=AUTO)
-        feed = Feed(self, sid, burst=6.0, edge=20.0, hls=True).ready().run(30.0)
-        feed.stalled = True
-        feed.run(9.0)  # the burst plus 2 s late, after a full cushion
-        feed.stalled = False
-        feed.run(30.0)
-        self.assertTrue(self.timelines[-1]["adjusted"])  # Auto's target moved: 2.5 -> 4.0
-        self.assertEqual(self.playback.rates, [])
-
-    def test_a_speed_the_user_chooses_is_still_applied(self):
-        sid = self.start()
-        feed = Feed(self, sid, burst=6.0, edge=30.0, hls=True).ready().run(1.0)
-        self.live.seek_to(5.0)
-        feed.sync()
-        self.live.toggle_pause()
-        self.live.set_speed(1.5)  # chosen while paused: applies on resume (CATCHING_UP)
-        self.live.toggle_pause()
-        feed.run(1.0)
-        self.assertEqual(self.playback.rates, [1.5])
-        self.live.go_live()
-        self.assertEqual(self.playback.rates, [1.5, 1.0])  # back to 1x, as it was
-
-    def test_a_raw_ts_source_in_bursts_still_changes_speed(self):
-        # The same shapes without the HLS flag: a raw TS source the helper measured.
-        sid = self.start()
-        Feed(self, sid, burst=6.0, edge=12.0).ready().run(120.0)
-        self.assertIn(1.05, self.playback.rates)
-        self.live = self.make()
-        sid = self.start()
-        Feed(self, sid, burst=10.0, edge=8.0).ready().run(10.0)
+        Feed(self, sid, burst=10.0, edge=8.0, hls=True).ready().run(10.0)
         self.assertEqual(self.playback.rates[:1], [0.95])
+
+    def test_a_crawl_at_another_rate_still_locks_1x(self):
+        sid = self.start()
+        Feed(self, sid, burst=6.0, edge=12.0, hls=True, crawl=True).ready().run(30.0)
+        self.assertEqual(self.playback.rates[-1], 1.0)
+        self.assertTrue(self.live._stay.rate_locked)
 
 
 class BackOffTests(LiveSessionCase):

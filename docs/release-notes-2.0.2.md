@@ -17,8 +17,8 @@ instead of using others' distributions, which may have malware.**
   count. After every 5 minutes without trouble it comes half a second closer again, back to where
   it started.
 - **No jumps.** When Auto moves a channel further behind, QiTV doesn't jump back: it plays 5%
-  slower for a while (the sound keeps its pitch) only on streams that handle speed changes well,
-  and on the others, HLS streams among them, simply lets the room grow.
+  slower for a while (the sound keeps its pitch), or simply lets the room grow if the channel
+  can't change speed.
 - **Channels are remembered.** What Auto learns is kept per channel, so the next time you watch
   one, it starts where it left off.
 - **You can see it.** At the live edge the player controls read, for example, "Stay live ● 7.2 s
