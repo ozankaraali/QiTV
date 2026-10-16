@@ -94,7 +94,8 @@ class MediaOptionsTests(unittest.TestCase):
             options = media_options(kind)
             reconnect = "false" if kind is PlayKind.LIVE_PIPELINE else "true"
             self.assertIn(f":http-reconnect={reconnect}", options)
-            self.assertIn(":avcodec-hw=any", options)
+            # The decoder is the instance's (Settings): a media option would override it.
+            self.assertFalse([o for o in options if o.startswith(":avcodec-hw")])
 
 
 if __name__ == "__main__":

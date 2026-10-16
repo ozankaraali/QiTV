@@ -35,7 +35,8 @@ def media_options(
 ) -> list[str]:
     options = [
         f":http-user-agent={user_agent or DEFAULT_USER_AGENT}",
-        ":avcodec-hw=any",
+        # No ":avcodec-hw" here: a media option overrides the instance's, and the decoder is
+        # Settings' choice (services.playback.decoder_args).
         ":avcodec-fast",
     ]
     if kind is PlayKind.LIVE_PIPELINE:
