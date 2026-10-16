@@ -122,12 +122,13 @@ class LiveTuningTests(unittest.TestCase):
             "bool": {"target": True, "used": 1.0},
             "when": {"target": 4.0, "used": "today"},
             "lock": {"rate_locked": True, "used": 1.0, "locked_at": "today"},
+            "direct": {"direct": "yes", "used": self.clock.now},
             "list": [4.0, True],
         }
         self.path.write_text(json.dumps({"version": 1, "channels": channels}))
         store = self.store()
         self.assertEqual(store.get("ok"), Tuning(target=4.0, rate_locked=True))
-        for key in ("text", "flag", "bool", "when", "lock", "list"):
+        for key in ("text", "flag", "bool", "when", "lock", "direct", "list"):
             self.assertEqual(store.get(key), Tuning(), key)
 
     def test_the_file_is_written_off_the_calling_thread(self):
@@ -196,6 +197,22 @@ class LiveTuningTests(unittest.TestCase):
         self.assertEqual(self.store().get("a"), Tuning(rate_locked=True))
         self.clock.now += tuning.RATE_LOCK_S
         self.assertEqual(self.store().get("a"), Tuning())
+
+    def test_a_channel_played_directly_is_tried_on_the_pipeline_again_after_a_day(self):
+        store = self.store()
+        store.remember("a", Tuning(target=4.0, direct=True))
+        set_at = self.clock.now
+        self.clock.now = set_at + tuning.DIRECT_S - 10
+        self.assertEqual(store.get("a"), Tuning(target=4.0, direct=True))
+        store.remember("a", Tuning(target=5.5, direct=True))  # a later lesson keeps its time
+        store.flush()
+        self.clock.now = set_at + tuning.DIRECT_S - 10
+        self.assertEqual(self.store().get("a"), Tuning(target=5.5, direct=True))  # the file
+        self.clock.now = set_at + tuning.DIRECT_S
+        self.assertEqual(store.get("a"), Tuning(target=5.5))
+        store.remember("a", Tuning(direct=True))  # it crawled again
+        self.clock.now += tuning.DIRECT_S - 10
+        self.assertEqual(store.get("a"), Tuning(direct=True))
 
     def test_without_a_file_it_remembers_for_the_run(self):
         store = LiveTuning(None)

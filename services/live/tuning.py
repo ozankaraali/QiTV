@@ -1,13 +1,16 @@
 """What QiTV learned about each live channel (2.0.2), for that channel's next tune.
 
-Per (provider, channel): Auto latency's target (`AutoTarget`) and whether VLC can play the
-channel at a rate other than 1x (`RateHealth`). `channel_key()` tells channels apart as the
+Per (provider, channel): Auto latency's target (`AutoTarget`), whether VLC can play the
+channel at a rate other than 1x (`RateHealth`), and whether it plays directly because VLC
+crawled through the pipeline even at 1x (an HLS channel). `channel_key()` tells channels apart as the
 zap list does (the stream address, else the id, else the name) and hashes that with the
 provider's name: a stream address may carry credentials, and none reach the file.
 
 A lock is kept with when it was set: from `RATE_LOCK_S` (a day) later it reads as unlocked,
 so the channel's next tune tries other rates again, and rate health locks it again if VLC
-still crawls (a new day from then). A later lesson (Auto's target moving) keeps its time.
+still crawls (a new day from then). Playing directly is kept the same way (`DIRECT_S`): a
+day later the next tune tries the pipeline again. A later lesson (Auto's target moving)
+keeps their times.
 
 `LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
 most `MAX_ENTRIES` (the least recently learned go first). The file is read once; each change
@@ -37,6 +40,7 @@ _LOG = logging.getLogger(__name__)
 FILE_NAME = "live_tuning.json"
 MAX_ENTRIES = 500
 RATE_LOCK_S = 24 * 60 * 60  # a lock older than this is tried again
+DIRECT_S = 24 * 60 * 60  # so is a channel played directly
 _VERSION = 1
 
 
@@ -46,6 +50,7 @@ class Tuning:
 
     target: Optional[float] = None  # Auto latency's target, when not where Auto starts
     rate_locked: bool = False  # VLC cannot play the channel at a rate other than 1x
+    direct: bool = False  # it crawled through the pipeline even at 1x: play it directly
 
 
 def channel_key(provider: str, item: Mapping[str, Any]) -> str:
@@ -71,18 +76,20 @@ def _entry(value: Any) -> Optional[dict[str, Any]]:
     if not isinstance(value, dict):
         return None
     target, locked, used = value.get("target"), value.get("rate_locked", False), value.get("used")
+    direct = value.get("direct", False)
     if target is not None and not (_number(target) and math.isfinite(target)):
         return None
-    if not isinstance(locked, bool) or not _number(used):
+    if not isinstance(locked, bool) or not isinstance(direct, bool) or not _number(used):
         return None
-    if target is None and not locked:
+    if target is None and not locked and not direct:
         return None
-    entry = {"target": target, "rate_locked": locked, "used": used}
-    if locked:
-        locked_at = value.get("locked_at", used)  # without its time: when it was learned
-        if not _number(locked_at):
-            return None
-        entry["locked_at"] = locked_at
+    entry = {"target": target, "rate_locked": locked, "direct": direct, "used": used}
+    for flag, at in (("rate_locked", "locked_at"), ("direct", "direct_at")):
+        if entry[flag]:
+            when = value.get(at, used)  # without its time: when it was learned
+            if not _number(when):
+                return None
+            entry[at] = when
     return entry
 
 
@@ -106,12 +113,15 @@ class LiveTuning:
         self._trim()
 
     def get(self, key: str) -> Tuning:
-        """What the channel taught; a lock from `RATE_LOCK_S` ago or longer reads as none."""
+        """What the channel taught; a lock from `RATE_LOCK_S` ago or longer reads as none,
+        and so does playing directly from `DIRECT_S` ago."""
         entry = self._entries.get(key) if key else None
         if entry is None:
             return Tuning()
-        locked = entry["rate_locked"] and self._now() - entry["locked_at"] < RATE_LOCK_S
-        return Tuning(entry["target"], locked)
+        now = self._now()
+        locked = entry["rate_locked"] and now - entry["locked_at"] < RATE_LOCK_S
+        direct = entry.get("direct", False) and now - entry["direct_at"] < DIRECT_S
+        return Tuning(entry["target"], locked, direct)
 
     def remember(self, key: str, tuning: Tuning) -> None:
         """Keep `tuning` for the channel `key` (nothing learned: forget it); write it soon."""
@@ -122,12 +132,21 @@ class LiveTuning:
                 return
         else:
             now, old = self._now(), self._entries.get(key)
-            entry = {"target": tuning.target, "rate_locked": tuning.rate_locked, "used": now}
-            if tuning.rate_locked:  # a lock still in force keeps its time; else from now
-                entry["locked_at"] = now
-                if old is not None and old["rate_locked"]:
-                    if now - old["locked_at"] < RATE_LOCK_S:
-                        entry["locked_at"] = old["locked_at"]
+            entry = {
+                "target": tuning.target,
+                "rate_locked": tuning.rate_locked,
+                "direct": tuning.direct,
+                "used": now,
+            }
+            # A lock (or direct play) still in force keeps its time; else it counts from now.
+            for flag, at, lasts in (
+                ("rate_locked", "locked_at", RATE_LOCK_S),
+                ("direct", "direct_at", DIRECT_S),
+            ):
+                if entry[flag]:
+                    entry[at] = now
+                    if old is not None and old.get(flag) and now - old[at] < lasts:
+                        entry[at] = old[at]
             self._entries[key] = entry
             self._trim()
         self._save()

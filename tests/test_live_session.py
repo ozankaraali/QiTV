@@ -232,7 +232,8 @@ class Feed:
     the last rate set while it has data; at the edge it reports `starved` (BUFFERING; real
     libVLC 3 keeps reporting PLAYING with its clock standing still). With `crawl` it cannot
     play at any rate but 1x, as on a real channel (2.0.2): at another rate its clock stands
-    still and moves a quarter second every two seconds, while it reports PLAYING. While
+    still and moves a quarter second every two seconds, while it reports PLAYING; with
+    `crawl_1x` it crawls so at 1x too (measured on an HLS channel through the pipeline). While
     `stalled` the source sends nothing: the edge stands still and no state arrives.
     LiveSession ticks every 0.25 s.
     """
@@ -254,10 +255,12 @@ class Feed:
         starved=PlaybackState.BUFFERING,
         metered=False,
         crawl=False,
+        crawl_1x=False,
         hls=False,
     ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
         self.crawl, self.crawled = crawl, 0.0  # wall seconds at another rate since a step
+        self.crawl_1x = crawl_1x
         self.hls = hls
         self.meter = worker.BurstMeter() if metered else None
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
@@ -317,7 +320,7 @@ class Feed:
             ):
                 rate = (playback.rates or [1.0])[-1]
                 wanted = rate * self.DT
-                if self.crawl and rate != 1.0:
+                if (self.crawl and rate != 1.0) or self.crawl_1x:
                     every, media = self.CRAWL
                     self.crawled += self.DT
                     wanted = 0.0
@@ -1446,6 +1449,93 @@ class HlsRateTests(LiveSessionCase):
         Feed(self, sid, burst=6.0, edge=12.0, hls=True, crawl=True).ready().run(30.0)
         self.assertEqual(self.playback.rates[-1], 1.0)
         self.assertTrue(self.live._stay.rate_locked)
+
+
+class CrawlFallbackTests(LiveSessionCase):
+    """2.0.2: on some HLS channels VLC crawls through the pipeline even at 1x (measured: about
+    0.8x with a jump every ~23 s), while VLC's own HLS plays them at 1x. Under 70% progress
+    over 8 s at 1x with at least 3 s buffered ahead, the channel plays directly, with one
+    notice, and is remembered for a day: its next tune plays directly at once."""
+
+    CRAWLING = "Plays without rewind for smoother playback"
+
+    def setUp(self):
+        self.now = [1_000_000.0]
+        self.tuning = LiveTuning(None, now=lambda: self.now[0])
+        super().setUp()
+
+    def make(self, **kwargs):
+        kwargs.setdefault("tuning", self.tuning)
+        return super().make(**kwargs)
+
+    def tune(self, channel="A", *, hls=True, edge=12.0, **kwargs):
+        plays = len(self.playback.plays)
+        self.start(channel=channel)
+        self.engine.answer()  # the channel before closes
+        if len(self.playback.plays) > plays:
+            return None  # played directly at once
+        return Feed(self, self.engine.last_sid, burst=6.0, edge=edge, hls=hls, **kwargs).ready()
+
+    def test_an_hls_channel_that_crawls_at_1x_plays_directly_once(self):
+        feed = self.tune(crawl_1x=True)
+        sid = self.engine.last_sid
+        feed.run(30.0)
+        # Its nudge crawled first: 1x for good (rate health), and it still crawled at 1x.
+        self.assertEqual(self.playback.rates[-1], 1.0)
+        self.assertIn(sid, self.engine.closed)  # the pipeline's upstream closes first
+        self.assertNotIn("direct", self.modes)
+        self.engine.answer()
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.assertEqual(self.modes[-1], "direct")
+        self.assertEqual(self.notices, [self.CRAWLING])  # said once
+        self.assertEqual(self.tuning.get("A"), Tuning(rate_locked=True, direct=True))
+        feed.run(30.0)
+        self.assertEqual(self.notices, [self.CRAWLING])
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+
+    def test_its_next_tune_plays_directly_at_once_and_a_day_later_tries_again(self):
+        self.tuning.remember("A", Tuning(direct=True))
+        opened = len(self.engine.opened)
+        self.assertIsNone(self.tune())
+        self.assertEqual(len(self.engine.opened), opened)  # no pipeline session at all
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        self.assertEqual(self.notices[-1], UNAVAILABLE)  # shown only when a rewind needs it
+        self.assertNotIn(self.CRAWLING, self.notices)
+        self.now[0] += 24 * 60 * 60
+        feed = self.tune()
+        self.assertIsNotNone(feed)  # the pipeline again
+        feed.run(20.0)
+        self.assertEqual(self.modes[-1], "pipeline")
+
+    def test_a_healthy_hls_channel_stays_on_the_pipeline_with_its_nudges(self):
+        feed = self.tune()
+        feed.run(120.0)
+        self.assertIn(1.05, self.playback.rates)
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertEqual(self.engine.closed, [])
+        self.assertEqual(self.notices, [])
+        self.assertEqual(self.tuning.get("A"), Tuning())
+
+    def test_raw_ts_is_left_as_it_was(self):
+        feed = self.tune(hls=False, crawl_1x=True)
+        feed.run(60.0)
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertEqual(self.engine.closed, [])
+        self.assertFalse(self.tuning.get("A").direct)
+
+    def test_waiting_at_the_live_edge_is_no_crawl(self):
+        # 1x for good, a short buffer and a source that keeps stalling: VLC waits at the edge
+        # with under 3 s ahead, and plays at 1x in between.
+        self.tuning.remember("A", Tuning(rate_locked=True))
+        feed = self.tune(edge=3.0, starved=PlaybackState.PLAYING)
+        for _ in range(6):
+            feed.stalled = True
+            feed.run(9.0)
+            feed.stalled = False
+            feed.run(6.0)
+        self.assertGreater(feed.starved_s, 10.0)
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertNotIn(self.CRAWLING, self.notices)
 
 
 class BackOffTests(LiveSessionCase):

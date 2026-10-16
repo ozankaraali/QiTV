@@ -65,12 +65,13 @@ class RateHealth:
 
     The caller adds only time that says something about the rate: at a rate other than 1x,
     with VLC playing and media ahead of it (a VLC waiting at the live edge is starved, not
-    slow). Each window of `_HEALTH_WINDOW_S` counted seconds is judged on its own; `share` is
-    the last window's progress against what its rates asked.
+    slow). Each window of `window_s` counted seconds (default `_HEALTH_WINDOW_S`) is judged on
+    its own; `share` is the last window's progress against what its rates asked.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, window_s: float = _HEALTH_WINDOW_S) -> None:
         self.share = 1.0
+        self._window = window_s
         self.reset()
 
     def reset(self) -> None:
@@ -86,7 +87,7 @@ class RateHealth:
         self._wall += wall
         self._asked += wall * rate
         self._played += played
-        if self._wall < _HEALTH_WINDOW_S - 1e-9:
+        if self._wall < self._window - 1e-9:
             return False
         self.share = self._played / self._asked if self._asked > 0 else 1.0
         self.reset()
