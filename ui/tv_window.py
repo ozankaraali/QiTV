@@ -474,6 +474,8 @@ class TVWindow(QMainWindow):
         self.menus = TVMenus(self, self)
         # The player controls' and the guide's ⌕: the Library's search, as Ctrl/⌘+F.
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
+        # ‹ Library on the player controls: back to the Library a title came from, as Esc.
+        self.overlays.transport.libraryRequested.connect(self.screens.back_to_library)
         self.overlays.guide.searchRequested.connect(self.screens.open_search)
         # The Library's ⛶: the menu bar, with View → Fullscreen, hides in fullscreen.
         self.library_page.nav.fullscreenRequested.connect(self.toggle_fullscreen)

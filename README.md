@@ -193,7 +193,7 @@ The guide comes from your provider (STB and Xtream), or from a guide file or web
 
 ## The Library: movies and series
 
-<kbd>Ctrl/⌘+2</kbd> opens Movies and <kbd>Ctrl/⌘+3</kbd> Series (also from the channel list's sections). Opening the Library stops live TV; **Live TV** (or <kbd>Ctrl/⌘+1</kbd>) takes you back to the last channel. The **⛶** at the right end of its top bar switches fullscreen.
+<kbd>Ctrl/⌘+2</kbd> opens Movies and <kbd>Ctrl/⌘+3</kbd> Series (also from the channel list's sections). Opening the Library stops live TV; **Live TV** (or <kbd>Ctrl/⌘+1</kbd>) takes you back to the last channel. While a movie or an episode from the Library plays, **‹ Library** in the player controls (or <kbd>Esc</kbd>) takes you back to where you were in the Library. The **⛶** at the right end of its top bar switches fullscreen.
 
 - **Genres** are on the left. Above them: **Continue** (what you started watching), **New** (the most recently added titles, when your provider says when it added them) and **My list** (titles you saved with ★ or <kbd>Ctrl/⌘+D</kbd>).
 - **Posters** fill the rest. The highlighted one opens a strip with its year, genre, rating and story, and **Resume**, **Start over** and ★.

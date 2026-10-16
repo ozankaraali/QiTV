@@ -1339,6 +1339,22 @@ XTREAM = local_xtream.PROVIDER_NAME
 LIBRARY_WAIT_MS = 15000  # a provider setup and a section over the local HTTP fixture
 
 
+def library_button(window):
+    """The player controls' ‹ Library, when they lay it out (else None)."""
+    return window.overlays.transport._layout().get("library")
+
+
+def click_library_button(case, window):
+    """Move the pointer (the player controls show), then click ‹ Library as a mouse does."""
+    transport = window.overlays.transport
+    case.assertTrue(wait_until(lambda: library_button(window) is not None, LIBRARY_WAIT_MS))
+    window.controller.mouse_moved()
+    case.assertTrue(transport.isVisible())
+    host = transport.window()
+    point = transport.mapTo(host, library_button(window).center().toPoint())
+    QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+
+
 class TwoProviderCase(WindowCase):
     """The local M3U fixture and a fake Xtream provider served on 127.0.0.1 (no network).
 
@@ -1517,6 +1533,47 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertIs(grid.item(1), current)  # the same title, not a reloaded list
         self.wait_idle()
 
+    def test_the_library_button_returns_to_the_library_where_it_was(self):
+        # 2.0.1 review I1: ‹ Library on the player controls does what Esc does after a movie.
+        plays = self.play_spy()
+        self.show()
+        self.wait_ready(XTREAM)
+        window = self.window
+        self.menu_actions()["Movies"].trigger()
+        grid = self.wait_for_titles()
+        QTest.keyClick(window, Qt.Key.Key_Right)
+        current = grid.item(grid.current_index())
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertTrue(wait_until(lambda: plays == [current["cmd"]]))
+        click_library_button(self, window)
+        self.assertIs(window.pages.currentWidget(), window.library_page)
+        self.assertEqual(grid.current_index(), 1)
+        self.assertIs(grid.item(1), current)  # the same title, not a reloaded list
+        self.wait_idle()
+
+    def test_the_library_button_returns_to_the_series_on_its_episode(self):
+        plays = self.play_spy()
+        self.show()
+        self.wait_ready(XTREAM)
+        window = self.window
+        self.menu_actions()["Series"].trigger()
+        self.wait_for_titles()
+        QTest.keyClick(window, Qt.Key.Key_Return)  # the series
+        series = window.library_page.series
+        self.assertTrue(wait_until(lambda: series.current_episode() is not None, LIBRARY_WAIT_MS))
+        for key in (Qt.Key.Key_Down, Qt.Key.Key_Down):  # the episodes, then the second one
+            QTest.keyClick(window, key)
+        episode, season = series.current_episode(), series.current_season()
+        self.assertEqual(episode["name"], "Low Tide")
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertTrue(wait_until(lambda: len(plays) == 1, LIBRARY_WAIT_MS))
+        click_library_button(self, window)
+        self.assertIs(window.pages.currentWidget(), window.library_page)
+        self.assertEqual(window.library_controller.mode, "series")
+        self.assertIs(series.current_season(), season)
+        self.assertIs(series.current_episode(), episode)
+        self.wait_idle()
+
     def test_a_posters_right_click_menu_copies_its_link_and_says_so_on_the_library(self):
         # Owner (2026-10-15): a Library title offers the channels' Play in VLC/MPV and link.
         self.show()
@@ -1645,6 +1702,24 @@ class LibraryReturnTests(WindowCase):
         QTest.keyClick(self.window, Qt.Key.Key_Escape)
         self.assertFalse(self.window.screens.library_shown())  # live TV now: no way back
         self.assertFalse(self.window.controller.overlay_open())
+
+    def test_the_player_controls_offer_the_way_back_only_for_the_librarys_titles(self):
+        # 2.0.1 review I1: ‹ Library on the player controls, as Esc after a movie.
+        ids = self.held_links()
+        self.play_from_the_library()
+        self.window.catalog.linkReady.emit(ids[0], self.MOVIE["cmd"])
+        self.assertTrue(wait_until(lambda: library_button(self.window) is not None))
+        channel = self.window.catalog.items("live", "*")[0]
+        self.window.controller.tune(channel, group_key="*", channels=[channel])
+        # The controls show the channel once it plays (no ‹ Library on live TV); a click
+        # while it opens, as Esc then, stays on live TV.
+        self.window.overlays.transport.libraryRequested.emit()
+        self.assertFalse(self.window.screens.library_shown())
+        path = Path(self.config_dir) / "home video.mp4"
+        with mock.patch("ui.tv_pages.QFileDialog.getOpenFileName", return_value=(str(path), "")):
+            self.window.screens.open_file()  # a local file
+        self.assertTrue(self.window.controller.vod_current())
+        self.assertIsNone(library_button(self.window))
 
     def test_the_library_leaves_the_mini_player_first(self):
         self.show()

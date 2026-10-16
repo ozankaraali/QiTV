@@ -15,7 +15,8 @@ Without a keyboard every key of the player has a control here too (the owner's m
 rule): left of the speaker sit Search, and on live TV the guide and the previous channel; a
 time-shifted channel at its live edge has ◀10 beside play; on live TV the channel's name (and
 logo) shows its info, and a star after the name adds or removes it from the favorites. Each
-names its key when hovered.
+names its key when hovered. A movie or an episode played from the Library has "‹ Library" at the
+left of the right-hand buttons: back to where it came from, as Esc.
 At a small width the Stay live indicator's text is shortened, or the indicator left out, so it
 never runs under the play button.
 """
@@ -70,7 +71,9 @@ TOOLTIPS = {
     "fullscreen": "Fullscreen (F)",
     "external": "Open in external player",
     "volume": "Volume (+/−, M)",
+    "library": "Back to the Library (Esc)",
 }
+LIBRARY_LABEL = "‹ Library"
 # Controls for a key of the player's (ui.keymap.SHORTCUTS): what they do, and that key.
 KEY_HINTS = {
     "play": ("Play / pause", "Space"),
@@ -189,6 +192,7 @@ class Transport(Overlay):
     previousRequested = Signal()  # the channel before
     infoRequested = Signal()  # the channel's name: its info (the banner)
     favoriteRequested = Signal()  # the star after the name: add or remove the channel
+    libraryRequested = Signal()  # ‹ Library: back to the Library the title came from (Esc)
     bandChanged = Signal()  # its controls changed (a mode, the bar): controls_top() moved
 
     def __init__(
@@ -215,6 +219,7 @@ class Transport(Overlay):
         self._pip_open = False
         self._muted = False  # the large picture's mute: the speaker shows it
         self._favorite = False  # the live channel is a favorite: its star is lit
+        self._library = False  # the title came from the Library: ‹ Library shows
         self._hand = False  # the pointer is over the title row's controls
         self._timeline: _Timeline | None = None
         self._claimed: tuple[object, ...] = ()  # what hole_claims() covered last
@@ -328,6 +333,14 @@ class Transport(Overlay):
         if muted != self._muted:
             self._muted = muted
             self.update()
+
+    def set_library_available(self, available: bool) -> None:
+        """The "‹ Library" button: shown during a movie or an episode when `available` (it was
+        played from the Library); never on live TV."""
+        if available != self._library:
+            self._library = available
+            self.update()
+            self._controls_changed()
 
     def set_favorite(self, favorite: bool) -> None:
         """Whether the live channel is a favorite: its star is lit."""
@@ -639,6 +652,10 @@ class Transport(Overlay):
                 fm = QFontMetricsF(self._chip_font(un))
                 width = 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance("Go live")
                 rects["golive"] = QRectF(x - width, cy - un.px(1.1), width, un.px(2.2))
+            elif self._library and not self._live:
+                fm = QFontMetricsF(self._chip_font(un))
+                width = 2 * un.px(1.0) + fm.horizontalAdvance(LIBRARY_LABEL)
+                rects["library"] = QRectF(x - width, cy - un.px(1.1), width, un.px(2.2))
         return rects
 
     def _right_buttons(self, *rest: str) -> tuple[str, ...]:
@@ -814,6 +831,12 @@ class Transport(Overlay):
         self._paint_skips(p, un, rects, text)
         self._paint_play(p, rects["play"], qcolor(PALETTE.canvas))
         self._paint_speed(p, un, rects["speed"], text)
+        chip = rects.get("library")
+        if chip is not None:
+            fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
+            p.setFont(self._chip_font(un))
+            p.setPen(text)
+            p.drawText(chip, Qt.AlignCenter, LIBRARY_LABEL)
 
     def _paint_timeshift(
         self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor
@@ -1054,6 +1077,8 @@ class Transport(Overlay):
                 self.guideRequested.emit()
             elif name == "previous":
                 self.previousRequested.emit()
+            elif name == "library":
+                self.libraryRequested.emit()
             return
 
     def _nearest_speed(self) -> int:

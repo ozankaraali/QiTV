@@ -75,13 +75,12 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "Alt+P"): (("transport", "mini"),),
     # Close what is open: a click on the picture closes the channel list, × the guide (the
     # banner, the zap list and the mixer fade by themselves); ⛶ leaves fullscreen; after a
-    # movie, the channel list's Movies and Series rows open the Library again.
+    # movie or an episode from the Library, ‹ Library goes back to where it came from.
     ("player", "Esc"): (
         ("picture", "click"),
         ("guide", "close"),
         ("transport", "fullscreen"),
-        ("drawer", "Movies"),
-        ("drawer", "Series"),
+        ("transport", "library"),
     ),
     # ---- Channel list ----------------------------------------------------------------------
     ("drawer", "Up, Down"): (("drawer", "rows"),),  # a click on the row; the wheel scrolls
@@ -149,7 +148,8 @@ def _host() -> QWidget:
 
 
 def _transport(host: QWidget) -> set[str]:
-    """Every control the player controls lay out: live, at the live edge, behind it, a movie."""
+    """Every control the player controls lay out: live, at the live edge, behind it, a movie
+    from the Library."""
     t = Transport(host)
     t.set_pip_state(True, False)
     found: set[str] = set()
@@ -165,6 +165,7 @@ def _transport(host: QWidget) -> set[str]:
     take()
     t.update_timeline(dict(TIMELINE, position=300.0, lag=300.0, mode="shifted"), [])
     take()
+    t.set_library_available(True)
     t.show_vod("Film", "")
     t.update_position(0, 100_000)
     take()

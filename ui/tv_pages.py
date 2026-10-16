@@ -2,8 +2,9 @@
 
 Opening the Library (View → Movies, Series or Search, Ctrl/⌘+F, Movies or Series chosen in
 the drawer) stops what plays and shows the Library page. A title played from the Library
-switches to the player; Esc on it, with nothing open on the player, shows the Library again as
-it was (its genre, title and scroll). Live TV (the menu, the Library's tab, Esc at its top
+switches to the player; Esc on it, with nothing open on the player, or "‹ Library" on the player
+controls shows the Library again as it was (its genre, title and scroll, or the series view on
+its season and episode). Live TV (the menu, the Library's tab, Esc at its top
 level) tunes the last channel again. The Library's LibraryController is made here, after the
 TVController was wired (see TVWindow.__init__). Messages show on both pages' toasts: the
 overlay host, and its toast, hide with the player page.
@@ -86,9 +87,14 @@ class TVPages(QObject):
     def _enter_library(self) -> None:
         window = self._window
         window.leave_mini_player()  # the Library is a full window: never inside the corner
-        self._return_to_library = False
+        self._set_return_to_library(False)
         window.controller.stop_for_library()
         self._show_page(window.library_page)
+
+    def _set_return_to_library(self, value: bool) -> None:
+        """Whether the title playing came from the Library: Esc and ‹ Library go back to it."""
+        self._return_to_library = value
+        self._window.overlays.transport.set_library_available(value)
 
     def play(self, item: dict, kind: str, context: dict) -> None:
         """A movie or an episode from the Library: Esc brings the Library back."""
@@ -96,7 +102,7 @@ class TVPages(QObject):
         if window.closing():
             return
         self._show_page(window.player_page)
-        self._return_to_library = True
+        self._set_return_to_library(True)
         window.controller.play_vod(item, kind, context)
 
     def tune_live(self, channel: dict) -> None:
@@ -105,7 +111,7 @@ class TVPages(QObject):
         if window.closing():
             return
         self._show_page(window.player_page)
-        self._return_to_library = False
+        self._set_return_to_library(False)
         window.controller.tune_live(channel)
 
     def back_to_tv(self) -> None:
@@ -114,7 +120,7 @@ class TVPages(QObject):
         if window.closing():
             return
         self._show_page(window.player_page)
-        self._return_to_library = False
+        self._set_return_to_library(False)
         window.controller.resume_live()
 
     def escape_to_library(self) -> bool:
@@ -126,18 +132,34 @@ class TVPages(QObject):
         scroll: it is shown again, not opened again.
         """
         window = self._window
-        controller = window.controller
         if (
-            not self._return_to_library
-            or self.library_shown()
+            not self._can_return()
             or window.mini_player_active()
             or window.fullscreen_heading()
-            or not controller.vod_chosen()
-            or controller.overlay_open()
+            or window.controller.overlay_open()
         ):
             return False
         self._enter_library()
         return True
+
+    def back_to_library(self) -> None:
+        """The player controls' "‹ Library": what Esc does after a movie from the Library.
+
+        Esc first closes what is open on the player and leaves fullscreen; a click on the
+        button goes back at once, also from fullscreen or the mini player (which the Library
+        leaves).
+        """
+        if not self._window.closing() and self._can_return():
+            self._enter_library()
+
+    def _can_return(self) -> bool:
+        """The title playing, on its way or failed came from the Library, and no live channel
+        was chosen since."""
+        return (
+            self._return_to_library
+            and not self.library_shown()
+            and self._window.controller.vod_chosen()
+        )
 
     def context_menu(self, item: dict, section: str, global_pos: QPoint) -> None:
         """A right-click on a Library film or episode: Play in VLC/MPV or Copy stream link."""
@@ -154,7 +176,7 @@ class TVPages(QObject):
         if not path or window.closing():
             return
         self._show_page(window.player_page)
-        self._return_to_library = False
+        self._set_return_to_library(False)
         window.controller.play_file(path)
 
     def export(self, kind: ExportKind) -> None:

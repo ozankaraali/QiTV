@@ -496,6 +496,47 @@ class OnScreenKeysTests(unittest.TestCase):
             self.assertNotIn(name, rects)
         self.assertEqual(t.title_rects(), {})  # no channel: nothing to favor or to tell
 
+    def test_a_title_from_the_library_has_a_way_back_to_it(self):
+        t = self.make()
+        t.set_library_available(True)
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        rect = t.button_rect("library")
+        self.assert_big_enough(rect, "library")
+        self.assertEqual(t.tooltip_at(rect.center()), "Back to the Library (Esc)")
+        # At the left of the right-hand group, clear of the speed chip.
+        self.assertLess(rect.right(), t.button_rect("search").left())
+        self.assertGreater(rect.left(), t.button_rect("speed").right())
+        self.assertTrue(t.hole_claims().contains(rect.center().toPoint()))
+        spy = QSignalSpy(t.libraryRequested)
+        self.click(t, rect.center())
+        self.assertEqual(spy.count(), 1)
+
+    def test_the_way_back_to_the_library_shows_only_for_its_titles(self):
+        host = _Host()
+        self.addCleanup(host.deleteLater)
+        t = Transport(host, idle_ms=3000)
+        host.show()
+        t.show_vod("A local file", "")
+        t.update_position(0, 100_000)
+        self.assertNotIn("library", t._layout())
+        plain = t.grab().toImage()
+        changes = host.changes
+        t.set_library_available(True)
+        self.assertGreater(host.changes, changes)  # the host masks the new button
+        rect = t.button_rect("library").toAlignedRect()
+        self.assertNotEqual(t.grab().toImage().copy(rect), plain.copy(rect))  # painted
+        t.show_live("One", "")
+        self.assertNotIn("library", t._layout())
+        t.show_timeshift("One", "")
+        for state in (LIVE_EDGE, dict(LIVE_EDGE, position=30.0, lag=30.0, mode="shifted")):
+            t.update_timeline(state, [])
+            self.assertNotIn("library", t._layout())
+        t.show_vod("Film", "")
+        self.assertIn("library", t._layout())
+        t.set_library_available(False)
+        self.assertNotIn("library", t._layout())
+
     def test_time_shifted_live_shows_back_10_seconds_at_the_live_edge(self):
         t = self.make()
         t.show_live("One", "")
@@ -754,6 +795,8 @@ class SmallWidthLayoutTests(unittest.TestCase):
         t.update_position(0, 100_000)
         t.set_next_available(True)
         yield "movie with Next"
+        t.set_library_available(True)
+        yield "movie from the Library, with Next"
         t.set_next_available(False)
         t.show_live("One", "")
         yield "live"
@@ -778,9 +821,13 @@ class SmallWidthLayoutTests(unittest.TestCase):
                     }
                     self.assertIn("volume", rects)
                     self.assertIn("search", rects)
-                    if mode != "movie with Next":
+                    movie = mode.startswith("movie")
+                    if not movie:
                         self.assertIn("guide", rects)
                         self.assertIn("previous", rects)
+                    # ‹ Library: only for a title from the Library (live TV ignores it).
+                    library = mode == "movie from the Library, with Next"
+                    self.assertEqual("library" in rects, library)
                     if mode == "stay live, catching up":
                         self.assertIn("back10", rects)
                     names = list(rects)
