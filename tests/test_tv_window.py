@@ -1796,6 +1796,23 @@ class DrawerSettingsTests(WindowCase):
         self.assertEqual(self.window.library_controller.mode, "search")
         self.assertFalse(drawer.isVisible())
 
+    def test_a_double_clicks_second_click_on_search_reaches_nothing_in_the_library(self):
+        # ⌕ shows the Library at once: the second click would land on it (2.0.1 review).
+        self.show()
+        drawer = self.wait_for_drawer()
+        host = drawer.window()
+        point = drawer.mapTo(host, drawer.search_rect().center().toPoint())
+        at = host.mapToGlobal(point)
+        QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+        self.assertTrue(self.window.screens.library_shown())
+        inside = self.window.mapFromGlobal(at)
+        under = self.window.childAt(inside)
+        self.assertIsNotNone(under)
+        heard = MouseHeard(under)
+        QTest.mouseClick(self.window.windowHandle(), Qt.MouseButton.LeftButton, pos=inside)
+        self.assertEqual(heard.events, [])
+        self.assertEqual(self.window.library_controller.mode, "search")
+
     def test_the_drawers_open_file_row_opens_a_file(self):
         # Ctrl/⌘+O without the menu bar (hidden in fullscreen on Windows and Linux).
         self.show()

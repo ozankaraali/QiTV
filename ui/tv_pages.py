@@ -39,7 +39,8 @@ class TVPages(QObject):
         super().__init__(parent)
         self._window = window
         self._return_to_library = False  # the movie playing came from the Library
-        self._second_click = SecondClickGuard(self)  # after ‹ Library: see back_to_library
+        # After ‹ Library, ⌕ and the Movies/Series rows: see back_to_library.
+        self._second_click = SecondClickGuard(self)
         self.library_model = LibraryModel(window.catalog, window.config_manager, window.watch, self)
         self.library_controller = LibraryController(
             config=window.config_manager,
@@ -70,21 +71,31 @@ class TVPages(QObject):
             return
         if self.library_shown():
             self.library_controller.leave()  # a play waiting for its provider is dropped
+        self._second_click.disarm()  # it kept a click off the page shown before
         window.pages.setCurrentWidget(page)
         window.menus.set_player_enabled(page is not window.library_page)
 
     def open_library(self, section: str) -> None:
-        """Movies or Series: live playback stops first (R5)."""
+        """Movies or Series: live playback stops first (R5).
+
+        From the channel list's Movies and Series rows the Library shows at once, so a
+        double-click's second click reaches nothing (see back_to_library). Keys and the menu
+        arm the guard too: only a click within the double-click interval is dropped.
+        """
         if self._window.closing():
             return
         self._enter_library()
         self.library_controller.open(section)
+        self._second_click.arm()
 
     def open_search(self) -> None:
+        """The quick search: from ⌕ (the player controls, the guide, the channel list) a
+        double-click's second click reaches nothing, as in open_library."""
         if self._window.closing():
             return
         self._enter_library()
         self.library_controller.open_search()
+        self._second_click.arm()
 
     def _enter_library(self) -> None:
         window = self._window

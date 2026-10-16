@@ -48,16 +48,17 @@ class PointerInput(QObject):
 class SecondClickGuard(QObject):
     """Swallows the second click of a double-click whose first click showed another page.
 
-    "‹ Library" shows the Library at once, so a quick second click would land on whatever the
-    Library shows under the pointer, and a click on an episode plays it. `arm()` right after
-    such a click: for the double-click interval, the next left press (Qt may report it as a
-    press or as a double-click) and its release reach no window. Only that one click.
+    "‹ Library", ⌕ and the channel list's Movies and Series rows show the Library at once, so a
+    quick second click would land on whatever the Library shows under the pointer, and a click
+    on an episode plays it. `arm()` right after such a click: for the double-click interval,
+    the next left press (Qt may report it as a press or as a double-click) and its release
+    reach no window. Only that one click, and only on that page: `disarm()` when it changes.
     """
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._open = QTimer(self, singleShot=True)  # the double-click interval
-        self._open.timeout.connect(self._disarm)
+        self._open.timeout.connect(self.disarm)
         self._held = False  # its press was swallowed: its release goes too
         self._installed = False
 
@@ -70,9 +71,9 @@ class SecondClickGuard(QObject):
             self._installed = True
         self._open.start(QApplication.doubleClickInterval())
 
-    def _disarm(self) -> None:
-        """Done: its release came, or the interval passed (a release after that, of a press
-        held that long, goes on: a release alone does nothing)."""
+    def disarm(self) -> None:
+        """Done: its release came, the interval passed (a release after that, of a press held
+        that long, goes on: a release alone does nothing), or the page changed again."""
         self._open.stop()
         self._held = False
         if self._installed:
@@ -92,6 +93,6 @@ class SecondClickGuard(QObject):
             self._held = True
             return True
         if kind == QEvent.Type.MouseButtonRelease and self._held:
-            self._disarm()
+            self.disarm()
             return True
         return False

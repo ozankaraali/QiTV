@@ -95,6 +95,13 @@ class SecondClickGuardTests(unittest.TestCase):
             QApplication.sendEvent(window, event)
         self.assertEqual(self.page.events, [])
 
+    def test_a_click_after_disarming_reaches_the_page(self):
+        # The page changed again (a key played a title): the guard was for the page before.
+        self.guard.arm()
+        self.guard.disarm()
+        self.click()
+        self.assertEqual(self.page.events, ["press", "release"])
+
     def test_a_click_after_the_double_click_interval_reaches_the_page(self):
         self.guard.arm()
         elapse(QApplication.doubleClickInterval() + 100)
