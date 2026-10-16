@@ -30,6 +30,22 @@ class TransportCase(unittest.TestCase):
     def click(self, t, point):
         QTest.mouseClick(t, Qt.LeftButton, Qt.NoModifier, point)
 
+    def test_the_shades_leave_the_small_picture_alone(self):
+        # The bottom shade, cut to the PiP label's row by the host's mask, showed as a dark
+        # rectangle behind the label (owner's screenshot): it is not painted over the PiP.
+        t = self.make()
+        t.show_vod("Salt Roads", "2024")
+        pip = QRect(880, 400, 360, 200)  # a bottom-right PiP, in the bottom shade's reach
+        t.set_pip_rect(pip)
+        image = t.grab().toImage()
+        inside, beside = QPoint(pip.left() + 40, pip.bottom() - 4), QPoint(
+            pip.left() - 40, pip.bottom() - 4
+        )
+        self.assertEqual(image.pixelColor(inside).alpha(), 0)
+        self.assertGreater(image.pixelColor(beside).alpha(), 0)
+        t.set_pip_rect(QRect())  # PiP closed: the shade is whole again
+        self.assertGreater(t.grab().toImage().pixelColor(inside).alpha(), 0)
+
     def test_vod_texts(self):
         t = self.make()
         t.show_vod("Salt Roads", "2024")

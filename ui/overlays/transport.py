@@ -227,6 +227,7 @@ class Transport(Overlay):
         self._next_available = False
         self._pip_available = False  # the window can open a second channel
         self._pip_open = False
+        self._pip_rect = QRect()  # the small picture: the shades leave it alone
         self._muted = False  # the large picture's mute: the speaker shows it
         self._favorite = False  # the live channel is a favorite: its star is lit
         self._library = False  # the title came from the Library: ‹ Library shows
@@ -334,6 +335,14 @@ class Transport(Overlay):
         self._next_available = available
         self.update()
         self._controls_changed()
+
+    def set_pip_rect(self, rect: QRect) -> None:
+        """Where the small picture is (this widget's coordinates; empty: no PiP). The shades
+        leave it alone: cut by the host's mask to the PiP label's row, the bottom shade showed
+        as a dark rectangle behind the label."""
+        if rect != self._pip_rect:
+            self._pip_rect = QRect(rect)
+            self.update()
 
     def set_pip_state(self, available: bool, open_: bool) -> None:
         """The second channel's button: shown on live TV when `available`; lit while open."""
@@ -750,6 +759,13 @@ class Transport(Overlay):
         p.end()
 
     def _paint_scrims(self, p: QPainter) -> None:
+        p.save()
+        if not self._pip_rect.isEmpty():
+            p.setClipRegion(QRegion(self.rect()).subtracted(QRegion(self._pip_rect)))
+        self._paint_scrim_bands(p)
+        p.restore()
+
+    def _paint_scrim_bands(self, p: QPainter) -> None:
         top_h = self.height() * TOP_FRACTION
         grad = QLinearGradient(0, 0, 0, top_h)
         grad.setColorAt(0, qcolor("#000000", 0.62))

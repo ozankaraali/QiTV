@@ -47,3 +47,8 @@ instead of using others' distributions, which may have malware.**
 - See the [2.0.1 notes](https://github.com/ozankaraali/QiTV/blob/main/docs/release-notes-2.0.1.md)
   and the [2.0.0 notes](https://github.com/ozankaraali/QiTV/blob/main/docs/release-notes-2.0.0.md)
   for the earlier changes.
+
+## Fixes
+
+- **Picture-in-picture buttons work while the player controls show.** The controls were drawn above the
+  small picture's label and took the clicks on its speaker, ⇄ and ×; a dark band behind the label is gone too.
