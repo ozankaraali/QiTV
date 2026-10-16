@@ -1,6 +1,6 @@
 import unittest
 
-from services.live.stay_live import TARGETS, Decision, Mode, RateHealth, StayLive
+from services.live.stay_live import AUTO, TARGETS, AutoTarget, Decision, Mode, RateHealth, StayLive
 
 T = TARGETS["normal"]
 S, N, P, R = T + 0.2, T + 0.75, T + 3, T + 20
@@ -283,6 +283,105 @@ class RateHealthTests(unittest.TestCase):
         health = RateHealth()
         self.assertFalse(any(self.feed(health, 1.0)))  # a healthy window
         self.assertEqual(self.feed(health, 0.2)[-1], True)  # not averaged with the one before
+
+
+class AutoTargetTests(unittest.TestCase):
+    """2.0.2 "Auto" latency: each channel's target starts at Normal's, rises 1.5 s with each
+    starvation or stall up to max(Stable + 4, burst + 2), and falls 0.5 s after each 5 quiet
+    minutes, down to where it started."""
+
+    def test_it_starts_at_normal(self):
+        auto = AutoTarget()
+        self.assertEqual((auto.start, auto.target), (TARGETS["normal"], TARGETS["normal"]))
+        self.assertFalse(auto.adjusted)
+
+    def test_trouble_raises_it_in_steps_up_to_the_cap(self):
+        auto = AutoTarget()
+        targets = []
+        for _ in range(7):
+            auto.trouble(burst=0.0)
+            targets.append(auto.target)
+        self.assertEqual(targets, [4.0, 5.5, 7.0, 8.5, 10.0, 10.0, 10.0])  # Stable + 4
+        self.assertTrue(auto.adjusted)
+
+    def test_a_bursty_source_may_go_two_seconds_beyond_its_burst(self):
+        auto = AutoTarget()
+        for _ in range(10):
+            auto.trouble(burst=10.0)
+        self.assertEqual(auto.target, 12.0)
+        self.assertFalse(auto.trouble(burst=0.0))  # never lowered by trouble
+        self.assertEqual(auto.target, 12.0)
+
+    def test_trouble_says_whether_it_changed(self):
+        auto = AutoTarget(10.0)
+        self.assertFalse(auto.trouble(burst=0.0))
+        self.assertTrue(auto.trouble(burst=10.0))
+
+    def test_five_quiet_minutes_lower_it_half_a_second_down_to_the_start(self):
+        auto = AutoTarget(4.0)
+        changes = [auto.quiet(1.0) for _ in range(299)]
+        self.assertEqual((auto.target, any(changes)), (4.0, False))
+        self.assertTrue(auto.quiet(1.0))
+        self.assertEqual(auto.target, 3.5)
+        for _ in range(300 * 5):
+            auto.quiet(1.0)
+        self.assertEqual(auto.target, TARGETS["normal"])  # 3.0 after 10 min, then 2.5
+        self.assertFalse(auto.adjusted)
+
+    def test_trouble_starts_the_quiet_minutes_afresh(self):
+        auto = AutoTarget(7.0)
+        auto.quiet(299.0)
+        auto.trouble(burst=0.0)
+        self.assertFalse(auto.quiet(299.0))
+        self.assertEqual(auto.target, 8.5)
+        self.assertTrue(auto.quiet(1.0))
+        self.assertEqual(auto.target, 8.0)
+
+    def test_a_remembered_target_starts_there(self):
+        self.assertEqual(AutoTarget(5.5).target, 5.5)
+        self.assertTrue(AutoTarget(5.5).adjusted)
+        for bad in (1.0, float("nan"), float("inf"), -3.0):
+            with self.subTest(bad=bad):
+                self.assertEqual(AutoTarget(bad).target, TARGETS["normal"])
+
+    def test_stay_live_starts_auto_at_normal(self):
+        self.assertEqual(StayLive(AUTO).target, TARGETS["normal"])
+        stay = StayLive("low")
+        stay.set_latency(AUTO)
+        self.assertEqual(stay.target, TARGETS["normal"])
+
+
+class BuildTests(unittest.TestCase):
+    """A raised Auto target is reached without a jump back: at 0.95x while the rate may
+    change (`build`), else at 1x as starvations add room (2.0.2)."""
+
+    def live(self, target):
+        stay = StayLive(AUTO)
+        stay.target = stay.build = target
+        return stay
+
+    def rates(self, stay, lags):
+        return [stay.update(lag, False).rate for lag in lags]
+
+    def test_under_a_raised_target_it_slows_until_there(self):
+        stay = self.live(5.5)
+        lags = (1.0, 4.9, 5.4, 5.5, 5.2, 4.99)
+        self.assertEqual(self.rates(stay, lags), [0.95, 0.95, 0.95, 1.0, 1.0, 0.95])
+
+    def test_nothing_to_build_plays_at_normal_speed_below_the_target(self):
+        stay = self.live(TARGETS["normal"])
+        stay.build = 0.0
+        self.assertEqual(set(self.rates(stay, (0.0, 1.0, 2.0))), {1.0})
+
+    def test_a_locked_rate_never_slows_to_build(self):
+        stay = self.live(5.5)
+        stay.lock_rate()
+        self.assertEqual(set(self.rates(stay, (0.0, 1.0, 5.0))), {1.0})
+
+    def test_the_larger_of_the_burst_and_the_raised_target_is_built(self):
+        stay = self.live(12.0)
+        stay.burst = 10.0
+        self.assertEqual(self.rates(stay, (11.0, 11.9, 12.0)), [0.95, 0.95, 1.0])
 
 
 if __name__ == "__main__":

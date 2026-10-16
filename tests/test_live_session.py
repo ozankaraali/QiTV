@@ -15,7 +15,7 @@ from services.live import worker
 import services.live.live_session as live_session
 from services.live.live_session import LiveSession
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
-from services.live.stay_live import TARGETS
+from services.live.stay_live import AUTO, TARGETS
 from services.live.timeline import Span
 from services.playback import PlaybackState
 from services.vlc_profile import PlayKind
@@ -1411,6 +1411,116 @@ class RateHealthTests(LiveSessionCase):
         feed.run(30.0)
         self.assertGreater(feed.starved_s, 5.0)  # it waited at the edge for the first burst
         self.assertEqual(self.playback.rates, [0.95])  # still building the room at 0.95x
+
+
+class BackOffTests(LiveSessionCase):
+    """2.0.2 "Auto" latency: the channel's target starts at Normal's, rises 1.5 s with each
+    starvation at the live edge or stall, up to Stable's plus 4 s (a bursty source: its burst
+    plus 2 s), and falls 0.5 s after each 5 quiet minutes. A rise never jumps back: the room
+    grows at 0.95x where the rate may change, else as VLC waits at 1x."""
+
+    def stall(self, feed, seconds=4.0, after=20.0):
+        """The source sends nothing for `seconds`, then sends on; the target after."""
+        feed.stalled = True
+        feed.run(seconds)
+        feed.stalled = False
+        feed.run(after)
+        return self.timelines[-1]["target"]
+
+    def settled(self, *, latency=AUTO, **kwargs):
+        """A steady source, played 20 s from 4 s behind (caught up to Normal's target)."""
+        sid = self.start(latency=latency)
+        feed = Feed(self, sid, burst=0.0, edge=4.0, **kwargs).ready().run(20.0)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS.get(latency, TARGETS["normal"]))
+        return feed
+
+    def test_each_stall_raises_the_target_in_steps_up_to_the_cap(self):
+        feed = self.settled()
+        plays, rates = len(self.playback.plays), len(self.playback.rates)
+        targets = [self.stall(feed) for _ in range(6)]
+        self.assertEqual(targets, [4.0, 5.5, 7.0, 8.5, 10.0, 10.0])  # Stable + 4 s at most
+        self.assertEqual(len(self.playback.plays), plays)  # never a jump back for room
+        self.assertEqual(set(self.playback.rates[rates:]), {0.95, 1.0})  # room built slowly
+
+    def test_a_starvation_at_the_edge_raises_the_target(self):
+        # A second of room; the source is 1.9 s late (not a stall: under 2 s), so VLC meets
+        # the edge and waits, its clock standing still while it says Playing (libVLC 3).
+        sid = self.start(latency=AUTO)
+        feed = Feed(self, sid, burst=0.0, edge=1.0, starved=PlaybackState.PLAYING).ready()
+        feed.run(10.0)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
+        self.assertEqual(self.stall(feed, seconds=1.9, after=10.0), 4.0)
+        self.assertGreater(feed.starved_s, 0.5)
+        self.assertFalse(any(state["stalled"] for state in self.timelines))
+
+    def test_a_long_stall_is_one_rise(self):
+        feed = self.settled()
+        self.assertEqual(self.stall(feed, seconds=60.0), 4.0)
+
+    def test_quiet_minutes_lower_it_back_to_where_it_started(self):
+        feed = self.settled()
+        for _ in range(3):
+            self.stall(feed, after=0.0 if _ == 2 else 5.0)
+        self.assertEqual(self.timelines[-1]["target"], 7.0)
+        feed.run(299.0)  # 5 minutes after the last trouble, less a second
+        self.assertEqual(self.timelines[-1]["target"], 7.0)
+        feed.run(2.0)
+        self.assertEqual(self.timelines[-1]["target"], 6.5)
+        feed.run(300.0 * 8)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
+        self.assertEqual(len(self.playback.plays), 1)
+        self.assertNotIn(1.10, self.playback.rates)  # each half second is caught up gently
+
+    def test_paused_minutes_are_not_quiet_ones(self):
+        feed = self.settled()
+        self.stall(feed, after=10.0)
+        self.live.toggle_pause()
+        feed.run(600.0)
+        self.live.go_live()
+        feed.sync()
+        feed.run(280.0)  # 10 + 280 quiet seconds at the edge: under 5 minutes
+        self.assertEqual(self.timelines[-1]["target"], 4.0)
+        feed.run(20.0)
+        self.assertEqual(self.timelines[-1]["target"], 3.5)
+
+    def test_a_bursty_source_goes_up_to_its_burst_plus_two_seconds(self):
+        sid = self.start(latency=AUTO)
+        feed = Feed(self, sid, burst=10.0, edge=20.0).ready().run(60.0)
+        self.assertEqual(self.timelines[-1]["target"], 10.0)  # the burst, above Normal's
+        for _ in range(8):
+            self.stall(feed, seconds=13.0, after=30.0)  # a stall: the burst plus 2 s late
+        self.assertEqual(self.timelines[-1]["target"], 12.0)  # 10 + 2 > Stable + 4
+        self.assertEqual(max(state["target"] for state in self.timelines), 12.0)
+
+    def test_a_channel_that_cannot_change_speed_builds_its_room_by_waiting(self):
+        sid = self.start(latency=AUTO)
+        feed = Feed(self, sid, burst=0.0, edge=4.0, crawl=True).ready().run(20.0)
+        rates = list(self.playback.rates)
+        self.assertEqual(rates[-1], 1.0)  # rate health: 1x for good
+        self.assertEqual(self.stall(feed, seconds=4.0, after=60.0), 4.0)
+        self.assertEqual(self.playback.rates, rates)  # no 0.95x to build the room
+        self.assertEqual(len(self.playback.plays), 1)  # and no jump back
+
+    def test_fixed_latencies_never_back_off(self):
+        for latency in ("low", "normal", "stable"):
+            with self.subTest(latency=latency):
+                self.live = self.make()
+                feed = self.settled(latency=latency)
+                for _ in range(3):
+                    self.stall(feed)
+                self.assertEqual({state["target"] for state in self.timelines}, {TARGETS[latency]})
+
+    def test_auto_can_be_chosen_while_a_channel_plays_and_left_again(self):
+        feed = self.settled(latency="normal")
+        self.live.set_latency(AUTO)
+        self.assertEqual(self.stall(feed), 4.0)
+        self.live.set_latency("stable")
+        feed.run(1.0)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS["stable"])
+
+    def test_auto_opens_the_buffer_as_normal_does(self):
+        self.start(latency=AUTO)
+        self.assertEqual(self.engine.opened[-1][2]["live_delay"], live_session.LIVE_DELAY["normal"])
 
 
 class StallTests(LiveSessionCase):

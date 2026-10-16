@@ -56,7 +56,15 @@ channels VLC cannot play at any rate but 1x: its position crawls. While stay-liv
 not 1x, VLC's progress is checked against rate x wall time (`RateHealth`), counted only while
 VLC plays (from a second after it opened) with more than `_AHEAD_S` of media ahead, so a
 starved VLC is not taken for a slow one. Under 70% of it over 3 s, the rate goes back to 1x at
-once and stay-live changes it no more on that channel (`StayLive.lock_rate`). Go live
+once and stay-live changes it no more on that channel (`StayLive.lock_rate`).
+
+"Auto" latency (2.0.2, `AutoTarget`) learns the target per channel instead of keeping the
+setting's: it starts at Normal's and rises 1.5 s with each starvation of VLC at the live
+edge (BUFFERING, or its clock standing still while Playing, within `_AHEAD_S` of the edge)
+and each stall, while stay-live is LIVE; trouble again within `_CALM_S` is the same one. Each
+5 minutes of playing at the edge without trouble (not paused, not time-shifted) lower it
+0.5 s. The target used is the larger of it and the burst, and a raised one is built at 0.95x
+(`StayLive.build`) unless the rate is locked; otherwise the lag grows only as VLC waits. Go live
 picks among every segment start, the open one included, by the lag it would give once VLC
 plays it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 s; for a
 bursty source the mean; see `_live_seq`): never below the target less a quarter second,
@@ -113,7 +121,15 @@ from typing import TYPE_CHECKING, Any, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.live.refusals import REFUSALS, STREAM_LIMIT
-from services.live.stay_live import TARGETS, Mode, RateHealth, StayLive
+from services.live.stay_live import (
+    AUTO,
+    LATENCIES,
+    TARGETS,
+    AutoTarget,
+    Mode,
+    RateHealth,
+    StayLive,
+)
 from services.live.timeline import Span
 from services.playback import PlaybackState, Session
 from services.vlc_profile import PlayKind
@@ -124,7 +140,7 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 
 # How far behind the provider's live point an HLS source starts, per latency (Phase 2A).
-LIVE_DELAY = {"low": 3.0, "normal": 6.0, "stable": 12.0}
+LIVE_DELAY = {"low": 3.0, "normal": 6.0, "stable": 12.0, AUTO: 6.0}
 UNAVAILABLE = "Time-shift isn't available for this channel"
 LOST = "Lost the time-shift buffer; playing live"
 BUFFERED = "Lost the connection; playing what's buffered"
@@ -146,6 +162,7 @@ _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
 _OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
 _AHEAD_S = 1.0  # rate health counts only time with more media than this ahead of VLC
 _RATE_GRACE_S = 1.0  # and only from this long after an opened stream plays (VLC's clock starts)
+_CALM_S = 1.0  # Auto: trouble again within this is the same starvation (VLC refills, starves)
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -261,6 +278,10 @@ class LiveSession(QObject):
         self._health = RateHealth()
         self._rate_mark: Optional[tuple[float, float]] = None  # (wall, position) last tick
         self._rate_from: Optional[float] = None  # counted from here (after an open plays)
+        # Auto latency: the channel's target, the last tick it heard of, the last trouble.
+        self._auto: Optional[AutoTarget] = None
+        self._auto_mark: Optional[float] = None
+        self._troubled_at: Optional[float] = None
         self._wire_engine(engine, connect=True)
         playback.stateChanged.connect(self._on_state)
         playback.ended.connect(self._on_interrupted)
@@ -322,7 +343,9 @@ class LiveSession(QObject):
         when None)."""
         self.stop()
         self._url, self._user_agent = url, user_agent
-        self._latency = latency if latency in TARGETS else "normal"
+        self._latency = latency if latency in LATENCIES else "normal"
+        self._auto = AutoTarget() if self._latency == AUTO else None
+        self._auto_mark = self._troubled_at = None
         self._open_args = {
             "headers": dict(headers),
             "verify_ssl": verify_ssl,
@@ -453,10 +476,14 @@ class LiveSession(QObject):
         self._stay.user_speed(rate)
 
     def set_latency(self, name: str) -> None:
-        if name not in TARGETS:
+        if name not in LATENCIES:
             return
         self._latency = name
         self._stay.set_latency(name)
+        if name != AUTO:
+            self._auto = None
+        elif self._auto is None:
+            self._auto = AutoTarget()
 
     def buffered_range(self) -> tuple[float, float]:
         """The buffered timeline seconds, from the oldest point to the live edge."""
@@ -789,8 +816,11 @@ class LiveSession(QObject):
         # starved VLC (libVLC 3 still says Playing then) count as buffering: no rate
         # change and no reopen while nothing arrives.
         if not self._ended and not self._paused:
+            self._back_off(snapshot, position, stalled)
             self._stay.target = self._target(snapshot)
             self._stay.burst = _number(snapshot.get("burst_s"))
+            auto = self._auto
+            self._stay.build = auto.target if auto is not None and auto.adjusted else 0.0
             buffering = (
                 stalled or self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
             )
@@ -800,7 +830,32 @@ class LiveSession(QObject):
                 self._go_live(unpause=False)
                 if self._phase is not _Phase.PIPELINE:
                     return
+        else:
+            self._auto_mark = None  # paused (or ended): no quiet time for Auto
         self._emit_timeline()
+
+    def _back_off(self, snapshot: Mapping[str, Any], position: float, stalled: bool) -> None:
+        """Auto latency: raise the channel's target on trouble, lower it while quiet.
+
+        Counted only while stay-live is LIVE (the caller skips paused and ended sessions).
+        """
+        now = self._clock()
+        mark, self._auto_mark = self._auto_mark, now
+        auto = self._auto
+        if auto is None or self._stay.mode is not Mode.LIVE:
+            return
+        if stalled or self._starved(snapshot, position):
+            fresh = self._troubled_at is None or now - self._troubled_at > _CALM_S
+            self._troubled_at = now
+            if fresh and auto.trouble(_number(snapshot.get("burst_s"))):
+                _LOG.debug("Auto latency: %.1f s for this channel", auto.target)
+        elif mark is not None and auto.quiet(now - mark):
+            _LOG.debug("Auto latency: %.1f s for this channel", auto.target)
+
+    def _starved(self, snapshot: Mapping[str, Any], position: float) -> bool:
+        """VLC met the live edge and waits there (libVLC 3 says Playing, its clock stands still)."""
+        waiting = self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
+        return waiting and self._live_edge(snapshot) - position <= _AHEAD_S
 
     def _check_rate(self, snapshot: Mapping[str, Any], position: float) -> None:
         """Rate health: since the last tick, did VLC play at stay-live's rate?
@@ -935,7 +990,9 @@ class LiveSession(QObject):
         return self._snapshot_cache
 
     def _target(self, snapshot: Mapping[str, Any]) -> float:
-        return max(TARGETS[self._latency], _number(snapshot.get("burst_s")))
+        """The latency's target (Auto: the channel's), or the burst when that is larger."""
+        latency = self._auto.target if self._auto is not None else TARGETS[self._latency]
+        return max(latency, _number(snapshot.get("burst_s")))
 
     @staticmethod
     def _live_edge(snapshot: Mapping[str, Any]) -> float:
