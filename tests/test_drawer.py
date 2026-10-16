@@ -2,6 +2,7 @@ import os
 import sys
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -447,8 +448,12 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.nav.path[-1].key, "10")  # its channels stay on the right
 
     def test_a_click_on_a_name_further_up_shows_that_layer(self):
-        # Wide enough for three whole names beside ⌕ ↻ ⚙ (at 1280 the head elides).
+        # Three whole names beside ⌕ ↻ ⚙ with any system font: the row's text scales with the
+        # host, so a smaller crumb font, not a wider host, keeps Linux CI's wider fonts whole.
         self.host.resize(1600, 900)
+        patcher = mock.patch("ui.overlays.drawer.CRUMB_FONT_U", 0.8)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.catalog.movies = {"5": [{"id": "s1", "name": "Show"}]}
         self.nav.reset_to("series", "5")
         self.nav.open(self.nav.children(self.nav.path[-1])[0])  # Home › Series › Films › Show
