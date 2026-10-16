@@ -379,6 +379,7 @@ class DrawerTests(unittest.TestCase):
             d.tooltip_at(d.refresh_rect().center()),
             key_hint("Refresh channels and guide", "Ctrl+R"),
         )
+        self.assertEqual(d.tooltip_at(d.back_rect().center()), key_hint("Back", "Left"))
 
     def test_the_buttons_are_there_on_the_sources_layer_too(self):
         self.open_on_the_sources()

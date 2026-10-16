@@ -595,6 +595,14 @@ class OnScreenKeysTests(unittest.TestCase):
         self.double_click(t, t.button_rect("back10").center())
         self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [-10_000, -10_000])
 
+    def test_the_sound_buttons_say_what_they_do(self):
+        # 2.0.1 review M3: ♪ and the subtitles had no tooltip (neither has a key).
+        t = self.make()
+        t.show_vod("Film", "")
+        t.update_position(0, 100_000)
+        for name, tooltip in (("audio", "Audio track"), ("subtitles", "Subtitles")):
+            self.assertEqual(t.tooltip_at(t.button_rect(name).center()), tooltip, name)
+
     def test_the_channels_name_shows_its_info(self):
         t = self.make()
         t.show_live("Nature One", "Wild rivers")

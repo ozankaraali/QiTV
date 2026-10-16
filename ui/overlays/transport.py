@@ -71,6 +71,8 @@ TOOLTIPS = {
     "fullscreen": "Fullscreen (F)",
     "external": "Open in external player",
     "volume": "Volume (+/−, M)",
+    "audio": "Audio track",
+    "subtitles": "Subtitles",
     "library": "Back to the Library (Esc)",
 }
 LIBRARY_LABEL = "‹ Library"
