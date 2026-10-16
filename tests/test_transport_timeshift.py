@@ -262,14 +262,16 @@ class TimeShiftCase(unittest.TestCase):
 
     def test_a_narrow_transport_shortens_the_auto_text_as_the_others(self):
         t = self.make()
-        t.setGeometry(0, 0, 480, 270)
-        t.show_timeshift("104", "Nature")
         state = dict(at_edge(lag=4.9), auto=True, target=4.5, adjusted=True)
+        t.show_timeshift("104", "Nature")
         t.update_timeline(state, PROGRAMME)
+        whole = t._layout()["indicator"].width()
+        t.setGeometry(0, 0, 480, 270)
         layout = t._layout()
-        if "indicator" in layout:  # shortened (painted elided), or left out
-            self.assertLessEqual(layout["indicator"].right(), layout["live"].left())
-            self.assertGreaterEqual(layout["indicator"].left(), layout["back10"].right())
+        box = layout["indicator"]
+        self.assertLess(box.width(), whole)  # shortened: the tail is painted elided
+        self.assertLessEqual(box.right(), layout["live"].left())
+        self.assertGreaterEqual(box.left(), layout["back10"].right())
 
     def dot_colors(self, t):
         """Colours along the middle of the indicator pill, as painted."""
