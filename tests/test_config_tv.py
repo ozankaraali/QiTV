@@ -28,7 +28,7 @@ class TvConfigTests(unittest.TestCase):
 
     def test_new_install_has_tv_defaults(self):
         config, _ = self._load(None)
-        self.assertEqual(config.live_latency, "normal")
+        self.assertEqual(config.live_latency, "auto")  # 2.0.2
         self.assertEqual(config.mouse_wheel_action, "channel")
         self.assertTrue(config.start_with_last_channel)
         self.assertIsNone(config.last_live_channel)
@@ -286,9 +286,22 @@ class TvConfigTests(unittest.TestCase):
             ConfigManager.TV_DEFAULTS_VERSION,
         )
 
+    def test_a_saved_live_latency_is_kept_and_auto_is_the_default_otherwise(self):
+        # 2.0.2: Auto is new and the default; a latency saved before (2.0.x saved "normal"
+        # for everyone) stays, also on disk. A config from before the setting gets Auto.
+        for saved in ("low", "normal", "stable", "auto"):
+            with self.subTest(saved=saved):
+                config, path = self._load({"live_latency": saved})
+                self.assertEqual(config.live_latency, saved)
+                on_disk = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(on_disk["live_latency"], saved)
+        config, _ = self._load({"favorites": []})
+        self.assertEqual(config.live_latency, "auto")
+        self.assertEqual(ConfigManager.LIVE_LATENCY_CHOICES[0], "auto")
+
     def test_invalid_choices_fall_back_to_defaults(self):
         config, _ = self._load({"live_latency": "turbo", "mouse_wheel_action": 3})
-        self.assertEqual(config.live_latency, "normal")
+        self.assertEqual(config.live_latency, "auto")
         self.assertEqual(config.mouse_wheel_action, "channel")
         config.live_latency = "low"
         self.assertEqual(config.live_latency, "low")

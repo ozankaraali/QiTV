@@ -55,6 +55,12 @@ class MediaOptionsTests(unittest.TestCase):
             self.assertNotIn(":adaptive-logic=lowest", options)
             self.assertNotIn(":no-audio-time-stretch", options)
 
+    def test_auto_latency_plays_a_direct_channel_as_normal_does(self):
+        self.assertEqual(
+            media_options(PlayKind.LIVE, latency="auto"),
+            media_options(PlayKind.LIVE, latency="normal"),
+        )
+
     def test_live_latency_drives_caching(self):
         low = media_options(PlayKind.LIVE, latency="low")
         stable = media_options(PlayKind.LIVE, latency="stable")

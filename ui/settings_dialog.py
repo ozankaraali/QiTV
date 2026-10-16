@@ -277,12 +277,19 @@ class OptionsDialog(QDialog):
 
         # TV playback
         self.live_latency_combo = QComboBox(self.settings_tab)
-        for label, value in (("Low", "low"), ("Normal", "normal"), ("Stable", "stable")):
+        for label, value in (
+            ("Auto (recommended)", "auto"),
+            ("Low", "low"),
+            ("Normal", "normal"),
+            ("Stable", "stable"),
+        ):
             self.live_latency_combo.addItem(label, value)
         self.live_latency_combo.setCurrentIndex(
             max(0, self.live_latency_combo.findData(self.config_manager.live_latency))
         )
         self.live_latency_combo.setToolTip(
+            "Auto adjusts each channel: it starts at Normal and plays further behind on "
+            "channels that run dry, coming back over time.\n"
             "Low starts live channels sooner; Stable buffers more for unreliable streams."
         )
         self.settings_layout.addRow("Live latency", self.live_latency_combo)

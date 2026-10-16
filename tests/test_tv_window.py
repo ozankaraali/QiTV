@@ -2019,8 +2019,10 @@ class OptionsDialogTests(WindowCase):
         self.assertEqual(dialog.mouse_wheel_combo.currentData(), "volume")
         self.assertFalse(dialog.start_last_channel_checkbox.isChecked())
         self.assertEqual(
-            [dialog.live_latency_combo.itemText(i) for i in range(3)], ["Low", "Normal", "Stable"]
+            [dialog.live_latency_combo.itemText(i) for i in range(4)],
+            ["Auto (recommended)", "Low", "Normal", "Stable"],
         )
+        self.assertEqual(dialog.live_latency_combo.count(), 4)
         self.assertEqual(
             [dialog.mouse_wheel_combo.itemText(i) for i in range(2)], ["Change channel", "Volume"]
         )
@@ -2032,6 +2034,14 @@ class OptionsDialogTests(WindowCase):
         self.assertEqual(saved.live_latency, "low")
         self.assertEqual(saved.mouse_wheel_action, "channel")
         self.assertTrue(saved.start_with_last_channel)
+
+    def test_a_new_install_shows_and_saves_auto_latency(self):
+        dialog = self.dialog()
+        self.assertEqual(dialog.live_latency_combo.currentData(), "auto")
+        self.assertEqual(dialog.live_latency_combo.currentIndex(), 0)
+        self.assertIn("Auto", dialog.live_latency_combo.toolTip())
+        dialog.save_settings()
+        self.assertEqual(ConfigManager().live_latency, "auto")
 
     def test_a_locked_config_on_save_says_so_and_the_settings_still_apply(self):
         dialog = self.dialog()

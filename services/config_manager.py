@@ -132,8 +132,9 @@ class ConfigManager:
     EPG_EXPIRATION_CHOICES = ("Hours", "Days", "Weeks", "Months")  # what Settings offers
     DEFAULT_OPTION_PREFER_HTTPS = False
     DEFAULT_OPTION_SSL_VERIFY = True
-    DEFAULT_OPTION_LIVE_LATENCY = "normal"
-    LIVE_LATENCY_CHOICES = ("low", "normal", "stable")
+    # Auto (2.0.2) learns each channel's latency; a latency saved before stays as it was.
+    DEFAULT_OPTION_LIVE_LATENCY = "auto"
+    LIVE_LATENCY_CHOICES = ("auto", "low", "normal", "stable")
     DEFAULT_OPTION_MOUSE_WHEEL = "channel"
     MOUSE_WHEEL_CHOICES = ("channel", "volume")
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True

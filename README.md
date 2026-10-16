@@ -167,7 +167,12 @@ QiTV keeps the last few minutes of every live channel you watch, so you can paus
 
 ### Live latency
 
-Live streams arrive a little behind the broadcast. Settings → **Live latency** chooses how far behind QiTV plays: **Low** (about 1 second, starts sooner), **Normal** (about 2.5 seconds) or **Stable** (about 6 seconds, for unreliable streams). QiTV gently speeds playback up or down to stay there. Channels that cannot be time-shifted play directly, with the same choice.
+Live streams arrive a little behind the broadcast. Settings → **Live latency** chooses how far behind QiTV plays:
+
+- **Auto** (recommended, and the default for new installs) finds it for each channel. A channel starts about 2.5 seconds behind; each time it runs dry or stalls, QiTV plays it 1.5 seconds further behind (up to about 10 seconds; for a channel that arrives in bursts, up to a burst plus 2 seconds), and after every 5 minutes without trouble it comes half a second closer again. QiTV remembers this per channel for the next time. At the live edge the player controls show it, for example "Stay live ● 4.5 s behind · adjusted".
+- **Low** (about 1 second, starts sooner), **Normal** (about 2.5 seconds) or **Stable** (about 6 seconds, for unreliable streams) keep the same distance on every channel. A setting you chose before 2.0.2 stays as it was.
+
+QiTV gently speeds playback up or down to stay there. On a channel where that does not play smoothly, QiTV notices within a few seconds, plays it at normal speed only and remembers that too. Channels that cannot be time-shifted play directly; under Auto they play as with Normal.
 
 ### Picture-in-picture
 
