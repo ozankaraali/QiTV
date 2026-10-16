@@ -264,6 +264,11 @@ class SlotRoleTests(unittest.TestCase):
         on_disk = start_kwargs(LiveStart(URL, "QiTV", False), self.config)
         self.assertEqual(on_disk["ram_bytes"], 512 * 1024 * 1024)
 
+    def test_start_kwargs_carry_the_channels_key_for_what_it_taught(self):
+        kwargs = start_kwargs(LiveStart(URL, "QiTV", True, channel="k1"), self.config)
+        self.assertEqual(kwargs["channel"], "k1")
+        self.assertNotIn("channel", start_kwargs(LiveStart(URL, "QiTV", True), self.config))
+
     def test_one_disk_ring_at_most_the_other_player_keeps_it(self):
         # Ruling (M5): the user's disk cap is the total: a second stream goes to RAM.
         self.config.timeshift_ram_mib = 128

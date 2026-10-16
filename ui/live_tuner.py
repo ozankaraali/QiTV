@@ -60,6 +60,7 @@ class LiveStart:
     url: str
     user_agent: str
     verify_ssl: bool
+    channel: str = ""  # its key for what it taught (services.live.tuning; "": none)
 
 
 def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) -> dict[str, Any]:
@@ -67,7 +68,7 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
 
     The time-shift buffer is on disk with the user's consent (`disk=False`: in memory all
     the same), else the memory per stream (`timeshift_ram_mib`). A disk buffer that fails
-    goes on in that memory (`ram_bytes`).
+    goes on in that memory (`ram_bytes`). A channel with a key passes it (`channel`).
     """
     consent = bool(config.timeshift_enabled)
     disk = consent if disk is None else disk and consent
@@ -84,6 +85,8 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
     }
     if disk:
         kwargs["ram_bytes"] = ram * 1024 * 1024
+    if start.channel:
+        kwargs["channel"] = start.channel
     return kwargs
 
 

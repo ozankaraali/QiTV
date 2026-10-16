@@ -17,6 +17,7 @@ from services.live.live_session import LiveSession
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.stay_live import AUTO, TARGETS
 from services.live.timeline import Span
+from services.live.tuning import LiveTuning, Tuning
 from services.playback import PlaybackState
 from services.vlc_profile import PlayKind
 
@@ -368,7 +369,8 @@ class LiveSessionCase(unittest.TestCase):
         self.enterContext(mock.patch.object(live_session, name, value))
 
     # ---- helpers ----------------------------------------------------------------------
-    def start(self, latency="normal", disk=False, max_bytes=128 * MiB):
+    def start(self, latency="normal", disk=False, max_bytes=128 * MiB, channel=None):
+        extra = {} if channel is None else {"channel": channel}
         self.live.start(
             URL,
             headers={"User-Agent": "QiTV-Test"},
@@ -377,6 +379,7 @@ class LiveSessionCase(unittest.TestCase):
             user_agent="QiTV-Test",
             disk=disk,
             max_bytes=max_bytes,
+            **extra,
         )
         return self.engine.last_sid if self.engine.opened else None
 
@@ -1521,6 +1524,84 @@ class BackOffTests(LiveSessionCase):
     def test_auto_opens_the_buffer_as_normal_does(self):
         self.start(latency=AUTO)
         self.assertEqual(self.engine.opened[-1][2]["live_delay"], live_session.LIVE_DELAY["normal"])
+
+
+class MemoryTests(LiveSessionCase):
+    """2.0.2: what a channel taught (Auto's target, "can't change speed") is kept per channel
+    (`LiveTuning`, shared by the players): the channel's next tune starts there."""
+
+    def setUp(self):
+        self.tuning = LiveTuning(None)  # in memory; tests/test_live_tuning.py has the file
+        super().setUp()
+
+    def make(self, **kwargs):
+        kwargs.setdefault("tuning", self.tuning)
+        return super().make(**kwargs)
+
+    def tune(self, channel, *, latency=AUTO, edge=4.0, **kwargs):
+        """Tune `channel` (a zap: the channel before closes first) and play it."""
+        self.start(latency=latency, channel=channel)
+        self.engine.answer()
+        return Feed(self, self.engine.last_sid, burst=0.0, edge=edge, **kwargs).ready()
+
+    def stall(self, feed):
+        feed.stalled = True
+        feed.run(4.0)
+        feed.stalled = False
+        feed.run(5.0)
+
+    def test_a_channel_that_cannot_change_speed_plays_at_1x_from_its_next_tune(self):
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            self.tune("A", edge=12.0, crawl=True).run(10.0)
+            self.assertEqual(self.playback.rates, [1.10, 1.0])
+            self.assertEqual(self.tuning.get("A"), Tuning(rate_locked=True))
+            rates = len(self.playback.rates)
+            self.tune("A", edge=12.0, crawl=True).run(30.0)
+            self.assertEqual(self.playback.rates[rates:], [])  # no other rate asked for
+            self.assertGreater(self.timelines[-1]["lag"], TARGETS["normal"] + 3.0)
+            self.tune("B", edge=12.0).run(5.0)
+            self.assertEqual(self.playback.rates[rates:], [1.10])  # another channel: as before
+        self.assertEqual(len(logs.records), 1)  # said once for the channel
+
+    def test_auto_starts_a_channel_where_its_last_tune_left_it(self):
+        feed = self.tune("A").run(20.0)
+        self.stall(feed)
+        self.assertEqual(self.timelines[-1]["target"], 4.0)
+        self.assertEqual(self.tuning.get("A"), Tuning(target=4.0))
+        self.tune("B").run(1.0)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
+        self.tune("A").run(1.0)
+        self.assertEqual(self.timelines[-1]["target"], 4.0)
+        self.assertEqual(self.tuning.get("B"), Tuning())  # nothing learned, nothing kept
+
+    def test_a_fixed_latency_keeps_its_own_target_and_the_channels_locked_rate(self):
+        self.tuning.remember("A", Tuning(target=7.0, rate_locked=True))
+        self.tune("A", latency="normal", edge=12.0).run(10.0)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
+        self.assertEqual(self.playback.rates, [])  # far behind, and still 1x
+        self.tune("A").run(1.0)  # Auto
+        self.assertEqual(self.timelines[-1]["target"], 7.0)
+        self.assertEqual(self.tuning.get("A"), Tuning(target=7.0, rate_locked=True))
+
+    def test_auto_chosen_while_a_channel_plays_starts_where_it_left_it(self):
+        self.tuning.remember("A", Tuning(target=5.5))
+        feed = self.tune("A", latency="normal").run(1.0)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
+        self.live.set_latency(AUTO)
+        feed.run(1.0)
+        self.assertEqual(self.timelines[-1]["target"], 5.5)
+
+    def test_a_target_back_where_auto_starts_is_forgotten(self):
+        self.tuning.remember("A", Tuning(target=3.0))
+        self.tune("A").run(301.0)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
+        self.assertEqual(self.tuning.get("A"), Tuning())
+
+    def test_a_channel_without_a_key_teaches_nothing(self):
+        feed = self.tune("").run(20.0)
+        self.stall(feed)
+        self.assertEqual(self.timelines[-1]["target"], 4.0)  # for this tune
+        self.assertEqual(self.tuning.get(""), Tuning())
 
 
 class StallTests(LiveSessionCase):

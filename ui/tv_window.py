@@ -59,6 +59,7 @@ from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
 from services.live.engine import LiveEngine
 from services.live.live_session import LiveSession
+from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
 from services.navigation import NavModel
 from services.playback import NullSession, PlaybackSession, Session, create_instance
 from services.redact import safe_message, safe_traceback
@@ -334,6 +335,7 @@ class TVWindow(QMainWindow):
         self.live_session: Optional[LiveSession] = None
         self.pip_session: Optional[PlaybackSession] = None
         self.pip_live: Optional[LiveSession] = None
+        self.live_tuning: Optional[LiveTuning] = None
         self.sessions: Optional[SessionManager] = None
         self.budget = ConnectionBudget(self)
         if self._instance is None:
@@ -344,9 +346,13 @@ class TVWindow(QMainWindow):
             self.pip_session = PlaybackSession(self._instance, self)
             root = os.path.join(config_manager.get_config_dir(), TIMESHIFT_DIR)
             self.engine = LiveEngine(root, self)
+            # What channels taught stay-live (Auto's target, a locked rate), kept for both.
+            self.live_tuning = LiveTuning(
+                os.path.join(config_manager.get_config_dir(), TUNING_FILE)
+            )
             # Connected before the engine starts, so they hear a helper that never comes up.
-            self.live_session = LiveSession(self.engine, self.session)
-            self.pip_live = LiveSession(self.engine, self.pip_session)
+            self.live_session = LiveSession(self.engine, self.session, tuning=self.live_tuning)
+            self.pip_live = LiveSession(self.engine, self.pip_session, tuning=self.live_tuning)
             self.engine.start()
             self.sessions = SessionManager(
                 Slot(

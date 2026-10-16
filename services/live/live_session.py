@@ -64,7 +64,9 @@ edge (BUFFERING, or its clock standing still while Playing, within `_AHEAD_S` of
 and each stall, while stay-live is LIVE; trouble again within `_CALM_S` is the same one. Each
 5 minutes of playing at the edge without trouble (not paused, not time-shifted) lower it
 0.5 s. The target used is the larger of it and the burst, and a raised one is built at 0.95x
-(`StayLive.build`) unless the rate is locked; otherwise the lag grows only as VLC waits. Go live
+(`StayLive.build`) unless the rate is locked; otherwise the lag grows only as VLC waits. What a
+channel taught (Auto's target, a locked rate) is kept per channel (`start(channel=...)`, in the
+`LiveTuning` given): its next tune starts there, a locked rate under any latency. Go live
 picks among every segment start, the open one included, by the lag it would give once VLC
 plays it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 s; for a
 bursty source the mean; see `_live_seq`): never below the target less a quarter second,
@@ -131,6 +133,7 @@ from services.live.stay_live import (
     StayLive,
 )
 from services.live.timeline import Span
+from services.live.tuning import LiveTuning, Tuning
 from services.playback import PlaybackState, Session
 from services.vlc_profile import PlayKind
 
@@ -217,11 +220,16 @@ class LiveSession(QObject):
         ready_timeout_ms: int = 6000,
         ready_max_ms: int = 15_000,
         clock: Callable[[], float] = time.monotonic,
+        tuning: Optional[LiveTuning] = None,
     ) -> None:
+        """`tuning`: what channels taught, shared by the players (None: nothing is kept)."""
         super().__init__()
         self._engine = engine
         self._playback = playback
         self._clock = clock
+        self._tuning = tuning
+        self._channel = ""  # the current channel's key in `tuning` ("": none)
+        self._memory = Tuning()  # what it taught so far
         self._ready_timeout_ms = ready_timeout_ms
         self._ready_timeout_s = ready_timeout_ms / 1000.0
         self._ready_more_ms = max(0, ready_max_ms - ready_timeout_ms)
@@ -338,13 +346,17 @@ class LiveSession(QObject):
         disk: bool,
         max_bytes: int,
         ram_bytes: Optional[int] = None,
+        channel: str = "",
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
-        when None)."""
+        when None). `channel`: the channel's key in the tuning store ("": nothing kept)."""
         self.stop()
         self._url, self._user_agent = url, user_agent
+        self._channel = channel
+        memory = self._tuning.get(channel) if self._tuning is not None else None
+        self._memory = memory or Tuning()
         self._latency = latency if latency in LATENCIES else "normal"
-        self._auto = AutoTarget() if self._latency == AUTO else None
+        self._auto = AutoTarget(self._memory.target) if self._latency == AUTO else None
         self._auto_mark = self._troubled_at = None
         self._open_args = {
             "headers": dict(headers),
@@ -355,6 +367,8 @@ class LiveSession(QObject):
         if ram_bytes is not None:
             self._open_args["ram_bytes"] = ram_bytes
         self._stay = StayLive(self._latency)
+        if self._memory.rate_locked:
+            self._stay.lock_rate()  # VLC could not play it at another rate before
         self._health = RateHealth()
         self._snapshot_cache = {}
         self._ended = self._source_lost = self._paused = False
@@ -483,7 +497,7 @@ class LiveSession(QObject):
         if name != AUTO:
             self._auto = None
         elif self._auto is None:
-            self._auto = AutoTarget()
+            self._auto = AutoTarget(self._memory.target)  # where the channel left it
 
     def buffered_range(self) -> tuple[float, float]:
         """The buffered timeline seconds, from the oldest point to the live edge."""
@@ -848,9 +862,20 @@ class LiveSession(QObject):
             fresh = self._troubled_at is None or now - self._troubled_at > _CALM_S
             self._troubled_at = now
             if fresh and auto.trouble(_number(snapshot.get("burst_s"))):
-                _LOG.debug("Auto latency: %.1f s for this channel", auto.target)
+                self._learn()
         elif mark is not None and auto.quiet(now - mark):
+            self._learn()
+
+    def _learn(self) -> None:
+        """Keep what the channel taught (Auto's target, a locked rate) for its next tune."""
+        auto = self._auto
+        target = self._memory.target
+        if auto is not None:
+            target = auto.target if auto.adjusted else None
             _LOG.debug("Auto latency: %.1f s for this channel", auto.target)
+        self._memory = Tuning(target, self._stay.rate_locked)
+        if self._tuning is not None:
+            self._tuning.remember(self._channel, self._memory)
 
     def _starved(self, snapshot: Mapping[str, Any], position: float) -> bool:
         """VLC met the live edge and waits there (libVLC 3 says Playing, its clock stands still)."""
@@ -884,6 +909,7 @@ class LiveSession(QObject):
                 "VLC played this channel at %.0f%% of the speed asked: staying at 1x on it",
                 100 * self._health.share,
             )
+            self._learn()
 
     def _lag(self, snapshot: Mapping[str, Any], position: float) -> float:
         """Seconds behind the live edge; for a bursty source, the mean over a burst.

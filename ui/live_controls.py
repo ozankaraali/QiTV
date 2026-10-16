@@ -30,6 +30,7 @@ from services import favorites
 from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
+from services.live.tuning import channel_key
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
@@ -183,11 +184,13 @@ class LiveControls(QObject):
         return True
 
     def live_start(self, target: Target, url: str) -> LiveStart:
-        """How the pipeline asks for `target`'s link: its agent and the provider's TLS check."""
+        """How the pipeline asks for `target`'s link: its agent and the provider's TLS check;
+        and the channel's key for what it taught stay-live (Auto's target, a locked rate)."""
         provider = self.catalog.current_provider()
         user_agent = target.item.get("user_agent") or DEFAULT_USER_AGENT
         verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
-        return LiveStart(url, user_agent, verify_ssl)
+        channel = channel_key(str(provider.get("name", "")), target.item)
+        return LiveStart(url, user_agent, verify_ssl, channel)
 
     def pipeline_live(self) -> bool:
         """The current channel plays from the time-shift buffer."""

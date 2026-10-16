@@ -14,6 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMenu
 
 from services.connection_budget import ConnectionBudget
+from services.live.tuning import channel_key
 from services.sessions import PIP_FAILED, SessionManager, Slot
 from services.vlc_profile import DEFAULT_USER_AGENT
 from tests.test_tv_controller import (
@@ -229,6 +230,7 @@ class PipTests(PipCase):
                 "user_agent": DEFAULT_USER_AGENT,
                 "disk": False,
                 "max_bytes": 256 * MIB,  # the memory per stream
+                "channel": channel_key("Home", CHANNELS[0]),
             },
         )
         self.assertTrue(self.sessions.pip_open())

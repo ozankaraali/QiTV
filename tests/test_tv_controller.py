@@ -20,6 +20,7 @@ from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
+from services.live.tuning import channel_key
 from services.navigation import FAVORITES_GROUP, NavModel, NavNode
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.zapping import ZapController
@@ -2030,6 +2031,7 @@ class PipelineTuneTests(PipelineCase):
                 "user_agent": DEFAULT_USER_AGENT,
                 "disk": False,
                 "max_bytes": 256 * MIB,  # without consent, the memory per stream: 256 MiB
+                "channel": channel_key("Home", CHANNELS[0]),  # what it taught is kept (2.0.2)
             },
         )
         self.assertEqual(self.session.plays, [])  # the live session plays it, not the controller

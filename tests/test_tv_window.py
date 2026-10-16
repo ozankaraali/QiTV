@@ -1134,6 +1134,13 @@ class VlcWindowTests(WindowCase):
         self.assertEqual(overlays.banner.info.name, "Channel 1")
         self.assertTrue(self.window.host.isVisible())
 
+    def test_both_players_keep_what_channels_taught_beside_the_config(self):
+        window = self.window
+        tuning = window.live_tuning
+        self.assertIs(window.live_session._tuning, tuning)
+        self.assertIs(window.pip_live._tuning, tuning)
+        self.assertEqual(tuning._path, os.path.join(self.config_dir, "live_tuning.json"))
+
     def test_down_tunes_the_second_channel(self):
         self.open_first_channel()
         self.assertTrue(wait_until(self.session_on(channel_urls()[0])))
