@@ -285,6 +285,31 @@ class RateHealthTests(unittest.TestCase):
         self.assertEqual(self.feed(health, 0.2)[-1], True)  # not averaged with the one before
 
 
+class ConsecutiveWindowTests(unittest.TestCase):
+    """The HLS crawl verdict needs two bad windows in a row (2.0.2 review, I3)."""
+
+    def window(self, health, share, seconds=8.0):
+        return [health.add(0.25, share * 0.25, 1.0) for _ in range(round(seconds / 0.25))]
+
+    def test_one_bad_window_is_not_enough(self):
+        health = RateHealth(8.0, windows=2)
+        self.assertFalse(any(self.window(health, 0.1)))
+        self.assertTrue(self.window(health, 0.1)[-1])  # the second in a row
+
+    def test_a_healthy_window_between_starts_the_count_again(self):
+        health = RateHealth(8.0, windows=2)
+        for share in (0.1, 1.0, 0.1):
+            self.assertFalse(any(self.window(health, share)))
+        self.assertTrue(self.window(health, 0.1)[-1])
+
+    def test_a_new_window_after_an_open_keeps_the_count(self):
+        health = RateHealth(8.0, windows=2)
+        self.window(health, 0.1)
+        self.window(health, 0.1, seconds=4.0)
+        health.reset()  # the stream was opened again: this window starts afresh
+        self.assertTrue(self.window(health, 0.1)[-1])
+
+
 class AutoTargetTests(unittest.TestCase):
     """2.0.2 "Auto" latency: each channel's target starts at Normal's, rises 1.5 s with each
     starvation or stall up to max(Stable + 4, burst + 2), and falls 0.5 s after each 5 quiet

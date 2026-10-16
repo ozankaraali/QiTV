@@ -66,12 +66,16 @@ class RateHealth:
     The caller adds only time that says something about the rate: at a rate other than 1x,
     with VLC playing and media ahead of it (a VLC waiting at the live edge is starved, not
     slow). Each window of `window_s` counted seconds (default `_HEALTH_WINDOW_S`) is judged on
-    its own; `share` is the last window's progress against what its rates asked.
+    its own; `share` is the last window's progress against what its rates asked. The verdict
+    needs `windows` bad windows in a row (a healthy one starts the count again; a new window
+    after an open keeps it).
     """
 
-    def __init__(self, window_s: float = _HEALTH_WINDOW_S) -> None:
+    def __init__(self, window_s: float = _HEALTH_WINDOW_S, *, windows: int = 1) -> None:
         self.share = 1.0
         self._window = window_s
+        self._needed = windows
+        self._bad = 0  # bad windows in a row
         self.reset()
 
     def reset(self) -> None:
@@ -91,7 +95,11 @@ class RateHealth:
             return False
         self.share = self._played / self._asked if self._asked > 0 else 1.0
         self.reset()
-        return self.share < _HEALTH_SHARE
+        self._bad = self._bad + 1 if self.share < _HEALTH_SHARE else 0
+        if self._bad < self._needed:
+            return False
+        self._bad = 0
+        return True
 
 
 class AutoTarget:

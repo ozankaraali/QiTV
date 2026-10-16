@@ -1533,6 +1533,18 @@ class CrawlFallbackTests(LiveSessionCase):
         self.assertEqual(self.notices, [self.CRAWLING])
         self.assertEqual(self.playback.plays[-1], DIRECT)
 
+    def test_a_single_freeze_does_not_send_it_to_direct_play(self):
+        # A healthy HLS channel whose VLC stands still for 5 s once, with plenty buffered (a
+        # decoder or audio restart): one bad window, never two in a row (2.0.2 review, I3).
+        feed = self.tune(edge=20.0)
+        feed.run(30.0)
+        feed.frozen_until = self.clock.now + 5.0
+        feed.run(60.0)
+        self.assertEqual(self.engine.closed, [])
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertNotIn(self.CRAWLING, self.notices)
+        self.assertFalse(self.tuning.get("A").direct)
+
     def test_its_next_tune_plays_directly_at_once_and_a_day_later_tries_again(self):
         self.tuning.remember("A", Tuning(direct=True))
         opened = len(self.engine.opened)
