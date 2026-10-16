@@ -61,7 +61,13 @@ from services.live.engine import LiveEngine
 from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
 from services.navigation import NavModel
-from services.playback import NullSession, PlaybackSession, Session, create_instance
+from services.playback import (
+    NullSession,
+    PlaybackSession,
+    Session,
+    create_instance,
+    default_args,
+)
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
 from services.thread_cleanup import has_pending_threads
@@ -331,8 +337,11 @@ class TVWindow(QMainWindow):
         self.catalog = CatalogService(config_manager, provider_manager, epg_manager, parent=self)
         self.nav = NavModel(self.catalog, config_manager, self)
         self.zap = ZapController(parent=self)
-        self._instance = vlc_instance if vlc_instance is not None else create_instance()
-        self._owns_instance = vlc_instance is None and self._instance is not None
+        owns_instance = vlc_instance is None
+        if owns_instance:  # the decoder Settings chose (software unless hardware)
+            vlc_instance = create_instance(default_args(config_manager.hardware_decoding))
+        self._instance = vlc_instance
+        self._owns_instance = owns_instance and self._instance is not None
         self.session: Session
         # The time-shift pipeline (spec §6): only with libVLC, since nothing plays without it.
         # Picture in picture needs it too: a second player and live session (spec §7).

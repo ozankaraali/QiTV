@@ -294,6 +294,16 @@ class OptionsDialog(QDialog):
         )
         self.settings_layout.addRow("Live latency", self.live_latency_combo)
 
+        self.hardware_decoding_checkbox = QCheckBox(
+            "Hardware video decoding (experimental)", self.settings_tab
+        )
+        self.hardware_decoding_checkbox.setToolTip(
+            "Decode video with your graphics chip instead of the processor. It uses less CPU,"
+            " but some TV channels stutter or freeze with it. Applies after QiTV restarts."
+        )
+        self.hardware_decoding_checkbox.setChecked(self.config_manager.hardware_decoding)
+        self.settings_layout.addRow(self.hardware_decoding_checkbox)
+
         self.mouse_wheel_combo = QComboBox(self.settings_tab)
         for label, value in (("Change channel", "channel"), ("Volume", "volume")):
             self.mouse_wheel_combo.addItem(label, value)
@@ -874,6 +884,7 @@ class OptionsDialog(QDialog):
         self.config_manager.prefer_https = self.prefer_https_checkbox.isChecked()
         self.config_manager.ssl_verify = self.ssl_verify_checkbox.isChecked()
         self.config_manager.live_latency = self.live_latency_combo.currentData()
+        self.config_manager.hardware_decoding = self.hardware_decoding_checkbox.isChecked()
         self.config_manager.mouse_wheel_action = self.mouse_wheel_combo.currentData()
         self.config_manager.start_with_last_channel = self.start_last_channel_checkbox.isChecked()
         self.config_manager.play_in_vlc = self.play_in_vlc_checkbox.isChecked()

@@ -63,12 +63,27 @@ class PlaybackState(str, Enum):
     ERROR = "error"
 
 
-def default_args() -> list[str]:
+def decoder_args(hardware: bool) -> list[str]:
+    """VLC's video decoder: software unless `hardware` (Settings, experimental).
+
+    The Mac's hardware decoder (VideoToolbox) showed about half the pictures of an interlaced
+    TV channel and froze it at times; VLC's software decoder showed them all, as mpv does.
+    `--no-videotoolbox` exists only where VLC has that module (an unknown option fails).
+    """
+    if hardware:
+        return []
+    args = ["--avcodec-hw=none"]
+    if platform.system() == "Darwin":
+        args.append("--no-videotoolbox")
+    return args
+
+
+def default_args(hardware_decoding: bool = False) -> list[str]:
     """The app's libVLC arguments: quiet, or a verbose log file when VLC_LOG_ENV names one."""
     # VLC 3's volume-save keeps the last level set on any audio output in the process's
     # config, and every output opened later starts there: the PiP player's 30 became the
     # large picture's. Each player is given its own level instead (SessionManager).
-    args = ["--no-video-title-show", "--no-volume-save"]
+    args = ["--no-video-title-show", "--no-volume-save", *decoder_args(hardware_decoding)]
     if platform.system() == "Windows":
         # VLC 3's default Windows output, mmdevice, sets volume and mute on the process's
         # audio session (ISimpleAudioVolume), which every player's stream joins: the main

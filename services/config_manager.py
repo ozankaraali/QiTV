@@ -140,6 +140,7 @@ class ConfigManager:
     MOUSE_WHEEL_CHOICES = ("channel", "volume")
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
     DEFAULT_OPTION_TIMESHIFT_ENABLED = False
+    DEFAULT_OPTION_HARDWARE_DECODING = False  # experimental: software decodes every picture
     DEFAULT_OPTION_TIMESHIFT_MAX_MIB = 2048
     DEFAULT_OPTION_TIMESHIFT_RAM_MIB = 256  # memory per stream not on the disk ring
     TIMESHIFT_RAM_CHOICES = (128, 256, 512)
@@ -275,6 +276,7 @@ class ConfigManager:
             "start_with_last_channel": ConfigManager.DEFAULT_OPTION_START_WITH_LAST_CHANNEL,
             "last_live_channel": None,
             "timeshift_enabled": ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
+            "hardware_decoding": ConfigManager.DEFAULT_OPTION_HARDWARE_DECODING,
             "timeshift_max_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB,
             "timeshift_ram_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB,
         }
@@ -377,6 +379,9 @@ class ConfigManager:
     timeshift_enabled = _config_property(
         "timeshift_enabled", DEFAULT_OPTION_TIMESHIFT_ENABLED, coerce=lambda value: value is True
     )
+    hardware_decoding = _config_property(
+        "hardware_decoding", DEFAULT_OPTION_HARDWARE_DECODING, coerce=lambda value: value is True
+    )
     timeshift_max_mib = _config_property(
         "timeshift_max_mib", DEFAULT_OPTION_TIMESHIFT_MAX_MIB, coerce=int, clamp=(256, 16384)
     )
@@ -462,6 +467,7 @@ class ConfigManager:
             "start_with_last_channel": ConfigManager.DEFAULT_OPTION_START_WITH_LAST_CHANNEL,
             "last_live_channel": None,
             "timeshift_enabled": ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
+            "hardware_decoding": ConfigManager.DEFAULT_OPTION_HARDWARE_DECODING,
             "timeshift_max_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB,
             "timeshift_ram_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB,
             "tv_defaults_version": ConfigManager.TV_DEFAULTS_VERSION,
