@@ -11,9 +11,11 @@ instead of using others' distributions, which may have malware.**
 
 - **Auto adjusts each channel.** Settings → **Live latency** has a new first choice, **Auto
   (recommended)**. It starts a channel about 2.5 seconds behind live, like Normal. Each time the
-  channel runs dry or stalls, Auto plays it 1.5 seconds further behind, up to about 10 seconds (for
-  a channel that arrives in bursts, up to a burst plus 2 seconds). After every 5 minutes without
-  trouble it comes half a second closer again, back to where it started.
+  channel runs dry or stalls although it had that much room, Auto plays it 1.5 seconds further
+  behind, up to about 10 seconds (for a channel that arrives in bursts, up to a burst plus 2
+  seconds). Running dry right after you switch to a channel, before it had the room, doesn't
+  count. After every 5 minutes without trouble it comes half a second closer again, back to where
+  it started.
 - **No jumps.** When Auto moves a channel further behind, QiTV doesn't jump back: it plays 5%
   slower for a while (the sound keeps its pitch), or simply lets the room grow if the channel
   can't change speed.
@@ -31,7 +33,9 @@ instead of using others' distributions, which may have malware.**
 - To stay near live, QiTV plays a little faster or slower (1.05×, 1.1× or 0.95×). On some
   channels the player can't do that smoothly: the picture crawled, and QiTV then jumped back to
   live every half minute or so. QiTV now notices this within a few seconds, plays such a channel
-  at normal speed only, and remembers that for the channel, whatever latency you chose.
+  at normal speed only, and remembers that for the channel for a day, whatever latency you chose.
+  After a day it tries other speeds again, and goes back to normal speed only if they still don't
+  play smoothly.
 
 ## Good to know
 
