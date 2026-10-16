@@ -55,6 +55,6 @@ instead of using others' distributions, which may have malware.**
 
 ## Fixes
 
-- **Security:** the `multidict` library (used through `aiohttp`) is updated to 6.9.1 for a reported vulnerability.
+- **Security and upkeep:** `aiohttp` 3.14.5 and `multidict` 7.1.0 (a reported vulnerability in 6.9.0), plus `orjson` and other small library updates. Qt stays at 6.11 for now.
 - **Picture-in-picture buttons work while the player controls show.** The controls were drawn above the
   small picture's label and took the clicks on its speaker, ⇄ and ×; a dark band behind the label is gone too.
