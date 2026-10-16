@@ -1,12 +1,13 @@
 import os
 from pathlib import Path
+import sys
 import unittest
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QFont, QFontMetricsF, QPainter
+from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtGui import QFont, QFontMetricsF, QHelpEvent, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
@@ -14,6 +15,7 @@ from timer_fixtures import elapse
 from services.library import Genre
 from ui import brand
 from ui.brand import logo_pixmap
+from ui.keymap import key_hint
 from ui.library.genre_list import PREVIEW_DEBOUNCE_MS, GenreList
 from ui.library.top_nav import TopNav
 from ui.overlays.painting import Units
@@ -252,6 +254,31 @@ class TopNavTests(unittest.TestCase):
         rect = self.nav._item_rects()["live"]
         QTest.mouseClick(self.nav, Qt.LeftButton, pos=QPoint(int(rect.right()) + 60, 10))
         self.assertEqual(self.tabs, [])
+
+    def test_a_fullscreen_button_ends_the_bar(self):
+        # The owner's mouse-only rule (2.0.1): F11 (⌃⌘F) has a button in the Library too.
+        fullscreens = []
+        self.nav.fullscreenRequested.connect(lambda: fullscreens.append(True))
+        rects = self.nav._item_rects()
+        button = rects["fullscreen"]
+        self.assertGreater(button.left(), rects["source"].right())
+        self.assertLessEqual(button.right(), self.nav.width())
+        self.assertGreaterEqual(min(button.width(), button.height()), 28)
+        keys = "Ctrl+Meta+F" if sys.platform == "darwin" else "F11"
+        self.assertEqual(self.nav.tooltip_at(button.center()), key_hint("Fullscreen", keys))
+        QTest.mouseClick(self.nav, Qt.LeftButton, pos=button.center().toPoint())
+        self.assertEqual(fullscreens, [True])
+        self.assertEqual((self.tabs, self.sources, self.searches), ([], [], []))
+
+    def test_hovering_shows_the_tooltip(self):
+        # A real tooltip event: QHelpEvent has pos(), not position().
+        button = self.nav._item_rects()["fullscreen"].center().toPoint()
+        for point, text in ((button, "Fullscreen"), (self.nav.logo_rect().center().toPoint(), "")):
+            event = QHelpEvent(QEvent.Type.ToolTip, point, self.nav.mapToGlobal(point))
+            with mock.patch("ui.library.top_nav.QToolTip.showText") as show:
+                self.assertTrue(self.nav.event(event))
+            show.assert_called_once()
+            self.assertTrue(show.call_args[0][1].startswith(text or "QiTV"))
 
     def test_keyboard_moves_between_tabs_and_pills(self):
         self.nav.move_by(1)

@@ -475,6 +475,8 @@ class TVWindow(QMainWindow):
         # The player controls' and the guide's ⌕: the Library's search, as Ctrl/⌘+F.
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
         self.overlays.guide.searchRequested.connect(self.screens.open_search)
+        # The Library's ⛶: the menu bar, with View → Fullscreen, hides in fullscreen.
+        self.library_page.nav.fullscreenRequested.connect(self.toggle_fullscreen)
         self.overlays.welcome.addRequested.connect(self.add_provider)
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
         # A Windows self-update waits for background threads: the engine's must stop first,

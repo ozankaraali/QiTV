@@ -1,16 +1,24 @@
-"""The Library's top bar: the QiTV logo, Live TV / Movies / Series, and the Search and source pills.
+"""The Library's top bar: the QiTV logo, Live TV / Movies / Series, the Search and source pills,
+and a fullscreen button.
 
 The logo is about the height of the old "QiTV" wordmark's capitals ×1.6, vertically centred; the
 tabs start the same gap after it as they did after the wordmark. Its name stays for assistive
 technology (the accessible name) and as the logo's tooltip.
+
+The fullscreen button (⛶) ends the bar: the Library's F11 (⌃⌘F on a Mac) for the mouse, since
+Windows and Linux hide the menu bar in fullscreen (the owner's mouse-only rule). The keys never
+focus it; they have F11.
 """
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal
+import sys
+
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QHelpEvent, QPainter
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from ui.brand import BRAND_NAME, logo_aspect, logo_available, logo_pixmap
-from ui.overlays.painting import Units, elided, fill_round
+from ui.keymap import key_hint
+from ui.overlays.painting import Units, draw_icon, elided, fill_round
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
 HEIGHT_U = 6.0
@@ -24,12 +32,14 @@ BRAND_FONT_U = 1.6  # the old wordmark's size: the logo is sized from its capita
 LOGO_CAP_FACTOR = 1.6
 LOGO_LEFT_U = 2.0
 LOGO_GAP_U = 3.0  # between the logo and the first tab
+FULLSCREEN_KEYS = "Ctrl+Meta+F" if sys.platform == "darwin" else "F11"  # macOS keeps F11
 
 
 class TopNav(QWidget):
     tabRequested = Signal(str)  # "live" | "movies" | "series"
     searchRequested = Signal()
     sourceRequested = Signal(QPoint)  # global position under the pill
+    fullscreenRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -105,6 +115,8 @@ class TopNav(QWidget):
             self.sourceRequested.emit(
                 self.mapToGlobal(QPoint(int(rect.left()), int(rect.bottom())))
             )
+        elif item == "fullscreen":
+            self.fullscreenRequested.emit()
 
     def _host_width(self) -> int:
         parent = self.parentWidget()
@@ -128,7 +140,9 @@ class TopNav(QWidget):
             min(fm.horizontalAdvance(self._source_text()) + u, MAX_SOURCE_U * u - 2 * pad) + 2 * pad
         )
         search_w = fm.horizontalAdvance(SEARCH_LABEL) + u + 2 * pad
-        x = self.width() - 2.0 * u - source_w
+        x = self.width() - 2.0 * u - pill_h
+        rects["fullscreen"] = QRectF(x, top, pill_h, pill_h)  # a square pill
+        x -= 1.0 * u + source_w
         rects["source"] = QRectF(x, top, source_w, pill_h)
         x -= 1.0 * u + search_w
         rects["search"] = QRectF(x, top, search_w, pill_h)
@@ -169,10 +183,19 @@ class TopNav(QWidget):
             self._relayout()
         return False
 
+    def tooltip_at(self, pos: QPointF) -> str:
+        """What hovering `pos` says: the logo's name, or the fullscreen button and its key."""
+        if self.logo_rect().contains(pos):
+            return BRAND_NAME
+        if self._item_rects()["fullscreen"].contains(pos):
+            return key_hint("Fullscreen", FULLSCREEN_KEYS)
+        return ""
+
     def event(self, event) -> bool:
         if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
-            if self.logo_rect().contains(event.position()):
-                QToolTip.showText(event.globalPos(), BRAND_NAME, self)
+            text = self.tooltip_at(QPointF(event.pos()))  # QHelpEvent has no position()
+            if text:
+                QToolTip.showText(event.globalPos(), text, self)
             else:
                 QToolTip.hideText()
             return True
@@ -247,4 +270,15 @@ class TopNav(QWidget):
             p.setPen(qcolor(PALETTE.accent if active else PALETTE.text, 1.0 if active else 0.85))
             inner = rect.adjusted(pad, 0, -pad, 0)
             p.drawText(inner, Qt.AlignCenter, elided(p, text, inner.width()))
+        rect = rects["fullscreen"]
+        p.setPen(qcolor(PALETTE.text, 0.15))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 1.6 * u, 1.6 * u)
+        icon = rect.height() * 0.5
+        draw_icon(
+            p,
+            "fullscreen",
+            QRectF(rect.center().x() - icon / 2, rect.center().y() - icon / 2, icon, icon),
+            qcolor(PALETTE.text, 0.85),
+        )
         p.end()

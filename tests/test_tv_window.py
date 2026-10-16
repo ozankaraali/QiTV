@@ -529,6 +529,21 @@ class TVWindowTests(WindowCase):
         self.assertTrue(window.screens.library_shown())
         self.assertFalse(window.overlays.guide.isVisible())
 
+    def test_the_librarys_fullscreen_button_toggles_fullscreen(self):
+        # Windows and Linux hide the menu bar in fullscreen: the Library has a button for it.
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        window.screens.open_search()
+        self.assertTrue(window.screens.library_shown())
+        nav = window.library_page.nav
+        button = nav._item_rects()["fullscreen"].center().toPoint()
+        QTest.mouseClick(nav, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, button)
+        self.assertTrue(wait_until(window.isFullScreen))
+        QTest.mouseClick(nav, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, button)
+        self.assertTrue(wait_until(lambda: not window.isFullScreen()))
+        self.assertTrue(window.screens.library_shown())
+
     def test_the_guides_search_button_opens_the_search(self):
         self.show()
         drawer = self.wait_for_drawer()
