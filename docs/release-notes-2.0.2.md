@@ -30,17 +30,19 @@ instead of using others' distributions, which may have malware.**
 
 ## Smoother live playback
 
-- **HLS channels whose segments are packaged separately no longer stutter or jump.**
-- **A few channels whose streams can't be time-shifted smoothly play without rewind.** QiTV
-  notices this by itself ("Plays without rewind for smoother playback") and tries again a day
-  later.
+- **HLS channels whose segments are packaged separately are joined cleanly.** The player no
+  longer sees a broken stream at every segment join.
+- **A few channels whose streams can't be time-shifted smoothly play without rewind.** Some
+  channels still crawl through the time-shift buffer while the player plays them smoothly on its
+  own. QiTV notices this by itself after about 20 seconds, plays the channel without rewind ("Plays
+  without rewind for smoother playback", which a rewind there says too), and tries the
+  time-shift again a day later.
 - **Channels that can't change speed play at normal speed.** To stay near live, QiTV plays a
   little faster or slower (1.05×, 1.1× or 0.95×). On some channels the player can't do that
-  smoothly: the picture crawled, and QiTV then jumped back to
-  live every half minute or so. QiTV now notices this within a few seconds, plays such a channel
-  at normal speed only, and remembers that for the channel for a day, whatever latency you chose.
-  After a day it tries other speeds again, and goes back to normal speed only if they still don't
-  play smoothly.
+  smoothly: the picture crawled, and QiTV then jumped back to live every half minute or so. QiTV
+  now notices this within a few seconds, plays such a channel at normal speed only, and
+  remembers that for the channel for a day, whatever latency you chose. After a day it tries
+  other speeds again, and goes back to normal speed only if they still don't play smoothly.
 
 ## Good to know
 
