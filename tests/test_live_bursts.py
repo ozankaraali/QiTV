@@ -15,7 +15,7 @@ import tempfile
 import time
 import unittest
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QTimer, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -318,6 +318,14 @@ class BurstyRawTsTests(unittest.TestCase):
         self.engine.shutdown()
         self.assertTrue(wait_until(lambda: not has_pending_threads(), 5))
         self.assertEqual(multiprocessing.active_children(), [])
+        # Delete the Qt objects here, on the GUI thread: left to Python's garbage collector,
+        # they (and the model player's running timer) were destroyed from another thread,
+        # which crashed the rest of the suite.
+        self.playback._timer.stop()
+        for obj in (self.live, self.playback, self.engine):
+            obj.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        del self.live, self.playback, self.engine
 
     def test_measured_bursts_raise_the_target_without_stalls_or_catch_up(self):
         latency = "low"  # a 1 s target: the 3 s bursts raise it
