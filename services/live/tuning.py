@@ -5,6 +5,10 @@ channel at a rate other than 1x (`RateHealth`). `channel_key()` tells channels a
 zap list does (the stream address, else the id, else the name) and hashes that with the
 provider's name: a stream address may carry credentials, and none reach the file.
 
+A lock is kept with when it was set: from `RATE_LOCK_S` (a day) later it reads as unlocked,
+so the channel's next tune tries other rates again, and rate health locks it again if VLC
+still crawls (a new day from then). A later lesson (Auto's target moving) keeps its time.
+
 `LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
 most `MAX_ENTRIES` (the least recently learned go first). The file is read once; each change
 writes it on one background thread, the newest state only, through a temporary file swapped
@@ -32,6 +36,7 @@ _LOG = logging.getLogger(__name__)
 
 FILE_NAME = "live_tuning.json"
 MAX_ENTRIES = 500
+RATE_LOCK_S = 24 * 60 * 60  # a lock older than this is tried again
 _VERSION = 1
 
 
@@ -72,7 +77,13 @@ def _entry(value: Any) -> Optional[dict[str, Any]]:
         return None
     if target is None and not locked:
         return None
-    return {"target": target, "rate_locked": locked, "used": used}
+    entry = {"target": target, "rate_locked": locked, "used": used}
+    if locked:
+        locked_at = value.get("locked_at", used)  # without its time: when it was learned
+        if not _number(locked_at):
+            return None
+        entry["locked_at"] = locked_at
+    return entry
 
 
 class LiveTuning:
@@ -95,10 +106,12 @@ class LiveTuning:
         self._trim()
 
     def get(self, key: str) -> Tuning:
+        """What the channel taught; a lock from `RATE_LOCK_S` ago or longer reads as none."""
         entry = self._entries.get(key) if key else None
         if entry is None:
             return Tuning()
-        return Tuning(entry["target"], entry["rate_locked"])
+        locked = entry["rate_locked"] and self._now() - entry["locked_at"] < RATE_LOCK_S
+        return Tuning(entry["target"], locked)
 
     def remember(self, key: str, tuning: Tuning) -> None:
         """Keep `tuning` for the channel `key` (nothing learned: forget it); write it soon."""
@@ -108,11 +121,14 @@ class LiveTuning:
             if self._entries.pop(key, None) is None:
                 return
         else:
-            self._entries[key] = {
-                "target": tuning.target,
-                "rate_locked": tuning.rate_locked,
-                "used": self._now(),
-            }
+            now, old = self._now(), self._entries.get(key)
+            entry = {"target": tuning.target, "rate_locked": tuning.rate_locked, "used": now}
+            if tuning.rate_locked:  # a lock still in force keeps its time; else from now
+                entry["locked_at"] = now
+                if old is not None and old["rate_locked"]:
+                    if now - old["locked_at"] < RATE_LOCK_S:
+                        entry["locked_at"] = old["locked_at"]
+            self._entries[key] = entry
             self._trim()
         self._save()
 

@@ -1627,6 +1627,27 @@ class MemoryTests(LiveSessionCase):
             self.assertEqual(self.playback.rates[rates:], [1.10])  # another channel: as before
         self.assertEqual(len(logs.records), 1)  # said once for the channel
 
+    def test_a_channel_that_could_not_change_speed_is_tried_again_after_a_day(self):
+        now = [1_000_000.0]
+        self.tuning = LiveTuning(None, now=lambda: now[0])
+        self.live = self.make()
+        self.tune("A", edge=12.0, crawl=True).run(10.0)
+        self.assertEqual(self.playback.rates, [1.10, 1.0])
+        now[0] += 23 * 3600
+        self.tune("A", edge=12.0, crawl=True).run(10.0)
+        self.assertEqual(self.playback.rates, [1.10, 1.0])  # still 1x only
+        now[0] += 3600
+        # A day on: rate changes are allowed again, and the crawl is seen and locked again.
+        self.tune("A", edge=12.0, crawl=True).run(10.0)
+        self.assertEqual(self.playback.rates, [1.10, 1.0, 1.10, 1.0])
+        now[0] += 23 * 3600
+        self.assertTrue(self.tuning.get("A").rate_locked)  # a day from the new lock
+        now[0] += 3600
+        # A day on again, and VLC now plays the channel at any rate: as before, no lock.
+        rates = len(self.playback.rates)
+        self.tune("A", edge=12.0).run(120.0)
+        self.assertEqual(self.playback.rates[rates:], [1.10, 1.05, 1.0])
+
     def test_auto_starts_a_channel_where_its_last_tune_left_it(self):
         feed = self.tune("A").run(20.0)
         self.stall(feed)

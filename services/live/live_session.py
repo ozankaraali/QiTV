@@ -69,7 +69,8 @@ less, and a starvation before the first cushion says nothing about the target. E
 0.5 s. The target used is the larger of it and the burst, and a raised one is built at 0.95x
 (`StayLive.build`) unless the rate is locked; otherwise the lag grows only as VLC waits. What a
 channel taught (Auto's target, a locked rate) is kept per channel (`start(channel=...)`, in the
-`LiveTuning` given): its next tune starts there, a locked rate under any latency. Go live
+`LiveTuning` given): its next tune starts there, a locked rate under any latency (for a day:
+then the store reads it as none, so a tune tries other rates again). Go live
 picks among every segment start, the open one included, by the lag it would give once VLC
 plays it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 s; for a
 bursty source the mean; see `_live_seq`): never below the target less a quarter second,

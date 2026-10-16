@@ -116,17 +116,18 @@ class LiveTuningTests(unittest.TestCase):
 
     def test_entries_that_make_no_sense_are_left_out(self):
         channels = {
-            "ok": {"target": 4.0, "rate_locked": True, "used": 1.0},
+            "ok": {"target": 4.0, "rate_locked": True, "used": self.clock.now},
             "text": {"target": "4", "used": 1.0},
             "flag": {"rate_locked": "yes", "used": 1.0},
             "bool": {"target": True, "used": 1.0},
             "when": {"target": 4.0, "used": "today"},
+            "lock": {"rate_locked": True, "used": 1.0, "locked_at": "today"},
             "list": [4.0, True],
         }
         self.path.write_text(json.dumps({"version": 1, "channels": channels}))
         store = self.store()
         self.assertEqual(store.get("ok"), Tuning(target=4.0, rate_locked=True))
-        for key in ("text", "flag", "bool", "when", "list"):
+        for key in ("text", "flag", "bool", "when", "lock", "list"):
             self.assertEqual(store.get(key), Tuning(), key)
 
     def test_the_file_is_written_off_the_calling_thread(self):
@@ -157,6 +158,44 @@ class LiveTuningTests(unittest.TestCase):
         self.assertNotIn(str(self.path.parent), "\n".join(logs.output))
         self.assertEqual(list(self.path.parent.iterdir()), [])  # no temporary file left
         self.assertEqual(store.get("a"), Tuning(target=4.0))  # kept for this run
+
+    def test_a_lock_is_tried_again_a_day_after_it_was_set(self):
+        store = self.store()
+        store.remember("a", Tuning(target=5.5, rate_locked=True))
+        locked_at = self.clock.now
+        self.clock.now = locked_at + tuning.RATE_LOCK_S - 10
+        self.assertEqual(store.get("a"), Tuning(target=5.5, rate_locked=True))
+        self.clock.now = locked_at + tuning.RATE_LOCK_S
+        self.assertEqual(store.get("a"), Tuning(target=5.5))  # the target stays
+        store.remember("a", Tuning(target=5.5, rate_locked=True))  # it crawled again
+        self.clock.now += tuning.RATE_LOCK_S - 10
+        self.assertEqual(store.get("a"), Tuning(target=5.5, rate_locked=True))
+
+    def test_a_later_lesson_keeps_the_time_of_the_lock(self):
+        store = self.store()
+        store.remember("a", Tuning(rate_locked=True))
+        locked_at = self.clock.now
+        self.clock.now = locked_at + 20 * 3600
+        store.remember("a", Tuning(target=4.0, rate_locked=True))  # Auto moved meanwhile
+        self.clock.now = locked_at + tuning.RATE_LOCK_S
+        self.assertEqual(store.get("a"), Tuning(target=4.0))
+
+    def test_the_time_of_a_lock_round_trips_through_the_file(self):
+        store = self.store()
+        store.remember("a", Tuning(rate_locked=True))
+        locked_at = self.clock.now
+        store.flush()
+        self.clock.now = locked_at + tuning.RATE_LOCK_S - 10
+        self.assertEqual(self.store().get("a"), Tuning(rate_locked=True))
+        self.clock.now = locked_at + tuning.RATE_LOCK_S
+        self.assertEqual(self.store().get("a"), Tuning())
+
+    def test_a_lock_without_its_time_counts_from_when_it_was_learned(self):
+        channels = {"a": {"rate_locked": True, "used": self.clock.now}}
+        self.path.write_text(json.dumps({"version": 1, "channels": channels}))
+        self.assertEqual(self.store().get("a"), Tuning(rate_locked=True))
+        self.clock.now += tuning.RATE_LOCK_S
+        self.assertEqual(self.store().get("a"), Tuning())
 
     def test_without_a_file_it_remembers_for_the_run(self):
         store = LiveTuning(None)
