@@ -73,7 +73,6 @@ TOOLTIPS = {
     "volume": "Volume (+/−, M)",
     "audio": "Audio track",
     "subtitles": "Subtitles",
-    "library": "Back to the Library (Esc)",
 }
 LIBRARY_LABEL = "‹ Library"
 # Controls for a key of the player's (ui.keymap.SHORTCUTS): what they do, and that key.
@@ -86,6 +85,7 @@ KEY_HINTS = {
     "guide": ("Guide", "G"),
     "search": ("Search", "Ctrl+F"),
     "title": ("Channel info", "I"),
+    "library": ("Back to the Library", "Esc"),
 }
 FAVORITE_KEY = "Ctrl+D"
 # button name -> painting icon, if they differ

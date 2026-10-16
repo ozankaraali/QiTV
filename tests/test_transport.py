@@ -503,7 +503,8 @@ class OnScreenKeysTests(unittest.TestCase):
         t.update_position(0, 100_000)
         rect = t.button_rect("library")
         self.assert_big_enough(rect, "library")
-        self.assertEqual(t.tooltip_at(rect.center()), "Back to the Library (Esc)")
+        # Named as this computer names the key: "(⎋)" on macOS, "(Esc)" elsewhere.
+        self.assertEqual(t.tooltip_at(rect.center()), key_hint("Back to the Library", "Esc"))
         # At the left of the right-hand group, clear of the speed chip.
         self.assertLess(rect.right(), t.button_rect("search").left())
         self.assertGreater(rect.left(), t.button_rect("speed").right())
