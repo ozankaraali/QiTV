@@ -106,7 +106,7 @@ class FakeEngine(QObject):
     def stream_url(self, sid, seq):
         return f"http://127.0.0.1:9/token/{sid}/stream/{seq}.ts" if self.up else ""
 
-    def buffer(self, sid, spans, *, live_edge=None, open_seq=None, burst=0.0):
+    def buffer(self, sid, spans, *, live_edge=None, open_seq=None, burst=0.0, hls=False):
         """Closed `spans` plus an optional open segment, as the helper's state reports them."""
         end = spans[-1].end if spans else 0.0
         oldest = spans[0].seq if spans else open_seq
@@ -121,6 +121,7 @@ class FakeEngine(QObject):
             "bytes": 0,
             "ended": False,
             "burst_s": burst,
+            "hls": hls,
         }
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
@@ -225,7 +226,8 @@ class Feed:
     Media arrives `burst` seconds at a time every `burst` seconds (raw TS when 0: a quarter
     second at a time), each arrival optionally jittered, cut into `gop` second segments
     whose newest stays open until the next arrival, as in the real segmenter. The state
-    reports `burst` as `burst_s` (HLS: its target duration), or with `metered` what the
+    reports `burst` as `burst_s` (HLS: its target duration; with `hls` the state says the
+    source is HLS, as the helper does, 2.0.2), or with `metered` what the
     helper's BurstMeter measures from the arrivals (raw TS; `edge` arrived at connect). VLC plays at
     the last rate set while it has data; at the edge it reports `starved` (BUFFERING; real
     libVLC 3 keeps reporting PLAYING with its clock standing still). With `crawl` it cannot
@@ -252,9 +254,11 @@ class Feed:
         starved=PlaybackState.BUFFERING,
         metered=False,
         crawl=False,
+        hls=False,
     ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
         self.crawl, self.crawled = crawl, 0.0  # wall seconds at another rate since a step
+        self.hls = hls
         self.meter = worker.BurstMeter() if metered else None
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
         self.jitter, self.rng = jitter, random.Random(seed)
@@ -274,7 +278,9 @@ class Feed:
         if self.meter is not None:
             self.meter.add(self.case.clock.now, self.edge)
             burst = self.meter.burst_s
-        self.case.engine.buffer(self.sid, spans, live_edge=self.edge, open_seq=closed, burst=burst)
+        self.case.engine.buffer(
+            self.sid, spans, live_edge=self.edge, open_seq=closed, burst=burst, hls=self.hls
+        )
 
     def ready(self):
         self.case.engine.sessionReady.emit(self.sid)
@@ -1015,7 +1021,9 @@ class StayLiveTests(LiveSessionCase):
         self.assertFalse(last["ended"])
         self.assertEqual(last["target"], 2.5)
 
-    def test_hls_bursts_raise_the_target(self):
+    def test_bursts_raise_the_target(self):
+        # A source that reports its burst without being HLS (raw TS the helper measured):
+        # an HLS one never changes speed (HlsRateTests).
         self.ready(segments(0, 2), live_edge=4.0, burst=6.0)
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(0.25)  # lag 3.75 is under the 6 s burst: no nudge
@@ -1023,7 +1031,7 @@ class StayLiveTests(LiveSessionCase):
         # A mean lag of 1 s is under half a burst of room: it is built at 0.95x (2.0.1).
         self.assertEqual(self.playback.rates, [0.95])
 
-    def test_hls_bursts_settle_without_rate_flapping(self):
+    def test_bursts_settle_without_rate_flapping(self):
         sid = self.start()
         feed = Feed(self, sid, burst=6.0, edge=12.0).ready().run(120.0)
         self.assertEqual(len(self.playback.plays), 1)  # no reopen
@@ -1034,7 +1042,7 @@ class StayLiveTests(LiveSessionCase):
         reported = [timeline["lag"] for timeline in self.timelines[-24:]]
         self.assertLess(max(reported) - min(reported), 0.5)  # the mean, not the sawtooth
 
-    def test_hls_bursts_settle_after_reopening_at_live(self):
+    def test_bursts_settle_after_reopening_at_live(self):
         sid = self.start()
         feed = Feed(self, sid, burst=6.0, edge=60.0).ready().run(120.0)  # 60 s behind
         self.assertEqual(len(self.playback.plays), 2)  # one reopen at live, no loop
@@ -1414,6 +1422,67 @@ class RateHealthTests(LiveSessionCase):
         feed.run(30.0)
         self.assertGreater(feed.starved_s, 5.0)  # it waited at the edge for the first burst
         self.assertEqual(self.playback.rates, [0.95])  # still building the room at 0.95x
+
+
+class HlsRateTests(LiveSessionCase):
+    """2.0.2 ruling: on an HLS source VLC crawls once its rate was changed, even back at 1x
+    and across reopens (measured on a public channel). LiveSession never calls the player's
+    set_rate for one: stay-live corrects it only by its target (Auto's back-off) and the
+    single Go live when far behind. A speed the user chooses is the user's call."""
+
+    def test_behind_the_target_it_never_changes_the_rate(self):
+        sid = self.start()
+        Feed(self, sid, burst=6.0, edge=12.0, hls=True).ready().run(120.0)  # raw TS: 1.05x
+        self.assertEqual(self.playback.rates, [])  # not even a 1.0
+        self.assertEqual(len(self.playback.plays), 1)
+        self.assertTrue(all(state["rate"] == 1.0 for state in self.timelines))
+
+    def test_short_of_its_room_it_never_slows_down(self):
+        # The measured channel's shape: 10 s segments and 8 s buffered at the start.
+        sid = self.start(latency=AUTO)
+        feed = Feed(self, sid, burst=10.0, edge=8.0, hls=True).ready().run(120.0)
+        self.assertEqual(self.playback.rates, [])  # raw TS: 0.95x
+        self.assertEqual(len(self.playback.plays), 1)
+        self.assertGreater(min(feed.before[-3:]), 0.0)  # it plays on, the room as it is
+
+    def test_far_behind_it_goes_live_once_and_still_never_changes_the_rate(self):
+        sid = self.start()
+        Feed(self, sid, burst=6.0, edge=60.0, hls=True).ready().run(120.0)
+        self.assertEqual(len(self.playback.plays), 2)  # one Go live, no loop
+        self.assertEqual(self.playback.rates, [])
+
+    def test_auto_still_backs_off_on_hls(self):
+        sid = self.start(latency=AUTO)
+        feed = Feed(self, sid, burst=6.0, edge=20.0, hls=True).ready().run(30.0)
+        feed.stalled = True
+        feed.run(9.0)  # the burst plus 2 s late, after a full cushion
+        feed.stalled = False
+        feed.run(30.0)
+        self.assertTrue(self.timelines[-1]["adjusted"])  # Auto's target moved: 2.5 -> 4.0
+        self.assertEqual(self.playback.rates, [])
+
+    def test_a_speed_the_user_chooses_is_still_applied(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=6.0, edge=30.0, hls=True).ready().run(1.0)
+        self.live.seek_to(5.0)
+        feed.sync()
+        self.live.toggle_pause()
+        self.live.set_speed(1.5)  # chosen while paused: applies on resume (CATCHING_UP)
+        self.live.toggle_pause()
+        feed.run(1.0)
+        self.assertEqual(self.playback.rates, [1.5])
+        self.live.go_live()
+        self.assertEqual(self.playback.rates, [1.5, 1.0])  # back to 1x, as it was
+
+    def test_a_raw_ts_source_in_bursts_still_changes_speed(self):
+        # The same shapes without the HLS flag: a raw TS source the helper measured.
+        sid = self.start()
+        Feed(self, sid, burst=6.0, edge=12.0).ready().run(120.0)
+        self.assertIn(1.05, self.playback.rates)
+        self.live = self.make()
+        sid = self.start()
+        Feed(self, sid, burst=10.0, edge=8.0).ready().run(10.0)
+        self.assertEqual(self.playback.rates[:1], [0.95])
 
 
 class BackOffTests(LiveSessionCase):

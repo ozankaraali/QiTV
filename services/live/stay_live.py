@@ -7,7 +7,9 @@ lands, so the player never meets the live edge just before each one.
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in
 2.0.2: 4.5 s of media in 37 s). `RateHealth` notices that from VLC's progress, and the caller
 then calls `lock_rate()`: from there on stay-live keeps 1x and only reopens at live when the
-lag is beyond the target plus 20 s, as before.
+lag is beyond the target plus 20 s, as before. An HLS source is kept at 1x from the start
+(`keep_1x`, set by the caller): there VLC crawls once its rate was changed at all, even back
+at 1x and after reopening.
 
 "Auto" latency (`AUTO`, `AutoTarget`) learns each channel's target: it starts at Normal's,
 rises with each starvation or stall and falls again while the channel plays without one. A
@@ -147,6 +149,9 @@ class StayLive:
         self._user_rate = 1.0
         self._reopened = False
         self.rate_locked = False  # VLC cannot play this channel at another rate: 1x for good
+        # The source must stay at 1x (an HLS one), set by the caller each tick: in LIVE no
+        # nudge and no slow-down, only the reopen at live. Not a lesson about the channel.
+        self.keep_1x = False
 
     def lock_rate(self) -> None:
         """VLC cannot play this channel at any rate but 1x (`RateHealth`): keep 1x from now.
@@ -211,8 +216,9 @@ class StayLive:
                 return Decision(1.0)
             self._reopened = True
             return Decision(1.0, reopen_live=True)
-        if self.rate_locked:
-            return Decision(self._rate)  # 1x: set by lock_rate(), never changed after
+        if self.rate_locked or self.keep_1x:
+            self._rate = 1.0  # set by lock_rate(), or never changed (keep_1x)
+            return Decision(1.0)
         room = max(self.burst, self.build)
         if lag_s > self.target + _PUSH:
             self._rate = 1.10

@@ -48,6 +48,7 @@ STATE_KEYS = {
     "ended",
     "burst_s",
     "received",
+    "hls",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -351,6 +352,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(snapshot["oldest"], 0)
         self.assertEqual(snapshot["open"], 0)
         self.assertEqual(snapshot["burst_s"], 0.0)
+        self.assertIs(snapshot["hls"], False)  # raw MPEG-TS
         with urlopen(helper.stream_url(sid, snapshot["oldest"]), timeout=10) as response:
             self.assertEqual(response.headers["Content-Type"], "video/mp2t")
             body = response.read()  # the stream ends once the finite source has ended
@@ -374,9 +376,9 @@ class LiveWorkerTests(unittest.TestCase):
             }
         )
         helper = self.helper()
-        for path, seconds, burst in (
-            (SECRET_PATH, 9.0, 0.0),
-            ("/user/secret/channel.m3u8", 8.0, 4.0),
+        for path, seconds, burst, hls in (
+            (SECRET_PATH, 9.0, 0.0, False),
+            ("/user/secret/channel.m3u8", 8.0, 4.0, True),
         ):
             with self.subTest(path=path):
                 sid = helper.open(source.url + path)
@@ -387,6 +389,7 @@ class LiveWorkerTests(unittest.TestCase):
                 self.assertTrue(snapshot["ended"])
                 self.assertIsNone(snapshot["open"])
                 self.assertEqual(snapshot["burst_s"], burst)
+                self.assertIs(snapshot["hls"], hls)  # 2.0.2: stay-live keeps HLS at 1x
                 self.assertGreater(snapshot["bytes"], 0)
                 self.assertEqual(helper.of(sid, "error"), [])
                 buffered = spans(helper, sid)

@@ -592,6 +592,9 @@ class _Session:
             "burst_s": max(source.burst_s if source is not None else 0.0, self._bursts.burst_s),
             # Before ready: bytes arrived, though nothing is playable yet (no keyframe).
             "received": self._received,
+            # An HLS source: the parent keeps its player at 1x (VLC crawls once its rate
+            # was changed on such a stream; 2.0.2).
+            "hls": bool(source is not None and source.hls),
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the

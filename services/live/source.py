@@ -154,6 +154,7 @@ class Discontinuity:
 
 class Source(Protocol):
     user_agent: str
+    hls: bool  # an HLS source (stay-live keeps such a stream at 1x; 2.0.2)
 
     @property
     def burst_s(self) -> float:
@@ -792,6 +793,8 @@ class TsSource:
     reconnects while the backoff schedule allows.
     """
 
+    hls = False
+
     def __init__(self, http: _Http, url: str, response: Any, prefix: bytes) -> None:
         self.user_agent = http.user_agent
         self._http = http
@@ -1111,6 +1114,8 @@ class HlsSource:
       window, resumes at the live start;
     - reloads that bring no new segment for 60 s (download time excluded) time out.
     """
+
+    hls = True
 
     def __init__(self, http: _Http, playlist: Any, url: str, live_delay: float) -> None:
         self.user_agent = http.user_agent
