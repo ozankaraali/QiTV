@@ -1463,13 +1463,22 @@ class TuningBannerTests(ControllerTestCase):
         self.host.show()
         self.controller.start()
 
-    def test_the_banner_stays_until_the_link_resolves_then_fades(self):
+    def test_the_banner_stays_until_the_channel_plays_then_fades(self):
         self.tune(0)
         elapse(800)  # well past the banner's own time and its fade
         self.assertTrue(self.banner.isVisible())
         self.assertEqual(self.banner.info.name, "One")
-        self.ready()
+        self.ready()  # the link is in, but the stream still opens (a slow start)
+        elapse(800)
+        self.assertTrue(self.banner.isVisible())
+        self.session.stateChanged.emit("playing")
         self.assertTrue(wait_until(lambda: not self.banner.isVisible()))
+
+    def test_the_keep_alive_gives_up_after_its_cap(self):
+        with mock.patch("ui.tv_controller.TUNING_CAP_S", 0.3):
+            self.tune(0)
+            self.ready()  # opens and never plays
+            self.assertTrue(wait_until(lambda: not self.banner.isVisible(), 3000))
 
     def test_the_banner_stays_until_the_link_fails(self):
         self.tune(0)

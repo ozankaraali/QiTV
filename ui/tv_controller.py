@@ -46,6 +46,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -92,6 +93,7 @@ ERROR_MS = 6000
 VOLUME_STEP = 5
 SEEK_STEP_MS = 10_000
 TUNING_KEEP_MS = 3000  # under the banner's 4 s: it is shown again while a link resolves
+TUNING_CAP_S = 20.0  # and while the channel opens, up to this long after the tune
 EXTERNAL_SETTLE_MS = 1000  # the zap burst window: an external player opens once zapping stops
 FAVORITES_SAVE_FAILED_TEXT = "Couldn't save your favorites; they will be lost when QiTV closes"
 _ACTIVE_STATES = frozenset({"opening", "buffering", "playing", "paused"})
@@ -226,6 +228,7 @@ class TVController(QObject):
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
         self._digits = ""  # number entry under way
         self._state = "idle"
+        self._tuning_since = 0.0  # when the banner's keep-alive started (TUNING_CAP_S)
         self._audio_id: Optional[int] = None
         self._subtitle_id: Optional[int] = None
         self._guide = GuideController(overlays.guide, parent=self)
@@ -707,6 +710,7 @@ class TVController(QObject):
             return
         title = str(channel.get("name") or "")
         self._request(Target(channel, "live", title, group_key=group_key, zapped=from_zap))
+        self._tuning_since = time.monotonic()
         self._tuning.start(TUNING_KEEP_MS)
 
     def play_item(self, node: NavNode, siblings: list[NavNode], parent: NavNode) -> None:
@@ -827,17 +831,28 @@ class TVController(QObject):
             self._menu_error(f"{target.title}: {message}")
 
     def _keep_tuning_banner(self) -> None:
-        """Show the banner again while the link of the channel it announces resolves."""
+        """Show the banner again while the channel it announces is on its way: its link
+        resolves, or (delivered) its stream waits for the old one or opens, so a slow start
+        never lets the banner fade before the picture comes (capped at TUNING_CAP_S)."""
         pending = self._lanes.pending()
-        channel, banner = self._channel, self.overlays.banner
-        tuning = (
-            not self._closed
-            and pending is not None
+        channel, banner, current = self._channel, self.overlays.banner, self._current
+        resolving = (
+            pending is not None
             and pending.live
             and not self._is_stay(pending)
             and channel is not None
             and ZapContext.same(pending.item, channel)
         )
+        opening = (
+            pending is None
+            and current is not None
+            and current.live
+            and channel is not None
+            and ZapContext.same(current.item, channel)
+            and (self._tuner.settling() or self._state in ("idle", "opening", "buffering"))
+        )
+        fresh = time.monotonic() - self._tuning_since < TUNING_CAP_S
+        tuning = not self._closed and fresh and (resolving or opening)
         if not tuning:
             self._tuning.stop()  # delivered or failed: the banner fades on its own
             return
