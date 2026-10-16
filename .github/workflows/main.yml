@@ -1,13 +1,14 @@
 name: Build and verify
 
+# Pushes to main release; tv/vlc is checked on demand (Actions → Run workflow). A commit pushed
+# to both gave two runs, and GitHub showed both runs' checks on main's commit.
 on:
   push:
     branches:
       - main
-      - tv/vlc
   workflow_dispatch:
 
-# A newer push to tv/vlc replaces a running check; a release from main always finishes.
+# A newer manual check replaces a running one; a release from main always finishes.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
