@@ -55,5 +55,6 @@ instead of using others' distributions, which may have malware.**
 
 ## Fixes
 
+- **Security:** the `multidict` library (used through `aiohttp`) is updated to 6.9.1 for a reported vulnerability.
 - **Picture-in-picture buttons work while the player controls show.** The controls were drawn above the
   small picture's label and took the clicks on its speaker, ⇄ and ×; a dark band behind the label is gone too.
