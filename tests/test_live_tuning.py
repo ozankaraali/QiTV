@@ -1,4 +1,4 @@
-"""What QiTV learned per live channel (2.0.2): Auto's target and "can't change speed"."""
+"""What QiTV learned per live channel (2.0.2): Auto's extra and "can't change speed"."""
 
 import json
 from pathlib import Path
@@ -64,20 +64,20 @@ class LiveTuningTests(unittest.TestCase):
 
     def test_what_is_learned_round_trips_through_the_file(self):
         store = self.store()
-        store.remember("a", Tuning(target=5.5))
+        store.remember("a", Tuning(extra=5.5))
         store.remember("b", Tuning(rate_locked=True))
-        store.remember("c", Tuning(target=7.0, rate_locked=True))
-        self.assertEqual(store.get("a"), Tuning(target=5.5))  # at once, from memory
+        store.remember("c", Tuning(extra=7.0, rate_locked=True))
+        self.assertEqual(store.get("a"), Tuning(extra=5.5))  # at once, from memory
         store.flush()
         again = self.store()
-        self.assertEqual(again.get("a"), Tuning(target=5.5))
+        self.assertEqual(again.get("a"), Tuning(extra=5.5))
         self.assertEqual(again.get("b"), Tuning(rate_locked=True))
-        self.assertEqual(again.get("c"), Tuning(target=7.0, rate_locked=True))
+        self.assertEqual(again.get("c"), Tuning(extra=7.0, rate_locked=True))
         self.assertEqual(again.get("d"), Tuning())
 
     def test_nothing_left_to_remember_drops_the_channel(self):
         store = self.store()
-        store.remember("a", Tuning(target=5.5))
+        store.remember("a", Tuning(extra=5.5))
         store.remember("a", Tuning())  # Auto came back to where it starts
         store.flush()
         self.assertEqual(json.loads(self.path.read_text())["channels"], {})
@@ -85,14 +85,14 @@ class LiveTuningTests(unittest.TestCase):
     def test_at_most_the_newest_entries_are_kept(self):
         store = self.store(max_entries=3)
         for key in ("a", "b", "c", "d"):
-            store.remember(key, Tuning(target=4.0))
-        store.remember("b", Tuning(target=5.5))  # learned again: the newest now
-        store.remember("e", Tuning(target=4.0))
+            store.remember(key, Tuning(extra=4.0))
+        store.remember("b", Tuning(extra=5.5))  # learned again: the newest now
+        store.remember("e", Tuning(extra=4.0))
         self.assertEqual(store.get("a"), Tuning())  # the oldest went first
         self.assertEqual(store.get("c"), Tuning())
         store.flush()
         self.assertEqual(set(json.loads(self.path.read_text())["channels"]), {"b", "d", "e"})
-        self.assertEqual(self.store(max_entries=3).get("b"), Tuning(target=5.5))
+        self.assertEqual(self.store(max_entries=3).get("b"), Tuning(extra=5.5))
 
     def test_the_default_cap_is_five_hundred(self):
         self.assertEqual(tuning.MAX_ENTRIES, 500)
@@ -110,24 +110,24 @@ class LiveTuningTests(unittest.TestCase):
                 self.path.write_text(text)
                 store = self.store()
                 self.assertEqual(store.get("a"), Tuning())
-                store.remember("b", Tuning(target=4.0))
+                store.remember("b", Tuning(extra=4.0))
                 store.flush()
-                self.assertEqual(self.store().get("b"), Tuning(target=4.0))
+                self.assertEqual(self.store().get("b"), Tuning(extra=4.0))
 
     def test_entries_that_make_no_sense_are_left_out(self):
         channels = {
-            "ok": {"target": 4.0, "rate_locked": True, "used": self.clock.now},
-            "text": {"target": "4", "used": 1.0},
+            "ok": {"extra": 4.0, "rate_locked": True, "used": self.clock.now},
+            "text": {"extra": "4", "used": 1.0},
             "flag": {"rate_locked": "yes", "used": 1.0},
-            "bool": {"target": True, "used": 1.0},
-            "when": {"target": 4.0, "used": "today"},
+            "bool": {"extra": True, "used": 1.0},
+            "when": {"extra": 4.0, "used": "today"},
             "lock": {"rate_locked": True, "used": 1.0, "locked_at": "today"},
             "direct": {"direct": "yes", "used": self.clock.now},
             "list": [4.0, True],
         }
         self.path.write_text(json.dumps({"version": 1, "channels": channels}))
         store = self.store()
-        self.assertEqual(store.get("ok"), Tuning(target=4.0, rate_locked=True))
+        self.assertEqual(store.get("ok"), Tuning(extra=4.0, rate_locked=True))
         for key in ("text", "flag", "bool", "when", "lock", "direct", "list"):
             self.assertEqual(store.get(key), Tuning(), key)
 
@@ -141,7 +141,7 @@ class LiveTuningTests(unittest.TestCase):
 
         with mock.patch.object(LiveTuning, "_write", spy):
             store = self.store()
-            store.remember("a", Tuning(target=4.0))
+            store.remember("a", Tuning(extra=4.0))
             store.flush()
         self.assertTrue(threads)
         self.assertNotIn(threading.get_ident(), threads)
@@ -154,32 +154,32 @@ class LiveTuningTests(unittest.TestCase):
             ),
             self.assertLogs("services.live.tuning", "WARNING") as logs,
         ):
-            store.remember("a", Tuning(target=4.0))
+            store.remember("a", Tuning(extra=4.0))
             store.flush()
         self.assertNotIn(str(self.path.parent), "\n".join(logs.output))
         self.assertEqual(list(self.path.parent.iterdir()), [])  # no temporary file left
-        self.assertEqual(store.get("a"), Tuning(target=4.0))  # kept for this run
+        self.assertEqual(store.get("a"), Tuning(extra=4.0))  # kept for this run
 
     def test_a_lock_is_tried_again_a_day_after_it_was_set(self):
         store = self.store()
-        store.remember("a", Tuning(target=5.5, rate_locked=True))
+        store.remember("a", Tuning(extra=5.5, rate_locked=True))
         locked_at = self.clock.now
         self.clock.now = locked_at + tuning.RATE_LOCK_S - 10
-        self.assertEqual(store.get("a"), Tuning(target=5.5, rate_locked=True))
+        self.assertEqual(store.get("a"), Tuning(extra=5.5, rate_locked=True))
         self.clock.now = locked_at + tuning.RATE_LOCK_S
-        self.assertEqual(store.get("a"), Tuning(target=5.5))  # the target stays
-        store.remember("a", Tuning(target=5.5, rate_locked=True))  # it crawled again
+        self.assertEqual(store.get("a"), Tuning(extra=5.5))  # the extra stays
+        store.remember("a", Tuning(extra=5.5, rate_locked=True))  # it crawled again
         self.clock.now += tuning.RATE_LOCK_S - 10
-        self.assertEqual(store.get("a"), Tuning(target=5.5, rate_locked=True))
+        self.assertEqual(store.get("a"), Tuning(extra=5.5, rate_locked=True))
 
     def test_a_later_lesson_keeps_the_time_of_the_lock(self):
         store = self.store()
         store.remember("a", Tuning(rate_locked=True))
         locked_at = self.clock.now
         self.clock.now = locked_at + 20 * 3600
-        store.remember("a", Tuning(target=4.0, rate_locked=True))  # Auto moved meanwhile
+        store.remember("a", Tuning(extra=4.0, rate_locked=True))  # Auto moved meanwhile
         self.clock.now = locked_at + tuning.RATE_LOCK_S
-        self.assertEqual(store.get("a"), Tuning(target=4.0))
+        self.assertEqual(store.get("a"), Tuning(extra=4.0))
 
     def test_the_time_of_a_lock_round_trips_through_the_file(self):
         store = self.store()
@@ -200,16 +200,16 @@ class LiveTuningTests(unittest.TestCase):
 
     def test_a_channel_played_directly_is_tried_on_the_pipeline_again_after_a_day(self):
         store = self.store()
-        store.remember("a", Tuning(target=4.0, direct=True))
+        store.remember("a", Tuning(extra=4.0, direct=True))
         set_at = self.clock.now
         self.clock.now = set_at + tuning.DIRECT_S - 10
-        self.assertEqual(store.get("a"), Tuning(target=4.0, direct=True))
-        store.remember("a", Tuning(target=5.5, direct=True))  # a later lesson keeps its time
+        self.assertEqual(store.get("a"), Tuning(extra=4.0, direct=True))
+        store.remember("a", Tuning(extra=5.5, direct=True))  # a later lesson keeps its time
         store.flush()
         self.clock.now = set_at + tuning.DIRECT_S - 10
-        self.assertEqual(self.store().get("a"), Tuning(target=5.5, direct=True))  # the file
+        self.assertEqual(self.store().get("a"), Tuning(extra=5.5, direct=True))  # the file
         self.clock.now = set_at + tuning.DIRECT_S
-        self.assertEqual(store.get("a"), Tuning(target=5.5))
+        self.assertEqual(store.get("a"), Tuning(extra=5.5))
         store.remember("a", Tuning(direct=True))  # it crawled again
         self.clock.now += tuning.DIRECT_S - 10
         self.assertEqual(store.get("a"), Tuning(direct=True))

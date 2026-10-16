@@ -66,17 +66,18 @@ channel play directly ("Plays without rewind for smoother playback", `CRAWLING`)
 channel's next tune plays directly at once (for a day: see `services.live.tuning`). A raw TS
 channel never does.
 
-"Auto" latency (2.0.2, `AutoTarget`) learns the target per channel instead of keeping the
-setting's: it starts at Normal's and rises 1.5 s with each starvation of VLC at the live
-edge (BUFFERING, or its clock standing still while Playing, within `_EDGE_S` of the edge)
-and each stall, while stay-live is LIVE; trouble again within `_CALM_S` is the same one. Only
+"Auto" latency (2.0.2, `AutoTarget`) learns per channel what to add to the target in force
+(Normal's, or the burst when that is larger): nothing at first, then 1.5 s more with each
+starvation of VLC at the live edge (BUFFERING, or its clock standing still while Playing,
+within `_EDGE_S` of the edge) and each stall, while stay-live is LIVE, so the target moves at
+once, on long HLS segments too; trouble again within `_CALM_S` is the same one. Only
 trouble that ran out a cushion counts: the lag had reached the current target (less
 `_BELOW_TARGET_S`) since the tune. A tune starts from the oldest buffered point, often with
 less, and a starvation before the first cushion says nothing about the target. Each
-5 minutes of playing at the edge without trouble (not paused, not time-shifted) lower it
-0.5 s. The target used is the larger of it and the burst, and a raised one is built at 0.95x
-(`StayLive.build`) unless the rate is locked; otherwise the lag grows only as VLC waits. What a
-channel taught (Auto's target, a locked rate) is kept per channel (`start(channel=...)`, in the
+5 minutes of playing at the edge without trouble (not paused, not time-shifted) take 0.5 s
+off. A raised target is built at 0.95x (`StayLive.build`) unless the rate is locked;
+otherwise the lag grows only as VLC waits. What a channel taught (Auto's extra, a locked
+rate) is kept per channel (`start(channel=...)`, in the
 `LiveTuning` given): its next tune starts there, a locked rate under any latency (for a day:
 then the store reads it as none, so a tune tries other rates again). Go live
 picks among every segment start, the open one included, by the lag it would give once VLC
@@ -375,7 +376,7 @@ class LiveSession(QObject):
         memory = self._tuning.get(channel) if self._tuning is not None else None
         self._memory = memory or Tuning()
         self._latency = latency if latency in LATENCIES else "normal"
-        self._auto = AutoTarget(self._memory.target) if self._latency == AUTO else None
+        self._auto = AutoTarget(self._memory.extra) if self._latency == AUTO else None
         self._auto_mark = self._troubled_at = None
         self._cushion = 0.0
         self._open_args = {
@@ -518,7 +519,7 @@ class LiveSession(QObject):
         if name != AUTO:
             self._auto = None
         elif self._auto is None:
-            self._auto = AutoTarget(self._memory.target)  # where the channel left it
+            self._auto = AutoTarget(self._memory.extra)  # where the channel left it
 
     def buffered_range(self) -> tuple[float, float]:
         """The buffered timeline seconds, from the oldest point to the live edge."""
@@ -858,7 +859,7 @@ class LiveSession(QObject):
             self._stay.target = self._target(snapshot)
             self._stay.burst = _number(snapshot.get("burst_s"))
             auto = self._auto
-            self._stay.build = auto.target if auto is not None and auto.adjusted else 0.0
+            self._stay.build = self._stay.target if auto is not None and auto.adjusted else 0.0
             buffering = (
                 stalled or self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
             )
@@ -901,11 +902,11 @@ class LiveSession(QObject):
         """Keep what the channel taught (Auto's target, a locked rate, playing directly) for
         its next tune."""
         auto = self._auto
-        target = self._memory.target
+        extra = self._memory.extra
         if auto is not None:
-            target = auto.target if auto.adjusted else None
-            _LOG.debug("Auto latency: %.1f s for this channel", auto.target)
-        self._memory = Tuning(target, self._stay.rate_locked, self._memory.direct or direct)
+            extra = auto.extra if auto.adjusted else None
+            _LOG.debug("Auto latency: %.1f s more for this channel", auto.extra)
+        self._memory = Tuning(extra, self._stay.rate_locked, self._memory.direct or direct)
         if self._tuning is not None:
             self._tuning.remember(self._channel, self._memory)
 
@@ -1076,9 +1077,12 @@ class LiveSession(QObject):
         return self._snapshot_cache
 
     def _target(self, snapshot: Mapping[str, Any]) -> float:
-        """The latency's target (Auto: the channel's), or the burst when that is larger."""
-        latency = self._auto.target if self._auto is not None else TARGETS[self._latency]
-        return max(latency, _number(snapshot.get("burst_s")))
+        """The latency's target, or the burst when that is larger; under Auto, plus what the
+        channel added (`AutoTarget`)."""
+        burst = _number(snapshot.get("burst_s"))
+        if self._auto is not None:
+            return self._auto.target(burst)
+        return max(TARGETS[self._latency], burst)
 
     @staticmethod
     def _live_edge(snapshot: Mapping[str, Any]) -> float:

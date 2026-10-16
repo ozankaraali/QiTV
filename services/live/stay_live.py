@@ -9,9 +9,9 @@ On some channels VLC cannot play at any rate but 1x: its position crawls instead
 then calls `lock_rate()`: from there on stay-live keeps 1x and only reopens at live when the
 lag is beyond the target plus 20 s, as before.
 
-"Auto" latency (`AUTO`, `AutoTarget`) learns each channel's target: it starts at Normal's,
-rises with each starvation or stall and falls again while the channel plays without one. A
-target raised above the lag is reached without a jump back: at 0.95x (`build`) unless the
+"Auto" latency (`AUTO`, `AutoTarget`) learns what each channel adds to the target in force: it
+starts at nothing, rises with each starvation or stall and falls again while the channel plays
+without one. A target raised above the lag is reached without a jump back: at 0.95x (`build`) unless the
 rate is locked, else as VLC waits at the live edge, which adds to the lag by itself.
 
 Pure logic; the caller feeds the measured lag and applies the returned Decision.
@@ -40,7 +40,7 @@ _HEALTH_SHARE = 0.7  # under this share of rate x wall time, VLC cannot play at 
 _AUTO_UP = 1.5  # Auto: a starvation or a stall raises the channel's target this much
 _AUTO_DOWN = 0.5  # and each _AUTO_QUIET_S without one lowers it this much
 _AUTO_QUIET_S = 300.0
-_AUTO_MAX_S = 60.0  # a remembered target beyond this is not one Auto set: start afresh
+_AUTO_MAX_S = 60.0  # a remembered extra beyond this is not one Auto set: start afresh
 
 
 def start_target(latency: str) -> float:
@@ -103,42 +103,56 @@ class RateHealth:
 
 
 class AutoTarget:
-    """One channel's target under Auto latency (2.0.2).
+    """One channel's Auto latency (2.0.2): what it adds to the target in force.
 
-    It starts at Normal's (`start`), or where the channel's last tune left it. Each
-    starvation of VLC at the live edge, and each stall of the source, raises it by
-    `_AUTO_UP`, up to max(Stable's + 4 s, burst + 2 s); every `_AUTO_QUIET_S` of playing
-    without one lowers it by `_AUTO_DOWN`, down to `start`. The caller says what counts.
+    The target in force is Normal's, or the source's burst when that is larger, as under any
+    latency; Auto adds `extra` on top: 0 at first, or where the channel's last tune left it.
+    Each starvation of VLC at the live edge, and each stall of the source, adds `_AUTO_UP`,
+    so the target in force moves at once (on long HLS segments too), up to max(Stable's +
+    4 s, burst + 2 s) in all; every `_AUTO_QUIET_S` of playing without one takes
+    `_AUTO_DOWN` off, down to 0. The caller says what counts.
     """
 
-    def __init__(self, target: Optional[float] = None) -> None:
-        self.start = TARGETS["normal"]
-        self.target = self.start
-        if target is not None and math.isfinite(target) and self.start <= target <= _AUTO_MAX_S:
-            self.target = target
+    def __init__(self, extra: Optional[float] = None) -> None:
+        self.extra = 0.0
+        if extra is not None and math.isfinite(extra) and 0.0 < extra <= _AUTO_MAX_S:
+            self.extra = extra
         self._quiet = 0.0
+
+    @staticmethod
+    def _base(burst: float) -> float:
+        return max(TARGETS["normal"], burst)
+
+    @staticmethod
+    def _cap(burst: float) -> float:
+        return max(TARGETS["stable"] + 4.0, burst + 2.0)
+
+    def target(self, burst: float) -> float:
+        """The target in force for a source with this burst (0.0: steady), with the extra."""
+        base = self._base(burst)
+        return max(base, min(base + self.extra, self._cap(burst)))
 
     @property
     def adjusted(self) -> bool:
-        """The channel needed another target than the one Auto starts with."""
-        return self.target != self.start
+        """The channel needed more than the target in force."""
+        return self.extra > 0.0
 
     def trouble(self, burst: float) -> bool:
-        """A starvation or a stall: 1.5 s more, up to the cap; True when the target changed."""
+        """A starvation or a stall: 1.5 s more, up to the cap; True when the extra changed."""
         self._quiet = 0.0
-        cap = max(TARGETS["stable"] + 4.0, burst + 2.0)
-        raised = max(self.target, min(self.target + _AUTO_UP, cap))  # never lowered here
-        changed, self.target = raised != self.target, raised
+        room = self._cap(burst) - self._base(burst)  # the most Auto may add on this source
+        raised = max(self.extra, min(self.extra + _AUTO_UP, room))  # never lowered here
+        changed, self.extra = raised != self.extra, raised
         return changed
 
     def quiet(self, seconds: float) -> bool:
-        """`seconds` more of playing without trouble; True when the target was lowered."""
+        """`seconds` more of playing without trouble; True when the extra was lowered."""
         self._quiet += seconds
         if self._quiet < _AUTO_QUIET_S - 1e-9:
             return False
         self._quiet = 0.0
-        lowered = max(self.start, self.target - _AUTO_DOWN)
-        changed, self.target = lowered != self.target, lowered
+        lowered = max(0.0, self.extra - _AUTO_DOWN)
+        changed, self.extra = lowered != self.extra, lowered
         return changed
 
 

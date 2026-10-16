@@ -1677,12 +1677,13 @@ class BackOffTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["target"], 3.5)
 
     def test_a_bursty_source_goes_up_to_its_burst_plus_two_seconds(self):
+        # 10 s segments (HLS): each counted stall moves the target in force at once (2.0.2
+        # review, I2), up to the burst plus 2 s.
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=10.0, edge=20.0).ready().run(60.0)
         self.assertEqual(self.timelines[-1]["target"], 10.0)  # the burst, above Normal's
-        for _ in range(8):  # a stall: the burst plus 2 s late; then the cushion is rebuilt
-            self.stall(feed, seconds=13.0, after=150.0)
-        self.assertEqual(self.timelines[-1]["target"], 12.0)  # 10 + 2 > Stable + 4
+        targets = [self.stall(feed, seconds=13.0, after=150.0) for _ in range(3)]
+        self.assertEqual(targets, [11.5, 12.0, 12.0])  # 10 + 2 > Stable + 4
         self.assertEqual(max(state["target"] for state in self.timelines), 12.0)
 
     def test_a_channel_that_cannot_change_speed_builds_its_room_by_waiting(self):
@@ -1725,19 +1726,19 @@ class BackOffTests(LiveSessionCase):
             (self.timelines[-1]["auto"], self.timelines[-1]["adjusted"]), (False, False)
         )
 
-    def test_adjusted_means_the_channels_auto_target_moved_not_a_burst(self):
+    def test_adjusted_means_auto_added_to_the_target_not_a_burst(self):
         # Most HLS channels' segments are longer than Normal's 2.5 s: their target is the
-        # burst from the start, under any latency, and that is no adjustment. Auto's own
-        # target moving is, also while the burst is still the larger.
+        # burst from the start, under any latency, and that is no adjustment. Auto adds to
+        # it, at once (2.0.2 review, I2).
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=6.0, edge=20.0).ready().run(1.0)
         self.assertEqual(self.timelines[-1]["target"], 6.0)
         self.assertFalse(self.timelines[-1]["adjusted"])
         feed.stalled = True
-        feed.run(9.0)  # a stall (the burst plus 2 s) after a full cushion: Auto's 2.5 -> 4.0
+        feed.run(9.0)  # a stall (the burst plus 2 s) after a full cushion: 6.0 -> 7.5
         feed.stalled = False
         feed.run(10.0)
-        self.assertEqual(self.timelines[-1]["target"], 6.0)
+        self.assertEqual(self.timelines[-1]["target"], 7.5)
         self.assertTrue(self.timelines[-1]["adjusted"])
 
     def test_auto_opens_the_buffer_as_normal_does(self):
@@ -1772,7 +1773,7 @@ class MemoryTests(LiveSessionCase):
     def test_tunes_that_starve_right_after_the_start_leave_the_target_where_it_was(self):
         # Each tune plays from the oldest buffered point, a second behind the edge, and the
         # source is 1.9 s late at once: VLC runs dry before any cushion was built (2.0.2).
-        self.tuning.remember("A", Tuning(target=4.0))
+        self.tuning.remember("A", Tuning(extra=1.5))
         for channel, target in (("A", 4.0), ("B", TARGETS["normal"])):
             for _ in range(5):
                 with self.subTest(channel=channel, tune=_):
@@ -1783,7 +1784,7 @@ class MemoryTests(LiveSessionCase):
                     feed.run(5.0)
                     self.assertGreater(feed.starved_s, 0.5)
                     self.assertEqual(self.timelines[-1]["target"], target)
-        self.assertEqual(self.tuning.get("A"), Tuning(target=4.0))
+        self.assertEqual(self.tuning.get("A"), Tuning(extra=1.5))
         self.assertEqual(self.tuning.get("B"), Tuning())
 
     def test_a_channel_that_cannot_change_speed_plays_at_1x_from_its_next_tune(self):
@@ -1824,7 +1825,7 @@ class MemoryTests(LiveSessionCase):
         feed = self.tune("A").run(20.0)
         self.stall(feed)
         self.assertEqual(self.timelines[-1]["target"], 4.0)
-        self.assertEqual(self.tuning.get("A"), Tuning(target=4.0))
+        self.assertEqual(self.tuning.get("A"), Tuning(extra=1.5))
         self.tune("B").run(1.0)
         self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
         self.tune("A").run(1.0)
@@ -1832,16 +1833,16 @@ class MemoryTests(LiveSessionCase):
         self.assertEqual(self.tuning.get("B"), Tuning())  # nothing learned, nothing kept
 
     def test_a_fixed_latency_keeps_its_own_target_and_the_channels_locked_rate(self):
-        self.tuning.remember("A", Tuning(target=7.0, rate_locked=True))
+        self.tuning.remember("A", Tuning(extra=4.5, rate_locked=True))
         self.tune("A", latency="normal", edge=12.0).run(10.0)
         self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
         self.assertEqual(self.playback.rates, [])  # far behind, and still 1x
         self.tune("A").run(1.0)  # Auto
         self.assertEqual(self.timelines[-1]["target"], 7.0)
-        self.assertEqual(self.tuning.get("A"), Tuning(target=7.0, rate_locked=True))
+        self.assertEqual(self.tuning.get("A"), Tuning(extra=4.5, rate_locked=True))
 
     def test_auto_chosen_while_a_channel_plays_starts_where_it_left_it(self):
-        self.tuning.remember("A", Tuning(target=5.5))
+        self.tuning.remember("A", Tuning(extra=3.0))
         feed = self.tune("A", latency="normal").run(1.0)
         self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
         self.live.set_latency(AUTO)
@@ -1849,7 +1850,7 @@ class MemoryTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["target"], 5.5)
 
     def test_a_target_back_where_auto_starts_is_forgotten(self):
-        self.tuning.remember("A", Tuning(target=3.0))
+        self.tuning.remember("A", Tuning(extra=0.5))
         self.tune("A").run(301.0)
         self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
         self.assertEqual(self.tuning.get("A"), Tuning())

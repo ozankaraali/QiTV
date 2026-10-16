@@ -311,13 +311,16 @@ class ConsecutiveWindowTests(unittest.TestCase):
 
 
 class AutoTargetTests(unittest.TestCase):
-    """2.0.2 "Auto" latency: each channel's target starts at Normal's, rises 1.5 s with each
-    starvation or stall up to max(Stable + 4, burst + 2), and falls 0.5 s after each 5 quiet
-    minutes, down to where it started."""
+    """2.0.2 "Auto" latency: each channel adds an extra to the target in force (Normal's, or
+    the burst when that is larger): it starts at 0, rises 1.5 s with each starvation or stall
+    up to max(Stable + 4, burst + 2) in all, and falls 0.5 s after each 5 quiet minutes,
+    down to 0. Each rise moves the target in force at once, also on long HLS segments."""
 
-    def test_it_starts_at_normal(self):
+    def test_it_starts_at_the_target_in_force(self):
         auto = AutoTarget()
-        self.assertEqual((auto.start, auto.target), (TARGETS["normal"], TARGETS["normal"]))
+        self.assertEqual(auto.extra, 0.0)
+        self.assertEqual(auto.target(burst=0.0), TARGETS["normal"])
+        self.assertEqual(auto.target(burst=10.0), 10.0)
         self.assertFalse(auto.adjusted)
 
     def test_trouble_raises_it_in_steps_up_to_the_cap(self):
@@ -325,49 +328,56 @@ class AutoTargetTests(unittest.TestCase):
         targets = []
         for _ in range(7):
             auto.trouble(burst=0.0)
-            targets.append(auto.target)
+            targets.append(auto.target(burst=0.0))
         self.assertEqual(targets, [4.0, 5.5, 7.0, 8.5, 10.0, 10.0, 10.0])  # Stable + 4
         self.assertTrue(auto.adjusted)
 
-    def test_a_bursty_source_may_go_two_seconds_beyond_its_burst(self):
+    def test_on_long_segments_each_rise_moves_the_target_at_once(self):
         auto = AutoTarget()
-        for _ in range(10):
+        targets = []
+        for _ in range(3):
             auto.trouble(burst=10.0)
-        self.assertEqual(auto.target, 12.0)
-        self.assertFalse(auto.trouble(burst=0.0))  # never lowered by trouble
-        self.assertEqual(auto.target, 12.0)
+            targets.append(auto.target(burst=10.0))
+        self.assertEqual(targets, [11.5, 12.0, 12.0])  # the burst plus 2 s at most
+        six = AutoTarget()
+        six.trouble(burst=6.0)
+        self.assertEqual(six.target(burst=6.0), 7.5)
 
     def test_trouble_says_whether_it_changed(self):
-        auto = AutoTarget(10.0)
-        self.assertFalse(auto.trouble(burst=0.0))
-        self.assertTrue(auto.trouble(burst=10.0))
+        auto = AutoTarget(7.5)
+        self.assertFalse(auto.trouble(burst=0.0))  # at the cap
+        self.assertTrue(AutoTarget(1.0).trouble(burst=10.0))
 
-    def test_five_quiet_minutes_lower_it_half_a_second_down_to_the_start(self):
-        auto = AutoTarget(4.0)
+    def test_a_learned_extra_never_takes_the_target_past_the_cap(self):
+        auto = AutoTarget(7.5)  # learned on a steady source
+        self.assertEqual(auto.target(burst=10.0), 12.0)  # now bursty: 10 + 2 at most
+
+    def test_five_quiet_minutes_lower_it_half_a_second_down_to_nothing(self):
+        auto = AutoTarget(1.5)
         changes = [auto.quiet(1.0) for _ in range(299)]
-        self.assertEqual((auto.target, any(changes)), (4.0, False))
+        self.assertEqual((auto.extra, any(changes)), (1.5, False))
         self.assertTrue(auto.quiet(1.0))
-        self.assertEqual(auto.target, 3.5)
+        self.assertEqual(auto.extra, 1.0)
         for _ in range(300 * 5):
             auto.quiet(1.0)
-        self.assertEqual(auto.target, TARGETS["normal"])  # 3.0 after 10 min, then 2.5
+        self.assertEqual(auto.extra, 0.0)  # 0.5 after 10 min, then 0
         self.assertFalse(auto.adjusted)
 
     def test_trouble_starts_the_quiet_minutes_afresh(self):
-        auto = AutoTarget(7.0)
+        auto = AutoTarget(4.5)
         auto.quiet(299.0)
         auto.trouble(burst=0.0)
         self.assertFalse(auto.quiet(299.0))
-        self.assertEqual(auto.target, 8.5)
+        self.assertEqual(auto.extra, 6.0)
         self.assertTrue(auto.quiet(1.0))
-        self.assertEqual(auto.target, 8.0)
+        self.assertEqual(auto.extra, 5.5)
 
-    def test_a_remembered_target_starts_there(self):
-        self.assertEqual(AutoTarget(5.5).target, 5.5)
-        self.assertTrue(AutoTarget(5.5).adjusted)
-        for bad in (1.0, float("nan"), float("inf"), -3.0):
+    def test_a_remembered_extra_starts_there(self):
+        self.assertEqual(AutoTarget(3.0).target(burst=0.0), 5.5)
+        self.assertTrue(AutoTarget(3.0).adjusted)
+        for bad in (0.0, float("nan"), float("inf"), -3.0, 100.0):
             with self.subTest(bad=bad):
-                self.assertEqual(AutoTarget(bad).target, TARGETS["normal"])
+                self.assertEqual(AutoTarget(bad).extra, 0.0)
 
     def test_stay_live_starts_auto_at_normal(self):
         self.assertEqual(StayLive(AUTO).target, TARGETS["normal"])
