@@ -18,7 +18,7 @@ from timer_fixtures import elapse, wait_until
 from services.catalog import PROVIDER_LOADING_MESSAGE, UNREACHABLE_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme
-from services.live.live_session import UNAVAILABLE
+from services.live.live_session import CRAWLING, UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.navigation import FAVORITES_GROUP, NavModel, NavNode
@@ -494,6 +494,7 @@ class FakeLiveSession(QObject):
         self.calls = []
         self.mode = ""
         self.running = False
+        self.no_rewind_reason = UNAVAILABLE
 
     def named(self, name):
         return [c[1:] for c in self.calls if c[0] == name]
@@ -2437,6 +2438,13 @@ class PipelineControlTests(PipelineCase):
         self.controller.handle(Action.PLAY_PAUSE)
         self.assertEqual(self.live.calls[1:], [("toggle_pause",)])
         self.assertEqual(self.toast.messages(), [(UNAVAILABLE, "info")])
+
+    def test_a_rewind_on_a_channel_played_directly_for_smoothness_says_why(self):
+        self.start_channel(0)
+        self.live.no_rewind_reason = CRAWLING  # it crawled through the time-shift buffer
+        self.live.play_direct()
+        self.controller.handle(Action.SEEK_BACK)
+        self.assertEqual(self.toast.messages(), [(CRAWLING, "info")])
 
     def test_seeking_while_the_pipeline_still_opens_says_nothing(self):
         self.play(0)

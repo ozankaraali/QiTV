@@ -339,6 +339,12 @@ class LiveSession(QObject):
     def is_pipeline(self) -> bool:
         return self._mode == "pipeline"
 
+    @property
+    def no_rewind_reason(self) -> str:
+        """What a rewind says while the channel plays directly: `CRAWLING` when VLC crawled
+        through the time-shift buffer on it (now, or within the day), else `UNAVAILABLE`."""
+        return CRAWLING if self._memory.direct else UNAVAILABLE
+
     def engine_shut_down(self) -> None:
         """The engine was shut down, which no signal tells: count it gone for this run.
 

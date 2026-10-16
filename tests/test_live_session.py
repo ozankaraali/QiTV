@@ -439,6 +439,15 @@ class LiveSessionCase(unittest.TestCase):
         self.assertFalse(self.live.is_pipeline())
 
 
+class NoRewindReasonTests(LiveSessionCase):
+    def test_a_channel_that_cannot_be_time_shifted_says_so(self):
+        sid = self.start()
+        self.engine.sessionFailed.emit(sid, "unsupported", "Not MPEG-TS.")
+        self.engine.answer()
+        self.assertEqual(self.modes[-1], "direct")
+        self.assertEqual(self.live.no_rewind_reason, UNAVAILABLE)
+
+
 class StartTests(LiveSessionCase):
     def test_a_disk_buffer_carries_its_memory_fallback_size(self):
         # The helper's disk-failure fallback follows timeshift_ram_mib, not 128 MiB (H12).
@@ -1529,6 +1538,7 @@ class CrawlFallbackTests(LiveSessionCase):
         self.assertEqual(self.modes[-1], "direct")
         self.assertEqual(self.notices, [self.CRAWLING])  # said once
         self.assertEqual(self.tuning.get("A"), Tuning(rate_locked=True, direct=True))
+        self.assertEqual(self.live.no_rewind_reason, self.CRAWLING)  # why, on a rewind
         feed.run(30.0)
         self.assertEqual(self.notices, [self.CRAWLING])
         self.assertEqual(self.playback.plays[-1], DIRECT)
@@ -1551,8 +1561,9 @@ class CrawlFallbackTests(LiveSessionCase):
         self.assertIsNone(self.tune())
         self.assertEqual(len(self.engine.opened), opened)  # no pipeline session at all
         self.assertEqual(self.playback.plays[-1], DIRECT)
-        self.assertEqual(self.notices[-1], UNAVAILABLE)  # shown only when a rewind needs it
+        self.assertEqual(self.notices[-1], UNAVAILABLE)  # not toasted at tune
         self.assertNotIn(self.CRAWLING, self.notices)
+        self.assertEqual(self.live.no_rewind_reason, self.CRAWLING)  # a rewind says why
         self.now[0] += 24 * 60 * 60
         feed = self.tune()
         self.assertIsNotNone(feed)  # the pipeline again

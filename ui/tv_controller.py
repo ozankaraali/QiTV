@@ -58,7 +58,7 @@ from services import external_players, favorites
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
-from services.live.live_session import UNAVAILABLE, LiveSession
+from services.live.live_session import LiveSession
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
 from services.next_episode import play_context
 from services.redact import safe_traceback, scrub
@@ -1473,7 +1473,9 @@ class TVController(QObject):
         elif current is not None and not current.live:
             return  # a movie or an episode that cannot seek, or that ended
         elif self.live is not None and current is not None and current.live:
-            self._toast(UNAVAILABLE)  # played directly: there is no buffer to seek in
+            # Played directly: there is no buffer to seek in. Say why when it was the channel's
+            # own choice (it crawled through the time-shift buffer; back in a day).
+            self._toast(self.live.no_rewind_reason)
         else:
             self._toast("Rewind arrives with time-shift")
 
