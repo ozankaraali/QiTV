@@ -99,7 +99,7 @@ _FIRST_BURST_S = 1.5  # a burst this long counts at once, before a second one co
 # The connect burst counts for its period (up to the next burst) when that is longer than its
 # media, but at most this many times its media and this many seconds:
 _CONNECT_PERIOD_RATIO = 3.0
-_CONNECT_PERIOD_MAX_S = 12.0
+_CONNECT_PERIOD_MAX_S = 10.0  # the owner's cadence: 10 s bursts (the gap read 8.5 s)
 _BURST_SPREAD = 1.5  # two bursts in a row are alike when neither is larger by more than this
 _BURST_RUN = 3  # the estimate is the largest of this many latest bursts
 _STEADY_BURSTS = 3.0  # this many estimates' worth of seconds without a gap: steady again
@@ -142,7 +142,7 @@ class BurstMeter:
     A bursty source shows its next gap within half a period of a burst's first byte, inside an
     estimate of about its period (the owner's channel: 2-4 s at connect, then 10 s every 10 s),
     while a steady source that paused after connect (4 s, then 12 s without a byte, then real
-    time) is taken for bursty for 12 s rather than 36 s.
+    time) is taken for 10 s bursts for 10 s (before 2.0.1's review: for 12 s ones for 36 s).
 
     Pure logic: no clock of its own.
     """

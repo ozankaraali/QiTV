@@ -1275,19 +1275,19 @@ class StayLiveTests(LiveSessionCase):
 
     def test_a_steady_source_that_paused_after_connect_is_not_bursty_for_long(self):
         """The 2.0.1 review: a steady source sends 4 s at connect, nothing for 12 s while it
-        starts up, then real time. Its connect burst counts for its gap (12 s) until a second
-        burst confirms it, and none comes: steady again after 12 s (not 36 s), so it slows at
-        most that long, then a stall shows within the steady bound and Go live lands at the
-        target, not ~17 s behind."""
+        starts up, then real time. Its connect burst counts for its gap, at most 10 s, until a
+        second burst confirms it, and none comes: steady again after 10 s (it was 12 s for
+        36 s), so it slows at most that long, then a stall shows within the steady bound and
+        Go live lands at the target, not ~17 s behind."""
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=4.0, first=12.0, metered=True).ready()
-        feed.run(12.0)  # the source sends again: its connect burst counts for 12 s
-        self.assertEqual(feed.meter.burst_s, 12.0)
+        feed.run(12.0)  # the source sends again: its connect burst counts for 10 s
+        self.assertEqual(feed.meter.burst_s, 10.0)
         start = len(self.timelines)
-        feed.run(12.5)
+        feed.run(10.5)
         self.assertEqual(feed.meter.burst_s, 0.0)
         slowed = [state for state in self.timelines[start:] if state["rate"] < 1.0]
-        self.assertLessEqual(len(slowed), 12.0 / 0.25 + 1)  # the window at most
+        self.assertLessEqual(len(slowed), 10.0 / 0.25 + 1)  # the window at most
         timelines = len(self.timelines)
         feed.run(30.0)
         after = self.timelines[timelines:]
@@ -1295,7 +1295,7 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual({state["target"] for state in after}, {TARGETS["normal"]})
         self.assertFalse(any(state["stalled"] for state in after))
         feed.stalled = True
-        feed.run(2.5)  # "Reconnecting…" after the steady bound (2 s), not a 12 s burst's 14 s
+        feed.run(2.5)  # "Reconnecting…" after the steady bound (2 s), not a 10 s burst's 12 s
         self.assertTrue(self.timelines[-1]["stalled"])
         feed.stalled = False
         feed.run(5.0)

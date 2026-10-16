@@ -111,12 +111,12 @@ class BurstMeterTests(unittest.TestCase):
 
     def test_an_unconfirmed_estimate_drops_after_one_estimate_without_a_gap(self):
         # The 2.0.1 review's case: a steady source sends 4 s at connect, pauses 12 s while it
-        # starts up, then sends in real time. The connect burst counts for its gap (12 s),
-        # but no second burst confirms it: steady again after 12 s, not after 36 s.
+        # starts up, then sends in real time. The connect burst counts for its gap, at most
+        # 10 s, but no second burst confirms it: steady again after 10 s, not after 36 s.
         series = bursts(0.0, 4.0, 0.0, 1) + steady(12.2, 60.0, media=4.0)
         readings = measured(series)
-        window = round(12.0 / 0.1)  # the arrivals in one estimate's worth of seconds
-        self.assertEqual(set(readings[5 : 5 + window]), {12.0})
+        window = round(10.0 / 0.1)  # the arrivals in one estimate's worth of seconds
+        self.assertEqual(set(readings[5 : 5 + window]), {10.0})
         self.assertEqual(set(readings[5 + window + 1 :]), {0.0})
 
     def test_a_short_connect_burst_holds_while_the_next_bursts_arrive(self):
@@ -129,9 +129,9 @@ class BurstMeterTests(unittest.TestCase):
         self.assertEqual(set(readings[5:45]), {6.0})  # its gap, at most 3x its media
         self.assertEqual(set(readings[45:]), {10.0})
 
-    def test_the_connect_period_counts_for_at_most_twelve_seconds(self):
+    def test_the_connect_period_counts_for_at_most_ten_seconds(self):
         series = bursts(0.0, 6.0, 0.0, 1) + bursts(20.0, 6.0, 6.0, 2, media=6.0)
-        self.assertEqual(measured(series)[5], 12.0)
+        self.assertEqual(measured(series)[5], 10.0)
 
     def test_only_the_connect_burst_takes_its_gap(self):
         # Bursty, then steady (back to 0), then bursty again: the media, not the gap.
