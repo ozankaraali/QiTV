@@ -216,6 +216,20 @@ class TVWindowTests(WindowCase):
         self.assertIs(window.surface.parentWidget(), window.player_page)
         self.assertEqual(window.surface.geometry(), window.player_page.rect())
 
+    def test_the_player_page_and_its_overlays_reach_the_windows_edges_under_the_theme(self):
+        # The dark theme gives every QStackedWidget a 1-px border: the page and the overlay host
+        # sat 1 px inside it, and the guide's dimming left the outer pixel line undimmed.
+        previous = self.app.styleSheet()
+        self.addCleanup(self.app.setStyleSheet, previous)
+        self.app.setStyleSheet("QStackedWidget { border: 1px solid #3f4042; }")
+        self.show()
+        window = self.window
+        window.host.sync_geometry()
+        self.assertEqual(window.pages.frameWidth(), 0)
+        self.assertEqual(window.player_page.geometry(), window.pages.rect())
+        whole = QRect(window.pages.mapToGlobal(QPoint(0, 0)), window.pages.size())
+        self.assertEqual(window.host.geometry(), whole)
+
     def test_the_deferred_libraries_load_after_the_first_frame(self):
         with (
             mock.patch("ui.tv_window.deferred_modules", return_value=["a", "b"]),

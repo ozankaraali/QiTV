@@ -317,6 +317,10 @@ class TVWindow(QMainWindow):
         self.library_page = LibraryScreen(self.posters, self.logos)
         self.library_toast = Toast(self.library_page)  # the overlay host hides with the player
         self.pages = QStackedWidget(self)
+        # The dark theme borders every QStackedWidget: the page and its overlays (the guide's
+        # dimming) would sit 1 px inside the window, leaving its outer pixel line uncovered.
+        self.pages.setObjectName("pages")
+        self.pages.setStyleSheet("QStackedWidget#pages { border: none; }")
         self.pages.addWidget(self.player_page)
         self.pages.addWidget(self.library_page)
         self.setCentralWidget(self.pages)
