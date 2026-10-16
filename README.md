@@ -48,7 +48,7 @@ This installs a desktop entry and icon so QiTV appears in your application menu.
 On a first start QiTV opens with a [publicly available playlist](https://github.com/iptv-org/iptv) of free channels from around the world, so you can try it straight away. To add your own provider:
 
 1. Press <kbd>Enter</kbd> (or click the picture) to open the channel list.
-2. Press <kbd>←</kbd> until you reach the left-most column, the list of your sources (or click your provider's name at the top of the list). At its bottom are **⚙ Settings**, **＋ Add provider** and **Open file** (a video file on your computer, as <kbd>Ctrl/⌘+O</kbd>).
+2. Press <kbd>←</kbd> until you reach the left-most column, the list of your sources (or click your provider's name at the top of the list). At its bottom are **⚙ Settings**, **＋ Add provider**, **＋ Free channels…** (iptv-org's free playlist again, for all countries or one country) and **Open file** (a video file on your computer, as <kbd>Ctrl/⌘+O</kbd>).
 3. Choose **＋ Add provider**. Settings opens on the Providers tab with a new provider to fill in:
    - **M3U Playlist:** the playlist's web address, or **Load File** for a playlist on your computer;
    - **M3U Stream:** the address of a single stream;
@@ -56,7 +56,7 @@ On a first start QiTV opens with a [publicly available playlist](https://github.
    - **STB:** the portal address and your MAC address (serial number and device ID only if your provider asks for them).
 4. Press **Verify Provider** to check the details, then **Save**. QiTV loads the channels, and the Library loads the provider's movies and series.
 
-If you delete every provider, including the free playlist, QiTV shows a welcome card whose **Add provider** button does the same. Settings is one click away too: the **⚙** at the right end of the channel list's top row (beside it, **↻** loads your provider's channels and guide again, also <kbd>Ctrl/⌘+R</kbd>, and **⌕** searches), or the menu bar (<kbd>Ctrl/⌘+,</kbd>). The same row starts with **‹**, which goes back a level like <kbd>←</kbd>, and the names of where you are: click one to go there. To switch between providers, click your provider's name in that row and pick another in the sources column, or use the **Providers** menu.
+If you delete every provider, including the free playlist, QiTV shows a welcome card whose **Add provider** button does the same; its **Free channels…** button adds iptv-org's free list again, for all countries or one country. Settings is one click away too: the **⚙** at the right end of the channel list's top row (beside it, **↻** loads your provider's channels and guide again, also <kbd>Ctrl/⌘+R</kbd>, and **⌕** searches), or the menu bar (<kbd>Ctrl/⌘+,</kbd>). The same row starts with **‹**, which goes back a level like <kbd>←</kbd>, and the names of where you are: click one to go there. To switch between providers, click your provider's name in that row and pick another in the sources column, or use the **Providers** menu.
 
 QiTV keeps each provider's lists for six hours and refreshes them in the background, so they open at once. If your provider allows only one or two streams at a time, QiTV never opens more: set **Max simultaneous streams** in the provider's settings when QiTV cannot read the limit from the provider.
 
