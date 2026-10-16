@@ -472,8 +472,9 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         self.menus = TVMenus(self, self)
-        # The player controls' ⌕: the Library's search, as Ctrl/⌘+F.
+        # The player controls' and the guide's ⌕: the Library's search, as Ctrl/⌘+F.
         self.overlays.transport.searchRequested.connect(self.screens.open_search)
+        self.overlays.guide.searchRequested.connect(self.screens.open_search)
         self.overlays.welcome.addRequested.connect(self.add_provider)
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
         # A Windows self-update waits for background threads: the engine's must stop first,

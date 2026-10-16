@@ -16,8 +16,10 @@ from shiboken6 import isValid
 from timer_fixtures import elapse
 
 from services.epg_view import Programme
+from ui.keymap import key_hint
 from ui.overlay_host import OverlayHost
 from ui.overlays.guide import (
+    CHANNEL_U,
     HEADER_U,
     REPAINT_MS,
     ROW_U,
@@ -418,6 +420,122 @@ class GuideMouseTests(unittest.TestCase):
         self.assertEqual(self.guide.window_start(), start + 2 * HALF_HOUR)
         self.assertIs(self.guide.current_channel(), self.chans[0])
         self.assertEqual(self.host_events, [])
+
+
+class GuideHeaderTests(unittest.TestCase):
+    """The owner's mouse-only rule (2.0.1): the guide's keys have buttons in its header."""
+
+    BUTTONS = ("earlier", "later", "search", "fullscreen", "close")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.host = QWidget()
+        self.host.resize(1280, 720)
+        self.host.show()
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.guide = Guide(None, Lookups(), lambda: NOW, self.host)
+        self.chans = channels(30)
+        self.guide.open_guide(self.chans, 3)
+        self.tuned: list[dict] = []
+        self.guide.tuneRequested.connect(self.tuned.append)
+
+    def click(self, name, double=False):
+        point = self.guide.header_buttons()[name].center().toPoint()
+        left, none = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+        if double:  # as a mouse does it: press, release, then a press that is a double-click
+            host = self.host.windowHandle()
+            QTest.mouseDClick(host, left, none, self.guide.mapTo(self.host, point))
+        else:
+            QTest.mouseClick(self.guide, left, none, point)
+
+    def test_the_header_has_its_buttons_each_naming_its_key(self):
+        buttons = self.guide.header_buttons()
+        self.assertEqual(list(buttons), list(self.BUTTONS))
+        u = self.guide.width() / 100
+        header_bottom = (TOP_U + HEADER_U) * u
+        for name, (what, keys) in zip(
+            self.BUTTONS,
+            (
+                ("Earlier", "Left"),
+                ("Later", "Right"),
+                ("Search", "Ctrl+F"),
+                ("Fullscreen", "F"),
+                ("Close the guide", "G"),
+            ),
+        ):
+            with self.subTest(name=name):
+                rect = buttons[name]
+                self.assertGreaterEqual(min(rect.width(), rect.height()), 28)
+                self.assertLessEqual(rect.bottom(), header_bottom)
+                self.assertEqual(self.guide.tooltip_at(rect.center()), key_hint(what, keys))
+        # ‹ › beside the day, in the channels' column; ⌕ ⛶ × at the right end, in that order.
+        self.assertLessEqual(buttons["later"].right(), CHANNEL_U * u)
+        self.assertLess(buttons["earlier"].right(), buttons["later"].left())
+        self.assertLess(buttons["search"].right(), buttons["fullscreen"].left())
+        self.assertLess(buttons["fullscreen"].right(), buttons["close"].left())
+        self.assertLessEqual(buttons["close"].right(), self.guide.width())
+
+    def test_earlier_and_later_move_the_time_window(self):
+        start = self.guide.window_start()
+        self.click("earlier")  # already the current half hour
+        self.assertEqual(self.guide.window_start(), start)
+        self.click("later")
+        self.assertEqual(self.guide.window_start(), start + HALF_HOUR)
+        self.click("earlier")
+        self.assertEqual(self.guide.window_start(), start)
+        self.assertIs(self.guide.current_channel(), self.chans[3])  # the rows stay
+        self.assertEqual(self.tuned, [])
+
+    def test_a_quick_second_click_on_later_counts(self):
+        start = self.guide.window_start()
+        self.click("later", double=True)
+        self.assertEqual(self.guide.window_start(), start + 2 * HALF_HOUR)
+
+    def test_earlier_is_dimmed_when_nothing_is_earlier(self):
+        earlier = self.guide.header_buttons()["earlier"].toAlignedRect()
+        at_start = self.guide.grab().toImage().copy(earlier)
+        self.click("later")
+        self.assertNotEqual(self.guide.grab().toImage().copy(earlier), at_start)
+
+    def test_a_quick_second_click_on_fullscreen_asks_once(self):
+        fullscreens = []
+        self.guide.fullscreenRequested.connect(lambda: fullscreens.append(True))
+        self.click("fullscreen", double=True)
+        self.assertEqual(fullscreens, [True])  # not in and straight out again
+
+    def test_search_and_fullscreen_ask_the_shell(self):
+        searches, fullscreens = [], []
+        self.guide.searchRequested.connect(lambda: searches.append(True))
+        self.guide.fullscreenRequested.connect(lambda: fullscreens.append(True))
+        self.click("search")
+        self.click("fullscreen")
+        self.assertEqual((searches, fullscreens), ([True], [True]))
+        self.assertTrue(self.guide.isVisible())  # the shell decides what follows
+        self.assertEqual(self.tuned, [])
+
+    def test_close_closes_the_guide(self):
+        closed = []
+        self.guide.closed.connect(lambda: closed.append(True))
+        self.click("close")
+        self.assertFalse(self.guide.isVisible())
+        self.assertEqual(closed, [True])
+        self.assertEqual(self.tuned, [])
+
+    def test_the_buttons_fit_a_small_guide(self):
+        for width in (360, 640, 960):
+            self.host.resize(width, round(width * 9 / 16))
+            with self.subTest(width=width):
+                buttons = list(self.guide.header_buttons().values())
+                for i, a in enumerate(buttons):
+                    self.assertGreaterEqual(a.left(), 0)
+                    self.assertLessEqual(a.right(), width)
+                    for b in buttons[i + 1 :]:
+                        self.assertFalse(a.intersects(b))
+                self.assertFalse(self.guide.grab().isNull())
 
 
 class ProgrammeSpansTests(unittest.TestCase):

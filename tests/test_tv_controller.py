@@ -387,6 +387,8 @@ class FakeToast(FakeOverlay):
 class FakeGuide(FakeOverlay):
     tuneRequested = Signal(object)
     closed = Signal()
+    searchRequested = Signal()
+    fullscreenRequested = Signal()
     current = None
 
     def current_channel(self):
@@ -2844,6 +2846,12 @@ class GuideTests(ControllerTestCase):
         self.controller.handle(Action.GUIDE)
         self.catalog.epgReady.emit()
         self.assertEqual(self.guide.named("invalidate"), [()])
+
+    def test_the_guides_fullscreen_button_toggles_fullscreen_and_keeps_it_open(self):
+        self.controller.handle(Action.GUIDE)
+        self.guide.fullscreenRequested.emit()
+        self.assertEqual(self.window.calls, ["toggle_fullscreen"])
+        self.assertTrue(self.guide.visible)
 
 
 class AutoplayCase(ControllerTestCase):

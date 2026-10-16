@@ -334,6 +334,7 @@ class TVController(QObject):
         drawer.playRequested.connect(self.play_item)
         drawer.contextRequested.connect(self._on_context)
         self._guide.tuneRequested.connect(self._on_guide_tune)
+        self.overlays.guide.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
         transport.nextRequested.connect(self._on_next_requested)
         transport.playPauseRequested.connect(self._toggle_pause)
         transport.seekRequested.connect(self._seek_ms)

@@ -2,6 +2,10 @@
 
 The grid paints only the rows that fit on screen, and looks up programmes only for those
 rows, so groups with thousands of channels stay cheap.
+
+Its header has a button for each of its keys (the owner's mouse-only rule): ‹ and › beside the
+day move the time window (← →, dimmed at its ends), and ⌕ (Search), ⛶ (Fullscreen) and ×
+(close, as G or Esc) sit at its right end. Each names its key when hovered.
 """
 
 from collections.abc import Callable
@@ -11,10 +15,11 @@ import logging
 import math
 from typing import NamedTuple
 
-from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QFont,
     QFontMetrics,
+    QHelpEvent,
     QMouseEvent,
     QPainter,
     QPainterPath,
@@ -23,12 +28,13 @@ from PySide6.QtGui import (
     QTextLayout,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QToolTip, QWidget
 
 from services.epg_view import Programme
 from services.navigation import item_key
+from ui.keymap import key_hint
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_logo, elided, fill_round, fmt_clock
+from ui.overlays.painting import Units, draw_icon, draw_logo, elided, fill_round, fmt_clock
 from ui.pointer import PointerInput
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -49,6 +55,17 @@ SIDE_U = 1.6
 MIN_BOX_U = 1.5  # narrower boxes (slivers at the window's edges) are not drawn
 TIME_DETAIL_U = 8.0  # boxes at least this wide show their time under the title
 NO_INFO_TEXT = "No programme information"
+BUTTON_U = 2.2  # the header's buttons: 28 px at the default 1280 px window
+BUTTON_GAP_U = 0.6
+# The header's buttons, left to right: what they do and their key (ui.keymap.SHORTCUTS).
+HEADER_BUTTONS = {
+    "earlier": ("Earlier", "Left"),
+    "later": ("Later", "Right"),
+    "search": ("Search", "Ctrl+F"),
+    "fullscreen": ("Fullscreen", "F"),
+    "close": ("Close the guide", "G"),
+}
+_BUTTON_ICONS = {"earlier": "chevron_left", "later": "chevron_right"}
 
 # (channel key, row when the channel has no key, window start)
 _Key = tuple[str, int | None, datetime]
@@ -167,6 +184,8 @@ class _Layout:
 class Guide(Overlay):
     tuneRequested = Signal(object)  # channel dict
     closed = Signal()
+    searchRequested = Signal()  # the header's ⌕
+    fullscreenRequested = Signal()  # the header's ⛶
 
     def __init__(
         self,
@@ -239,12 +258,42 @@ class Guide(Overlay):
 
     def shift(self, delta: int) -> None:
         """Move the window by `delta` half-hours, between the current one and a day ahead."""
-        earliest = slot_start(self._now())
-        target = min(max(self._window_start + delta * SLOT, earliest), earliest + MAX_AHEAD)
+        target = self._shifted(delta)
         if target != self._window_start:
             self._window_start = target
             self._forget_lookups()
             self.update()
+
+    def _shifted(self, delta: int) -> datetime:
+        earliest = slot_start(self._now())
+        return min(max(self._window_start + delta * SLOT, earliest), earliest + MAX_AHEAD)
+
+    def header_buttons(self) -> dict[str, QRectF]:
+        """The header's buttons, left to right: ‹ › at the right of the channels' column, then
+        ⌕ ⛶ × at the header's right end."""
+        layout = self._layout()
+        u = layout.units.u
+        size, gap = BUTTON_U * u, BUTTON_GAP_U * u
+        top = layout.header.top() + 1.3 * u - size / 2  # centred on the day's line
+        later = QRectF(layout.times.left() - SIDE_U * u - size, top, size, size)
+        earlier = QRectF(later.left() - gap - size, top, size, size)
+        close = QRectF(layout.times.right() - size, top, size, size)
+        fullscreen = QRectF(close.left() - gap - size, top, size, size)
+        search = QRectF(fullscreen.left() - gap - size, top, size, size)
+        return {
+            "earlier": earlier,
+            "later": later,
+            "search": search,
+            "fullscreen": fullscreen,
+            "close": close,
+        }
+
+    def tooltip_at(self, point: QPointF) -> str:
+        """What hovering `point` says: a header button's name and key, or nothing."""
+        for name, rect in self.header_buttons().items():
+            if rect.contains(point):
+                return key_hint(*HEADER_BUTTONS[name])
+        return ""
 
     def activate(self) -> None:
         channel = self.current_channel()
@@ -363,15 +412,47 @@ class Guide(Overlay):
         self._set_current(row)
         return True
 
+    def _button_at(self, event: QMouseEvent) -> str | None:
+        pos = event.position()
+        return next((n for n, r in self.header_buttons().items() if r.contains(pos)), None)
+
+    def _press_button(self, name: str) -> None:
+        if name in ("earlier", "later"):
+            self.shift(-1 if name == "earlier" else 1)
+        elif name == "search":
+            self.searchRequested.emit()
+        elif name == "fullscreen":
+            self.fullscreenRequested.emit()
+        else:
+            self.close_guide()
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self._select_at(event)
+            button = self._button_at(event)
+            if button is not None:
+                self._press_button(button)
+            else:
+                self._select_at(event)
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self._select_at(event):
-            self.activate()
+        if event.button() == Qt.MouseButton.LeftButton:
+            button = self._button_at(event)
+            if button in ("earlier", "later"):
+                self._press_button(button)  # a quick second click moves the window again
+            elif button is None and self._select_at(event):
+                self.activate()
         event.accept()
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):
+            text = self.tooltip_at(QPointF(event.pos()))
+            if text:
+                QToolTip.showText(event.globalPos(), text, self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         delta = event.angleDelta()
@@ -458,14 +539,17 @@ class Guide(Overlay):
     def _paint_header(self, p: QPainter, layout: _Layout, now: datetime) -> None:
         units, header, times = layout.units, layout.header, layout.times
         u = units.u
+        buttons = self.header_buttons()
         label_top, label_h = header.top() + 0.4 * u, 1.8 * u
         p.setFont(units.font(1.1, QFont.Weight.DemiBold))
         p.setPen(qcolor(PALETTE.text, 0.85))
-        day = QRectF(SIDE_U * u, label_top, times.left() - 2 * SIDE_U * u, label_h)
+        day_w = buttons["earlier"].left() - BUTTON_GAP_U * u - SIDE_U * u
+        day = QRectF(SIDE_U * u, label_top, max(0.0, day_w), label_h)
         label = day_label(self._window_start, now)
         p.drawText(day, Qt.AlignLeft | Qt.AlignVCenter, elided(p, label, day.width()))
         slot_w = times.width() / SLOTS
         p.setFont(units.font(1.0))
+        labels_end = buttons["search"].left() - BUTTON_GAP_U * u  # never under ⌕ ⛶ ×
         for i in range(SLOTS):
             x = times.left() + i * slot_w
             p.fillRect(
@@ -473,10 +557,18 @@ class Guide(Overlay):
                 qcolor(PALETTE.text, 0.18),
             )
             p.setPen(qcolor(PALETTE.text, 0.6))
-            p.drawText(
-                QRectF(x + 0.6 * u, label_top, slot_w - 0.8 * u, label_h),
-                Qt.AlignLeft | Qt.AlignVCenter,
-                fmt_clock((self._window_start + i * SLOT).astimezone()),
+            width = min(slot_w - 0.8 * u, labels_end - x - 0.6 * u)
+            if width > 0:
+                p.drawText(
+                    QRectF(x + 0.6 * u, label_top, width, label_h),
+                    Qt.AlignLeft | Qt.AlignVCenter,
+                    elided(p, fmt_clock((self._window_start + i * SLOT).astimezone()), width),
+                )
+        for name, rect in buttons.items():
+            movable = {"earlier": -1, "later": 1}.get(name)
+            dim = movable is not None and self._shifted(movable) == self._window_start
+            draw_icon(
+                p, _BUTTON_ICONS.get(name, name), rect, qcolor(PALETTE.text, 0.3 if dim else 0.85)
             )
         now_x = self._now_x(layout, now)
         if now_x is not None:

@@ -529,6 +529,25 @@ class TVWindowTests(WindowCase):
         self.assertTrue(window.screens.library_shown())
         self.assertFalse(window.overlays.guide.isVisible())
 
+    def test_the_guides_search_button_opens_the_search(self):
+        self.show()
+        drawer = self.wait_for_drawer()
+        drawer.close_drawer()
+        window = self.window
+        window.controller.tune_live(window.catalog.items("live", "*")[0])
+        QTest.keyClick(window, Qt.Key.Key_G)
+        guide = window.overlays.guide
+        self.assertTrue(guide.isVisible())
+        QTest.mouseClick(
+            guide,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            guide.header_buttons()["search"].center().toPoint(),
+        )
+        self.assertTrue(window.screens.library_shown())
+        self.assertEqual(window.library_controller.mode, "search")
+        self.assertFalse(guide.isVisible())
+
     def test_the_player_controls_search_button_opens_the_search(self):
         # The owner's mouse-only rule (2.0.1): Ctrl/⌘+F has a button on the player too.
         self.show()

@@ -393,6 +393,22 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             fold.lineTo(0.78, 0.3)
             line(fold)
             fill(_poly([(0.42, 0.46), (0.62, 0.6), (0.42, 0.74)]))
+        elif name in ("chevron_left", "chevron_right"):  # ‹ and ›: earlier and later
+            tip, back = (0.34, 0.62) if name == "chevron_left" else (0.66, 0.38)
+            chevron = QPainterPath(QPointF(back, 0.2))
+            chevron.lineTo(tip, 0.5)
+            chevron.lineTo(back, 0.8)
+            p.setPen(QPen(color, 0.12, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(chevron)
+        elif name == "close":  # ×
+            cross = QPainterPath(QPointF(0.26, 0.26))
+            cross.lineTo(0.74, 0.74)
+            cross.moveTo(0.74, 0.26)
+            cross.lineTo(0.26, 0.74)
+            p.setPen(QPen(color, 0.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(cross)
         elif name == "live_dot":
             dot = QPainterPath()
             dot.addEllipse(QRectF(0.25, 0.25, 0.5, 0.5))

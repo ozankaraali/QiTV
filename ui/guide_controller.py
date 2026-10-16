@@ -8,6 +8,8 @@ the channel tuned last. While it is open it takes the keys:
 - G and Esc close it. A request for the drawer (the View menu, a click) or for the previous
   channel (the Playback menu) closes it and then acts as usual; the media keys do nothing,
   as with the drawer open. Playback, volume, fullscreen and favorites keys are not its own.
+Its header's buttons do the same with the mouse: ‹ › and × act in the guide itself, ⌕ and ⛶
+go to the shell (TVWindow, TVController).
 """
 
 from __future__ import annotations

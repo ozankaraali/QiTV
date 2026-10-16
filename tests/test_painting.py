@@ -50,6 +50,9 @@ ICONS = [
     "swap",
     "guide",
     "file",
+    "chevron_left",
+    "chevron_right",
+    "close",
 ]
 
 
