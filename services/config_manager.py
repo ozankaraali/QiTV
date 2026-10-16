@@ -12,6 +12,7 @@ import tomllib
 
 import orjson as json
 
+from services.free_channels import ALL_NAME, ALL_URL
 from services.multikeydict import MultiKeyDict
 from services.redact import safe_message
 
@@ -426,15 +427,15 @@ class ConfigManager:
     @staticmethod
     def default_config():
         return {
-            "selected_provider_name": "iptv-org.github.io",
+            "selected_provider_name": ALL_NAME,
             "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
             "prefer_https": ConfigManager.DEFAULT_OPTION_PREFER_HTTPS,
             "ssl_verify": ConfigManager.DEFAULT_OPTION_SSL_VERIFY,
             "data": [
                 {
                     "type": "M3UPLAYLIST",
-                    "name": "iptv-org.github.io",
-                    "url": "https://iptv-org.github.io/iptv/index.m3u",
+                    "name": ALL_NAME,
+                    "url": ALL_URL,
                 }
             ],
             "window_positions": {
