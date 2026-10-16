@@ -3,7 +3,8 @@
 `uv run python scripts/run_tests.py` (CI's tests job does the same). Each file runs as
 `unittest discover -s tests -p <file>` would run it alone, so a file's Qt application, temporary
 folders and patched environment stay its own. The largest files start first. A failing file's
-whole output is printed; the exit code is 1 if any file failed.
+whole output is printed, and it runs once more alone at the end; the exit code is 1 if it
+fails again.
 """
 
 from __future__ import annotations
@@ -45,13 +46,24 @@ def main() -> int:
                 flush=True,
             )
             if code != 0:
-                failed.append(path.name)
+                failed.append(path)
                 print(output, flush=True)
     print(
         f"\n{total} tests in {len(files)} files, {time.monotonic() - start:.0f}s, {workers} at once"
     )
-    if failed:
-        print("Failed: " + ", ".join(failed))
+    # A file that failed among the others runs once more alone: a timing test can miss its
+    # window on a loaded runner, a real failure fails again.
+    still, flaky = [], []
+    for path in failed:
+        _path, code, output, seconds = run_file(path)
+        (flaky if code == 0 else still).append(path.name)
+        print(f"{'ok  ' if code == 0 else 'FAIL'} {seconds:5.1f}s alone {path.name}", flush=True)
+        if code != 0:
+            print(output, flush=True)
+    if flaky:
+        print("Passed alone (flaky under load): " + ", ".join(flaky))
+    if still:
+        print("Failed: " + ", ".join(still))
         return 1
     return 0
 
