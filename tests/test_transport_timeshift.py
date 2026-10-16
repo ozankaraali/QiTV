@@ -240,6 +240,37 @@ class TimeShiftCase(unittest.TestCase):
         t.show_live_edge(0.9, False)
         self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.9 s behind source"))
 
+    def test_auto_names_its_target_and_says_when_it_was_adjusted(self):
+        # 2.0.2: under Auto latency the row names the channel's target, not the lag.
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        auto = {"auto": True, "target": 2.5, "adjusted": False}
+        t.update_timeline(dict(at_edge(lag=2.6), **auto), PROGRAMME)
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 2.5 s behind"))
+        auto = {"auto": True, "target": 4.5, "adjusted": True}
+        t.update_timeline(dict(at_edge(lag=4.9), **auto), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● 4.5 s behind · adjusted")
+        t.update_timeline(dict(at_edge(lag=7.0, rate=1.05), **auto), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● 4.5 s behind · adjusted · catching up 1.05×")
+        t.update_timeline(dict(at_edge(lag=4.9), stalled=True, **auto), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● Reconnecting…")
+        t.update_timeline(dict(at_edge(lag=2.6), target=2.5), PROGRAMME)  # a fixed latency
+        self.assertEqual(t.texts()[1], "Stay live ● 2.6 s behind source")
+        t.update_timeline(dict(at_edge(lag=4.9), **auto), PROGRAMME)
+        t.show_live_edge(1.2, False)  # no timeline: the lag, as before
+        self.assertEqual(t.texts()[1], "Stay live ● 1.2 s behind source")
+
+    def test_a_narrow_transport_shortens_the_auto_text_as_the_others(self):
+        t = self.make()
+        t.setGeometry(0, 0, 480, 270)
+        t.show_timeshift("104", "Nature")
+        state = dict(at_edge(lag=4.9), auto=True, target=4.5, adjusted=True)
+        t.update_timeline(state, PROGRAMME)
+        layout = t._layout()
+        if "indicator" in layout:  # shortened (painted elided), or left out
+            self.assertLessEqual(layout["indicator"].right(), layout["live"].left())
+            self.assertGreaterEqual(layout["indicator"].left(), layout["back10"].right())
+
     def dot_colors(self, t):
         """Colours along the middle of the indicator pill, as painted."""
         box = t._layout()["indicator"]

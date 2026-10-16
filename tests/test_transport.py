@@ -840,6 +840,9 @@ class SmallWidthLayoutTests(unittest.TestCase):
         t.show_timeshift("One", "")
         t.update_timeline(self.state("live", 12.5, 1.05), [])
         yield "stay live, catching up"
+        auto = dict(self.state("live", 12.5, 1.05), target=10.0, auto=True, adjusted=True)
+        t.update_timeline(auto, [])
+        yield "stay live, catching up, Auto adjusted"
         t.update_timeline(self.state("shifted", 300.0, 1.0), [])
         yield "shifted, Go live"
 
@@ -865,7 +868,7 @@ class SmallWidthLayoutTests(unittest.TestCase):
                     # ‹ Library: only for a title from the Library (live TV ignores it).
                     library = mode == "movie from the Library, with Next"
                     self.assertEqual("library" in rects, library)
-                    if mode == "stay live, catching up":
+                    if mode.startswith("stay live, catching up"):
                         self.assertIn("back10", rects)
                     names = list(rects)
                     for i, a in enumerate(names):

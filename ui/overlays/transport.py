@@ -3,7 +3,8 @@
 Modes: VOD, plain live (direct play) and time-shift (live through the pipeline). Time-shift shows
 the bar over the buffered range, or, while the session's stay-live mode is LIVE, the stay-live
 latency indicator (it reads "catching up" while stay-live nudges the rate, and "Reconnecting…"
-while the source has stalled). The bar and the Go live chip show only when the viewer left live
+while the source has stalled). Under Auto latency it names the channel's target ("4.5 s
+behind"), with "adjusted" when that is not where Auto starts; otherwise the lag behind source. The bar and the Go live chip show only when the viewer left live
 (shifted, or a chosen speed); a drag keeps the bar.
 
 Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
@@ -157,6 +158,8 @@ class _Timeline:
     paused: bool
     target: float
     stalled: bool
+    auto: bool  # Auto latency: the indicator names the target
+    adjusted: bool  # Auto's target is not the one it starts with
 
     @classmethod
     def from_state(cls, state: dict) -> "_Timeline":
@@ -171,6 +174,8 @@ class _Timeline:
             paused=bool(state["paused"]),
             target=float(state.get("target", TARGETS["normal"])),
             stalled=bool(state.get("stalled", False)),
+            auto=bool(state.get("auto", False)),
+            adjusted=bool(state.get("adjusted", False)),
         )
 
 
@@ -233,6 +238,7 @@ class Transport(Overlay):
         self._edge_lag: float | None = None
         self._catching_up = False
         self._stalled = False  # the source stalled at the live edge: "Reconnecting…"
+        self._auto: tuple[float, bool] | None = None  # Auto latency: (target, adjusted)
         self._rate = 1.0
         # A bar fraction, not a time: the knob stays under the cursor while the buffer slides.
         self._drag: float | None = None
@@ -283,6 +289,7 @@ class Transport(Overlay):
         `ticks` are programme starts in timeline seconds with their labels. An optional
         `target` key is the session's effective stay-live target (default: Normal), and an
         optional `stalled` key says the source stalled (the live-edge row reads "Reconnecting…").
+        Optional `auto` and `adjusted` keys: Auto latency, and its target moved from the start.
         """
         tl = _Timeline.from_state(state)
         self._timeline = tl
@@ -290,6 +297,7 @@ class Transport(Overlay):
         live = tl.mode is Mode.LIVE
         self._edge = live
         self._edge_lag = tl.lag
+        self._auto = (tl.target, tl.adjusted) if tl.auto else None
         self._stalled = live and tl.stalled
         self._catching_up = live and tl.rate > 1.0 and not self._stalled
         self._rate = tl.rate
@@ -303,6 +311,7 @@ class Transport(Overlay):
         self._live = self._timeshift = True
         self._edge = True
         self._edge_lag = _seconds(lag_s)
+        self._auto = None
         self._catching_up = catching_up
         self._stalled = False
         self.update()
@@ -522,7 +531,11 @@ class Transport(Overlay):
             return ("", "")
         if self._stalled:
             return ("Stay live", "Reconnecting…")
-        tail = f"{self._edge_lag:.1f} s behind source"
+        if self._auto is not None:
+            target, adjusted = self._auto
+            tail = f"{target:.1f} s behind" + (" · adjusted" if adjusted else "")
+        else:
+            tail = f"{self._edge_lag:.1f} s behind source"
         if self._catching_up:
             tail += " · catching up" + (f" {self._rate:g}×" if self._rate > 1.0 else "")
         return ("Stay live", tail)
@@ -1139,6 +1152,7 @@ class Transport(Overlay):
         self._ticks = []
         self._edge = True
         self._edge_lag = None
+        self._auto = None
         self._catching_up = False
         self._stalled = False
         self._rate = 1.0

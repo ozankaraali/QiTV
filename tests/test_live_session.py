@@ -1521,6 +1521,26 @@ class BackOffTests(LiveSessionCase):
         feed.run(1.0)
         self.assertEqual(self.timelines[-1]["target"], TARGETS["stable"])
 
+    def test_the_timeline_says_auto_and_whether_its_target_moved(self):
+        feed = self.settled()
+        self.assertEqual(
+            (self.timelines[-1]["auto"], self.timelines[-1]["adjusted"]), (True, False)
+        )
+        self.stall(feed)
+        self.assertEqual(self.timelines[-1]["target"], 4.0)
+        self.assertTrue(self.timelines[-1]["adjusted"])
+        self.live.set_latency("normal")
+        feed.run(0.25)
+        self.assertEqual(
+            (self.timelines[-1]["auto"], self.timelines[-1]["adjusted"]), (False, False)
+        )
+
+    def test_a_burst_above_where_auto_starts_reads_as_adjusted(self):
+        sid = self.start(latency=AUTO)
+        Feed(self, sid, burst=10.0, edge=20.0).ready().run(1.0)
+        self.assertEqual(self.timelines[-1]["target"], 10.0)
+        self.assertTrue(self.timelines[-1]["adjusted"])
+
     def test_auto_opens_the_buffer_as_normal_does(self):
         self.start(latency=AUTO)
         self.assertEqual(self.engine.opened[-1][2]["live_delay"], live_session.LIVE_DELAY["normal"])
