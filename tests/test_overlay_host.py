@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -41,6 +42,17 @@ class HostCase(unittest.TestCase):
 
 
 class OverlayHostTests(HostCase):
+    def test_a_restore_reported_before_the_state_settles_still_shows_the_overlays(self):
+        # X11: the restore's last event came while the window still said minimized, and no
+        # event followed (the Linux smoke's "host covers the video surface after a restore").
+        self.panel.show()
+        QTest.qWait(20)
+        self.assertTrue(self.host.isVisible())
+        with mock.patch.object(self.window, "isMinimized", return_value=True):
+            self.host.eventFilter(self.window, QEvent(QEvent.Type.WindowStateChange))
+            self.assertFalse(self.host.isVisible())
+        self.assertTrue(wait_until(self.host.isVisible, 2000))
+
     def test_hidden_until_an_overlay_is_visible(self):
         self.assertFalse(self.host.isVisible())
         self.panel.show()

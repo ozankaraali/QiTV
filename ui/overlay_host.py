@@ -22,6 +22,7 @@ _TRACKED = {
 # macOS reports a restore once the window has flown out of the Dock (about half a second).
 # Should that report never come, the overlays return after this long anyway.
 RESTORE_REPORT_MS = 2000
+SETTLE_CHECK_MS = 150  # after a window state change, visibility is checked once more
 
 
 class OverlayHost(QWidget):
@@ -59,6 +60,10 @@ class OverlayHost(QWidget):
         self._report_wait.setSingleShot(True)
         self._report_wait.setInterval(RESTORE_REPORT_MS)
         self._report_wait.timeout.connect(self._left_dock)
+        self._settle_check = QTimer(self)
+        self._settle_check.setSingleShot(True)
+        self._settle_check.setInterval(SETTLE_CHECK_MS)
+        self._settle_check.timeout.connect(self._settled)
         self._pointer = PointerInput(self)
         self._pointer.clicked.connect(self.clicked)
         self._pointer.doubleClicked.connect(self.doubleClicked)
@@ -154,6 +159,12 @@ class OverlayHost(QWidget):
             handle.installEventFilter(self)
             self._platform = handle
 
+    def _settled(self) -> None:
+        if isValid(self) and isValid(self._window) and isValid(self._surface):
+            if self.isVisible():
+                self.sync_geometry()
+            self._update_visibility()
+
     def _left_dock(self) -> None:
         self._report_wait.stop()
         if self._in_dock:
@@ -202,6 +213,10 @@ class OverlayHost(QWidget):
             if self.isVisible():
                 self.sync_geometry()
             self._update_visibility()
+            if obj is self._window and kind in (QEvent.Type.WindowStateChange, QEvent.Type.Show):
+                # X11 window managers can report a restore before the window's state settles:
+                # look once more when the events are through (the Linux smoke's restore check).
+                self._settle_check.start()
         elif obj in self._overlays and kind in (QEvent.Type.Resize, QEvent.Type.Move):
             self._update_mask()
         elif (
