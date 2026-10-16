@@ -61,7 +61,10 @@ once and stay-live changes it no more on that channel (`StayLive.lock_rate`).
 "Auto" latency (2.0.2, `AutoTarget`) learns the target per channel instead of keeping the
 setting's: it starts at Normal's and rises 1.5 s with each starvation of VLC at the live
 edge (BUFFERING, or its clock standing still while Playing, within `_AHEAD_S` of the edge)
-and each stall, while stay-live is LIVE; trouble again within `_CALM_S` is the same one. Each
+and each stall, while stay-live is LIVE; trouble again within `_CALM_S` is the same one. Only
+trouble that ran out a cushion counts: the lag had reached the current target (less
+`_BELOW_TARGET_S`) since the tune. A tune starts from the oldest buffered point, often with
+less, and a starvation before the first cushion says nothing about the target. Each
 5 minutes of playing at the edge without trouble (not paused, not time-shifted) lower it
 0.5 s. The target used is the larger of it and the burst, and a raised one is built at 0.95x
 (`StayLive.build`) unless the rate is locked; otherwise the lag grows only as VLC waits. What a
@@ -290,6 +293,7 @@ class LiveSession(QObject):
         self._auto: Optional[AutoTarget] = None
         self._auto_mark: Optional[float] = None
         self._troubled_at: Optional[float] = None
+        self._cushion = 0.0  # the largest lag at the live edge since the tune
         self._wire_engine(engine, connect=True)
         playback.stateChanged.connect(self._on_state)
         playback.ended.connect(self._on_interrupted)
@@ -358,6 +362,7 @@ class LiveSession(QObject):
         self._latency = latency if latency in LATENCIES else "normal"
         self._auto = AutoTarget(self._memory.target) if self._latency == AUTO else None
         self._auto_mark = self._troubled_at = None
+        self._cushion = 0.0
         self._open_args = {
             "headers": dict(headers),
             "verify_ssl": verify_ssl,
@@ -830,7 +835,7 @@ class LiveSession(QObject):
         # starved VLC (libVLC 3 still says Playing then) count as buffering: no rate
         # change and no reopen while nothing arrives.
         if not self._ended and not self._paused:
-            self._back_off(snapshot, position, stalled)
+            self._back_off(snapshot, position, stalled, lag)
             self._stay.target = self._target(snapshot)
             self._stay.burst = _number(snapshot.get("burst_s"))
             auto = self._auto
@@ -848,20 +853,27 @@ class LiveSession(QObject):
             self._auto_mark = None  # paused (or ended): no quiet time for Auto
         self._emit_timeline()
 
-    def _back_off(self, snapshot: Mapping[str, Any], position: float, stalled: bool) -> None:
+    def _back_off(
+        self, snapshot: Mapping[str, Any], position: float, stalled: bool, lag: float
+    ) -> None:
         """Auto latency: raise the channel's target on trouble, lower it while quiet.
 
-        Counted only while stay-live is LIVE (the caller skips paused and ended sessions).
+        Counted only while stay-live is LIVE (the caller skips paused and ended sessions),
+        and trouble only once the lag had reached the target since the tune (`_cushion`).
         """
         now = self._clock()
         mark, self._auto_mark = self._auto_mark, now
+        if self._stay.mode is not Mode.LIVE:
+            return
+        self._cushion = max(self._cushion, lag)  # under any latency: Auto may follow
         auto = self._auto
-        if auto is None or self._stay.mode is not Mode.LIVE:
+        if auto is None:
             return
         if stalled or self._starved(snapshot, position):
             fresh = self._troubled_at is None or now - self._troubled_at > _CALM_S
             self._troubled_at = now
-            if fresh and auto.trouble(_number(snapshot.get("burst_s"))):
+            ran_out = self._cushion >= self._target(snapshot) - _BELOW_TARGET_S
+            if fresh and ran_out and auto.trouble(_number(snapshot.get("burst_s"))):
                 self._learn()
         elif mark is not None and auto.quiet(now - mark):
             self._learn()

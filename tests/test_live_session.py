@@ -1418,9 +1418,10 @@ class RateHealthTests(LiveSessionCase):
 
 class BackOffTests(LiveSessionCase):
     """2.0.2 "Auto" latency: the channel's target starts at Normal's, rises 1.5 s with each
-    starvation at the live edge or stall, up to Stable's plus 4 s (a bursty source: its burst
-    plus 2 s), and falls 0.5 s after each 5 quiet minutes. A rise never jumps back: the room
-    grows at 0.95x where the rate may change, else as VLC waits at 1x."""
+    starvation at the live edge or stall that ran out a cushion (the lag had reached the
+    target since the tune), up to Stable's plus 4 s (a bursty source: its burst plus 2 s),
+    and falls 0.5 s after each 5 quiet minutes. A rise never jumps back: the room grows at
+    0.95x where the rate may change, else as VLC waits at 1x."""
 
     def stall(self, feed, seconds=4.0, after=20.0):
         """The source sends nothing for `seconds`, then sends on; the target after."""
@@ -1440,19 +1441,34 @@ class BackOffTests(LiveSessionCase):
     def test_each_stall_raises_the_target_in_steps_up_to_the_cap(self):
         feed = self.settled()
         plays, rates = len(self.playback.plays), len(self.playback.rates)
-        targets = [self.stall(feed) for _ in range(6)]
+        # Each stall runs out the cushion, built again at 0.95x before the next (2 min).
+        targets = [self.stall(feed, after=120.0) for _ in range(6)]
         self.assertEqual(targets, [4.0, 5.5, 7.0, 8.5, 10.0, 10.0])  # Stable + 4 s at most
         self.assertEqual(len(self.playback.plays), plays)  # never a jump back for room
         self.assertEqual(set(self.playback.rates[rates:]), {0.95, 1.0})  # room built slowly
 
-    def test_a_starvation_at_the_edge_raises_the_target(self):
-        # A second of room; the source is 1.9 s late (not a stall: under 2 s), so VLC meets
-        # the edge and waits, its clock standing still while it says Playing (libVLC 3).
+    def test_a_starvation_that_runs_out_a_full_cushion_raises_the_target(self):
+        # At the target (2.7 s of room), the source sends nothing for 1.6 s three times with
+        # a quarter second between: never a stall (under 2 s), but VLC runs dry and waits,
+        # its clock standing still while it says Playing (libVLC 3).
+        feed = self.settled(starved=PlaybackState.PLAYING)
+        timelines = len(self.timelines)
+        for _ in range(3):
+            feed.stalled = True
+            feed.run(1.6)
+            feed.stalled = False
+            feed.run(0.25)
+        feed.run(10.0)
+        self.assertGreater(feed.starved_s, 0.5)
+        self.assertFalse(any(state["stalled"] for state in self.timelines[timelines:]))
+        self.assertEqual(self.timelines[-1]["target"], 4.0)  # one starvation, one rise
+
+    def test_starvations_before_the_first_cushion_do_not_raise_it(self):
+        # Played from a second behind the edge, under the target; the source is 1.9 s late
+        # at once, so VLC runs dry before any cushion existed: nothing ran one out.
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=0.0, edge=1.0, starved=PlaybackState.PLAYING).ready()
-        feed.run(10.0)
-        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
-        self.assertEqual(self.stall(feed, seconds=1.9, after=10.0), 4.0)
+        self.assertEqual(self.stall(feed, seconds=1.9, after=10.0), TARGETS["normal"])
         self.assertGreater(feed.starved_s, 0.5)
         self.assertFalse(any(state["stalled"] for state in self.timelines))
 
@@ -1462,8 +1478,8 @@ class BackOffTests(LiveSessionCase):
 
     def test_quiet_minutes_lower_it_back_to_where_it_started(self):
         feed = self.settled()
-        for _ in range(3):
-            self.stall(feed, after=0.0 if _ == 2 else 5.0)
+        for _ in range(3):  # each cushion built again before the next stall, but the last
+            self.stall(feed, after=0.0 if _ == 2 else 120.0)
         self.assertEqual(self.timelines[-1]["target"], 7.0)
         feed.run(299.0)  # 5 minutes after the last trouble, less a second
         self.assertEqual(self.timelines[-1]["target"], 7.0)
@@ -1490,8 +1506,8 @@ class BackOffTests(LiveSessionCase):
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=10.0, edge=20.0).ready().run(60.0)
         self.assertEqual(self.timelines[-1]["target"], 10.0)  # the burst, above Normal's
-        for _ in range(8):
-            self.stall(feed, seconds=13.0, after=30.0)  # a stall: the burst plus 2 s late
+        for _ in range(8):  # a stall: the burst plus 2 s late; then the cushion is rebuilt
+            self.stall(feed, seconds=13.0, after=150.0)
         self.assertEqual(self.timelines[-1]["target"], 12.0)  # 10 + 2 > Stable + 4
         self.assertEqual(max(state["target"] for state in self.timelines), 12.0)
 
@@ -1580,6 +1596,23 @@ class MemoryTests(LiveSessionCase):
         feed.run(4.0)
         feed.stalled = False
         feed.run(5.0)
+
+    def test_tunes_that_starve_right_after_the_start_leave_the_target_where_it_was(self):
+        # Each tune plays from the oldest buffered point, a second behind the edge, and the
+        # source is 1.9 s late at once: VLC runs dry before any cushion was built (2.0.2).
+        self.tuning.remember("A", Tuning(target=4.0))
+        for channel, target in (("A", 4.0), ("B", TARGETS["normal"])):
+            for _ in range(5):
+                with self.subTest(channel=channel, tune=_):
+                    feed = self.tune(channel, edge=1.0, starved=PlaybackState.PLAYING)
+                    feed.stalled = True
+                    feed.run(1.9)
+                    feed.stalled = False
+                    feed.run(5.0)
+                    self.assertGreater(feed.starved_s, 0.5)
+                    self.assertEqual(self.timelines[-1]["target"], target)
+        self.assertEqual(self.tuning.get("A"), Tuning(target=4.0))
+        self.assertEqual(self.tuning.get("B"), Tuning())
 
     def test_a_channel_that_cannot_change_speed_plays_at_1x_from_its_next_tune(self):
         with self.assertLogs("services.live.live_session", "INFO") as logs:
