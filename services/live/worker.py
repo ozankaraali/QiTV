@@ -103,6 +103,7 @@ _CONNECT_PERIOD_MAX_S = 12.0
 _BURST_SPREAD = 1.5  # two bursts in a row are alike when neither is larger by more than this
 _BURST_RUN = 3  # the estimate is the largest of this many latest bursts
 _STEADY_BURSTS = 3.0  # this many estimates' worth of seconds without a gap: steady again
+_STEADY_UNCONFIRMED = 1.0  # the same for an estimate from one burst no other has confirmed
 
 
 class BurstMeter:
@@ -136,13 +137,19 @@ class BurstMeter:
     lands (and count as a stall), one smaller costs nothing. A burst unlike the one before
     starts a new run and leaves the estimate as it was until two are alike again, which
     corrects a first burst that was not typical. Once `_STEADY_BURSTS` estimates' worth of
-    seconds pass without a gap, the source is steady again (0.0).
+    seconds pass without a gap, the source is steady again (0.0); for an estimate from a single
+    burst that no second one has confirmed yet, once `_STEADY_UNCONFIRMED` estimate's worth has.
+    A bursty source shows its next gap within half a period of a burst's first byte, inside an
+    estimate of about its period (the owner's channel: 2-4 s at connect, then 10 s every 10 s),
+    while a steady source that paused after connect (4 s, then 12 s without a byte, then real
+    time) is taken for bursty for 12 s rather than 36 s.
 
     Pure logic: no clock of its own.
     """
 
     def __init__(self) -> None:
         self._estimate = 0.0
+        self._confirmed = False  # the estimate came from alike bursts, not one alone
         self._run: deque[float] = deque(maxlen=_BURST_RUN)
         self._last_wall: float | None = None  # the latest arrival
         self._connect = True  # the burst that ends next is the first since the start
@@ -165,9 +172,12 @@ class BurstMeter:
                 )
             self._start_wall, self._start_media = wall, self._media
         self._last_wall, self._media = wall, media
-        if self._estimate and wall - self._start_wall >= _STEADY_BURSTS * self._estimate:
-            self._estimate = 0.0  # no gap for a while: steady after all
-            self._run.clear()
+        if self._estimate:
+            steady = _STEADY_BURSTS if self._confirmed else _STEADY_UNCONFIRMED
+            if wall - self._start_wall >= steady * self._estimate:
+                self._estimate = 0.0  # no gap for a while: steady after all
+                self._confirmed = False
+                self._run.clear()
 
     def _ended(self, media: float, took: float, period: float) -> None:
         """A burst of `media` seconds ended: its bytes arrived over `took` seconds, and the
@@ -184,6 +194,7 @@ class BurstMeter:
         connect, self._connect = self._connect, False
         if len(run) >= 2:
             self._estimate = max(run)
+            self._confirmed = True
         elif not self._estimate and size >= _FIRST_BURST_S:
             # The first clear burst, until others confirm or correct it.
             if connect and period > size:

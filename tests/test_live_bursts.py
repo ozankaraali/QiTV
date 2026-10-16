@@ -106,7 +106,28 @@ class BurstMeterTests(unittest.TestCase):
         series = bursts(0.0, 2.0, 0.0, 1) + steady(22.0, 30.0, media=2.0)
         readings = measured(series)
         self.assertEqual(readings[5], 6.0)
-        self.assertEqual(set(readings[5 + round(18.0 / 0.1) + 1 :]), {0.0})  # 3 x 6 s steady
+        self.assertEqual(readings[5 + round(6.0 / 0.1) - 1], 6.0)
+        self.assertEqual(set(readings[5 + round(6.0 / 0.1) + 1 :]), {0.0})  # 6 s steady
+
+    def test_an_unconfirmed_estimate_drops_after_one_estimate_without_a_gap(self):
+        # The 2.0.1 review's case: a steady source sends 4 s at connect, pauses 12 s while it
+        # starts up, then sends in real time. The connect burst counts for its gap (12 s),
+        # but no second burst confirms it: steady again after 12 s, not after 36 s.
+        series = bursts(0.0, 4.0, 0.0, 1) + steady(12.2, 60.0, media=4.0)
+        readings = measured(series)
+        window = round(12.0 / 0.1)  # the arrivals in one estimate's worth of seconds
+        self.assertEqual(set(readings[5 : 5 + window]), {12.0})
+        self.assertEqual(set(readings[5 + window + 1 :]), {0.0})
+
+    def test_a_short_connect_burst_holds_while_the_next_bursts_arrive(self):
+        # The owner's channel: 2 s at connect, the first 10 s burst 8.5 s later, then 10 s
+        # every 10 s, each arriving over 2 s. The unconfirmed estimate never drops meanwhile.
+        series = bursts(0.0, 2.0, 0.0, 1)
+        series += bursts(8.5, 10.0, 10.0, 4, media=2.0, spread=2.0, chunks=20)
+        readings = measured(series)
+        self.assertEqual(set(readings[:5]), {0.0})
+        self.assertEqual(set(readings[5:45]), {6.0})  # its gap, at most 3x its media
+        self.assertEqual(set(readings[45:]), {10.0})
 
     def test_the_connect_period_counts_for_at_most_twelve_seconds(self):
         series = bursts(0.0, 6.0, 0.0, 1) + bursts(20.0, 6.0, 6.0, 2, media=6.0)
@@ -166,8 +187,8 @@ class BurstMeterTests(unittest.TestCase):
         series = bursts(0.0, 2.0, 0.0, 1) + steady(3.0, 20.0, media=2.0)
         readings = measured(series)
         self.assertEqual(readings[5], 3.0)
-        steady_from = 5 + round(9.0 / 0.1) + 1  # three estimates without a gap: 9 s
-        self.assertEqual(readings[steady_from - 12], 3.0)
+        steady_from = 5 + round(3.0 / 0.1) + 1  # one estimate without a gap (unconfirmed): 3 s
+        self.assertEqual(readings[steady_from - 2], 3.0)
         self.assertEqual(set(readings[steady_from:]), {0.0})
 
     def test_a_bursty_source_that_turns_continuous_is_steady_again(self):

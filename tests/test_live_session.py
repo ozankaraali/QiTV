@@ -1273,6 +1273,39 @@ class StayLiveTests(LiveSessionCase):
                 self.assertTrue(all(rate >= 1.0 for rate in self.playback.rates))
                 self.assertTrue(all(state["rate"] >= 1.0 for state in self.timelines))
 
+    def test_a_steady_source_that_paused_after_connect_is_not_bursty_for_long(self):
+        """The 2.0.1 review: a steady source sends 4 s at connect, nothing for 12 s while it
+        starts up, then real time. Its connect burst counts for its gap (12 s) until a second
+        burst confirms it, and none comes: steady again after 12 s (not 36 s), so it slows at
+        most that long, then a stall shows within the steady bound and Go live lands at the
+        target, not ~17 s behind."""
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=4.0, first=12.0, metered=True).ready()
+        feed.run(12.0)  # the source sends again: its connect burst counts for 12 s
+        self.assertEqual(feed.meter.burst_s, 12.0)
+        start = len(self.timelines)
+        feed.run(12.5)
+        self.assertEqual(feed.meter.burst_s, 0.0)
+        slowed = [state for state in self.timelines[start:] if state["rate"] < 1.0]
+        self.assertLessEqual(len(slowed), 12.0 / 0.25 + 1)  # the window at most
+        timelines = len(self.timelines)
+        feed.run(30.0)
+        after = self.timelines[timelines:]
+        self.assertTrue(all(state["rate"] >= 1.0 for state in after))
+        self.assertEqual({state["target"] for state in after}, {TARGETS["normal"]})
+        self.assertFalse(any(state["stalled"] for state in after))
+        feed.stalled = True
+        feed.run(2.5)  # "Reconnecting…" after the steady bound (2 s), not a 12 s burst's 14 s
+        self.assertTrue(self.timelines[-1]["stalled"])
+        feed.stalled = False
+        feed.run(5.0)
+        self.live.go_live()
+        feed.sync()
+        feed.run(5.0)
+        self.assertEqual(len(self.playback.plays), 2)
+        # A segment start within a GOP (2 s) of the target, not ~17 s behind.
+        self.assertLess(self.timelines[-1]["lag"], TARGETS["normal"] + 2.0)
+
     def test_a_source_bursty_again_after_steady_eases_afresh(self):
         """A raw TS source's measured bursts may stop and come back (2.0.1, L1)."""
         sid = self.ready(segments(0, 3), live_edge=6.0, burst=6.0)
