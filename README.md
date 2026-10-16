@@ -48,7 +48,7 @@ This installs a desktop entry and icon so QiTV appears in your application menu.
 On a first start QiTV opens with a [publicly available playlist](https://github.com/iptv-org/iptv) of free channels from around the world, so you can try it straight away. To add your own provider:
 
 1. Press <kbd>Enter</kbd> (or click the picture) to open the channel list.
-2. Press <kbd>←</kbd> until you reach the left-most column, the list of your sources (or click your provider's name at the top of the list). At its bottom are **⚙ Settings** and **＋ Add provider**.
+2. Press <kbd>←</kbd> until you reach the left-most column, the list of your sources (or click your provider's name at the top of the list). At its bottom are **⚙ Settings**, **＋ Add provider** and **Open file** (a video file on your computer, as <kbd>Ctrl/⌘+O</kbd>).
 3. Choose **＋ Add provider**. Settings opens on the Providers tab with a new provider to fill in:
    - **M3U Playlist:** the playlist's web address, or **Load File** for a playlist on your computer;
    - **M3U Stream:** the address of a single stream;
@@ -56,7 +56,7 @@ On a first start QiTV opens with a [publicly available playlist](https://github.
    - **STB:** the portal address and your MAC address (serial number and device ID only if your provider asks for them).
 4. Press **Verify Provider** to check the details, then **Save**. QiTV loads the channels, and the Library loads the provider's movies and series.
 
-If you have no provider at all, QiTV shows a welcome card whose **Add provider** button does the same. Settings is one click away too: the **⚙** at the right end of the channel list's top row (beside it, **↻** loads your provider's channels and guide again, also <kbd>Ctrl/⌘+R</kbd>), or the menu bar (<kbd>Ctrl/⌘+,</kbd>). The same row starts with **‹**, which goes back a level like <kbd>←</kbd>, and the names of where you are: click one to go there. To switch between providers, click your provider's name in that row and pick another in the sources column, or use the **Providers** menu.
+If you have no provider at all, QiTV shows a welcome card whose **Add provider** button does the same. Settings is one click away too: the **⚙** at the right end of the channel list's top row (beside it, **↻** loads your provider's channels and guide again, also <kbd>Ctrl/⌘+R</kbd>, and **⌕** searches), or the menu bar (<kbd>Ctrl/⌘+,</kbd>). The same row starts with **‹**, which goes back a level like <kbd>←</kbd>, and the names of where you are: click one to go there. To switch between providers, click your provider's name in that row and pick another in the sources column, or use the **Providers** menu.
 
 QiTV keeps each provider's lists for six hours and refreshes them in the background, so they open at once. If your provider allows only one or two streams at a time, QiTV never opens more: set **Max simultaneous streams** in the provider's settings when QiTV cannot read the limit from the provider.
 
@@ -66,7 +66,7 @@ Use the arrow keys like a TV remote: <kbd>↑</kbd> and <kbd>↓</kbd> change th
 
 ![The fast-zap list while changing channels](docs/screenshots/02-fast-zap.png)
 
-The channel list has your groups (with ★ Favorites and Recent at the top) on the left and their channels on the right, each with what is on now. Type to filter it. With the mouse: click the picture for the channel list, double-click it for fullscreen, and use the wheel to change channels (or the volume: see Settings → Mouse wheel; <kbd>Ctrl/⌘</kbd> with the wheel always changes the volume). Moving the mouse shows the player controls.
+The channel list has your groups (with ★ Favorites and Recent at the top) on the left and their channels on the right, each with what is on now. Type to filter it. With the mouse: click the picture for the channel list, double-click it for fullscreen, and use the wheel to change channels (or the volume: see Settings → Mouse wheel; <kbd>Ctrl/⌘</kbd> with the wheel always changes the volume). Moving the mouse shows the player controls. Besides play and the speaker they have **⌕** (search), the guide, **⟲** (the channel before) and, at the live edge of a channel you can rewind, **◀10**. On live TV, click the channel's name at the top for what is on, and the **★** beside it to add it to your favorites or remove it. Everything in the key tables below, typing aside, also has a button on screen; point at one to see its key.
 
 ![The channel list over the picture](docs/screenshots/03-drawer.png)
 
@@ -185,7 +185,7 @@ Picture-in-picture is for live TV, and it needs a provider that allows two strea
 
 ## The guide
 
-Press <kbd>G</kbd> for the programme guide (EPG): the channels of the group you are watching, from the current half hour on, up to 24 hours ahead. Move with the arrow keys, type a number to jump to a channel, and press <kbd>Enter</kbd> to watch it. The bottom shows the highlighted programme's description.
+Press <kbd>G</kbd> (or the guide button in the player controls) for the programme guide (EPG): the channels of the group you are watching, from the current half hour on, up to 24 hours ahead. Move with the arrow keys, type a number to jump to a channel, and press <kbd>Enter</kbd> to watch it. With the mouse, click a channel and double-click it to watch; **‹** and **›** beside the day move in time, and **⌕**, **⛶** (fullscreen) and **×** (close) are at the top right. The bottom shows the highlighted programme's description.
 
 ![The programme guide](docs/screenshots/07-guide.png)
 
@@ -193,7 +193,7 @@ The guide comes from your provider (STB and Xtream), or from a guide file or web
 
 ## The Library: movies and series
 
-<kbd>Ctrl/⌘+2</kbd> opens Movies and <kbd>Ctrl/⌘+3</kbd> Series (also from the channel list's sections). Opening the Library stops live TV; **Live TV** (or <kbd>Ctrl/⌘+1</kbd>) takes you back to the last channel.
+<kbd>Ctrl/⌘+2</kbd> opens Movies and <kbd>Ctrl/⌘+3</kbd> Series (also from the channel list's sections). Opening the Library stops live TV; **Live TV** (or <kbd>Ctrl/⌘+1</kbd>) takes you back to the last channel. The **⛶** at the right end of its top bar switches fullscreen.
 
 - **Genres** are on the left. Above them: **Continue** (what you started watching), **New** (the most recently added titles, when your provider says when it added them) and **My list** (titles you saved with ★ or <kbd>Ctrl/⌘+D</kbd>).
 - **Posters** fill the rest. The highlighted one opens a strip with its year, genre, rating and story, and **Resume**, **Start over** and ★.
@@ -208,7 +208,7 @@ A series opens on its seasons and episodes. Episodes you finished have a ✓, an
 
 ## Favorites
 
-Press <kbd>Ctrl/⌘+D</kbd> on a channel, or right-click it in the channel list, to add it to or remove it from **★ Favorites** at the top of the channel list. In the Library, <kbd>Ctrl/⌘+D</kbd> and ★ do the same for **My list**. Favorites are kept by name, as in QiTV 1.13: two items with the same name share one star.
+Press <kbd>Ctrl/⌘+D</kbd> on a channel, right-click it in the channel list, or click the **★** beside its name in the player controls, to add it to or remove it from **★ Favorites** at the top of the channel list. In the Library, <kbd>Ctrl/⌘+D</kbd> and ★ do the same for **My list**. Favorites are kept by name, as in QiTV 1.13: two items with the same name share one star.
 
 ## Exporting to M3U
 
