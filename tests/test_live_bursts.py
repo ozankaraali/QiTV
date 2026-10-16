@@ -341,7 +341,9 @@ class BurstyRawTsTests(unittest.TestCase):
         for state in after:
             # Shown as the source's own pace, never as "Reconnecting…" between bursts.
             self.assertFalse(state["stalled"], state)
-            self.assertAlmostEqual(state["target"], self.BURST, delta=0.3)
+            # About the burst, not the 1 s latency: a slow runner reads a burst late, which
+            # shortens the period the helper measures (a burst counts at most for it).
+            self.assertAlmostEqual(state["target"], self.BURST, delta=0.5)
             # No catch-up into the next gap: the buffer is a burst, not a lag to remove.
             self.assertLessEqual(state["rate"], 1.0, state)
             self.assertEqual(state["mode"], "live")

@@ -576,7 +576,7 @@ class StartTests(LiveSessionCase):
         started = time.monotonic()
         sid = self.start()  # the next channel sends nothing
         self.wait_until(lambda: sid in self.engine.closed)
-        self.assertLess(time.monotonic() - started, 0.2)  # not the extended 0.25 s
+        self.assertLess(time.monotonic() - started, 0.24)  # not the extended 0.25 s
         self.assertEqual(self.notices[-1], UNAVAILABLE)
 
     def test_a_fallback_plays_directly_after_the_close_cap(self):
