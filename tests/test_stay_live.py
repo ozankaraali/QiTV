@@ -1,6 +1,6 @@
 import unittest
 
-from services.live.stay_live import TARGETS, Decision, Mode, StayLive
+from services.live.stay_live import TARGETS, Decision, Mode, RateHealth, StayLive
 
 T = TARGETS["normal"]
 S, N, P, R = T + 0.2, T + 0.75, T + 3, T + 20
@@ -220,6 +220,69 @@ class RoomTests(unittest.TestCase):
         stay = self.live()
         lags = (14.0, 12.0, 10.2, 10.1, 10.0)
         self.assertEqual(self.rates(stay, lags), [1.10, 1.05, 1.0, 1.0, 1.0])
+
+
+class RateLockTests(unittest.TestCase):
+    """2.0.2: on some channels VLC cannot play at any rate but 1x (it crawls). Once that is
+    seen, stay-live keeps 1x for the channel; only a lag far beyond the target goes live."""
+
+    def test_a_locked_rate_stays_at_normal_speed_whatever_the_lag(self):
+        for burst in (0.0, 10.0):
+            with self.subTest(burst=burst):
+                stay = StayLive("normal")
+                stay.burst, stay.target = burst, max(T, burst)
+                self.assertEqual(stay.update(stay.target + 5, False).rate, 1.10)
+                stay.lock_rate()
+                self.assertTrue(stay.rate_locked)
+                lags = (0.0, 1.0, stay.target + 1, stay.target + 5, stay.target + 19)
+                self.assertEqual({stay.update(lag, False).rate for lag in lags}, {1.0})
+                self.assertEqual(stay.update(stay.target + 5, True), Decision(1.0))
+
+    def test_a_locked_rate_still_goes_live_once_when_far_behind(self):
+        stay = StayLive("normal")
+        stay.lock_rate()
+        flags = [stay.update(R + 1, False) for _ in range(3)]
+        self.assertEqual(flags, [Decision(1.0, True), Decision(1.0), Decision(1.0)])
+        stay.user_go_live()
+        self.assertTrue(stay.rate_locked)  # for the channel, not until Go live
+        self.assertEqual(stay.update(N + 1, False), Decision(1.0))
+        self.assertTrue(stay.update(R + 1, False).reopen_live)
+
+    def test_a_speed_the_user_chooses_still_applies(self):
+        stay = StayLive("normal")
+        stay.lock_rate()
+        stay.user_paused()
+        stay.user_speed(1.5)
+        self.assertEqual(stay.update(100.0, False), Decision(1.5))
+
+
+class RateHealthTests(unittest.TestCase):
+    """VLC's progress at a rate other than 1x, against rate x wall time over 3 s."""
+
+    def feed(self, health, share, rate=1.10, seconds=3.0, step=0.25):
+        """`seconds` of ticks in which VLC played `share` of what `rate` asks; the verdicts."""
+        return [health.add(step, share * rate * step, rate) for _ in range(round(seconds / step))]
+
+    def test_a_crawl_is_seen_once_three_seconds_were_counted(self):
+        health = RateHealth()
+        verdicts = self.feed(health, 0.1)
+        self.assertEqual(verdicts, [False] * 11 + [True])
+        self.assertAlmostEqual(health.share, 0.1)
+
+    def test_a_player_that_keeps_up_is_healthy(self):
+        for rate in (0.95, 1.05, 1.10):
+            with self.subTest(rate=rate):
+                health = RateHealth()
+                self.assertFalse(any(self.feed(health, 1.0, rate=rate, seconds=30.0)))
+
+    def test_the_threshold_is_seventy_percent(self):
+        self.assertFalse(any(self.feed(RateHealth(), 0.71)))
+        self.assertTrue(self.feed(RateHealth(), 0.69)[-1])
+
+    def test_each_window_is_judged_afresh(self):
+        health = RateHealth()
+        self.assertFalse(any(self.feed(health, 1.0)))  # a healthy window
+        self.assertEqual(self.feed(health, 0.2)[-1], True)  # not averaged with the one before
 
 
 if __name__ == "__main__":

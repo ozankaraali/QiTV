@@ -227,12 +227,15 @@ class Feed:
     reports `burst` as `burst_s` (HLS: its target duration), or with `metered` what the
     helper's BurstMeter measures from the arrivals (raw TS; `edge` arrived at connect). VLC plays at
     the last rate set while it has data; at the edge it reports `starved` (BUFFERING; real
-    libVLC 3 keeps reporting PLAYING with its clock standing still). While `stalled` the
-    source sends nothing: the edge stands still and no state arrives. LiveSession ticks every
-    0.25 s.
+    libVLC 3 keeps reporting PLAYING with its clock standing still). With `crawl` it cannot
+    play at any rate but 1x, as on a real channel (2.0.2): at another rate its clock stands
+    still and moves a quarter second every two seconds, while it reports PLAYING. While
+    `stalled` the source sends nothing: the edge stands still and no state arrives.
+    LiveSession ticks every 0.25 s.
     """
 
     DT = 0.05
+    CRAWL = (2.0, 0.25)  # at a rate other than 1x: this much media every this many seconds
 
     def __init__(
         self,
@@ -247,8 +250,10 @@ class Feed:
         first=None,
         starved=PlaybackState.BUFFERING,
         metered=False,
+        crawl=False,
     ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
+        self.crawl, self.crawled = crawl, 0.0  # wall seconds at another rate since a step
         self.meter = worker.BurstMeter() if metered else None
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
         self.jitter, self.rng = jitter, random.Random(seed)
@@ -304,9 +309,17 @@ class Feed:
                 PlaybackState.BUFFERING,
             ):
                 rate = (playback.rates or [1.0])[-1]
-                advance = max(0.0, min(rate * self.DT, self.edge - self.position))
+                wanted = rate * self.DT
+                if self.crawl and rate != 1.0:
+                    every, media = self.CRAWL
+                    self.crawled += self.DT
+                    wanted = 0.0
+                    if self.crawled >= every - 1e-9:
+                        self.crawled -= every
+                        wanted = media
+                advance = max(0.0, min(wanted, self.edge - self.position))
                 state = PlaybackState.PLAYING
-                if advance < rate * self.DT - 1e-9:
+                if advance < wanted - 1e-9:
                     state = self.starved
                     self.starved_s += self.DT
                 if state is not playback.current:
@@ -1346,6 +1359,58 @@ class StayLiveTests(LiveSessionCase):
         self.step(0.25)
         self.assertEqual(self.playback.rates, [])
         self.assertEqual(self.timelines[-1]["target"], 6.0)
+
+
+class RateHealthTests(LiveSessionCase):
+    """2.0.2: on some channels VLC cannot play at any rate but 1x; its position crawls (4.5 s
+    of media in 37 s, measured). Stay-live sees it within its window (3 s counted, from a
+    second after VLC plays) and keeps that channel at 1x: no rate change and no jump after."""
+
+    def test_a_bursty_channel_that_cannot_slow_down_plays_at_normal_speed(self):
+        # The measured channel: 10 s segments and 8 s buffered at the start, so stay-live
+        # slows to 0.95x at once; in 2.0.1 VLC crawled and stay-live jumped to live twice.
+        sid = self.start()
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            feed = Feed(self, sid, burst=10.0, edge=8.0, crawl=True).ready().run(8.0)
+            self.assertEqual(self.playback.rates, [0.95, 1.0])
+            slowed = [state for state in self.timelines if state["rate"] != 1.0]
+            self.assertLessEqual(len(slowed) * 0.25, 1.0 + 3.0 + 0.25)  # within the window
+            feed.run(120.0)
+        self.assertEqual(self.playback.rates, [0.95, 1.0])  # never changed again
+        self.assertEqual(len(self.playback.plays), 1)  # and no jump to live
+        self.assertEqual(self.timelines[-1]["rate"], 1.0)
+        self.assertEqual(len(logs.records), 1)  # said once
+        self.assertNotIn("provider.example", logs.output[0])
+        self.assertNotIn("://", logs.output[0])
+
+    def test_a_steady_channel_that_cannot_catch_up_plays_at_normal_speed(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=12.0, crawl=True).ready().run(8.0)
+        self.assertEqual(self.playback.rates, [1.10, 1.0])
+        feed.run(120.0)
+        self.assertEqual(self.playback.rates, [1.10, 1.0])
+        self.assertEqual(len(self.playback.plays), 1)
+        # It stays behind its target: only a lag beyond the target plus 20 s goes live.
+        self.assertGreater(self.timelines[-1]["lag"], TARGETS["normal"] + 3.0)
+
+    def test_a_channel_that_plays_any_rate_keeps_stay_live_as_before(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=12.0).ready().run(120.0)
+        self.assertEqual(self.playback.rates, [1.10, 1.05, 1.0])
+        feed.edge += 6.0  # a backlog arrives: behind again, and caught up again
+        feed.push()
+        feed.run(120.0)
+        self.assertEqual(self.playback.rates, [1.10, 1.05, 1.0] * 2)
+        self.assertEqual(len(self.playback.plays), 1)
+
+    def test_vlc_waiting_at_the_live_edge_is_not_taken_for_a_crawl(self):
+        """VLC meets the edge before the next burst and waits there, its clock standing still
+        while it reports Playing (libVLC 3), as stay-live slows to 0.95x: no crawl."""
+        sid = self.start()
+        feed = Feed(self, sid, burst=10.0, edge=3.0, starved=PlaybackState.PLAYING).ready()
+        feed.run(30.0)
+        self.assertGreater(feed.starved_s, 5.0)  # it waited at the edge for the first burst
+        self.assertEqual(self.playback.rates, [0.95])  # still building the room at 0.95x
 
 
 class StallTests(LiveSessionCase):

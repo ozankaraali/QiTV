@@ -51,7 +51,12 @@ for 0.5 s while it reports Playing (libVLC 3 does when starved): no rate change,
 and the easing starts afresh once the edge moves again. Stay-live slows down only to build a
 bursty source's room: at 0.95x while the mean lag is under a burst, which is under half a
 burst left when a burst lands (the player would meet the edge just before each one), until
-it is a burst (`StayLive`; not while paused, time-shifted or at a chosen speed). Go live
+it is a burst (`StayLive`; not while paused, time-shifted or at a chosen speed). On some
+channels VLC cannot play at any rate but 1x: its position crawls. While stay-live's rate is
+not 1x, VLC's progress is checked against rate x wall time (`RateHealth`), counted only while
+VLC plays (from a second after it opened) with more than `_AHEAD_S` of media ahead, so a
+starved VLC is not taken for a slow one. Under 70% of it over 3 s, the rate goes back to 1x at
+once and stay-live changes it no more on that channel (`StayLive.lock_rate`). Go live
 picks among every segment start, the open one included, by the lag it would give once VLC
 plays it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 s; for a
 bursty source the mean; see `_live_seq`): never below the target less a quarter second,
@@ -108,7 +113,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.live.refusals import REFUSALS, STREAM_LIMIT
-from services.live.stay_live import TARGETS, Mode, StayLive
+from services.live.stay_live import TARGETS, Mode, RateHealth, StayLive
 from services.live.timeline import Span
 from services.playback import PlaybackState, Session
 from services.vlc_profile import PlayKind
@@ -139,6 +144,8 @@ _FROZEN_S = 0.5  # a VLC clock standing still this long while Playing is starved
 _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measured
 _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
 _OPEN_WEIGHT = 0.3  # of each new measurement in the open time's moving average
+_AHEAD_S = 1.0  # rate health counts only time with more media than this ahead of VLC
+_RATE_GRACE_S = 1.0  # and only from this long after an opened stream plays (VLC's clock starts)
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -250,6 +257,10 @@ class LiveSession(QObject):
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
         # Bursty sources: (estimate, correction, when, position) at the last tick.
         self._smoothed: Optional[tuple[float, float, float, float]] = None
+        # Rate health: VLC's progress at stay-live's rates other than 1x (see _check_rate).
+        self._health = RateHealth()
+        self._rate_mark: Optional[tuple[float, float]] = None  # (wall, position) last tick
+        self._rate_from: Optional[float] = None  # counted from here (after an open plays)
         self._wire_engine(engine, connect=True)
         playback.stateChanged.connect(self._on_state)
         playback.ended.connect(self._on_interrupted)
@@ -321,6 +332,7 @@ class LiveSession(QObject):
         if ram_bytes is not None:
             self._open_args["ram_bytes"] = ram_bytes
         self._stay = StayLive(self._latency)
+        self._health = RateHealth()
         self._snapshot_cache = {}
         self._ended = self._source_lost = self._paused = False
         self._limited = None
@@ -706,6 +718,7 @@ class LiveSession(QObject):
             took = min(self._clock() - self._opened_at, _OPEN_MAX_S)
             self._open_s += _OPEN_WEIGHT * (took - self._open_s)
             self._opened_at = None
+            self._rate_from = self._clock() + _RATE_GRACE_S
         if state == _PLAYING:
             self._rewound = False
         if state in (_PLAYING, _PAUSED):
@@ -767,6 +780,7 @@ class LiveSession(QObject):
             return
         snapshot = self._snapshot()
         position = self._advance()
+        self._check_rate(snapshot, position)
         stalled = self._stalled(snapshot)
         lag = max(0.0, self._smooth(snapshot, position, self._lag(snapshot, position), stalled))
         # An ended source has no live edge left to stay near, and a paused player stays
@@ -787,6 +801,34 @@ class LiveSession(QObject):
                 if self._phase is not _Phase.PIPELINE:
                     return
         self._emit_timeline()
+
+    def _check_rate(self, snapshot: Mapping[str, Any], position: float) -> None:
+        """Rate health: since the last tick, did VLC play at stay-live's rate?
+
+        Counted only at a rate other than 1x that stay-live set (LIVE, not paused), while VLC
+        plays, from `_RATE_GRACE_S` after an opened stream plays, with more than `_AHEAD_S` of
+        media ahead. A crawl locks the rate at 1x at once, for the rest of the channel.
+        """
+        now = self._clock()
+        mark, self._rate_mark = self._rate_mark, (now, position)
+        if mark is None or self._stay.rate_locked or self._rate == 1.0:
+            return
+        counted = (
+            self._stay.mode is Mode.LIVE
+            and not self._paused
+            and not self._ended
+            and self._rate_from is not None
+            and mark[0] >= self._rate_from
+            and self._playback.state() is PlaybackState.PLAYING
+            and self._live_edge(snapshot) - position > _AHEAD_S
+        )
+        if counted and self._health.add(now - mark[0], position - mark[1], self._rate):
+            self._stay.lock_rate()
+            self._set_rate(1.0)
+            _LOG.info(
+                "VLC played this channel at %.0f%% of the speed asked: staying at 1x on it",
+                100 * self._health.share,
+            )
 
     def _lag(self, snapshot: Mapping[str, Any], position: float) -> float:
         """Seconds behind the live edge; for a bursty source, the mean over a burst.
@@ -985,6 +1027,8 @@ class LiveSession(QObject):
         self._last_ms, self._last_wall = 0, self._clock()
         self._clock_moved = self._opened_at = self._last_wall
         self._smoothed = None  # the old average says nothing about the new position
+        self._rate_mark = self._rate_from = None  # rate health counts once this one plays
+        self._health.reset()
         self._retry = None
         self._opening = True
         try:
