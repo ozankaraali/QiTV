@@ -75,9 +75,15 @@ class OverlayHost(QWidget):
         self._watch_platform()
 
     def add_overlay(self, widget: QWidget) -> None:
-        """Host an overlay; one with `stays_on_top` (the toast) stays above the others."""
+        """Host an overlay above those added before it; one with `stays_on_top` (the toast)
+        stays above the others.
+
+        Raised here too: one built with the host as its parent already (the PiP label) would
+        otherwise stay under every overlay added later, and the full-size transport took the
+        clicks on its buttons."""
         self._overlays.append(widget)
         widget.setParent(self)
+        widget.raise_()
         widget.hide()
         widget.installEventFilter(self)
         widget.destroyed.connect(lambda _=None, w=widget: self._forget(w))

@@ -53,6 +53,20 @@ class OverlayHostTests(HostCase):
             self.assertFalse(self.host.isVisible())
         self.assertTrue(wait_until(self.host.isVisible, 2000))
 
+    def test_overlays_stack_in_the_order_they_are_added(self):
+        # One built with the host as its parent already (the PiP label) sat under every overlay
+        # added after it: the transport, full-size, then took the clicks on its buttons.
+        early = Overlay(self.host)
+        later = Overlay()
+        self.host.add_overlay(later)
+        self.host.add_overlay(early)
+        stack = [c for c in self.host.children() if c in (self.panel, later, early)]
+        self.assertEqual(stack, [self.panel, later, early])
+        for overlay in (self.panel, later, early):
+            overlay.setGeometry(0, 0, 200, 100)
+            overlay.show()
+        self.assertIs(self.host.childAt(50, 50), early)
+
     def test_hidden_until_an_overlay_is_visible(self):
         self.assertFalse(self.host.isVisible())
         self.panel.show()
