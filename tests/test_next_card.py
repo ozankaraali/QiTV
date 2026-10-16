@@ -8,7 +8,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
 
-from ui.overlay_host import OverlayHost
+from ui.overlay_host import SETTLE_CHECK_MS, OverlayHost
 from ui.overlays.next_card import NextCard
 
 
@@ -28,6 +28,7 @@ class NextCardCase(unittest.TestCase):
         window.show()
         self.addCleanup(window.close)
         self.addCleanup(host.close)
+        elapse(SETTLE_CHECK_MS + 50)  # the host's look after the window showed is through
         return host, card
 
     def test_countdown_emits_play_now_once(self):
