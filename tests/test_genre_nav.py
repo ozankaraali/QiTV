@@ -283,6 +283,16 @@ class TopNavTests(unittest.TestCase):
         self.double_click(self.nav._item_rects()["fullscreen"].center().toPoint())
         self.assertEqual(fullscreens, [True])
 
+    def test_a_click_on_fullscreen_leaves_the_keys_where_they_were(self):
+        # 2.0.1 review M2: ⛶ is not in the keys' order, so it never takes their focus.
+        self.nav.set_active("movies")
+        self.nav.fullscreenRequested.connect(lambda: None)
+        button = self.nav._item_rects()["fullscreen"].center().toPoint()
+        QTest.mouseClick(self.nav, Qt.LeftButton, pos=button)
+        self.nav.set_focused(True)
+        self.nav.activate()  # Enter after ↑ into the bar
+        self.assertEqual(self.tabs, ["movies"])
+
     def test_hovering_shows_the_tooltip(self):
         # A real tooltip event: QHelpEvent has pos(), not position().
         button = self.nav._item_rects()["fullscreen"].center().toPoint()

@@ -180,8 +180,9 @@ class TopNav(QWidget):
         if item is None or self._item_at(event.position()) != item:
             super().mouseReleaseEvent(event)
             return
-        self._focus_item = item
-        self.update()
+        if item in self._order():  # ⛶ is not: the keys' focus stays where it was
+            self._focus_item = item
+            self.update()
         self._trigger(item)
 
     def eventFilter(self, obj, event):
