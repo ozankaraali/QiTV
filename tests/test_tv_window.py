@@ -1350,12 +1350,29 @@ def click_library_button(case, window):
     """Move the pointer (the player controls show), then click ‹ Library as a mouse does;
     return where (global)."""
     transport = window.overlays.transport
-    case.assertTrue(wait_until(lambda: library_button(window) is not None, LIBRARY_WAIT_MS))
+    # Like a person: once the title is on its way and the controls show it (not the live
+    # channel before it), with the button laid out (a slow Linux runner was still between).
+    case.assertTrue(
+        wait_until(
+            lambda: library_button(window) is not None
+            and not transport.title_rects()
+            and window.controller.vod_chosen(),
+            LIBRARY_WAIT_MS,
+        )
+    )
     window.controller.mouse_moved()
     case.assertTrue(transport.isVisible())
     host = transport.window()
-    point = transport.mapTo(host, library_button(window).center().toPoint())
+    centre = library_button(window).center()
+    point = transport.mapTo(host, centre.toPoint())
+    hit = [n for n, r in transport._layout().items() if r.contains(centre)]
+    titles = [n for n, r in transport.title_rects().items() if r.contains(centre)]
+    under = host.childAt(point)
     QTest.mouseClick(host.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
+    case.library_click_state = (
+        f"hit={hit} titles={titles} under={type(under).__name__ if under else None} "
+        f"can_return={window.screens._can_return()} page={type(window.pages.currentWidget()).__name__}"
+    )
     return host.mapToGlobal(point)
 
 
@@ -1592,7 +1609,7 @@ class XtreamLibraryTests(TwoProviderCase):
         QTest.keyClick(window, Qt.Key.Key_Return)
         self.assertTrue(wait_until(lambda: len(plays) == 1, LIBRARY_WAIT_MS))
         at = click_library_button(self, window)
-        self.assertIs(window.pages.currentWidget(), window.library_page)
+        self.assertIs(window.pages.currentWidget(), window.library_page, self.library_click_state)
         self.assertEqual(window.library_controller.mode, "series")
         self.assertIs(series.current_season(), season)
         self.assertIs(series.current_episode(), episode)
