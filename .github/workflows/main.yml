@@ -12,6 +12,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+permissions:
+  contents: read
+  actions: write  # a failed job cancels the run
+
 jobs:
   # The unit tests run once, on Linux, beside the builds; each build still smoke-tests its
   # packaged app (real playback with the bundled libVLC) on its own platform.
@@ -34,6 +38,13 @@ jobs:
         run: uv run python scripts/run_tests.py
         env:
           QT_QPA_PLATFORM: offscreen
+      - name: Cancel the run after a failure
+        # A failed job cancels the others: the run cannot release anyway, and a fix pushed
+        # next does not wait for it (main's runs queue instead of replacing each other).
+        if: failure()
+        run: gh run cancel ${{ github.run_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   build-linux:
     runs-on: ubuntu-latest
@@ -119,6 +130,13 @@ jobs:
         with:
           name: packaged-app-linux
           path: dist/qitv-linux
+      - name: Cancel the run after a failure
+        # A failed job cancels the others: the run cannot release anyway, and a fix pushed
+        # next does not wait for it (main's runs queue instead of replacing each other).
+        if: failure()
+        run: gh run cancel ${{ github.run_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   build-windows:
     runs-on: windows-latest
@@ -192,6 +210,13 @@ jobs:
         with:
           name: packaged-app-windows
           path: dist/qitv-windows.exe
+      - name: Cancel the run after a failure
+        # A failed job cancels the others: the run cannot release anyway, and a fix pushed
+        # next does not wait for it (main's runs queue instead of replacing each other).
+        if: failure()
+        run: gh run cancel ${{ github.run_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   build-macos-universal:
     runs-on: macos-latest
@@ -274,6 +299,13 @@ jobs:
         with:
           name: packaged-app-macos-universal
           path: dist/qitv-macos-universal.zip
+      - name: Cancel the run after a failure
+        # A failed job cancels the others: the run cannot release anyway, and a fix pushed
+        # next does not wait for it (main's runs queue instead of replacing each other).
+        if: failure()
+        run: gh run cancel ${{ github.run_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   build-macos-intel:
     runs-on: macos-15-intel
@@ -356,6 +388,13 @@ jobs:
         with:
           name: packaged-app-macos-intel
           path: dist/qitv-macos-intel.zip
+      - name: Cancel the run after a failure
+        # A failed job cancels the others: the run cannot release anyway, and a fix pushed
+        # next does not wait for it (main's runs queue instead of replacing each other).
+        if: failure()
+        run: gh run cancel ${{ github.run_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   release:
     needs: [tests, build-linux, build-windows, build-macos-universal, build-macos-intel]
