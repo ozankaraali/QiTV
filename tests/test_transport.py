@@ -1,9 +1,10 @@
 import os
+import sys
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QMouseEvent, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -45,6 +46,32 @@ class TransportCase(unittest.TestCase):
         self.assertGreater(image.pixelColor(beside).alpha(), 0)
         t.set_pip_rect(QRect())  # PiP closed: the shade is whole again
         self.assertGreater(t.grab().toImage().pixelColor(inside).alpha(), 0)
+
+    def test_it_follows_the_small_picture_in_its_hosts_coordinates(self):
+        t = self.make()
+        t.move(10, 20)
+        t.follow_pip(QRect(110, 220, 50, 30))
+        self.assertEqual(t._pip_rect, QRect(100, 200, 50, 30))
+
+    def test_a_late_report_of_the_small_picture_after_teardown_is_dropped(self):
+        # 2.0.2 review (M6): the PiP frame may report once more while the window closes;
+        # a slot without a receiver would reach a deleted transport.
+        class Frame(QObject):
+            smallRectChanged = Signal(QRect)
+
+        host, frame = QWidget(), Frame()
+        transport = Transport(host)
+        frame.smallRectChanged.connect(transport.follow_pip)
+        errors = []
+        hook, sys.excepthook = sys.excepthook, lambda *info: errors.append(info[1])
+        self.addCleanup(setattr, sys, "excepthook", hook)
+        transport.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        frame.smallRectChanged.emit(QRect(1, 2, 3, 4))
+        self.assertEqual(errors, [])
+        for obj in (frame, host):
+            obj.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_vod_texts(self):
         t = self.make()

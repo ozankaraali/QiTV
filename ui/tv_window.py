@@ -437,10 +437,7 @@ class TVWindow(QMainWindow):
         self.pip_frame.smallRectChanged.connect(self.mixer.avoid)
         # The transport's shades leave the small picture alone (host and transport coordinates
         # differ only by the transport's offset in the host).
-        transport = self.overlays.transport
-        self.pip_frame.smallRectChanged.connect(
-            lambda rect: transport.set_pip_rect(rect.translated(-transport.pos()))
-        )
+        self.pip_frame.smallRectChanged.connect(self.overlays.transport.follow_pip)
         # Clicks on the small picture reach it through the overlays (but their buttons).
         self.pip_frame.smallRectChanged.connect(self.host.set_hole)
         # While the transport, the mixer or the zap banner shows, a bottom corner's PiP rises

@@ -2002,6 +2002,14 @@ class FailingProviderTests(WindowCase):
         self.assertGreater(stack.index(toast), stack.index(drawer))  # the error stays readable
 
 
+class PipShadeWiringTests(WindowCase):
+    def test_the_transport_hears_where_the_small_picture_is(self):
+        transport = self.window.overlays.transport
+        rect = QRect(880, 400, 360, 200)
+        self.window.pip_frame.smallRectChanged.emit(rect)
+        self.assertEqual(transport._pip_rect, rect.translated(-transport.pos()))
+
+
 class OptionsDialogTests(WindowCase):
     def dialog(self):
         dialog = OptionsDialog(self.window)

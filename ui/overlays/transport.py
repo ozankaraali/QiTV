@@ -344,6 +344,13 @@ class Transport(Overlay):
             self._pip_rect = QRect(rect)
             self.update()
 
+    def follow_pip(self, rect: QRect) -> None:
+        """`set_pip_rect` for a rect in the host's coordinates (the PiP frame reports those).
+
+        A slot of this widget, so a report that comes after it was deleted (the window
+        closing) is dropped instead of reaching a deleted object."""
+        self.set_pip_rect(rect.translated(-self.pos()))
+
     def set_pip_state(self, available: bool, open_: bool) -> None:
         """The second channel's button: shown on live TV when `available`; lit while open."""
         if (available, open_) != (self._pip_available, self._pip_open):
