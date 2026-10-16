@@ -55,6 +55,7 @@ from urllib3.exceptions import ReadTimeoutError
 from urllib3.util.ssl_ import create_urllib3_context, resolve_cert_reqs, resolve_ssl_version
 
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
+from services.live.ts import ContinuityJoiner
 from services.vlc_profile import DEFAULT_USER_AGENT
 
 log = logging.getLogger(__name__)
@@ -1113,6 +1114,12 @@ class HlsSource:
     - a stale playlist copy is waited out; a media-sequence restart, or falling behind the
       window, resumes at the live start;
     - reloads that bring no new segment for 60 s (download time excluded) time out.
+
+    Segments are joined with each PID's continuity counter running on (`ContinuityJoiner`):
+    some CDNs package every segment on its own, its counters restarting at 0, and VLC took
+    each join for a break on every PID, losing its clock (2.0.2). At a discontinuity marker
+    the counters run on too, and the first PCR after it carries the discontinuity indicator:
+    the bytes tell VLC the time base changed (the marker itself only reaches the segmenter).
     """
 
     hls = True
@@ -1132,6 +1139,7 @@ class HlsSource:
         self._started = False  # bytes were yielded
         self._delivered = False  # a segment arrived whole
         self._pending = False  # a Discontinuity is due before the next bytes
+        self._joiner = ContinuityJoiner()  # the segments' counters run on across joins
 
     @property
     def burst_s(self) -> float:
@@ -1246,13 +1254,19 @@ class HlsSource:
             return
         failure: SourceError | None = None
         content = False
+        joiner = self._joiner
+        joiner.segment()
         try:
             for block in _checked_ts(self._blocks(response, decryptor)):
                 if self._pending:  # only ever right before bytes that really arrive
                     self._pending = False
+                    joiner.discontinuity()
                     yield Discontinuity()
                 self._started = True
-                yield block
+                if block := joiner.feed(block):
+                    yield block
+            if tail := joiner.end():  # a partial packet at the segment's end, as it came
+                yield tail
         except _ReadError as error:
             failure = _translate(error)
         except _BadSegment as error:

@@ -200,6 +200,28 @@ def split_header(body):
     return body[:header], body[header:]
 
 
+def counter_breaks(stream):
+    """(packet index, PID, counter, expected) wherever a PID's continuity counter breaks:
+    a packet with a payload takes the previous value plus one, adaptation only the same."""
+    breaks, last = [], {}
+    for index, at in enumerate(range(0, len(stream), 188)):
+        packet = stream[at : at + 188]
+        pid, afc, cc = pid_of(packet), (packet[3] >> 4) & 3, packet[3] & 0x0F
+        if pid == 0x1FFF or not afc:
+            continue
+        if pid in last:
+            expected = (last[pid] + 1) & 0x0F if afc & 1 else last[pid]
+            if cc != expected:
+                breaks.append((index, pid, cc, expected))
+        last[pid] = cc
+    return breaks
+
+
+def pcr_of(packet):
+    b = packet[6:11]
+    return (b[0] << 25) | (b[1] << 17) | (b[2] << 9) | (b[3] << 1) | (b[4] >> 7)
+
+
 def paced(payload, stop, hung_up, *, block=188 * 20, interval=0.02):
     """A close-delimited body that streams at a few times real time until the client hangs up."""
 
@@ -401,6 +423,50 @@ class LiveWorkerTests(unittest.TestCase):
                     self.assertAlmostEqual(before[2], after[1])
                 self.assertAlmostEqual(buffered[-1][2] - buffered[0][1], seconds, delta=0.25)
                 self.assertAlmostEqual(snapshot["end"], buffered[-1][2])
+        self.assert_no_credentials(helper)
+
+    def test_hls_segments_packaged_on_their_own_are_served_with_running_counters(self):
+        # 2.0.2: a CDN that packages each HLS segment on its own restarts every PID's
+        # continuity counter (PAT's and PMT's too) at 0, which VLC takes as a break on every
+        # PID. The served stream continues the counters, across a real discontinuity too,
+        # whose first PCR then carries the discontinuity indicator. Raw TS passes as it came.
+        segments = [make_stream(4, pts_start=900000 + i * 4 * 90000) for i in range(3)]
+        segments.append(make_stream(4, pts_start=9_000_000))  # after the discontinuity
+        playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n"
+        playlist += "#EXT-X-MEDIA-SEQUENCE:0\n"
+        playlist += "".join(f"#EXTINF:4,\n{name}.ts\n" for name in "abc")
+        playlist += "#EXT-X-DISCONTINUITY\n#EXTINF:4,\nd.ts\n#EXT-X-ENDLIST\n"
+        joined = b"".join(segments)
+        routes = {f"/user/secret/{name}.ts": (200, {}, s) for name, s in zip("abcd", segments)}
+        routes["/user/secret/channel.m3u8"] = (200, {}, playlist.encode())
+        routes[SECRET_PATH] = (200, {}, joined)  # the same bytes as one raw TS stream
+        source = self.source(routes)
+        helper = self.helper()
+        served = {}
+        for path in ("/user/secret/channel.m3u8", SECRET_PATH):
+            sid = helper.open(source.url + path)
+            helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
+            with urlopen(helper.stream_url(sid, 0), timeout=10) as response:
+                served[path] = split_header(response.read())[1]
+        hls, raw = served["/user/secret/channel.m3u8"], served[SECRET_PATH]
+        self.assertEqual(counter_breaks(hls), [])
+        self.assertGreater(len(counter_breaks(raw)), 0)  # untouched: its breaks remain
+        start = joined.index(raw[:188])
+        self.assertEqual(raw, joined[start:])  # raw TS: byte for byte
+        # HLS: only the counters change, and the one flag at the discontinuity.
+        self.assertEqual(len(hls), len(joined) - start)
+        flagged = []
+        for at in range(0, len(hls), 188):
+            got, was = bytearray(hls[at : at + 188]), bytearray(
+                joined[start + at : start + at + 188]
+            )
+            if got[3] & 0x20 and got[4] and got[5] & 0x80 and not was[5] & 0x80:
+                flagged.append(pcr_of(got))
+                got[5] &= 0x7F
+            got[3] &= 0xF0
+            was[3] &= 0xF0
+            self.assertEqual(got, was, f"packet {at // 188}")
+        self.assertEqual(flagged, [9_000_000])  # the first PCR after the discontinuity
         self.assert_no_credentials(helper)
 
     def test_closing_one_session_leaves_its_sibling_streaming(self):

@@ -16,6 +16,11 @@ content, made once with ffmpeg as a developer tool:
 With `burst_s`, the channel arrives in bursts, as some providers' restreams send it: every
 `burst_s` seconds, everything due before the next burst at once.
 
+With `hls_s`, the channel is live HLS instead: `url` is a media playlist whose window holds
+the last segments of `hls_s` seconds completed by the wall clock (three at once from the
+start), served beside it as `seg<n>.ts`. With `cc_reset`, each segment is packaged on its
+own, as some CDNs do: every PID's continuity counter, PAT's and PMT's too, restarts at 0.
+
 `connections` counts the requests; `events` records when each connection opened (+1) and
 closed (-1), and `peak` is the most open at once. A client going away is seen at once (the
 server watches its socket between chunks), so the counts follow the client's own closes.
@@ -43,6 +48,8 @@ from services.live.server import ThreadingLoopbackHTTPServer
 FIXTURE_DIR = Path(__file__).resolve().parent
 LIVE_TS = FIXTURE_DIR / "live.ts"
 PATH = "/live/1.ts"
+PLAYLIST = "/live/index.m3u8"
+HLS_WINDOW = 6  # segments in the live playlist
 PACKET = 188
 CHUNK_PACKETS = 64
 CLOCK = 90_000
@@ -153,6 +160,20 @@ class LoopedStream:
         ]
         self._due = [due[end - 1] for _, end in self._chunks]
 
+    def chunk_at(self, index: int) -> tuple[float, bytes]:
+        """Chunk `index` of the endless stream, as `chunks()` yields it."""
+        loop, at = divmod(index, len(self._chunks))
+        start, end = self._chunks[at]
+        return loop * self.period + self._due[at], self._render(loop, start, end)
+
+    def first_due_at(self, seconds: float) -> int:
+        """The index of the first chunk due at or after `seconds`."""
+        loop = max(0, int(seconds // self.period))
+        for at, due in enumerate(self._due):
+            if loop * self.period + due >= seconds:
+                return loop * len(self._chunks) + at
+        return (loop + 1) * len(self._chunks)
+
     def chunks(self) -> Iterator[tuple[float, bytes]]:
         """(seconds after the stream started when it is due, chunk), for ever."""
         for loop in itertools.count():
@@ -206,9 +227,20 @@ class LiveSource:
     """Serves `LoopedStream(path)` at `url` to every client until `close()`; in bursts of
     `burst_s` seconds when that is set."""
 
-    def __init__(self, path: Path = LIVE_TS, *, burst_s: float = 0.0) -> None:
+    def __init__(
+        self,
+        path: Path = LIVE_TS,
+        *,
+        burst_s: float = 0.0,
+        hls_s: float = 0.0,
+        cc_reset: bool = False,
+    ) -> None:
         self.stream = LoopedStream(Path(path).read_bytes())
         self.burst_s = burst_s
+        self.hls_s = hls_s
+        self.cc_reset = cc_reset
+        # HLS: three segments are complete as it starts, as on a live channel.
+        self._hls_started = time.monotonic() - 3 * hls_s
         self.connections = 0
         self.events: list[tuple[float, int]] = []  # (time.monotonic(), +1 open / -1 close)
         self._stop = threading.Event()
@@ -220,6 +252,9 @@ class LiveSource:
                 pass
 
             def do_GET(self) -> None:
+                if owner.hls_s > 0:
+                    self._hls()
+                    return
                 if self.path != PATH:
                     self.send_error(404)
                     return
@@ -231,6 +266,27 @@ class LiveSource:
                 finally:
                     with lock:
                         owner.events.append((time.monotonic(), -1))
+
+            def _hls(self) -> None:
+                if self.path == PLAYLIST:
+                    body = owner.playlist()
+                elif self.path.startswith("/live/seg") and self.path.endswith(".ts"):
+                    number = self.path[len("/live/seg") : -len(".ts")]
+                    if not number.isdigit() or int(number) >= owner.completed():
+                        self.send_error(404)
+                        return
+                    body = owner.segment(int(number))
+                else:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except OSError:
+                    pass
 
             def _serve(self) -> None:
                 self.send_response(200)
@@ -265,11 +321,41 @@ class LiveSource:
                 return False
 
         self._server = ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self._server.server_port}{PATH}"
+        self.url = f"http://127.0.0.1:{self._server.server_port}{PLAYLIST if hls_s else PATH}"
         self._thread = threading.Thread(
             target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
         )
         self._thread.start()
+
+    def completed(self) -> int:
+        """HLS: how many segments the wall clock completed so far."""
+        return int((time.monotonic() - self._hls_started) // self.hls_s)
+
+    def playlist(self) -> bytes:
+        """HLS: the live media playlist, the last `HLS_WINDOW` completed segments."""
+        last = self.completed()
+        first = max(0, last - HLS_WINDOW)
+        text = "#EXTM3U\n#EXT-X-VERSION:3\n"
+        text += f"#EXT-X-TARGETDURATION:{math.ceil(self.hls_s)}\n"
+        text += f"#EXT-X-MEDIA-SEQUENCE:{first}\n"
+        text += "".join(f"#EXTINF:{self.hls_s:.3f},\nseg{n}.ts\n" for n in range(first, last))
+        return text.encode()
+
+    def segment(self, number: int) -> bytes:
+        """HLS: the chunks due in segment `number`'s `hls_s` seconds; with `cc_reset` every
+        PID's continuity counter restarts at 0 in it."""
+        stream = self.stream
+        start = stream.first_due_at(number * self.hls_s)
+        end = stream.first_due_at((number + 1) * self.hls_s)
+        data = bytearray(b"".join(stream.chunk_at(i)[1] for i in range(start, end)))
+        if self.cc_reset:
+            first: dict[int, int] = {}
+            for at in range(0, len(data), PACKET):
+                pid = ((data[at + 1] & 0x1F) << 8) | data[at + 2]
+                cc = data[at + 3] & 0x0F
+                offset = first.setdefault(pid, cc)
+                data[at + 3] = (data[at + 3] & 0xF0) | ((cc - offset) & 0x0F)
+        return bytes(data)
 
     @property
     def peak(self) -> int:

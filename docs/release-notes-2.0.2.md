@@ -28,10 +28,12 @@ instead of using others' distributions, which may have malware.**
   you changed it). Choose **Auto (recommended)** in Settings to use it. Low, Normal and Stable keep
   the same distance on every channel, as before.
 
-## Smoother playback on channels that can't change speed
+## Smoother live playback
 
-- To stay near live, QiTV plays a little faster or slower (1.05×, 1.1× or 0.95×). On some
-  channels the player can't do that smoothly: the picture crawled, and QiTV then jumped back to
+- **HLS channels whose segments are packaged separately no longer stutter or jump.**
+- **Channels that can't change speed play at normal speed.** To stay near live, QiTV plays a
+  little faster or slower (1.05×, 1.1× or 0.95×). On some channels the player can't do that
+  smoothly: the picture crawled, and QiTV then jumped back to
   live every half minute or so. QiTV now notices this within a few seconds, plays such a channel
   at normal speed only, and remembers that for the channel for a day, whatever latency you chose.
   After a day it tries other speeds again, and goes back to normal speed only if they still don't

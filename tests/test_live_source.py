@@ -37,6 +37,7 @@ from services.live.source import (
     _scheme,
     open_source,
 )
+from services.live.ts import ContinuityJoiner
 
 KEY = bytes(range(16))
 FAST_RETRIES = (0.01,) * 6
@@ -78,6 +79,35 @@ def drain(source):
     finally:
         source.close()
     return parts
+
+
+def joined(*items):
+    """What an HLS source yields for these segments (bytes) and markers, as `drain` joins it:
+    each PID's continuity counter runs on across the segments, and the first PCR after a
+    marker carries the discontinuity indicator (2.0.2; tests/test_ts_continuity.py)."""
+    joiner, parts = ContinuityJoiner(), []
+    for item in items:
+        if isinstance(item, Discontinuity):
+            joiner.discontinuity()
+            parts.append(item)
+            continue
+        joiner.segment()
+        block = joiner.feed(item) + joiner.end()
+        if parts and isinstance(parts[-1], bytes):
+            parts[-1] += block
+        else:
+            parts.append(block)
+    return parts
+
+
+def plain(data):
+    """`data` without its continuity counters and discontinuity indicators."""
+    out = bytearray(data)
+    for at in range(0, len(out) - 187, 188):
+        out[at + 3] &= 0xF0
+        if out[at + 3] & 0x20 and out[at + 4]:
+            out[at + 5] &= 0x7F
+    return bytes(out)
 
 
 def media(url, *, headers=None, verify_ssl=True, stop=None, **options):
@@ -508,7 +538,7 @@ high.m3u8
                 "/live/second.ts": delayed_segment,
             }
         )
-        self.assertEqual(media(server.url + "/entry"), [self.video + self.next_video])
+        self.assertEqual(media(server.url + "/entry"), joined(self.video, self.next_video))
         self.assertGreaterEqual(server.counts["/live/channel.m3u8"], 2)
         self.assertEqual(server.counts["/entry"], 1)
         self.assertEqual(server.counts["/live/first.ts"], 1)
@@ -533,7 +563,7 @@ high.m3u8
             server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
         )
         self.assertEqual(source.burst_s, 2.0)
-        self.assertEqual(drain(source), [self.video, Discontinuity(), self.next_video])
+        self.assertEqual(drain(source), joined(self.video, Discontinuity(), self.next_video))
         self.assertEqual(source.burst_s, 3.0)  # follows the reloaded target duration
         self.assertEqual(server.counts["/live.m3u8"], 2)
 
@@ -551,7 +581,7 @@ high.m3u8
         )
         # Nothing precedes the first segment, so only the second tag is a break.
         parts = media(server.url + "/channel.m3u8")
-        self.assertEqual(parts, [self.video, Discontinuity(), self.next_video])
+        self.assertEqual(parts, joined(self.video, Discontinuity(), self.next_video))
 
     def test_hls_retries_transient_reload_and_segment_failures(self):
         def playlist(_request, count):
@@ -572,7 +602,7 @@ high.m3u8
         )
         with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
             parts = media(server.url + "/live.m3u8")
-        self.assertEqual(parts, [self.video + self.next_video])
+        self.assertEqual(parts, joined(self.video, self.next_video))
         self.assertEqual(server.counts["/live.m3u8"], 4)
         self.assertEqual(server.counts["/b.ts"], 2)
 
@@ -650,7 +680,7 @@ high.m3u8
                 "/channel.key": (200, {}, KEY),
             }
         )
-        self.assertEqual(media(server.url + "/channel.m3u8"), [self.video + self.next_video])
+        self.assertEqual(media(server.url + "/channel.m3u8"), joined(self.video, self.next_video))
         self.assertEqual(server.counts["/channel.key"], 1)
 
     def test_unsupported_key_methods_are_rejected(self):
@@ -1235,7 +1265,9 @@ high.m3u8
                 routes["/live.m3u8"] = playlist
                 server = self.server(routes)
                 parts = media(server.url + "/live.m3u8", live_delay=1.0)
-                self.assertEqual(parts, [self.video, Discontinuity(), self.next_video + self.video])
+                self.assertEqual(
+                    parts, joined(self.video, Discontinuity(), self.next_video, self.video)
+                )
                 requested = [path[1:] for path, _headers in server.requests if path.endswith(".ts")]
                 self.assertEqual(requested, fetched)
 
@@ -1266,7 +1298,7 @@ high.m3u8
                 routes["/live.m3u8"] = playlist
                 server = self.server(routes)
                 parts = media(server.url + "/live.m3u8", live_delay=100.0)
-                self.assertEqual(parts, [self.video * 3 + self.next_video])
+                self.assertEqual(parts, joined(self.video, self.video, self.video, self.next_video))
                 self.assertEqual(requested_segments(server), ["a.ts", "b.ts", "c.ts", "d.ts"])
                 self.assertEqual(server.counts["/live.m3u8"], 3)
 
@@ -1285,7 +1317,7 @@ high.m3u8
         routes["/live.m3u8"] = playlist
         server = self.server(routes)
         parts = media(server.url + "/live.m3u8", live_delay=1.0)
-        self.assertEqual(parts, [self.video + self.next_video])
+        self.assertEqual(parts, joined(self.video, self.next_video))
         self.assertEqual(requested_segments(server), ["w9.ts", "w10.ts"])
 
     def test_a_lagging_copy_that_persists_counts_as_a_restart(self):
@@ -1304,7 +1336,7 @@ high.m3u8
         )
         with patch.object(source_module, "_STALE_TARGETS", 1):  # one target duration
             parts = media(server.url + "/live.m3u8", live_delay=1.0)
-        self.assertEqual(parts, [self.video, Discontinuity(), self.next_video])
+        self.assertEqual(parts, joined(self.video, Discontinuity(), self.next_video))
         self.assertEqual(requested_segments(server), ["c.ts", "d.ts"])
 
     def test_falling_behind_the_window_resumes_at_the_live_start(self):
@@ -1324,7 +1356,7 @@ high.m3u8
             }
         )
         parts = media(server.url + "/live.m3u8", live_delay=1.0)
-        self.assertEqual(parts, [self.video, Discontinuity(), self.next_video + self.video])
+        self.assertEqual(parts, joined(self.video, Discontinuity(), self.next_video, self.video))
         self.assertEqual(requested_segments(server), ["s10.ts", "s16.ts", "s17.ts"])
 
     def test_a_stalled_segment_is_skipped_while_the_playlist_advances(self):
@@ -1354,7 +1386,9 @@ high.m3u8
                 parts = media(server.url + "/live.m3u8", live_delay=1.0)
         finally:
             release.set()
-        self.assertEqual(parts, [self.video + head, Discontinuity(), self.next_video + self.video])
+        self.assertEqual(
+            parts, joined(self.video, head, Discontinuity(), self.next_video, self.video)
+        )
 
     def test_a_segment_that_stalls_after_data_is_skipped_at_the_stall_timeout(self):
         release = threading.Event()
@@ -1388,7 +1422,9 @@ high.m3u8
                 parts = media(server.url + "/live.m3u8", live_delay=1.0)
         finally:
             release.set()
-        self.assertEqual(parts, [self.video + head, Discontinuity(), self.next_video + self.video])
+        self.assertEqual(
+            parts, joined(self.video, head, Discontinuity(), self.next_video, self.video)
+        )
         # The skip comes at the stall timeout; s3 then waits for the next reload (1 s).
         self.assertLess(marks["skipped"] - marks["stalled"], 2.0)
 
@@ -1432,7 +1468,7 @@ high.m3u8
         mark = Discontinuity()
         self.assertEqual(
             parts,
-            [self.video, mark, self.next_video, mark, self.video, mark, self.next_video],
+            joined(self.video, mark, self.next_video, mark, self.video, mark, self.next_video),
         )
         self.assertEqual(server.counts["/gone.ts"], 1)
         self.assertEqual(server.counts["/expired.ts"], 1)
@@ -1459,7 +1495,7 @@ high.m3u8
         with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
             parts = media(server.url + "/channel.m3u8")
         mark = Discontinuity()
-        self.assertEqual(parts, [self.video, mark, self.next_video, mark, self.video])
+        self.assertEqual(parts, joined(self.video, mark, self.next_video, mark, self.video))
         self.assertEqual(server.counts["/gone.key"], 1)
         self.assertEqual(server.counts["/locked.ts"], 0)
         self.assertEqual(server.counts["/busy.ts"], 7)
@@ -1478,7 +1514,7 @@ high.m3u8
             }
         )
         parts = media(server.url + "/channel.m3u8")
-        self.assertEqual(parts, [self.video, Discontinuity(), self.next_video])
+        self.assertEqual(parts, joined(self.video, Discontinuity(), self.next_video))
 
     def test_bad_segments_after_the_first_delivery_are_skipped(self):
         zero = "IV=0x" + "0" * 32
@@ -1505,9 +1541,13 @@ high.m3u8
         )
         parts = media(server.url + "/channel.m3u8")
         mark = Discontinuity()
-        self.assertEqual(parts[:4], [self.video, mark, self.next_video, mark])
-        self.assertTrue(parts[4].startswith(self.video))  # c, then what cut.ts gave
-        self.assertEqual(parts[5:], [mark, self.next_video])
+        expected = joined(self.video, mark, self.next_video, mark, self.video)
+        self.assertEqual(parts[:4], expected[:4])
+        self.assertTrue(parts[4].startswith(expected[4]))  # c, then what cut.ts gave
+        self.assertEqual(parts[5], mark)
+        # d: its counters run on from where cut.ts broke off.
+        self.assertEqual(plain(parts[6]), plain(self.next_video))
+        self.assertEqual(len(parts), 7)
 
     def test_three_consecutive_segment_failures_end_the_session(self):
         page = (200, {}, b"<html>busy</html>" * 20)
@@ -1596,7 +1636,7 @@ high.m3u8
             "Content-Length": "5",
         }
         parts = media(entry.url + "/play", headers=headers)
-        self.assertEqual(parts, [self.video + self.next_video])
+        self.assertEqual(parts, joined(self.video, self.next_video))
         for server in (entry, hop, cdn):
             for _path, received in server.requests:
                 self.assertEqual(received["User-Agent"], "Provider/3.0")
@@ -1625,7 +1665,7 @@ high.m3u8
             },
             keep_alive=True,
         )
-        self.assertEqual(media(server.url + "/live.m3u8"), [self.video + self.next_video])
+        self.assertEqual(media(server.url + "/live.m3u8"), joined(self.video, self.next_video))
         self.assertEqual(len(server.requests), 4)
         self.assertEqual(server.connections, 1)
 

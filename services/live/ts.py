@@ -639,6 +639,88 @@ class Segmenter:
         return True
 
 
+class ContinuityJoiner:
+    """Joins separately packaged TS segments (HLS) so each PID's continuity counter runs on.
+
+    Some CDNs package every HLS segment on its own, each PID's counter (PAT's and PMT's too)
+    restarting at 0. Joined as they are, VLC sees a counter break on every PID at every
+    segment, drops its reference clock and discards late pictures (measured on a public
+    channel, 2.0.2). Here the counters continue each PID's last one (ISO 13818-1, 2.4.3.3):
+    an adaptation-only packet takes the previous value; the first packet with a payload of a
+    PID in a segment takes the next one, and the PID's later payload packets in the segment
+    the same shift. A well-formed segment then runs on exactly, and a loss or a repeated
+    packet inside one stays as it came. A PID's first counter ever stays; null packets and packets with the transport error flag
+    are left alone. Only the counter nibble changes, but for one flag: after
+    `discontinuity()` (a real HLS discontinuity, whose counters run on too), the first packet
+    carrying a PCR gets the adaptation field's discontinuity_indicator, so VLC takes the new
+    time base. A segment out of packet sync passes through from where it lost sync.
+
+    Per segment: `segment()`, then `feed()` its bytes (whole packets come back; a partial one
+    is held), then `end()` (the partial packet held, as it came).
+    """
+
+    def __init__(self) -> None:
+        self._last: dict[int, int] = {}  # PID -> its last counter passed on
+        self._shift: dict[int, int] = {}  # PID -> what this segment adds to its counters
+        self._held = b""
+        self._lost = False  # out of packet sync: the rest of the segment passes through
+        self._flag_pcr = False
+
+    def segment(self) -> None:
+        """A segment starts: each PID's shift is found afresh from its first packet."""
+        self._shift.clear()
+        self._held = b""
+        self._lost = False
+
+    def discontinuity(self) -> None:
+        """A real discontinuity comes before the next bytes: flag the first PCR after it."""
+        self._flag_pcr = True
+
+    def feed(self, data: bytes) -> bytes:
+        if self._lost:
+            return data
+        data = self._held + data if self._held else data
+        whole = len(data) - len(data) % PACKET
+        self._held = data[whole:]
+        out = bytearray(data[:whole])
+        for at in range(0, whole, PACKET):
+            if out[at] != SYNC:
+                self._lost = True
+                rest, self._held = bytes(data[at:]), b""
+                return bytes(out[:at]) + rest
+            self._join(out, at)
+        return bytes(out)
+
+    def end(self) -> bytes:
+        """The segment ended: the partial packet held, as it came."""
+        held, self._held = self._held, b""
+        return held
+
+    def _join(self, out: bytearray, at: int) -> None:
+        b1, b3 = out[at + 1], out[at + 3]
+        pid = ((b1 & 0x1F) << 8) | out[at + 2]
+        afc = (b3 >> 4) & 3
+        if b1 & 0x80 or pid == 0x1FFF or afc == 0:  # errored, null or reserved: no counter
+            return
+        cc = b3 & 0x0F
+        last = self._last.get(pid)
+        if not afc & 1:  # adaptation only: the previous value
+            cc = cc if last is None else last  # the PID's first counter stays
+        else:
+            shift = self._shift.get(pid)
+            if shift is None:  # the first payload in the segment continues the PID's last
+                shift = 0 if last is None else (last + 1 - cc) & 0x0F
+                self._shift[pid] = shift
+            cc = (cc + shift) & 0x0F
+        if cc != b3 & 0x0F:
+            out[at + 3] = (b3 & 0xF0) | cc
+        self._last[pid] = cc
+        # The first PCR after a discontinuity: adaptation field, length >= 1, PCR_flag set.
+        if self._flag_pcr and afc & 2 and out[at + 4] and out[at + 5] & 0x10:
+            out[at + 5] |= 0x80
+            self._flag_pcr = False
+
+
 def _find_sync(data: bytes, start: int) -> int:
     """First i >= start with sync bytes at i, i+188 and i+376; -1 if none is decidable yet."""
     stop = len(data) - 2 * PACKET  # candidates must have i + 376 inside data

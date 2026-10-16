@@ -5,6 +5,7 @@ import itertools
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from tests.fixtures.live_source import LIVE_TS, LiveSource, LoopedStream, opens_in, peak_of
@@ -159,6 +160,60 @@ class LiveSourceTests(unittest.TestCase):
             urllib.request.urlopen(self.source.url + ".m3u8", timeout=5)
         self.assertEqual(caught.exception.code, 404)
         caught.exception.close()
+
+
+class HlsTests(unittest.TestCase):
+    """The channel as live HLS (`hls_s`), and as a CDN that packages each segment on its own
+    (`cc_reset`: every PID's continuity counter restarts at 0 in each segment; 2.0.2)."""
+
+    def channel(self, **options):
+        source = LiveSource(hls_s=2.0, **options)
+        self.addCleanup(source.close)
+        with urllib.request.urlopen(source.url, timeout=5) as response:
+            playlist = response.read().decode()
+        names = [line for line in playlist.splitlines() if line and not line.startswith("#")]
+        segments = []
+        for name in names:
+            url = urllib.parse.urljoin(source.url, name)
+            with urllib.request.urlopen(url, timeout=5) as response:
+                segments.append(response.read())
+        return source, playlist, segments
+
+    def test_it_serves_a_live_playlist_of_two_second_segments(self):
+        _, playlist, segments = self.channel()
+        self.assertIn("#EXT-X-TARGETDURATION:2", playlist)
+        self.assertNotIn("#EXT-X-ENDLIST", playlist)
+        self.assertGreaterEqual(len(segments), 3)  # a live window from the start
+        pcrs = [pcr for pid, cc, pcr, pts in _parse(b"".join(segments)) if pcr is not None]
+        self.assertAlmostEqual((pcrs[-1] - pcrs[0]) / CLOCK, 2.0 * len(segments), delta=1.0)
+
+    def test_its_segments_join_into_the_continuous_channel(self):
+        _, _, segments = self.channel()
+        last = {}
+        for pid, cc, _, _ in _parse(b"".join(segments)):
+            if pid in last:
+                self.assertIn(cc, ((last[pid] + 1) & 0x0F, last[pid]))
+            last[pid] = cc
+
+    def test_packaged_on_their_own_each_segment_restarts_every_counter(self):
+        _, _, segments = self.channel(cc_reset=True)
+        for segment in segments:
+            first = {}
+            for pid, cc, _, _ in _parse(segment):
+                first.setdefault(pid, cc)
+            self.assertEqual(set(first.values()), {0}, first)  # PAT and PMT too
+        self.assertIn(0, first)
+
+    def test_a_new_segment_completes_every_two_seconds(self):
+        def newest(playlist):
+            return int(playlist.strip().splitlines()[-1][len("seg") : -len(".ts")])
+
+        source, playlist, _ = self.channel()
+        time.sleep(2.2)
+        with urllib.request.urlopen(source.url, timeout=5) as response:
+            later = response.read().decode()
+        # One segment per 2 s (2.2 s may span two boundaries).
+        self.assertIn(newest(later) - newest(playlist), (1, 2))
 
 
 if __name__ == "__main__":
