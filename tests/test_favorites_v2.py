@@ -47,7 +47,7 @@ class StarsPerProviderTests(unittest.TestCase):
     def test_the_stored_format(self):
         self.config.favorites = ["News"]
         favorites.migrate(self.config)
-        self.assertEqual(self.config.favorites, [{"name": "News", "provider": "*"}])
+        self.assertEqual(self.config.provider_favorites, [{"name": "News", "provider": "*"}])
         favorites.toggle(self.config, self.item("News", "Demo TV"))
         self.assertEqual(
             favorites.entries(self.config),
@@ -63,13 +63,14 @@ class StarsPerProviderTests(unittest.TestCase):
         demo = self.item("News", "Demo TV")
         favorites.toggle(self.config, demo)
         self.assertTrue(favorites.toggle(self.config, demo))
-        self.assertEqual(self.config.favorites, [{"name": "News", "provider": "*"}])
+        self.assertEqual(self.config.provider_favorites, [{"name": "News", "provider": "*"}])
         self.assertTrue(favorites.is_favorite(self.config, demo))
 
     def test_unstarring_a_provider_star_removes_it(self):
         demo = self.item("Sports", "Demo TV")
         favorites.toggle(self.config, demo)
         self.assertFalse(favorites.toggle(self.config, demo))
+        self.assertEqual(self.config.provider_favorites, [])
         self.assertEqual(self.config.favorites, [])
 
     def test_an_unstamped_item_matches_a_star_by_name_at_any_provider(self):
@@ -77,9 +78,19 @@ class StarsPerProviderTests(unittest.TestCase):
         self.assertTrue(favorites.is_favorite(self.config, self.item("Sports")))
         self.assertFalse(favorites.is_favorite(self.config, self.item("News")))
 
-    def test_an_unstamped_toggle_stays_a_bare_name_and_unstars_everywhere(self):
+    def test_favorites_stays_a_list_of_strings_for_older_builds(self):
+        self.config.favorites = ["News", "Film"]
+        favorites.migrate(self.config)
+        self.assertEqual(self.config.favorites, ["News", "Film"])
+        favorites.toggle(self.config, self.item("Sports", "Harbor IPTV"))
+        favorites.toggle(self.config, self.item("News", "Demo TV"))
+        self.assertTrue(all(isinstance(e, str) for e in self.config.favorites))
+        self.assertEqual(self.config.favorites, ["News", "Film", "Sports"])
+
+    def test_an_unstamped_toggle_stars_and_unstars_everywhere(self):
         self.assertTrue(favorites.toggle(self.config, self.item("News")))
         self.assertEqual(self.config.favorites, ["News"])
+        self.assertEqual(self.config.provider_favorites, [{"name": "News", "provider": "*"}])
         self.assertTrue(favorites.is_favorite(self.config, self.item("News", "Demo TV")))
         self.assertFalse(favorites.toggle(self.config, self.item("News")))
         self.assertEqual(self.config.favorites, [])

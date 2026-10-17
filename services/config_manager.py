@@ -321,6 +321,7 @@ class ConfigManager:
     check_updates = _config_property("check_updates", DEFAULT_OPTION_CHECKUPDATE)
     skipped_update_version = _config_property("skipped_update_version", "")
     favorites = _config_property("favorites", [])
+    provider_favorites = _config_property("provider_favorites", None)
     last_watched = _config_property("last_watched", None)
     selected_provider_name = _config_property("selected_provider_name", "iptv-org.github.io")
     channel_epg = _config_property("channel_epg", DEFAULT_OPTION_CHANNEL_EPG)
