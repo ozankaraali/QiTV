@@ -17,10 +17,15 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
-from services.catalog import CatalogService, Group
+from services.catalog import ALL_GROUP_ID, CatalogService, Group
 from services.catalogs import Catalogs
 from services.epg_view import Programme
-from services.provider_ids import provider_of
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    mixed_group_id,
+    provider_of,
+    split_group_id,
+)
 from services.redact import safe_message
 
 logger = logging.getLogger(__name__)
@@ -42,6 +47,8 @@ FORWARDED_SIGNALS = (
 
 # content_version() mixes in how often the source changed: two catalogs count versions apart.
 _EPOCH_SHIFT = 32
+_VERSION_MASK = (1 << _EPOCH_SHIFT) - 1
+_TYPED_PROVIDERS = ("STB", "XTREAM")  # providers with movies and series besides live TV
 
 
 class BrowsedCatalog(QObject):
@@ -78,6 +85,9 @@ class BrowsedCatalog(QObject):
         self._all_key = all_key
         self._attached: dict[str, CatalogService] = {}
         self._epoch = 0
+        # What all mode builds from the providers' lists, kept against their content versions:
+        # ("groups"/"all", section) -> (versions, value). 200,000 channels are joined once.
+        self._memo: dict[tuple[str, str], tuple[tuple, Any]] = {}
         self._seen_source = self.source()
         catalogs.linkReady.connect(self.linkReady)
         catalogs.linkFailed.connect(self.linkFailed)
@@ -87,8 +97,13 @@ class BrowsedCatalog(QObject):
 
     # --- the source ------------------------------------------------------------------
     def source(self) -> str:
-        """The provider this page shows now: its setting if that provider exists, else the
-        first one (as a missing selection always fell back); "" when there are none."""
+        """The provider this page shows now (ALL_PROVIDERS when it mixes every provider)."""
+        return ALL_PROVIDERS if self.all_providers() else self._single_source()
+
+    def _single_source(self) -> str:
+        """The provider this page shows when it shows one: its setting if that provider
+        exists, else the first one (as a missing selection always fell back); "" when there
+        are none. In all mode it is the provider the page returns to."""
         names = self._catalogs.names()
         wanted = str(getattr(self.config, self._source_key, "") or "")
         if not wanted and self._source_key != "selected_provider_name":
@@ -98,13 +113,13 @@ class BrowsedCatalog(QObject):
         return names[0] if names else ""
 
     def all_providers(self) -> bool:
-        """Whether the page mixes every provider (not before 2.1's mixed pages)."""
-        return False
+        """Whether the page mixes every provider."""
+        return bool(getattr(self.config, self._all_key, False))
 
     def catalog_for(self, item: dict) -> CatalogService:
         """The catalog an item came from (an unstamped item belongs to the source); KeyError
         when that provider is no longer in the list."""
-        return self._catalogs.catalog(provider_of(item) or self.source())
+        return self._catalogs.catalog(provider_of(item) or self._single_source())
 
     @property
     def catalogs(self) -> Catalogs:
@@ -112,13 +127,14 @@ class BrowsedCatalog(QObject):
 
     def _for(self, item: dict) -> Optional[CatalogService]:
         """The catalog of an item's provider, None when that provider is gone."""
-        name = provider_of(item) or self.source()
+        name = provider_of(item) or self._single_source()
         if not name or name not in self._catalogs.names():
             return None
         return self._catalogs.catalog(name)
 
     def _cat(self, *, ensure: bool = False) -> Optional[CatalogService]:
-        name = self.source()
+        """The catalog of the single provider (in all mode, the one the page returns to)."""
+        name = self._single_source()
         if not name:
             return None
         if ensure:
@@ -147,20 +163,37 @@ class BrowsedCatalog(QObject):
 
     def _forwarder(self, name: str, signal_name: str) -> Callable[..., None]:
         def forward(*args: Any) -> None:
-            if self.source() == name:
-                getattr(self, signal_name).emit(*args)
+            if self.all_providers():
+                args = self._mixed_args(name, signal_name, args)
+            elif self.source() != name:
+                return
+            getattr(self, signal_name).emit(*args)
 
         return forward
+
+    @staticmethod
+    def _mixed_args(name: str, signal_name: str, args: tuple) -> tuple:
+        """A provider's group ids are mixed ids in a list that mixes providers."""
+        if signal_name in ("groupReady", "groupFailed"):
+            section, group_id, *rest = args
+            if group_id != ALL_GROUP_ID:
+                group_id = mixed_group_id(name, group_id)
+            return (section, group_id, *rest)
+        return args
 
     # --- providers -------------------------------------------------------------------
     def provider_names(self) -> list[str]:
         return self._catalogs.names()
 
     def current_provider(self) -> dict:
+        if self.all_providers():
+            return {"name": ALL_PROVIDERS, "type": "ALL"}
         catalog = self._cat()
         return catalog.current_provider() if catalog is not None else {}
 
     def current_provider_name(self) -> str:
+        if self.all_providers():
+            return ALL_PROVIDERS
         catalog = self._cat()
         return catalog.current_provider_name() if catalog is not None else ""
 
@@ -177,6 +210,8 @@ class BrowsedCatalog(QObject):
         self._catalogs.sign_in_again(name)
 
     def provider_type(self) -> str:
+        if self.all_providers():
+            return "ALL"
         catalog = self._cat()
         return catalog.provider_type() if catalog is not None else ""
 
@@ -185,33 +220,74 @@ class BrowsedCatalog(QObject):
         if source != self._seen_source:
             self._seen_source = source
             self._epoch += 1
+        if self.all_providers():
+            return (self._epoch << _EPOCH_SHIFT) + self._all_version()
         catalog = self._cat()
         return (self._epoch << _EPOCH_SHIFT) + (
             catalog.content_version() if catalog is not None else 0
         )
 
+    def _all_version(self) -> int:
+        """Changes whenever the content of any provider (or the provider list) does."""
+        names = self._catalogs.names()
+        total = len(names) * 1_000_003
+        for name in names:
+            total += self._catalogs.catalog(name).content_version()
+        return total & _VERSION_MASK
+
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
-        """Show `name` (None: the current source) and start its setup."""
+        """Show `name` (None: the current source) and start its setup. ALL_PROVIDERS shows
+        every provider: the lists come from the caches at once, each setup starts beside."""
+        if name == ALL_PROVIDERS:
+            self._select_all(force_refresh)
+            return
         if name is not None:
             if name not in self._catalogs.names():
                 logger.warning("Not a provider in the list: nothing selected")
                 return
+            if self.all_providers():
+                setattr(self.config, self._all_key, False)
+                self._save_choice()
             if name != str(getattr(self.config, self._source_key, "") or ""):
                 setattr(self.config, self._source_key, name)
-                try:
-                    self.config.save_config()
-                except Exception as e:
-                    # The setup still runs; the choice is saved with the next settings write.
-                    logger.warning("Couldn't save the provider choice: %s", safe_message(e))
-        target = self.source()
+                self._save_choice()
+        if self.all_providers():
+            self._select_all(force_refresh)
+            return
+        target = self._single_source()
         if target:
             self._catalogs.select(target, force_refresh=force_refresh)
 
+    def _save_choice(self) -> None:
+        try:
+            self.config.save_config()
+        except Exception as e:
+            # The setup still runs; the choice is saved with the next settings write.
+            logger.warning("Couldn't save the provider choice: %s", safe_message(e))
+
+    def _select_all(self, force_refresh: bool) -> None:
+        if not self.all_providers():
+            setattr(self.config, self._all_key, True)
+            self._save_choice()
+        for name in self._catalogs.names():
+            if force_refresh:
+                self._catalogs.select(name, force_refresh=True)
+            else:
+                self._catalogs.ensure(name)
+        self.providerReady.emit(ALL_PROVIDERS)  # the lists come from the caches
+
     def loading_provider(self) -> Optional[str]:
+        if self.all_providers():
+            for name in self._catalogs.created():
+                if name in self._catalogs.names() and self._catalogs.catalog(name).is_loading():
+                    return name
+            return None
         catalog = self._cat()
         return catalog.loading_provider() if catalog is not None else None
 
     def is_loading(self) -> bool:
+        if self.all_providers():
+            return self.loading_provider() is not None
         catalog = self._cat()
         return catalog.is_loading() if catalog is not None else False
 
@@ -220,35 +296,143 @@ class BrowsedCatalog(QObject):
         self._catalogs.shutdown()
 
     # --- sections and content ------------------------------------------------------------
+    def _sections_of(self, name: str) -> list[str]:
+        """The sections a provider has, from its entry in the list (known before its setup)."""
+        try:
+            kind = str(self._catalogs.provider(name).get("type", "")).upper()
+        except KeyError:
+            return []
+        return ["live", "movies", "series"] if kind in _TYPED_PROVIDERS else ["live"]
+
     def sections(self) -> list[str]:
+        if self.all_providers():
+            names = self._catalogs.names()
+            if not names:
+                return []
+            return (
+                ["live", "movies", "series"]
+                if any(len(self._sections_of(name)) > 1 for name in names)
+                else ["live"]
+            )
         catalog = self._cat()
         return catalog.sections() if catalog is not None else []
 
     def is_live(self, section: str) -> Optional[bool]:
+        if self.all_providers():
+            if section != "live":
+                return False
+            # A playlist's entries may be live or on demand: undecided while one is mixed in.
+            typed = all(len(self._sections_of(n)) > 1 for n in self._catalogs.names())
+            return True if typed else None
         catalog = self._cat()
         return catalog.is_live(section) if catalog is not None else None
 
     def has_content(self, section: str) -> bool:
+        if self.all_providers():
+            return any(
+                self._catalogs.catalog(name).has_content(section) for name in self._having(section)
+            )
         catalog = self._cat()
         return catalog.has_content(section) if catalog is not None else False
 
     def request_section(self, section: str, *, force: bool = False) -> None:
+        if self.all_providers():
+            for name in self._having(section):
+                self._catalogs.ensure(name)
+                self._catalogs.catalog(name).request_section(section, force=force)
+            return
         catalog = self._cat(ensure=True)
         if catalog is not None:
             catalog.request_section(section, force=force)
 
     def groups(self, section: str) -> list[Group]:
+        if self.all_providers():
+            return list(self._mixed_groups(section))
         catalog = self._cat()
         return catalog.groups(section) if catalog is not None else []
 
     def items(self, section: str, group_id: str) -> Optional[list[dict]]:
+        if self.all_providers():
+            return self._mixed_items(section, group_id)
         catalog = self._cat()
         return catalog.items(section, group_id) if catalog is not None else None
 
     def request_group(self, section: str, group_id: str) -> None:
+        if self.all_providers():
+            name, own_id = split_group_id(group_id)
+            if not name or not own_id:
+                # The mixed All, or a provider's heading: its sections as a whole.
+                if not name:
+                    self.request_section(section)
+                elif name in self._having(section):
+                    self._catalogs.ensure(name)
+                    self._catalogs.catalog(name).request_section(section)
+                return
+            if name in self._having(section):
+                self._catalogs.ensure(name)
+                self._catalogs.catalog(name).request_group(section, own_id)
+            return
         catalog = self._cat(ensure=True)
         if catalog is not None:
             catalog.request_group(section, group_id)
+
+    # --- all providers -------------------------------------------------------------------
+    def _having(self, section: str) -> list[str]:
+        """The providers (in Settings order) that have this section."""
+        return [name for name in self._catalogs.names() if section in self._sections_of(name)]
+
+    def _versions(self) -> tuple:
+        return tuple(
+            (name, self._catalogs.catalog(name).content_version())
+            for name in self._catalogs.names()
+        )
+
+    def _mixed_groups(self, section: str) -> list[Group]:
+        versions = self._versions()
+        hit = self._memo.get(("groups", section))
+        if hit is not None and hit[0] == versions:
+            return hit[1]
+        rows: list[Group] = []
+        total, any_all = 0, False
+        for name in self._having(section):
+            rows.append(Group(section, mixed_group_id(name, ""), name, None, name, True))
+            for group in self._catalogs.catalog(name).groups(section):
+                if group.id == ALL_GROUP_ID:
+                    any_all = True
+                    total += group.count or 0
+                    continue
+                rows.append(
+                    Group(section, mixed_group_id(name, group.id), group.title, group.count, name)
+                )
+        if any_all:
+            rows.insert(0, Group(section, ALL_GROUP_ID, "All", total))
+        self._memo[("groups", section)] = (versions, rows)
+        return rows
+
+    def _mixed_items(self, section: str, group_id: str) -> Optional[list[dict]]:
+        """The mixed All is every provider's All in Settings order (one list, built once per
+        change of content: treat it as read-only); a mixed id is that provider's group."""
+        name, own_id = split_group_id(group_id)
+        if name:
+            if not own_id or name not in self._having(section):
+                return None
+            return self._catalogs.catalog(name).items(section, own_id)
+        if group_id != ALL_GROUP_ID:
+            return None
+        versions = self._versions()
+        hit = self._memo.get(("all", section))
+        if hit is not None and hit[0] == versions:
+            return hit[1]
+        joined: list[dict] = []
+        loaded = False
+        for provider in self._having(section):
+            part = self._catalogs.catalog(provider).items(section, ALL_GROUP_ID)
+            if part is not None:
+                loaded = True
+                joined.extend(part)
+        result = joined if loaded else None
+        self._memo[("all", section)] = (versions, result)
+        return result
 
     def seasons(self, series: dict) -> Optional[list[dict]]:
         catalog = self._for(series)
