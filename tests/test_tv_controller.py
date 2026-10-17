@@ -61,6 +61,18 @@ class Clock:
         return self.now
 
 
+class FakeSignal:
+    def __init__(self):
+        self.slots = []
+
+    def connect(self, slot):
+        self.slots.append(slot)
+
+    def emit(self, *args):
+        for slot in list(self.slots):
+            slot(*args)
+
+
 class FakeOwnCatalog:
     """One provider's own catalog behind the hub: its live channels, loaded on request."""
 
@@ -68,6 +80,7 @@ class FakeOwnCatalog:
         self.channels = channels
         self.loaded = False
         self.requests = []
+        self.sectionFailed = FakeSignal()
 
     def has_content(self, section):
         return self.loaded
@@ -1170,6 +1183,24 @@ class StartupTests(ControllerTestCase):
         hub.providerFailed.emit("Harbor IPTV", "Handshake failed")
         self.assertEqual(self.catalog.links, [])
         self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
+
+    def test_a_last_channel_whose_live_section_fails_opens_the_drawer_with_the_error(self):
+        hub = self.start_with_last_of_harbor()
+        hub.ready.add("Harbor IPTV")
+        hub.contentChanged.emit("Harbor IPTV")
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        hub.own["Harbor IPTV"].sectionFailed.emit("live", "Network down")
+        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
+        self.assertEqual(self.toast.messages(), [("Harbor IPTV: Network down", "error")])
+        self.assertEqual(self.catalog.links, [])
+
+    def test_a_last_channel_that_never_arrives_gives_up_and_opens_the_drawer(self):
+        self.start_with_last_of_harbor()
+        self.controller._flow._foreign_timer.setInterval(30)
+        self.controller._flow._foreign_timer.start()
+        self.assertEqual(self.drawer.named("open_drawer"), [])
+        self.assertTrue(wait_until(lambda: len(self.drawer.named("open_drawer")) == 1))
+        self.assertEqual(self.catalog.links, [])
 
     def test_a_last_channel_of_another_provider_waits_for_nothing_else_played(self):
         hub = self.start_with_last_of_harbor()

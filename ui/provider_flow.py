@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QTimer
 
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode
@@ -26,6 +26,9 @@ from services.zapping import ZapContext
 logger = logging.getLogger(__name__)
 
 _PINNED_GROUPS = (FAVORITES_GROUP, RECENT_GROUP)
+
+
+FOREIGN_WAIT_MS = 25_000  # the longest wait for another provider's channels
 
 
 class ProviderFlow(QObject):
@@ -70,6 +73,9 @@ class ProviderFlow(QObject):
         # tuned once that provider's own catalog has its channels.
         self._foreign: Optional[tuple[str, dict]] = None
         self._foreign_asked = False
+        self._foreign_listening: set[str] = set()  # owners whose live failure is heard
+        self._foreign_timer = QTimer(self, singleShot=True, interval=FOREIGN_WAIT_MS)
+        self._foreign_timer.timeout.connect(self._on_foreign_timeout)
 
     def wire(self) -> None:
         catalog = self.catalog
@@ -107,6 +113,7 @@ class ProviderFlow(QObject):
         self._live_on_ready = False
         self._autotune = None
         self._foreign = None
+        self._foreign_timer.stop()
 
     def in_library(self) -> bool:
         """The window shows the Library (from enter_library until the player is back)."""
@@ -120,6 +127,7 @@ class ProviderFlow(QObject):
         """A choice made before the live section loaded comes first."""
         self._autotune = None
         self._foreign = None
+        self._foreign_timer.stop()
 
     def resume_live(self) -> None:
         """Back to live TV from the Library (R5): the last live channel again, else the drawer.
@@ -153,6 +161,7 @@ class ProviderFlow(QObject):
     def shutdown(self) -> None:
         self._autotune = None
         self._foreign = None
+        self._foreign_timer.stop()
         self._loading = False
 
     # ---- hints --------------------------------------------------------------------------------
@@ -204,6 +213,7 @@ class ProviderFlow(QObject):
         )
         self._autotune = last if wanted else None
         self._foreign = None
+        self._foreign_timer.stop()
         if wanted and last is None:
             self._start_foreign(self._foreign_channel(name))
         self._await_live = True
@@ -259,12 +269,16 @@ class ProviderFlow(QObject):
         if foreign is None:
             return False
         self._foreign, self._foreign_asked = foreign, False
+        self._foreign_timer.start()
         self._hub().ensure(foreign[0])
         self._try_foreign()
         return True
 
     def _try_foreign(self, *_args) -> None:
-        if self._foreign is None or self._closed():
+        if self._foreign is None:
+            self._foreign_timer.stop()
+            return
+        if self._closed():
             return
         hub = self._hub()
         owner, item = self._foreign
@@ -274,10 +288,18 @@ class ProviderFlow(QObject):
         if not catalog.has_content("live"):
             if not self._foreign_asked:
                 self._foreign_asked = True
+                if owner not in self._foreign_listening:
+                    self._foreign_listening.add(owner)
+                    catalog.sectionFailed.connect(
+                        lambda section, message, owner=owner: self._on_foreign_section_failed(
+                            owner, section, message
+                        )
+                    )
                 catalog.request_section("live")
             return
         self._foreign = None
-        if self._has_media() or self._in_library:
+        self._foreign_timer.stop()
+        if self._has_media() or self._links_busy() or self._in_library:
             return  # something else was chosen meanwhile
         channels = list(catalog.items("live", ALL_GROUP_ID) or [])
         found = next((c for c in channels if ZapContext.same(c, item)), None)
@@ -289,7 +311,25 @@ class ProviderFlow(QObject):
 
     def _on_foreign_failed(self, name: str, _message: str) -> None:
         if self._foreign is not None and self._foreign[0] == name:
-            self._foreign = None
+            self._give_up_foreign()
+
+    def _on_foreign_section_failed(self, owner: str, section: str, message: str) -> None:
+        if section != "live" or self._foreign is None or self._foreign[0] != owner:
+            return  # not the wait of this owner (a later wait ignores an old failure)
+        if not self._closed():
+            self._error(f"{owner}: {message}")
+        self._give_up_foreign()
+
+    def _on_foreign_timeout(self) -> None:
+        if self._foreign is not None:
+            logger.info("Gave up waiting for the channels of %r", self._foreign[0])
+            self._give_up_foreign()
+
+    def _give_up_foreign(self) -> None:
+        """The last channel's provider can't list it: the drawer, never a black screen."""
+        self._foreign = None
+        self._foreign_timer.stop()
+        if not self._closed():
             self._open_drawer_if_idle()
 
     def _on_provider_failed(self, name: str, message: str) -> None:
