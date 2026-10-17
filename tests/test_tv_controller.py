@@ -952,6 +952,18 @@ class LinkPipelineTests(ControllerTestCase):
         self.ready("http://stream/1")
         self.assertEqual(self.played_urls(), ["http://stream/1"])
 
+    def test_a_tune_waiting_for_its_loading_provider_is_asked_when_that_one_is_ready(self):
+        self.catalog.provider = "@all"
+        self.tune_stamped(HOME_ONE)
+        self.catalog.linkFailed.emit(1, PROVIDER_LOADING_MESSAGE)  # Home is loading
+        self.assertEqual(self.requested(), ["One"])
+        self.catalog.providerReady.emit("Backup")  # another provider: Home's tune waits on
+        self.assertEqual(self.requested(), ["One"])
+        self.catalog.providerReady.emit("Home")
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.ready("http://stream/1")
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+
     def test_provider_refresh_requests_the_pending_tune_again(self):
         self.catalog.providerReady.emit("Home")
         self.tune(0)

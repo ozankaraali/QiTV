@@ -1270,6 +1270,14 @@ class TVController(QObject):
                 self._lanes.take_queued()  # the playing channel was the newest choice
             else:
                 self._request(newest)
+        elif self._lanes.in_flight() is None:
+            # A tune that failed because this provider was loading waits queued for it.
+            queued = self._lanes.queued
+            if queued is not None and self._link_owner(queued.item) == name:
+                if self._is_stay(queued):
+                    self._lanes.take_queued()
+                else:
+                    self._request(queued)
         if self._pip is not None:
             self._pip.provider_settled(name, self._link_owner, ask_again=True)
 
