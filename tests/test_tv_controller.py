@@ -21,11 +21,12 @@ from services.epg_view import Programme
 from services.live.live_session import CRAWLING, UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
-from services.navigation import FAVORITES_GROUP, NavModel, NavNode
+from services.navigation import FAVORITES_GROUP, NavModel, NavNode, item_key
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
 from ui.keymap import Action
+from ui.link_lanes import Target
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import LOADING_TEXT, PROVIDER_ERROR_TEXT, Drawer
@@ -83,6 +84,14 @@ class FakeCatalog(NavCatalog):
 
     def provider_names(self):
         return list(self.names)
+
+    def source(self):
+        return self.provider
+
+    def select_provider(self, name=None, **kwargs):
+        super().select_provider(name, **kwargs)
+        if name in self.names:
+            self.provider = name  # the page shows it from now on
 
     def episodes(self, series, season):
         episodes = self.episode_map.get((series["id"], season["id"]))
@@ -752,6 +761,28 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(kwargs["latency"], "low")
         self.assertEqual(self.zap.context.current(), CHANNELS[1])
         self.assertEqual(self.watch.plays, [("Home", CHANNELS[1], "channel", url, "10")])
+
+    def test_the_list_opens_where_the_big_picture_was_picked(self):
+        self.catalog.select_provider("Backup")
+        self.play(1)
+        self.catalog.select_provider("Home")  # browsing elsewhere
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual([n.key for n in self.nav.path][:3], ["Backup", "live", "10"])
+        self.assertEqual(self.nav.revealed()["name"], "Two")
+        self.assertEqual(self.catalog.provider, "Backup")
+        self.assertEqual(self.drawer.named("open_drawer")[-1], (item_key(CHANNELS[1]),))
+
+    def test_after_a_swap_the_list_follows_the_new_big_picture(self):
+        self.play(0)
+        self.catalog.select_provider("Backup")
+        # What _on_large_changed leaves: the other slot's target is the large one's now.
+        self.controller._current = Target(
+            CHANNELS[1], "live", "Two", group_key="10", source="Backup"
+        )
+        self.catalog.select_provider("Home")
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.nav.path[0].key, "Backup")
+        self.assertEqual(self.nav.revealed()["name"], "Two")
 
     def test_three_tunes_during_one_request_make_two_requests(self):
         self.tune(0)

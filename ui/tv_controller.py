@@ -769,7 +769,16 @@ class TVController(QObject):
             self.zap.tuned(channel)
             return
         title = str(channel.get("name") or "")
-        self._request(Target(channel, "live", title, group_key=group_key, zapped=from_zap))
+        self._request(
+            Target(
+                channel,
+                "live",
+                title,
+                group_key=group_key,
+                source=self.catalog.source(),
+                zapped=from_zap,
+            )
+        )
         self._tuning_since = time.monotonic()
         self._tuning.start(TUNING_KEEP_MS)
 
@@ -1488,8 +1497,18 @@ class TVController(QObject):
         if not self.catalog.provider_names():
             self._flow.welcome()
             return
-        self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
-        channel = self._channel or self.zap.context.current()
+        # Where the big picture's channel was picked (after a swap, the new large one's).
+        shown = self._current if self._current is not None and self._current.live else None
+        if shown is not None:
+            self.nav.reveal(
+                shown.source,
+                "live",
+                shown.group_key or self.zap.context.group_key,
+                shown.item,
+            )
+        else:
+            self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
+        channel = shown.item if shown is not None else self._channel or self.zap.context.current()
         focus = None
         if channel:
             provider = provider_of(channel)

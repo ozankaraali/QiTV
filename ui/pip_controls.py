@@ -254,7 +254,7 @@ class PipControls(QObject):
             return
         title = str(channel.get("name") or "")
         group = context.group_key if context is not None else ""
-        target = Target(channel, "live", title, group_key=group)
+        target = Target(channel, "live", title, group_key=group, source=self.catalog.source())
         self._wanted = (target, context if context is not None else ZapContext())
         self._request(target)
 

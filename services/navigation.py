@@ -124,6 +124,7 @@ class NavModel(QObject):
         self._requested_sections: set[str] = set()  # asked for, neither ready nor failed yet
         self._ready_sections: set[str] = set()
         self._pending_group: Optional[tuple[str, str]] = None
+        self._revealed: Optional[dict] = None  # the row the list opened on (see reveal)
         # children() results, keyed by parent and stamped with what they depend on.
         self._memo: OrderedDict[tuple, tuple[tuple, Any]] = OrderedDict()
         self._events = 0  # bumped by every catalog event handled here, and by retry()
@@ -465,6 +466,7 @@ class NavModel(QObject):
         return True
 
     def reset_to(self, section: str = "live", group_id: Optional[str] = None) -> None:
+        self._revealed = None
         source = self._source()
         section_node = NavNode("section", section, SECTION_TITLES.get(section, section), section)
         self._path = [source, section_node]
@@ -473,6 +475,24 @@ class NavModel(QObject):
         if group_id is not None and not self._resolve_group(section, group_id):
             self._pending_group = (section, group_id)
         self.changed.emit()
+
+    def reveal(self, source: str, section: str, group_key: str, item: dict) -> None:
+        """Open the list where `item` was picked: its source, section and group (the channel
+        list opening at the big picture's channel). A source other than the page's is only
+        shown (navigation: nothing that plays stops); `revealed()` is the row to highlight."""
+        names = self.catalog.provider_names()
+        if source and source != self.catalog.current_provider_name():
+            if source == ALL_PROVIDERS and len(names) < 2:
+                pass  # the providers changed since: keep what the list shows
+            elif source == ALL_PROVIDERS or source in names:
+                self._provider_errors.pop(source, None)
+                self.catalog.select_provider(source)
+        self.reset_to(section, group_key or ALL_GROUP_ID)
+        self._revealed = item
+
+    def revealed(self) -> Optional[dict]:
+        """The item the list was last opened on by reveal(); None after any other reset."""
+        return self._revealed
 
     def _request_section(self, section: str) -> None:
         """Ask for a section; it is loading until sectionReady or sectionFailed."""

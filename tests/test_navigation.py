@@ -131,6 +131,18 @@ class NavModelTests(unittest.TestCase):
         )
         self.nav = NavModel(self.catalog, self.config)
 
+    def test_reveal_opens_the_list_at_the_item_s_source_section_and_group(self):
+        self.catalog.select_provider = lambda name=None, **kw: setattr(
+            self.catalog, "provider", name
+        )
+        item = {"id": 2, "name": "Two"}
+        self.nav.reveal("Backup", "live", "10", item)
+        self.assertEqual(self.catalog.provider, "Backup")
+        self.assertEqual([n.key for n in self.nav.path][:2], ["Backup", "live"])
+        self.assertIs(self.nav.revealed(), item)
+        self.nav.reset_to("live")
+        self.assertIsNone(self.nav.revealed())
+
     def test_root_is_sources_then_the_settings_rows(self):
         rows = self.nav.children(None)
         self.assertEqual(
