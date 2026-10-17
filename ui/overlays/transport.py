@@ -2,10 +2,13 @@
 
 Modes: VOD, plain live (direct play) and time-shift (live through the pipeline). Time-shift shows
 the bar over the buffered range, or, while the session's stay-live mode is LIVE, the stay-live
-latency indicator (it reads "catching up" while stay-live nudges the rate, and "Reconnecting…"
-while the source has stalled). It shows the measured lag: "2.6 s behind source"; under Auto
-latency "7.2 s behind", with "adjusted" once the channel's Auto target moved from its start. The bar and the Go live chip show only when the viewer left live
-(shifted, or a chosen speed); a drag keeps the bar.
+latency indicator (it reads "catching up" while stay-live nudges the rate up, "adding buffer"
+while it nudges it down, and "Reconnecting…" while the source has stalled). It shows the settled
+lag (2.1: in half seconds, changed only once the lag moved for a few seconds): "≈ 2.5 s behind
+source"; under Auto latency "≈ 7 s behind", with "adjusted" once the channel's Auto target moved
+from its start. Its dot is green while stay-live plays at 1x and amber whenever the rate is
+another (0.95x included) or the source stalled. The bar and the Go live chip show only when the
+viewer left live (shifted, or a chosen speed); a drag keeps the bar.
 
 Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
 TV while the window offers picture in picture the second channel (P), then "Open in external
@@ -45,7 +48,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from services.live.stay_live import TARGETS, Mode
+from services.live.stay_live import TARGETS, Mode, SettledLag
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.painting import (
@@ -158,8 +161,10 @@ class _Timeline:
     position: float
     live_edge: float
     lag: float
+    shown: float  # the lag as the Stay live indicator shows it (settled, in half seconds)
     mode: Mode
     rate: float
+    nudge: float  # the rate stay-live's nudge ramps to (1.0: none)
     paused: bool
     target: float
     stalled: bool
@@ -174,8 +179,10 @@ class _Timeline:
             position=float(state["position"]),
             live_edge=float(state["live_edge"]),
             lag=_seconds(float(state["lag"])),
+            shown=SettledLag.rounded(_seconds(float(state.get("shown", state["lag"])))),
             mode=Mode(state["mode"]),
             rate=float(state["rate"]),
+            nudge=float(state.get("nudge", 1.0)),
             paused=bool(state["paused"]),
             target=float(state.get("target", TARGETS["normal"])),
             stalled=bool(state.get("stalled", False)),
@@ -303,11 +310,12 @@ class Transport(Overlay):
         self._ticks = [(float(t), str(label)) for t, label in ticks]
         live = tl.mode is Mode.LIVE
         self._edge = live
-        self._edge_lag = tl.lag
+        self._edge_lag = tl.shown
         self._auto = tl.adjusted if tl.auto else None
         self._stalled = live and tl.stalled
-        self._catching_up = live and tl.rate > 1.0 and not self._stalled
-        self._rate = tl.rate
+        # Steering: any rate but 1x (a nudge's ramp included), slower ones too.
+        self._catching_up = live and (tl.rate != 1.0 or tl.nudge != 1.0) and not self._stalled
+        self._rate = tl.nudge if tl.nudge != 1.0 else tl.rate  # the nudge's, not the ramp's
         self._speed = 1.0 if live else tl.rate  # stay-live's nudges are not a chosen speed
         self._paused = tl.paused
         self.update()
@@ -317,7 +325,7 @@ class Transport(Overlay):
         """Show the live-edge indicator instead of the bar; never changes visibility."""
         self._live = self._timeshift = True
         self._edge = True
-        self._edge_lag = _seconds(lag_s)
+        self._edge_lag = SettledLag.rounded(_seconds(lag_s))
         self._auto = None
         self._catching_up = catching_up
         self._stalled = False
@@ -571,12 +579,16 @@ class Transport(Overlay):
             return ("", "")
         if self._stalled:
             return ("Stay live", "Reconnecting…")
+        lag = f"≈ {self._edge_lag:g} s behind"
         if self._auto is not None:
-            tail = f"{self._edge_lag:.1f} s behind" + (" · adjusted" if self._auto else "")
+            tail = lag + (" · adjusted" if self._auto else "")
         else:
-            tail = f"{self._edge_lag:.1f} s behind source"
+            tail = lag + " source"
         if self._catching_up:
-            tail += " · catching up" + (f" {self._rate:g}×" if self._rate > 1.0 else "")
+            if self._rate < 1.0:
+                tail += f" · adding buffer {self._rate:g}×"
+            else:
+                tail += " · catching up" + (f" {self._rate:g}×" if self._rate > 1.0 else "")
         return ("Stay live", tail)
 
     # ---- geometry -----------------------------------------------------------------------------
@@ -1036,7 +1048,7 @@ class Transport(Overlay):
         p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, head)
         x += fm.horizontalAdvance(head) + un.px(0.6)
         d = un.px(0.8)
-        # Green only on target: amber while catching up or reconnecting.
+        # Green only at 1x: amber while stay-live steers the rate (either way) or reconnecting.
         dot = qcolor(PALETTE.warn if self._catching_up or self._stalled else PALETTE.ok)
         fill_round(p, QRectF(x, box.center().y() - d / 2, d, d), dot, d / 2)
         x += d + un.px(0.6)
