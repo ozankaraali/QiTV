@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 from timer_fixtures import elapse, wait_until
 
 from tests.http_fixtures import LocalSource
@@ -88,6 +89,9 @@ class CornerPlayerTests(WindowCase):
         """A mouse click on a corner control, through the host's window."""
         controls, host = self.window.corner_controls, self.window.host
         self.assertTrue(QTest.qWaitForWindowExposed(host))  # a click before that is dropped
+        # Opening the Library arms the second-click guard: a press within the double-click
+        # interval is the second click of a double-click and reaches nothing.
+        elapse(QApplication.doubleClickInterval() + 150)
         point = controls.mapTo(
             host, self.window.corner_controls.button_rect(name).center().toPoint()
         )

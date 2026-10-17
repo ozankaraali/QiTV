@@ -322,8 +322,9 @@ class FakeColumn(FakeOverlay):
     closed = Signal()
     rowClicked = Signal(int)
 
-    def open(self, title, channels, index):
+    def open(self, title, channels, index, show_provider=False):
         self.record("open", title, channels, index)
+        self.shows_provider = show_provider
         self.visible = True
 
     def highlight(self, index):
@@ -1259,6 +1260,7 @@ class StartupTests(ControllerTestCase):
         self.controller.handle(Action.PREVIOUS)
         self.assertEqual(self.requested(), ["Two", "One", "Two"])
         self.assertEqual(self.catalog.links[-1][1].get("_provider"), None)
+        self.ready("http://stream/2")  # Two is tuned (one tune in flight at a time)
         self.controller.handle(Action.PREVIOUS)  # and forth again
         self.assertEqual(self.catalog.links[-1][1].get("_provider"), "Harbor IPTV")
 
@@ -2008,6 +2010,7 @@ class ReviewFixTests(ControllerTestCase):
         self.catalog.provider = "Backup"
         self.catalog.hub_ready("Backup")
         self.controller.handle(Action.PREVIOUS)
+        self.ready("http://stream/1")  # One is tuned: the next step starts from it
         self.controller.handle(Action.CH_NEXT)
         self.assertEqual(self.requested(), ["One", "Two", "One", "Two"])  # Home's list walks on
 
