@@ -236,8 +236,10 @@ class BrowsedCatalog(QObject):
         return total & _VERSION_MASK
 
     def select_provider(self, name: Optional[str] = None, *, force_refresh: bool = False) -> None:
-        """Show `name` (None: the current source) and start its setup. ALL_PROVIDERS shows
-        every provider: the lists come from the caches at once, each setup starts beside."""
+        """Show `name` (None: the current source). Its setup starts when it has not run (or
+        failed) and `providerReady` follows when it is or becomes ready; nothing that plays
+        is touched. `force_refresh` sets that provider up again. ALL_PROVIDERS shows every
+        provider: the lists come from the caches at once, each setup starts beside."""
         if name == ALL_PROVIDERS:
             self._select_all(force_refresh)
             return
@@ -255,8 +257,16 @@ class BrowsedCatalog(QObject):
             self._select_all(force_refresh)
             return
         target = self._single_source()
-        if target:
-            self._catalogs.select(target, force_refresh=force_refresh)
+        if not target:
+            return
+        if force_refresh:
+            self._catalogs.select(target, force_refresh=True)
+            return
+        # Choosing a provider only moves what the page shows: its catalog is set up once
+        # (never again while it is ready) and no other catalog is touched.
+        self._catalogs.ensure(target)
+        if self._catalogs.is_ready(target):
+            self.providerReady.emit(target)  # its lists come from its cache at once
 
     def _save_choice(self) -> None:
         try:
