@@ -108,7 +108,8 @@ class TVPages(QObject):
         self._show_page(window.library_page)
 
     def open_library(self, section: str) -> None:
-        """Movies or Series: live playback stops first (R5).
+        """Movies or Series: what plays goes on in a corner of the Library (nothing playing: the
+        Library has the whole window).
 
         From the channel list's Movies and Series rows the Library shows at once, so a
         double-click's second click reaches nothing (see back_to_library). Keys and the menu
