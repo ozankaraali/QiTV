@@ -6,11 +6,12 @@ import time
 import unittest
 
 from PySide6.QtCore import QModelIndex, QObject, QPoint, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QFontMetricsF, QImage, QPainter, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem, QWidget
 from timer_fixtures import elapse, timeline, wait_until
 
+from services.provider_ids import PROVIDER_KEY
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import (
@@ -18,6 +19,8 @@ from ui.overlays.channel_rows import (
     ChannelRowDelegate,
     ChannelRowsModel,
     number_column_width,
+    tag_font,
+    tag_layout,
 )
 from ui.overlays.painting import Units
 
@@ -193,6 +196,88 @@ class DelegateTests(unittest.TestCase):
         self.assertEqual(ChannelRowDelegate(2.0).sizeHint(option, QModelIndex()).height(), 264)
 
 
+def tagged(n=1, long_name=False):
+    rows = items(n)
+    for row in rows:
+        row[PROVIDER_KEY] = "Harbor IPTV"
+        if long_name:
+            row["name"] = "A channel with a very long name that goes on and on and on " * 3
+    return rows
+
+
+class ProviderTagTests(unittest.TestCase):
+    """A channel in a list that mixes providers shows its provider's name after its own."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_the_model_names_the_provider_only_when_asked(self):
+        model = ChannelRowsModel(None, now_provider)
+        model.set_channels(tagged(2))
+        self.assertEqual(model.index(0).data(ChannelRowsModel.ProviderRole), "")
+        model.set_channels(tagged(2), show_provider=True)
+        self.assertEqual(model.index(1).data(ChannelRowsModel.ProviderRole), "Harbor IPTV")
+        model.set_channels(items(2), show_provider=True)  # not stamped: nothing to name
+        self.assertEqual(model.index(0).data(ChannelRowsModel.ProviderRole), "")
+
+    def test_the_name_and_the_tag_never_overlap_and_fit_the_row(self):
+        for window in (640, 1280, 2560):
+            units = Units(window)
+            name_font, chip_font = units.font(1.6), tag_font(units)
+            for name in ("BBC", "A channel with a very long name " * 4):
+                for tag in ("Demo TV", "A provider with a rather long name"):
+                    for width in (60.0, 200.0, 500.0):
+                        name_w, dx, chip_w = tag_layout(
+                            units, name_font, chip_font, name, tag, width
+                        )
+                        self.assertGreaterEqual(name_w, 0)
+                        self.assertGreaterEqual(dx, name_w)  # the tag starts after the name
+                        self.assertLessEqual(dx + chip_w, width + 1e-6)  # inside the row
+                        self.assertLessEqual(chip_w, width + 1e-6)
+
+    def test_the_name_elides_before_the_tag_does(self):
+        units = Units(1280)
+        name_font, chip_font = units.font(1.6), tag_font(units)
+        tag = "Harbor IPTV"
+        full = QFontMetricsF(chip_font).horizontalAdvance(tag)
+        name = "A channel with a very long name " * 4
+        name_w, _dx, chip_w = tag_layout(units, name_font, chip_font, name, tag, 400.0)
+        self.assertLess(name_w, QFontMetricsF(name_font).horizontalAdvance(name))  # elided
+        self.assertGreaterEqual(chip_w, full)  # the tag keeps its whole name
+        # A short name takes its own width, so the tag follows right after it.
+        short_w, dx, _ = tag_layout(units, name_font, chip_font, "BBC", tag, 400.0)
+        self.assertGreaterEqual(short_w, QFontMetricsF(name_font).horizontalAdvance("BBC"))
+        self.assertAlmostEqual(dx - short_w, 0.8 * units.u)  # a gap, not a column
+
+    def render(self, rows, show_provider):
+        view = ChannelListView()
+        view.units_width = 1000
+        model = ChannelRowsModel(None, now_provider)
+        model.set_channels(rows, show_provider=show_provider)
+        option = QStyleOptionViewItem()
+        option.rect = QRect(0, 0, 600, 66)
+        option.widget = view
+        image = QImage(600, 66, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor("black"))
+        painter = QPainter(image)
+        ChannelRowDelegate(1.0, view).paint(painter, option, model.index(0))
+        painter.end()
+        view.deleteLater()
+        return image
+
+    def test_a_tagged_row_paints_the_tag_and_an_untagged_one_does_not(self):
+        plain = self.render(tagged(), False)
+        with_tag = self.render(tagged(), True)
+        self.assertNotEqual(plain, with_tag)
+        self.assertEqual(plain, self.render(items(1), True))  # nothing to name: as before
+
+    def test_a_very_long_name_still_paints_with_its_tag(self):
+        self.assertNotEqual(
+            self.render(tagged(long_name=True), False), self.render(tagged(long_name=True), True)
+        )
+
+
 class RowFocusTests(unittest.TestCase):
     """Live rows dim their highlight when their column is not focused (as the other rows)."""
 
@@ -237,6 +322,14 @@ class ColumnTests(unittest.TestCase):
         host.resize(1280, 720)
         col = ChannelColumn(FakeLogos(), now_provider, parent=host, idle_ms=idle_ms)
         return host, col
+
+    def test_the_fast_zap_column_shows_the_tags_when_asked(self):
+        host, column = self.make()
+        self.addCleanup(host.deleteLater)
+        column.open("All", tagged(3), 0, show_provider=True)
+        self.assertEqual(column._model.index(2).data(ChannelRowsModel.ProviderRole), "Harbor IPTV")
+        column.open("News", tagged(3), 0)
+        self.assertEqual(column._model.index(2).data(ChannelRowsModel.ProviderRole), "")
 
     def test_open_highlight_close(self):
         host, col = self.make(idle_ms=60)

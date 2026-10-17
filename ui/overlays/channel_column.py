@@ -51,10 +51,14 @@ class ChannelColumn(Overlay):
 
     # ---- public API -------------------------------------------------------------------------
 
-    def open(self, title: str, channels: list[dict], index: int) -> None:
+    def open(
+        self, title: str, channels: list[dict], index: int, show_provider: bool = False
+    ) -> None:
+        """Show `channels`, each with its provider's name when `show_provider` (a list that
+        mixes providers)."""
         self._title = title
         self._hovering, self._pointer = False, None
-        self._model.set_channels(channels)
+        self._model.set_channels(channels, None, show_provider)
         self._relayout()
         self.show()
         self.raise_()

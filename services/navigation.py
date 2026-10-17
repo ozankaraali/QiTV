@@ -15,7 +15,14 @@ from typing import Any, Callable, Optional, cast
 from PySide6.QtCore import QObject, Signal
 
 from services import favorites
-from services.catalog import PROVIDER_LOADING_MESSAGE
+from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    ALL_PROVIDERS_TITLE,
+    provider_of,
+    split_group_id,
+    with_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +46,20 @@ class NavNode:
     payload: Any = None
     count: Optional[int] = None
 
-    def __hash__(self):  # payload dicts are unhashable; identity is layer + key
-        return hash((self.layer, self.key))
+    def _identity(self) -> tuple:
+        # Payload dicts are unhashable: identity is layer + key, and for a channel or title
+        # its provider (the same id at two providers is two rows in a mixed list).
+        return (
+            self.layer,
+            self.key,
+            provider_of(self.payload) if isinstance(self.payload, dict) else "",
+        )
+
+    def __hash__(self):
+        return hash(self._identity())
 
     def __eq__(self, other):
-        return isinstance(other, NavNode) and (self.layer, self.key) == (other.layer, other.key)
+        return isinstance(other, NavNode) and self._identity() == other._identity()
 
 
 ACTION_ROWS = (  # the drawer paints their icons (a gear, a plus, a file)
@@ -129,7 +145,11 @@ class NavModel(QObject):
     # --- structure ---------------------------------------------------------------------
     def _source(self) -> NavNode:
         name = self.catalog.current_provider_name()
-        return NavNode("source", name, name, name)
+        return NavNode("source", name, ALL_PROVIDERS_TITLE if name == ALL_PROVIDERS else name, name)
+
+    def all_mode(self) -> bool:
+        """Whether the channel list shows every provider (the "All providers" source)."""
+        return self.catalog.current_provider_name() == ALL_PROVIDERS
 
     def section_of(self, node: Optional[NavNode] = None) -> Optional[str]:
         chain = self._path if node is None else self._path + [node]
@@ -142,7 +162,12 @@ class NavModel(QObject):
         self, parent: Optional[NavNode]
     ) -> Optional[list[NavNode]]:
         if parent is None:
-            sources = [NavNode("source", n, n, n) for n in self.catalog.provider_names()]
+            names = self.catalog.provider_names()
+            sources = [NavNode("source", n, n, n) for n in names]
+            if len(names) >= 2:  # one provider has nothing to mix
+                sources.insert(
+                    0, NavNode("source", ALL_PROVIDERS, ALL_PROVIDERS_TITLE, ALL_PROVIDERS)
+                )
             return sources + list(ACTION_ROWS)
         if parent.layer == "source":
             return [
@@ -173,7 +198,12 @@ class NavModel(QObject):
             return []
         pinned = self._pinned_groups() if parent.key == "live" else []
         groups = [
-            NavNode("group", g.id, g.title, g, g.count) for g in self.catalog.groups(parent.key)
+            (
+                NavNode("header", g.id, g.title, g)  # a provider's heading: never opened
+                if g.header
+                else NavNode("group", g.id, g.title, g, g.count)
+            )
+            for g in self.catalog.groups(parent.key)
         ]
         return pinned + groups
 
@@ -262,7 +292,7 @@ class NavModel(QObject):
             return ("section", node.key)
         if node.layer == "group":
             section = self.section_of(node) or "live"
-            if self.catalog.provider_type() == "STB":
+            if self._group_is_fetched_alone(node.key):
                 return ("group", section, node.key)
             return ("section", section)
         if node.layer == "item":
@@ -271,6 +301,19 @@ class NavModel(QObject):
             series = next((n for n in reversed(self._path) if n.layer == "item"), None)
             return ("episodes", series.key, node.key) if series else None
         return None
+
+    def _group_is_fetched_alone(self, group_id: str) -> bool:
+        """Whether a group's items are fetched on their own (an STB provider's), not with
+        the whole section; in "All providers" the group's id names its provider."""
+        if self.catalog.provider_type() != "ALL":
+            return self.catalog.provider_type() == "STB"
+        name, own_id = split_group_id(group_id)
+        if not name or not own_id:
+            return False  # the mixed All, or a provider's heading: the sections as a whole
+        try:
+            return self.catalog.provider(name).get("type") == "STB"
+        except KeyError:
+            return False
 
     def load_error(self, node: NavNode) -> Optional[str]:
         """Why `node`'s children failed to load; None while they may still come."""
@@ -314,10 +357,13 @@ class NavModel(QObject):
         self.changed.emit()
 
     def _all_live_items(self) -> list[dict]:
+        """Every live channel once; the same id at two providers is two channels."""
         seen, result = set(), []
         for group in self.catalog.groups("live"):
+            if group.header:
+                continue
             for item in self.catalog.items("live", group.id) or []:
-                key = item_key(item)
+                key = (provider_of(item), item_key(item))
                 if key not in seen:
                     seen.add(key)
                     result.append(item)
@@ -329,7 +375,7 @@ class NavModel(QObject):
         return cast(list[dict], self._cached(("@favorites",), deps, self._compute_favorites))
 
     def _recent_items(self) -> list[dict]:
-        deps = (self._history_fingerprint(), self.catalog.current_provider_name())
+        deps = (self._history_fingerprint(), tuple(self.catalog.provider_names()))
         return cast(list[dict], self._cached(("@recent",), deps, self._compute_recent))
 
     def _compute_favorites(self) -> list[dict]:
@@ -339,16 +385,19 @@ class NavModel(QObject):
         return [i for i in self._all_live_items() if is_kept(i)]
 
     def _compute_recent(self) -> list[dict]:
-        provider = self.catalog.current_provider_name()
+        # What was watched at any provider in the list, newest first (a removed provider's
+        # entries can no longer play).
+        known = set(self.catalog.provider_names())
         seen, result = set(), []
         for entry in self.config.watch_history or []:
-            if entry.get("provider_name") != provider or entry.get("item_type") != "channel":
+            provider = entry.get("provider_name")
+            if provider not in known or entry.get("item_type") != "channel":
                 continue
             item = entry.get("item_data") or {}
-            key = item_key(item)
+            key = (provider, item_key(item))
             if key not in seen:
                 seen.add(key)
-                result.append(item)
+                result.append(with_provider(item, provider) if len(known) > 1 else item)
             if len(result) >= _RECENT_LIMIT:
                 break
         return result
@@ -367,6 +416,15 @@ class NavModel(QObject):
             pinned.append(NavNode("group", RECENT_GROUP, "⟲ Recent", None, len(recent)))
         return pinned
 
+    def shows_provider(self, parent: Optional[NavNode]) -> bool:
+        """Whether the channels under `parent` name their provider: ★ Favorites and
+        ⟲ Recent when there are several providers, and All in "All providers"."""
+        if parent is None or parent.layer != "group" or len(self.catalog.provider_names()) < 2:
+            return False
+        if parent.key in (FAVORITES_GROUP, RECENT_GROUP):
+            return True
+        return parent.key == ALL_GROUP_ID and self.all_mode()
+
     # --- movement ----------------------------------------------------------------------
     def is_playable(self, node: NavNode) -> bool:
         if node.layer == "episode":
@@ -374,6 +432,8 @@ class NavModel(QObject):
         return node.layer == "item" and self.section_of(node) in ("live", "movies")
 
     def open(self, node: NavNode) -> None:
+        if node.layer == "header":
+            return  # a provider's heading in the mixed lists only labels its groups
         if node.layer == "source":
             # Another provider is only shown (its setup runs once, if it has not); the
             # current one is set up again when its last setup failed. A ready provider
@@ -381,7 +441,7 @@ class NavModel(QObject):
             self._path = [node]
             if self.needs_setup(node) or node.key != self.catalog.current_provider_name():
                 self._provider_errors.pop(node.key, None)
-                self.providerRequested.emit(node.key)
+                self.providerRequested.emit(node.title)
                 self.catalog.select_provider(node.key)
         else:
             depth = {"section": 1, "group": 2, "item": 3, "season": 4, "episode": 5}[node.layer]

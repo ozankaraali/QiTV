@@ -1267,7 +1267,10 @@ class TVController(QObject):
             self.overlays.banner.dismiss()
             context = self.zap.context
             column.open(
-                self._group_title(context.group_key), context.channels, context.current_index
+                self._group_title(context.group_key),
+                context.channels,
+                context.current_index,
+                self.nav.shows_provider(NavNode("group", context.group_key, "")),
             )
         else:
             column.close()

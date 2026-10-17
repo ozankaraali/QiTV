@@ -173,6 +173,11 @@ def _leaves_drawer(node: NavNode) -> bool:
     return node.layer == "action" or (node.layer == "section" and node.key in LIBRARY_SECTIONS)
 
 
+def _selectable(node: NavNode) -> bool:
+    """Whether a row can hold the highlight: a provider's heading cannot."""
+    return node.layer != "header"
+
+
 def _is_live_item(nav: NavModel, node: NavNode) -> bool:
     return node.layer == "item" and nav.section_of(node) == "live"
 
@@ -193,14 +198,19 @@ def _numbers(group: list[NavNode], shown: list[NavNode]) -> list[str | None]:
     return [position.get(node) for node in shown]
 
 
-def _shown_rows(nodes: list[NavNode], live: bool, numbers: list[str | None] | None) -> tuple:
+def _shown_rows(
+    nodes: list[NavNode],
+    live: bool,
+    numbers: list[str | None] | None,
+    tagged: bool = False,
+) -> tuple:
     """What a column's list shows for `nodes`: equal values show the same rows.
 
     A row shows its node's title, count and icon, and a live channel its item (by identity:
     a refreshed catalog brings new item dicts) and number.
     """
     rows = tuple((n.layer, n.key, n.title, n.count, id(n.payload)) for n in nodes)
-    return (live, rows, tuple(numbers) if numbers is not None else None)
+    return (live, rows, tuple(numbers) if numbers is not None else None, tagged)
 
 
 class _NodeModel(ChannelRowsModel):
@@ -211,13 +221,17 @@ class _NodeModel(ChannelRowsModel):
         self._nodes: list[NavNode] = []
 
     def set_nodes(
-        self, nodes: list[NavNode], live: bool, numbers: list[str | None] | None = None
+        self,
+        nodes: list[NavNode],
+        live: bool,
+        numbers: list[str | None] | None = None,
+        tagged: bool = False,
     ) -> None:
         self._nodes = list(nodes)
         rows = [
             n.payload if live and isinstance(n.payload, dict) else {"name": n.title} for n in nodes
         ]
-        self.set_channels(rows, numbers if live else [None] * len(rows))
+        self.set_channels(rows, numbers if live else [None] * len(rows), tagged and live)
 
     def data(self, index, role=Qt.DisplayRole):
         row = index.row()
@@ -248,7 +262,21 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         rect = QRectF(option.rect)
         selected = bool(option.state & QStyle.State_Selected)
         focused = column_focused(option.widget)
+        node = index.data(NodeRole)
         p.save()
+        if isinstance(node, NavNode) and node.layer == "header":
+            # A provider's heading: small, quiet, with a rule; it is never highlighted.
+            p.setFont(units.font(1.1, QFont.Weight.DemiBold))
+            p.setPen(qcolor(PALETTE.text, 0.5))
+            left = rect.x() + 1.2 * u
+            width = max(0.0, rect.right() - 1.2 * u - left)
+            p.drawText(
+                QRectF(left, rect.y(), width, rect.height()),
+                Qt.AlignLeft | Qt.AlignBottom,
+                elided(p, str(index.data(Qt.DisplayRole) or "").upper(), width),
+            )
+            p.restore()
+            return
         if selected:
             box = rect.adjusted(0.3 * u, 0.2 * u, -0.3 * u, -0.2 * u)
             fill_round(
@@ -390,7 +418,22 @@ class Drawer(Overlay):
             return
         self._pending_key = None
         row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))  # type: ignore[arg-type]
-        self._select(col, min(len(col.nodes) - 1, max(0, row + delta)))
+        target = self._selectable_row(col, min(len(col.nodes) - 1, max(0, row + delta)), delta)
+        if target is not None:
+            self._select(col, target)
+
+    @staticmethod
+    def _selectable_row(col: _Column, row: int, delta: int) -> int | None:
+        """`row`, or the nearest row that can hold the highlight: onward in the direction
+        of `delta`, else back (Up/Down step over a provider's heading); None if there is none."""
+        step = 1 if delta > 0 else -1
+        for direction in (step, -step):
+            at = row
+            while 0 <= at < len(col.nodes):
+                if _selectable(col.nodes[at]):
+                    return at
+                at += direction
+        return None
 
     def page(self, delta: int) -> None:
         col = self._columns[self.focus_side]
@@ -562,8 +605,8 @@ class Drawer(Overlay):
 
     def _on_row_clicked(self, side: str, row: int) -> None:
         col = self._columns[side]
-        if not 0 <= row < len(col.nodes):
-            return
+        if not 0 <= row < len(col.nodes) or not _selectable(col.nodes[row]):
+            return  # a heading does nothing
         if side != self.focus_side:
             self.focus_side = side
             self._refresh()
@@ -632,20 +675,21 @@ class Drawer(Overlay):
             col.message = None
         nodes = children or []
         if col.side == self.focus_side and needle:
-            nodes = [n for n in nodes if needle in fold(n.title)]
+            nodes = [n for n in nodes if _selectable(n) and needle in fold(n.title)]
         if col.message is None and not nodes:
             col.message = EMPTY_TEXT
         live = bool(nodes) and _is_live_item(self._nav, nodes[0])
         numbers = _numbers(children or [], nodes) if live else None
         # The same rows again (e.g. the section reported ready once more): the list keeps its
         # model, so it is neither laid out nor repainted from scratch.
-        shown = _shown_rows(nodes, live, numbers)
+        tagged = live and self._nav.shows_provider(parent)
+        shown = _shown_rows(nodes, live, numbers, tagged)
         if shown != col.shown:
             col.shown = shown
             col.nodes = nodes
             col.rows = {n: i for i, n in enumerate(nodes)}
             col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
-            col.model.set_nodes(nodes, live, numbers)
+            col.model.set_nodes(nodes, live, numbers, tagged)
         else:
             col.model.refresh_now()  # a refresh still looks "now" up again (the EPG loaded)
         if col.side == "left":
@@ -660,7 +704,7 @@ class Drawer(Overlay):
                     col.current = match
                     matched = True
             if not matched and (parent_changed or col.current not in col.rows):
-                col.current = nodes[0] if nodes else None
+                col.current = next((n for n in nodes if _selectable(n)), None)
             if children is not None:
                 self._pending_key = None  # a stale focus key must not outlive the first fill
         self._show_current(col)
