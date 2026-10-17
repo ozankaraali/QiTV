@@ -65,6 +65,7 @@ from services.epg_view import Programme, now_next
 from services.live.live_session import LiveSession
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
 from services.next_episode import play_context
+from services.provider_ids import provider_of
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot
 from services.vlc_profile import classify
@@ -1489,7 +1490,11 @@ class TVController(QObject):
             return
         self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
         channel = self._channel or self.zap.context.current()
-        self.overlays.drawer.open_drawer(focus_key=item_key(channel) if channel else None)
+        focus = None
+        if channel:
+            provider = provider_of(channel)
+            focus = (provider, item_key(channel)) if provider else item_key(channel)
+        self.overlays.drawer.open_drawer(focus_key=focus)
 
     def _open_guide(self) -> None:
         """The guide over live TV: the zap group's channels, on the one tuned last."""
