@@ -815,17 +815,27 @@ class TVController(QObject):
         self.tune(node.payload, group_key=parent.key, channels=channels)
         self.overlays.drawer.close_drawer()
 
-    def play_vod(self, item: dict, kind: str, context: Optional[dict] = None) -> None:
+    def play_vod(
+        self,
+        item: dict,
+        kind: str,
+        context: Optional[dict] = None,
+        *,
+        from_library: Optional[bool] = None,
+    ) -> None:
         """Play a movie or an episode where it stopped (the drawer and the Library).
 
         `kind` is "movie" or "episode". `context` is the Library's play context: start_over
         plays from the start; an episode's series and season, or a movie's genre_items, give
         Next and autoplay what follows. Its link is the tune slot's, and it opens once what
-        plays now (a live channel too) is released.
+        plays now (a live channel too) is released. `from_library` says the title was chosen in
+        the Library: TVPages knows it before it switches pages (which ends the flow's Library
+        state); None reads the flow.
         """
         if self._closed:
             return
-        from_library = self._flow.in_library()
+        if from_library is None:
+            from_library = self._flow.in_library()
         self._flow.leave_library()
         context = play_context(context)
         episode = kind == "episode"

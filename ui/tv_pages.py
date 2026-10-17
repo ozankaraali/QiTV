@@ -151,9 +151,10 @@ class TVPages(QObject):
         window = self._window
         if window.closing():
             return
+        from_library = self.library_shown()  # the page switch ends the controller's Library state
         self._show_page(window.player_page)
         self._set_return_to_library(True)
-        window.controller.play_vod(item, kind, context)
+        window.controller.play_vod(item, kind, context, from_library=from_library)
 
     def tune_live(self, channel: dict) -> None:
         """A live channel from the Library's search."""
