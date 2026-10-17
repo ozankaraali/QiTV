@@ -626,8 +626,9 @@ class TVController(QObject):
             else:
                 self._open_drawer()
         elif action is Action.OPEN_DRAWER:
+            from_column = self.overlays.column.isVisible()
             self.overlays.column.close()
-            self._open_drawer()
+            self._open_drawer(from_column=from_column)
         elif action in (Action.SEEK_BACK, Action.SEEK_FWD):
             back = action is Action.SEEK_BACK
             if not self._live_controls.seek_live(back):
@@ -1609,7 +1610,7 @@ class TVController(QObject):
         if banner.isVisible() and banner.info is not None and banner.info.logo is None:
             banner.show_info(self.banner_info(channel))
 
-    def _open_drawer(self) -> None:
+    def _open_drawer(self, from_column: bool = False) -> None:
         if not self.catalog.provider_names():
             self._flow.welcome()
             return
@@ -1617,7 +1618,7 @@ class TVController(QObject):
         # the fast-zap column is open the user is choosing in it, so the list opens at the zap's
         # own channel and group, as before 2.1.
         shown = self._current if self._current is not None and self._current.live else None
-        if self.overlays.column.isVisible():
+        if from_column or self.overlays.column.isVisible():
             shown = None
         if shown is not None:
             self.nav.reveal(
