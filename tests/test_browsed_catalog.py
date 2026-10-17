@@ -1,6 +1,7 @@
 import logging
 import os
 import tempfile
+import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -8,13 +9,21 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 from mixed_fixtures import DEMO, HARBOR, live_content, mixed_config
+import orjson
+from test_catalog_service import FakeWorker
 from test_catalogs import RecordingFactory
 
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
 from services.catalogs import Catalogs
 from services.jobs import ImmediateRunner
-from services.provider_ids import provider_of, with_provider
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    mixed_group_id,
+    provider_of,
+    split_group_id,
+    with_provider,
+)
 from services.provider_manager import ProviderManager
 
 
@@ -31,6 +40,45 @@ class Progress:
         pass
 
 
+def demo_content() -> dict:
+    """24 channels in two groups of 12."""
+    return live_content(
+        [f"Demo {n}" for n in range(24)], {"News": list(range(12)), "Sports": list(range(12, 24))}
+    )
+
+
+def harbor_content() -> dict:
+    """69 channels: group 41 ("TR: Haber") has 41 of them, group 42 ("UK: News") 28."""
+    content = live_content(
+        [f"Harbor {n}" for n in range(69)], {"41": list(range(41)), "42": list(range(41, 69))}
+    )
+    titles = {"41": "TR: Haber", "42": "UK: News"}
+    for category in content["categories"]:
+        category["title"] = titles.get(category["id"], category["title"])
+    return content
+
+
+class ScriptedFactory(RecordingFactory):
+    """The real setups; a provider named in `fail_setup` loads its cache, then fails."""
+
+    def __init__(self):
+        super().__init__()
+        self.failures = {}
+
+    def fail_setup(self, name, message):
+        self.failures[name] = message
+
+    def provider_setup(self, provider_manager, force_refresh):
+        name = provider_manager._pinned_provider
+        message = self.failures.get(name)
+        if message is None:
+            return super().provider_setup(provider_manager, force_refresh)
+        self.setups.append(name)
+        return FakeWorker(
+            fail=message, on_run=lambda: provider_manager.set_current_provider(Progress())
+        )
+
+
 class BrowsedCatalogTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -43,12 +91,12 @@ class BrowsedCatalogTests(unittest.TestCase):
             directory.name,
             [DEMO, HARBOR],
             {
-                "Demo TV": live_content(["One", "Two"], {"News": [0, 1]}),
-                "Harbor IPTV": live_content(["Four"], {"News": [0]}),
+                "Demo TV": demo_content(),
+                "Harbor IPTV": harbor_content(),
             },
         )
         self.addCleanup(self.registry._cache_writer.shutdown, wait=True)
-        self.factory = RecordingFactory()
+        self.factory = ScriptedFactory()
         self.catalogs = Catalogs(
             self.config,
             self.registry,
@@ -59,13 +107,34 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.addCleanup(self.catalogs.shutdown)
 
     def view(self, source="Demo TV"):
-        self.config.selected_provider_name = source
-        return BrowsedCatalog(
+        """A TV page showing `source` (ALL_PROVIDERS: every provider, set up from the caches)."""
+        self.config.selected_provider_name = "Demo TV" if source == ALL_PROVIDERS else source
+        view = BrowsedCatalog(
             self.catalogs,
             self.config,
             source_key="selected_provider_name",
             all_key="tv_all_providers",
         )
+        if source == ALL_PROVIDERS:
+            view.select_provider(ALL_PROVIDERS)
+        return view
+
+    def remove_cache(self, name):
+        os.remove(self.registry._provider_cache_name(name))
+
+    def finish_setup(self, name, content):
+        """The provider's content arrives (its cache is written) and its setup runs again."""
+        provider = self.catalogs.provider(name)
+        cache = {
+            "itv": content,
+            "_cache": {
+                "identity": self.registry.provider_cache_identity(provider),
+                "refreshed_at": {"itv": time.time()},
+            },
+        }
+        with open(self.registry._provider_cache_name(name), "wb") as f:
+            f.write(orjson.dumps(cache))
+        self.catalogs.select(name)
 
     def library_view(self):
         return BrowsedCatalog(
@@ -181,8 +250,140 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertIsNone(view.seasons(gone))
         view.request_seasons(gone)
 
-    def test_it_does_not_mix_yet(self):
+    def test_a_page_shows_one_provider_until_it_chooses_all(self):
         self.assertFalse(self.view("Demo TV").all_providers())
+
+    def test_all_providers_lists_each_providers_groups_under_its_name(self):
+        view = self.view(ALL_PROVIDERS)
+        groups = view.groups("live")
+        self.assertEqual(
+            [(g.title, g.header) for g in groups],
+            [
+                ("All", False),
+                ("Demo TV", True),
+                ("News", False),
+                ("Sports", False),
+                ("Harbor IPTV", True),
+                ("TR: Haber", False),
+                ("UK: News", False),
+            ],
+        )
+        self.assertEqual(split_group_id(groups[5].id), ("Harbor IPTV", "41"))
+        self.assertEqual(groups[0].id, ALL_GROUP_ID)
+        self.assertEqual(groups[0].count, 93)
+        self.assertEqual([g.provider for g in groups[1:3]], ["Demo TV", "Demo TV"])
+
+    def test_the_mixed_all_is_every_provider_in_settings_order(self):
+        items = self.view(ALL_PROVIDERS).items("live", ALL_GROUP_ID)
+        self.assertEqual([provider_of(i) for i in items], ["Demo TV"] * 24 + ["Harbor IPTV"] * 69)
+
+    def test_a_mixed_group_is_that_providers_group(self):
+        view = self.view(ALL_PROVIDERS)
+        items = view.items("live", mixed_group_id("Harbor IPTV", "42"))
+        self.assertEqual(len(items), 28)
+        self.assertEqual({provider_of(i) for i in items}, {"Harbor IPTV"})
+        self.assertIsNone(view.items("live", mixed_group_id("Harbor IPTV", "")))
+        self.assertIsNone(view.items("live", mixed_group_id("Gone", "42")))
+
+    def test_the_mixed_lists_are_built_once_per_change(self):
+        view = self.view(ALL_PROVIDERS)
+        self.assertIs(view.items("live", ALL_GROUP_ID), view.items("live", ALL_GROUP_ID))
+        self.assertEqual(view.groups("live"), view.groups("live"))
+        first = view.items("live", ALL_GROUP_ID)
+        self.finish_setup("Demo TV", live_content(["Only"], {"News": [0]}))
+        second = view.items("live", ALL_GROUP_ID)
+        self.assertIsNot(second, first)
+        self.assertEqual(len(second), 1 + 69)
+
+    def test_all_providers_mode_is_the_pages_setting(self):
+        view = self.view(ALL_PROVIDERS)
+        self.assertTrue(self.config.tv_all_providers)
+        self.assertEqual(self.config.selected_provider_name, "Demo TV")  # the single one stays
+        self.assertTrue(view.all_providers())
+        self.assertEqual(view.source(), ALL_PROVIDERS)
+        self.assertEqual(view.current_provider_name(), ALL_PROVIDERS)
+        self.assertEqual(view.current_provider(), {"name": ALL_PROVIDERS, "type": "ALL"})
+        self.assertEqual(sorted(self.factory.setups), ["Demo TV", "Harbor IPTV"])
+        view.select_provider("Harbor IPTV")
+        self.assertFalse(self.config.tv_all_providers)
+        self.assertEqual(view.source(), "Harbor IPTV")
+        self.assertEqual(view.current_provider_name(), "Harbor IPTV")
+
+    def test_selecting_all_says_the_lists_are_ready_at_once(self):
+        view = self.view("Demo TV")
+        ready = QSignalSpy(view.providerReady)
+        view.select_provider(ALL_PROVIDERS)
+        self.assertEqual([ready.at(i)[0] for i in range(ready.count())][-1], ALL_PROVIDERS)
+
+    def test_all_providers_has_the_sections_any_provider_has(self):
+        self.assertEqual(self.view(ALL_PROVIDERS).sections(), ["live", "movies", "series"])
+        self.registry.providers[:] = [dict(DEMO)]
+        self.assertEqual(self.view(ALL_PROVIDERS).sections(), ["live"])
+
+    def test_a_provider_that_fails_to_sign_in_keeps_its_saved_channels(self):
+        self.factory.fail_setup("Harbor IPTV", "The provider refused the login")
+        items = self.view(ALL_PROVIDERS).items("live", mixed_group_id("Harbor IPTV", "41"))
+        self.assertEqual(len(items), 41)
+
+    def test_a_provider_never_loaded_shows_its_header_and_starts_loading(self):
+        self.remove_cache("Harbor IPTV")
+        view = self.view(ALL_PROVIDERS)
+        self.assertIn("Harbor IPTV", [g.title for g in view.groups("live") if g.header])
+        self.assertIn("Harbor IPTV", self.factory.setups)
+        rows = [g for g in view.groups("live") if g.provider == "Harbor IPTV" and not g.header]
+        self.assertEqual(rows, [])
+        self.finish_setup("Harbor IPTV", harbor_content())
+        rows = [g for g in view.groups("live") if g.provider == "Harbor IPTV" and not g.header]
+        self.assertTrue(rows)
+
+    def test_content_version_changes_when_any_provider_does(self):
+        view = self.view(ALL_PROVIDERS)
+        before = view.content_version()
+        self.assertEqual(view.content_version(), before)
+        self.finish_setup("Harbor IPTV", harbor_content())
+        self.assertNotEqual(view.content_version(), before)
+        again = view.content_version()
+        self.finish_setup("Demo TV", demo_content())
+        self.assertNotEqual(view.content_version(), again)
+
+    def test_signals_of_every_provider_reach_the_all_page(self):
+        view = self.view(ALL_PROVIDERS)
+        ready, group = QSignalSpy(view.sectionReady), QSignalSpy(view.groupReady)
+        self.catalogs.catalog("Harbor IPTV").sectionReady.emit("live")
+        self.catalogs.catalog("Demo TV").sectionReady.emit("live")
+        self.assertEqual(ready.count(), 2)
+        self.catalogs.catalog("Harbor IPTV").groupReady.emit("live", "41")
+        self.assertEqual(group.at(0), ["live", mixed_group_id("Harbor IPTV", "41")])
+
+    def test_a_group_failure_names_the_mixed_group(self):
+        view = self.view(ALL_PROVIDERS)
+        failed = QSignalSpy(view.groupFailed)
+        self.catalogs.catalog("Harbor IPTV").groupFailed.emit("live", "41", "No")
+        self.assertEqual(failed.at(0), ["live", mixed_group_id("Harbor IPTV", "41"), "No"])
+
+    def test_requests_go_to_the_provider_of_the_group(self):
+        view = self.view(ALL_PROVIDERS)
+        asked = []
+        for name in ("Demo TV", "Harbor IPTV"):
+            catalog = self.catalogs.catalog(name)
+            catalog.request_group = lambda s, g, n=name: asked.append(("group", n, s, g))
+            catalog.request_section = lambda s, force=False, n=name: asked.append(("section", n, s))
+        view.request_group("live", mixed_group_id("Harbor IPTV", "41"))
+        view.request_group("live", ALL_GROUP_ID)
+        self.assertEqual(
+            asked,
+            [
+                ("group", "Harbor IPTV", "live", "41"),
+                ("section", "Demo TV", "live"),
+                ("section", "Harbor IPTV", "live"),
+            ],
+        )
+
+    def test_a_single_page_keeps_its_group_ids(self):
+        view = self.view("Demo TV")
+        group = QSignalSpy(view.groupReady)
+        self.catalogs.catalog("Demo TV").groupReady.emit("live", "News")
+        self.assertEqual(group.at(0), ["live", "News"])
 
     def test_the_new_settings_have_their_defaults(self):
         self.assertFalse(self.config.tv_all_providers)
