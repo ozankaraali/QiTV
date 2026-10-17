@@ -30,6 +30,7 @@ BUFFERED = "Lost the connection; playing what's buffered"
 DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
 LOADING = "Still loading…"
+RECONNECTING = "Reconnecting…"
 DIRECT = (URL, PlayKind.LIVE, "normal")
 MiB = 1024 * 1024
 
@@ -1450,6 +1451,51 @@ class StayLiveTests(LiveSessionCase):
             self.step(0.25)
         self.assertEqual(len(self.playback.plays), 2)
 
+    def test_a_recovery_or_the_ram_ring_opens_even_just_after_a_reopen(self):
+        # The merge (one open, not two) is for the Go live button and a seek to the edge:
+        # a helper's restart and the RAM ring after a disk failure always open (review 2).
+        for case in ("recovery", "disk"):
+            with self.subTest(case=case):
+                self.live = self.make()
+                sid = self.ready(segments(0, 20), live_edge=40.0)
+                self.playback.set_state(PlaybackState.PLAYING)
+                for k in range(1, 22):  # far behind: stay-live reopens at live after 5 s
+                    self.engine.buffer(sid, segments(0, 20), live_edge=40.0 + 0.25 * k)
+                    self.step(0.25)
+                self.assertEqual(len(self.playback.plays), 2)
+                self.playback.set_state(PlaybackState.PLAYING)
+                if case == "recovery":
+                    self.engine.sessionFailed.emit(sid, "internal", "The helper died.")
+                    self.engine.buffer(sid, segments(0, 20), live_edge=46.0)
+                    self.engine.sessionReady.emit(sid)
+                else:
+                    self.engine.sessionFailed.emit(sid, "disk", "The disk buffer failed.")
+                    self.engine.buffer(sid, segments(10, 13, start=20.0), live_edge=46.0)
+                self.assertEqual(len(self.playback.plays), 3)
+
+    def test_a_catch_up_from_far_behind_goes_on_through_stalls(self):
+        """Review round 2: a stall while catching up from far behind ended the catch-up (it
+        counted as trouble, the cushion having existed), and it started again 3 s later, at
+        every stall; a gentle one spent the budget and left the lag behind. A steady source
+        20 s behind with three 3 s stalls: one catch-up, as in 4577a9e."""
+        for latency in ("normal", AUTO):
+            with self.subTest(latency=latency):
+                self.live = self.make()
+                sid = self.start(latency=latency)
+                feed = Feed(self, sid, burst=0.0, edge=20.0).ready()
+                for _ in range(3):  # each one while still far behind (Auto raises its target)
+                    feed.run(10.0)
+                    feed.stalled = True
+                    feed.run(3.0)
+                    feed.stalled = False
+                feed.run(240.0)
+                rates = self.playback.rates
+                self.assertLessEqual(changes(rates), 2)
+                self.assertTrue(all(rate >= 1.0 for rate in rates))  # never slowed down
+                self.assertEqual(len(self.playback.plays), 1)
+                self.live.stop()
+                self.engine.answer()
+
     def test_go_live_then_a_backlog_is_one_open_not_two(self):
         """One provider (2.1 review): after a stall it sent 21 s at once just after the
         viewer's Go live, and stay-live reopened at live 1.2 s later, measuring the new lag
@@ -1730,7 +1776,7 @@ class BackOffTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), plays)  # never a jump back for room
         built = self.playback.rates[rates:]
         self.assertTrue(all(0.95 <= rate <= 1.0 for rate in built))  # room built slowly
-        self.assertEqual(min(built), 0.95)
+        self.assertEqual((min(built), changes(built)), (0.95, 2 * 6))
 
     def test_a_starvation_that_runs_out_a_full_cushion_raises_the_target(self):
         # At the target (2.7 s of room), the source sends nothing for 1.6 s three times with
@@ -2389,34 +2435,54 @@ class InterruptionTests(LiveSessionCase):
         self.assertEqual(self.failures, ["The stream could not be played"])
         self.assertEqual(len(self.playback.plays), plays)
 
-    def test_a_fallback_on_a_one_stream_provider_waits_for_the_buffer_and_tries_twice(self):
+    def fall_back_on_one_stream(self, kind="network"):
+        """Plays from the buffer until the source gives up at the live edge; the direct play
+        opens once the buffer's upstream is closed. The plays before it."""
+        self.live = self.make(retry_ms=(20, 30, 40))
+        self.failures.clear()
+        self.notices.clear()
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        plays = len(self.playback.plays)
+        self.engine.sessionFailed.emit(sid, kind, "The stream could not be reached.")
+        self.assertIn(sid, self.engine.closed)
+        self.assertEqual(len(self.playback.plays), plays)  # the buffer still holds it
+        self.engine.answer()  # its upstream is closed
+        self.assertEqual(self.playback.plays[-1], DIRECT)
+        return plays
+
+    def test_a_fallback_on_a_one_stream_provider_tries_its_direct_play_again(self):
         """The owner's provider allows one stream (2.1 review): its source gave up at the
         live edge, the direct play failed at once ("The stream could not be opened": the
         provider still counted the buffer's connection) and nothing played for minutes. The
         direct play opens only once the buffer's upstream is closed (never two connections),
-        and a failure right after is tried once more after a moment, then reported."""
+        and a failure right after is tried again up to three times (3, 5 and 10 s apart),
+        "Reconnecting…" each time, and only then reported (ruling R19)."""
         for kind in ("network", "crashed"):
             with self.subTest(kind=kind):
-                self.live = self.make(retry_ms=30)
-                self.failures.clear()
-                sid = self.ready(segments(0, 3), live_edge=6.0)
-                self.playback.set_state(PlaybackState.PLAYING)
-                self.step(0.25)
-                plays = len(self.playback.plays)
-                self.engine.sessionFailed.emit(sid, kind, "The stream could not be reached.")
-                self.assertIn(sid, self.engine.closed)
-                self.assertEqual(len(self.playback.plays), plays)  # the buffer still holds it
-                self.engine.answer()  # its upstream is closed
-                self.assertEqual(self.playback.plays[-1], DIRECT)
+                plays = self.fall_back_on_one_stream(kind)
                 self.playback.set_state(PlaybackState.ERROR)
-                self.playback.errorOccurred.emit("The stream could not be opened")
-                self.assertEqual(self.failures, [])  # not yet: once more after a moment
-                self.wait_until(lambda: len(self.playback.plays) == plays + 2)
-                self.assertEqual(self.playback.plays[-1], DIRECT)
+                for tries in range(1, 4):
+                    self.playback.errorOccurred.emit("The stream could not be opened")
+                    self.assertEqual(self.failures, [])  # not yet: again after a while
+                    self.assertEqual(self.notices[-1], RECONNECTING)
+                    self.wait_until(lambda: len(self.playback.plays) == plays + 1 + tries)
+                    self.assertEqual(self.playback.plays[-1], DIRECT)
                 self.playback.errorOccurred.emit("The stream could not be opened")
                 self.assertEqual(self.failures, ["The stream could not be opened"])
                 QTest.qWait(80)
-                self.assertEqual(len(self.playback.plays), plays + 2)  # tried twice, no more
+                self.assertEqual(len(self.playback.plays), plays + 4)  # four tries, no more
+                self.assertEqual(self.notices.count(RECONNECTING), 3)
+
+    def test_a_fallback_that_played_reports_a_later_error_at_once(self):
+        plays = self.fall_back_on_one_stream()
+        self.playback.set_state(PlaybackState.PLAYING)  # it played
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be played")
+        self.assertEqual(self.failures, ["The stream could not be played"])
+        QTest.qWait(80)
+        self.assertEqual(len(self.playback.plays), plays + 1)
 
 
 class InputReleaseTests(LiveSessionCase):

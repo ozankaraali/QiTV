@@ -357,10 +357,47 @@ class SteeringTests(unittest.TestCase):
         _, rates = drive(stay, T + 3.0, 20.0, clock=clock)
         self.assertEqual(rates[-1], 1.03)
         stay.trouble()
-        lag, rates = drive(stay, 0.5, 120.0, clock=clock)
+        lag, rates = drive(stay, 0.5, 120.0, clock=clock)  # short of the target now
         self.assertEqual(calls(rates, start=1.03)[:3], [1.02, 1.01, 1.0])
         self.assertEqual(min(rates), 0.95)
         self.assertAlmostEqual(lag, T, delta=0.15)
+        # The cut catch-up spent no budget: a drift behind again gets its nudge.
+        lag, rates = drive(stay, T + 2.0, 30.0, clock=clock)
+        self.assertEqual(max(rates), 1.03)
+
+    def test_trouble_far_behind_leaves_a_catch_up_alone(self):
+        # Review round 2: a stall while catching up from far behind ended the catch-up, and
+        # it started again 3 s later, at every stall; VLC had all the room it needed.
+        for target in (T, T + 1.5):  # Auto may raise the target with the stall
+            with self.subTest(target=target):
+                stay, clock = live(), Clock()
+                lag, rates = drive(stay, T + 12.0, 10.0, clock=clock)
+                self.assertEqual(rates[-1], 1.1)
+                stay.trouble()
+                stay.target = target
+                lag, more = drive(stay, lag, 3.0, clock=clock, buffering=True)  # the stall
+                lag, more = drive(stay, lag, 150.0, clock=clock)
+                self.assertEqual(changes(rates + more), 2)  # one catch-up, in and out once
+                self.assertEqual(min(rates + more), 1.0)  # never slowed down
+                self.assertAlmostEqual(lag, target, delta=0.15)
+
+    def test_trouble_then_go_live_owes_nothing(self):
+        # Review round 2: an owed slow-down outlived a Go live and slowed the stream that
+        # opened at the target (a little short of it while VLC opens).
+        stay, clock = live(), Clock()
+        stay.trouble()  # VLC ran dry ...
+        drive(stay, 0.2, 2.0, clock=clock, buffering=True)  # ... and waits
+        stay.user_go_live()
+        _, rates = drive(stay, T - 0.6, 30.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
+        for leave in ("user_paused", "user_seeked_back"):
+            with self.subTest(leave=leave):
+                stay, clock = live(), Clock()
+                stay.trouble()
+                getattr(stay, leave)()
+                stay.user_go_live()
+                _, rates = drive(stay, T - 0.6, 30.0, clock=clock)
+                self.assertEqual(set(rates), {1.0})
 
     def test_a_vlc_that_runs_dry_again_and_again_still_slows_down(self):
         # Short of room, VLC plays a second and waits a second, over and over: the urgent

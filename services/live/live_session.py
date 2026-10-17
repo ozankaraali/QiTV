@@ -10,15 +10,16 @@ from the start, it plays from the oldest segment then.
 Falling back (spec §9) never overlaps two upstream connections: the session is closed and
 the provider URL plays directly (`PlayKind.LIVE`) once the engine confirms the close, or
 after `_CLOSE_CAP_MS`. A direct play after a session was open that fails at once is tried
-once more after `retry_ms` (a provider allowing one stream may still count the buffer's
-connection a moment), then reported. Only `available(False)` plays directly at once: no
-helper, so no upstream and no buffer, is left (also for a session whose input had ended).
-Unsupported sources, failures before ready and a ready that does not come within `ready_timeout_ms`
-fall back with "Time-shift isn't available for this channel"; after `available(False)`
-every start plays directly for the rest of the run. A source that sent bytes by then without
-anything playable (no keyframe yet: an on-demand restream starting up, say) gets until
-`ready_max_ms` from the start, with "Still loading…" at `ready_timeout_ms`; one that sent
-nothing falls back at `ready_timeout_ms`.
+again up to three times, `retry_ms` apart (3, 5 and 10 s; a provider allowing one stream may
+still count the buffer's connection a while), with "Reconnecting…" each time, and only then
+reported; once it played, an error is reported at once. Only `available(False)` plays
+directly at once: no helper, so no upstream and no buffer, is left (also for a session whose
+input had ended). Unsupported sources, failures before ready and a ready that does not come
+within `ready_timeout_ms` fall back with "Time-shift isn't available for this channel";
+after `available(False)` every start plays directly for the rest of the run. A source that
+sent bytes by then without anything playable (no keyframe yet: an on-demand restream
+starting up, say) gets until `ready_max_ms` from the start, with "Still loading…" at
+`ready_timeout_ms`; one that sent nothing falls back at `ready_timeout_ms`.
 
 Position (spec §6.3): the start of the opened segment plus VLC's `get_time()` deltas; a
 delta further than 1 s from wall clock × rate (counted only while VLC plays) is replaced by
@@ -177,6 +178,8 @@ BUFFERED = "Lost the connection; playing what's buffered"
 DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
 CRAWLING = "Plays without rewind for smoother playback"
+RECONNECTING = "Reconnecting…"
+_DIRECT_RETRIES_MS = (3000, 5000, 10000)  # a fallback's direct play, failing at once
 LOADING = "Still loading…"
 _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
@@ -251,11 +254,11 @@ class LiveSession(QObject):
         ready_max_ms: int = 15_000,
         clock: Callable[[], float] = time.monotonic,
         tuning: Optional[LiveTuning] = None,
-        retry_ms: int = 3000,
+        retry_ms: Sequence[int] = _DIRECT_RETRIES_MS,
     ) -> None:
         """`tuning`: what channels taught, shared by the players (None: nothing is kept).
-        `retry_ms`: after a fallback, the wait before the direct play is tried once more when
-        it fails at once (a provider may count the connection just closed a moment longer)."""
+        `retry_ms`: after a fallback, the waits before the direct play is tried again when it
+        fails at once (a provider may count the connection just closed a while longer)."""
         super().__init__()
         self._engine = engine
         self._playback = playback
@@ -278,9 +281,10 @@ class LiveSession(QObject):
         self._input_timer = QTimer(self, singleShot=True)
         self._input_timer.timeout.connect(self._on_input_cap)
         self._input_open = False  # stopped direct play: libVLC may still hold the stream
-        self._direct_timer = QTimer(self, singleShot=True, interval=retry_ms)
+        self._direct_waits = tuple(retry_ms)
+        self._direct_timer = QTimer(self, singleShot=True)
         self._direct_timer.timeout.connect(self._retry_direct)
-        self._direct_retries = 0  # direct plays a fallback may still try after an error
+        self._direct_retries = 0  # tries a fallback's direct play has left (0: report errors)
         self._limited: Optional[str] = None  # the provider's refusal (one of REFUSALS)
         self._phase = _Phase.IDLE
         self._mode = ""
@@ -427,6 +431,7 @@ class LiveSession(QObject):
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
         self._edge_seen = None
+        self._reopened_at = -math.inf
         self._filter = LagFilter()  # a new source: its burst too is known afresh
         self._settled.reset()
         self._was_stalled = False
@@ -491,7 +496,8 @@ class LiveSession(QObject):
             return
         snapshot = self._snapshot()
         if t >= self._live_edge(snapshot) - self._target(snapshot):
-            self._go_live(unpause=False)  # at the edge: not a segment back, and back to LIVE
+            # At the edge: not a segment back, and back to LIVE.
+            self._go_live(unpause=False, merge=True)
             return
         if self._deferred is not None:
             self._after_update = t  # the spans still describe the lost disk ring
@@ -507,12 +513,13 @@ class LiveSession(QObject):
 
     def go_live(self) -> None:
         """The Go live button: back to the live edge at 1x, playing (not paused)."""
-        self._go_live(unpause=True)
+        self._go_live(unpause=True, merge=True)
 
-    def _go_live(self, *, unpause: bool, reopen: bool = False) -> None:
+    def _go_live(self, *, unpause: bool, reopen: bool = False, merge: bool = False) -> None:
         """Reopen at the live target behind the edge, at 1x; a paused one stays paused.
-        `reopen`: stay-live's own, far behind; a Go live within `_REOPEN_HOLD_S` of it opens
-        nothing more (it is at live already: one open, not two)."""
+        `reopen`: stay-live's own, far behind. `merge` (the Go live button, a seek to the
+        edge): within `_REOPEN_HOLD_S` of stay-live's reopen nothing more opens (it is at
+        live already: one open, not two). A recovery or the RAM ring's reopen always opens."""
         try:
             if unpause and self._phase in _BEFORE_PLAY:
                 self._paused = False  # remembered: the stream that opens next plays, live
@@ -528,7 +535,7 @@ class LiveSession(QObject):
                 self._advance()
                 self._set_rate(1.0)
                 if (
-                    not reopen
+                    merge
                     and not self._paused
                     and self._stay.mode is Mode.LIVE
                     and self._retry is None
@@ -620,8 +627,8 @@ class LiveSession(QObject):
         sid, self._sid = self._sid, None
         self._phase = _Phase.FALLING_BACK
         self._fallback_notice = message
-        # A buffer that was open may still count with the provider a moment (one stream).
-        self._direct_retries = 1 if sid is not None else 0
+        # A buffer that was open may still count with the provider a while (one stream).
+        self._direct_retries = len(self._direct_waits) if sid is not None else 0
         self._paused = self._source_lost = False
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
@@ -826,6 +833,8 @@ class LiveSession(QObject):
 
     # ---- playback ----------------------------------------------------------------------
     def _on_state(self, state: str) -> None:
+        if self._phase is _Phase.DIRECT and state == _PLAYING:
+            self._direct_retries = 0  # it played: a later error is reported at once
         if self._phase is not _Phase.PIPELINE:
             return
         if state == _PLAYING and self._opened_at is not None:
@@ -844,10 +853,12 @@ class LiveSession(QObject):
         if self._phase is _Phase.DIRECT:
             if self._direct_retries > 0:
                 # Right after a fallback the provider may still count the connection the
-                # buffer closed (one allowed stream): one more try after a moment.
+                # buffer closed (one allowed stream): tried again after a while.
+                wait = self._direct_waits[len(self._direct_waits) - self._direct_retries]
                 self._direct_retries -= 1
-                _LOG.info("The channel did not open directly; trying once more.")
-                self._direct_timer.start()
+                _LOG.info("The channel did not open directly; trying again in %d ms.", wait)
+                self.notice.emit(RECONNECTING)
+                self._direct_timer.start(wait)
                 return
             self.failed.emit(message)
         else:
@@ -1254,7 +1265,6 @@ class LiveSession(QObject):
         self._base, self._elapsed = self._start_of(seq), 0.0
         self._last_ms, self._last_wall = 0, self._clock()
         self._clock_moved = self._opened_at = self._last_open = self._last_wall
-        self._filter.reset()  # the lag starts afresh from the new position
         self._stay.absorb()  # the position starts afresh: a step, not a drift
         self._settled.reset()  # and the lag shows where it landed at once
         self._rate_mark = self._rate_from = None  # rate health counts once this one plays
