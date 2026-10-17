@@ -228,6 +228,33 @@ class SessionManager(QObject):
         self.largeChanged.emit(small.name)
         return True
 
+    def demote_large(self) -> bool:
+        """Make the large picture small while PiP is closed, without reopening its stream.
+
+        The roles trade as in swap(), but the slot that becomes large is the closed one (idle,
+        or still releasing what it played): the caller opens something in it, and it waits for
+        the release as any open does. The small slot opens muted and the user's mute of the
+        large picture moves to the new large slot. False (and nothing changes) when PiP is
+        open or opening, or the large slot streams nothing.
+        """
+        if self._open or self._pending is not None:
+            return False
+        large = self._large
+        stream = self._tuners[large.name].stream
+        if stream is None or not stream.running():
+            return False
+        freed = self.other()
+        self._large = freed
+        self._tuners[freed.name].set_purpose(MAIN_PURPOSE)
+        self._tuners[large.name].set_purpose(PURPOSE)
+        users_mute = self._muted[large.name]
+        self._set_mute(large, True)  # the PiP is small and muted, as it opens
+        self._set_mute(freed, users_mute)
+        self._open = True
+        self.largeChanged.emit(freed.name)  # the shell trades what each picture shows first
+        self.pipStateChanged.emit(True)
+        return True
+
     # ---- the small slot -----------------------------------------------------------------------
 
     def open_pip(

@@ -30,12 +30,16 @@ SessionManager: each player has its own LiveTuner, and `session`, `live` and the
 are always the large picture's, so zapping, the banner, the transport, seek and Go live act
 on it. A swap re-points them (`_use_slot`) and trades what each picture showed (its target
 and zap group); nothing is stopped or restarted. A zap onto the channel the small picture
-shows swaps instead of opening it twice. Movies, episodes, files and the Library close the
-small picture first: it is for live TV.
+shows swaps instead of opening it twice. A movie or an episode started from the Library while
+a channel plays takes the large picture and the channel goes small without reopening (a
+previous small picture closes first, and so does the channel when the title's provider has no
+second stream); files and a title with no channel streaming close the small picture first: it
+is for live TV.
 
 Provider setups (the loading and welcome hints, the last channel, the drawer on an idle player)
-are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4, R5) stops
-what plays (`stop_for_library`); back to live TV (`resume_live`) tunes the last channel. The
+are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4) keeps what
+plays going in a corner of it (`enter_library_playing`; `stop_for_library` is the corner's ×, or
+nothing playing); back to live TV (`resume_live`) tunes the last channel when nothing plays. The
 window wires this controller before the Library's: a Library play that waited for its provider
 runs from the Library's providerReady slot, after this controller settled the provider change.
 """
@@ -792,22 +796,41 @@ class TVController(QObject):
         """
         if self._closed:
             return
+        from_library = self._flow.in_library()
         self._flow.leave_library()
         context = play_context(context)
         episode = kind == "episode"
         series = context["series"]
-        self._close_pip()  # picture in picture is for live TV
+        title = item_title(item, episode=episode)
+        if not (from_library and self._keep_channel_small(item, title)):
+            self._close_pip()  # picture in picture is for live TV
         self._lanes.supersede()  # a newer choice than an external play waiting for its link
         self._request(
             Target(
                 item,
                 "series" if episode else "movies",
-                item_title(item, episode=episode),
+                title,
                 subtitle=item_title(series) if episode and isinstance(series, dict) else "",
                 context=context,
                 start_over=bool(context["start_over"]),
             )
         )
+
+    def _keep_channel_small(self, item: dict, title: str) -> bool:
+        """A title from the Library while a channel plays large (corner player): the channel
+        goes small without reopening and the title opens in the freed large slot.
+
+        False: nothing was kept (no channel streaming large, or its provider has no stream for
+        the title and the channel closed); the caller closes the PiP and plays as before.
+        """
+        pip = self._pip
+        if pip is None or self.sessions is None or self._playing_live() is None:
+            return False
+        if self._tuner.settling() or not self._tuner.running():
+            return False  # a channel still opening has nothing to keep
+        self._cancel_external()
+        self._lanes.drop_tune()  # a choice on its way for the large picture is superseded
+        return pip.keep_large_small(item, title)
 
     def _all_live(self) -> list[dict]:
         return list(self.catalog.items("live", ALL_GROUP_ID) or [])

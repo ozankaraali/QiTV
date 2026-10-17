@@ -283,6 +283,33 @@ class PipControls(QObject):
         else:
             self._wanted = None
 
+    def keep_large_small(self, item: dict, title: str) -> bool:
+        """A movie or an episode from the Library takes the large picture: the channel that
+        was large moves to the small one without reopening, and a previous small picture
+        closes first (its stream is released before the title opens, as any open waits).
+
+        False when nothing is kept and the caller plays as before: no channel plays large, the
+        channels play in an external player, or the title's provider has no second stream, in
+        which case the channel is closed for it (toasted).
+        """
+        channel = self._large_channel()
+        if channel is None or self._external():
+            return False
+        self.close()
+        provider = item_provider.provider_dict(self.catalog, item)
+        name = str(provider.get("name", ""))
+        limit = self._budget.limit_for(provider, item_provider.max_connections(self.catalog, item))
+        # The channel is the only stream left once the small picture closed.
+        same = item_provider.provider_name(self.catalog, channel) == name
+        if limit is not None and limit < 2 and same:
+            plural = "s" if limit != 1 else ""
+            self._toast(
+                f"Closed {channel.get('name') or ''} to play {title}: "
+                f"{name} allows {limit} stream{plural}"
+            )
+            return False
+        return self.sessions.demote_large()
+
     def _limit_reached(self, channel: dict) -> bool:
         """The limit of the channel's own provider leaves no stream for a small picture: say
         so before asking for a link (an STB portal mints one per request, and allows one)."""

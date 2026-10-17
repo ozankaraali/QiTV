@@ -19,6 +19,7 @@ from services.sessions import PIP_FAILED, SessionManager, Slot
 from services.vlc_profile import DEFAULT_USER_AGENT
 from tests.test_tv_controller import (
     CHANNELS,
+    HARBOR_ONE,
     MIB,
     NO_MODS,
     ControllerTestCase,
@@ -657,6 +658,85 @@ class BrowsingProviderPipTests(PipCase):
         self.ready("http://stream/1")
         self.assertTrue(wait_until(lambda: self.live.named("start")))
         self.assertEqual(self.live.named("start")[0][0], "http://stream/1")
+
+
+class LibraryPlayTests(PipCase):
+    """A title from the Library while pictures run (QiTV 2.1): it takes the large picture."""
+
+    def play_from_library(self, movie=MOVIE):
+        self.controller.enter_library_playing()  # the Library is open, the player in its corner
+        self.controller.play_vod(movie, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+
+    def small_title(self):
+        return self.label.info[0]
+
+    def test_a_movie_takes_the_big_picture_and_the_channel_goes_small(self):
+        self.start_large(0)
+        before = (len(self.live.calls), self.session.stops, len(self.session.plays))
+        self.play_from_library()
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.assertEqual([url for url, _ in self.pip_session.plays], ["http://vod/heat.mkv"])
+        self.assertTrue(self.sessions.pip_open())
+        self.assertEqual(self.small_title(), "One")
+        self.assertIs(self.controller.session, self.pip_session)
+        # The channel was not restarted, stopped or re-pointed.
+        self.assertEqual(
+            (len(self.live.calls), self.session.stops, len(self.session.plays)), before
+        )
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+
+    def test_a_previous_small_picture_closes(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.play_from_library()
+        self.assertEqual(self.pip_live.calls[-1], ("stop",))  # Two closed first
+        self.assertNotIn("http://vod/heat.mkv", [url for url, _ in self.pip_session.plays])
+        self.pip_live.released.emit()
+        self.assertEqual(self.pip_session.plays[-1][0], "http://vod/heat.mkv")
+        self.assertEqual(self.small_title(), "One")
+        self.assertNotIn(("stop",), self.live.calls)
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+
+    def test_the_movies_provider_limit_closes_its_small_picture(self):
+        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: self.live.named("start")))
+        self.live.play_pipeline()
+        movie = {**MOVIE, "_provider": "Harbor IPTV"}  # Harbor's panel allows one stream
+        self.play_from_library(movie)
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(
+            self.toast.messages()[-1],
+            ("Closed One to play Heat: Harbor IPTV allows 1 stream", "info"),
+        )
+        self.assertLessEqual(len(self.budget.holders("Harbor IPTV")), 1)
+        self.assertEqual(self.live.calls[-1], ("stop",))  # as before: the channel stops
+        self.live.released.emit()
+        self.assertEqual([url for url, _ in self.session.plays][-1], "http://vod/heat.mkv")
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
+
+    def test_a_movie_of_another_provider_keeps_the_channel_small_whatever_its_limit(self):
+        self.start_large(0)  # Home, two streams
+        self.play_from_library({**MOVIE, "_provider": "Harbor IPTV"})
+        self.assertTrue(self.sessions.pip_open())
+        self.assertEqual(self.budget.holders("Home"), ["pip"])
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
+
+    def test_without_the_library_a_movie_still_closes_the_small_picture(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.play_vod(MOVIE, "movie", play_context())
+        self.assertFalse(self.sessions.pip_open())
+
+    def test_a_channel_from_the_librarys_search_tunes_the_big_picture_only(self):
+        self.start_large(0)
+        small = self.open_small(CHANNELS[1])
+        self.controller.enter_library_playing()
+        self.controller.tune_live(CHANNELS[2])
+        self.assertTrue(self.sessions.pip_open())
+        self.assertNotIn(("stop",), small.live.calls)
+        self.assertEqual(self.requested()[-1], "Three")
 
 
 class MixedProviderPipTests(PipCase):
