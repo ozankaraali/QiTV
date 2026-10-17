@@ -6,9 +6,9 @@ Branch: `tv/vlc` (part of 2.1). Builds on 2.0.1/2.0.2's stay-live, bursts, Auto 
 ## Why (the owner's words)
 - "current stay live is a bit annoying my hls is around 8 sec, sometimes green sometimes yellow, and
   therefore 1x or 1.05x and then it scratches audio when changing speed"
-- "it was unbearable on iptvorg trt1 hls with 7 sec stay alive on border of 1.05 and 1x so i switched
+- "it was unbearable on iptvorg [a public HLS channel] with 7 sec stay alive on border of 1.05 and 1x so i switched
   to vlc.app so fix it please"
-- "if the stay live says 20 sec and somehow we fasten or jump, 3-4 sec in trt 1 4k in strong vendor,
+- "if the stay live says 20 sec and somehow we fasten or jump, 3-4 sec in [a 4K channel] in [the owner's provider],
   frame freezes, or frame runs audio is missing"
 - "not only hls, as i told, you need to find a way, idk maybe bayesian stat to understand, like you
   need to sense things that audio and video does not break, drift and such"
@@ -17,9 +17,9 @@ Branch: `tv/vlc` (part of 2.1). Builds on 2.0.1/2.0.2's stay-live, bursts, Auto 
 The measured root causes, with the recorder, runs and numbers, are in the session's
 `scratchpad/staylive/FINDINGS.md` (copied into this branch's ledger folder,
 `.superpowers/sdd/2026-10-17-qitv-2.1-mixed-providers/staylive-FINDINGS.md`). In short: a dead band
-narrower than the stream's own arrival sawtooth (the public HLS channel HLS: 18 rate changes / 5 min; the 1-stream provider raw TS: 40,
+narrower than the stream's own arrival sawtooth (a public HLS channel: 18 rate changes / 5 min; the owner's raw-TS provider: 40,
 some 0.25 s apart); a burst detector that flips on/off and moves the target; a start at the oldest
-segment (the 1-stream provider: 20 s backlog → 1.10x for 177 s; the sparse-PCR channels: starved start → 4 s freeze and 2 s of
+segment (the owner's raw-TS provider: 20 s backlog → 1.10x for 177 s; two sparse-PCR HLS channels: starved start → 4 s freeze and 2 s of
 dropped audio/video); a position estimate that misreads sparse-PCR clocks (a sparse-PCR channel: -11 s error →
 false "crawl" lock and direct-play fallback); an unsmoothed lag text (90 changes/min). Fullscreen
 toggles are not a cause.
@@ -49,11 +49,11 @@ toggles are not a cause.
    keyframe segment start, never twice within a minute, merged with a user's Go live.
 
 ## Acceptance (measured with the recorder, offscreen and muted, 5 minutes per run)
-- iptv-org the public HLS channel (HLS), Auto: after the first 30 s, ≤ 2 rate changes, none within 15 s of another,
+- A public iptv-org HLS channel (6 s segments every 7 s), Auto: after the first 30 s, ≤ 2 rate changes, none within 15 s of another,
   rate ≠ 1.0 for ≤ 10% of the time, ≤ 2 colour flips, lag text changes ≤ 1 per 10 s on average.
-- iptv-org a sparse-PCR channel and a sparse-PCR channel: |mean position error| ≤ 1 s; no crawl lock or direct-play fallback caused
+- Public iptv-org HLS channels with sparse PCR: |mean position error| ≤ 1 s; no crawl lock or direct-play fallback caused
   by the clock; no "buffer too late … dropped" incident after the start.
-- The owner's the 1-stream provider the 4K raw-TS channel (run by the controller): ≤ 2 rate changes after 30 s; the start lag
+- A 4K raw-TS channel on the owner's 1-stream provider (run by the controller): ≤ 2 rate changes after 30 s; the start lag
   within 1 s of the target (no long catch-up); with jumps (back30/golive actions) no A/V loss.
 - One provider and every existing stay-live behaviour that isn't named above keep their tests green;
   2.0.1's bursty-source handling and 2.0.2's HLS direct fallback still work where they're really needed.
