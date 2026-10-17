@@ -18,8 +18,11 @@ class ZapContext:
         group_key: str = "",
         channels: Optional[list[dict]] = None,
         fallback: Optional[list[dict]] = None,
+        source: str = "",
     ):
         self.group_key = group_key
+        # The list the group was picked from (a provider or ALL_PROVIDERS); "" when unknown.
+        self.source = source
         self.channels = list(channels or [])
         # Searched by number entry when the group has no match (the shell passes every
         # live channel: TV numbers are global, not per group).

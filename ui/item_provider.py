@@ -9,7 +9,20 @@ from __future__ import annotations
 
 from typing import Optional
 
-from services.provider_ids import provider_of
+from services.catalog import ALL_GROUP_ID
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP
+from services.provider_ids import ALL_PROVIDERS, provider_of
+
+
+def pick_source(catalog, item: dict, group_key: str) -> str:
+    """The TV page's source a channel of `group_key` is listed under: the browsed one for
+    ★/⟲ and the mixed lists, else the channel's own provider (so a channel started from
+    outside the browsed list, or zapped after browsing elsewhere, still reveals its list)."""
+    browsed = catalog.source()
+    provider = provider_of(item)
+    if not provider or browsed == ALL_PROVIDERS or group_key in (FAVORITES_GROUP, RECENT_GROUP):
+        return browsed
+    return provider
 
 
 def provider_name(catalog, item: dict) -> str:

@@ -803,6 +803,28 @@ class MixedProviderPipTests(PipCase):
         self.assertEqual(self.pip_live.calls, [])
 
 
+class PreviousChannelSourceTests(PipCase):
+    def test_previous_into_the_pip_after_browsing_keeps_the_list_it_was_picked_from(self):
+        self.catalog.names.append("Harbor IPTV")
+        self.catalog.limits_of["Harbor IPTV"] = 2
+        harbor = [{**c, "_provider": "Harbor IPTV"} for c in CHANNELS]
+        self.catalog.select_provider("Harbor IPTV")
+        live = self.controller.live
+        for channel in harbor[:2]:  # One, then Two on the large picture
+            count, running = len(live.named("start")), live.running
+            self.controller.tune(channel, group_key="10", channels=harbor)
+            self.ready(f"http://stream/{channel['id']}")
+            if running:
+                live.released.emit()
+            self.assertTrue(wait_until(lambda: len(live.named("start")) == count + 1))
+            live.play_pipeline()
+        self.catalog.select_provider("Home")  # browsing elsewhere
+        self.controller.handle(Action.PIP)  # One, small
+        wanted = self.controller._pip._wanted[0]
+        self.assertEqual((wanted.item["name"], wanted.group_key), ("One", "10"))
+        self.assertEqual(wanted.source, "Harbor IPTV")
+
+
 class OneStreamPipTests(PipCase):
     """A provider allowing one stream: the small picture holds it while the large one is idle
     (its channel failed). What the large picture opens next waits for the PiP's release."""

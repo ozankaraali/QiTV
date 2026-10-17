@@ -208,7 +208,10 @@ class PipControls(QObject):
         nodes = nav.children(group) if group is not None else []
         channels = [n.payload for n in nodes if isinstance(n.payload, dict)] or [node.payload]
         key = group.key if group is not None else ALL_GROUP_ID
-        self.open_channel(node.payload, ZapContext(key, channels, fallback=self._all_live()))
+        source = item_provider.pick_source(self.catalog, node.payload, key)
+        self.open_channel(
+            node.payload, ZapContext(key, channels, fallback=self._all_live(), source=source)
+        )
 
     def _previous_channel(self) -> tuple[Optional[dict], Optional[ZapContext]]:
         """The channel tuned before the large picture's, with the zap group to walk."""
@@ -219,8 +222,11 @@ class PipControls(QObject):
         context = zap.context
         if context.index_of(channel) < 0:
             channels = self._all_live()
-            context = ZapContext(ALL_GROUP_ID, channels, fallback=channels)
-        return channel, ZapContext(context.group_key, context.channels, fallback=context.fallback)
+            source = item_provider.pick_source(self.catalog, channel, ALL_GROUP_ID)
+            context = ZapContext(ALL_GROUP_ID, channels, fallback=channels, source=source)
+        return channel, ZapContext(
+            context.group_key, context.channels, fallback=context.fallback, source=context.source
+        )
 
     # ---- opening and closing ------------------------------------------------------------------
 
@@ -254,7 +260,10 @@ class PipControls(QObject):
             return
         title = str(channel.get("name") or "")
         group = context.group_key if context is not None else ""
-        target = Target(channel, "live", title, group_key=group, source=self.catalog.source())
+        source = (context.source if context is not None else "") or item_provider.pick_source(
+            self.catalog, channel, group
+        )
+        target = Target(channel, "live", title, group_key=group, source=source)
         self._wanted = (target, context if context is not None else ZapContext())
         self._request(target)
 
