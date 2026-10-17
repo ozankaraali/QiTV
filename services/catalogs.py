@@ -52,6 +52,7 @@ class Catalogs(QObject):
     providerFailed = Signal(str, str)
     epgReady = Signal(str)
     contentChanged = Signal(str)  # the provider whose content may have changed
+    catalogCreated = Signal(str)  # a provider's catalog was made (views connect to it)
 
     def __init__(
         self,
@@ -112,7 +113,12 @@ class Catalogs(QObject):
         self._connect(name, catalog)
         self._by_name[name] = catalog
         self._specs[name] = spec
+        self.catalogCreated.emit(name)
         return catalog
+
+    def created(self) -> list[str]:
+        """The providers whose catalogs exist now."""
+        return list(self._by_name)
 
     def _connect(self, name: str, catalog: CatalogService) -> None:
         catalog.providerReady.connect(lambda *_: self._on_ready(name))
@@ -135,6 +141,14 @@ class Catalogs(QObject):
         catalog = self.catalog(name)
         self._started.add(name)
         catalog.select_provider()
+
+    def select(self, name: str, *, force_refresh: bool = False) -> None:
+        """(Re)start this catalog's setup, as the screens ask when a provider is chosen."""
+        if self._closed:
+            return
+        catalog = self.catalog(name)
+        self._started.add(name)
+        catalog.select_provider(force_refresh=force_refresh)
 
     def is_ready(self, name: str) -> bool:
         return name in self._ready
@@ -228,6 +242,11 @@ class Catalogs(QObject):
     def _stop(catalog: CatalogService) -> None:
         catalog.shutdown()
         catalog.provider_manager._cache_writer.shutdown(wait=False)
+
+    def save_epg_indexes(self) -> None:
+        """The window closes: each guide manager saves its index."""
+        for catalog in self._by_name.values():
+            catalog.epg_manager.save_index()
 
     def shutdown(self) -> None:
         self._closed = True

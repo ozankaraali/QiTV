@@ -53,7 +53,8 @@ from PySide6.QtWidgets import (
 )
 
 from services import free_channels, thread_cleanup
-from services.catalog import CatalogService
+from services.browsed_catalog import BrowsedCatalog
+from services.catalogs import Catalogs
 from services.connection_budget import ConnectionBudget
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
@@ -261,6 +262,7 @@ class TVWindow(QMainWindow):
         epg_manager,
         *,
         vlc_instance=None,
+        catalogs: Optional[Catalogs] = None,
     ):
         super().__init__()
         self.app = app
@@ -333,7 +335,25 @@ class TVWindow(QMainWindow):
         # Glued to the page, not a surface: either surface may be the large one.
         self.host = OverlayHost(self, self.player_page)  # shown only while the page is
 
-        self.catalog = CatalogService(config_manager, provider_manager, epg_manager, parent=self)
+        # One catalog per provider behind the hub; each page browses its own provider's.
+        # provider_manager stays the registry (the provider list Settings edits).
+        self.catalogs = catalogs or Catalogs(
+            config_manager, provider_manager, in_use=self._providers_in_use, parent=self
+        )
+        self.catalog = BrowsedCatalog(
+            self.catalogs,
+            config_manager,
+            source_key="selected_provider_name",
+            all_key="tv_all_providers",
+            parent=self,
+        )
+        self.library_catalog = BrowsedCatalog(
+            self.catalogs,
+            config_manager,
+            source_key="library_provider_name",
+            all_key="library_all_providers",
+            parent=self,
+        )
         self.nav = NavModel(self.catalog, config_manager, self)
         self.zap = ZapController(parent=self)
         owns_instance = vlc_instance is None
@@ -488,7 +508,7 @@ class TVWindow(QMainWindow):
         self.screens = TVPages(self, self)  # the Library's controller and the page moves
         self.library_controller = self.screens.library_controller
         self.exports = ExportFlow(
-            provider_manager=provider_manager,
+            catalog=self.catalog,
             config=config_manager,
             runner=self.jobs,
             notify=self.screens.notify,
@@ -944,6 +964,15 @@ class TVWindow(QMainWindow):
         if existing is None or name != self.catalog.current_provider_name():
             self.set_provider()
 
+    def _providers_in_use(self) -> set[str]:
+        """The providers a page shows: Settings may not drop their catalogs."""
+        return {name for name in (self.catalog.source(), self.library_catalog.source()) if name}
+
+    def providers_saved(self) -> None:
+        """Settings changed the provider list: catalogs of removed or edited providers go."""
+        self.catalogs.reload()
+        self.menus.rebuild_providers()
+
     def save_config(self) -> None:
         """Settings → Save: the new settings apply even when config.json cannot be written."""
         try:
@@ -1065,7 +1094,7 @@ class TVWindow(QMainWindow):
             self._video_released = True
             self._run_steps(
                 ("save the image cache index", self.image_manager.save_index),
-                ("save the EPG index", self.epg_manager.save_index),
+                ("save the EPG indexes", self.catalogs.save_epg_indexes),
                 ("release the video", self._release_video),
             )
             self._close_later(event)
@@ -1135,7 +1164,7 @@ class TVWindow(QMainWindow):
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
             ("stop the live pipeline", self.stop_live),
-            ("stop the catalog", self.catalog.shutdown),  # and cancel its running jobs
+            ("stop the catalogs", self.catalogs.shutdown),  # and cancel their running jobs
             ("cancel the Library's jobs", self.jobs.cancel_all),  # its searches
             ("stop the controller", self.controller.shutdown),
             ("stop following the surfaces", self.pip_frame.close),

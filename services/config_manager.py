@@ -324,6 +324,11 @@ class ConfigManager:
     provider_favorites = _config_property("provider_favorites", None)
     last_watched = _config_property("last_watched", None)
     selected_provider_name = _config_property("selected_provider_name", "iptv-org.github.io")
+    # Mixed providers (2.1): what the TV and the Library show. An empty library_provider_name
+    # means the selected provider.
+    tv_all_providers = _config_property("tv_all_providers", False, coerce=bool)
+    library_provider_name = _config_property("library_provider_name", "", coerce=str)
+    library_all_providers = _config_property("library_all_providers", False, coerce=bool)
     channel_epg = _config_property("channel_epg", DEFAULT_OPTION_CHANNEL_EPG)
     channel_logos = _config_property("channel_logos", DEFAULT_OPTION_CHANNEL_LOGO)
     max_cache_image_size = _config_property(

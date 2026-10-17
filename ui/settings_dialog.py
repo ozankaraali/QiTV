@@ -882,6 +882,12 @@ class OptionsDialog(QDialog):
         self.load_providers()
         self.providers_modified = True
 
+    def _manager_of(self, name):
+        """The provider's own ProviderManager (its catalog's), else the list's."""
+        if name in self.parent().catalogs.names():
+            return self.parent().catalogs.catalog(name).provider_manager
+        return self.provider_manager
+
     def browse_epg_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self)
         if file_path:
@@ -959,12 +965,14 @@ class OptionsDialog(QDialog):
 
         self.providers_modified = self.providers != self._original_providers
         if self.providers_modified:
-            self.provider_manager.providers = deepcopy(self.providers)
+            # In place: the providers' own managers share this list.
+            self.provider_manager.providers[:] = deepcopy(self.providers)
             self.provider_manager.save_providers()
+            self.parent().providers_saved()  # catalogs of removed or edited providers go
         for name in changed_names:
             # The selected provider is invalidated after setup is serialized by the parent.
             if name != self.selected_provider_name:
-                self.provider_manager.invalidate_provider_cache(name)
+                self._manager_of(name).invalidate_provider_cache(name)
 
         if current_provider_changed or force_provider_refresh:
             self.parent().set_provider(force_update=force_provider_refresh)
@@ -972,7 +980,7 @@ class OptionsDialog(QDialog):
             self.parent().reload_epg()  # in the background; the guide repaints when ready
         elif self.xmltv_mapping_modified:
             if self.config_manager.epg_source != "STB":
-                self.epg_manager.reindex_programs()
+                (self.parent().catalog.epg_manager or self.epg_manager).reindex_programs()
 
         self.accept()
 

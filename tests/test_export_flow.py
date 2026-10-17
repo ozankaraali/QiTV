@@ -41,7 +41,7 @@ class ExportFlowTests(unittest.TestCase):
         self.runner = HeldRunner()
         self.toasts = []
         self.flow = ExportFlow(
-            provider_manager=self.manager,
+            catalog=SimpleNamespace(provider_manager=self.manager),
             config=self.config,
             runner=self.runner,
             notify=lambda text, kind, ms: self.toasts.append((text, kind, ms)),
