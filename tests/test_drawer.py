@@ -14,6 +14,7 @@ from timer_fixtures import elapse
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
 from services.navigation import (
     ADD_PROVIDER_ROW,
+    FAVORITES_GROUP,
     FREE_CHANNELS_ROW,
     OPEN_FILE_ROW,
     SETTINGS_ROW,
@@ -22,7 +23,7 @@ from services.navigation import (
 from tests.test_navigation import FakeCatalog
 from ui.keymap import key_hint
 from ui.overlay_host import OverlayHost
-from ui.overlays.channel_rows import NumberRole
+from ui.overlays.channel_rows import ChannelRowsModel, NumberRole
 from ui.overlays.drawer import (
     EMPTY_TEXT,
     LOADING_TEXT,
@@ -69,6 +70,16 @@ class DrawerTests(unittest.TestCase):
         self.closed = []
         self.drawer.playRequested.connect(lambda *a: self.played.append(a))
         self.drawer.closed.connect(lambda: self.closed.append(True))
+
+    def test_the_mixed_lists_tag_their_rows_with_the_provider_and_a_provider_group_does_not(self):
+        for channel in self.catalog.live["10"]:
+            channel["_provider"] = "Home"
+        self.nav.reset_to("live", FAVORITES_GROUP)
+        self.drawer.open_drawer()
+        model = self.drawer._columns["right"].model
+        self.assertEqual(model.index(0).data(ChannelRowsModel.ProviderRole), "Home")
+        self.nav.reset_to("live", "10")
+        self.assertEqual(model.index(0).data(ChannelRowsModel.ProviderRole), "")
 
     def test_open_focuses_right_and_highlights_key(self):
         self.drawer.open_drawer("1")
@@ -219,7 +230,7 @@ class DrawerTests(unittest.TestCase):
 
     def test_a_source_switch_shows_loading_instead_of_the_old_sections(self):
         self.drawer.open_drawer()
-        backup = self.nav.children(None)[1]
+        backup = self.nav.children(None)[2]
         self.catalog.select_provider = lambda name=None, **kw: setattr(
             self.catalog, "loading", True
         )
@@ -500,6 +511,7 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(
             [(r.data(), r.data(IconRole)) for r in rows],
             [
+                ("All providers", None),
                 ("Home", None),
                 ("Backup", None),
                 ("Settings", "gear"),
@@ -513,7 +525,7 @@ class DrawerTests(unittest.TestCase):
     def test_a_click_on_open_file_asks_for_it(self):
         column = self.open_on_the_sources()
         path = self.nav.path
-        self.drawer._on_row_clicked("left", 5)
+        self.drawer._on_row_clicked("left", 6)
         self.assertEqual(self.actions, [OPEN_FILE_ROW])
         self.assertEqual(column.current.key, OPEN_FILE_ROW)
         self.assertEqual((self.nav.path, self.catalog.selected, self.library), (path, [], []))
@@ -539,20 +551,20 @@ class DrawerTests(unittest.TestCase):
     def test_free_channels_sits_under_add_provider_and_asks_with_a_row_anchor(self):
         column = self.open_on_the_sources()
         self.assertEqual(
-            [n.key for n in column.nodes[2:]],
+            [n.key for n in column.nodes[3:]],
             [SETTINGS_ROW, ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW],
         )
-        self.drawer._on_row_clicked("left", 4)
+        self.drawer._on_row_clicked("left", 5)
         self.assertEqual(self.actions, [FREE_CHANNELS_ROW])
         self.assertTrue(self.drawer.isVisible())  # the menu opens over it
         # The menu opens right under the row, in the column.
         anchor = self.drawer.row_anchor(FREE_CHANNELS_ROW)
-        rect = column.view.visualRect(column.model.index(4, 0))
+        rect = column.view.visualRect(column.model.index(5, 0))
         self.assertEqual(column.view.viewport().mapFromGlobal(anchor), rect.bottomLeft())
 
     def test_a_click_on_settings_asks_for_it(self):
         column = self.open_on_the_sources()
-        self.drawer._on_row_clicked("left", 2)
+        self.drawer._on_row_clicked("left", 3)
         self.assertEqual(self.actions, [SETTINGS_ROW])
         self.assertEqual(column.current.key, SETTINGS_ROW)
 
