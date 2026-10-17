@@ -130,7 +130,14 @@ class LibraryController(QObject):
         self._series_back = "browse"
         self._history_episode: Optional[dict] = None  # the series' newest watched episode
         # search and cross-provider activations
-        self._search = SearchSession(provider_manager, jobs, model, watch, self)
+        self._search = SearchSession(
+            provider_manager,
+            jobs,
+            model,
+            watch,
+            self,
+            loaded=getattr(catalog, "loaded_contents", None),
+        )
         self._pending = PendingAction()
         self._ran_for = ""  # the shown provider whose ready just ran the pending action
         self._watched_sections: set[str] = set()  # providers whose section signals we follow
