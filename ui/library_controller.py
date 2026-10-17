@@ -147,6 +147,7 @@ class LibraryController(QObject):
         # An activation waits for its own provider, which need not be the one shown.
         catalog.catalogs.providerReady.connect(self._on_pending_ready)
         catalog.catalogs.providerFailed.connect(self._on_provider_failed)
+        catalog.catalogs.providersChanged.connect(self._on_providers_changed)
         catalog.seasonsReady.connect(self._on_seasons_ready)
         catalog.seasonsFailed.connect(self._on_seasons_failed)
         catalog.episodesReady.connect(self._on_episodes_ready)
@@ -737,6 +738,13 @@ class LibraryController(QObject):
         self._sync_nav("search" if self._mode == "search" else self._model.section)
         if self._grid_content == "search":
             self._search.rerun()
+
+    def _on_providers_changed(self) -> None:
+        """The provider list changed: a title waiting for a provider that is gone is dropped."""
+        action = self._pending.action
+        if not self._closed and action and action.provider not in self._catalog.catalogs.names():
+            self._pending.cancel()
+            self.notice.emit(UNKNOWN_PROVIDER_NOTICE)
 
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._closed:
