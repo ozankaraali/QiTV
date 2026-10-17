@@ -345,6 +345,8 @@ class CatalogService(QObject):
         self._generation = 0
         self._content_version = 0  # bumped whenever the catalog content may have changed
         self._epg_ready = False
+        # False: this provider's guide is not in use, so it is not loaded (the hub sets it).
+        self.epg_enabled = True
         self._ready_provider: Optional[str] = None
         # Serial provider-state queue: setups and EPG loads never overlap.
         self._state_job: Optional[str] = None  # "provider" or "epg" while one runs
@@ -514,7 +516,7 @@ class CatalogService(QObject):
         self._request_epg(force)
 
     def _request_epg(self, force: bool) -> None:
-        if self._closed or self._setup_active():
+        if self._closed or self._setup_active() or not self.epg_enabled:
             return
         if self._state_job is not None:  # an EPG load is running: load once more after it
             self._pending_epg = bool(force or self._pending_epg)
@@ -528,6 +530,9 @@ class CatalogService(QObject):
 
     def _on_epg_ready(self, job: _Job, payload) -> None:
         if self._next_state_job() or not self._current(job):
+            return
+        if not self.epg_enabled:  # released while it loaded
+            self.release_epg()
             return
         self._epg_ready = True
         self.epgReady.emit()
@@ -546,6 +551,10 @@ class CatalogService(QObject):
 
     def epg_ready(self) -> bool:
         return self._epg_ready
+
+    def epg_loading(self) -> bool:
+        """Whether a guide load is running or queued."""
+        return self._state_job == "epg" or self._pending_epg is not None
 
     def programmes(self, channel: dict, now: datetime, limit: int = 8) -> list[Programme]:
         if not self._epg_ready or not self.config.channel_epg:

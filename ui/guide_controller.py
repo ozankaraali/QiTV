@@ -1,7 +1,8 @@
 """The EPG guide's behaviour over live TV (spec §5.1): what it opens on and the keys it takes.
 
 The guide lists the zap group's channels (every live channel when nothing was tuned yet) on
-the channel tuned last. While it is open it takes the keys:
+the channel tuned last; in all providers mode, when the drawer shows another live group, that
+group's channels (any provider's) instead. While it is open it takes the keys:
 - ↑/↓, PgUp/PgDn and Ch± move the highlight; ←/→ move the time window;
 - digits jump to a channel number (the fast way through thousands of channels), Enter tunes
   the highlighted channel and closes the guide;
@@ -79,6 +80,10 @@ class GuideController(QObject):
 
     def current_channel(self) -> Optional[dict]:
         return self.guide.current_channel() if self.is_open() else None
+
+    def visible_channels(self) -> list[dict]:
+        """The channels on screen while the guide is open (any provider's)."""
+        return self.guide.visible_channels() if self.is_open() else []
 
     def handle(self, action: Action, payload: str = "") -> bool:
         """Act on a key while the guide is open; False when the usual handling follows."""

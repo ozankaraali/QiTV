@@ -390,6 +390,23 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertEqual(self.config.library_provider_name, "")
         self.assertFalse(self.config.library_all_providers)
 
+    def give_guide(self, name, titles):
+        catalog = self.catalogs.catalog(name)
+        catalog.programmes = lambda channel, now, limit=8: titles
+
+    def test_a_channels_programmes_come_from_its_provider(self):
+        self.give_guide("Harbor IPTV", ["Ana Haber"])
+        self.give_guide("Demo TV", ["Wrong"])
+        channel = with_provider({"id": 2, "xmltv_id": "harbor-news"}, "Harbor IPTV")
+        for source in (ALL_PROVIDERS, "Demo TV"):
+            self.assertEqual(self.view(source).programmes(channel, None), ["Ana Haber"])
+
+    def test_a_guide_in_use_repaints_whichever_provider_the_list_shows(self):
+        view = self.view("Demo TV")
+        spy = QSignalSpy(view.epgReady)
+        self.catalogs.catalog("Harbor IPTV").epgReady.emit()
+        self.assertEqual(spy.count(), 1)
+
 
 class PinnedManagerTests(unittest.TestCase):
     def test_a_pinned_manager_fails_for_a_provider_that_is_gone(self):

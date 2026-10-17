@@ -1,3 +1,4 @@
+import copy
 from datetime import datetime, timedelta
 import gzip
 import hashlib
@@ -163,6 +164,9 @@ class EpgManager:
         self.provider_manager = provider_manager
 
         self.index: Dict[str, Any] = {}
+        # The index as last read from or written to the shared file: save_index() writes only
+        # what this manager changed since, so providers' managers keep each other's entries.
+        self._index_base: Dict[str, Any] = {}
         # The guide is replaced, never emptied and refilled: a loader thread builds the new
         # one and swaps it in (see _publish), while the GUI thread keeps reading.
         self.epg: MultiKeyDict = MultiKeyDict()
@@ -306,14 +310,21 @@ class EpgManager:
             self._publish(None, MultiKeyDict())
 
     def _load_index(self):
-        index_file = self._index_file()
         self.index.clear()
-        if os.path.exists(index_file):
+        self.index.update(self._read_index_file())
+        self._index_base = copy.deepcopy(self.index)
+
+    def _read_index_file(self) -> Dict[str, Any]:
+        index_file = self._index_file()
+        if not os.path.exists(index_file):
+            return {}
+        try:
             with open(index_file, "r", encoding="utf-8") as f:
-                try:
-                    self.index = json.loads(f.read())
-                except (json.JSONDecodeError, IOError) as e:
-                    logger.warning(f"Error loading index file: {e}")
+                data = json.loads(f.read())
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Error loading index file: {e}")
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def clear_index(self):
         cache_dir = self._cache_dir()
@@ -409,9 +420,27 @@ class EpgManager:
         self._publish(self._epg_source, new_epg)
 
     def save_index(self):
+        """Write this manager's changes into the index file every provider's manager shares.
+
+        The file is read again first and only the entries changed (or removed) here since this
+        manager last read or wrote it are updated, so a stale copy never wipes another
+        provider's entries. The write goes through a temporary file.
+        """
+        merged = self._read_index_file()
+        for key, value in self.index.items():
+            if key not in self._index_base or self._index_base[key] != value:
+                merged[key] = value
+        for key in self._index_base:
+            if key not in self.index:
+                merged.pop(key, None)
         index_file = self._index_file()
-        with open(index_file, "w", encoding="utf-8") as f:
-            f.write(json.dumps(self.index, option=json.OPT_INDENT_2).decode("utf-8"))
+        temporary = index_file + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
+            f.write(json.dumps(merged, option=json.OPT_INDENT_2).decode("utf-8"))
+        os.replace(temporary, index_file)
+        self._index_base = copy.deepcopy(merged)
+        for key, value in merged.items():  # other providers' entries are known here now
+            self.index.setdefault(key, value)
 
     # The _refresh_epg_* helpers refetch a cached source once it is out of date and
     # return True when they did so.

@@ -80,6 +80,8 @@ class Catalogs(QObject):
         self._ready: set[str] = set()
         # Link requests waiting for a catalog's setup: (request id, item, section, is_episode)
         self._waiting: dict[str, list[tuple[int, dict, str, bool]]] = {}
+        # The providers whose guides are in use (None: nobody said yet, every guide loads).
+        self._guides: Optional[set[str]] = None
         self._closed = False
 
     # --- providers -------------------------------------------------------------------
@@ -111,6 +113,7 @@ class Catalogs(QObject):
             provider_name=name,
             link_ids=self._ids,
         )
+        catalog.epg_enabled = self._guides is None or name in self._guides
         self._connect(name, catalog)
         self._by_name[name] = catalog
         self._specs[name] = spec
@@ -215,16 +218,26 @@ class Catalogs(QObject):
 
     def use_guides(self, names: set[str]) -> None:
         """Keep the guides of `names` loaded; the others give their memory back."""
+        self._guides = set(names)
         for name in names:
             if name not in self._by_name and name not in self.names():
                 continue
             self.ensure(name)
             catalog = self.catalog(name)
-            if name in self._ready and not catalog.epg_ready():
+            catalog.epg_enabled = True
+            if name in self._ready and not catalog.epg_ready() and not catalog.epg_loading():
                 catalog.refresh_epg()
         for name, catalog in self._by_name.items():
             if name not in names:
+                catalog.epg_enabled = False
                 catalog.release_epg()
+
+    def refresh_guides(self, *, skip: str = "", force: bool = False) -> None:
+        """The guides in use load again (the periodic refresh), except `skip`'s."""
+        for name in self._guides or ():
+            catalog = self._by_name.get(name)
+            if catalog is not None and name != skip and name in self._ready:
+                catalog.refresh_epg(force=force)
 
     # --- Settings saved ---------------------------------------------------------------------
     def reload(self) -> None:

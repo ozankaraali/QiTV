@@ -21,17 +21,20 @@ class RecordingFactory(RealSetupFactory):
     def __init__(self):
         super().__init__()
         self.setups = []
+        self.epg_loads = []
 
     def provider_setup(self, provider_manager, force_refresh):
         self.setups.append(provider_manager._pinned_provider)
         return super().provider_setup(provider_manager, force_refresh)
 
     def epg(self, epg_manager, force_refresh):
+        self.epg_loads.append(epg_manager.name)
         return FakeWorker({})
 
 
 class FakeEpg:
-    def __init__(self):
+    def __init__(self, name=""):
+        self.name = name
         self.released = 0
 
     def release(self):
@@ -72,7 +75,7 @@ class CatalogsTests(unittest.TestCase):
         self.addCleanup(self.catalogs.shutdown)
 
     def make_epg(self, manager):
-        epg = FakeEpg()
+        epg = FakeEpg(manager._pinned_provider)
         self.epgs.append(epg)
         return epg
 
@@ -137,6 +140,26 @@ class CatalogsTests(unittest.TestCase):
         self.catalogs.catalog("Harbor IPTV")
         self.catalogs.use_guides({"Demo TV"})
         self.assertEqual([e.released for e in self.epgs], [0, 1])
+
+    def test_only_guides_in_use_are_loaded(self):
+        self.catalogs.use_guides({"Demo TV"})
+        QTest.qWait(50)
+        self.assertEqual(self.factory.epg_loads, ["Demo TV"])
+        self.catalogs.use_guides({"Harbor IPTV"})
+        QTest.qWait(50)
+        self.assertEqual(self.factory.epg_loads, ["Demo TV", "Harbor IPTV"])
+        self.assertEqual([e.name for e in self.epgs if e.released], ["Demo TV"])
+
+    def test_a_provider_set_up_for_browsing_loads_no_guide_once_guides_are_chosen(self):
+        self.catalogs.use_guides({"Demo TV"})
+        self.catalogs.ensure("Harbor IPTV")
+        QTest.qWait(50)
+        self.assertEqual(self.factory.epg_loads, ["Demo TV"])
+
+    def test_every_guide_loads_until_guides_are_chosen(self):  # one provider: as before 2.1
+        self.catalogs.ensure("Demo TV")
+        QTest.qWait(50)
+        self.assertEqual(self.factory.epg_loads, ["Demo TV"])
 
 
 if __name__ == "__main__":

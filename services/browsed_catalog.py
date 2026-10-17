@@ -165,8 +165,8 @@ class BrowsedCatalog(QObject):
         def forward(*args: Any) -> None:
             if self.all_providers():
                 args = self._mixed_args(name, signal_name, args)
-            elif self.source() != name:
-                return
+            elif self.source() != name and signal_name != "epgReady":
+                return  # (a guide in use is repainted whichever provider the list shows)
             getattr(self, signal_name).emit(*args)
 
         return forward
@@ -473,6 +473,11 @@ class BrowsedCatalog(QObject):
         catalog = self._cat()
         if catalog is not None:
             catalog.refresh_epg(force=force)
+        self._catalogs.refresh_guides(skip=self.source(), force=force)
+
+    def use_guides(self, names: set[str]) -> None:
+        """The providers whose guides are in use (the others free their memory)."""
+        self._catalogs.use_guides(names)
 
     def epg_ready(self) -> bool:
         catalog = self._cat()

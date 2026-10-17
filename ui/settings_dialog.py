@@ -883,9 +883,11 @@ class OptionsDialog(QDialog):
         self.providers_modified = True
 
     def _manager_of(self, name):
-        """The provider's own ProviderManager (its catalog's), else the list's."""
-        if name in self.parent().catalogs.names():
-            return self.parent().catalogs.catalog(name).provider_manager
+        """The provider's own ProviderManager when its catalog exists (it holds the provider's
+        queued cache writes), else the list's: a catalog is never made just for this."""
+        catalogs = self.parent().catalogs
+        if name in catalogs.created():
+            return catalogs.catalog(name).provider_manager
         return self.provider_manager
 
     def browse_epg_file(self):
