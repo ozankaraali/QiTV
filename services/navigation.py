@@ -200,7 +200,9 @@ class NodeSeq(Sequence):
                 narrowed = seq.matching(needle)
                 self._narrowed = (needle, narrowed)
                 return narrowed
-        folded = self._folded_titles()
+        folded = self._folded_titles(wait=False)
+        if folded is None:  # still folding in the background: show the list as it is
+            return self
         rows = [row for row, title in enumerate(folded) if needle in title]
         narrowed = NodeSeq(
             [self.items[row] for row in rows],
@@ -223,8 +225,10 @@ class NodeSeq(Sequence):
             self._folding = threading.Thread(target=self._folded_titles, daemon=True)
             self._folding.start()
 
-    def _folded_titles(self) -> list[str]:
-        with self._lock:
+    def _folded_titles(self, wait: bool = True) -> Optional[list[str]]:
+        if not self._lock.acquire(blocking=wait):
+            return None
+        try:
             if self._folded is None:
                 titles = [i.get("name") or i.get("title") or "Untitled" for i in self.items]
                 try:
@@ -232,6 +236,8 @@ class NodeSeq(Sequence):
                 except TypeError:  # a title that is not text
                     self._folded = fold_all([str(title) for title in titles])
             return self._folded
+        finally:
+            self._lock.release()
 
     def numbered(self) -> bool:
         """Whether any channel has a number (else the position stands in for it)."""

@@ -703,6 +703,14 @@ class MixedProvidersTests(unittest.TestCase):
         self.assertEqual(model.genre_id, "*")
 
 
+class AddedFastPathTests(unittest.TestCase):
+    def test_a_unix_time_as_text_and_an_absurd_one(self):
+        self.assertEqual(library._added({"added": "1700000000"}), 1700000000.0)
+        self.assertEqual(library._added({"added": "1700000000000"}), 1700000000.0)
+        self.assertIsNone(library._added({"added": "0"}))
+        self.assertIsNone(library._added({"added": "9" * 400}))
+
+
 class AllListsEverythingTests(unittest.TestCase):
     """The loaded titles come from All alone when All holds them (200,000 channels' worth of
     genre lists repeating it cost a third of a second), but not for a portal that gives its

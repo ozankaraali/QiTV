@@ -164,6 +164,18 @@ class Catalogs(QObject):
         self._started.discard(name)
         self.ensure(name)
 
+    _frozen = False
+
+    @classmethod
+    def _freeze_heap(cls) -> None:
+        """Once, with the first provider loaded: the catalog (up to 57,000 channels a provider)
+        is not scanned by the collector again. Collected first, so that no garbage cycle is
+        frozen with it for good; freezing again would freeze whatever is pending each time."""
+        if not cls._frozen:
+            cls._frozen = True
+            gc.collect()
+            gc.freeze()
+
     def is_ready(self, name: str) -> bool:
         return name in self._ready
 
@@ -181,7 +193,7 @@ class Catalogs(QObject):
 
     def _on_ready(self, name: str) -> None:
         self._ready.add(name)
-        gc.freeze()  # the provider's catalog (up to 57,000 channels) is not scanned again
+        self._freeze_heap()
         self.providerReady.emit(name)
         self.contentChanged.emit(name)
         catalog = self._by_name.get(name)

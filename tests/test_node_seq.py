@@ -89,6 +89,12 @@ class NodeSeqTests(unittest.TestCase):
         self.assertIs(seq._folded_titles(), folded)
         self.assertEqual([n.key for n in seq.matching("cafe 3")], ["3", "30"])
 
+    def test_filtering_while_the_titles_are_still_folding_shows_the_list_as_it_is(self):
+        seq = NodeSeq(channels(30))
+        with seq._lock:  # the background fold holds it
+            self.assertIs(seq.matching("cafe"), seq)
+        self.assertEqual(len(seq.matching("cafe")), 10)
+
     def test_numbers_and_their_width(self):
         self.assertTrue(NodeSeq(channels(5)).numbered())
         self.assertFalse(NodeSeq(channels(5, numbered=False)).numbered())

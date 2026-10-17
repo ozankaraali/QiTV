@@ -90,7 +90,9 @@ _title = title_of  # the earlier private name
 def _added(item: dict) -> Optional[float]:
     """The unix time of ``added`` (a unix time or ``YYYY-MM-DD[ HH:MM:SS]``), else None."""
     raw = item.get("added")
-    if raw.__class__ is str and raw.isdecimal():  # a unix time as text, the usual case
+    if (
+        raw.__class__ is str and raw.isdecimal() and len(raw) <= 13
+    ):  # a unix time as text, the usual case
         value = int(raw)
         if value <= 0:
             return None
