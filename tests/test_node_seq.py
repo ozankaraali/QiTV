@@ -5,15 +5,19 @@ to everything the list path does.
 """
 
 import os
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+
 from services import navigation
 from services.navigation import LAZY_ROWS, NavModel, NodeSeq, _item_node, payloads
-from tests.test_drawer import DrawerTests
+from tests.test_drawer import DrawerTests, make
 from tests.test_navigation import FakeCatalog
 
 
@@ -133,6 +137,43 @@ class LongGroupTests(unittest.TestCase):
             self.assertIsInstance(seq, NodeSeq)
             self.assertIs(nav.children(group), seq)  # memoized: the same list, not a copy
         self.assertGreater(LAZY_ROWS, 100)
+
+
+class FoldedFilterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_a_filter_typed_before_the_fold_applies_when_it_ends(self):
+        with mock.patch.object(navigation, "LAZY_ROWS", 1):
+            catalog, nav, host, drawer = make()
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        with mock.patch.object(navigation, "LAZY_ROWS", 1):
+            nav._memo.clear()
+            nav.reset_to("live", "10")
+            started = []
+            with mock.patch.object(NodeSeq, "_fold_in_background", lambda s: started.append(s)):
+                drawer.open_drawer()
+                drawer.type_text("tw")
+                self.assertEqual(len(drawer._columns["right"].nodes), 2)  # not filtered yet
+            seq = started[0]
+            thread = seq._folding = threading.Thread(target=seq._fold_and_tell)
+            thread.start()
+            thread.join()
+            QTest.qWait(50)  # the signal is queued to this thread
+            self.assertEqual([n.title for n in drawer._columns["right"].nodes], ["Two"])
+
+    def test_a_fold_that_fails_is_tried_again_by_the_next_filter(self):
+        seq = NodeSeq(channels(30))
+        with mock.patch("services.navigation.fold_all", side_effect=ValueError("boom")):
+            thread = seq._folding = threading.Thread(target=seq._fold_and_tell)
+            thread.start()
+            thread.join()
+        self.assertIsNone(seq._folding)
+        self.assertIsNone(seq._folded)
+        seq._folded_titles()
+        self.assertEqual(len(seq.matching("cafe")), 10)
 
 
 class LazyDrawerTests(DrawerTests):
