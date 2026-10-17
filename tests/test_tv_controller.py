@@ -96,6 +96,7 @@ class FakeHub(QObject):
     """The Catalogs hub as far as the last-channel start needs it."""
 
     contentChanged = Signal(str)
+    providerReady = Signal(str)
     providerFailed = Signal(str, str)
 
     def __init__(self):
@@ -193,6 +194,15 @@ class FakeCatalog(NavCatalog):
 
     def sign_in_again(self, name):
         self.setups.append(name)
+
+    def hub_ready(self, name):
+        """A provider's setup is done: the hub says so (link lanes), then the page's view."""
+        self.catalogs.providerReady.emit(name)
+        self.providerReady.emit(name)
+
+    def hub_failed(self, name, message):
+        self.catalogs.providerFailed.emit(name, message)
+        self.providerFailed.emit(name, message)
 
     def current_provider(self):
         return {"name": self.provider, "type": self.ptype}
@@ -925,22 +935,22 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.watch.plays, [])
 
     def test_browsing_another_provider_keeps_the_pending_tune(self):
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.controller.tune(HOME_ONE, group_key="10", channels=[HOME_ONE])  # a link on its way
         self.controller.select_provider("Backup")
         self.assertEqual(self.catalog.selected[-1], "Backup")
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.assertEqual(self.requested(), ["One"])  # nothing asked again, nothing dropped
         self.ready("http://stream/1")  # the link still arrives
         self.assertEqual(self.played_urls(), ["http://stream/1"])
 
     def test_browsing_another_provider_keeps_the_zap_list_and_the_guide(self):
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.play(0)
         self.controller.handle(Action.GUIDE)
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.assertEqual(self.zap.context.group_key, "10")
         self.assertEqual(len(self.zap.context.channels), len(CHANNELS))
         self.assertTrue(self.guide.visible)
@@ -951,11 +961,11 @@ class LinkPipelineTests(ControllerTestCase):
         self.controller.tune(item, group_key="10", channels=[item])
 
     def test_a_browsed_providers_failure_keeps_another_providers_pending_tune(self):
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.provider = "Backup"  # the list shows Backup
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.tune_stamped(HOME_ONE)
-        self.catalog.providerFailed.emit("Backup", "down")
+        self.catalog.hub_failed("Backup", "down")
         self.assertEqual(self.requested(), ["One"])
         self.ready("http://stream/1")
         self.assertEqual(self.played_urls(), ["http://stream/1"])
@@ -963,7 +973,7 @@ class LinkPipelineTests(ControllerTestCase):
     def test_a_failed_provider_releases_its_request_in_all_mode(self):
         self.catalog.provider = "@all"
         self.tune_stamped(HOME_ONE)
-        self.catalog.providerFailed.emit("Home", "down")  # its link never settles
+        self.catalog.hub_failed("Home", "down")  # its link never settles
         self.tune_stamped(BACKUP_TWO)  # not queued behind the dead request
         self.assertEqual(self.requested(), ["One", "Two"])
         self.ready("http://stream/2")
@@ -973,15 +983,15 @@ class LinkPipelineTests(ControllerTestCase):
         self.catalog.provider = "@all"
         self.tune_stamped(HOME_ONE)
         self.tune_stamped(BACKUP_TWO)  # queued behind One
-        self.catalog.providerFailed.emit("Home", "down")
+        self.catalog.hub_failed("Home", "down")
         self.assertEqual(self.requested(), ["One", "Two"])
 
     def test_refreshing_every_provider_asks_a_link_in_flight_again_in_all_mode(self):
         self.catalog.provider = "@all"
         self.tune_stamped(HOME_ONE)
-        self.catalog.providerReady.emit("Backup")  # another provider's setup: untouched
+        self.catalog.hub_ready("Backup")  # another provider's setup: untouched
         self.assertEqual(self.requested(), ["One"])
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.assertEqual(self.requested(), ["One", "One"])
         self.ready("http://stream/1")
         self.assertEqual(self.played_urls(), ["http://stream/1"])
@@ -989,7 +999,7 @@ class LinkPipelineTests(ControllerTestCase):
     def test_a_forced_setup_of_a_provider_not_shown_asks_its_link_again(self):
         self.catalog.provider = "Backup"
         self.tune_stamped(HOME_ONE)
-        self.catalog.providerReady.emit("Home")  # the hub's signal; the view shows Backup
+        self.catalog.hub_ready("Home")  # the hub's signal; the view shows Backup
         self.assertEqual(self.requested(), ["One", "One"])
         self.ready("http://stream/1")
         self.assertEqual(self.played_urls(), ["http://stream/1"])
@@ -999,19 +1009,19 @@ class LinkPipelineTests(ControllerTestCase):
         self.tune_stamped(HOME_ONE)
         self.catalog.linkFailed.emit(1, PROVIDER_LOADING_MESSAGE)  # Home is loading
         self.assertEqual(self.requested(), ["One"])
-        self.catalog.providerReady.emit("Backup")  # another provider: Home's tune waits on
+        self.catalog.hub_ready("Backup")  # another provider: Home's tune waits on
         self.assertEqual(self.requested(), ["One"])
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.assertEqual(self.requested(), ["One", "One"])
         self.ready("http://stream/1")
         self.assertEqual(self.played_urls(), ["http://stream/1"])
 
     def test_provider_refresh_requests_the_pending_tune_again(self):
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.tune(0)
         self.controller.select_provider(force_refresh=True)
         self.tune(1)
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.assertEqual(self.requested(), ["One", "Two"])
         self.catalog.linkReady.emit(1, "http://stream/1")  # stale
         self.ready("http://stream/2")
@@ -1107,7 +1117,7 @@ class StartupTests(ControllerTestCase):
     def test_the_loading_hint_shows_until_the_first_live_section(self):
         self.controller.start()
         self.assertEqual(self.toast.hint, "Loading Home…")
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.assertEqual(self.toast.hint, "Loading Home…")  # the channels are still on their way
         self.catalog.sectionReady.emit("live")
         self.assertIsNone(self.toast.hint)
@@ -1120,7 +1130,7 @@ class StartupTests(ControllerTestCase):
     def test_the_loading_hint_ends_when_the_live_section_fails(self):
         self.controller.start()
         self.catalog.loaded = False
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionFailed.emit("live", PROVIDER_LOADING_MESSAGE)
         self.assertEqual(self.toast.hint, "Loading Home…")  # a setup is still running
         self.catalog.sectionFailed.emit("live", "Timed out")
@@ -1128,13 +1138,13 @@ class StartupTests(ControllerTestCase):
 
     def test_a_provider_chosen_in_the_drawer_shows_the_loading_hint(self):
         self.controller.start()
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionReady.emit("live")
         self.nav.open(NavNode("source", "Backup", "Backup", "Backup"))
         self.assertEqual(self.catalog.selected, [None, "Backup"])
         self.assertEqual(self.toast.hint, "Loading Backup…")
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.catalog.sectionReady.emit("live")
         self.assertIsNone(self.toast.hint)
 
@@ -1151,7 +1161,7 @@ class StartupTests(ControllerTestCase):
         }
         self.controller.start()
         self.assertEqual(self.catalog.selected, [None])
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.assertEqual(self.catalog.requests[-1], ("section", "live"))
         self.catalog.sectionReady.emit("live")
         self.assertEqual([n.key for n in self.nav.path], ["Home", "live", "10"])
@@ -1168,7 +1178,7 @@ class StartupTests(ControllerTestCase):
             "item": CHANNELS[2],
         }
         self.controller.start()
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionReady.emit("live")
         self.assertEqual(self.catalog.links, [])
         self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
@@ -1187,7 +1197,7 @@ class StartupTests(ControllerTestCase):
             [HARBOR_ONE, {**CHANNELS[1], "_provider": "Harbor IPTV"}]
         )
         self.controller.start()
-        self.catalog.providerReady.emit("Home")  # the browsed provider is another one
+        self.catalog.hub_ready("Home")  # the browsed provider is another one
         self.catalog.sectionReady.emit("live")
         return hub
 
@@ -1240,7 +1250,8 @@ class StartupTests(ControllerTestCase):
         self.assertEqual(self.requested(), ["Two"])
 
     def test_previous_channel_goes_back_across_providers(self):
-        self.catalog.providerReady.emit("Home")
+        self.controller.start()  # wires the link lanes and the zapping to the catalog
+        self.catalog.hub_ready("Home")
         self.controller.tune(CHANNELS[1], group_key="10", channels=CHANNELS)
         self.ready("http://stream/2")
         self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
@@ -1253,7 +1264,7 @@ class StartupTests(ControllerTestCase):
 
     def test_provider_failure_toasts_and_opens_the_drawer_on_the_sources(self):
         self.controller.start()
-        self.catalog.providerFailed.emit("Home", "Handshake failed")
+        self.catalog.hub_failed("Home", "Handshake failed")
         self.assertEqual(self.toast.messages(), [("Home: Handshake failed", "error")])
         self.assertIsNone(self.toast.hint)
         self.assertEqual(self.drawer.named("open_drawer"), [(None, "left")])
@@ -1262,7 +1273,7 @@ class StartupTests(ControllerTestCase):
     def test_live_section_failure_opens_the_drawer_with_a_hint(self):
         self.controller.start()
         self.catalog.loaded = False  # nothing saved to fall back on
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionFailed.emit("live", "Timed out")
         self.assertEqual(self.toast.messages(), [("Live TV: Timed out", "error")])
         self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
@@ -1712,7 +1723,7 @@ class RealOverlayTests(ControllerTestCase):
         self.addCleanup(controller.shutdown)
         host.show()
         controller.start()
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionReady.emit("live")
         self.assertTrue(overlays.drawer.isVisible())
         self.assertEqual(overlays.drawer.highlighted().title, "News")  # at Section | Group
@@ -1782,7 +1793,7 @@ class ProviderRetryTests(ControllerTestCase):
 
     def fail_setup(self):
         self.catalog.loading = False
-        self.catalog.providerFailed.emit("Home", "Couldn't reach the provider")
+        self.catalog.hub_failed("Home", "Couldn't reach the provider")
 
     def test_the_drawer_opens_on_the_failed_source_with_a_retry_row(self):
         self.fail_setup()
@@ -1800,7 +1811,7 @@ class ProviderRetryTests(ControllerTestCase):
         self.assertEqual(self.real_drawer.message_for("right"), LOADING_TEXT)
         self.assertEqual(self.real_toast.text(), "Loading Home…")
         self.catalog.loading = False
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionReady.emit("live")
         self.assertEqual(self.real_drawer.highlighted().title, "News")
 
@@ -1961,7 +1972,7 @@ class ReviewFixTests(ControllerTestCase):
             self.tune(0)
             self.catalog.linkFailed.emit(1, self.LEAK)
             self.catalog.loaded = False  # no saved groups: the live failure is an error
-            self.catalog.providerReady.emit("Home")
+            self.catalog.hub_ready("Home")
             self.catalog.sectionFailed.emit("live", self.LEAK)
         self.assertEqual(
             self.toast.messages(),
@@ -1984,38 +1995,38 @@ class ReviewFixTests(ControllerTestCase):
             "group_id": "10",
             "item": CHANNELS[2],
         }
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionReady.emit("live")  # autotunes Three
         self.controller.handle(Action.CH_NEXT)
         self.catalog.linkReady.emit(1, "http://stream/3")
         self.assertEqual(self.requested(), ["Three", "Four"])
 
     def test_another_provider_in_the_list_keeps_zapping(self):
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.play(0)
         self.play(1)  # previous channel: One
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.controller.handle(Action.PREVIOUS)
         self.controller.handle(Action.CH_NEXT)
         self.assertEqual(self.requested(), ["One", "Two", "One", "Two"])  # Home's list walks on
 
     def test_link_failure_while_loading_waits_for_the_provider(self):
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.tune(0)
         self.catalog.loading = True
         self.catalog.linkFailed.emit(1, PROVIDER_LOADING_MESSAGE)
         self.assertEqual(self.toast.messages(), [])
         self.assertEqual(self.requested(), ["One"])
         self.catalog.loading = False
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.assertEqual(self.requested(), ["One", "One"])
         self.ready("http://stream/1")
         self.assertEqual(self.played_urls(), ["http://stream/1"])
 
     def test_live_section_still_loading_is_ignored(self):
         self.catalog.loaded = False
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionFailed.emit("live", PROVIDER_LOADING_MESSAGE)
         self.assertEqual(self.toast.messages(), [])
         self.assertEqual(self.drawer.named("open_drawer"), [])
@@ -2029,7 +2040,7 @@ class ReviewFixTests(ControllerTestCase):
             "group_id": "10",
             "item": CHANNELS[2],
         }
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionFailed.emit("live", UNREACHABLE_MESSAGE)
         self.assertEqual(self.requested(), ["Three"])
         self.assertEqual(
@@ -2134,10 +2145,10 @@ class ReviewFixTests(ControllerTestCase):
     def test_closed_controller_ignores_catalog_signals(self):
         self.controller.shutdown()
         self.toast.calls.clear()  # the startup hint, cleared by the shutdown
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionReady.emit("live")
         self.catalog.sectionFailed.emit("live", UNREACHABLE_MESSAGE)
-        self.catalog.providerFailed.emit("Home", UNREACHABLE_MESSAGE)
+        self.catalog.hub_failed("Home", UNREACHABLE_MESSAGE)
         self.catalog.epgReady.emit()
         self.zap.digit("9")  # zap timers may still fire while the window is torn down
         elapse(80)  # past the digit commit: "No channel 9" must not be toasted
@@ -2154,7 +2165,7 @@ class FixRound2Tests(ControllerTestCase):
     def setUp(self):
         super().setUp()
         self.controller.start()
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
 
     def test_two_loading_failures_keep_the_newest_choice(self):
         self.play(0)
@@ -2164,7 +2175,7 @@ class FixRound2Tests(ControllerTestCase):
         self.tune(2)  # the newest choice, sent while Two waits for the provider
         self.catalog.linkFailed.emit(3, PROVIDER_LOADING_MESSAGE)
         self.catalog.loading = False
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.assertEqual(self.requested(), ["One", "Two", "Three", "Three"])
         self.ready("http://stream/3")
         self.assertEqual(self.played_urls(), ["http://stream/1", "http://stream/3"])
@@ -3287,7 +3298,7 @@ class AutoplayCase(ControllerTestCase):
     def setUp(self):
         super().setUp()
         self.controller.start()
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionReady.emit("live")  # the setup's "Loading Home…" ends
         self.drawer.visible = False  # it opened on the idle player
         self.assertIsNone(self.toast.hint)
@@ -3920,7 +3931,7 @@ class SeasonWaitTests(AutoplayCase):
         self.play_episode(SEASON_1, 2)
         self.end()  # the wait starts while the setup still loads
         self.assertEqual(self.toast.hint, "Loading Home…")
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.catalog.sectionReady.emit("live")  # the setup ends; the wait goes on
         self.assertEqual(self.toast.hint, "Loading next season…")
         self.catalog.episode_map[("s9", "2")] = [episode(SEASON_2, 1)]
@@ -4036,7 +4047,7 @@ class LibraryTests(AutoplayCase):
         self.drawer.calls.clear()
         self.controller.select_provider("Backup")
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.catalog.sectionReady.emit("live")
         self.assertEqual(self.catalog.links, [])
         self.assertEqual(self.drawer.named("open_drawer"), [])
@@ -4070,7 +4081,7 @@ class LibraryTests(AutoplayCase):
         self.drawer.calls.clear()
         self.controller.select_provider("Backup")
         self.catalog.provider = "Backup"
-        self.catalog.providerFailed.emit("Backup", "Handshake failed")
+        self.catalog.hub_failed("Backup", "Handshake failed")
         self.assertEqual(self.drawer.named("open_drawer"), [])  # not behind the Library
         requests = list(self.catalog.requests)
         self.controller.resume_live()
@@ -4088,7 +4099,7 @@ class LibraryTests(AutoplayCase):
         self.assertEqual(self.catalog.links, [])
         self.catalog.loading = False
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.catalog.sectionReady.emit("live")
         self.assertEqual(self.requested(), ["Three"])
 
@@ -4103,7 +4114,7 @@ class LibraryTests(AutoplayCase):
         self.catalog.providerReady.connect(
             lambda _name: self.controller.play_vod(film, "movie", play_context())
         )
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.catalog.sectionReady.emit("live")
         self.assertEqual(self.link_items(), ["m4"])
         self.ready(film["cmd"])

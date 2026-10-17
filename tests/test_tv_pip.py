@@ -514,13 +514,13 @@ class PipTests(PipCase):
         self.assertFalse(self.sessions.pip_open())
 
     def test_another_provider_closes_the_small_picture(self):
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.start_large(0)
         self.open_small(CHANNELS[1])
-        self.catalog.providerReady.emit("Home")  # the same provider again: it stays open
+        self.catalog.hub_ready("Home")  # the same provider again: it stays open
         self.assertTrue(self.sessions.pip_open())
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.assertFalse(self.sessions.pip_open())
         self.assertEqual(self.pip_live.calls[-1], ("stop",))
 
@@ -583,25 +583,25 @@ class PipTests(PipCase):
 
     def test_a_provider_setup_while_the_pips_link_is_on_its_way_asks_again(self):
         # Review I1: a setup drops every link request; the PiP's must not stay stuck.
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.start_large(0)
         self.start_large(1)
         self.controller.handle(Action.PIP)
         self.assertEqual(self.requested()[-1], "One")
         links = len(self.catalog.links)
-        self.catalog.providerReady.emit("Home")  # a refresh: the same provider
+        self.catalog.hub_ready("Home")  # a refresh: the same provider
         self.assertEqual(len(self.catalog.links), links + 1)  # asked again
         self.assertEqual(self.requested()[-1], "One")
         self.ready("http://stream/1")
         self.assertTrue(wait_until(self.sessions.pip_open))
 
     def test_after_another_provider_pip_still_opens(self):
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.start_large(0)
         self.start_large(1)
         self.controller.handle(Action.PIP)  # its link is on its way…
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")  # …and dropped with the old provider
+        self.catalog.hub_ready("Backup")  # …and dropped with the old provider
         links = len(self.catalog.links)
         self.assertEqual(len(self.catalog.links), links)  # the old channel is not asked again
         self.start_large(2)
@@ -614,7 +614,7 @@ class PipTests(PipCase):
         self.start_large(0)
         self.start_large(1)
         self.controller.handle(Action.PIP)
-        self.catalog.providerFailed.emit("Home", "Portal down")
+        self.catalog.hub_failed("Home", "Portal down")
         links = len(self.catalog.links)
         self.controller.handle(Action.PIP)  # nothing was open: P asks again
         self.assertEqual(len(self.catalog.links), links + 1)
@@ -644,7 +644,7 @@ class BrowsingProviderPipTests(PipCase):
         before = self.counts()
         self.controller.select_provider("Backup")
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.assertTrue(self.sessions.pip_open())
         self.assertEqual(self.counts(), before)
         self.assertEqual(self.zap.context.group_key, "10")
@@ -655,7 +655,7 @@ class BrowsingProviderPipTests(PipCase):
         self.controller.tune(HOME_ONE, group_key="10", channels=[HOME_ONE])
         self.controller.select_provider("Backup")
         self.catalog.provider = "Backup"
-        self.catalog.providerReady.emit("Backup")
+        self.catalog.hub_ready("Backup")
         self.assertEqual(self.requested(), ["One"])
         self.ready("http://stream/1")
         self.assertTrue(wait_until(lambda: self.live.named("start")))
@@ -752,14 +752,14 @@ class PipLinkSettlingTests(PipCase):
     def test_a_browsed_providers_failure_keeps_the_small_pictures_link(self):
         self.controller.open_pip(self.home_two, group_key="10", channels=[self.home_two])
         self.catalog.provider = "Backup"
-        self.catalog.providerFailed.emit("Backup", "down")
+        self.catalog.hub_failed("Backup", "down")
         self.ready("http://stream/2")
         self.assertTrue(wait_until(lambda: self.pip_live.named("start")))
         self.assertTrue(self.sessions.pip_open())
 
     def test_its_own_providers_failure_forgets_the_small_picture(self):
         self.controller.open_pip(self.home_two, group_key="10", channels=[self.home_two])
-        self.catalog.providerFailed.emit("Home", "down")
+        self.catalog.hub_failed("Home", "down")
         self.ready("http://stream/2")  # a late result is ignored
         QTest.qWait(20)
         self.assertFalse(self.sessions.pip_open())
@@ -768,9 +768,9 @@ class PipLinkSettlingTests(PipCase):
     def test_its_own_providers_setup_asks_the_link_again(self):
         self.controller.open_pip(self.home_two, group_key="10", channels=[self.home_two])
         count = len(self.catalog.links)
-        self.catalog.providerReady.emit("Harbor IPTV")  # another provider's: untouched
+        self.catalog.hub_ready("Harbor IPTV")  # another provider's: untouched
         self.assertEqual(len(self.catalog.links), count)
-        self.catalog.providerReady.emit("Home")
+        self.catalog.hub_ready("Home")
         self.assertEqual(len(self.catalog.links), count + 1)
         self.ready("http://stream/2")
         self.assertTrue(wait_until(lambda: self.pip_live.named("start")))

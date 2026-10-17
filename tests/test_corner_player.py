@@ -87,6 +87,7 @@ class CornerPlayerTests(WindowCase):
     def click(self, name):
         """A mouse click on a corner control, through the host's window."""
         controls, host = self.window.corner_controls, self.window.host
+        self.assertTrue(QTest.qWaitForWindowExposed(host))  # a click before that is dropped
         point = controls.mapTo(
             host, self.window.corner_controls.button_rect(name).center().toPoint()
         )

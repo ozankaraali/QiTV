@@ -53,7 +53,7 @@ class MixedNavigationTests(unittest.TestCase):
             registry,
             runner=ImmediateRunner(),
             factory=ScriptedFactory(),
-            make_epg=lambda manager: FakeEpg(),
+            make_epg=lambda manager: FakeEpg(manager._pinned_provider),
         )
         self.addCleanup(catalogs.shutdown)
         config.selected_provider_name = providers[0]["name"]

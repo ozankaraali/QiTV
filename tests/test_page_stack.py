@@ -120,7 +120,9 @@ class PageStackTests(StackCase):
         stack.show_library(corner=True)
         stack.show_library(corner=False)
         stack.show_player()
-        self.assertEqual([call[0] for call in spy], ["corner", "library", "player"])
+        self.assertEqual(
+            [spy.at(i)[0] for i in range(spy.count())], ["corner", "library", "player"]
+        )
 
     def test_dragging_snaps_to_the_nearest_corner_and_is_saved(self):
         stack = self.make_stack(width=1280, height=720)

@@ -1659,7 +1659,7 @@ class XtreamLibraryTests(TwoProviderCase):
         # A double-click's second click lands on the Library under the pointer (an episode
         # there would play): it reaches nothing (2.0.1 review M1).
         point = window.mapFromGlobal(at)
-        heard = MouseHeard(window.childAt(point))
+        heard = MouseHeard(window.childAt(point) or window.library_page)
         QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
         self.assertEqual(heard.events, [])
         self.assertEqual(len(plays), 1)
@@ -1704,8 +1704,8 @@ class XtreamLibraryTests(TwoProviderCase):
         self.wait_for_titles()
 
     def test_a_search_hit_on_another_provider_plays_once_it_is_ready(self):
-        # Review Focus 4: the play waits for its provider, and the shell's own provider
-        # change (it drops older requests) never drops it.
+        # Review Focus 4: the play waits for its provider (set up beside the shown one in 2.1,
+        # no provider change), and an older request being dropped never drops it.
         plays = self.play_spy()
         self.show()
         self.wait_ready(XTREAM)
@@ -1729,7 +1729,8 @@ class XtreamLibraryTests(TwoProviderCase):
         )
         QTest.keyClick(window, Qt.Key.Key_Down)  # from the field to the results
         QTest.keyClick(window, Qt.Key.Key_Return)
-        self.wait_ready(XTREAM)
+        # 2.1: the hit's own provider is set up beside the shown one (the TV page stays on
+        # PROVIDER_NAME) and the play runs once that provider is ready.
         self.assertTrue(wait_until(lambda: len(plays) == 1, LIBRARY_WAIT_MS))
         self.assertTrue(plays[0].endswith("/102.mp4"), plays)
         elapse(300)
