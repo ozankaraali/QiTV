@@ -21,7 +21,6 @@ from PySide6.QtCore import QObject
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode
 from services.zapping import ZapContext
-from ui.link_lanes import Target
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +36,8 @@ class ProviderFlow(QObject):
         config,
         overlays,
         closed: Callable[[], bool],
-        settle_links: Callable[[bool], Optional[Target]],
-        request: Callable[[Target], None],
         has_media: Callable[[], bool],
         links_busy: Callable[[], bool],
-        drop_links: Callable[[], None],
         tune: Callable[[dict, str, list[dict]], None],
         open_drawer: Callable[[], None],
         live_section_loaded: Callable[[], None],
@@ -56,18 +52,14 @@ class ProviderFlow(QObject):
         self.config = config
         self.overlays = overlays
         self._closed = closed
-        self._settle_links = settle_links
-        self._request = request
         self._has_media = has_media
         self._links_busy = links_busy
-        self._drop_links = drop_links
         self._tune = tune
         self._open_drawer = open_drawer
         self._live_section_loaded = live_section_loaded
         self._error = error
         self._drop_autoplay = drop_autoplay
         self._autoplay_hint = autoplay_hint
-        self._provider: Optional[str] = None
         self._await_live = False  # after providerReady: the first live section decides
         self._loading = False  # the "Loading <provider>…" hint is up
         self._autotune: Optional[tuple[dict, str]] = None
@@ -188,17 +180,11 @@ class ProviderFlow(QObject):
     def _on_provider_ready(self, name: str) -> None:
         if self._closed():
             return
-        # A provider setup makes the catalog drop link results requested before it, so a
-        # request still in flight may never settle: ask again for the newest target, unless
-        # the provider changed and its channels belong to the old one.
-        pending = self._settle_links(self._provider is not None and name != self._provider)
-        self._provider = name
+        # Links the setup dropped are asked again by the controller, per provider.
         self.overlays.welcome.dismiss()
-        if pending is not None:
-            self._request(pending)
         back_to_live, self._live_on_ready = self._live_on_ready, False
         last = self._last_channel(name)
-        idle = pending is None and not self._has_media()
+        idle = not self._has_media() and not self._links_busy()
         wanted = (
             idle and not self._in_library and (back_to_live or self.config.start_with_last_channel)
         )
@@ -223,8 +209,6 @@ class ProviderFlow(QObject):
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._closed():
             return
-        if self._provider is None or name == self._provider:
-            self._drop_links()  # a browsed provider's failure drops nothing of another's
         self._end_loading()
         self._error(f"{name}: {message}" if name else message)
         # The sources, on the failed one, with a row to connect again: never a black screen.

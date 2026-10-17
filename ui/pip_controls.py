@@ -268,47 +268,26 @@ class PipControls(QObject):
             return True
         return False
 
-    def links_dropped(self, ask_again: bool) -> None:
-        """The shell dropped every link request (a provider setup or failure): none comes.
-
-        `ask_again`: the provider is the same, so the channel waiting to open asks anew;
-        else it is forgotten.
-        """
-        self._link = None
+    def provider_settled(self, name: str, owner: Callable[[dict], str], *, ask_again: bool) -> None:
+        """Provider `name`'s setup dropped its link requests: none comes. The channel waiting
+        to open asks anew when it is `name`'s and `ask_again` (a setup that finished), else it
+        is forgotten when it is `name`'s (a failure); another provider's request stays."""
+        link = self._link
         wanted = self._wanted
         if wanted is None:
+            if link is not None and owner(link.item) == name:
+                self._link = None
             return
-        if ask_again and not self._closed():
-            self._request(wanted[0])
-        else:
+        if link is not None:
+            if owner(link.item) != name:
+                return  # another provider's request is still coming
+            self._link = None
+        elif owner(wanted[0].item) != name:
+            return
+        if owner(wanted[0].item) == name and not ask_again:
             self._wanted = None
-
-    def keep_large_small(self, item: dict, title: str) -> bool:
-        """A movie or an episode from the Library takes the large picture: the channel that
-        was large moves to the small one without reopening, and a previous small picture
-        closes first (its stream is released before the title opens, as any open waits).
-
-        False when nothing is kept and the caller plays as before: no channel plays large, the
-        channels play in an external player, or the title's provider has no second stream, in
-        which case the channel is closed for it (toasted).
-        """
-        channel = self._large_channel()
-        if channel is None or self._external():
-            return False
-        self.close()
-        provider = item_provider.provider_dict(self.catalog, item)
-        name = str(provider.get("name", ""))
-        limit = self._budget.limit_for(provider, item_provider.max_connections(self.catalog, item))
-        # The channel is the only stream left once the small picture closed.
-        same = item_provider.provider_name(self.catalog, channel) == name
-        if limit is not None and limit < 2 and same:
-            plural = "s" if limit != 1 else ""
-            self._toast(
-                f"Closed {channel.get('name') or ''} to play {title}: "
-                f"{name} allows {limit} stream{plural}"
-            )
-            return False
-        return self.sessions.demote_large()
+        elif not self._closed():
+            self._request(wanted[0])
 
     def _limit_reached(self, channel: dict) -> bool:
         """The limit of the channel's own provider leaves no stream for a small picture: say

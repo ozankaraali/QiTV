@@ -20,6 +20,7 @@ from services.vlc_profile import DEFAULT_USER_AGENT
 from tests.test_tv_controller import (
     CHANNELS,
     HARBOR_ONE,
+    HOME_ONE,
     MIB,
     NO_MODS,
     ControllerTestCase,
@@ -651,10 +652,11 @@ class BrowsingProviderPipTests(PipCase):
         self.assertEqual(self.requested()[-1], "Three")
 
     def test_a_link_on_its_way_still_arrives_after_browsing(self):
-        self.tune(0)
+        self.controller.tune(HOME_ONE, group_key="10", channels=[HOME_ONE])
         self.controller.select_provider("Backup")
         self.catalog.provider = "Backup"
         self.catalog.providerReady.emit("Backup")
+        self.assertEqual(self.requested(), ["One"])
         self.ready("http://stream/1")
         self.assertTrue(wait_until(lambda: self.live.named("start")))
         self.assertEqual(self.live.named("start")[0][0], "http://stream/1")
@@ -737,6 +739,41 @@ class LibraryPlayTests(PipCase):
         self.assertTrue(self.sessions.pip_open())
         self.assertNotIn(("stop",), small.live.calls)
         self.assertEqual(self.requested()[-1], "Three")
+
+
+class PipLinkSettlingTests(PipCase):
+    """The small picture's link settles with its own channel's provider."""
+
+    def setUp(self):
+        super().setUp()
+        self.start_large(0)
+        self.home_two = {**CHANNELS[1], "_provider": "Home"}
+
+    def test_a_browsed_providers_failure_keeps_the_small_pictures_link(self):
+        self.controller.open_pip(self.home_two, group_key="10", channels=[self.home_two])
+        self.catalog.provider = "Backup"
+        self.catalog.providerFailed.emit("Backup", "down")
+        self.ready("http://stream/2")
+        self.assertTrue(wait_until(lambda: self.pip_live.named("start")))
+        self.assertTrue(self.sessions.pip_open())
+
+    def test_its_own_providers_failure_forgets_the_small_picture(self):
+        self.controller.open_pip(self.home_two, group_key="10", channels=[self.home_two])
+        self.catalog.providerFailed.emit("Home", "down")
+        self.ready("http://stream/2")  # a late result is ignored
+        QTest.qWait(20)
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.pip_live.named("start"), [])
+
+    def test_its_own_providers_setup_asks_the_link_again(self):
+        self.controller.open_pip(self.home_two, group_key="10", channels=[self.home_two])
+        count = len(self.catalog.links)
+        self.catalog.providerReady.emit("Harbor IPTV")  # another provider's: untouched
+        self.assertEqual(len(self.catalog.links), count)
+        self.catalog.providerReady.emit("Home")
+        self.assertEqual(len(self.catalog.links), count + 1)
+        self.ready("http://stream/2")
+        self.assertTrue(wait_until(lambda: self.pip_live.named("start")))
 
 
 class MixedProviderPipTests(PipCase):

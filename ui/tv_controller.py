@@ -65,7 +65,7 @@ from services.epg_view import Programme, now_next
 from services.live.live_session import LiveSession
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
 from services.next_episode import play_context
-from services.provider_ids import provider_of
+from services.provider_ids import ALL_PROVIDERS, provider_of
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot
 from services.vlc_profile import classify
@@ -213,11 +213,8 @@ class TVController(QObject):
             config=config,
             overlays=overlays,
             closed=lambda: self._closed,
-            settle_links=self._settle_links,
-            request=self._request,
             has_media=self._has_media,
             links_busy=lambda: self._lanes.busy(),
-            drop_links=lambda: self._drop_links(ask_again=False),
             tune=lambda channel, key, channels: self.tune(
                 channel, group_key=key, channels=channels
             ),
@@ -321,6 +318,11 @@ class TVController(QObject):
         catalog, zap, session = self.catalog, self.zap, self.session
         column, drawer = self.overlays.column, self.overlays.drawer
         transport = self.overlays.transport
+        # Links settle per provider, on the hub's signals (every provider's, not just the
+        # shown one's); the flow's own slots, on the shown provider's, run after.
+        hub = getattr(catalog, "catalogs", catalog)
+        hub.providerReady.connect(self._on_links_provider_ready)
+        hub.providerFailed.connect(self._on_links_provider_failed)
         self._flow.wire()
         self._lanes.tuneReady.connect(self._on_tune_ready)
         self._lanes.tuneFailed.connect(self._on_tune_failed)
@@ -1236,27 +1238,48 @@ class TVController(QObject):
 
     # ---- catalog events -----------------------------------------------------------------------
 
-    def _settle_links(self, provider_changed: bool) -> Optional[Target]:
-        """A provider became ready: the newest choice to ask again, its links dropped.
+    def _link_owner(self, item: dict) -> str:
+        """The provider a link request for `item` goes to (an unstamped item: the shown one)."""
+        name = provider_of(item)
+        if name:
+            return name
+        name = self.catalog.current_provider_name()
+        if name == ALL_PROVIDERS:
+            name = str(getattr(self.config, "selected_provider_name", "") or "")
+        return name
 
-        A setup makes that provider's catalog drop the link results requested before it, so
-        a request still in flight may never settle: it is asked again. A different provider
-        becoming the one the list shows changes nothing that plays or waits: no catalog
-        dropped anything, so no link is dropped and none is asked again.
-        """
-        if provider_changed:
-            return None
-        pending = self._lanes.pending()
-        if self._is_stay(pending):
-            pending = None  # the playing channel was the newest choice: nothing to ask again
-        self._drop_links(ask_again=True)
-        return pending
-
-    def _drop_links(self, *, ask_again: bool) -> None:
-        """Forget every link request; the PiP's asks again when `ask_again`."""
-        self._lanes.drop()
+    def _on_links_provider_ready(self, name: str) -> None:
+        """Provider `name` was set up: its catalog dropped the link results requested
+        before, so its request in flight is asked again (the newest choice, unless the
+        playing channel was it). Other providers' requests are not touched."""
+        if self._closed:
+            return
+        dropped = self._lanes.drop_provider(name, self._link_owner)
+        if dropped is not None:
+            newest = self._lanes.queued or dropped
+            if self._is_stay(newest):
+                self._lanes.take_queued()  # the playing channel was the newest choice
+            else:
+                self._request(newest)
         if self._pip is not None:
-            self._pip.links_dropped(ask_again)
+            self._pip.provider_settled(name, self._link_owner, ask_again=True)
+
+    def _on_links_provider_failed(self, name: str, _message: str) -> None:
+        """Provider `name` failed: the link requests it dropped never settle, so they are
+        forgotten; the queued choice of another provider goes on."""
+        if self._closed:
+            return
+        dropped = self._lanes.drop_provider(name, self._link_owner)
+        queued = self._lanes.queued
+        if queued is not None and self._link_owner(queued.item) == name:
+            self._lanes.take_queued()
+        elif queued is not None and dropped is not None:
+            if self._is_stay(queued):
+                self._lanes.take_queued()
+            else:
+                self._request(queued)
+        if self._pip is not None:
+            self._pip.provider_settled(name, self._link_owner, ask_again=False)
 
     def _live_section_loaded(self) -> None:
         context = self.zap.context
