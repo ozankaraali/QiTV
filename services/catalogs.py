@@ -1,0 +1,236 @@
+"""One catalog per provider, behind a hub that routes requests by an item's provider stamp.
+
+QiTV 2.1 mixes providers. `Catalogs` holds a `CatalogService` pinned to each provider
+(created on first use, no network until `ensure()`), forwards their signals with the
+provider's name, and sends link and guide requests to the catalog an item came from.
+
+main.py's `ProviderManager` stays the registry: it owns the `providers` list for Settings;
+each catalog gets its own pinned `ProviderManager` (and `EpgManager`) over that same list.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+import itertools
+import logging
+from typing import Callable, Iterator, Optional
+
+from PySide6.QtCore import QObject, QTimer, Signal
+
+from services.catalog import CatalogService, WorkerFactory
+from services.epg_manager import EpgManager
+from services.epg_view import Programme
+from services.provider_ids import provider_of
+from services.provider_manager import ProviderManager
+
+logger = logging.getLogger(__name__)
+
+UNKNOWN_PROVIDER_MESSAGE = "This provider is no longer in your list."
+
+
+class _LinkIds(Iterator[int]):
+    """The request ids shared by every catalog; `reserve` makes the next one a given id."""
+
+    def __init__(self) -> None:
+        self._count = itertools.count(1)
+        self._reserved: Optional[int] = None
+
+    def __next__(self) -> int:
+        if self._reserved is not None:
+            reserved, self._reserved = self._reserved, None
+            return reserved
+        return next(self._count)
+
+    def reserve(self, request_id: int) -> None:
+        self._reserved = request_id
+
+
+class Catalogs(QObject):
+    linkReady = Signal(int, str)
+    linkFailed = Signal(int, str)
+    providerReady = Signal(str)
+    providerFailed = Signal(str, str)
+    epgReady = Signal(str)
+    contentChanged = Signal(str)  # the provider whose content may have changed
+
+    def __init__(
+        self,
+        config_manager,
+        registry: ProviderManager,
+        *,
+        runner=None,
+        factory: Optional[WorkerFactory] = None,
+        make_epg: Optional[Callable[[ProviderManager], EpgManager]] = None,
+        in_use: Callable[[], set[str]] = set,
+        parent: Optional[QObject] = None,
+    ):
+        super().__init__(parent)
+        self.config = config_manager
+        self.registry = registry
+        self._runner = runner
+        self._factory = factory
+        self._make_epg = make_epg or (lambda manager: EpgManager(config_manager, manager))
+        self._in_use = in_use
+        self._ids = _LinkIds()
+        self._by_name: dict[str, CatalogService] = {}
+        self._specs: dict[str, dict] = {}  # the provider each catalog was built for
+        self._started: set[str] = set()  # ensure() has begun this catalog's setup
+        self._ready: set[str] = set()
+        # Link requests waiting for a catalog's setup: (request id, item, section, is_episode)
+        self._waiting: dict[str, list[tuple[int, dict, str, bool]]] = {}
+        self._closed = False
+
+    # --- providers -------------------------------------------------------------------
+    def names(self) -> list[str]:
+        return [str(p.get("name", "")) for p in self.registry.providers]
+
+    def provider(self, name: str) -> dict:
+        for provider in self.registry.providers:
+            if provider.get("name") == name:
+                return provider
+        raise KeyError(name)
+
+    def catalog(self, name: str) -> CatalogService:
+        """The provider's catalog, created on first use (no network)."""
+        existing = self._by_name.get(name)
+        if existing is not None:
+            return existing
+        spec = dict(self.provider(name))
+        manager = ProviderManager(
+            self.config, provider_name=name, providers=self.registry.providers
+        )
+        catalog = CatalogService(
+            self.config,
+            manager,
+            self._make_epg(manager),
+            runner=self._runner,
+            factory=self._factory,
+            parent=self,
+            provider_name=name,
+            link_ids=self._ids,
+        )
+        self._connect(name, catalog)
+        self._by_name[name] = catalog
+        self._specs[name] = spec
+        return catalog
+
+    def _connect(self, name: str, catalog: CatalogService) -> None:
+        catalog.providerReady.connect(lambda *_: self._on_ready(name))
+        catalog.providerFailed.connect(lambda _name, message: self._on_failed(name, message))
+        catalog.epgReady.connect(lambda: self.epgReady.emit(name))
+        catalog.linkReady.connect(self.linkReady)
+        catalog.linkFailed.connect(self.linkFailed)
+        for signal in (
+            catalog.sectionReady,
+            catalog.groupReady,
+            catalog.seasonsReady,
+            catalog.episodesReady,
+        ):
+            signal.connect(lambda *_: self.contentChanged.emit(name))
+
+    def ensure(self, name: str) -> None:
+        """Start this catalog's setup (cache load, STB sign-in) once, in its worker."""
+        if self._closed or name in self._started:
+            return
+        catalog = self.catalog(name)
+        self._started.add(name)
+        catalog.select_provider()
+
+    def is_ready(self, name: str) -> bool:
+        return name in self._ready
+
+    def _on_ready(self, name: str) -> None:
+        self._ready.add(name)
+        self.providerReady.emit(name)
+        self.contentChanged.emit(name)
+        catalog = self._by_name.get(name)
+        for request_id, item, section, is_episode in self._waiting.pop(name, []):
+            if catalog is not None:
+                self._ids.reserve(request_id)
+                catalog.request_link(item, section=section, is_episode=is_episode)
+
+    def _on_failed(self, name: str, message: str) -> None:
+        self._ready.discard(name)
+        self._started.discard(name)  # the next request tries again
+        self.providerFailed.emit(name, message)
+        for request_id, *_ in self._waiting.pop(name, []):
+            self.linkFailed.emit(request_id, message)
+
+    # --- links and guides ---------------------------------------------------------------
+    def _route(self, item: dict) -> str:
+        """The provider an item belongs to; an unstamped item goes to the selected one."""
+        name = provider_of(item)
+        if not name:
+            name = str(self.config.selected_provider_name or "")
+            logger.debug("An unstamped item goes to the selected provider")
+        return name
+
+    def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
+        name = self._route(item)
+        if name not in self._by_name and name not in self.names():
+            request_id = next(self._ids)
+            QTimer.singleShot(
+                0, self, lambda: self.linkFailed.emit(request_id, UNKNOWN_PROVIDER_MESSAGE)
+            )
+            return request_id
+        if name in self._ready:
+            return self.catalog(name).request_link(item, section=section, is_episode=is_episode)
+        # Never set up (or still signing in): the request runs once the catalog is ready.
+        request_id = next(self._ids)
+        self._waiting.setdefault(name, []).append((request_id, item, section, is_episode))
+        self.ensure(name)
+        return request_id
+
+    def programmes(self, channel: dict, now: datetime, limit: int = 8) -> list[Programme]:
+        catalog = self._by_name.get(self._route(channel))
+        return catalog.programmes(channel, now, limit) if catalog is not None else []
+
+    def max_connections(self, name: str) -> Optional[int]:
+        catalog = self._by_name.get(name)
+        return catalog.max_connections() if catalog is not None else None
+
+    def use_guides(self, names: set[str]) -> None:
+        """Keep the guides of `names` loaded; the others give their memory back."""
+        for name in names:
+            if name not in self._by_name and name not in self.names():
+                continue
+            self.ensure(name)
+            catalog = self.catalog(name)
+            if name in self._ready and not catalog.epg_ready():
+                catalog.refresh_epg()
+        for name, catalog in self._by_name.items():
+            if name not in names:
+                catalog.release_epg()
+
+    # --- Settings saved ---------------------------------------------------------------------
+    def reload(self) -> None:
+        """Drop the catalogs of removed providers and rebuild edited ones (on next use),
+        except those in use: they stay until a later reload() finds them out of use."""
+        current = {str(p.get("name", "")): p for p in self.registry.providers}
+        busy = set(self._in_use())
+        for name in list(self._by_name):
+            if name in current and self._specs.get(name) == current[name]:
+                continue
+            if name not in busy:
+                self._drop(name)
+
+    def _drop(self, name: str) -> None:
+        catalog = self._by_name.pop(name)
+        self._specs.pop(name, None)
+        self._started.discard(name)
+        self._ready.discard(name)
+        for request_id, *_ in self._waiting.pop(name, []):
+            self.linkFailed.emit(request_id, UNKNOWN_PROVIDER_MESSAGE)
+        self._stop(catalog)
+        catalog.deleteLater()
+
+    @staticmethod
+    def _stop(catalog: CatalogService) -> None:
+        catalog.shutdown()
+        catalog.provider_manager._cache_writer.shutdown(wait=False)
+
+    def shutdown(self) -> None:
+        self._closed = True
+        self._waiting.clear()
+        for catalog in self._by_name.values():
+            self._stop(catalog)
