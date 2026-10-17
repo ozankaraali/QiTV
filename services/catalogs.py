@@ -150,6 +150,15 @@ class Catalogs(QObject):
         self._started.add(name)
         catalog.select_provider(force_refresh=force_refresh)
 
+    def sign_in_again(self, name: str) -> None:
+        """Make the provider sign in anew: a link asked next is held until the new sign-in
+        is ready (or fails with it)."""
+        if self._closed or name not in self.names():
+            return
+        self._ready.discard(name)
+        self._started.discard(name)
+        self.ensure(name)
+
     def is_ready(self, name: str) -> bool:
         return name in self._ready
 

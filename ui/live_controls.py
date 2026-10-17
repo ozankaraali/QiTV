@@ -31,7 +31,9 @@ from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
+from services.provider_ids import provider_of
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
+from ui import item_provider
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
 from ui.overlays.transport import Transport
@@ -158,10 +160,16 @@ class LiveControls(QObject):
             return False
         return urlsplit(url).scheme.lower() in _PIPELINE_SCHEMES
 
-    def limit(self) -> Optional[int]:
-        """The provider's simultaneous streams: None when unlimited or unknown."""
+    def limit(self, item: Optional[dict] = None) -> Optional[int]:
+        """The simultaneous streams of the item's provider (the browsed one without an item):
+        None when unlimited or unknown."""
+        if item is None:
+            return self._tuner.budget.limit_for(
+                self.catalog.current_provider(), self.catalog.max_connections()
+            )
         return self._tuner.budget.limit_for(
-            self.catalog.current_provider(), self.catalog.max_connections()
+            item_provider.provider_dict(self.catalog, item),
+            item_provider.max_connections(self.catalog, item),
         )
 
     def limit_text(self, limit: Optional[int]) -> str:
@@ -173,8 +181,8 @@ class LiveControls(QObject):
         False when the provider's limit is taken by other streams (Phase 4: picture in
         picture): the toast says so and the running channel goes on.
         """
-        name = self.catalog.current_provider_name()
-        limit = self.limit()
+        name = item_provider.provider_name(self.catalog, target.item)
+        limit = self.limit(target.item)
         if self._tuner.refused(name, limit):
             logger.info("Not opening %s: the provider allows %s streams", target.title, limit)
             self._restore_channel()
@@ -186,7 +194,7 @@ class LiveControls(QObject):
     def live_start(self, target: Target, url: str) -> LiveStart:
         """How the pipeline asks for `target`'s link: its agent and the provider's TLS check;
         and the channel's key for what it taught stay-live (Auto's target, a locked rate)."""
-        provider = self.catalog.current_provider()
+        provider = item_provider.provider_dict(self.catalog, target.item)
         user_agent = target.item.get("user_agent") or DEFAULT_USER_AGENT
         verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
         channel = channel_key(str(provider.get("name", "")), target.item)
@@ -208,7 +216,7 @@ class LiveControls(QObject):
             current is not None
             and current.live
             and not current.retried
-            and self.catalog.provider_type() == "STB"
+            and item_provider.provider_type(self.catalog, current.item) == "STB"
             and not self._lanes.busy()
         )
 
@@ -256,6 +264,9 @@ class LiveControls(QObject):
     def retry(self, current: Target) -> None:
         logger.info("Making the link of %s again after a playback failure", current.title)
         self.stop_tune()  # it failed: its slot goes back, also if the new link does not come
+        name = provider_of(current.item)
+        if name and name != self.catalog.current_provider_name():
+            self.catalog.sign_in_again(name)  # its own portal, not the browsed one
         self._request(replace(current, retried=True))
 
     # ---- LiveSession's reports ----------------------------------------------------------------
@@ -326,7 +337,8 @@ class LiveControls(QObject):
         self._error(f"{title}: {message}" if title else message)
 
     def _refusal_text(self, message: str) -> str:
-        limit = self.limit()
+        current = self._current()
+        limit = self.limit(current.item if current is not None else None)
         if message != STREAM_REFUSED:
             return self.limit_text(limit)
         if limit:

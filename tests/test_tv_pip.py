@@ -43,6 +43,7 @@ from ui.pip_controls import (
 MOVIE = {"id": "m7", "name": "Heat", "cmd": "http://vod/heat.mkv"}
 UP, DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value  # the mixer's arrows
 
+HARBOR_TWO = {**CHANNELS[1], "_provider": "Harbor IPTV"}  # another provider, an Xtream panel
 GROUP_B = [
     {"id": i, "name": name, "number": str(i), "cmd": f"ffrt http://tv/{i}"}
     for i, name in ((5, "Five"), (6, "Six"))
@@ -630,6 +631,33 @@ class PipTests(PipCase):
         self.assertTrue(wait_until(lambda: self.live.named("start")[-1][0] == "http://stream/3"))
         self.controller.handle(Action.SWAP)
         self.assertIs(self.sessions.large(), self.pip_slot)
+
+
+class MixedProviderPipTests(PipCase):
+    """The small picture's limit and slot are those of its channel's own provider."""
+
+    def setUp(self):
+        super().setUp()
+        # Home (browsed) allows one stream and the large picture holds it; Harbor's panel
+        # reported one for itself.
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+
+    def test_the_limit_is_the_small_channels_provider(self):
+        self.start_large(0)
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        self.open_small(HARBOR_TWO)  # Home is full, Harbor is not: both play
+        self.assertTrue(self.sessions.pip_open())
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["pip"])
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_a_full_providers_channel_is_refused_whatever_the_browsed_one_allows(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
+        self.budget.request("Harbor IPTV", 1, purpose="main")  # Harbor's only stream is taken
+        self.controller.open_pip(HARBOR_TWO, group_key="10", channels=[HARBOR_TWO])
+        QTest.qWait(20)
+        self.assertIn(("Your provider allows 1 stream at a time", "error"), self.toast.messages())
+        self.assertEqual(self.catalog.links, [])  # no link was asked for
+        self.assertEqual(self.pip_live.calls, [])
 
 
 class OneStreamPipTests(PipCase):

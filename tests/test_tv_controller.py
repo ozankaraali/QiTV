@@ -44,6 +44,9 @@ CHANNELS = [
     for i, name in ((1, "One"), (2, "Two"), (3, "Three"), (4, "Four"))
 ]
 NO_MODS = Qt.KeyboardModifier.NoModifier
+# Channels of other providers than the browsed "Home" (QiTV 2.1 mixes providers).
+HARBOR_ONE = {**CHANNELS[0], "_provider": "Harbor IPTV"}  # an Xtream panel, 1 stream
+PORTAL_ONE = {**CHANNELS[0], "_provider": "Portal B"}  # an STB portal
 
 
 class Clock:
@@ -69,6 +72,14 @@ class FakeCatalog(NavCatalog):
         self.loading = False
         self.epg_refreshes = 0
         self.episode_map = {}  # (series id, season id) -> episodes; missing: not loaded
+        # The other providers of the list (the hub's `provider(name)`), their reported limits
+        # and the sign-ins asked again by name.
+        self.specs = {
+            "Harbor IPTV": {"name": "Harbor IPTV", "type": "XTREAM"},
+            "Portal B": {"name": "Portal B", "type": "STB"},
+        }
+        self.limits_of = {"Harbor IPTV": 1}
+        self.setups = []
 
     def provider_names(self):
         return list(self.names)
@@ -101,6 +112,17 @@ class FakeCatalog(NavCatalog):
 
     def max_connections(self):
         return 1
+
+    def provider(self, name):
+        if name == self.provider:
+            return self.current_provider()
+        return self.specs[name]  # KeyError: not in the list
+
+    def max_connections_of(self, name):
+        return self.limits_of.get(name)
+
+    def sign_in_again(self, name):
+        self.setups.append(name)
 
     def current_provider(self):
         return {"name": self.provider, "type": self.ptype}
@@ -823,6 +845,29 @@ class LinkPipelineTests(ControllerTestCase):
         self.play(1)  # a new play may try again
         self.session.errorOccurred.emit("The stream could not be opened")
         self.assertEqual(self.requested(), ["One", "One", "Two", "Two"])
+
+    def test_a_failed_stb_link_is_made_again_by_its_own_provider(self):
+        self.controller.tune(PORTAL_ONE, group_key="10", channels=[PORTAL_ONE])
+        self.ready("http://stream/1")
+        self.session.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.catalog.setups, ["Portal B"])  # signed in again, then...
+        self.assertEqual(self.catalog.links[-1][1]["_provider"], "Portal B")  # ...its 2nd link
+        self.assertEqual(len(self.catalog.links), 2)
+
+    def test_a_browsed_providers_retry_does_not_sign_in_again(self):
+        self.play(0)
+        self.session.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.catalog.setups, [])
+        self.assertEqual(self.requested(), ["One", "One"])
+
+    def test_the_retry_follows_the_channels_provider_type(self):
+        # Browsed Home is an STB portal, but Harbor's panel (Xtream) has no link to make again.
+        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+        self.ready("http://stream/1")
+        self.session.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(len(self.catalog.links), 1)
+        self.assertEqual(self.catalog.setups, [])
+        self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
 
     def test_xtream_and_m3u_channels_failing_in_direct_play_are_not_made_again(self):
         for index, ptype in enumerate(("XTREAM", "M3UPLAYLIST")):
@@ -2120,6 +2165,31 @@ class PipelineTuneTests(PipelineCase):
         self.assertEqual(self.session.plays[-1][0], "udp://239.0.0.1:1234")
         self.assertEqual(len(self.starts()), 1)
         self.assertEqual(self.budget.holders("Home"), ["main"])  # the direct play's own
+
+    def test_a_channel_from_another_provider_holds_that_providers_slot(self):
+        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: self.starts()))
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
+        self.assertEqual(self.budget.holders("Home"), [])
+        self.assertEqual(self.watch.plays[-1][0], "Harbor IPTV")
+        self.assertEqual(self.starts()[0][1]["channel"], channel_key("Harbor IPTV", HARBOR_ONE))
+
+    def test_a_direct_play_of_another_providers_channel_books_its_slot(self):
+        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+        self.ready("udp://239.0.0.1:1234")
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
+        self.assertEqual(self.budget.holders("Home"), [])
+        self.assertEqual(self.watch.plays[-1][0], "Harbor IPTV")
+
+    def test_the_limit_is_the_channels_own_providers(self):
+        # Home is an STB portal (one stream); Harbor's panel reported two.
+        self.catalog.limits_of["Harbor IPTV"] = 2
+        self.budget.request("Harbor IPTV", 2, purpose="pip")
+        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: self.starts()))  # one of two taken: it opens
+        self.assertEqual(sorted(self.budget.holders("Harbor IPTV")), ["main", "pip"])
 
     def test_a_direct_play_books_its_slot_under_the_catalogs_provider(self):
         # During a provider setup the selected provider is already the next one, while the

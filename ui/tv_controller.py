@@ -46,8 +46,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 import logging
-import time
 from pathlib import Path
+import time
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
@@ -65,6 +65,7 @@ from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot
 from services.vlc_profile import classify
 from services.zapping import ZapContext
+from ui import item_provider
 from ui.autoplay import FINISHED_TEXT, Autoplay
 from ui.context_actions import ContextActions, Launcher, is_channel
 from ui.guide_controller import GuideController
@@ -921,8 +922,8 @@ class TVController(QObject):
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item
         launcher = self._external_launcher()
-        # Direct plays book the slot under the catalog's provider, as pipeline tunes do.
-        provider_name = self.catalog.current_provider_name()
+        # Direct plays book the slot under the item's own provider, as pipeline tunes do.
+        provider_name = item_provider.provider_name(self.catalog, item)
         self._audio_id = self._subtitle_id = None
         self._live_controls.new_target()  # the old channel's ticks and held notice
         if launcher is not None:
@@ -1029,7 +1030,7 @@ class TVController(QObject):
     def _record_watched(self, target: Target, url: str) -> None:
         try:
             self.watch.record_play(
-                self.catalog.current_provider_name(),
+                item_provider.provider_name(self.catalog, target.item),
                 target.item,
                 item_type=target.item_type,
                 link=url,
