@@ -761,9 +761,14 @@ class TVController(QObject):
         self._cancel_external()  # a newer choice: the settling external launch is dropped
         self._lanes.supersede()  # and an external play still waiting for its link
         context = self.zap.context
+        picked = item_provider.pick_source(self.catalog, channel, group_key)
         if group_key != context.group_key or context.index_of(channel) < 0:
             # Numbers reach every live channel, not only the group's (TV numbers are global).
-            self.zap.set_context(ZapContext(group_key, channels, fallback=self._all_live()))
+            self.zap.set_context(
+                ZapContext(group_key, channels, fallback=self._all_live(), source=picked)
+            )
+        elif not from_zap or not context.source:
+            context.source = picked  # a zap keeps the list its group was picked from
         playing = self._playing_live()
         stay = playing is not None and ZapContext.same(channel, playing.item)
         if not stay and self._pip_takes(channel, group_key, channels):
@@ -788,7 +793,7 @@ class TVController(QObject):
                 "live",
                 title,
                 group_key=group_key,
-                source=self.catalog.source(),
+                source=self.zap.context.source or picked,
                 zapped=from_zap,
             )
         )
@@ -1128,7 +1133,8 @@ class TVController(QObject):
     def open_pip(self, channel: dict, *, group_key: str, channels: list[dict]) -> None:
         """Open `channel` small (the drawer's menu or Ctrl/⌘+P), or show it in the PiP."""
         if self._pip is not None and not self._closed:
-            context = ZapContext(group_key, channels, fallback=self._all_live())
+            source = item_provider.pick_source(self.catalog, channel, group_key)
+            context = ZapContext(group_key, channels, fallback=self._all_live(), source=source)
             self._pip.open_channel(channel, context)
 
     def _pip_takes(self, channel: dict, group_key: str, channels: list[dict]) -> bool:
@@ -1145,7 +1151,12 @@ class TVController(QObject):
             return False
         if self._tuner.settling():
             self._tuner.stop()  # the zap still waiting is abandoned: nothing to keep small
-        pip.view(small.name).context = ZapContext(group_key, channels, fallback=self._all_live())
+        pip.view(small.name).context = ZapContext(
+            group_key,
+            channels,
+            fallback=self._all_live(),
+            source=item_provider.pick_source(self.catalog, channel, group_key),
+        )
         self.overlays.column.close()
         if self.swap():
             return True
@@ -1305,7 +1316,9 @@ class TVController(QObject):
         if context.group_key == ALL_GROUP_ID and not context.channels:
             # A search's channel tuned before the live section loaded: ↑/↓ walk it now.
             channels = self._all_live()
-            self.zap.set_context(ZapContext(ALL_GROUP_ID, channels, fallback=channels))
+            self.zap.set_context(
+                ZapContext(ALL_GROUP_ID, channels, fallback=channels, source=context.source)
+            )
 
     def guides_in_use(self) -> set[str]:
         """The providers whose guides are needed now: the big and small pictures', the one

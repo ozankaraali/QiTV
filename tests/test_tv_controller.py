@@ -838,6 +838,35 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.catalog.provider, "Backup")
         self.assertEqual(self.drawer.named("open_drawer")[-1], (item_key(CHANNELS[1]),))
 
+    def stamped(self, provider="Harbor IPTV"):
+        """The channels as that provider's list holds them."""
+        if provider not in self.catalog.names:
+            self.catalog.names.append(provider)
+        return [{**c, "_provider": provider} for c in CHANNELS]
+
+    def test_a_zap_after_browsing_elsewhere_keeps_the_list_it_was_picked_from(self):
+        harbor = self.stamped()
+        self.catalog.select_provider("Harbor IPTV")
+        self.controller.tune(harbor[1], group_key="10", channels=harbor)
+        self.ready("http://stream/2")
+        self.catalog.select_provider("Home")  # the drawer's sources: browsing another
+        self.controller._on_zap_tune(harbor[2])  # then up/down
+        self.ready("http://stream/3")
+        self.assertEqual(self.controller._current.source, "Harbor IPTV")
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual([n.key for n in self.nav.path][:3], ["Harbor IPTV", "live", "10"])
+        self.assertEqual(self.nav.revealed()["name"], "Three")
+
+    def test_a_channel_started_from_outside_the_browsed_list_reveals_its_provider(self):
+        harbor = self.stamped()  # the last channel of an owner other than the browsed one
+        self.controller.tune(harbor[0], group_key="*", channels=harbor)
+        self.ready("http://stream/1")
+        self.assertEqual(self.catalog.provider, "Home")
+        self.assertEqual(self.controller._current.source, "Harbor IPTV")
+        self.controller.handle(Action.OPEN_DRAWER)
+        self.assertEqual(self.nav.path[0].key, "Harbor IPTV")
+        self.assertEqual(self.nav.revealed()["name"], "One")
+
     def test_after_a_swap_the_list_follows_the_new_big_picture(self):
         self.play(0)
         self.catalog.select_provider("Backup")
