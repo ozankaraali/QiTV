@@ -33,6 +33,7 @@ from tests.test_tv_controller import (
 )
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
+from ui.page_stack import PageStack
 from ui.pip_controls import (
     ALREADY_LARGE,
     NO_PREVIOUS,
@@ -42,6 +43,7 @@ from ui.pip_controls import (
     SWITCHING,
     SWITCHING_MS,
 )
+from ui.tv_pages import TVPages
 
 MOVIE = {"id": "m7", "name": "Heat", "cmd": "http://vod/heat.mkv"}
 UP, DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value  # the mixer's arrows
@@ -128,6 +130,17 @@ class FakeMixer(FakeOverlay):
     def shown(self):
         """(title, channel, level, muted) per row, and the selected row."""
         return [(r.title, r.channel, r.level, r.muted) for r in self.rows], self.selected
+
+
+class PagesForTest(TVPages):
+    """TVPages with the real page moves (play, _show_page) and none of the Library wiring."""
+
+    def __init__(self, window):
+        QObject.__init__(self)
+        self._window = window
+        self._return_to_library = False
+        self._second_click = mock.Mock()
+        self.library_controller = mock.Mock()
 
 
 class PipCase(ControllerTestCase):
@@ -690,6 +703,39 @@ class LibraryPlayTests(PipCase):
             (len(self.live.calls), self.session.stops, len(self.session.plays)), before
         )
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+
+    def test_a_movie_through_the_pages_keeps_the_channel_small(self):
+        """The real call order: TVPages.play switches the page (which leaves the corner)
+        before play_vod runs."""
+        self.start_large(0)
+        before = (len(self.live.calls), self.session.stops, len(self.session.plays))
+        self.controller.enter_library_playing()
+        library_page, player_page = object(), object()
+        stack = mock.Mock()
+        stack.mode.return_value = PageStack.CORNER
+        stack.currentWidget.return_value = library_page
+
+        def show_player():
+            stack.mode.return_value = PageStack.PLAYER
+            stack.currentWidget.return_value = player_page
+
+        stack.show_player.side_effect = show_player
+        window = mock.Mock(
+            pages=stack,
+            library_page=library_page,
+            player_page=player_page,
+            controller=self.controller,
+        )
+        window.closing.return_value = False
+        pages = PagesForTest(window)
+        pages.play(MOVIE, "movie", play_context())
+        self.ready("http://vod/heat.mkv")
+        self.assertTrue(self.sessions.pip_open())
+        self.assertEqual([url for url, _ in self.pip_session.plays], ["http://vod/heat.mkv"])
+        self.assertEqual(self.small_title(), "One")
+        self.assertEqual(
+            (len(self.live.calls), self.session.stops, len(self.session.plays)), before
+        )
 
     def test_a_previous_small_picture_closes(self):
         self.start_large(0)
