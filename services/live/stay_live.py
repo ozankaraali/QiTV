@@ -3,24 +3,29 @@
 A live source arrives in its own rhythm (HLS segments, raw TS bursts or chunks), so the lag behind
 the live edge is a sawtooth. `LagFilter` gives its mean (2.1): per tick the mean over a burst in
 closed form, averaged over a window of a dozen bursts, so arrivals that are late, early or not
-alike (the public HLS channel: 6 s, every sixth time 12 s, every 7 s) do not move it. The window is over the
-live edge only: the player's side (its rate, a frozen clock, a reopen) shows in the position at
-once. The filter also says how much its mean still wanders by itself (`spread`) and which burst
-the source has (`burst`, with hysteresis: a burst the helper measures for a moment is none).
+alike (a public HLS channel measured in 2.1: 6 s segments every 7 s, every sixth one 12 s) do
+not move it. The window is over the live edge only: the player's side (its rate, a frozen
+clock, a reopen) shows in the position at once. The filter also says how much its mean still
+wanders by itself (`spread`) and which burst the source has (`burst`, with hysteresis: a burst
+the helper measures for a moment is none).
 
 `StayLive` leaves the rate at 1x while the mean lag stays within a dead band around the target:
 at least `_BAND_S`, at least `_BAND_SPREAD` times the filter's spread, and behind the target a
 quarter of a burst more (a bursty source's target already holds half a burst of room). Only a
 lag outside the band for `_PERSIST_S` (counted while VLC plays: buffering, a reopen or Go live
 start the count again, so such a step is taken into the lag once and never chased) starts a
-nudge: one gentle rate (1.03x behind, 0.97x ahead), ramped in and out `_RAMP_STEP` a tick and
-sized to end at the target, then 1x again. At most one nudge (two rate changes) per
-`_BUDGET_S`; a lag outside the band before that only widens the band. Two cases act sooner
-(after `_URGENT_S`) and beyond the budget: further than `_FAR_S` behind (1.10x), and less
-room than `_ROOM_S` when a burst lands (a steady source: at all; 0.95x: VLC would run dry,
-before each burst as 2.0.1 measured, or at any hiccup). A nudge stops early when the lag gets
-to the target by itself (a step), and is resized when the target moves. `SettledLag` gives the
-lag as shown: in half seconds, changed only after it differed for `_SHOWN_HOLD_S`.
+nudge: one gentle rate (1.03x behind, 0.97x ahead), ramped in and out in `_RAMP_STEPS` steps
+`_RAMP_EVERY_S` apart (each libVLC rate change retunes its audio: few, small ones) and sized
+to end at the target, then 1x again. At most one nudge per `_BUDGET_S`; a lag outside the
+band before that only widens the band. Two cases act sooner (after `_URGENT_S`, a count that
+VLC's waits pause but do not restart) and beyond the budget: further than `_FAR_S` behind
+(1.10x), and less room than `_ROOM_S` when a burst lands (a steady source: at all; 0.95x: VLC
+would run dry, before each burst as 2.0.1 measured, or at any hiccup). And VLC running out of
+room (`trouble()`: a starvation or a stall that ran out the cushion, when Auto raises the
+target) is owed one slow-down to the target at 0.95x as soon as VLC plays again, beyond the
+budget, as 2.0.2 built a raised target at once. A nudge stops early when the lag gets to the
+target by itself (a step), and is resized when the target moves. `SettledLag` gives the lag as
+shown: in half seconds, changed only after it differed for `_SHOWN_HOLD_S`.
 
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in
 2.0.2: 4.5 s of media in 37 s). `RateHealth` notices that from VLC's progress, and the caller
@@ -68,9 +73,12 @@ _GENTLE_UP = 1.03  # the nudge behind the target ...
 _GENTLE_DOWN = 0.97  # ... and the one that adds room ahead of it
 _FAST = 1.10
 _SLOW = 0.95
-_RAMP_STEP = 0.01  # a nudge ramps the rate this much per update, in and out
-_TICK_S = 0.25  # the caller's update interval (the ramp's length in time)
-_BUDGET_S = 300.0  # one nudge (two rate changes) at most in this long
+_RAMP_STEPS = 3  # a nudge ramps in (and out) in this many equal steps ...
+_RAMP_EVERY_S = 1.0  # ... this far apart
+_OWED_MIN_S = 0.5  # a slow-down owed after trouble is made for a deficit beyond this
+_BUDGET_S = 300.0  # one gentle nudge at most in this long
+_WIDEN_S = 0.01  # beyond the budget the band takes in the lag outside it, and this much
+_TICK_S = 0.25  # the caller's update interval (what a first sample stands for)
 _MAX_DT = 1.0  # a longer gap between two updates counts as this long
 
 # LagFilter: the mean lag over the source's own arrival rhythm.
@@ -78,7 +86,7 @@ _WINDOW_MIN_S = 10.0  # a steady source: the mean over this long ...
 _WINDOW_BURSTS = 12.0  # ... a bursty one over this many bursts ...
 _WINDOW_MAX_S = 90.0  # ... at most this long
 _STEP_S = 3.0  # an arrival that moves the level more than this (and a burst) is a step
-_STALL_S = 2.0  # as LiveSession's: a burst this much late is a stall, not the rhythm
+STALL_S = 2.0  # a source silent a burst plus this long (steady: this long) has stalled
 _SPREAD_S = 120.0  # the mean's own spread is measured over this long ...
 _SPREAD_EVERY_S = 1.0  # ... from one reading per this long
 _WARMUP_S = 10.0  # until the filter held this long (or a window), its spread is its range
@@ -211,7 +219,7 @@ class LagFilter:
     Each tick `add()` takes the live edge and the time since it last moved. For a bursty
     source (`burst` > 0) the mean over a burst is the lag now plus that time, less half a
     burst (in closed form, as LiveSession's `_lag`; the time counts up to the burst plus
-    `_STALL_S`). Carried forward at real time (edge + that shift - wall) it is a level: steady
+    `STALL_S`). Carried forward at real time (edge + that shift - wall) it is a level: steady
     while bursts land as large as they are apart, stepping by the difference when they do
     not; for a steady source, the edge less the wall clock. Its time-weighted mean over a
     window of `_WINDOW_BURSTS` bursts (`_WINDOW_MIN_S` to `_WINDOW_MAX_S`) plus the wall time
@@ -267,7 +275,7 @@ class LagFilter:
         since the edge last moved."""
         self._classify(now, max(0.0, burst))
         burst = self.burst
-        shift = min(max(0.0, since), burst + _STALL_S) - burst / 2 if burst > 0 else 0.0
+        shift = min(max(0.0, since), burst + STALL_S) - burst / 2 if burst > 0 else 0.0
         level = edge + shift - now
         if self._level is not None and abs(level - self._level) > max(_STEP_S, burst):
             self.reset()  # a step, not the rhythm: taken in at once
@@ -376,6 +384,12 @@ class _Nudge:
     left: float  # seconds of lag still to take off (behind) or add (ahead)
     target: float  # the target it was sized for
     ending: bool = False  # ramping out: back to 1x, whatever the lag does meanwhile
+    stepped: Optional[float] = None  # when the rate last stepped
+
+    @property
+    def step(self) -> float:
+        """One ramp step's size."""
+        return abs(self.peak - 1.0) / _RAMP_STEPS
 
 
 class StayLive:
@@ -389,6 +403,9 @@ class StayLive:
         self.burst = 0.0
         self.spread = 0.0
         self.slack = 0.0
+        # Set by the caller: a stream opened a moment ago (Go live, a seek, a reopen), so its
+        # lag is not known yet: no reopen at live until it is (never two opens in a row).
+        self.hold_reopen = False
         self._rate = 1.0  # last rate decided in LIVE
         self._user_rate = 1.0
         self._reopened = False
@@ -399,6 +416,8 @@ class StayLive:
         self._nudge: Optional[_Nudge] = None
         self._nudged_at: Optional[float] = None  # the last budgeted nudge's end
         self._wide = 0.0  # the band widened while the budget is spent
+        self._urgent = False  # the time outside counts towards an urgent nudge
+        self._owed = False  # VLC ran out of room: a slow-down to the target is owed
 
     @property
     def nudge(self) -> float:
@@ -429,7 +448,15 @@ class StayLive:
 
     def absorb(self) -> None:
         """The lag stepped (a reopen, say): count the time outside the band afresh."""
-        self._outside, self._side = 0.0, 0
+        self._outside, self._side, self._urgent = 0.0, 0, False
+
+    def trouble(self) -> None:
+        """VLC ran out of room: a starvation, or a stall, that ran out the cushion (Auto may have
+        raised the target for it). One slow-down to the target is owed, at `_SLOW`, as soon as
+        VLC plays again and beyond the budget; a nudge speeding up ends."""
+        self._owed = True
+        if self._nudge is not None and self._nudge.peak > 1.0:
+            self._nudge.ending = True
 
     def user_paused(self) -> None:
         """A pause leaves LIVE, and a catch-up too: it resumes time-shifted at 1x."""
@@ -477,9 +504,14 @@ class StayLive:
                 return Decision(1.0)
             return Decision(self._user_rate)
         if buffering:
-            self.absorb()  # what the wait adds is a step, not a drift
+            # What the wait adds is a step, not a drift; but a VLC that runs dry again and
+            # again is the urgent case itself: its count only pauses.
+            if not self._urgent:
+                self.absorb()
             return Decision(self._rate)
         if lag_s > self.target + _REOPEN:
+            if self.hold_reopen:
+                return Decision(self._rate)  # the stream just opened: its lag comes first
             self._rate, self._nudge = 1.0, None
             if self._reopened:
                 return Decision(1.0)
@@ -489,6 +521,8 @@ class StayLive:
             return Decision(self._rate)  # 1x: set by lock_rate(), never changed after
         if self._wide and self._budget_free(now):
             self._wide = 0.0
+        if self._owed:
+            self._pay(lag_s, now)
         if self._nudge is not None:
             self._steer(dt, lag_s, now)
         else:
@@ -497,6 +531,21 @@ class StayLive:
 
     def _budget_free(self, now: float) -> bool:
         return self._nudged_at is None or now - self._nudged_at >= _BUDGET_S - 1e-9
+
+    def _pay(self, lag: float, now: float) -> None:
+        """The slow-down owed after trouble: now, unless a nudge still ramps out to 1x."""
+        nudge = self._nudge
+        if nudge is not None and (nudge.peak > 1.0 or nudge.ending):
+            return  # ramping out (`trouble` ends one speeding up): the slow-down follows it
+        self._owed = False
+        deficit = self.target - lag
+        if deficit <= _OWED_MIN_S:
+            return  # room enough after all (the source caught up, say)
+        if nudge is None:
+            self._nudge = _Nudge(_SLOW, deficit, self.target)
+            self.absorb()
+        else:
+            nudge.peak = _SLOW  # a gentle one under way: at once to the owed rate
 
     def _short(self, lag: float) -> bool:
         """Under `_ROOM_S` left when a burst lands (a steady source: at all): VLC runs dry."""
@@ -516,11 +565,12 @@ class StayLive:
             self._outside, self._side = 0.0, side
         self._outside += dt
         urgent = far or short
+        self._urgent = urgent
         if self._outside < (_URGENT_S if urgent else _PERSIST_S) - 1e-9:
             return
         if not urgent and not self._budget_free(now):
             # Spent: tolerate this much rather than a second nudge within the budget.
-            self._wide = abs(error) + _RAMP_STEP
+            self._wide = abs(error) + _WIDEN_S
             self.absorb()
             return
         peak = _FAST if far else _SLOW if short else _GENTLE_UP if side > 0 else _GENTLE_DOWN
@@ -540,32 +590,46 @@ class StayLive:
             nudge.left -= sign * (centre - nudge.target)
             nudge.target = centre
         error = lag - centre
-        if nudge.peak == _GENTLE_UP and error > _FAR_S:
+        if not nudge.ending and nudge.peak == _GENTLE_UP and error > _FAR_S:
             nudge.peak = _FAST  # far behind after all (a step)
-        elif nudge.peak == _GENTLE_DOWN and self._short(lag):
+        elif not nudge.ending and nudge.peak == _GENTLE_DOWN and self._short(lag):
             nudge.peak = _SLOW  # short of room after all (the burst grew)
         reached = sign * error <= 0.0  # at the target already (a step, say)
         # A gentle nudge ends once its size is taken: the estimate's own wander is no reason
-        # to go on. An urgent one goes on to the target (it may have been sized on a lag that
-        # was still settling), but never more than a band beyond its size.
+        # to go on. An urgent one goes on to the target: it may have been sized on a lag that
+        # was still settling, or the lag stepped (a backlog) or the target moved since, and
+        # stopping it short would only start the next one.
         urgent = nudge.peak in (_FAST, _SLOW)
-        spent = nudge.left <= (-_BAND_S if urgent else self._ramp_out(rate))
+        spent = not urgent and nudge.left <= self._ramp_out(rate, nudge.step)
         nudge.ending = nudge.ending or spent or reached
-        if not nudge.ending:
-            self._rate = round(rate + sign * min(_RAMP_STEP, abs(nudge.peak - rate)), 4)
+        due = nudge.stepped is None or now - nudge.stepped >= _RAMP_EVERY_S - 1e-9
+        goal = 1.0 if nudge.ending else nudge.peak
+        if abs(goal - rate) < 1e-9 or not due:
             return
-        self._rate = round(rate - sign * min(_RAMP_STEP, abs(rate - 1.0)), 4)
-        if self._rate == 1.0:
+        # Steps on the nudge's grid, 1x to its peak; off the grid (a gentle nudge turned
+        # urgent raised its peak) one step goes straight to the peak.
+        k = abs(rate - 1.0) / nudge.step  # steps from 1x (rates are rounded: nearly whole)
+        on_grid = abs(k - round(k)) < 0.05
+        if nudge.ending:
+            k = max(0.0, round(k) - 1.0 if on_grid else float(math.floor(k)))
+        else:
+            k = min(float(_RAMP_STEPS), round(k) + 1.0) if on_grid else float(_RAMP_STEPS)
+        self._rate = round(1.0 + sign * k * nudge.step, 4)
+        nudge.stepped = now
+        if nudge.ending and self._rate == 1.0:
             if nudge.peak in (_GENTLE_UP, _GENTLE_DOWN):
                 self._nudged_at = now  # the budget counts the gentle ones
             self._nudge = None
             self.absorb()
 
     @staticmethod
-    def _ramp_out(rate: float) -> float:
-        """The lag the ramp back to 1x from `rate` still takes, a step per update."""
-        steps = round(abs(rate - 1.0) / _RAMP_STEP)
-        return sum(k * _RAMP_STEP for k in range(steps)) * _TICK_S
+    def _ramp_out(rate: float, step: float) -> float:
+        """The lag the ramp back to 1x from `rate` still takes: each step held a ramp step."""
+        taken, rate_left = 0.0, abs(rate - 1.0) - step
+        while rate_left > 1e-9:
+            taken += rate_left * _RAMP_EVERY_S
+            rate_left -= step
+        return taken
 
     def _leave_live(self) -> None:
         if self.mode is Mode.LIVE:

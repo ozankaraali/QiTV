@@ -9,9 +9,11 @@ from the start, it plays from the oldest segment then.
 
 Falling back (spec §9) never overlaps two upstream connections: the session is closed and
 the provider URL plays directly (`PlayKind.LIVE`) once the engine confirms the close, or
-after `_CLOSE_CAP_MS`. Only `available(False)` plays directly at once: no helper, so no
-upstream and no buffer, is left (also for a session whose input had ended). Unsupported
-sources, failures before ready and a ready that does not come within `ready_timeout_ms`
+after `_CLOSE_CAP_MS`. A direct play after a session was open that fails at once is tried
+once more after `retry_ms` (a provider allowing one stream may still count the buffer's
+connection a moment), then reported. Only `available(False)` plays directly at once: no
+helper, so no upstream and no buffer, is left (also for a session whose input had ended).
+Unsupported sources, failures before ready and a ready that does not come within `ready_timeout_ms`
 fall back with "Time-shift isn't available for this channel"; after `available(False)`
 every start plays directly for the rest of the run. A source that sent bytes by then without
 anything playable (no keyframe yet: an on-demand restream starting up, say) gets until
@@ -36,40 +38,44 @@ Every `tick_ms` the lag behind the live edge feeds `StayLive`, whose target is t
 setting's or the source's burst (`burst_s`), whichever is larger: segments that arrive whole
 would make a smaller target underrun at every segment. The burst is an HLS source's target
 duration, or what the helper measured on a raw TS source that arrives in bursts (some
-providers' restreams send ~10 s at once every ~10 s); 0.0 for a steady source, and for a
-raw TS one until its first clear burst was followed by the next (from the second burst on;
-`services.live.worker.BurstMeter`). With bursts the lag is a sawtooth as tall as a burst,
-so the lag used (and reported) is its mean (2.1, `LagFilter`): per tick in closed form, the
-current lag plus the time since the edge last moved, less half a burst (see `_lag`), averaged
-over a dozen bursts of the live edge's own history, so arrivals that are late, early or unlike
-(the public HLS channel: 6 s, every sixth time 12 s, every 7 s) do not move it; the position (VLC's
-side) is never averaged. The burst stay-live steers by has hysteresis (a burst the helper
-measures for a moment is none: `LagFilter.burst`); the timeline's target, the stall bound
-and Go live follow the helper's at once. Held against the instantaneous peak, the rate would
-change at every burst. A source that sends nothing for a burst plus 2 s (a steady one: 2 s)
-has stalled: the timeline says so (`stalled`; the transport reads "Reconnecting…"), the lag
-is the closed form with the time since the edge moved counted up to there only, and
-StayLive takes it as buffering, as it does a VLC whose clock stood still for 0.5 s while it
-reports Playing (libVLC 3 does when starved): no rate change, no reopen, and the filter
-starts afresh once the edge moves again. StayLive changes the rate only for a lag outside its
-dead band for 15 s, by one gentle nudge (1.03x or 0.97x, ramped, sized to end at the target;
-one per 5 minutes), sooner and beyond that budget only far behind (1.10x) or with under half
-a second of room when a burst lands (0.95x, 2.0.1's case); not while paused, time-shifted or
-at a chosen speed. The timeline's `shown` is the lag as the indicator shows it (`SettledLag`:
-half seconds, changed after 3 s), `nudge` the rate a nudge ramps to. On some
-channels VLC cannot play at any rate but 1x: its position crawls. While stay-live's rate is
-not 1x, VLC's progress is checked against rate x wall time (`RateHealth`), counted only while
-VLC plays and at least `_MEASURE_AHEAD_S` of media is ahead at both ends of a tick, and from
-`_RATE_GRACE_S` after an opened stream plays or after VLC was at the live edge (within
-`_EDGE_S`, BUFFERING, or the source stalled): a starved VLC, and its restart once data comes
-again (it refills its caching while its clock stands still), are not taken for a slow one.
-Under 70% of it over 3 s, the rate goes back to 1x at once and stay-live changes it no more
-on that channel (`StayLive.lock_rate`). On some HLS channels VLC crawls through the pipeline
-even at 1x (measured, 2.0.2), while its own HLS plays them smoothly: counted the same way at
-1x, under 70% progress in `_CRAWL_WINDOWS` windows of `_CRAWL_WINDOW_S` in a row makes the
-channel play directly ("Plays without rewind for smoother playback", `CRAWLING`), and the
-channel's next tune plays directly at once (for a day: see `services.live.tuning`). A raw TS
-channel never does.
+providers' restreams send ~10 s at once every ~10 s); 0.0 for a steady source, and for a raw
+TS one until its first clear burst was followed by the next (from the second burst on;
+`services.live.worker.BurstMeter`). With bursts the lag is a sawtooth as tall as a burst, so
+the lag used (and reported) is its mean (2.1, `LagFilter`): per tick in closed form, the
+current lag plus the time since the edge last moved, less half a burst (see `_lag`),
+averaged over a dozen bursts of the live edge's own history, so arrivals that are late,
+early or unlike (a public HLS channel measured in 2.1: 6 s segments every 7 s, every sixth
+one 12 s) do not move it; the position (VLC's side) is never averaged. The burst stay-live
+steers by has hysteresis (a burst the helper measures for a moment is none:
+`LagFilter.burst`); the timeline's target, the stall bound and Go live follow the helper's
+at once. Held against the instantaneous peak, the rate would change at every burst. A source
+that sends nothing for a burst plus 2 s (a steady one: 2 s) has stalled: the timeline says
+so (`stalled`; the transport reads "Reconnecting…"), the lag is the closed form with the
+time since the edge moved counted up to there only, and StayLive takes it as buffering, as
+it does a VLC whose clock stood still for 0.5 s while it reports Playing (libVLC 3 does when
+starved): no rate change, no reopen, and the filter starts afresh once the edge moves again.
+StayLive changes the rate only for a lag outside its dead band for 15 s, by one gentle nudge
+(1.03x or 0.97x, ramped in three steps, sized to end at the target; one per 5 minutes),
+sooner and beyond that budget only far behind (1.10x), with under half a second of room when
+a burst lands (0.95x, 2.0.1's case) and once after trouble (a starvation or a stall that ran
+out the cushion: 0.95x back to the target, as soon as VLC plays); not while paused,
+time-shifted or at a chosen speed. Its reopen at live waits until a stream opened (Go live,
+a seek, a reopen) has played and `_REOPEN_HOLD_S` passed, and a Go live right after
+stay-live's reopen opens nothing more: never two opens in a row. The timeline's `shown` is
+the lag as the indicator shows it (`SettledLag`: half seconds, changed after 3 s), `nudge`
+the rate a nudge ramps to. On some channels VLC cannot play at any rate but 1x: its position
+crawls. While stay-live's rate is not 1x, VLC's progress is checked against rate x wall time
+(`RateHealth`), counted only while VLC plays and at least `_MEASURE_AHEAD_S` of media is
+ahead at both ends of a tick, and from `_RATE_GRACE_S` after an opened stream plays or after
+VLC was at the live edge (within `_EDGE_S`, BUFFERING, or the source stalled): a starved
+VLC, and its restart once data comes again (it refills its caching while its clock stands
+still), are not taken for a slow one. Under 70% of it over 3 s, the rate goes back to 1x at
+once and stay-live changes it no more on that channel (`StayLive.lock_rate`). On some HLS
+channels VLC crawls through the pipeline even at 1x (measured, 2.0.2), while its own HLS
+plays them smoothly: counted the same way at 1x, under 70% progress in `_CRAWL_WINDOWS`
+windows of `_CRAWL_WINDOW_S` in a row makes the channel play directly ("Plays without rewind
+for smoother playback", `CRAWLING`), and the channel's next tune plays directly at once (for
+a day: see `services.live.tuning`). A raw TS channel never does.
 
 "Auto" latency (2.0.2, `AutoTarget`) learns per channel what to add to the target in force
 (Normal's, or the burst when that is larger): nothing at first, then 1.5 s more with each
@@ -134,6 +140,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 import logging
+import math
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -143,6 +150,7 @@ from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import (
     AUTO,
     LATENCIES,
+    STALL_S,
     TARGETS,
     AutoTarget,
     LagFilter,
@@ -176,8 +184,7 @@ _JUMP_S = 1.0  # get_time deltas further than this from wall clock x rate are no
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
 _REWIND_MARGIN_S = 5.0  # an evicted position reopens this far past the oldest point
 _BELOW_TARGET_S = 0.25  # Go live never lands a mean lag further below the target
-_NUDGE_S = 0.75  # Go live lands at most this far above the target (when a start is there)
-_STALL_S = 2.0  # an edge this much later than a burst (steady: at all) is a stalled source
+_LAND_ABOVE_S = 0.75  # Go live lands at most this far above the target (when a start is there)
 _FROZEN_S = 0.5  # a VLC clock standing still this long while Playing is starved
 _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measured
 _OPEN_MAX_S = 2.0  # a longer open (a stalled source, say) counts as this long
@@ -186,6 +193,7 @@ _EDGE_S = 1.0  # VLC this close to the live edge is at it (a starvation, and its
 _MEASURE_AHEAD_S = 3.0  # rate health counts only ticks with this much ahead at both ends
 _RATE_GRACE_S = 2.0  # and only from this long after an open plays or VLC was at the edge
 _CALM_S = 1.0  # Auto: trouble again within this is the same starvation (VLC refills, starves)
+_REOPEN_HOLD_S = 5.0  # no reopen at live within this of an open (and before VLC played it)
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) ...
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
 _PLAYING = PlaybackState.PLAYING.value
@@ -243,8 +251,11 @@ class LiveSession(QObject):
         ready_max_ms: int = 15_000,
         clock: Callable[[], float] = time.monotonic,
         tuning: Optional[LiveTuning] = None,
+        retry_ms: int = 3000,
     ) -> None:
-        """`tuning`: what channels taught, shared by the players (None: nothing is kept)."""
+        """`tuning`: what channels taught, shared by the players (None: nothing is kept).
+        `retry_ms`: after a fallback, the wait before the direct play is tried once more when
+        it fails at once (a provider may count the connection just closed a moment longer)."""
         super().__init__()
         self._engine = engine
         self._playback = playback
@@ -267,6 +278,9 @@ class LiveSession(QObject):
         self._input_timer = QTimer(self, singleShot=True)
         self._input_timer.timeout.connect(self._on_input_cap)
         self._input_open = False  # stopped direct play: libVLC may still hold the stream
+        self._direct_timer = QTimer(self, singleShot=True, interval=retry_ms)
+        self._direct_timer.timeout.connect(self._retry_direct)
+        self._direct_retries = 0  # direct plays a fallback may still try after an error
         self._limited: Optional[str] = None  # the provider's refusal (one of REFUSALS)
         self._phase = _Phase.IDLE
         self._mode = ""
@@ -298,6 +312,8 @@ class LiveSession(QObject):
         self._edge_seen: Optional[float] = None  # the live edge last seen
         self._edge_moved = 0.0  # when it last moved (for bursts: when the last one landed)
         self._clock_moved = 0.0  # when VLC's clock last moved (or was not expected to)
+        self._last_open = -math.inf  # when the last pipeline play() was made
+        self._reopened_at = -math.inf  # when stay-live last reopened at live
         self._open_s = _OPEN_SEED_S  # VLC's open time, averaged over this object's opens
         self._opened_at: Optional[float] = None  # a pipeline play() not yet Playing
         self._ready_seen = False  # the session is ready: Stable may still wait for its cushion
@@ -493,8 +509,10 @@ class LiveSession(QObject):
         """The Go live button: back to the live edge at 1x, playing (not paused)."""
         self._go_live(unpause=True)
 
-    def _go_live(self, *, unpause: bool) -> None:
-        """Reopen at the live target behind the edge, at 1x; a paused one stays paused."""
+    def _go_live(self, *, unpause: bool, reopen: bool = False) -> None:
+        """Reopen at the live target behind the edge, at 1x; a paused one stays paused.
+        `reopen`: stay-live's own, far behind; a Go live within `_REOPEN_HOLD_S` of it opens
+        nothing more (it is at live already: one open, not two)."""
         try:
             if unpause and self._phase in _BEFORE_PLAY:
                 self._paused = False  # remembered: the stream that opens next plays, live
@@ -509,9 +527,19 @@ class LiveSession(QObject):
                     return
                 self._advance()
                 self._set_rate(1.0)
+                if (
+                    not reopen
+                    and not self._paused
+                    and self._stay.mode is Mode.LIVE
+                    and self._retry is None
+                    and self._clock() - self._reopened_at < _REOPEN_HOLD_S
+                ):
+                    return  # stay-live reopened at live a moment ago
                 seq = self._live_seq()
                 if seq is None or not self._open_at(seq):
                     self._retry = _Retry.LIVE
+                elif reopen:
+                    self._reopened_at = self._clock()
         finally:
             # Always, so StayLive's edge-triggered reopen re-arms; but a pause that was kept
             # stays time-shifted: only the Go live button (it unpaused) returns to LIVE.
@@ -592,6 +620,8 @@ class LiveSession(QObject):
         sid, self._sid = self._sid, None
         self._phase = _Phase.FALLING_BACK
         self._fallback_notice = message
+        # A buffer that was open may still count with the provider a moment (one stream).
+        self._direct_retries = 1 if sid is not None else 0
         self._paused = self._source_lost = False
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
@@ -642,6 +672,7 @@ class LiveSession(QObject):
         self._ready_timer.stop()
         self._tick_timer.stop()
         self._recovery_timer.stop()
+        self._direct_timer.stop()
 
     # ---- engine ------------------------------------------------------------------------
     def _on_available(self, available: bool) -> None:
@@ -811,9 +842,22 @@ class LiveSession(QObject):
 
     def _on_error(self, message: str) -> None:
         if self._phase is _Phase.DIRECT:
+            if self._direct_retries > 0:
+                # Right after a fallback the provider may still count the connection the
+                # buffer closed (one allowed stream): one more try after a moment.
+                self._direct_retries -= 1
+                _LOG.info("The channel did not open directly; trying once more.")
+                self._direct_timer.start()
+                return
             self.failed.emit(message)
         else:
             self._on_interrupted()
+
+    def _retry_direct(self) -> None:
+        if self._phase is _Phase.DIRECT:
+            self._playback.play(
+                self._url, kind=PlayKind.LIVE, latency=self._latency, user_agent=self._user_agent
+            )
 
     def _on_interrupted(self) -> None:
         if self._phase is not _Phase.PIPELINE:
@@ -879,6 +923,7 @@ class LiveSession(QObject):
             self._back_off(snapshot, position, stalled, lag)
             self._stay.target = self._control_target()
             self._stay.slack = self._target(snapshot) - self._stay.target
+            self._stay.hold_reopen = self._just_opened()
             self._stay.burst = self._filter.burst
             self._stay.spread = self._filter.spread()
             buffering = (
@@ -887,7 +932,7 @@ class LiveSession(QObject):
             decision = self._stay.update(lag, buffering, now=self._clock())
             self._set_rate(decision.rate)
             if decision.reopen_live:
-                self._go_live(unpause=False)
+                self._go_live(unpause=False, reopen=True)
                 if self._phase is not _Phase.PIPELINE:
                     return
         else:
@@ -897,7 +942,9 @@ class LiveSession(QObject):
     def _back_off(
         self, snapshot: Mapping[str, Any], position: float, stalled: bool, lag: float
     ) -> None:
-        """Auto latency: raise the channel's target on trouble, lower it while quiet.
+        """Trouble: a starvation or a stall that ran out the cushion. Auto latency raises the
+        channel's target on it and lowers it while quiet; under any latency stay-live owes
+        a slow-down back to the target (`StayLive.trouble`: at once, beyond its budget).
 
         Counted only while stay-live is LIVE (the caller skips paused and ended sessions),
         and trouble only once the lag had reached the target since the tune (`_cushion`).
@@ -908,15 +955,15 @@ class LiveSession(QObject):
             return
         self._cushion = max(self._cushion, lag)  # under any latency: Auto may follow
         auto = self._auto
-        if auto is None:
-            return
         if stalled or self._starved(snapshot, position):
             fresh = self._troubled_at is None or now - self._troubled_at > _CALM_S
             self._troubled_at = now
             ran_out = self._cushion >= self._target(snapshot) - _BELOW_TARGET_S
-            if fresh and ran_out and auto.trouble(_number(snapshot.get("burst_s"))):
-                self._learn()
-        elif mark is not None and auto.quiet(now - mark):
+            if fresh and ran_out:
+                if auto is not None and auto.trouble(_number(snapshot.get("burst_s"))):
+                    self._learn()
+                self._stay.trouble()
+        elif auto is not None and mark is not None and auto.quiet(now - mark):
             self._learn()
 
     def _learn(self, *, direct: bool = False) -> None:
@@ -999,19 +1046,19 @@ class LiveSession(QObject):
 
     def _burst_shift(self, snapshot: Mapping[str, Any]) -> float:
         """What a bursty source adds to the current lag for its mean: since the edge moved,
-        less half a burst; 0 for a steady source. A burst later than `_STALL_S` is a stall,
+        less half a burst; 0 for a steady source. A burst later than `STALL_S` is a stall,
         not the sawtooth: the time since the edge moved counts up to there only.
         """
         burst = _number(snapshot.get("burst_s"))
         if burst <= 0:
             return 0.0
-        return min(self._since_edge_moved(snapshot), burst + _STALL_S) - burst / 2
+        return min(self._since_edge_moved(snapshot), burst + STALL_S) - burst / 2
 
     def _stalled(self, snapshot: Mapping[str, Any]) -> bool:
-        """The source sent nothing for a burst plus `_STALL_S` (a steady one: `_STALL_S`)."""
+        """The source sent nothing for a burst plus `STALL_S` (a steady one: `STALL_S`)."""
         if self._ended:
             return False  # its input is over: nothing more is expected
-        limit = _number(snapshot.get("burst_s")) + _STALL_S
+        limit = _number(snapshot.get("burst_s")) + STALL_S
         return self._since_edge_moved(snapshot) > limit
 
     def _clock_frozen(self) -> bool:
@@ -1101,6 +1148,15 @@ class LiveSession(QObject):
             return self._auto.target(burst)
         return max(TARGETS[self._latency], burst)
 
+    def _just_opened(self) -> bool:
+        """A pipeline stream opened a moment ago: VLC has not played it yet (a fresh clock),
+        or it is within `_REOPEN_HOLD_S` of the open. Its lag is not known yet, so stay-live
+        does not reopen at live: a user's Go live and stay-live's reopen are never two opens
+        in a row (a backlog landing just after Go live made them so, on one provider)."""
+        if self._opened_at is not None or self._last_ms == 0:
+            return True
+        return self._clock() - self._last_open < _REOPEN_HOLD_S
+
     def _control_target(self) -> float:
         """The target stay-live steers to: as `_target`, for the source's burst as the lag
         filter classifies it (a burst the helper measures for a moment and drops is none)."""
@@ -1165,7 +1221,7 @@ class LiveSession(QObject):
         safe = [mean for mean in means if mean[0] >= target - _BELOW_TARGET_S]
         if not safe:
             return None if cushion else means[-1][1]  # a short buffer: all of it
-        band = [mean for mean in safe if mean[0] <= target + _NUDGE_S]
+        band = [mean for mean in safe if mean[0] <= target + _LAND_ABOVE_S]
         if band:
             return min(band, key=lambda mean: (abs(mean[0] - target), mean[0]))[1]
         return safe[0][1]
@@ -1197,7 +1253,8 @@ class LiveSession(QObject):
             return False
         self._base, self._elapsed = self._start_of(seq), 0.0
         self._last_ms, self._last_wall = 0, self._clock()
-        self._clock_moved = self._opened_at = self._last_wall
+        self._clock_moved = self._opened_at = self._last_open = self._last_wall
+        self._filter.reset()  # the lag starts afresh from the new position
         self._stay.absorb()  # the position starts afresh: a step, not a drift
         self._settled.reset()  # and the lag shows where it landed at once
         self._rate_mark = self._rate_from = None  # rate health counts once this one plays
