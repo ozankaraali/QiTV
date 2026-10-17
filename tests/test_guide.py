@@ -127,6 +127,14 @@ class GuideTests(unittest.TestCase):
         self.guide.move_by(-10)
         self.assertIs(self.guide.current_channel(), chans[0])
 
+    def test_visible_channels_are_the_rows_on_screen(self):
+        chans = channels(100)
+        self.guide.open_guide(chans, 0)
+        shown = self.guide.visible_channels()
+        self.assertGreater(len(shown), 1)
+        self.assertLess(len(shown), len(chans))
+        self.assertEqual(shown, chans[: len(shown)])
+
     def test_open_without_channels_has_no_current_channel(self):
         self.guide.open_guide([], -1)
         self.guide.move_by(1)
