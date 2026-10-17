@@ -3,8 +3,13 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlencode, urlsplit
 
 from services.redact import redact_url, safe_exc
+from services.vlc_profile import DEFAULT_USER_AGENT
 
 logger = logging.getLogger(__name__)
+
+# Some panels' proxies answer the requests library's own agent ("python-requests/…") with
+# 403: every provider request names the player the streams already go out as.
+CLIENT_HEADERS = {"User-Agent": DEFAULT_USER_AGENT}
 
 
 def base_from_url(url: str) -> str:
@@ -138,6 +143,23 @@ def xtream_player_api_url(
     if extra:
         params.update(extra)
     return _build_xtream_url(base, "player_api.php", username, password, params or None)
+
+
+def xtream_signed_in(body: Any) -> bool:
+    """Whether a Player API sign-in reply (no action) accepted the account.
+
+    ``body`` is the parsed JSON, or None when the panel sent no JSON (some answer a
+    wrong password with an empty 513). An accepted reply looks like:
+    {"user_info": {"auth": 1, "status": "Active", "exp_date": "1794855950", ...},
+     "server_info": {...}}
+    A refused one is {"user_info": {"auth": 0}}, [] or None, depending on the panel.
+    Verified means the account can watch: an expired, banned or disabled one is refused.
+    """
+    user_info = body.get("user_info") if isinstance(body, dict) else None
+    if not isinstance(user_info, dict) or str(user_info.get("auth", "")).strip() != "1":
+        return False
+    status = str(user_info.get("status") or "Active").strip()
+    return status.lower() == "active"
 
 
 def xtream_get_php_url(

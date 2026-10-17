@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from services.lazy_import import lazy_module
 from services.m3u import decode_playlist, parse_m3u
 from services.provider_api import (
+    CLIENT_HEADERS,
     base_from_url,
     https_fallback_candidates,
     stb_create_link_url,
@@ -101,7 +102,9 @@ class M3ULoaderWorker(QObject):
             last_exc = None
             for u in https_fallback_candidates(self.url, self.prefer_https):
                 try:
-                    response = requests.get(u, timeout=10, verify=self.verify_ssl)
+                    response = requests.get(
+                        u, timeout=10, headers=CLIENT_HEADERS, verify=self.verify_ssl
+                    )
                     response.raise_for_status()
                     self.finished.emit(parse_m3u(decode_playlist(response), categorize=True))
                     return
@@ -158,6 +161,7 @@ class XtreamLoaderWorker(QObject):
         # closed when the worker finishes (avoids leaking connections
         # against providers with strict connection limits).
         session = requests.Session()
+        session.headers.update(CLIENT_HEADERS)
         try:
             # Step 1: Authenticate and resolve proper base + formats
             auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
@@ -335,7 +339,9 @@ class XtreamSeriesInfoWorker(QObject):
             # Use resolved_base if provided, otherwise determine from base_url
             if not self.resolved_base:
                 auth_url = xtream_player_api_url(self.base_url, self.username, self.password)
-                auth_resp = requests.get(auth_url, timeout=10, verify=self.verify_ssl)
+                auth_resp = requests.get(
+                    auth_url, timeout=10, headers=CLIENT_HEADERS, verify=self.verify_ssl
+                )
                 auth_resp.raise_for_status()
                 auth_body = auth_resp.json() if auth_resp.content else {}
                 server_info = (
@@ -353,7 +359,9 @@ class XtreamSeriesInfoWorker(QObject):
                 action="get_series_info",
                 extra={"series_id": self.series_id},
             )
-            info_resp = requests.get(info_url, timeout=15, verify=self.verify_ssl)
+            info_resp = requests.get(
+                info_url, timeout=15, headers=CLIENT_HEADERS, verify=self.verify_ssl
+            )
             info_resp.raise_for_status()
             series_data = info_resp.json() or {}
 

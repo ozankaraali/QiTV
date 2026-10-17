@@ -8,6 +8,7 @@ from services.provider_api import (
     stb_create_link_url,
     stb_endpoint,
     stb_portal_base,
+    xtream_signed_in,
 )
 
 PORTAL_URLS = [
@@ -66,6 +67,22 @@ class StbUrlTests(unittest.TestCase):
         )
         self.assertEqual(https_fallback_candidates("http://h/x", False), ["http://h/x"])
         self.assertEqual(https_fallback_candidates("https://h/x", True), ["https://h/x"])
+
+
+class XtreamSignInTests(unittest.TestCase):
+    def test_an_active_account_is_signed_in(self):
+        for auth in (1, "1"):
+            body = {"user_info": {"auth": auth, "status": "Active"}, "server_info": {}}
+            self.assertTrue(xtream_signed_in(body))
+        self.assertTrue(xtream_signed_in({"user_info": {"auth": 1}}))  # no status given
+
+    def test_refusals_as_panels_send_them(self):
+        for body in (None, [], {}, {"user_info": {"auth": 0}}, {"user_info": []}, "nope"):
+            self.assertFalse(xtream_signed_in(body), body)
+
+    def test_an_account_that_cannot_watch_is_refused(self):
+        for status in ("Expired", "Banned", "Disabled"):
+            self.assertFalse(xtream_signed_in({"user_info": {"auth": 1, "status": status}}))
 
 
 if __name__ == "__main__":

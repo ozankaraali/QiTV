@@ -32,6 +32,12 @@ import orjson as json
 from services.config_manager import ConfigManager
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
+from services.provider_api import (
+    CLIENT_HEADERS,
+    https_fallback_candidates,
+    xtream_player_api_url,
+    xtream_signed_in,
+)
 from services.provider_manager import StbHandshake
 from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
@@ -72,7 +78,15 @@ class ProviderVerificationWorker(QObject):
                     serial_number=provider.get("serial_number", ""),
                     device_id=provider.get("device_id", ""),
                 )
-            elif provider["type"] in ("M3UPLAYLIST", "M3USTREAM", "XTREAM"):
+            elif provider["type"] == "XTREAM":
+                verified = self.verify_xtream(
+                    provider["url"],
+                    provider.get("username", ""),
+                    provider.get("password", ""),
+                    prefer_https=self.prefer_https,
+                    verify_ssl=self.ssl_verify,
+                )
+            elif provider["type"] in ("M3UPLAYLIST", "M3USTREAM"):
                 verified = self.verify_url(
                     provider["url"],
                     prefer_https=self.prefer_https,
@@ -86,6 +100,22 @@ class ProviderVerificationWorker(QObject):
             self.finished.emit()
 
     @staticmethod
+    def verify_xtream(url, username, password, *, prefer_https=False, verify_ssl=True):
+        # Sign in through the Player API: a panel's bare host often answers 404 or 502.
+        api_url = xtream_player_api_url(url, username, password)
+        for candidate in https_fallback_candidates(api_url, prefer_https):
+            try:
+                response = requests.get(
+                    candidate, timeout=10, headers=CLIENT_HEADERS, verify=verify_ssl
+                )
+                body = response.json() if response.ok and response.content else None
+            except requests.RequestException, ValueError:
+                continue
+            if xtream_signed_in(body):
+                return True
+        return False
+
+    @staticmethod
     def verify_url(url, *, prefer_https=False, verify_ssl=True):
         if url.startswith(("http://", "https://")):
             try:
@@ -95,7 +125,9 @@ class ProviderVerificationWorker(QObject):
                 test_urls.append(url)
                 for turl in test_urls:
                     try:
-                        response = requests.head(turl, timeout=5, verify=verify_ssl)
+                        response = requests.head(
+                            turl, timeout=5, headers=CLIENT_HEADERS, verify=verify_ssl
+                        )
                         if response.status_code == 200:
                             return True
                     except requests.RequestException:

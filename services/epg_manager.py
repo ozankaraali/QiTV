@@ -20,6 +20,7 @@ from services.jobs import Cancelled, cancel_requested
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.provider_api import (
+    CLIENT_HEADERS,
     base_from_url,
     https_fallback_candidates,
     provider_prefers_https,
@@ -447,7 +448,10 @@ class EpgManager:
             if (current_time - last_access).total_seconds() > self.config_manager.epg_expiration:
                 epg_date = datetime.strptime(epg_info["date"], _INDEX_TIME_FORMAT)
                 # Request the URL with "If-Modified-Since" header
-                headers = {"If-Modified-Since": epg_date.strftime("%a, %d %b %Y %H:%M:%S GMT")}
+                headers = {
+                    **CLIENT_HEADERS,
+                    "If-Modified-Since": epg_date.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+                }
                 r = requests.get(
                     url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify
                 )
@@ -598,7 +602,13 @@ class EpgManager:
             body = None  # the chunks of the first non-empty answer, streamed (cancellable)
             for _url in https_fallback_candidates(xmltv_url, prefer_https):
                 try:
-                    r = requests.get(_url, stream=True, timeout=30, verify=verify_ssl)
+                    r = requests.get(
+                        _url,
+                        stream=True,
+                        timeout=30,
+                        headers=CLIENT_HEADERS,
+                        verify=verify_ssl,
+                    )
                     if r.status_code == 200:
                         chunks = r.iter_content(_CHUNK)
                         first = next(chunks, b"")
@@ -637,7 +647,13 @@ class EpgManager:
         self.save_index()
 
     def _fetch_epg_from_url(self, url):
-        r = requests.get(url, stream=True, timeout=30, verify=self.config_manager.ssl_verify)
+        r = requests.get(
+            url,
+            stream=True,
+            timeout=30,
+            headers=CLIENT_HEADERS,
+            verify=self.config_manager.ssl_verify,
+        )
         if r.status_code == 200:
             url_hash = _cache_key(url)
             xmltv_file_path = os.path.join(self._cache_dir(), f"{url_hash}.xml")

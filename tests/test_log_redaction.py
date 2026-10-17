@@ -100,6 +100,9 @@ class LogPathTests(unittest.TestCase):
 
     def test_xtream_categories_failure(self):
         class Session:
+            def __init__(self):
+                self.headers = {}
+
             def get(self, url, **kwargs):
                 if "action=get_live_categories" in url:
                     raise refused(url)
