@@ -75,6 +75,20 @@ class NodeSeqTests(unittest.TestCase):
         self.assertEqual(seq.matching("zzz").items, [])
         self.assertIs(seq.matching(""), seq)
 
+    def test_titles_folded_ahead_in_the_background_serve_the_filter(self):
+        seq = NodeSeq(channels(30))
+        seq.fold_ahead(0)
+        seq.fold_ahead(0)  # asking again starts nothing
+        self.assertTrue(seq._fold_due)
+        seq._fold_in_background()
+        thread = seq._folding
+        seq._fold_in_background()
+        self.assertIs(seq._folding, thread)
+        folded = seq._folded_titles()  # waits for the thread if it is still folding
+        self.assertEqual(folded[2], "cafe 3")
+        self.assertIs(seq._folded_titles(), folded)
+        self.assertEqual([n.key for n in seq.matching("cafe 3")], ["3", "30"])
+
     def test_numbers_and_their_width(self):
         self.assertTrue(NodeSeq(channels(5)).numbered())
         self.assertFalse(NodeSeq(channels(5, numbered=False)).numbered())

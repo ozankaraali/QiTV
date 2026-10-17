@@ -746,6 +746,8 @@ class Drawer(Overlay):
         else:
             col.message = None
         nodes = children or []
+        if isinstance(nodes, NodeSeq):
+            nodes.fold_ahead()  # typing to filter will find the titles folded
         if col.side == self.focus_side and needle:
             if isinstance(nodes, NodeSeq):
                 nodes = nodes.matching(needle)
