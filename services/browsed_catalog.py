@@ -164,6 +164,18 @@ class BrowsedCatalog(QObject):
         catalog = self._cat()
         return catalog.current_provider_name() if catalog is not None else ""
 
+    def provider(self, name: str) -> dict:
+        """The settings of any provider by name (KeyError when it is not in the list)."""
+        return self._catalogs.provider(name)
+
+    def max_connections_of(self, name: str) -> Optional[int]:
+        """What provider `name` reported as its simultaneous streams (None: unknown)."""
+        return self._catalogs.max_connections(name)
+
+    def sign_in_again(self, name: str) -> None:
+        """Sign provider `name` in again: a link asked next waits for it (an STB retry)."""
+        self._catalogs.sign_in_again(name)
+
     def provider_type(self) -> str:
         catalog = self._cat()
         return catalog.provider_type() if catalog is not None else ""

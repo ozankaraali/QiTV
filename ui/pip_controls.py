@@ -31,6 +31,7 @@ from services.catalog import ALL_GROUP_ID
 from services.live.stay_live import TARGETS
 from services.sessions import PURPOSE, SessionManager, Slot, limit_message
 from services.zapping import ZapContext
+from ui import item_provider
 from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
@@ -249,7 +250,7 @@ class PipControls(QObject):
             return
         if self.small_showing(channel) is not None:
             return  # already small
-        if self._limit_reached():
+        if self._limit_reached(channel):
             return
         title = str(channel.get("name") or "")
         group = context.group_key if context is not None else ""
@@ -282,11 +283,13 @@ class PipControls(QObject):
         else:
             self._wanted = None
 
-    def _limit_reached(self) -> bool:
-        """The provider's limit leaves no stream for a small picture: say so before asking
-        for a link (an STB portal mints one per request, and allows one stream)."""
-        provider = self.catalog.current_provider()
-        limit = self._budget.limit_for(provider, self.catalog.max_connections())
+    def _limit_reached(self, channel: dict) -> bool:
+        """The limit of the channel's own provider leaves no stream for a small picture: say
+        so before asking for a link (an STB portal mints one per request, and allows one)."""
+        provider = item_provider.provider_dict(self.catalog, channel)
+        limit = self._budget.limit_for(
+            provider, item_provider.max_connections(self.catalog, channel)
+        )
         if limit is None:
             return False
         name = str(provider.get("name", ""))
@@ -345,8 +348,8 @@ class PipControls(QObject):
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
         sessions.open_pip(
             target.item,
-            provider=self.catalog.current_provider(),
-            xtream_max=self.catalog.max_connections(),
+            provider=item_provider.provider_dict(self.catalog, target.item),
+            xtream_max=item_provider.max_connections(self.catalog, target.item),
             start_kwargs=kwargs,
         )
         slot.group_key = target.group_key
