@@ -218,7 +218,7 @@ class NavModel(QObject):
         return version() if callable(version) else self._events
 
     def _favorites_fingerprint(self) -> tuple:
-        return tuple(favorites.names(self.config))
+        return favorites.fingerprint(self.config)
 
     def _history_fingerprint(self) -> tuple:
         history = self.config.watch_history or []
@@ -335,10 +335,10 @@ class NavModel(QObject):
         return cast(list[dict], self._cached(("@recent",), deps, self._compute_recent))
 
     def _compute_favorites(self) -> list[dict]:
-        kept = set(favorites.names(self.config))
-        if not kept:
+        is_kept = favorites.matcher(self.config)
+        if is_kept is None:
             return []
-        return [i for i in self._all_live_items() if favorites.favorite_key(i) in kept]
+        return [i for i in self._all_live_items() if is_kept(i)]
 
     def _compute_recent(self) -> list[dict]:
         provider = self.catalog.current_provider_name()
