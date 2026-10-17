@@ -20,6 +20,15 @@ class _KeepBases(dict):
 _KEEP_BASES = _KeepBases()
 
 
+def fold_all(texts: list[str]) -> list[str]:
+    """fold() of every text; one pass over the joined texts is far quicker than a call each
+    (200,000 channel names), and each text is folded on its own, as it would be alone."""
+    folded = fold("\n".join(texts)).split("\n")
+    if len(folded) == len(texts):
+        return folded
+    return [fold(text) for text in texts]  # a text held a line break itself
+
+
 def fold(text: str) -> str:
     """Casefold, strip accents and map dotless i, so "ist" matches "İstanbul" and "cafe" "Café"."""
     if text.isascii():  # no accents and no dotless i: casefold is the whole job

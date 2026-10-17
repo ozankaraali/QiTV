@@ -8,7 +8,9 @@ Library's sections).
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
+import itertools
 import logging
 from typing import Any, Callable, Optional, cast
 
@@ -23,6 +25,7 @@ from services.provider_ids import (
     split_group_id,
     with_provider,
 )
+from services.text_fold import fold_all
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,7 @@ FAVORITES_GROUP = "@favorites"
 RECENT_GROUP = "@recent"
 _RECENT_LIMIT = 20
 _MEMO_LIMIT = 64  # memoized child lists kept (least recently used are dropped)
+LAZY_ROWS = 2000  # a list of items this long gets its nodes made on demand (see NodeSeq)
 
 
 @dataclass(frozen=True)
@@ -103,6 +107,139 @@ def _item_node(item: dict, layer: str = "item") -> NavNode:
     episode = layer == "episode"
     key = episode_key(item) if episode else item_key(item)
     return NavNode(layer, key, item_title(item, episode=episode), item)
+
+
+class NodeSeq(Sequence):
+    """The item nodes of a long list (one provider's 57,000 channels, or all four's 200,000),
+    made when a row is asked for: the drawer shows a screenful at a time, and making every
+    node up front cost seconds. It reads like a list of NavNodes and is not changed once made.
+
+    `items` are the dicts behind the rows (the models take them as they are); `matching()` is
+    the same list narrowed by the drawer's filter.
+    """
+
+    _tokens = itertools.count(1)
+
+    def __init__(
+        self,
+        items: list[dict],
+        origin: Optional[list[int]] = None,
+        folded: Optional[list[str]] = None,
+    ):
+        self.items = items
+        self.token = next(self._tokens)  # tells one list from another without comparing rows
+        self._origin = origin  # each item's row in the list this one was narrowed from
+        self._folded = folded
+        self._made: dict[int, NavNode] = {}
+        self._rows: dict[NavNode, int] = {}  # the nodes made so far -> their rows
+        self._absent: set[NavNode] = set()  # nodes looked for here and not found
+        self._narrowed: Optional[tuple[str, NodeSeq]] = None
+        self._digits: Optional[int] = None
+        self._numbered: Optional[bool] = None
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, row):  # type: ignore[override]
+        if isinstance(row, slice):
+            return [self[i] for i in range(*row.indices(len(self.items)))]
+        if row < 0:
+            row += len(self.items)
+        node = self._made.get(row)
+        if node is None:
+            if not 0 <= row < len(self.items):
+                raise IndexError(row)
+            node = self._made[row] = _item_node(self.items[row])
+            self._rows[node] = row
+        return node
+
+    def __iter__(self):
+        for row, item in enumerate(self.items):
+            yield self._made.get(row) or _item_node(item)
+
+    def source_row(self, row: int) -> int:
+        """Row `row`'s position in the list this one was narrowed from (its own if none)."""
+        return self._origin[row] if self._origin is not None else row
+
+    def row_of(self, node: NavNode) -> Optional[int]:
+        """The row holding `node` (any node of the same item), None if it is not listed."""
+        row = self._rows.get(node)
+        if row is not None or node.layer != "item" or node in self._absent:
+            return row
+        # A node from an older list: find it by its id and provider, and keep it as made.
+        provider = provider_of(node.payload) if isinstance(node.payload, dict) else ""
+        for at, item in enumerate(self.items):
+            if item_key(item) == node.key and provider_of(item) == provider:
+                return self._rows.setdefault(self[at], at)
+        self._absent.add(node)
+        return None
+
+    def find_focus(self, wanted: "str | tuple[str, str]") -> Optional[NavNode]:
+        """The first row an id, or a (provider, id) pair, names (without making every node)."""
+        provider, key = wanted if isinstance(wanted, tuple) else ("", wanted)
+        for row, item in enumerate(self.items):
+            if item_key(item) == key and (not provider or provider_of(item) == provider):
+                return self[row]
+        return None
+
+    def matching(self, needle: str) -> "NodeSeq":
+        """The rows whose folded title contains `needle` (already folded); typing on narrows
+        the rows of the filter before."""
+        if not needle:
+            return self
+        if self._narrowed is not None:
+            before, seq = self._narrowed
+            if before == needle:
+                return seq
+            if needle.startswith(before):
+                narrowed = seq.matching(needle)
+                self._narrowed = (needle, narrowed)
+                return narrowed
+        if self._folded is None:
+            self._folded = fold_all([item_title(item) for item in self.items])
+        rows = [row for row, title in enumerate(self._folded) if needle in title]
+        narrowed = NodeSeq(
+            [self.items[row] for row in rows],
+            [self.source_row(row) for row in rows],
+            [self._folded[row] for row in rows],
+        )
+        self._narrowed = (needle, narrowed)
+        return narrowed
+
+    def numbered(self) -> bool:
+        """Whether any channel has a number (else the position stands in for it)."""
+        if self._numbered is None:
+            self._numbered = any(_number(item) for item in self.items)
+        return self._numbered
+
+    def number_digits(self) -> int:
+        """The most digits any channel's number has."""
+        if self._digits is None:
+            numbers = {item.get("number") for item in self.items}
+            self._digits = max((len(text) for text in map(_text, numbers) if text), default=0)
+        return self._digits
+
+
+def _text(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _number(item: dict) -> str:
+    return _text(item.get("number"))
+
+
+def payloads(nodes: Sequence) -> list[dict]:
+    """The dicts behind a column's nodes (the channels of a group)."""
+    if isinstance(nodes, NodeSeq):
+        return list(nodes.items)
+    return [n.payload for n in nodes if isinstance(n.payload, dict)]
+
+
+def _item_nodes(items: list[dict]) -> "Sequence[NavNode]":
+    """Nodes for a group's items: a long list makes them on demand."""
+    if len(items) >= LAZY_ROWS:
+        return NodeSeq(items)
+    return [_item_node(i) for i in items]
 
 
 class NavModel(QObject):
@@ -240,7 +377,7 @@ class NavModel(QObject):
             if key and key[0] == "group":
                 return self._load(key, lambda: self.catalog.request_group(section, group.key))
             return self._load(("section", section), lambda: self.catalog.request_section(section))
-        return [_item_node(i) for i in items]
+        return _item_nodes(items)
 
     # --- memoization -------------------------------------------------------------------
     def _data_version(self) -> object:
@@ -269,7 +406,7 @@ class NavModel(QObject):
         entry = self._memo.get(key)
         if entry is not None and entry[0] == deps:
             self._memo.move_to_end(key)
-            return list(entry[1])
+            return entry[1] if isinstance(entry[1], NodeSeq) else list(entry[1])
         value = compute()
         if value is None:
             self._memo.pop(key, None)
@@ -278,7 +415,7 @@ class NavModel(QObject):
         self._memo.move_to_end(key)
         while len(self._memo) > _MEMO_LIMIT:
             self._memo.popitem(last=False)
-        return list(value)
+        return value if isinstance(value, NodeSeq) else list(value)
 
     def _load(self, key: tuple, request) -> Optional[list[NavNode]]:
         if key in self._errors:

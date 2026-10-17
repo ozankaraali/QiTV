@@ -14,6 +14,7 @@ pick another. A head cut short ("…") goes a layer up. ⌕ (Search, as Ctrl/⌘
 ⚙ (Settings) end it; each takes clicks over at least MIN_HIT_PX and names its key when hovered.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import logging
 
@@ -52,6 +53,7 @@ from services.navigation import (
     SETTINGS_ROW,
     NavModel,
     NavNode,
+    NodeSeq,
 )
 from services.provider_ids import provider_of
 from services.text_fold import fold
@@ -62,6 +64,7 @@ from ui.overlays.channel_rows import (
     ChannelListView,
     ChannelRowDelegate,
     ChannelRowsModel,
+    LazyNumbers,
     column_focused,
 )
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
@@ -195,12 +198,36 @@ def _is_live_item(nav: NavModel, node: NavNode) -> bool:
     return node.layer == "item" and nav.section_of(node) == "live"
 
 
-def _numbers(group: list[NavNode], shown: list[NavNode]) -> list[str | None]:
+class _SeqNumbers(LazyNumbers):
+    """The numbers of a long group's shown rows, looked up row by row (see _numbers)."""
+
+    def __init__(self, group: NodeSeq, shown: NodeSeq) -> None:
+        self._shown = shown
+        self._own = group.numbered()
+        if self._own:
+            self.digits = shown.number_digits()
+        else:  # positions stand in: the last row's is the longest
+            last = shown.source_row(len(shown) - 1) + 1 if len(shown) else 0
+            self.digits = len(str(last)) if last else 0
+        self.signature = (group.token, shown.token)
+
+    def __len__(self) -> int:
+        return len(self._shown)
+
+    def __getitem__(self, row: int) -> str | None:
+        if self._own:
+            return ZapContext.number_of(self._shown.items[row]) or None
+        return str(self._shown.source_row(row) + 1)
+
+
+def _numbers(group, shown):
     """The numbers of the `shown` rows of a live group, the filter aside.
 
     When no channel of the group has a number, its position in the group stands in, as on
     the banner and for number entry.
     """
+    if isinstance(group, NodeSeq) and isinstance(shown, NodeSeq):
+        return _SeqNumbers(group, shown)
     channels = [n.payload for n in group if isinstance(n.payload, dict)]
     if any(ZapContext.number_of(c) for c in channels):
         return [
@@ -212,9 +239,9 @@ def _numbers(group: list[NavNode], shown: list[NavNode]) -> list[str | None]:
 
 
 def _shown_rows(
-    nodes: list[NavNode],
+    nodes,
     live: bool,
-    numbers: list[str | None] | None,
+    numbers,
     tagged: bool = False,
 ) -> tuple:
     """What a column's list shows for `nodes`: equal values show the same rows.
@@ -222,6 +249,8 @@ def _shown_rows(
     A row shows its node's title, count and icon, and a live channel its item (by identity:
     a refreshed catalog brings new item dicts) and number.
     """
+    if isinstance(nodes, NodeSeq):  # a long list is told by its identity, not row by row
+        return (live, ("rows", nodes.token), getattr(numbers, "signature", None), tagged)
     rows = tuple((n.layer, n.key, n.title, n.count, id(n.payload)) for n in nodes)
     return (live, rows, tuple(numbers) if numbers is not None else None, tagged)
 
@@ -231,19 +260,23 @@ class _NodeModel(ChannelRowsModel):
 
     def __init__(self, logos, now_provider, parent=None) -> None:
         super().__init__(logos, now_provider, parent)
-        self._nodes: list[NavNode] = []
+        self._nodes: Sequence[NavNode] = []
 
     def set_nodes(
         self,
-        nodes: list[NavNode],
+        nodes,
         live: bool,
-        numbers: list[str | None] | None = None,
+        numbers=None,
         tagged: bool = False,
     ) -> None:
-        self._nodes = list(nodes)
-        rows = [
-            n.payload if live and isinstance(n.payload, dict) else {"name": n.title} for n in nodes
-        ]
+        self._nodes = nodes if isinstance(nodes, NodeSeq) else list(nodes)
+        if live and isinstance(nodes, NodeSeq):
+            rows = nodes.items  # a long list shows the dicts themselves
+        else:
+            rows = [
+                n.payload if live and isinstance(n.payload, dict) else {"name": n.title}
+                for n in nodes
+            ]
         self.set_channels(rows, numbers if live else [None] * len(rows), tagged and live)
 
     def data(self, index, role=Qt.DisplayRole):
@@ -335,6 +368,29 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         p.restore()
 
 
+class _RowIndex:
+    """Each node's row in a column; a long list of channels makes its nodes on demand."""
+
+    def __init__(self, nodes) -> None:
+        self._seq = nodes if isinstance(nodes, NodeSeq) else None
+        self._map = None if self._seq is not None else {n: i for i, n in enumerate(nodes)}
+
+    def get(self, node, default=None):
+        if node is None:
+            return default
+        row = self._seq.row_of(node) if self._seq is not None else self._map.get(node)  # type: ignore[union-attr]
+        return default if row is None else row
+
+    def __contains__(self, node) -> bool:
+        return self.get(node) is not None
+
+    def __getitem__(self, node) -> int:
+        row = self.get(node)
+        if row is None:
+            raise KeyError(node)
+        return row
+
+
 class _Column:
     def __init__(self, side: str, drawer: "Drawer", logos, now_provider) -> None:
         self.side = side
@@ -349,8 +405,8 @@ class _Column:
         self.view.customContextMenuRequested.connect(lambda pos: drawer._on_row_context(side, pos))
         self.view.viewport().installEventFilter(drawer)  # a right press must not select
         self.parent: NavNode | None = None
-        self.nodes: list[NavNode] = []
-        self.rows: dict[NavNode, int] = {}
+        self.nodes: Sequence[NavNode] = []
+        self.rows = _RowIndex([])
         self.current: NavNode | None = None
         self.message: str | None = None
         self.rect = QRect()
@@ -493,7 +549,8 @@ class Drawer(Overlay):
         if node is None:
             return
         if self.focus_side == "right" and self._nav.is_playable(node):
-            self.playRequested.emit(node, list(col.nodes), self._nav.path[-1])
+            nodes = col.nodes if isinstance(col.nodes, NodeSeq) else list(col.nodes)
+            self.playRequested.emit(node, nodes, self._nav.path[-1])
         else:
             self.right()
 
@@ -668,7 +725,7 @@ class Drawer(Overlay):
         self,
         col: _Column,
         parent: NavNode | None,
-        children: list[NavNode] | None,
+        children: Sequence[NavNode] | None,
         needle: str,
     ) -> None:
         parent_changed = parent != col.parent
@@ -690,7 +747,10 @@ class Drawer(Overlay):
             col.message = None
         nodes = children or []
         if col.side == self.focus_side and needle:
-            nodes = [n for n in nodes if _selectable(n) and needle in fold(n.title)]
+            if isinstance(nodes, NodeSeq):
+                nodes = nodes.matching(needle)
+            else:
+                nodes = [n for n in nodes if _selectable(n) and needle in fold(n.title)]
         if col.message is None and not nodes:
             col.message = EMPTY_TEXT
         live = bool(nodes) and _is_live_item(self._nav, nodes[0])
@@ -702,7 +762,7 @@ class Drawer(Overlay):
         if shown != col.shown:
             col.shown = shown
             col.nodes = nodes
-            col.rows = {n: i for i, n in enumerate(nodes)}
+            col.rows = _RowIndex(nodes)
             col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
             col.model.set_nodes(nodes, live, numbers, tagged)
         else:
@@ -714,7 +774,12 @@ class Drawer(Overlay):
         else:
             matched = False
             if self._pending_key is not None:
-                match = next((n for n in nodes if _is_focus_key(n, self._pending_key)), None)
+                pending = self._pending_key
+                match = (
+                    nodes.find_focus(pending)
+                    if isinstance(nodes, NodeSeq)
+                    else next((n for n in nodes if _is_focus_key(n, pending)), None)
+                )
                 if match is not None:
                     col.current = match
                     matched = True
@@ -724,7 +789,7 @@ class Drawer(Overlay):
                 self._pending_key = None  # a stale focus key must not outlive the first fill
         self._show_current(col)
 
-    def _choose_left(self, col: _Column, nodes: list[NavNode]) -> None:
+    def _choose_left(self, col: _Column, nodes: Sequence[NavNode]) -> None:
         path = self._nav.path
         end = path[-1] if path else None
         if self._left_choice is not None and self._left_choice not in col.rows:

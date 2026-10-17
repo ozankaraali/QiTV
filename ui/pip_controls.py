@@ -29,6 +29,7 @@ from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
 from services.live.stay_live import TARGETS
+from services.navigation import payloads
 from services.sessions import PURPOSE, SessionManager, Slot, limit_message
 from services.zapping import ZapContext
 from ui import item_provider
@@ -206,7 +207,7 @@ class PipControls(QObject):
         nav = self._nav
         group = next((n for n in reversed(nav.path) if n.layer == "group"), None)
         nodes = nav.children(group) if group is not None else []
-        channels = [n.payload for n in nodes if isinstance(n.payload, dict)] or [node.payload]
+        channels = payloads(nodes) or [node.payload]
         key = group.key if group is not None else ALL_GROUP_ID
         source = item_provider.pick_source(self.catalog, node.payload, key)
         self.open_channel(

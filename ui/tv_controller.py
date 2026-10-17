@@ -46,6 +46,7 @@ runs from the Library's providerReady slot, after this controller settled the pr
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
@@ -63,7 +64,14 @@ from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
 from services.live.live_session import LiveSession
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
+from services.navigation import (
+    FAVORITES_GROUP,
+    RECENT_GROUP,
+    NavNode,
+    item_key,
+    item_title,
+    payloads,
+)
 from services.next_episode import play_context
 from services.provider_ids import ALL_PROVIDERS, provider_of, split_group_id
 from services.redact import safe_traceback, scrub
@@ -801,7 +809,7 @@ class TVController(QObject):
         self._tuning_since = time.monotonic()
         self._tuning.start(TUNING_KEEP_MS)
 
-    def play_item(self, node: NavNode, siblings: list[NavNode], parent: NavNode) -> None:
+    def play_item(self, node: NavNode, siblings: Sequence[NavNode], parent: NavNode) -> None:
         """A drawer row was chosen. Only channels play from the drawer: Movies and Series
         open the Library, whose titles and episodes play through play_vod()."""
         if self._closed:
@@ -811,7 +819,7 @@ class TVController(QObject):
             return
         # The whole group, not just the rows the drawer's filter shows: ↑/↓ walk the group.
         nodes = self.nav.children(parent) or siblings
-        channels = [n.payload for n in nodes if isinstance(n.payload, dict)]
+        channels = payloads(nodes)
         self.tune(node.payload, group_key=parent.key, channels=channels)
         self.overlays.drawer.close_drawer()
 
