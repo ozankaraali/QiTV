@@ -60,6 +60,46 @@ class Clock:
         return self.now
 
 
+class FakeOwnCatalog:
+    """One provider's own catalog behind the hub: its live channels, loaded on request."""
+
+    def __init__(self, channels):
+        self.channels = channels
+        self.loaded = False
+        self.requests = []
+
+    def has_content(self, section):
+        return self.loaded
+
+    def request_section(self, section, *, force=False):
+        self.requests.append(section)
+
+    def items(self, section, group_id):
+        return list(self.channels) if self.loaded else None
+
+
+class FakeHub(QObject):
+    """The Catalogs hub as far as the last-channel start needs it."""
+
+    contentChanged = Signal(str)
+    providerFailed = Signal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        self.own = {}
+        self.ensured = []
+        self.ready = set()
+
+    def ensure(self, name):
+        self.ensured.append(name)
+
+    def is_ready(self, name):
+        return name in self.ready
+
+    def catalog(self, name):
+        return self.own[name]
+
+
 class FakeCatalog(NavCatalog):
     providerFailed = Signal(str, str)
     epgReady = Signal()
@@ -83,6 +123,7 @@ class FakeCatalog(NavCatalog):
         }
         self.limits_of = {"Harbor IPTV": 1}
         self.setups = []
+        self.catalogs = FakeHub()
 
     def provider_names(self):
         return list(self.names)
@@ -1069,6 +1110,64 @@ class StartupTests(ControllerTestCase):
         self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
         self.catalog.sectionReady.emit("live")  # later section loads do not reopen it
         self.assertEqual(len(self.drawer.named("open_drawer")), 1)
+
+    def start_with_last_of_harbor(self):
+        self.catalog.names = ["Home", "Harbor IPTV"]
+        self.config.last_live_channel = {
+            "provider_name": "Harbor IPTV",
+            "group_id": "41",
+            "item": CHANNELS[0],
+        }
+        hub = self.catalog.catalogs
+        hub.own["Harbor IPTV"] = FakeOwnCatalog(
+            [HARBOR_ONE, {**CHANNELS[1], "_provider": "Harbor IPTV"}]
+        )
+        self.controller.start()
+        self.catalog.providerReady.emit("Home")  # the browsed provider is another one
+        self.catalog.sectionReady.emit("live")
+        return hub
+
+    def test_start_with_last_channel_uses_its_own_provider(self):
+        hub = self.start_with_last_of_harbor()
+        self.assertEqual(hub.ensured, ["Harbor IPTV"])
+        self.assertEqual(self.catalog.links, [])  # its channels are not here yet
+        self.assertEqual(self.drawer.named("open_drawer"), [])  # the drawer waits for it
+        hub.ready.add("Harbor IPTV")
+        hub.contentChanged.emit("Harbor IPTV")
+        self.assertEqual(hub.own["Harbor IPTV"].requests, ["live"])
+        hub.own["Harbor IPTV"].loaded = True
+        hub.contentChanged.emit("Harbor IPTV")
+        self.assertEqual(
+            [item["_provider"] for _, item, _, _ in self.catalog.links], ["Harbor IPTV"]
+        )
+        self.assertEqual(self.requested(), ["One"])
+        self.assertEqual(self.zap.context.channels, hub.own["Harbor IPTV"].items("live", "*"))
+
+    def test_a_last_channel_whose_provider_failed_opens_the_drawer(self):
+        hub = self.start_with_last_of_harbor()
+        hub.providerFailed.emit("Harbor IPTV", "Handshake failed")
+        self.assertEqual(self.catalog.links, [])
+        self.assertEqual(self.drawer.named("open_drawer"), [(None,)])
+
+    def test_a_last_channel_of_another_provider_waits_for_nothing_else_played(self):
+        hub = self.start_with_last_of_harbor()
+        self.play(1)  # the viewer chose a channel meanwhile
+        hub.ready.add("Harbor IPTV")
+        hub.own["Harbor IPTV"].loaded = True
+        hub.contentChanged.emit("Harbor IPTV")
+        self.assertEqual(self.requested(), ["Two"])
+
+    def test_previous_channel_goes_back_across_providers(self):
+        self.catalog.providerReady.emit("Home")
+        self.controller.tune(CHANNELS[1], group_key="10", channels=CHANNELS)
+        self.ready("http://stream/2")
+        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+        self.ready("http://stream/1")
+        self.controller.handle(Action.PREVIOUS)
+        self.assertEqual(self.requested(), ["Two", "One", "Two"])
+        self.assertEqual(self.catalog.links[-1][1].get("_provider"), None)
+        self.controller.handle(Action.PREVIOUS)  # and forth again
+        self.assertEqual(self.catalog.links[-1][1].get("_provider"), "Harbor IPTV")
 
     def test_provider_failure_toasts_and_opens_the_drawer_on_the_sources(self):
         self.controller.start()
