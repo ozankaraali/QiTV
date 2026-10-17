@@ -512,15 +512,15 @@ class LibraryModel(QObject):
     def _continue_items(self) -> list[dict]:
         out: list[dict] = []
         seen: set[str] = set()
-        mixed = self._mixed()
         for entry in self._history_entries():
             cid = self._entry_content_id(entry)
             if cid in seen or self._watch.resume_position(cid) is None:
                 continue
             seen.add(cid)
             item = entry["item_data"]
-            # Stamped with the provider that played it, so it plays and stars there.
-            out.append(with_provider(item, entry["provider_name"]) if mixed else item)
+            # Stamped with the provider that played it (older history has no stamp), so it
+            # plays, stars and asks for its link there, whatever page is on another provider.
+            out.append(with_provider(item, entry["provider_name"]))
         return out
 
     def _my_list_items(self) -> list[dict]:

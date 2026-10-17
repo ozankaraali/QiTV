@@ -648,7 +648,7 @@ class MixedProvidersTests(unittest.TestCase):
         self.assertAlmostEqual(model.progress(items[0]), 300_000 / 6_000_000)
         self.assertAlmostEqual(model.progress(items[1]), 600_000 / 6_000_000)
 
-    def test_one_provider_continue_is_unchanged(self):
+    def test_one_provider_continue_is_stamped_with_its_provider(self):
         cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})
         cfg = make_config()
         history(cfg, movie(1), "movie")
@@ -656,7 +656,7 @@ class MixedProvidersTests(unittest.TestCase):
         resume(cfg, movie(1), "movie")
         resume(cfg, movie(2), "movie", provider="Q")
         model, _ = build(cat, cfg)
-        self.assertEqual(model.items(), [movie(1)])  # not stamped, as before
+        self.assertEqual(model.items(), [with_provider(movie(1), "P")])  # stamped with its provider
 
     def test_my_list_and_new_mix_providers(self):
         cat, ledger, salt, tide = mixed_catalog()

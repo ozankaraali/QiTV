@@ -53,6 +53,7 @@ class Catalogs(QObject):
     epgReady = Signal(str)
     contentChanged = Signal(str)  # the provider whose content may have changed
     catalogCreated = Signal(str)  # a provider's catalog was made (views connect to it)
+    providersChanged = Signal()  # reload(): the provider list was edited
 
     def __init__(
         self,
@@ -236,6 +237,7 @@ class Catalogs(QObject):
                 continue
             if name not in busy:
                 self._drop(name)
+        self.providersChanged.emit()
 
     def _drop(self, name: str) -> None:
         catalog = self._by_name.pop(name)

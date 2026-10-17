@@ -76,6 +76,7 @@ class FakeCatalogs(QObject):
 
     providerReady = Signal(str)
     providerFailed = Signal(str, str)
+    providersChanged = Signal()
 
     def __init__(self, owner):
         super().__init__()
@@ -538,7 +539,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.catalog.sectionReady.emit("series")
         grid = self.screen.grid
         grid.contextRequested.emit(grid.current_index(), QPoint(1, 2))
-        self.assertEqual(self.menus, [(ep, "series", QPoint(1, 2))])
+        self.assertEqual(self.menus, [(with_provider(ep, "P"), "series", QPoint(1, 2))])
 
     def test_only_the_current_providers_films_have_a_menu(self):
         # Links are asked of the provider QiTV is on: another's title, a channel or a title
@@ -953,6 +954,35 @@ class LibraryControllerTests(unittest.TestCase):
         self.catalog.names.remove("Q")  # removed in Settings while the results were up
         ctl.handle(Action.NAV_ACTIVATE)
         self.assertEqual(notices[-1], UNKNOWN_PROVIDER_NOTICE)
+
+    def test_a_waiting_title_whose_provider_is_removed_is_dropped(self):
+        ctl = self.search_salt()
+        notices = []
+        ctl.notice.connect(notices.append)
+        self.activate_name(ctl, "Salt Lake")  # waits for Q
+        self.catalog.catalogs.providersChanged.emit()  # Q is still listed: it keeps waiting
+        self.assertEqual(notices, [])
+        self.catalog.names.remove("Q")
+        self.catalog.catalogs.providersChanged.emit()
+        self.assertEqual(notices, [UNKNOWN_PROVIDER_NOTICE])
+        self.make_ready("Q")
+        self.assertEqual(self.played, [])
+
+    def test_an_unstamped_continue_title_plays_at_the_provider_that_played_it(self):
+        # History from earlier builds has no stamp: Continue stamps it, so the link is asked
+        # of its own provider, not of the TV page's.
+        ep = {**episodes("1")[0], "season": "1"}
+        self.config.watch_history.append(
+            {"item_data": ep, "item_type": "episode", "provider_name": "P"}
+        )
+        cid = WatchState.content_id("P", ep, item_type="episode")
+        self.config.playback_positions[cid] = {"position": 60_000, "duration": 1_200_000}
+        self.config.selected_provider_name = "Q"  # the TV page is elsewhere
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(provider_of(self.played[-1][0]), "P")
 
     def test_source_menu_lists_providers_and_all_providers_and_switches(self):
         ctl = self.open_movies()
