@@ -537,6 +537,13 @@ class CatalogService(QObject):
             return
         logger.info("EPG unavailable: %s", friendly_error(message))
 
+    def release_epg(self) -> None:
+        """Give the guide's memory back (the saved copy stays); refresh_epg() loads it again."""
+        self._pending_epg = None
+        self._epg_ready = False
+        if self.epg_manager is not None:
+            self.epg_manager.release()
+
     def epg_ready(self) -> bool:
         return self._epg_ready
 

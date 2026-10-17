@@ -201,6 +201,11 @@ class EpgManager:
         self._epg_source = cache_key
         self.epg = guide
 
+    def release(self) -> None:
+        """Show an empty guide and free the memory of the one held; the disk cache stays."""
+        self._publish(None, MultiKeyDict())
+        self._saved = None
+
     def _load_cached_epg(self, cache_key):
         """Load a previously indexed EPG from disk; return False if it is missing.
 
