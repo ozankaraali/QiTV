@@ -269,7 +269,7 @@ class LagFilter:
         burst = self.burst
         shift = min(max(0.0, since), burst + _STALL_S) - burst / 2 if burst > 0 else 0.0
         level = edge + shift - now
-        if self._level is not None and abs(level - self._level) > max(_STEP_S, self.burst):
+        if self._level is not None and abs(level - self._level) > max(_STEP_S, burst):
             self.reset()  # a step, not the rhythm: taken in at once
         dt = _TICK_S if self._last is None else min(max(now - self._last, 0.0), _MAX_DT)
         self._last, self._level = now, level
@@ -375,6 +375,7 @@ class _Nudge:
     peak: float  # the rate it ramps to
     left: float  # seconds of lag still to take off (behind) or add (ahead)
     target: float  # the target it was sized for
+    ending: bool = False  # ramping out: back to 1x, whatever the lag does meanwhile
 
 
 class StayLive:
@@ -549,7 +550,8 @@ class StayLive:
         # was still settling), but never more than a band beyond its size.
         urgent = nudge.peak in (_FAST, _SLOW)
         spent = nudge.left <= (-_BAND_S if urgent else self._ramp_out(rate))
-        if not spent and not reached:
+        nudge.ending = nudge.ending or spent or reached
+        if not nudge.ending:
             self._rate = round(rate + sign * min(_RAMP_STEP, abs(nudge.peak - rate)), 4)
             return
         self._rate = round(rate - sign * min(_RAMP_STEP, abs(rate - 1.0)), 4)

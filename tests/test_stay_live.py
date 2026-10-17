@@ -240,6 +240,20 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(rates[:3], [1.02, 1.01, 1.0])
         self.assertEqual(stay.nudge, 1.0)
 
+    def test_a_nudge_ramps_out_once_whatever_the_lag_does_meanwhile(self):
+        # Measured on the public HLS channel (2.1): the estimate hovered around the target as a 0.95x nudge
+        # ended, and the ramp went 0.95, 0.96, 0.95, 0.96 ... before 1x.
+        stay, clock = live(7.0, burst=7.0), Clock()
+        _, rates = drive(stay, 3.0, 6.0, clock=clock)  # short of room: 0.95x
+        self.assertEqual((rates[-1], stay.nudge), (0.95, 0.95))
+        rates = []
+        for k in range(12):  # at the target, give or take a few hundredths
+            rates.append(
+                stay.update(7.0 + (-0.05 if k % 2 else 0.05), False, now=clock.tick()).rate
+            )
+        self.assertEqual(rates[:5], [0.96, 0.97, 0.98, 0.99, 1.0])
+        self.assertEqual(changes(rates, start=0.95), 1)
+
     def test_buffering_holds_a_nudge_where_it_was(self):
         stay, clock = live(), Clock()
         _, rates = drive(stay, T + 3.0, 20.0, clock=clock)
