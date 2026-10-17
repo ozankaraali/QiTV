@@ -10,8 +10,7 @@ from unittest.mock import patch
 
 import requests
 
-from services import epg_manager as epg_manager_module
-from services import epg_store as epg_store_module
+from services import epg_manager as epg_manager_module, epg_store as epg_store_module
 from services.epg_manager import _INDEX_TIME_FORMAT, EpgManager, _cache_key, _xtream_cache_key
 from services.multikeydict import MultiKeyDict
 
@@ -374,3 +373,33 @@ class SavedGuideTests(_GuideCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedIndexTests(_GuideCase):
+    """Every provider's manager shares one index file: saving never wipes another's entries."""
+
+    def test_two_managers_saving_in_turn_keep_each_others_entries(self):
+        first, second = self.manager(), self.manager()  # both read the empty index
+        first.index["a"] = {"date": "2026-10-15 20:00:00", "last_access": "2026-10-15 20:00:00"}
+        second.index["b"] = None
+        first.save_index()
+        second.save_index()  # its copy never saw "a"
+        third = self.manager()
+        self.assertEqual(set(third.index), {"a", "b"})
+        self.assertIsNone(third.index["b"])
+
+    def test_a_removed_entry_is_removed_from_the_file(self):
+        first = self.manager()
+        first.index["a"] = None
+        first.save_index()
+        second = self.manager()
+        del second.index["a"]
+        second.index["b"] = None
+        second.save_index()
+        self.assertEqual(set(self.manager().index), {"b"})
+
+    def test_a_single_managers_existing_index_reads_unchanged(self):
+        first = self.manager()
+        first.index["a"] = None
+        first.save_index()
+        self.assertEqual(self.manager().index, {"a": None})

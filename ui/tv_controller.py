@@ -65,7 +65,7 @@ from services.epg_view import Programme, now_next
 from services.live.live_session import LiveSession
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
 from services.next_episode import play_context
-from services.provider_ids import ALL_PROVIDERS, provider_of
+from services.provider_ids import ALL_PROVIDERS, provider_of, split_group_id
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot
 from services.vlc_profile import classify
@@ -107,6 +107,7 @@ _ON_DEMAND_STOPS = frozenset({"ended", "error"})  # a movie or episode still cur
 _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
+_DRAWER_ROWS = 40  # rows of a mixed list whose providers load their guides
 _PINNED_TITLES = {FAVORITES_GROUP: "Favorites", RECENT_GROUP: "Recent"}
 
 
@@ -182,6 +183,7 @@ class TVController(QObject):
         self._started = False
         self._wired = False
         self._closed = False
+        self._guides_applied: Optional[set[str]] = None  # what the hub was last told
         self._lanes = LinkLanes(catalog, self)
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
         self._live_controls = LiveControls(
@@ -295,6 +297,7 @@ class TVController(QObject):
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
+            self._pip.changed.connect(self._update_guides)
         self._column_wheel = PointerInput(self)
         # While a live link resolves, the banner is shown again before it fades (Minor 11).
         self._tuning = QTimer(self, interval=TUNING_KEEP_MS)
@@ -329,6 +332,10 @@ class TVController(QObject):
         self._lanes.tuneDropped.connect(self._on_tune_dropped)
         self._lanes.sideFailed.connect(self._on_side_failed)
         catalog.epgReady.connect(self._on_epg_ready)
+        catalog.providerReady.connect(lambda *_: self._update_guides())
+        self.nav.changed.connect(self._update_guides)
+        self.overlays.guide.rowsMoved.connect(self._update_guides)
+        self.overlays.guide.closed.connect(self._update_guides)
         self.nav.notice.connect(self._on_notice)
         zap.tuneRequested.connect(self._on_zap_tune)
         zap.columnRequested.connect(self._on_column_requested)
@@ -340,6 +347,7 @@ class TVController(QObject):
             player.stateChanged.connect(partial(self._states.__setitem__, name))
         if self.sessions is not None:
             self.sessions.largeChanged.connect(self._on_large_changed)
+            self.sessions.largeChanged.connect(lambda *_: self._update_guides())
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
@@ -762,6 +770,7 @@ class TVController(QObject):
             self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
         self.overlays.column.close()
         self._channel = channel
+        self._update_guides()
         self._show_banner(channel)
         if stay:
             # The channel already playing was chosen again: never restart it, and drop a
@@ -1288,6 +1297,67 @@ class TVController(QObject):
             channels = self._all_live()
             self.zap.set_context(ZapContext(ALL_GROUP_ID, channels, fallback=channels))
 
+    def guides_in_use(self) -> set[str]:
+        """The providers whose guides are needed now: the big and small pictures', the one
+        the TV page browses, and in all mode those of the channels on screen (the drawer's
+        group, the open guide's rows). Others stay unloaded: accounts hold 57,000+ channels."""
+        names: set[str] = set()
+        items = [self._channel, self._current.item if self._current is not None else None]
+        sessions = self.sessions
+        if sessions is not None and (sessions.pip_open() or sessions.pip_opening()):
+            items.append(sessions.other().channel)
+        names.update(provider_of(item) for item in items if item)
+        source = self.catalog.current_provider_name()
+        if source != ALL_PROVIDERS:
+            names.add(source)
+        elif self._guide.is_open():
+            names.update(provider_of(c) for c in self._guide.visible_channels())
+        elif self.overlays.drawer.isVisible():
+            names.update(self._drawer_providers())
+        names.discard("")
+        return names
+
+    def _guide_context(self) -> ZapContext:
+        """What the guide lists: the zap group's channels, but in all mode the live group the
+        drawer shows when it is another one (its channels may be any provider's)."""
+        context = self.zap.context
+        if not self.nav.all_mode():
+            return context
+        group = self._drawer_group()
+        if group is None or group.key == context.group_key:
+            return context
+        channels = self.catalog.items("live", group.key)
+        if not channels:
+            return context
+        return ZapContext(group.key, list(channels), fallback=self._all_live())
+
+    def _drawer_group(self) -> Optional[NavNode]:
+        """The live group the drawer's path ends in (None: not in a live group)."""
+        group = next((n for n in self.nav.path if n.layer == "group"), None)
+        if group is None or self.nav.section_of(group) != "live":
+            return None
+        return group
+
+    def _drawer_providers(self) -> set[str]:
+        """The providers of the live group the drawer shows (a provider's own group, or the
+        first rows of a mixed list)."""
+        group = self._drawer_group()
+        if group is None:
+            return set()
+        provider, _ = split_group_id(group.key)
+        if provider:
+            return {provider}
+        rows = self.catalog.items("live", group.key) or []
+        return {provider_of(c) for c in rows[:_DRAWER_ROWS]}
+
+    def _update_guides(self) -> None:
+        if self._closed:
+            return
+        names = self.guides_in_use()
+        if names != self._guides_applied:
+            self._guides_applied = names
+            self.catalog.use_guides(names)
+
     def _on_epg_ready(self) -> None:
         if not self._closed:
             self._repaint()
@@ -1542,7 +1612,7 @@ class TVController(QObject):
         """The guide over live TV: the zap group's channels, on the one tuned last."""
         if self._on_demand():
             return  # it lists live channels
-        context = self.zap.context
+        context = self._guide_context()
         if not self._guide.open(context, self._channel or context.current(), self._all_live):
             return
         if self._digits:

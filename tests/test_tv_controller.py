@@ -22,6 +22,7 @@ from services.live.live_session import CRAWLING, UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.navigation import FAVORITES_GROUP, NavModel, NavNode, item_key
+from services.provider_ids import ALL_PROVIDERS, mixed_group_id
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
@@ -114,6 +115,7 @@ class FakeCatalog(NavCatalog):
         self.epg = {}
         self.loading = False
         self.epg_refreshes = 0
+        self.guides_used = []  # the sets of providers whose guides were asked for
         self.episode_map = {}  # (series id, season id) -> episodes; missing: not loaded
         # The other providers of the list (the hub's `provider(name)`), their reported limits
         # and the sign-ins asked again by name.
@@ -150,6 +152,9 @@ class FakeCatalog(NavCatalog):
 
     def refresh_epg(self, *, force=False):
         self.epg_refreshes += 1
+
+    def use_guides(self, names):
+        self.guides_used.append(set(names))
 
     def request_link(self, item, *, section, is_episode=False):
         request_id = len(self.links) + 1
@@ -464,10 +469,15 @@ class FakeGuide(FakeOverlay):
     closed = Signal()
     searchRequested = Signal()
     fullscreenRequested = Signal()
+    rowsMoved = Signal()
     current = None
+    visible_rows = ()
 
     def current_channel(self):
         return self.current
+
+    def visible_channels(self):
+        return list(self.visible_rows)
 
     def open_guide(self, channels, current):
         self.record("open_guide", channels, current)
@@ -1402,6 +1412,54 @@ class VodTests(ControllerTestCase):
         self.controller.handle(Action.CH_PREV)
         self.assertEqual(self.session.level, 55)
         self.assertEqual(len(self.catalog.links), 1)
+
+
+class GuidesInUseTests(ControllerTestCase):
+    """Only the guides of the providers on screen or playing load (QiTV 2.1)."""
+
+    def test_guides_in_use_follow_the_picture_and_the_browsed_provider(self):
+        self.controller.start()
+        self.assertEqual(self.controller.guides_in_use(), {"Home"})
+        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+        self.assertEqual(self.controller.guides_in_use(), {"Home", "Harbor IPTV"})
+        self.assertEqual(self.catalog.guides_used[-1], {"Home", "Harbor IPTV"})
+
+    def test_the_hub_is_told_only_when_the_set_changes(self):
+        self.controller.start()
+        self.nav.changed.emit()
+        self.nav.changed.emit()
+        self.assertEqual(self.catalog.guides_used, [{"Home"}])
+
+    def test_all_mode_loads_the_providers_of_the_drawers_group(self):
+        self.controller.start()
+        self.catalog.provider = ALL_PROVIDERS
+        source = NavNode("source", ALL_PROVIDERS, "All", ALL_PROVIDERS)
+        section = NavNode("section", "live", "Live", "live")
+        group = NavNode("group", mixed_group_id("Portal B", "7"), "Sports", "x")
+        self.nav._path = [source, section, group]
+        self.assertEqual(self.controller.guides_in_use(), set())  # the drawer is closed
+        self.drawer.visible = True
+        self.assertEqual(self.controller.guides_in_use(), {"Portal B"})
+
+    def test_all_mode_guide_lists_the_drawers_group(self):
+        self.controller.start()
+        self.catalog.provider = ALL_PROVIDERS
+        self.catalog.live["41"] = [HARBOR_ONE, PORTAL_ONE]
+        source = NavNode("source", ALL_PROVIDERS, "All", ALL_PROVIDERS)
+        section = NavNode("section", "live", "Live", "live")
+        self.nav._path = [source, section, NavNode("group", "41", "Mixed", "41")]
+        self.controller.handle(Action.GUIDE)
+        self.assertEqual(self.guide.named("open_guide"), [([HARBOR_ONE, PORTAL_ONE], 0)])
+
+    def test_all_mode_loads_the_providers_of_the_guides_rows(self):
+        self.controller.start()
+        self.catalog.provider = ALL_PROVIDERS
+        self.guide.visible = True
+        self.guide.visible_rows = [HARBOR_ONE, PORTAL_ONE]
+        self.assertEqual(self.controller.guides_in_use(), {"Harbor IPTV", "Portal B"})
+        self.guide.visible_rows = [PORTAL_ONE]
+        self.guide.rowsMoved.emit()
+        self.assertEqual(self.catalog.guides_used[-1], {"Portal B"})
 
 
 class DrawerPlayTests(ControllerTestCase):
