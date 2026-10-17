@@ -11,13 +11,14 @@ from datetime import datetime
 import itertools
 import logging
 import re
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, Iterator, Optional, cast
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.epg_view import Programme, programmes_for_channel
 from services.jobs import FAILED_MESSAGE, NO_RESULT_MESSAGE, JobRunner
 from services.provider_api import provider_prefers_https, stb_endpoint, stb_portal_base
+from services.provider_ids import stamp
 from services.redact import safe_message
 from services.workers import NO_PORTAL_DATA_MESSAGE, STB_DEVICE_REJECTED_MESSAGE, find_roman_token
 
@@ -214,6 +215,8 @@ class Group:
     id: str
     title: str
     count: Optional[int] = None  # None: an STB group that has not been fetched yet
+    provider: str = ""  # the provider of a pinned catalog's group; "" for the selected provider
+    header: bool = False  # a provider's heading row in a list that mixes providers
 
 
 @dataclass(frozen=True, eq=False)
@@ -325,8 +328,15 @@ class CatalogService(QObject):
         runner=None,
         factory: Optional[WorkerFactory] = None,
         parent: Optional[QObject] = None,
+        provider_name: Optional[str] = None,
+        link_ids: Optional[Iterator[int]] = None,
     ):
+        """`provider_name` pins this catalog to one provider: it never follows (or writes)
+        `config.selected_provider_name`. `link_ids` is shared by the catalogs of one app so
+        link request ids are unique across them.
+        """
         super().__init__(parent)
+        self._pinned = provider_name
         self.config = config_manager
         self.provider_manager = provider_manager
         self.epg_manager = epg_manager
@@ -351,7 +361,7 @@ class CatalogService(QObject):
             "seasons": (self._on_seasons_loaded, self._on_seasons_error),
             "episodes": (self._on_episodes_loaded, self._on_episodes_error),
         }
-        self._link_ids = itertools.count(1)
+        self._link_ids = link_ids if link_ids is not None else itertools.count(1)
         self._closed = False  # shutdown(): nothing starts or reports any more
 
     # --- providers -------------------------------------------------------------------
@@ -396,6 +406,8 @@ class CatalogService(QObject):
 
     def _target(self, name: Optional[str]) -> str:
         """The provider a setup for `name` loads: None means the selected provider."""
+        if self._pinned is not None:
+            return self._pinned
         return name if name is not None else str(self.config.selected_provider_name or "")
 
     def loading_provider(self) -> Optional[str]:
@@ -434,14 +446,14 @@ class CatalogService(QObject):
         return self._state_job == "provider" or self._pending_setup is not None
 
     def _start_setup(self, name: Optional[str], force_refresh: bool) -> None:
-        if name is not None and name != self.config.selected_provider_name:
+        if self._pinned is None and name is not None and name != self.config.selected_provider_name:
             self.config.selected_provider_name = name
             try:
                 self.config.save_config()
             except Exception as e:
                 # The setup still runs; the choice is saved with the next settings write.
                 logger.warning("Couldn't save the provider choice: %s", safe_message(e))
-        target = name if name is not None else self.config.selected_provider_name
+        target = self._target(name)
         worker = self.factory.provider_setup(self.provider_manager, force_refresh)
         self._state_job = "provider"
         self._setup_target = target
@@ -478,6 +490,7 @@ class CatalogService(QObject):
         # A new generation for the ready provider: nothing issued before or during the
         # setup can store its result now.
         self._generation += 1
+        self._stamp_loaded_content()
         self._ready_provider = self.current_provider_name()
         self.providerReady.emit(self._ready_provider)
         self._request_epg(job.data[1])
@@ -617,10 +630,48 @@ class CatalogService(QObject):
         self._fail(self.sectionFailed, job.data, message)
 
     def _store_section(self, ct: str, payload) -> None:
+        self._stamp_content(payload)
         self._content_version += 1
         self.provider_manager.current_provider_content[ct] = payload
         self.provider_manager.mark_content_fresh(ct)
         self.provider_manager.save_provider()
+
+    def has_content(self, section: str) -> bool:
+        """True when the section's content is loaded (it may be stale)."""
+        return self._usable(self._content(section))
+
+    # --- provider stamps ---------------------------------------------------------------
+    # Stamped once when content is stored or loaded from the cache, not on every read:
+    # a catalog can hold 50,000 channels.
+    def _stamp_loaded_content(self) -> None:
+        for key, content in self.provider_manager.current_provider_content.items():
+            if key != "_cache":
+                self._stamp_content(content)
+
+    def _stamp_content(self, content) -> None:
+        """Stamp every item in a section's content (the lists, the per-group lists, the
+        cached seasons and episodes) with the current provider."""
+        provider = self.current_provider_name()
+        if isinstance(content, list):
+            stamp(content, provider)
+            return
+        if not isinstance(content, dict):
+            return
+        for key in ("contents", "seasons"):
+            part = content.get(key)
+            if isinstance(part, list):
+                stamp(part, provider)
+            elif isinstance(part, dict):
+                for items in part.values():
+                    if isinstance(items, list):
+                        stamp(items, provider)
+        episodes = content.get("episodes")
+        if isinstance(episodes, dict):
+            for by_season in episodes.values():
+                if isinstance(by_season, dict):
+                    for items in by_season.values():
+                        if isinstance(items, list):
+                            stamp(items, provider)
 
     @staticmethod
     def _usable(content) -> bool:
@@ -635,7 +686,9 @@ class CatalogService(QObject):
     def groups(self, section: str) -> list[Group]:
         content = self._content(section)
         if isinstance(content, list):
-            return [Group(section, ALL_GROUP_ID, "All", len(content))] if content else []
+            if not content:
+                return []
+            return [Group(section, ALL_GROUP_ID, "All", len(content), self._pinned or "")]
         if not isinstance(content, dict):
             return []
         contents = content.get("contents")
@@ -659,7 +712,7 @@ class CatalogService(QObject):
                 count = None
             if count == 0:
                 continue
-            groups.append(Group(section, group_id, title, count))
+            groups.append(Group(section, group_id, title, count, self._pinned or ""))
         return groups
 
     def items(self, section: str, group_id: str) -> Optional[list[dict]]:
@@ -719,7 +772,9 @@ class CatalogService(QObject):
             logger.warning("Dropping %s group %s: section content is not loaded", section, group_id)
             self._fail(self.groupFailed, section, group_id, GROUP_UNAVAILABLE_MESSAGE)
             return
-        content.setdefault("contents", {})[group_id] = list(payload.get("items") or [])
+        loaded = list(payload.get("items") or [])
+        stamp(loaded, self.current_provider_name())
+        content.setdefault("contents", {})[group_id] = loaded
         self._content_version += 1
         self.provider_manager.save_provider()
         self.groupReady.emit(section, group_id)
@@ -790,6 +845,7 @@ class CatalogService(QObject):
             cache["resolved_base"] = payload["resolved_base"]
         raw = payload.get("seasons") if "seasons" in payload else payload.get("items")
         items = normalize_seasons(series.get("name", "Unknown Series"), list(raw or []))
+        stamp(items, self.current_provider_name())
         cache.setdefault("seasons", {})[str(series.get("id"))] = items
         self._content_version += 1
         self.provider_manager.save_provider()
@@ -801,13 +857,15 @@ class CatalogService(QObject):
     def episodes(self, series: dict, season: dict) -> Optional[list[dict]]:
         if self.provider_type() == "XTREAM":
             provider, cache = self.current_provider(), self._series_cache()
-            return format_xtream_episodes(
+            formatted = format_xtream_episodes(
                 season,
                 cache.get("stream_base", "") or cache.get("resolved_base", ""),
                 cache.get("stream_ext", "ts"),
                 provider.get("username", ""),
                 provider.get("password", ""),
             )
+            stamp(formatted, self.current_provider_name())  # made on the fly, never stored
+            return formatted
         cached = (
             self._series_cache()
             .get("episodes", {})
@@ -878,6 +936,7 @@ class CatalogService(QObject):
             if season_number not in (None, ""):
                 episode["season"] = str(season_number)
             episodes.append(episode)
+        stamp(episodes, self.current_provider_name())
         by_season = self._series_cache().setdefault("episodes", {})
         by_season.setdefault(str(series.get("id")), {})[season_id] = episodes
         self._content_version += 1

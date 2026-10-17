@@ -7,6 +7,7 @@ import string
 import tempfile
 import threading
 import time
+from typing import Optional
 from urllib.parse import urlencode
 
 from PySide6.QtCore import QObject, Signal
@@ -64,9 +65,18 @@ class ProviderManager(QObject):
 
     CONTENT_CACHE_TTL = 6 * 60 * 60
 
-    def __init__(self, config_manager):
+    def __init__(
+        self,
+        config_manager,
+        provider_name: Optional[str] = None,
+        providers: Optional[list] = None,
+    ):
+        """`provider_name` pins this manager to one provider whatever the config selects;
+        `providers` shares that list (so pinned managers agree) instead of reading index.json.
+        """
         super().__init__()
         self.config_manager = config_manager
+        self._pinned_provider = provider_name
         self.provider_dir = os.path.join(config_manager.get_config_dir(), "cache", "provider")
         os.makedirs(self.provider_dir, exist_ok=True)
         self.index_file = os.path.join(self.provider_dir, "index.json")
@@ -80,7 +90,10 @@ class ProviderManager(QObject):
         self._cache_lock = threading.Lock()
         self._cache_generations = {}
         self._pending_cache_snapshots = {}
-        self._load_providers()
+        if providers is not None:
+            self.providers = providers
+        else:
+            self._load_providers()
 
     def _provider_cache_name(self, provider_name):
         hashed_name = hashlib.sha256(provider_name.encode("utf-8")).hexdigest()
@@ -214,9 +227,10 @@ class ProviderManager(QObject):
         progress_callback.emit("Searching for provider...")
         self.current_provider = {}
         # search for provider in the list
-        if self.config_manager.selected_provider_name:
+        wanted = self._pinned_provider or self.config_manager.selected_provider_name
+        if wanted:
             for provider in self.providers:
-                if provider["name"] == self.config_manager.selected_provider_name:
+                if provider["name"] == wanted:
                     self.current_provider = provider
                     break
 
