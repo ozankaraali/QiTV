@@ -141,10 +141,14 @@ def migrate(config) -> bool:
 
     `favorites` itself stays a list of names, which is all older builds read.
     """
-    if getattr(config, "provider_favorites", None) is not None:
-        return False
-    config.provider_favorites = entries(config)
-    return True
+    changed = False
+    if getattr(config, "provider_favorites", None) is None:
+        config.provider_favorites = entries(config)
+        changed = True
+    if any(not isinstance(e, str) for e in config.favorites or []):
+        config.favorites = names(config)  # entries an earlier build wrote there: names only
+        changed = True
+    return changed
 
 
 def save(config) -> bool:
