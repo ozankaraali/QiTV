@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import os
 import pickle
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -371,10 +372,6 @@ class SavedGuideTests(_GuideCase):
         self.assertEqual(self.cache_files(), [f"{self.key}.guide", "index.json"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SharedIndexTests(_GuideCase):
     """Every provider's manager shares one index file: saving never wipes another's entries."""
 
@@ -403,3 +400,32 @@ class SharedIndexTests(_GuideCase):
         first.index["a"] = None
         first.save_index()
         self.assertEqual(self.manager().index, {"a": None})
+
+    def test_concurrent_saves_keep_every_managers_entries(self):
+        managers = [self.manager() for _ in range(6)]
+        barrier = threading.Barrier(len(managers))
+        errors = []
+
+        def save(n, manager):
+            manager.index[f"k{n}"] = None
+            barrier.wait()
+            try:
+                manager.save_index()
+            except Exception as e:  # noqa: BLE001 - the test reports any failure
+                errors.append(e)
+
+        threads = [threading.Thread(target=save, args=(n, m)) for n, m in enumerate(managers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(set(self.manager().index), {f"k{n}" for n in range(6)})
+        leftovers = [
+            f for f in os.listdir(os.path.dirname(managers[0]._index_file())) if f.endswith(".tmp")
+        ]
+        self.assertEqual(leftovers, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

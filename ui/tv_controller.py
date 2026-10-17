@@ -315,6 +315,7 @@ class TVController(QObject):
         if not self._started:
             self._started = True
             self.wire()
+        self._update_guides()  # before any provider's setup starts a guide load
         self._flow.start()
 
     def _wire(self) -> None:
@@ -336,6 +337,7 @@ class TVController(QObject):
         self.nav.changed.connect(self._update_guides)
         self.overlays.guide.rowsMoved.connect(self._update_guides)
         self.overlays.guide.closed.connect(self._update_guides)
+        self.overlays.drawer.closed.connect(self._update_guides)
         self.nav.notice.connect(self._on_notice)
         zap.tuneRequested.connect(self._on_zap_tune)
         zap.columnRequested.connect(self._on_column_requested)
@@ -1347,8 +1349,8 @@ class TVController(QObject):
         return group
 
     def _drawer_providers(self) -> set[str]:
-        """The providers of the live group the drawer shows (a provider's own group, or the
-        first rows of a mixed list)."""
+        """The providers of the live group the drawer shows: a provider's own group, or, in a
+        mixed list, those of its first rows (the drawer's scroll position is not known)."""
         group = self._drawer_group()
         if group is None:
             return set()
@@ -1615,6 +1617,7 @@ class TVController(QObject):
             provider = provider_of(channel)
             focus = (provider, item_key(channel)) if provider else item_key(channel)
         self.overlays.drawer.open_drawer(focus_key=focus)
+        self._update_guides()  # the drawer is visible now: its group's providers are in use
 
     def _open_guide(self) -> None:
         """The guide over live TV: the zap group's channels, on the one tuned last."""

@@ -1453,6 +1453,21 @@ class GuidesInUseTests(ControllerTestCase):
         self.drawer.visible = True
         self.assertEqual(self.controller.guides_in_use(), {"Portal B"})
 
+    def test_opening_the_drawer_on_a_mixed_group_loads_its_providers_and_closing_releases(self):
+        self.controller.start()
+        self.catalog.provider = ALL_PROVIDERS
+        self.catalog.live["41"] = [HARBOR_ONE, PORTAL_ONE]
+        source = NavNode("source", ALL_PROVIDERS, "All", ALL_PROVIDERS)
+        section = NavNode("section", "live", "Live", "live")
+        self.nav._path = [source, section, NavNode("group", "41", "Mixed", "41")]
+        with mock.patch.object(self.nav, "reset_to"):  # the path above stays
+            self.controller.handle(Action.OPEN_DRAWER)
+        self.assertTrue(self.drawer.visible)
+        self.assertEqual(self.catalog.guides_used[-1], {"Harbor IPTV", "Portal B"})
+        self.drawer.visible = False
+        self.drawer.closed.emit()
+        self.assertEqual(self.catalog.guides_used[-1], set())
+
     def test_all_mode_guide_lists_the_drawers_group(self):
         self.controller.start()
         self.catalog.provider = ALL_PROVIDERS

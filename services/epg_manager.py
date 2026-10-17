@@ -7,6 +7,8 @@ import logging
 import os
 import pickle
 import shutil
+import tempfile
+import threading
 from typing import Any, Dict, List, Optional, Set
 import xml.etree.ElementTree as ET
 import zipfile
@@ -156,6 +158,11 @@ _UNREADABLE_GUIDE = (
     IndexError,
     TypeError,
 )
+
+
+# Every provider's manager saves the one shared index: loader threads run at once, so the
+# read, merge and replace of one save finish before the next begins.
+_INDEX_SAVE_LOCK = threading.Lock()
 
 
 class EpgManager:
@@ -426,18 +433,28 @@ class EpgManager:
         manager last read or wrote it are updated, so a stale copy never wipes another
         provider's entries. The write goes through a temporary file.
         """
-        merged = self._read_index_file()
-        for key, value in self.index.items():
-            if key not in self._index_base or self._index_base[key] != value:
-                merged[key] = value
-        for key in self._index_base:
-            if key not in self.index:
-                merged.pop(key, None)
-        index_file = self._index_file()
-        temporary = index_file + ".tmp"
-        with open(temporary, "w", encoding="utf-8") as f:
-            f.write(json.dumps(merged, option=json.OPT_INDENT_2).decode("utf-8"))
-        os.replace(temporary, index_file)
+        with _INDEX_SAVE_LOCK:
+            merged = self._read_index_file()
+            for key, value in self.index.items():
+                if key not in self._index_base or self._index_base[key] != value:
+                    merged[key] = value
+            for key in self._index_base:
+                if key not in self.index:
+                    merged.pop(key, None)
+            index_file = self._index_file()
+            handle, temporary = tempfile.mkstemp(
+                dir=os.path.dirname(index_file), prefix="index-", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(merged, option=json.OPT_INDENT_2).decode("utf-8"))
+                os.replace(temporary, index_file)
+            except BaseException:
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+                raise
         self._index_base = copy.deepcopy(merged)
         for key, value in merged.items():  # other providers' entries are known here now
             self.index.setdefault(key, value)
