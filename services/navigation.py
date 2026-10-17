@@ -112,7 +112,60 @@ def _item_node(item: dict, layer: str = "item") -> NavNode:
 
 
 class _Folded(QObject):
-    folded = Signal()
+    folded = Signal(object)  # the token of the NodeSeq whose titles are folded
+
+
+_fold_notifier: Optional[_Folded] = None
+
+
+def fold_notifier() -> _Folded:
+    """Emits `folded(token)` on the GUI thread when a long list's titles are folded (the token
+    tells which list). Made on first use, which must be on the GUI thread (the drawer makes it):
+    the signal is queued to it from the fold's. It lives as long as the app, so a fold thread
+    never lets go of the last reference to it."""
+    global _fold_notifier
+    if _fold_notifier is None:
+        _fold_notifier = _Folded()
+    return _fold_notifier
+
+
+class _Fold:
+    """A list's folded titles, made once under a lock (by the fold thread, or by a caller that
+    waits for it). Plain data: the fold thread holds this, never the NodeSeq."""
+
+    __slots__ = ("titles", "lock")
+
+    def __init__(self, titles: Optional[list[str]]):
+        self.titles = titles
+        self.lock = threading.Lock()
+
+    def make(self, items: list[dict], wait: bool = True) -> Optional[list[str]]:
+        if not self.lock.acquire(blocking=wait):
+            return None
+        try:
+            if self.titles is None:
+                titles = [i.get("name") or i.get("title") or "Untitled" for i in items]
+                try:
+                    self.titles = fold_all(titles)
+                except TypeError:  # a title that is not text
+                    self.titles = fold_all([str(title) for title in titles])
+            return self.titles
+        finally:
+            self.lock.release()
+
+
+def _fold_and_tell(fold: _Fold, items: list[dict], token: int) -> None:
+    """The fold thread: folds `items`' titles into `fold`, then tells the GUI thread. It holds
+    neither the NodeSeq nor anything Qt it could be the last to let go of: a list replaced
+    while it folds goes on the GUI thread, then and there."""
+    try:
+        fold.make(items)
+    except Exception:
+        logger.exception("Folding the titles failed")  # a later filter tries again
+        return
+    notifier = _fold_notifier  # (made on the GUI thread, and kept: never dropped here)
+    if notifier is not None:
+        notifier.folded.emit(token)
 
 
 class NodeSeq(Sequence):
@@ -135,12 +188,9 @@ class NodeSeq(Sequence):
         self.items = items
         self.token = next(self._tokens)  # tells one list from another without comparing rows
         self._origin = origin  # each item's row in the list this one was narrowed from
-        self._folded = folded
-        self._folding: Optional[threading.Thread] = None
+        self._fold = _Fold(folded)
+        self._folding: Optional[threading.Thread] = None  # the last fold thread started
         self._fold_due = False
-        self._notifier: Optional[_Folded] = None
-        self.heard_by: set[int] = set()  # the views connected to `folded`
-        self._lock = threading.Lock()
         self._made: dict[int, NavNode] = {}
         self._rows: dict[NavNode, int] = {}  # the nodes made so far -> their rows
         self._absent: set[NavNode] = set()  # nodes looked for here and not found
@@ -208,9 +258,8 @@ class NodeSeq(Sequence):
                 return narrowed
         if self._folded is None:
             # Never folded on the GUI thread (200,000 titles): start it in the background if
-            # it has not, and show the list as it is until it ends.
-            if self._folding is None:
-                self._fold_in_background()
+            # it has not (or a fold failed), and show the list as it is until it ends.
+            self._fold_in_background()
             if self._folded is None:
                 return self
         folded = self._folded
@@ -227,47 +276,30 @@ class NodeSeq(Sequence):
         """Fold the titles in the background a moment from now (not while the list is still
         opening), so the first letter typed to filter finds them done: a quarter of a second
         for 200,000 channels. Asking again starts nothing."""
-        if self._folded is None and self._folding is None and not self._fold_due:
+        if self._folded is None and not self._fold_under_way() and not self._fold_due:
             self._fold_due = True
             QTimer.singleShot(after_ms, self._fold_in_background)
 
     def _fold_in_background(self) -> None:
-        if self._folded is None and self._folding is None:
-            self._folding = threading.Thread(target=self._fold_and_tell, daemon=True)
+        """Start folding the titles in a thread, unless they are folded or a fold runs. The
+        thread is given the titles and where to put them, never this list (see
+        _fold_and_tell); `fold_notifier()` tells when it ends."""
+        if self._folded is None and not self._fold_under_way():
+            self._folding = threading.Thread(
+                target=_fold_and_tell, args=(self._fold, self.items, self.token), daemon=True
+            )
             self._folding.start()
 
-    @property
-    def folded(self) -> "_Folded":
-        """Emits `folded` (on the GUI thread) when the titles are folded. Made on first use,
-        and that must be on the GUI thread: the signal is queued to it from the fold's."""
-        if self._notifier is None:
-            self._notifier = _Folded()
-        return self._notifier
+    def _fold_under_way(self) -> bool:
+        return self._folding is not None and self._folding.is_alive()
 
-    def _fold_and_tell(self) -> None:
-        try:
-            self._folded_titles()
-        except Exception:
-            logger.exception("Folding the titles failed")  # a later filter tries again
-            return
-        finally:
-            self._folding = None
-        if self._notifier is not None:
-            self._notifier.folded.emit()
+    @property
+    def _folded(self) -> Optional[list[str]]:
+        return self._fold.titles
 
     def _folded_titles(self, wait: bool = True) -> Optional[list[str]]:
-        if not self._lock.acquire(blocking=wait):
-            return None
-        try:
-            if self._folded is None:
-                titles = [i.get("name") or i.get("title") or "Untitled" for i in self.items]
-                try:
-                    self._folded = fold_all(titles)
-                except TypeError:  # a title that is not text
-                    self._folded = fold_all([str(title) for title in titles])
-            return self._folded
-        finally:
-            self._lock.release()
+        """The folded titles, folded here if no thread has (waiting for one that folds)."""
+        return self._fold.make(self.items, wait)
 
     def numbered(self) -> bool:
         """Whether any channel has a number (else the position stands in for it)."""

@@ -54,6 +54,7 @@ from services.navigation import (
     NavModel,
     NavNode,
     NodeSeq,
+    fold_notifier,
 )
 from services.provider_ids import provider_of
 from services.text_fold import fold
@@ -447,6 +448,8 @@ class Drawer(Overlay):
         # Hover over the header buttons (a move elsewhere goes on to the host, as without it).
         self.setMouseTracking(True)
         nav.changed.connect(self._on_nav_changed)
+        # A long list's titles folded in the background: a filter typed meanwhile applies now.
+        fold_notifier().folded.connect(self._on_folded)
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
@@ -702,8 +705,10 @@ class Drawer(Overlay):
         if 0 <= row < len(col.nodes) and col.nodes[row].layer in _CONTEXT_LAYERS:
             self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
 
-    def _on_folded(self) -> None:
-        if self.isVisible() and self.filter_text:
+    def _on_folded(self, token: int) -> None:
+        # (A list still unfiltered for want of its folded titles is the column's own list.)
+        shown = any(getattr(col.nodes, "token", None) == token for col in self._columns.values())
+        if shown and self.isVisible() and self.filter_text:
             self._refresh()
 
     def _on_nav_changed(self) -> None:
@@ -752,9 +757,6 @@ class Drawer(Overlay):
         nodes = children or []
         if isinstance(nodes, NodeSeq):
             nodes.fold_ahead()  # typing to filter will find the titles folded
-            if id(self) not in nodes.heard_by:  # its fold ending re-applies the typed filter
-                nodes.heard_by.add(id(self))
-                nodes.folded.folded.connect(self._on_folded)
         if col.side == self.focus_side and needle:
             if isinstance(nodes, NodeSeq):
                 nodes = nodes.matching(needle)

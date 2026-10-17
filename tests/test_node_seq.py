@@ -9,14 +9,23 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import weakref
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+import shiboken6
 
 from services import navigation
-from services.navigation import LAZY_ROWS, NavModel, NodeSeq, _item_node, payloads
+from services.navigation import (
+    LAZY_ROWS,
+    NavModel,
+    NodeSeq,
+    _item_node,
+    fold_notifier,
+    payloads,
+)
 from tests.test_drawer import DrawerTests, make
 from tests.test_navigation import FakeCatalog
 
@@ -106,10 +115,16 @@ class NodeSeqTests(unittest.TestCase):
 
     def test_filtering_while_the_titles_are_still_folding_shows_the_list_as_it_is(self):
         seq = NodeSeq(channels(30))
-        seq._folding = object()  # a fold is under way
-        self.assertIs(seq.matching("cafe"), seq)
-        seq._folding = None
-        seq._folded_titles()
+        gate = threading.Event()
+        fold_all = navigation.fold_all
+        with mock.patch.object(navigation, "fold_all", lambda t: gate.wait(5) and fold_all(t)):
+            seq._fold_in_background()  # a fold is under way
+            thread = seq._folding
+            self.assertIs(seq.matching("cafe"), seq)
+            seq._fold_in_background()  # (and no second one starts)
+            self.assertIs(seq._folding, thread)
+            gate.set()
+            thread.join(5)
         self.assertEqual(len(seq.matching("cafe")), 10)
 
     def test_numbers_and_their_width(self):
@@ -158,22 +173,58 @@ class FoldedFilterTests(unittest.TestCase):
                 drawer.type_text("tw")
                 self.assertEqual(len(drawer._columns["right"].nodes), 2)  # not filtered yet
             seq = started[0]
-            thread = seq._folding = threading.Thread(target=seq._fold_and_tell)
-            thread.start()
-            thread.join()
+            with mock.patch.object(drawer, "_refresh") as refresh:
+                fold_notifier().folded.emit(-1)  # another list's fold (not shown) changes nothing
+            refresh.assert_not_called()
+            seq._fold_in_background()
+            seq._folding.join(5)
             QTest.qWait(50)  # the signal is queued to this thread
             self.assertEqual([n.title for n in drawer._columns["right"].nodes], ["Two"])
 
+    def test_a_list_replaced_while_it_folds_is_let_go_on_the_gui_thread(self):
+        # The fold thread never holds the list: when the drawer and the nav model let go of it
+        # mid-fold, it goes then and there, on this thread, never later on the fold's (where
+        # the last reference to anything Qt it held would be dropped off the GUI thread).
+        seq = NodeSeq(channels(30))
+        token = seq.token
+        let_go_on = []
+        watch = weakref.ref(seq, lambda _ref: let_go_on.append(threading.current_thread()))
+        notifier, told = fold_notifier(), []  # (the drawer makes it, on this thread)
+        notifier.folded.connect(told.append)
+        self.addCleanup(notifier.folded.disconnect, told.append)
+        gate = threading.Event()
+        fold_all = navigation.fold_all
+
+        def slow_fold(titles):
+            gate.wait(5)
+            return fold_all(titles)
+
+        with mock.patch.object(navigation, "fold_all", slow_fold):
+            seq._fold_in_background()
+            thread = seq._folding
+            del seq  # the list is replaced (a refresh, another group): its last reference goes
+            gate.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(watch())
+        self.assertEqual(let_go_on, [threading.main_thread()])
+        QTest.qWait(20)
+        self.assertEqual(told, [token])  # the fold still tells, and its notifier lives on
+        self.assertTrue(shiboken6.isValid(notifier))
+        self.assertIs(fold_notifier(), notifier)
+
     def test_a_fold_that_fails_is_tried_again_by_the_next_filter(self):
         seq = NodeSeq(channels(30))
-        with mock.patch("services.navigation.fold_all", side_effect=ValueError("boom")):
-            thread = seq._folding = threading.Thread(target=seq._fold_and_tell)
-            thread.start()
-            thread.join()
-        self.assertIsNone(seq._folding)
+        boom = mock.patch.object(navigation, "fold_all", side_effect=ValueError("boom"))
+        with boom, self.assertLogs(navigation.logger, "ERROR"):
+            self.assertIs(seq.matching("cafe"), seq)  # starts the fold, which fails
+            seq._folding.join(5)
         self.assertIsNone(seq._folded)
-        seq._folded_titles()
-        self.assertEqual(len(seq.matching("cafe")), 10)
+        failed = seq._folding
+        seq.matching("cafe")  # starts a new fold
+        self.assertIsNot(seq._folding, failed)
+        seq._folding.join(5)
+        self.assertEqual([n.key for n in seq.matching("cafe")], [str(n) for n in range(3, 31, 3)])
 
 
 class LazyDrawerTests(DrawerTests):
