@@ -48,6 +48,8 @@ NO_MODS = Qt.KeyboardModifier.NoModifier
 # Channels of other providers than the browsed "Home" (QiTV 2.1 mixes providers).
 HARBOR_ONE = {**CHANNELS[0], "_provider": "Harbor IPTV"}  # an Xtream panel, 1 stream
 PORTAL_ONE = {**CHANNELS[0], "_provider": "Portal B"}  # an STB portal
+HOME_ONE = {**CHANNELS[0], "_provider": "Home"}
+BACKUP_TWO = {**CHANNELS[1], "_provider": "Backup"}
 
 
 class Clock:
@@ -831,7 +833,7 @@ class LinkPipelineTests(ControllerTestCase):
 
     def test_browsing_another_provider_keeps_the_pending_tune(self):
         self.catalog.providerReady.emit("Home")
-        self.tune(0)  # a link on its way
+        self.controller.tune(HOME_ONE, group_key="10", channels=[HOME_ONE])  # a link on its way
         self.controller.select_provider("Backup")
         self.assertEqual(self.catalog.selected[-1], "Backup")
         self.catalog.provider = "Backup"
@@ -851,6 +853,53 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertTrue(self.guide.visible)
         self.assertEqual(self.guide.named("close_guide"), [])
         self.assertEqual(self.session.stops, 0)
+
+    def tune_stamped(self, item):
+        self.controller.tune(item, group_key="10", channels=[item])
+
+    def test_a_browsed_providers_failure_keeps_another_providers_pending_tune(self):
+        self.catalog.providerReady.emit("Home")
+        self.catalog.provider = "Backup"  # the list shows Backup
+        self.catalog.providerReady.emit("Backup")
+        self.tune_stamped(HOME_ONE)
+        self.catalog.providerFailed.emit("Backup", "down")
+        self.assertEqual(self.requested(), ["One"])
+        self.ready("http://stream/1")
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+
+    def test_a_failed_provider_releases_its_request_in_all_mode(self):
+        self.catalog.provider = "@all"
+        self.tune_stamped(HOME_ONE)
+        self.catalog.providerFailed.emit("Home", "down")  # its link never settles
+        self.tune_stamped(BACKUP_TWO)  # not queued behind the dead request
+        self.assertEqual(self.requested(), ["One", "Two"])
+        self.ready("http://stream/2")
+        self.assertEqual(self.played_urls(), ["http://stream/2"])
+
+    def test_a_failed_providers_request_lets_the_queued_other_one_go(self):
+        self.catalog.provider = "@all"
+        self.tune_stamped(HOME_ONE)
+        self.tune_stamped(BACKUP_TWO)  # queued behind One
+        self.catalog.providerFailed.emit("Home", "down")
+        self.assertEqual(self.requested(), ["One", "Two"])
+
+    def test_refreshing_every_provider_asks_a_link_in_flight_again_in_all_mode(self):
+        self.catalog.provider = "@all"
+        self.tune_stamped(HOME_ONE)
+        self.catalog.providerReady.emit("Backup")  # another provider's setup: untouched
+        self.assertEqual(self.requested(), ["One"])
+        self.catalog.providerReady.emit("Home")
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.ready("http://stream/1")
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+
+    def test_a_forced_setup_of_a_provider_not_shown_asks_its_link_again(self):
+        self.catalog.provider = "Backup"
+        self.tune_stamped(HOME_ONE)
+        self.catalog.providerReady.emit("Home")  # the hub's signal; the view shows Backup
+        self.assertEqual(self.requested(), ["One", "One"])
+        self.ready("http://stream/1")
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
 
     def test_provider_refresh_requests_the_pending_tune_again(self):
         self.catalog.providerReady.emit("Home")

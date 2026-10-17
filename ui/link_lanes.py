@@ -175,6 +175,22 @@ class LinkLanes(QObject):
         self._side = None
         self._side_queue.clear()
 
+    def drop_provider(self, name: str, owner: Callable[[dict], str]) -> Optional[Target]:
+        """Forget the requests of provider `name` (`owner` names an item's provider), whose
+        setup dropped their results; other providers' requests stay. Returns the tune in
+        flight that was dropped, if it was `name`'s."""
+        dropped = None
+        inflight = self._inflight
+        if inflight is not None and owner(inflight[1].item) == name:
+            dropped = inflight[1]
+            self._inflight = None
+        side = self._side
+        if side is not None and owner(side[1].target.item) == name:
+            self._side = None
+        self._side_queue = deque(j for j in self._side_queue if owner(j.target.item) != name)
+        self._next_side()
+        return dropped
+
     def close(self) -> None:
         self._closed = True
         self.drop()
