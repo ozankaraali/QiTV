@@ -384,7 +384,7 @@ class LibraryModel(QObject):
 
     # --- fingerprints -----------------------------------------------------------------
     def _favorites(self) -> tuple:
-        return tuple(favorites.names(self._config))
+        return favorites.fingerprint(self._config)
 
     def _history_entries(self) -> list[dict]:
         wanted = "episode" if self._section == "series" else "movie"
@@ -492,10 +492,10 @@ class LibraryModel(QObject):
         return out
 
     def _my_list_items(self) -> list[dict]:
-        kept = set(self._favorites())
-        if not kept:
+        is_kept = favorites.matcher(self._config)
+        if is_kept is None:
             return []
-        return [i for i in self._loaded_items() if favorites.favorite_key(i) in kept]
+        return [i for i in self._loaded_items() if is_kept(i)]
 
     def _pinned_items(self, genre_id: str) -> list[dict]:
         fp = self._fingerprint()

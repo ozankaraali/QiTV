@@ -75,6 +75,16 @@ def handle_replace_flag():
         logging.error(f"Failed to perform update replacement: {e}")
 
 
+def _migrate_favorites(config_manager) -> None:
+    """Old stars (bare names) become per-provider entries once; a failed save is only logged."""
+    from services import favorites
+
+    if not favorites.migrate(config_manager):
+        return
+    if not favorites.save(config_manager):
+        logging.getLogger(__name__).warning("The migrated favorites were not saved; will retry")
+
+
 def main() -> int:
     from PySide6 import QtGui
     from PySide6.QtCore import QLoggingCategory, qInstallMessageHandler
@@ -131,6 +141,7 @@ def main() -> int:
             icon_path = os.path.join(sys._MEIPASS, "assets", "qitv.png")
 
     config_manager = ConfigManager()
+    _migrate_favorites(config_manager)
     image_manager = ImageManager(config_manager, config_manager.max_cache_image_size * 1024 * 1024)
     provider_manager = ProviderManager(config_manager)
     epg_manager = EpgManager(config_manager, provider_manager)
