@@ -94,6 +94,7 @@ from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
 from ui.pip import PipFrame
+from ui.pointer import PointerHider
 from ui.settings_dialog import OptionsDialog
 from ui.tv_controller import ERROR_MS, Overlays, TVController
 from ui.tv_menus import TVMenus
@@ -508,9 +509,18 @@ class TVWindow(QMainWindow):
         # A Windows self-update waits for background threads: the engine's must stop first,
         # and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
-        for source in (self.surface, self.pip_surface, self.host):
+        sources = (self.surface, self.pip_surface, self.host)
+        # The pointer over the video goes with the player controls (and comes back on a move).
+        self.pointer = PointerHider(
+            sources,
+            self.overlays.transport,
+            lambda: not self.screens.library_shown() and controller.pointer_may_hide(),
+            parent=self,
+        )
+        for source in sources:
             source.clicked.connect(self._on_video_clicked)
             source.doubleClicked.connect(controller.video_double_clicked)
+            source.mouseMoved.connect(self.pointer.moved)
             source.mouseMoved.connect(controller.mouse_moved)
             source.wheelSteps.connect(controller.wheel)
             source.backPressed.connect(controller.mouse_back)

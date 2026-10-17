@@ -9,7 +9,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse
 
-from ui.pointer import PointerInput, SecondClickGuard
+from ui.pointer import PointerHider, PointerInput, SecondClickGuard
 
 
 class PointerButtonTests(unittest.TestCase):
@@ -107,6 +107,75 @@ class SecondClickGuardTests(unittest.TestCase):
         elapse(QApplication.doubleClickInterval() + 100)
         self.click()
         self.assertEqual(self.page.events, ["press", "release"])
+
+
+class PointerHiderTests(unittest.TestCase):
+    """The pointer over the video goes with the player controls, and a move brings it back."""
+
+    IDLE_MS = 40
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.video, self.host = QWidget(), QWidget()
+        self.controls = QWidget()  # the transport
+        self.allowed = True
+        self.hider = PointerHider(
+            (self.video, self.host), self.controls, lambda: self.allowed, idle_ms=self.IDLE_MS
+        )
+
+    def blank(self):
+        return [
+            w.testAttribute(Qt.WidgetAttribute.WA_SetCursor)
+            and w.cursor().shape() == Qt.CursorShape.BlankCursor
+            for w in (self.video, self.host)
+        ]
+
+    def rest(self):
+        elapse(self.IDLE_MS * 2)
+
+    def test_it_hides_once_the_pointer_rests(self):
+        self.hider.moved()
+        self.assertFalse(self.hider.hidden())
+        self.rest()
+        self.assertTrue(self.hider.hidden())
+        self.assertEqual(self.blank(), [True, True])
+
+    def test_a_move_brings_it_back_and_starts_the_wait_again(self):
+        self.hider.moved()
+        self.rest()
+        self.hider.moved()
+        self.assertFalse(self.hider.hidden())
+        self.assertEqual(self.blank(), [False, False])
+        self.rest()
+        self.assertTrue(self.hider.hidden())
+
+    def test_it_stays_while_the_controls_show_and_goes_with_them(self):
+        self.controls.show()
+        self.hider.moved()
+        self.rest()
+        self.assertFalse(self.hider.hidden())
+        self.controls.hide()
+        self.assertTrue(self.hider.hidden())
+
+    def test_controls_closed_right_after_a_move_leave_it_until_the_wait_ends(self):
+        self.controls.show()
+        self.hider.moved()
+        self.controls.hide()  # Esc, say
+        self.assertFalse(self.hider.hidden())
+        self.rest()
+        self.assertTrue(self.hider.hidden())
+
+    def test_it_stays_while_hiding_is_not_allowed(self):
+        self.allowed = False  # a list or menu is open, or nothing plays
+        self.hider.moved()
+        self.rest()
+        self.controls.show()
+        self.controls.hide()
+        self.assertFalse(self.hider.hidden())
+        self.assertEqual(self.blank(), [False, False])
 
 
 if __name__ == "__main__":

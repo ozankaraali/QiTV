@@ -65,6 +65,28 @@ def reclaim_first_responder(window) -> bool:
         return False
 
 
+def hide_pointer_until_moved() -> bool:
+    """macOS: hide the pointer until the mouse moves ([NSCursor setHiddenUntilMouseMoves:YES]).
+
+    AppKit shows it again on the next move, over any view, libVLC's included. Nothing happens
+    elsewhere (False).
+    """
+    if QGuiApplication.platformName() != "cocoa":
+        return False
+    try:
+        objc = _objc()
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        cursor = objc.objc_getClass(b"NSCursor")
+        if not cursor:
+            return False
+        _send(cursor, b"setHiddenUntilMouseMoves:", None, (ctypes.c_bool, True))
+        return True
+    except Exception as e:  # never let a Cocoa detail break the player
+        logger.debug("Could not hide the pointer: %s", e)
+        return False
+
+
 def attach_child_window(parent, child) -> bool:
     # Only the cocoa platform plugin hands out NSView pointers as winId()
     if QGuiApplication.platformName() != "cocoa":

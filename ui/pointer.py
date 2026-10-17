@@ -1,11 +1,17 @@
-"""Shared click/double-click/wheel interpretation for the video surface and overlay host, and
-a guard for the second click of a double-click whose first click showed another page."""
+"""Shared click/double-click/wheel interpretation for the video surface and overlay host, a
+guard for the second click of a double-click whose first click showed another page, and the
+pointer that hides over the video with the player controls."""
+
+from typing import Callable, Sequence
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QMouseEvent, QWindow
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
+
+from ui.macos_window import hide_pointer_until_moved
 
 NAV_BUTTONS = (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton)
+POINTER_IDLE_MS = 3000  # the player controls' own wait (Transport's idle_ms)
 _SECOND_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 
 
@@ -96,3 +102,57 @@ class SecondClickGuard(QObject):
             self.disarm()
             return True
         return False
+
+
+class PointerHider(QObject):
+    """The pointer over the video goes with the player controls, as in VLC and mpv.
+
+    `moved()` (a mouse move over the video, the PiP or the overlays) shows it and starts the
+    wait. Once `idle_ms` have passed without a move, and `controls` (the transport) are gone,
+    it hides, as long as `may_hide()` holds: something plays and no list or menu is open.
+    The controls hiding later (they stay while hovered) hides it then. macOS hides it until
+    the mouse moves, whatever view is under it (libVLC's own takes no Qt cursor); elsewhere
+    `widgets` get a blank cursor.
+    """
+
+    def __init__(
+        self,
+        widgets: Sequence[QWidget],
+        controls: QWidget,
+        may_hide: Callable[[], bool],
+        idle_ms: int = POINTER_IDLE_MS,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._widgets = tuple(widgets)
+        self._controls = controls
+        self._may_hide = may_hide
+        self._hidden = False
+        self._idle = QTimer(self, singleShot=True, interval=idle_ms)
+        self._idle.timeout.connect(self._try_hide)
+        controls.installEventFilter(self)
+
+    def hidden(self) -> bool:
+        return self._hidden
+
+    def moved(self) -> None:
+        self._idle.start()
+        if self._hidden:
+            self._hidden = False
+            for widget in self._widgets:
+                widget.unsetCursor()  # macOS shows it again on the move itself
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self._controls and event.type() == QEvent.Type.Hide:
+            self._try_hide()
+        return False
+
+    def _try_hide(self) -> None:
+        if self._hidden or self._idle.isActive() or self._controls.isVisible():
+            return
+        if not self._may_hide():
+            return
+        self._hidden = True
+        if not hide_pointer_until_moved():
+            for widget in self._widgets:
+                widget.setCursor(Qt.CursorShape.BlankCursor)

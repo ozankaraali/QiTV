@@ -1118,6 +1118,16 @@ class KeyTests(ControllerTestCase):
         self.controller.mouse_moved()
         self.assertEqual(self.transport.calls[-1], ("poke",))
 
+    def test_the_pointer_may_hide_only_over_a_playing_picture_with_nothing_open(self):
+        self.assertFalse(self.controller.pointer_may_hide())  # nothing plays
+        self.play(0)
+        self.assertTrue(self.controller.pointer_may_hide())
+        for overlay in (self.drawer, self.column, self.guide, self.next_card, self.welcome):
+            overlay.visible = True
+            self.assertFalse(self.controller.pointer_may_hide(), type(overlay).__name__)
+            overlay.visible = False
+        self.assertTrue(self.controller.pointer_may_hide())
+
 
 class VodTests(ControllerTestCase):
     MOVIE = {"id": "m7", "name": "Heat", "cmd": "http://vod/heat.mkv"}

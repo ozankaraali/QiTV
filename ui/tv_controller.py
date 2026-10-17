@@ -648,6 +648,24 @@ class TVController(QObject):
     def mouse_moved(self) -> None:
         self._show_transport()
 
+    def pointer_may_hide(self) -> bool:
+        """The pointer may go with the player controls: a picture plays on the player page and
+        no list, guide, mixer or card that the pointer clicks is open."""
+        if self._closed or self._current is None or not self._has_media():
+            return False
+        if self._flow.in_library():
+            return False
+        overlays = self.overlays
+        menus = (
+            overlays.drawer,
+            overlays.column,
+            overlays.guide,
+            overlays.next_card,
+            overlays.welcome,
+            overlays.mixer,
+        )
+        return not any(menu is not None and menu.isVisible() for menu in menus)
+
     def wheel(self, steps: int, modifiers) -> None:
         """`steps` follows PointerInput: +1 is one notch down (the next channel)."""
         if not steps or self._closed:
