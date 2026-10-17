@@ -702,6 +702,10 @@ class Drawer(Overlay):
         if 0 <= row < len(col.nodes) and col.nodes[row].layer in _CONTEXT_LAYERS:
             self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
 
+    def _on_folded(self) -> None:
+        if self.isVisible() and self.filter_text:
+            self._refresh()
+
     def _on_nav_changed(self) -> None:
         if self.isVisible():
             self._refresh()
@@ -748,6 +752,9 @@ class Drawer(Overlay):
         nodes = children or []
         if isinstance(nodes, NodeSeq):
             nodes.fold_ahead()  # typing to filter will find the titles folded
+            if id(self) not in nodes.heard_by:  # its fold ending re-applies the typed filter
+                nodes.heard_by.add(id(self))
+                nodes.folded.folded.connect(self._on_folded)
         if col.side == self.focus_side and needle:
             if isinstance(nodes, NodeSeq):
                 nodes = nodes.matching(needle)

@@ -111,6 +111,10 @@ def _item_node(item: dict, layer: str = "item") -> NavNode:
     return NavNode(layer, key, item_title(item, episode=episode), item)
 
 
+class _Folded(QObject):
+    folded = Signal()
+
+
 class NodeSeq(Sequence):
     """The item nodes of a long list (one provider's 57,000 channels, or all four's 200,000),
     made when a row is asked for: the drawer shows a screenful at a time, and making every
@@ -134,6 +138,8 @@ class NodeSeq(Sequence):
         self._folded = folded
         self._folding: Optional[threading.Thread] = None
         self._fold_due = False
+        self._notifier: Optional[_Folded] = None
+        self.heard_by: set[int] = set()  # the views connected to `folded`
         self._lock = threading.Lock()
         self._made: dict[int, NavNode] = {}
         self._rows: dict[NavNode, int] = {}  # the nodes made so far -> their rows
@@ -227,8 +233,27 @@ class NodeSeq(Sequence):
 
     def _fold_in_background(self) -> None:
         if self._folded is None and self._folding is None:
-            self._folding = threading.Thread(target=self._folded_titles, daemon=True)
+            self._folding = threading.Thread(target=self._fold_and_tell, daemon=True)
             self._folding.start()
+
+    @property
+    def folded(self) -> "_Folded":
+        """Emits `folded` (on the GUI thread) when the titles are folded. Made on first use,
+        and that must be on the GUI thread: the signal is queued to it from the fold's."""
+        if self._notifier is None:
+            self._notifier = _Folded()
+        return self._notifier
+
+    def _fold_and_tell(self) -> None:
+        try:
+            self._folded_titles()
+        except Exception:
+            logger.exception("Folding the titles failed")  # a later filter tries again
+            return
+        finally:
+            self._folding = None
+        if self._notifier is not None:
+            self._notifier.folded.emit()
 
     def _folded_titles(self, wait: bool = True) -> Optional[list[str]]:
         if not self._lock.acquire(blocking=wait):
