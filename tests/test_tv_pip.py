@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QMenu
 
 from services.connection_budget import ConnectionBudget
 from services.live.tuning import channel_key
+from services.provider_ids import with_provider
 from services.sessions import PIP_FAILED, SessionManager, Slot
 from services.vlc_profile import DEFAULT_USER_AGENT
 from tests.test_tv_controller import (
@@ -599,6 +600,8 @@ class PipTests(PipCase):
     def test_after_another_provider_pip_still_opens(self):
         # 2.1: another provider's setup leaves the PiP's link alone; it still arrives.
         self.catalog.hub_ready("Home")
+        home = [with_provider(c, "Home") for c in CHANNELS]  # items are always stamped
+        self.tune = lambda i: self.controller.tune(home[i], group_key="10", channels=home)
         self.start_large(0)
         self.start_large(1)
         self.controller.handle(Action.PIP)  # its link is on its way…
