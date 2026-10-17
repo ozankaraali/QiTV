@@ -56,8 +56,12 @@ class _GenreModel(QAbstractListModel):
             rows.append((HEADER, "PINNED", None, None))
             rows += [(GENRE, g.title, g.count, g.id) for g in pinned]
         if rest:
-            rows.append((HEADER, f"GENRES · {len(rest)}", None, None))
-            rows += [(GENRE, g.title, g.count, g.id) for g in rest]
+            rows.append((HEADER, f"GENRES · {sum(1 for g in rest if not g.header)}", None, None))
+            # All providers: each provider's name heads its genres (a row that cannot be chosen)
+            rows += [
+                (HEADER, g.title, None, None) if g.header else (GENRE, g.title, g.count, g.id)
+                for g in rest
+            ]
         self.beginResetModel()
         self._rows = rows
         self.endResetModel()
@@ -196,7 +200,7 @@ class GenreList(QWidget):
     def set_genres(self, genres: list[Genre]) -> None:
         if genres != self._genres:  # the same genres again (a genre switch): keep the list
             self._genres = list(genres)
-            self._ids = [g.id for g in genres]
+            self._ids = [g.id for g in genres if not g.header]
             self._model.set_genres(genres)
             self._rows_by_id = {
                 self._model.index(i).data(IdRole): i

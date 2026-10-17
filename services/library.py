@@ -21,6 +21,7 @@ from PySide6.QtCore import QObject, Signal
 from services import favorites
 from services.catalog import ALL_GROUP_ID
 from services.navigation import item_key
+from services.provider_ids import ALL_PROVIDERS, provider_of, with_provider
 from services.text_fold import fold
 from services.watch_state import WatchState
 
@@ -45,6 +46,7 @@ class Genre:
     title: str
     count: Optional[int]
     pinned: bool = False
+    header: bool = False  # a provider's heading above its genres (All providers): not a genre
 
 
 class Sort(str, Enum):
@@ -74,6 +76,7 @@ class Details:
     progress: Optional[float]
     favorite: bool
     kind: str  # "movie" | "series" | "episode"
+    provider: str = ""  # the title's provider, named in the strip while providers are mixed
 
 
 # --- field parsing ------------------------------------------------------------------------
@@ -333,17 +336,25 @@ class LibraryModel(QObject):
         )
 
     # --- catalog events ---------------------------------------------------------------
-    def _on_provider_ready(self, _name: str) -> None:
-        if self._requested:
-            self.set_section(self._section)
+    def _on_provider_ready(self, name: str) -> None:
+        if not self._requested:
+            return
+        if self._mixed() and name != ALL_PROVIDERS:
+            # One provider of the mix is ready: its lists join the others, the genre stays.
+            self._catalog.request_section(self._section)
+            self.changed.emit()
+            return
+        self.set_section(self._section)
 
     def _on_section_ready(self, section: str) -> None:
         if not self._current(section):
             return
         self._ready = True  # memo keys carry the content version: nothing to clear
         pinned = self._pinned_genres()
-        groups = self._catalog.groups(self._section)
-        if pinned:
+        groups = [g for g in self._catalog.groups(self._section) if not g.header]
+        if self._mixed() and self._genre_listed(groups):
+            pass  # another provider's lists arrived: the genre being read stays
+        elif pinned:
             self._genre = pinned[0].id
         elif groups:
             self._select(str(groups[0].id))
@@ -364,6 +375,15 @@ class LibraryModel(QObject):
         if grew or moved or group_id == self._genre:
             self.changed.emit()
 
+    def _genre_listed(self, groups: list) -> bool:
+        """Whether the genre chosen is still one of the genres listed (groups: no headings)."""
+        genre = self._genre
+        if genre is None:
+            return False
+        if genre in PINNED_TITLES:
+            return bool(self._pinned_items(genre))
+        return any(str(g.id) == genre for g in groups)
+
     def _pinned_signature(self) -> tuple:
         return tuple((g.id, g.count) for g in self._pinned_genres())
 
@@ -371,7 +391,7 @@ class LibraryModel(QObject):
         """Leave a pinned genre that has emptied for the first available one."""
         if self._genre not in PINNED_TITLES or self._pinned_items(self._genre):
             return False
-        available = self.genres()
+        available = [g for g in self.genres() if not g.header]
         if available:
             self._select(available[0].id)
         else:
@@ -388,20 +408,28 @@ class LibraryModel(QObject):
 
     def _history_entries(self) -> list[dict]:
         wanted = "episode" if self._section == "series" else "movie"
-        provider = self._catalog.current_provider_name()
+        if self._mixed():  # every provider still in the list, newest first
+            names = set(self._catalog.provider_names())
+        else:
+            names = {self._catalog.current_provider_name()}
         return [
             h
             for h in (self._config.watch_history or [])
-            if h.get("provider_name") == provider
+            if h.get("provider_name") in names
             and h.get("item_type") == wanted
             and isinstance(h.get("item_data"), dict)
         ]
+
+    def _entry_content_id(self, entry: dict) -> str:
+        """The resume key of a watch-history entry (at the provider that played it)."""
+        kind = "episode" if self._section == "series" else "movie"
+        return WatchState.content_id(entry["provider_name"], entry["item_data"], item_type=kind)
 
     def _fingerprint(self) -> tuple:
         positions = self._config.playback_positions or {}
         hist = []
         for entry in self._history_entries():
-            cid = self._content_id(entry["item_data"], self._section == "series" and "episode")
+            cid = self._entry_content_id(entry)
             hist.append((cid, (positions.get(cid) or {}).get("position")))
         return (self._catalog.content_version(), self._favorites(), tuple(hist))
 
@@ -431,12 +459,15 @@ class LibraryModel(QObject):
         return lookup
 
     # --- content ids / kinds ----------------------------------------------------------
+    def _mixed(self) -> bool:
+        """Whether the Library shows every provider (All providers)."""
+        return bool(self._catalog.all_providers())
+
     def _content_id(self, item: dict, item_type=None) -> str:
         if not item_type:
             item_type = "serie" if self._section == "series" else "movie"
-        return WatchState.content_id(
-            self._catalog.current_provider_name(), item, item_type=item_type
-        )
+        provider = provider_of(item) or self._catalog.current_provider_name()
+        return WatchState.content_id(provider, item, item_type=item_type)
 
     def item_kind(self, item: dict) -> str:
         if self._section == "series":
@@ -453,13 +484,13 @@ class LibraryModel(QObject):
             return []
 
         def build() -> list[dict]:
-            seen: set[str] = set()
+            seen: set[tuple[str, str]] = set()
             out: list[dict] = []
             for group in self._catalog.groups(self._section):
-                if group.count is None:
+                if group.count is None:  # not fetched yet; a provider's heading
                     continue
                 for item in self._catalog.items(self._section, str(group.id)) or []:
-                    key = item_key(item)
+                    key = (provider_of(item), item_key(item))
                     if key not in seen:
                         seen.add(key)
                         out.append(item)
@@ -481,14 +512,15 @@ class LibraryModel(QObject):
     def _continue_items(self) -> list[dict]:
         out: list[dict] = []
         seen: set[str] = set()
-        kind = "episode" if self._section == "series" else "movie"
+        mixed = self._mixed()
         for entry in self._history_entries():
-            item = entry["item_data"]
-            cid = self._content_id(item, kind)
+            cid = self._entry_content_id(entry)
             if cid in seen or self._watch.resume_position(cid) is None:
                 continue
             seen.add(cid)
-            out.append(item)
+            item = entry["item_data"]
+            # Stamped with the provider that played it, so it plays and stars there.
+            out.append(with_provider(item, entry["provider_name"]) if mixed else item)
         return out
 
     def _my_list_items(self) -> list[dict]:
@@ -524,13 +556,29 @@ class LibraryModel(QObject):
 
         def build() -> list[Genre]:
             found = self._pinned_genres() + [
-                Genre(str(g.id), g.title, g.count) for g in self._catalog.groups(self._section)
+                Genre(str(g.id), g.title, g.count, header=g.header)
+                for g in self._catalog.groups(self._section)
             ]
             if needle:
-                found = [g for g in found if needle in fold(g.title)]
+                found = self._matching(found, needle)
             return found
 
         return list(self._memoized(("genres", self._section, needle, self._fingerprint()), build))
+
+    @staticmethod
+    def _matching(genres: list[Genre], needle: str) -> list[Genre]:
+        """The genres whose title has `needle`, each provider's heading only above a match."""
+        found: list[Genre] = []
+        heading: Optional[Genre] = None
+        for genre in genres:
+            if genre.header:
+                heading = genre
+            elif needle in fold(genre.title):
+                if heading is not None:
+                    found.append(heading)
+                    heading = None
+                found.append(genre)
+        return found
 
     def select_genre(self, genre_id: str) -> None:
         self._select(genre_id)
@@ -632,6 +680,7 @@ class LibraryModel(QObject):
             progress=self.progress(item),
             favorite=self.is_favorite(item),
             kind=self.item_kind(item),
+            provider=provider_of(item) if self._mixed() else "",
         )
 
     def is_favorite(self, item: dict) -> bool:

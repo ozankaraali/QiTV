@@ -1143,10 +1143,11 @@ class PosterGrid(QAbstractScrollArea):
 
     @staticmethod
     def _meta_parts(details: Details | None) -> tuple[str, str]:
-        """('year · duration · genre · ★ rating', 'mm:ss watched'), empty parts omitted."""
+        """('provider · year · duration · genre · ★ rating', 'mm:ss watched'), empty parts
+        omitted (the provider only while the Library mixes providers)."""
         if details is None:
             return "", ""
-        parts = [details.year, details.duration, details.genre]
+        parts = [details.provider, details.year, details.duration, details.genre]
         if details.rating:
             parts.append(f"★ {details.rating}")
         meta = SEPARATOR.join(part for part in parts if part)

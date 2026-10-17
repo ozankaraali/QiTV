@@ -18,6 +18,7 @@ from services.library import (
     history_episode,
     history_season,
 )
+from services.provider_ids import ALL_PROVIDERS, provider_of, with_provider
 from services.watch_state import WatchState
 
 app = QApplication.instance() or QApplication([])
@@ -40,8 +41,17 @@ class FakeCatalog(QObject):
         self.item_map = items or {}  # (section, gid) -> list | None
         self.requests = []
         self.name = "P"
+        self.names = ["P", "Q"]
+        self.mixed = False  # All providers
+        self.headers = set()  # ids of the provider headings among the groups
         self.version = 1
         self.section_list = ["live", "movies", "series"]
+
+    def all_providers(self):
+        return self.mixed
+
+    def provider_names(self):
+        return list(self.names)
 
     def sections(self):
         return list(self.section_list)
@@ -54,7 +64,7 @@ class FakeCatalog(QObject):
 
     def groups(self, section):
         return [
-            Group(section=section, id=i, title=t, count=c)
+            Group(section=section, id=i, title=t, count=c, header=i in self.headers)
             for i, t, c in self.group_list.get(section, [])
         ]
 
@@ -549,6 +559,148 @@ class HistorySeasonTests(unittest.TestCase):
         gone = [self.entry({"id": "7", "season_id": "8"})]
         self.assertIsNone(history_season(gone, "P", series, self.SEASONS))
         self.assertIsNone(history_season([None, "x"], "P", series, self.SEASONS))
+
+
+DEMO_TV, HARBOR_IPTV = "Demo TV", "Harbor IPTV"
+SEP = "\x1f"  # the separator of provider_ids.mixed_group_id
+
+
+def mixed_catalog():
+    """The Library over both providers: the mixed All, then a heading and the genres of each."""
+    ledger = with_provider(movie(1, "Ledger Nights"), DEMO_TV)
+    salt = with_provider(movie(1, "Salt Roads"), HARBOR_IPTV)  # the same id at another provider
+    tide = with_provider(movie(2, "Tide Lines"), HARBOR_IPTV)
+    cat = FakeCatalog(
+        {
+            "movies": [
+                ("*", "All", 3),
+                (f"{DEMO_TV}{SEP}", DEMO_TV, None),
+                (f"{DEMO_TV}{SEP}d", "Drama", 1),
+                (f"{HARBOR_IPTV}{SEP}", HARBOR_IPTV, None),
+                (f"{HARBOR_IPTV}{SEP}d", "Drama", 1),
+                (f"{HARBOR_IPTV}{SEP}c", "Comedy", 1),
+            ]
+        },
+        {
+            ("movies", "*"): [ledger, salt, tide],
+            ("movies", f"{DEMO_TV}{SEP}d"): [ledger],
+            ("movies", f"{HARBOR_IPTV}{SEP}d"): [salt],
+            ("movies", f"{HARBOR_IPTV}{SEP}c"): [tide],
+        },
+    )
+    cat.mixed = True
+    cat.name = ALL_PROVIDERS
+    cat.names = [DEMO_TV, HARBOR_IPTV]
+    cat.headers = {f"{DEMO_TV}{SEP}", f"{HARBOR_IPTV}{SEP}"}
+    return cat, ledger, salt, tide
+
+
+class MixedProvidersTests(unittest.TestCase):
+    def test_genres_sit_under_each_providers_heading(self):
+        cat, *_ = mixed_catalog()
+        model, _ = build(cat)
+        self.assertEqual(
+            [(g.header, g.title) for g in model.genres()],
+            [
+                (False, "All"),
+                (True, DEMO_TV),
+                (False, "Drama"),
+                (True, HARBOR_IPTV),
+                (False, "Drama"),
+                (False, "Comedy"),
+            ],
+        )
+        self.assertEqual(model.genre_id, "*")  # never a heading
+
+    def test_a_filter_keeps_a_heading_only_above_a_match(self):
+        cat, *_ = mixed_catalog()
+        model, _ = build(cat)
+        self.assertEqual(
+            [(g.header, g.title) for g in model.genres("com")],
+            [(True, HARBOR_IPTV), (False, "Comedy")],
+        )
+        self.assertEqual(model.genres("zzz"), [])
+
+    def test_a_providers_genre_lists_its_titles(self):
+        cat, *_ = mixed_catalog()
+        model, _ = build(cat)
+        model.select_genre(f"{HARBOR_IPTV}{SEP}d")
+        self.assertEqual([i["name"] for i in model.items()], ["Salt Roads"])
+
+    def test_continue_mixes_providers_newest_first(self):
+        cat, *_ = mixed_catalog()
+        cfg = make_config()
+        ledger, salt = movie(1, "Ledger Nights"), movie(
+            1, "Salt Roads"
+        )  # as the history keeps them
+        history(cfg, salt, "movie", provider=HARBOR_IPTV)  # the newest first
+        history(cfg, ledger, "movie", provider=DEMO_TV)
+        history(cfg, movie(5, "Gone"), "movie", provider="Removed")  # no longer a provider
+        resume(cfg, ledger, "movie", pos=600_000, provider=DEMO_TV)
+        resume(cfg, salt, "movie", pos=300_000, provider=HARBOR_IPTV)
+        resume(cfg, movie(5), "movie", provider="Removed")
+        model, _ = build(cat, cfg)
+        self.assertEqual(model.genre_id, CONTINUE)
+        items = model.items()
+        self.assertEqual([provider_of(i) for i in items], [HARBOR_IPTV, DEMO_TV])
+        self.assertEqual([i["name"] for i in items], ["Salt Roads", "Ledger Nights"])
+        # the same id at two providers keeps two resume points
+        self.assertAlmostEqual(model.progress(items[0]), 300_000 / 6_000_000)
+        self.assertAlmostEqual(model.progress(items[1]), 600_000 / 6_000_000)
+
+    def test_one_provider_continue_is_unchanged(self):
+        cat = FakeCatalog({"movies": [("1", "G", 1)]}, {("movies", "1"): [movie(1)]})
+        cfg = make_config()
+        history(cfg, movie(1), "movie")
+        history(cfg, movie(2), "movie", provider="Q")  # another provider's: not listed
+        resume(cfg, movie(1), "movie")
+        resume(cfg, movie(2), "movie", provider="Q")
+        model, _ = build(cat, cfg)
+        self.assertEqual(model.items(), [movie(1)])  # not stamped, as before
+
+    def test_my_list_and_new_mix_providers(self):
+        cat, ledger, salt, tide = mixed_catalog()
+        ledger["added"], salt["added"], tide["added"] = "1700000300", "1700000100", "1700000200"
+        cfg = make_config(favorites=["Ledger Nights", "Salt Roads"])
+        model, _ = build(cat, cfg)
+        self.assertEqual([g.id for g in model.genres()[:2]], [NEW, MY_LIST])
+        model.select_genre(NEW)
+        self.assertEqual(
+            [provider_of(i) for i in model.items()], [DEMO_TV, HARBOR_IPTV, HARBOR_IPTV]
+        )
+        model.select_genre(MY_LIST)
+        self.assertEqual(
+            [(provider_of(i), i["name"]) for i in model.items()],
+            [(DEMO_TV, "Ledger Nights"), (HARBOR_IPTV, "Salt Roads")],
+        )
+
+    def test_a_star_belongs_to_the_titles_provider(self):
+        cat, _ledger, salt, _tide = mixed_catalog()
+        cfg = make_config(provider_favorites=[{"name": "Salt Roads", "provider": HARBOR_IPTV}])
+        model, _ = build(cat, cfg)
+        self.assertTrue(model.is_favorite(salt))
+        self.assertFalse(model.is_favorite(with_provider(movie(1, "Salt Roads"), DEMO_TV)))
+
+    def test_the_strip_names_the_provider_only_while_mixed(self):
+        cat, ledger, *_ = mixed_catalog()
+        model, _ = build(cat)
+        self.assertEqual(model.details(ledger).provider, DEMO_TV)
+        cat.mixed = False
+        self.assertEqual(model.details(ledger).provider, "")
+
+    def test_another_providers_lists_arriving_keep_the_genre(self):
+        cat, *_ = mixed_catalog()
+        model, _ = build(cat)
+        model.select_genre(f"{HARBOR_IPTV}{SEP}c")
+        cat.sectionReady.emit("movies")  # another provider's section landed
+        self.assertEqual(model.genre_id, f"{HARBOR_IPTV}{SEP}c")
+        cat.requests.clear()
+        cat.providerReady.emit(DEMO_TV)  # one provider of the mix is ready
+        self.assertEqual(cat.requests, [("section", "movies")])
+        self.assertEqual(model.genre_id, f"{HARBOR_IPTV}{SEP}c")
+        cat.providerReady.emit(ALL_PROVIDERS)  # the source changed: start over
+        cat.sectionReady.emit("movies")
+        self.assertEqual(model.genre_id, "*")
 
 
 class LargeGenreTests(unittest.TestCase):
