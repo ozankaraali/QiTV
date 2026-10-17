@@ -1,6 +1,8 @@
-"""Favorites: stars in `config.favorites`, for channels and titles alike.
+"""Favorites: stars for channels and titles alike.
 
-A star is a name (or the title when an item has no name) at one provider; stars of earlier
+A star is a name (or the title when an item has no name) at one provider, kept in
+`config.provider_favorites`; `config.favorites` stays a list of the starred names, the only
+thing builds before 2.1 read (and they fail on anything but strings). Stars of earlier
 versions are bare names that match at every provider (see entries and migrate). NavModel (the pinned Favorites group), the
 Library (My list) and the player (Ctrl+D, the context menu) all use these helpers.
 """
@@ -40,9 +42,20 @@ def entries(config) -> list[dict]:
 
     {"name", "provider"} is a star at one provider; provider "*" is an old star that matches
     that name at every provider; {"name", "provider", "off": True} un-stars an old star at that
-    provider. Bare strings (a config not migrated yet) read as old stars.
+    provider. They live in `config.provider_favorites`; until that exists, the bare names of
+    `config.favorites` read as old stars.
     """
-    return [e for e in map(_normal, config.favorites or []) if e is not None]
+    stored = getattr(config, "provider_favorites", None)
+    if stored is None:
+        stored = config.favorites or []
+    return [e for e in map(_normal, stored) if e is not None]
+
+
+def _store(config, kept: list[dict]) -> None:
+    """Write the entries, and the starred names to `favorites`: older builds read only that
+    (a list of strings; they fail on anything else)."""
+    config.provider_favorites = kept
+    config.favorites = names(config)
 
 
 def names(config) -> list[str]:
@@ -94,41 +107,43 @@ def toggle(config, item: dict) -> bool:
 
     A star belongs to the item's provider; an old star ("*") is un-starred at one provider with
     an "off" entry, so the others keep it. An item with no provider (not stamped) stars and
-    un-stars by name at every provider, and is kept as a bare name, as before. An item with
-    neither a name nor a title is left alone (False). The config is not saved here: see save().
+    un-stars by name at every provider (it stars as "*"). An item with neither a name nor a
+    title is left alone (False). The config is not saved here: see save().
     """
     key = favorite_key(item)
     if not key:
         return False
     provider = provider_of(item)
-    raw = list(config.favorites or [])
+    raw = entries(config)
     if not is_favorite(config, item):
         if not provider:
-            config.favorites = [*raw, key]
+            _store(config, [*raw, {"name": key, "provider": ANY_PROVIDER}])
             return True
         # Starring again where an old star was switched off just lifts the exclusion.
         lifted = [e for e in raw if not _is_entry(e, key, provider, True)]
         if len(lifted) != len(raw):
-            config.favorites = lifted
+            _store(config, lifted)
         else:
-            config.favorites = [*raw, {"name": key, "provider": provider}]
+            _store(config, [*raw, {"name": key, "provider": provider}])
         return True
     if not provider:
-        config.favorites = [e for e in raw if (_normal(e) or {}).get("name") != key]
+        _store(config, [e for e in raw if e["name"] != key])
         return False
     kept = [e for e in raw if not _is_entry(e, key, provider, False)]
     if any(_is_entry(e, key, ANY_PROVIDER, False) for e in kept):
         kept.append({"name": key, "provider": provider, "off": True})
-    config.favorites = kept
+    _store(config, kept)
     return False
 
 
 def migrate(config) -> bool:
-    """Turn bare names into {"name", "provider": "*"}; True when anything changed."""
-    raw = list(config.favorites or [])
-    if not any(isinstance(e, str) for e in raw):
+    """Start `provider_favorites` from the bare names (each an old star, "*"); True if it did.
+
+    `favorites` itself stays a list of names, which is all older builds read.
+    """
+    if getattr(config, "provider_favorites", None) is not None:
         return False
-    config.favorites = [_normal(e) if isinstance(e, str) else e for e in raw if _normal(e)]
+    config.provider_favorites = entries(config)
     return True
 
 
