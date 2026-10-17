@@ -238,7 +238,7 @@ class Feed:
     clock stands still while it says Playing; the 2.0.2 review's model). While
     `stalled` the source sends nothing: the edge stands still and no state arrives. With
     `sizes` (an iterator) each arrival brings the next size instead of `burst` seconds, at
-    the same rhythm (the public HLS channel: 6 s every 7 s, every sixth time 12 s).
+    the same rhythm (a public HLS channel: 6 s every 7 s, every sixth time 12 s).
     LiveSession ticks every 0.25 s.
     """
 
@@ -1050,7 +1050,7 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(last["target"], 2.5)
 
     def test_a_lasting_lag_above_the_band_gets_one_gentle_nudge_then_settles(self):
-        # 2.1: not within a tick (2.0 did, and flapped on the public HLS channel): after 15 s outside
+        # 2.1: not within a tick (2.0 did, and flapped on a public HLS channel): after 15 s outside
         # the band, one nudge ramped to 1.03x and back, sized to end at the target.
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=6.0).ready()
@@ -1068,8 +1068,8 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["shown"], 2.5)
         self.assertEqual(len(self.playback.plays), 1)
 
-    def test_trt1_like_hls_arrivals_change_the_rate_once_at_most(self):
-        """The owner's report (the public HLS channel on iptv-org, HLS): every 7 s a batch of 6 s, every sixth
+    def test_segmented_hls_arrivals_change_the_rate_once_at_most(self):
+        """The owner's report (a public HLS channel): every 7 s a batch of 6 s, every sixth
         12 s, so the lag saws by 6-12 s around a mean that wanders by itself. 2.0.x changed the
         rate 18 times in 5 minutes there. Now: at its target, the rate never changes; a second
         under it, one gentle nudge; and the indicator's text barely moves."""
@@ -1099,9 +1099,9 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["target"], 6.0)
         self.assertEqual(self.playback.rates, [])
         # A mean lag of 1 s is under half a burst of room (2.0.1): after 3 s, 0.95x.
-        for _ in range(17):
+        for _ in range(25):
             self.step(0.25)
-        self.assertEqual(self.playback.rates[:5], [0.99, 0.98, 0.97, 0.96, 0.95])
+        self.assertEqual(self.playback.rates[:3], [0.9833, 0.9667, 0.95])  # three steps
         self.assertEqual(self.timelines[-1]["nudge"], 0.95)
 
     def test_bursts_settle_without_rate_flapping(self):
@@ -1436,12 +1436,44 @@ class StayLiveTests(LiveSessionCase):
     def test_far_behind_reopens_at_live_once(self):
         sid = self.ready(segments(0, 20), live_edge=40.0)
         self.playback.set_state(PlaybackState.PLAYING)
-        self.step(0.25)  # lag 39.75 > 2.5 + 20
+        for k in range(1, 20):  # 40 s behind (> 2.5 + 20), the source sending on
+            self.engine.buffer(sid, segments(0, 20), live_edge=40.0 + 0.25 * k)
+            self.step(0.25)
+        # Not within 5 s of the stream's open (its lag is not known before): then once.
+        self.assertEqual(len(self.playback.plays), 1)
+        self.engine.buffer(sid, segments(0, 20), live_edge=45.0)
+        self.step(0.25)
         self.assertEqual(self.playback.plays[-1], self.stream(sid, 19))
         self.playback.set_state(PlaybackState.PLAYING)
+        self.live.go_live()  # the viewer's Go live a moment after it: merged, one open
         for _ in range(8):
             self.step(0.25)
         self.assertEqual(len(self.playback.plays), 2)
+
+    def test_go_live_then_a_backlog_is_one_open_not_two(self):
+        """One provider (2.1 review): after a stall it sent 21 s at once just after the
+        viewer's Go live, and stay-live reopened at live 1.2 s later, measuring the new lag
+        against the old position. Now an open waits for VLC to play it and 5 s before another
+        reopen at live, so a Go live and stay-live's reopen are never two opens in a row."""
+        sid = self.ready(segments(0, 30), live_edge=60.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.live.seek_to(16.0)  # time-shifted, 44 s behind
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        plays = len(self.playback.plays)
+        self.live.go_live()  # the viewer's Go live
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.buffer(sid, segments(0, 40), live_edge=81.0)  # a backlog lands at once
+        for k in range(1, 19):  # 4.5 s, the source sending on
+            self.engine.buffer(sid, segments(0, 40), live_edge=81.0 + 0.25 * k)
+            self.step(0.25)
+        self.assertEqual(len(self.playback.plays), plays + 1)  # no second open
+        for k in range(19, 41):
+            self.engine.buffer(sid, segments(0, 40), live_edge=81.0 + 0.25 * k)
+            self.step(0.25)
+        self.assertLessEqual(len(self.playback.plays), plays + 2)  # then at most one more
 
     def test_latency_change_moves_the_target(self):
         self.ready(segments(0, 2), live_edge=4.0)
@@ -1464,7 +1496,7 @@ class RateHealthTests(LiveSessionCase):
         with self.assertLogs("services.live.live_session", "INFO") as logs:
             feed = Feed(self, sid, burst=10.0, edge=8.0, crawl=True).ready().run(8.0)
             rates = list(self.playback.rates)
-            self.assertEqual((rates[0], rates[-1], changes(rates)), (0.99, 1.0, 2))
+            self.assertEqual((rates[0], rates[-1], changes(rates)), (0.9833, 1.0, 2))
             slowed = [state for state in self.timelines if state["rate"] != 1.0]
             self.assertLessEqual(len(slowed) * 0.25, 3.0 + 0.25)  # its first 3 s window
             feed.run(120.0)
@@ -1479,7 +1511,7 @@ class RateHealthTests(LiveSessionCase):
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=12.0, crawl=True).ready().run(8.0)
         rates = list(self.playback.rates)
-        self.assertEqual((rates[0], rates[-1], changes(rates)), (1.01, 1.0, 2))  # far: 1.10x
+        self.assertEqual((rates[0], rates[-1], changes(rates)), (1.0333, 1.0, 2))  # far: 1.10x
         feed.run(120.0)
         self.assertEqual(self.playback.rates, rates)
         self.assertEqual(len(self.playback.plays), 1)
@@ -1525,7 +1557,7 @@ class HlsRateTests(LiveSessionCase):
         # The measured channel's shape: 10 s segments and 8 s buffered at the start.
         sid = self.start(latency=AUTO)
         Feed(self, sid, burst=10.0, edge=8.0, hls=True).ready().run(10.0)
-        self.assertEqual(self.playback.rates[:5], [0.99, 0.98, 0.97, 0.96, 0.95])
+        self.assertEqual(self.playback.rates[:3], [0.9833, 0.9667, 0.95])
 
     def test_a_crawl_at_another_rate_still_locks_1x(self):
         sid = self.start()
@@ -1593,15 +1625,15 @@ class CrawlFallbackTests(LiveSessionCase):
         feed = self.tune(crawl_1x=True)
         sid = self.engine.last_sid
         feed.run(30.0)
-        # 2.1: no nudge first (2.0.2 nudged at once and locked 1x): it crawled at 1x.
-        self.assertEqual(self.playback.rates, [])
+        # Its nudge crawled first: 1x for good (rate health), and it still crawled at 1x.
+        self.assertEqual(self.playback.rates[-1], 1.0)
         self.assertIn(sid, self.engine.closed)  # the pipeline's upstream closes first
         self.assertNotIn("direct", self.modes)
         self.engine.answer()
         self.assertEqual(self.playback.plays[-1], DIRECT)
         self.assertEqual(self.modes[-1], "direct")
         self.assertEqual(self.notices, [self.CRAWLING])  # said once
-        self.assertEqual(self.tuning.get("A"), Tuning(direct=True))
+        self.assertEqual(self.tuning.get("A"), Tuning(rate_locked=True, direct=True))
         self.assertEqual(self.live.no_rewind_reason, self.CRAWLING)  # why, on a rewind
         feed.run(30.0)
         self.assertEqual(self.notices, [self.CRAWLING])
@@ -1690,15 +1722,15 @@ class BackOffTests(LiveSessionCase):
     def test_each_stall_raises_the_target_in_steps_up_to_the_cap(self):
         feed = self.settled()
         plays, rates = len(self.playback.plays), len(self.playback.rates)
-        # Each stall runs out the cushion and leaves VLC at the edge (no room at all): built
-        # again at 0.95x, one nudge each, before the next (2.1: a stall that leaves room
-        # enough waits for the budget of one gentle nudge per 5 minutes).
-        targets = [self.stall(feed, seconds=12.0, after=215.0) for _ in range(6)]
+        # Each stall runs out the cushion, built again at 0.95x before the next (2 min): the
+        # slow-down a stall is owed starts as soon as VLC plays, beyond the budget (2.1: ramped
+        # in and out in three steps, so not only 0.95x and 1x).
+        targets = [self.stall(feed, after=120.0) for _ in range(6)]
         self.assertEqual(targets, [4.0, 5.5, 7.0, 8.5, 10.0, 10.0])  # Stable + 4 s at most
         self.assertEqual(len(self.playback.plays), plays)  # never a jump back for room
         built = self.playback.rates[rates:]
         self.assertTrue(all(0.95 <= rate <= 1.0 for rate in built))  # room built slowly
-        self.assertEqual(changes(built), 2 * 6)
+        self.assertEqual(min(built), 0.95)
 
     def test_a_starvation_that_runs_out_a_full_cushion_raises_the_target(self):
         # At the target (2.7 s of room), the source sends nothing for 1.6 s three times with
@@ -1732,7 +1764,7 @@ class BackOffTests(LiveSessionCase):
     def test_quiet_minutes_lower_it_back_to_where_it_started(self):
         feed = self.settled()
         for _ in range(3):  # each cushion built again before the next stall, but the last
-            self.stall(feed, after=0.0 if _ == 2 else 180.0)
+            self.stall(feed, after=0.0 if _ == 2 else 120.0)
         self.assertEqual(self.timelines[-1]["target"], 7.0)
         feed.run(299.0)  # 5 minutes after the last trouble, less a second
         self.assertEqual(self.timelines[-1]["target"], 7.0)
@@ -1870,14 +1902,14 @@ class MemoryTests(LiveSessionCase):
         with self.assertLogs("services.live.live_session", "INFO") as logs:
             self.tune("A", edge=12.0, crawl=True).run(10.0)
             tried = list(self.playback.rates)
-            self.assertEqual((tried[0], tried[-1], changes(tried)), (1.01, 1.0, 2))
+            self.assertEqual((tried[0], tried[-1], changes(tried)), (1.0333, 1.0, 2))
             self.assertEqual(self.tuning.get("A"), Tuning(rate_locked=True))
             rates = len(self.playback.rates)
             self.tune("A", edge=12.0, crawl=True).run(30.0)
             self.assertEqual(self.playback.rates[rates:], [])  # no other rate asked for
             self.assertGreater(self.timelines[-1]["lag"], TARGETS["normal"] + 3.0)
             self.tune("B", edge=12.0).run(5.0)
-            self.assertEqual(self.playback.rates[rates], 1.01)  # another channel: as before
+            self.assertEqual(self.playback.rates[rates], 1.0333)  # another channel: as before
         self.assertEqual(len(logs.records), 1)  # said once for the channel
 
     def test_a_channel_that_could_not_change_speed_is_tried_again_after_a_day(self):
@@ -2022,7 +2054,9 @@ class StallTests(LiveSessionCase):
         self.assertEqual(self.playback.rates, [])
         self.assertEqual(len(self.playback.plays), 1)  # no reopen at live either
         self.assertFalse(self.timelines[-1]["stalled"])  # the source is fine
-        self.step(0.25)  # the clock moves again: 39 s behind, so back to live
+        for k in range(1, 21):  # the clock moves again: 39 s behind, so back to live, once
+            self.engine.buffer(sid, segments(0, 20), live_edge=40.0 + 0.25 * k)
+            self.step(0.25)  # (5 s after the open: before, its lag was not known)
         self.assertEqual(len(self.playback.plays), 2)
 
     def test_the_timeline_is_not_stalled_once_the_source_ended(self):
@@ -2347,13 +2381,42 @@ class InterruptionTests(LiveSessionCase):
         self.assert_falls_back(sid, LOST, 2)
 
     def test_direct_play_errors_are_reported(self):
-        sid = self.ready(segments(0, 3), live_edge=6.0)
-        self.engine.sessionFailed.emit(sid, "network", "The stream could not be reached.")
-        self.engine.answer()
+        # Without a buffer before it, a direct play's error is reported at once.
+        self.engine.lose()
+        self.start()
         plays = len(self.playback.plays)
         self.playback.errorOccurred.emit("The stream could not be played")
         self.assertEqual(self.failures, ["The stream could not be played"])
         self.assertEqual(len(self.playback.plays), plays)
+
+    def test_a_fallback_on_a_one_stream_provider_waits_for_the_buffer_and_tries_twice(self):
+        """The owner's provider allows one stream (2.1 review): its source gave up at the
+        live edge, the direct play failed at once ("The stream could not be opened": the
+        provider still counted the buffer's connection) and nothing played for minutes. The
+        direct play opens only once the buffer's upstream is closed (never two connections),
+        and a failure right after is tried once more after a moment, then reported."""
+        for kind in ("network", "crashed"):
+            with self.subTest(kind=kind):
+                self.live = self.make(retry_ms=30)
+                self.failures.clear()
+                sid = self.ready(segments(0, 3), live_edge=6.0)
+                self.playback.set_state(PlaybackState.PLAYING)
+                self.step(0.25)
+                plays = len(self.playback.plays)
+                self.engine.sessionFailed.emit(sid, kind, "The stream could not be reached.")
+                self.assertIn(sid, self.engine.closed)
+                self.assertEqual(len(self.playback.plays), plays)  # the buffer still holds it
+                self.engine.answer()  # its upstream is closed
+                self.assertEqual(self.playback.plays[-1], DIRECT)
+                self.playback.set_state(PlaybackState.ERROR)
+                self.playback.errorOccurred.emit("The stream could not be opened")
+                self.assertEqual(self.failures, [])  # not yet: once more after a moment
+                self.wait_until(lambda: len(self.playback.plays) == plays + 2)
+                self.assertEqual(self.playback.plays[-1], DIRECT)
+                self.playback.errorOccurred.emit("The stream could not be opened")
+                self.assertEqual(self.failures, ["The stream could not be opened"])
+                QTest.qWait(80)
+                self.assertEqual(len(self.playback.plays), plays + 2)  # tried twice, no more
 
 
 class InputReleaseTests(LiveSessionCase):

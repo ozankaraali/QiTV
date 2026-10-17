@@ -42,6 +42,16 @@ def drive(stay, lag, seconds, *, clock, drift=0.0, noise=None, buffering=False):
     return lag, rates
 
 
+def calls(rates, start=1.0):
+    """The rates set, as libVLC would be asked: each change once."""
+    out, previous = [], start
+    for rate in rates:
+        if rate != previous:
+            out.append(rate)
+        previous = rate
+    return out
+
+
 def changes(rates, start=1.0):
     """The rate changes between 1x and another rate (a ramp's steps count once each way)."""
     count, previous = 0, start
@@ -143,7 +153,7 @@ class ModeTests(unittest.TestCase):
 
 
 class SteeringTests(unittest.TestCase):
-    """2.1 (the owner: the public HLS channel flapped between 1x and 1.05x every few seconds, and each
+    """2.1 (the owner: a public HLS channel flapped between 1x and 1.05x every few seconds, and each
     change crackled): the rate changes only for a lasting drift outside a dead band, once,
     gently, ramped and sized to end at the target; at most one such nudge per 5 minutes."""
 
@@ -164,10 +174,11 @@ class SteeringTests(unittest.TestCase):
         stay, clock = live(), Clock()
         lag, rates = drive(stay, T + 2.0, 200.0, clock=clock)
         self.assertEqual(rates[: round(15.0 / TICK) - 1], [1.0] * (round(15.0 / TICK) - 1))
-        steps = [rate for rate in rates if rate != 1.0]
-        self.assertEqual(steps[:3], [1.01, 1.02, 1.03])  # ramped in ...
-        self.assertEqual(steps[-2:], [1.02, 1.01])  # ... and out
-        self.assertEqual(max(rates), 1.03)
+        # Ramped in and out in three steps a second apart: six rate changes in all (each
+        # libVLC rate change retunes its audio: few and small ones).
+        self.assertEqual(calls(rates), [1.01, 1.02, 1.03, 1.02, 1.01, 1.0])
+        first = rates.index(1.01)
+        self.assertEqual(rates[first : first + 9], [1.01] * 4 + [1.02] * 4 + [1.03])
         self.assertEqual(changes(rates), 2)  # one nudge: to 1.03 and back
         self.assertAlmostEqual(lag, T, delta=0.1)  # sized to end at the target
         self.assertEqual(rates[-1], 1.0)
@@ -176,8 +187,7 @@ class SteeringTests(unittest.TestCase):
     def test_ahead_of_the_band_the_nudge_adds_room_at_0_97(self):
         stay, clock = live(6.0), Clock()
         lag, rates = drive(stay, 4.0, 200.0, clock=clock)
-        self.assertEqual(min(rates), 0.97)
-        self.assertEqual(changes(rates), 2)
+        self.assertEqual(calls(rates), [0.99, 0.98, 0.97, 0.98, 0.99, 1.0])
         self.assertAlmostEqual(lag, 6.0, delta=0.1)
 
     def test_the_nudge_rate_is_reported_while_it_ramps(self):
@@ -190,8 +200,7 @@ class SteeringTests(unittest.TestCase):
         lag, rates = drive(stay, T + 12.0, 200.0, clock=clock)
         first = next(i for i, rate in enumerate(rates) if rate != 1.0)
         self.assertLessEqual(first * TICK, 3.25)
-        self.assertEqual(max(rates), 1.10)
-        self.assertEqual(changes(rates), 2)
+        self.assertEqual(calls(rates), [1.0333, 1.0667, 1.1, 1.0667, 1.0333, 1.0])
         self.assertAlmostEqual(lag, T, delta=0.15)
 
     def test_one_nudge_per_five_minutes_then_the_band_widens(self):
@@ -215,6 +224,18 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(max(rates), 1.10)
         self.assertAlmostEqual(lag, T, delta=0.15)
 
+    def test_a_target_that_rises_does_not_stop_a_far_nudge_to_start_it_again(self):
+        # Seen on a public HLS channel after a network change (2.1 review round): a backlog
+        # landed during a 1.10x catch-up and Auto raised the target; the nudge stopped short
+        # of it and the next one started 3 s later.
+        stay, clock = live(), Clock()
+        lag, rates = drive(stay, T + 10.0, 10.0, clock=clock)  # sized for 10 s
+        lag += 15.0  # a backlog lands: further behind than it was sized for
+        stay.target = T + 12.0  # and Auto raises the target: more than is left, still far
+        lag, more = drive(stay, lag, 200.0, clock=clock)
+        self.assertEqual(changes(rates + more), 2)  # one nudge, in and out once
+        self.assertAlmostEqual(lag, T + 12.0, delta=0.15)
+
     def test_buffering_and_reopens_start_the_count_again(self):
         stay, clock = live(), Clock()
         for step in ("buffering", "absorb", "go live"):
@@ -236,13 +257,13 @@ class SteeringTests(unittest.TestCase):
         stay, clock = live(), Clock()
         _, rates = drive(stay, T + 3.0, 20.0, clock=clock)
         self.assertEqual(rates[-1], 1.03)
-        _, rates = drive(stay, T - 0.5, 2.0, clock=clock)  # a reopen landed at the target
-        self.assertEqual(rates[:3], [1.02, 1.01, 1.0])
+        _, rates = drive(stay, T - 0.5, 3.0, clock=clock)  # a reopen landed at the target
+        self.assertEqual(calls(rates, start=1.03), [1.02, 1.01, 1.0])
         self.assertEqual(stay.nudge, 1.0)
 
     def test_a_nudge_ramps_out_once_whatever_the_lag_does_meanwhile(self):
-        # Measured on the public HLS channel (2.1): the estimate hovered around the target as a 0.95x nudge
-        # ended, and the ramp went 0.95, 0.96, 0.95, 0.96 ... before 1x.
+        # Measured on a public HLS channel (2.1): the estimate hovered around the target as
+        # a 0.95x nudge ended, and the ramp went 0.95, 0.96, 0.95, 0.96 ... before 1x.
         stay, clock = live(7.0, burst=7.0), Clock()
         _, rates = drive(stay, 3.0, 6.0, clock=clock)  # short of room: 0.95x
         self.assertEqual((rates[-1], stay.nudge), (0.95, 0.95))
@@ -251,8 +272,7 @@ class SteeringTests(unittest.TestCase):
             rates.append(
                 stay.update(7.0 + (-0.05 if k % 2 else 0.05), False, now=clock.tick()).rate
             )
-        self.assertEqual(rates[:5], [0.96, 0.97, 0.98, 0.99, 1.0])
-        self.assertEqual(changes(rates, start=0.95), 1)
+        self.assertEqual(calls(rates, start=0.95), [0.9667, 0.9833, 1.0])
 
     def test_buffering_holds_a_nudge_where_it_was(self):
         stay, clock = live(), Clock()
@@ -288,8 +308,7 @@ class SteeringTests(unittest.TestCase):
         lag, rates = drive(stay, 5.2, 200.0, clock=clock)
         first = next(i for i, rate in enumerate(rates) if rate != 1.0)
         self.assertLessEqual(first * TICK, 3.25)
-        self.assertEqual(min(rates), 0.95)
-        self.assertEqual(changes(rates), 2)
+        self.assertEqual(calls(rates), [0.9833, 0.9667, 0.95, 0.9667, 0.9833, 1.0])
         self.assertAlmostEqual(lag, 10.0, delta=0.15)
 
     def test_with_room_enough_a_bursty_source_waits_for_its_budget(self):
@@ -311,6 +330,48 @@ class SteeringTests(unittest.TestCase):
         stay, clock = live(TARGETS["low"]), Clock()
         _, rates = drive(stay, 0.2, 60.0, clock=clock)  # within its band: as wanted
         self.assertEqual(set(rates), {1.0})
+
+    def test_trouble_owes_a_slow_down_at_once_beyond_the_budget(self):
+        # 2.0.2 built a raised Auto target at once at 0.95x; 2.1 first made it wait for the
+        # budget when the stall left more than half a second of room (review, R14).
+        stay, clock = live(T, latency=AUTO), Clock()
+        _, rates = drive(stay, T + 2.0, 120.0, clock=clock)  # a nudge spends the budget
+        self.assertEqual(changes(rates), 2)
+        stay.trouble()  # a stall ran out the cushion ...
+        stay.target = T + 1.5  # ... and Auto raised the target
+        _, waiting = drive(stay, 1.5, 8.0, clock=clock, buffering=True)  # VLC waits
+        self.assertEqual(set(waiting), {1.0})
+        lag, rates = drive(stay, 1.5, 120.0, clock=clock)
+        self.assertEqual(rates[0], 0.9833)  # as soon as VLC plays
+        self.assertEqual(calls(rates), [0.9833, 0.9667, 0.95, 0.9667, 0.9833, 1.0])
+        self.assertAlmostEqual(lag, T + 1.5, delta=0.15)
+
+    def test_trouble_with_room_enough_owes_nothing(self):
+        stay, clock = live(T, latency=AUTO), Clock()
+        stay.trouble()  # the source came back with what it had missed, say
+        _, rates = drive(stay, T - 0.2, 60.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
+
+    def test_trouble_ends_a_catch_up_then_slows_down(self):
+        stay, clock = live(), Clock()
+        _, rates = drive(stay, T + 3.0, 20.0, clock=clock)
+        self.assertEqual(rates[-1], 1.03)
+        stay.trouble()
+        lag, rates = drive(stay, 0.5, 120.0, clock=clock)
+        self.assertEqual(calls(rates, start=1.03)[:3], [1.02, 1.01, 1.0])
+        self.assertEqual(min(rates), 0.95)
+        self.assertAlmostEqual(lag, T, delta=0.15)
+
+    def test_a_vlc_that_runs_dry_again_and_again_still_slows_down(self):
+        # Short of room, VLC plays a second and waits a second, over and over: the urgent
+        # count pauses while it waits rather than starting again (review, R14).
+        stay, clock = live(10.0, burst=10.0), Clock()
+        rates = []
+        for k in range(40):
+            rates += drive(stay, 5.2, 1.0, clock=clock, buffering=k % 2 == 1)[1]
+        first = next(i for i, rate in enumerate(rates) if rate != 1.0)
+        self.assertLessEqual(first * TICK, 2 * 3.25)  # 3 s of playing, in 6 s
+        self.assertEqual(min(rates), 0.95)
 
     def test_the_rate_never_leaves_0_95_to_1_10(self):
         rng = random.Random(3)
@@ -387,7 +448,7 @@ class LagFilterTests(unittest.TestCase):
         self.assertLess(max(spread for _, _, spread, _ in rows[8:]), 0.2)
 
     def test_uneven_arrivals_average_out(self):
-        # the public HLS channel (measured): every 7 s, 6 s of media, every sixth time 12 s.
+        # A public HLS channel (measured): every 7 s, 6 s of media, every sixth time 12 s.
         arrivals = [(k * 7.0, 12.0 if k % 6 == 5 or k == 0 else 6.0) for k in range(45)]
         rows = self.run_source(arrivals, 300.0, burst=7.0)
         late = [lag for t, lag, _, _ in rows if t > 120.0]
@@ -483,7 +544,7 @@ class BurstClassTests(unittest.TestCase):
 
 class SettledLagTests(unittest.TestCase):
     """The lag as shown (2.1): 2.0 printed every tick's estimate with a decimal, 90 changes a
-    minute on the public HLS channel."""
+    minute on a public HLS channel."""
 
     def test_half_seconds(self):
         self.assertEqual(SettledLag().update(0.0, 7.24), 7.0)
