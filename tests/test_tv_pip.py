@@ -513,7 +513,8 @@ class PipTests(PipCase):
         self.assertTrue(wait_until(lambda: self.live.named("start")[-1][0] == "http://stream/2"))
         self.assertFalse(self.sessions.pip_open())
 
-    def test_another_provider_closes_the_small_picture(self):
+    def test_another_provider_keeps_the_small_picture(self):
+        # 2.1: browsing another provider changes the list only; the small picture plays on.
         self.catalog.hub_ready("Home")
         self.start_large(0)
         self.open_small(CHANNELS[1])
@@ -521,8 +522,8 @@ class PipTests(PipCase):
         self.assertTrue(self.sessions.pip_open())
         self.catalog.provider = "Backup"
         self.catalog.hub_ready("Backup")
-        self.assertFalse(self.sessions.pip_open())
-        self.assertEqual(self.pip_live.calls[-1], ("stop",))
+        self.assertTrue(self.sessions.pip_open())
+        self.assertNotIn(("stop",), self.pip_live.calls)
 
     def test_an_external_play_closes_the_small_picture_first(self):
         # Review M6: external players are outside the budget; the PiP gives its slot back.
@@ -596,18 +597,17 @@ class PipTests(PipCase):
         self.assertTrue(wait_until(self.sessions.pip_open))
 
     def test_after_another_provider_pip_still_opens(self):
+        # 2.1: another provider's setup leaves the PiP's link alone; it still arrives.
         self.catalog.hub_ready("Home")
         self.start_large(0)
         self.start_large(1)
         self.controller.handle(Action.PIP)  # its link is on its way…
-        self.catalog.provider = "Backup"
-        self.catalog.hub_ready("Backup")  # …and dropped with the old provider
         links = len(self.catalog.links)
-        self.assertEqual(len(self.catalog.links), links)  # the old channel is not asked again
-        self.start_large(2)
-        self.controller.open_pip(CHANNELS[3], group_key="10", channels=CHANNELS)
-        self.assertEqual(self.requested()[-1], "Four")
-        self.ready("http://stream/4")
+        self.catalog.provider = "Backup"
+        self.catalog.hub_ready("Backup")  # …and stays: it is Home's, not Backup's
+        self.assertEqual(len(self.catalog.links), links)  # nothing is asked again
+        self.assertEqual(self.requested()[-1], "One")
+        self.ready("http://stream/1")
         self.assertTrue(wait_until(self.sessions.pip_open))
 
     def test_a_provider_failure_forgets_the_pips_link_and_p_works_again(self):
@@ -640,7 +640,7 @@ class BrowsingProviderPipTests(PipCase):
 
     def test_browsing_another_provider_stops_nothing(self):
         self.start_large(0)
-        self.open_small(CHANNELS[1])
+        self.open_small(CHANNELS[2])
         before = self.counts()
         self.controller.select_provider("Backup")
         self.catalog.provider = "Backup"
@@ -649,7 +649,7 @@ class BrowsingProviderPipTests(PipCase):
         self.assertEqual(self.counts(), before)
         self.assertEqual(self.zap.context.group_key, "10")
         self.controller.handle(Action.CH_NEXT)  # the zap list is still the playing provider's
-        self.assertEqual(self.requested()[-1], "Three")
+        self.assertEqual(self.requested()[-1], "Two")  # (One's next; Three is the small one)
 
     def test_a_link_on_its_way_still_arrives_after_browsing(self):
         self.controller.tune(HOME_ONE, group_key="10", channels=[HOME_ONE])
