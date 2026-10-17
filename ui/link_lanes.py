@@ -38,6 +38,7 @@ class Target:
     section: str  # "live", "movies" or "series" (an episode)
     title: str
     group_key: str = ""
+    source: str = ""  # the TV page's source when it was picked (a provider or ALL_PROVIDERS)
     subtitle: str = ""
     zapped: bool = False  # chosen by a zap step (↑/↓, digits, previous), not picked
     retried: bool = False  # its link was made again after a playback failure (STB tokens)
