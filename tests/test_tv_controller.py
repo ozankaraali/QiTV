@@ -113,7 +113,7 @@ class FakeCatalog(NavCatalog):
     def max_connections(self):
         return 1
 
-    def provider(self, name):
+    def provider_entry(self, name):
         if name == self.provider:
             return self.current_provider()
         return self.specs[name]  # KeyError: not in the list
