@@ -175,12 +175,13 @@ class TimeShiftCase(unittest.TestCase):
             self.click(t, t.button_rect(name).center().toPoint())
         self.assertEqual([rel.at(i)[0] for i in range(3)], [-10_000, 10_000, 60_000])
         speed = QSignalSpy(t.speedRequested)
-        self.click(t, t.button_rect("speed").center().toPoint())
-        self.assertEqual(speed.at(0)[0], 1.25)
+        self.click(t, t.button_rect("faster").center().toPoint())
+        self.click(t, t.button_rect("slower").center().toPoint())
+        self.assertEqual([speed.at(0)[0], speed.at(1)[0]], [1.25, 1.0])
         play = QSignalSpy(t.playPauseRequested)
         self.click(t, t.button_rect("play").center().toPoint())
         self.assertEqual(play.count(), 1)
-        left_to_right = ["start", "back10", "play", "fwd10", "fwd60", "speed"]
+        left_to_right = ["start", "back10", "play", "fwd10", "fwd60", "slower", "speed", "faster"]
         xs = [t.button_rect(name).x() for name in left_to_right]
         self.assertEqual(xs, sorted(xs))
 
@@ -188,12 +189,12 @@ class TimeShiftCase(unittest.TestCase):
         t = self.shifted()
         t.update_timeline(timeline(mode="catching_up", rate=1.5), PROGRAMME)
         speed = QSignalSpy(t.speedRequested)
-        self.click(t, t.button_rect("speed").center().toPoint())
+        self.click(t, t.button_rect("faster").center().toPoint())
         self.assertEqual(speed.at(0)[0], 2.0)
         t.update_timeline(at_edge(lag=4.0, rate=1.05), PROGRAMME)  # stay-live's nudge, not a choice
         self.assertNotIn("speed", t._layout())  # the edge row has no speed chip
         t.update_timeline(timeline(position=3476.0, lag=4.0), PROGRAMME)  # the nudge is not kept
-        self.click(t, t.button_rect("speed").center().toPoint())
+        self.click(t, t.button_rect("faster").center().toPoint())
         self.assertEqual(speed.at(1)[0], 1.25)
 
     def test_clicks_on_the_bar_and_chips_do_not_fall_through(self):
@@ -207,7 +208,9 @@ class TimeShiftCase(unittest.TestCase):
         for point in (
             t.seek_rect().center().toPoint(),
             t.button_rect("golive").center().toPoint(),
+            t.button_rect("slower").center().toPoint(),
             t.button_rect("speed").center().toPoint(),
+            t.button_rect("faster").center().toPoint(),
             t.button_rect("start").center().toPoint(),
         ):
             self.click(t, point)

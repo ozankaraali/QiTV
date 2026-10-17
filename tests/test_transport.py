@@ -22,7 +22,7 @@ from timer_fixtures import elapse, timeline, wait_until
 
 from ui.keymap import key_hint
 from ui.overlays.painting import Units, badge_color, draw_icon
-from ui.overlays.transport import Transport
+from ui.overlays.transport import SPEEDS, Transport
 
 
 class TransportCase(unittest.TestCase):
@@ -403,7 +403,7 @@ class TransportCase(unittest.TestCase):
         self.click(t, t.button_rect("next").center().toPoint())
         self.assertEqual(spy.count(), 1)
         self.assertGreater(t.button_rect("next").x(), t.button_rect("fwd10").right() - 1)
-        self.assertLess(t.button_rect("next").right(), t.button_rect("speed").x() + 1)
+        self.assertLess(t.button_rect("next").right(), t.button_rect("slower").x() + 1)
         t.set_next_available(False)
         self.assertEqual(t._layout(), base)
         self.assertNotIn("next", t._layout())
@@ -411,13 +411,40 @@ class TransportCase(unittest.TestCase):
         t.show_live("104", "Nature")
         self.assertNotIn("next", t._layout())
 
-    def test_speed_cycles(self):
+    def test_speed_steps_both_ways_and_stops_at_the_ends(self):
         t = self.make()
         t.show_vod("A", "b")
         spy = QSignalSpy(t.speedRequested)
-        for _ in range(4):
-            self.click(t, t.button_rect("speed").center().toPoint())
-        self.assertEqual([spy.at(i)[0] for i in range(4)], [1.25, 1.5, 2.0, 1.0])
+        for name, times in (("faster", 4), ("slower", 7), ("speed", 2)):
+            for _ in range(times):
+                self.click(t, t.button_rect(name).center().toPoint())
+        # Faster to 2x and no further, slower to 0.5x and no further, the number back to 1x.
+        rates = [spy.at(i)[0] for i in range(spy.count())]
+        self.assertEqual(rates, [1.25, 1.5, 2.0, 1.5, 1.25, 1.0, 0.75, 0.5, 1.0])
+        lefts = [t.button_rect(n).left() for n in ("slower", "speed", "faster")]
+        self.assertEqual(lefts, sorted(lefts))
+        self.assertEqual(t.tooltip_at(t.button_rect("faster").center()), "Faster")
+        self.assertEqual(t.tooltip_at(t.button_rect("slower").center()), "Slower")
+
+    def test_the_speed_chip_fits_its_text_in_a_small_window(self):
+        # "1.25x" was cut off: the chip shrank with the window, its font stops at a floor.
+        t = self.make()
+        for width in (360, 480, 640, 1280):
+            t.setGeometry(0, 0, width, width * 9 // 16)
+            t.show_vod("A", "b")
+            fm = QFontMetricsF(t._chip_font(Units(width)))
+            layout = t._layout()
+            chip = layout["slower"].united(layout["faster"])
+            for rate in SPEEDS:
+                t.set_speed(rate)
+                label = f"{rate:g}x"
+                with self.subTest(width=width, label=label):
+                    self.assertGreaterEqual(layout["speed"].width(), fm.horizontalAdvance(label))
+                    self.assertGreaterEqual(layout["speed"].height(), fm.height())
+            for name, rect in layout.items():
+                if name not in ("seek", "times", "slower", "speed", "faster"):
+                    with self.subTest(width=width, clear_of=name):
+                        self.assertFalse(chip.intersects(rect))
 
     def test_idle_hide_and_poke(self):
         t = self.make(idle_ms=60)
@@ -581,7 +608,7 @@ class OnScreenKeysTests(unittest.TestCase):
         self.assertEqual(t.tooltip_at(rect.center()), key_hint("Back to the Library", "Esc"))
         # At the left of the right-hand group, clear of the speed chip.
         self.assertLess(rect.right(), t.button_rect("search").left())
-        self.assertGreater(rect.left(), t.button_rect("speed").right())
+        self.assertGreater(rect.left(), t.button_rect("faster").right())
         self.assertTrue(t.hole_claims().contains(rect.center().toPoint()))
         spy = QSignalSpy(t.libraryRequested)
         self.click(t, rect.center())
@@ -951,6 +978,27 @@ class SmallWidthLayoutTests(unittest.TestCase):
                         for b in names[i + 1 :]:
                             self.assertFalse(rects[a].intersects(rects[b]), f"{a} overlaps {b}")
                     self.assertFalse(t.grab().isNull())
+
+    def test_without_room_for_minus_and_plus_the_speed_shows_alone(self):
+        # A mini player, shifted, with Go live: the number alone, readable; it goes back to 1x.
+        t = Transport(idle_ms=3000)
+        self.addCleanup(t.close)
+        t.setGeometry(0, 0, 300, 169)
+        t.set_pip_state(True, False)
+        t.show_timeshift("One", "")
+        t.update_timeline(self.state("shifted", 300.0, 1.5), [])
+        rects = t._layout()
+        self.assertNotIn("slower", rects)
+        self.assertNotIn("faster", rects)
+        fm = QFontMetricsF(t._chip_font(Units(300)))
+        self.assertGreaterEqual(rects["speed"].width(), fm.horizontalAdvance("1.25x"))
+        self.assertFalse(rects["speed"].intersects(rects["golive"]))
+        for name in ("speed", "golive"):  # as tall as their text at the font's floor
+            self.assertGreaterEqual(rects[name].height(), fm.height(), name)
+        spy = QSignalSpy(t.speedRequested)
+        QTest.mouseClick(t, Qt.LeftButton, Qt.NoModifier, rects["speed"].center().toPoint())
+        self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [1.0])
+        self.assertFalse(t.grab().isNull())
 
     def test_the_title_rows_controls_stay_inside_at_any_width(self):
         for width in self.WIDTHS:

@@ -61,7 +61,7 @@ from ui.overlays.painting import (
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
-SPEEDS = (1.0, 1.25, 1.5, 2.0)
+SPEEDS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)  # − and + step through these
 TOP_FRACTION = 0.22
 BOTTOM_FRACTION = 0.42
 TICK_LABEL_MAX_U = 25.0
@@ -76,6 +76,9 @@ TOOLTIPS = {
     "volume": "Volume (+/−, M)",
     "audio": "Audio track",
     "subtitles": "Subtitles",
+    "slower": "Slower",
+    "speed": "Normal speed",
+    "faster": "Faster",
 }
 LIBRARY_LABEL = "‹ Library"
 # Controls for a key of the player's (ui.keymap.SHORTCUTS): what they do, and that key.
@@ -96,7 +99,7 @@ _ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
 # A quick second click (a double-click) repeats these steps; on any other control it counts
 # once: a toggle (★, ⛶, ▶) would undo itself, a jump (⟲, Next) go one further.
-_REPEATS = ("back10", "fwd10", "fwd60", "speed", "audio", "subtitles")
+_REPEATS = ("back10", "fwd10", "fwd60", "slower", "faster", "audio", "subtitles")
 _ICON_BUTTONS = (  # painted as icons
     "previous",
     "guide",
@@ -595,6 +598,11 @@ class Transport(Overlay):
     def _chip_font(un: Units) -> QFont:
         return un.font(1.2, QFont.Weight.DemiBold)
 
+    @classmethod
+    def _chip_h(cls, un: Units) -> float:
+        """A chip's height: 2.2u, or its text's at the font's floor (a small window)."""
+        return max(float(un.px(2.2)), QFontMetricsF(cls._chip_font(un)).height() + un.px(0.4))
+
     @staticmethod
     def _times_font(un: Units) -> QFont:
         return un.font(1.25)
@@ -695,8 +703,7 @@ class Transport(Overlay):
                 put("fwd10", skip, un.px(0.6) if self._next_available else un.px(1.0))
                 if self._next_available:
                     put("next", skip, un.px(1.0))
-            chip_w = un.px(3.6)
-            rects["speed"] = QRectF(x, cy - un.px(1.1), chip_w, un.px(2.2))
+            speed_x = x  # the chip goes in once the right side has taken its room
             x = float(right)
             for name in self._right_buttons("audio", "volume", "subtitles"):
                 x -= icon
@@ -705,12 +712,34 @@ class Transport(Overlay):
             if shifted and self._behind():
                 fm = QFontMetricsF(self._chip_font(un))
                 width = 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance("Go live")
-                rects["golive"] = QRectF(x - width, cy - un.px(1.1), width, un.px(2.2))
+                h = self._chip_h(un)
+                rects["golive"] = QRectF(x - width, cy - h / 2, width, h)
             elif self._library and not self._live:
                 fm = QFontMetricsF(self._chip_font(un))
                 width = 2 * un.px(1.0) + fm.horizontalAdvance(LIBRARY_LABEL)
-                rects["library"] = QRectF(x - width, cy - un.px(1.1), width, un.px(2.2))
+                h = self._chip_h(un)
+                rects["library"] = QRectF(x - width, cy - h / 2, width, h)
+            chips = [rects[n].left() - un.px(0.8) for n in ("golive", "library") if n in rects]
+            rects.update(self._speed_rects(un, speed_x, cy, min(chips, default=x)))
         return rects
+
+    def _speed_rects(self, un: Units, x: float, cy: float, room: float) -> dict[str, QRectF]:
+        """− 1.25x + from `x`: as wide and tall as their text, whose font stops at a floor
+        while u shrinks with the window (in a small one, "1.25x" was cut off). Short of
+        `room` (a mini player's), the number alone (it goes back to 1x), else nothing."""
+        fm = QFontMetricsF(self._chip_font(un))
+        h = self._chip_h(un)
+        step = max(float(un.px(2.2)), fm.horizontalAdvance("+") + 2 * un.px(0.6))
+        widest = max(fm.horizontalAdvance(_speed_label(rate)) for rate in SPEEDS)
+        label = max(float(un.px(3.6)), widest + 2 * un.px(0.4))
+        top = cy - h / 2
+        if x + 2 * step + label <= room:
+            return {
+                "slower": QRectF(x, top, step, h),
+                "speed": QRectF(x + step, top, label, h),
+                "faster": QRectF(x + step + label, top, step, h),
+            }
+        return {"speed": QRectF(x, top, label, h)} if x + label <= room else {}
 
     def _right_buttons(self, *rest: str) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
@@ -878,11 +907,24 @@ class Transport(Overlay):
                 text,
             )
 
-    def _paint_speed(self, p: QPainter, un: Units, chip: QRectF, text: QColor) -> None:
+    def _paint_speed(self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor) -> None:
+        if "speed" not in rects:
+            return  # no room (see _speed_rects)
+        steps = "slower" in rects
+        chip = rects["slower"].united(rects["faster"]) if steps else rects["speed"]
         fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
         p.setFont(self._chip_font(un))
         p.setPen(text)
-        p.drawText(chip, Qt.AlignCenter, _speed_label(self._speed))
+        p.drawText(rects["speed"], Qt.AlignCenter, _speed_label(self._speed))
+        if not steps:
+            return
+        dim = QColor(text)
+        dim.setAlphaF(text.alphaF() * 0.35)  # nothing slower or faster to go to
+        index = self._nearest_speed()
+        p.setPen(text if index > 0 else dim)
+        p.drawText(rects["slower"], Qt.AlignCenter, MINUS)
+        p.setPen(text if index < len(SPEEDS) - 1 else dim)
+        p.drawText(rects["faster"], Qt.AlignCenter, "+")
 
     def _paint_vod(self, p: QPainter, un: Units, rects: dict[str, QRectF], text: QColor) -> None:
         kc = self._paint_track(p, un, rects["seek"], 0.14)
@@ -890,7 +932,7 @@ class Transport(Overlay):
         self._paint_times(p, un, rects)
         self._paint_skips(p, un, rects, text)
         self._paint_play(p, rects["play"], qcolor(PALETTE.canvas))
-        self._paint_speed(p, un, rects["speed"], text)
+        self._paint_speed(p, un, rects, text)
         chip = rects.get("library")
         if chip is not None:
             fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
@@ -926,7 +968,7 @@ class Transport(Overlay):
         self._paint_skips(p, un, rects, text)
         dark = qcolor(PALETTE.canvas)
         self._paint_play(p, rects["play"], dark)
-        self._paint_speed(p, un, rects["speed"], text)
+        self._paint_speed(p, un, rects, text)
         chip = rects.get("golive")
         if chip is not None:
             fill_round(p, chip, qcolor(PALETTE.accent), chip.height() / 2)
@@ -1135,11 +1177,13 @@ class Transport(Overlay):
                 self.goLiveRequested.emit()
             elif name == "next":
                 self.nextRequested.emit()
+            elif name in ("slower", "faster"):
+                index = self._nearest_speed() + (1 if name == "faster" else -1)
+                if 0 <= index < len(SPEEDS):
+                    self._choose_speed(SPEEDS[index])
             elif name == "speed":
-                nxt = SPEEDS[(self._nearest_speed() + 1) % len(SPEEDS)]
-                self._speed = nxt
-                self.update()
-                self.speedRequested.emit(nxt)
+                if self._speed != 1.0:
+                    self._choose_speed(1.0)
             elif name == "fullscreen":
                 self.fullscreenRequested.emit()
             elif name == "audio":
@@ -1163,6 +1207,11 @@ class Transport(Overlay):
             elif name == "library":
                 self.libraryRequested.emit()
             return
+
+    def _choose_speed(self, rate: float) -> None:
+        self._speed = rate
+        self.update()
+        self.speedRequested.emit(rate)
 
     def _nearest_speed(self) -> int:
         return min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - self._speed))
