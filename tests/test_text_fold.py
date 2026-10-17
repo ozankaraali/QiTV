@@ -1,6 +1,6 @@
 import unittest
 
-from services.text_fold import fold
+from services.text_fold import fold, fold_all
 
 
 class FoldTests(unittest.TestCase):
@@ -43,6 +43,16 @@ class FoldTests(unittest.TestCase):
             self.assertEqual(fold(text), reference(text), hex(ord(chars[start])))
         for text in ["Ístanbul Café", "ǅemal", "ﬁlm ﬂow", "Ⅻ ①", "e\u0301\u0327", "ıI İ i̇"]:
             self.assertEqual(fold(text), reference(text), text)
+
+    def test_fold_all_folds_each_text_as_it_would_alone(self):
+        texts = ["News 24", "İstanbul Café", "ısı", "", "Ǆ ﬁlm", "e\u0301\u0327", "Saltmarsh HD"]
+        self.assertEqual(fold_all(texts), [fold(t) for t in texts])
+        self.assertEqual(fold_all(["a", "B"]), ["a", "b"])
+        self.assertEqual(fold_all([]), [])
+
+    def test_fold_all_keeps_the_rows_when_a_text_has_a_line_break(self):
+        texts = ["One\nTwo", "Three", "Fôur"]
+        self.assertEqual(fold_all(texts), [fold(t) for t in texts])
 
 
 if __name__ == "__main__":

@@ -175,6 +175,9 @@ class Bench:
         self.clock.start()
         self._last_beat = 0
         self.max_gap = 0.0
+        self.label = "start"  # the step running now, for the stall report
+        self.worst_step = ""
+        self.stalls: list[tuple[int, str]] = []
         self.recording = False
         self.beat = QTimer()
         self.beat.setInterval(5)
@@ -184,7 +187,11 @@ class Bench:
     def _tick(self) -> None:
         now = self.clock.nsecsElapsed()
         if self.recording and self._last_beat:
-            self.max_gap = max(self.max_gap, (now - self._last_beat) / 1e6)
+            gap = (now - self._last_beat) / 1e6
+            if gap > self.max_gap:
+                self.max_gap, self.worst_step = gap, self.label
+            if gap > 100:
+                self.stalls.append((round(gap), self.label))
         self._last_beat = now
 
     def pump(self) -> None:
@@ -206,6 +213,17 @@ class Bench:
             self.app.processEvents()
             time.sleep(0.001)
 
+    def step(self, name: str, action: Callable[[], None]) -> float:
+        """Run a key press and let the events it caused run: ms until the screen is current."""
+        self.label = name
+        t0 = time.perf_counter()
+        action()
+        self.app.processEvents()
+        ms = round((time.perf_counter() - t0) * 1000, 1)
+        self.results[name] = ms
+        logger.info("%-28s %8.1f ms", name, ms)
+        return ms
+
     def timed(
         self,
         name: str,
@@ -214,6 +232,7 @@ class Bench:
         timeout: float = 30.0,
     ):
         """Run `step`, then pump until `done()`: ms from the call until it is on screen."""
+        self.label = name
         profiler = None
         if name in self.profile:
             import cProfile
@@ -377,12 +396,7 @@ def run(args) -> int:
     bench.idle()
 
     # a key step inside the 200,000-row list
-    steps = []
-    for _ in range(20):
-        t0 = time.perf_counter()
-        handle(Action.NAV_DOWN)
-        bench.app.processEvents()
-        steps.append((time.perf_counter() - t0) * 1000)
+    steps = [bench.step("key_all_list", lambda: handle(Action.NAV_DOWN)) for _ in range(20)]
     res["key_step_all_list_max"] = round(max(steps), 1)
     res["key_step_all_list_mean"] = round(sum(steps) / len(steps), 1)
 
@@ -402,10 +416,7 @@ def run(args) -> int:
         target = heads[1] - 1
         drawer.focus_side = "right"
         drawer._select(col, target)
-        t0 = time.perf_counter()
-        handle(Action.NAV_DOWN)
-        bench.app.processEvents()
-        res["key_step_header"] = round((time.perf_counter() - t0) * 1000, 1)
+        res["key_step_header"] = bench.step("key_header", lambda: handle(Action.NAV_DOWN))
         col.current and res.setdefault("key_step_header_on", col.current.layer)
 
     # open one provider's group (the biggest of the second provider), then the mixed All
@@ -416,20 +427,12 @@ def run(args) -> int:
     bench.timed("group_open", lambda: handle(Action.NAV_RIGHT), _drawer_ready(window))
     bench.idle()
     res["group_items"] = len(drawer._columns["right"].nodes)
-    gsteps = []
-    for _ in range(20):
-        t0 = time.perf_counter()
-        handle(Action.NAV_DOWN)
-        bench.app.processEvents()
-        gsteps.append((time.perf_counter() - t0) * 1000)
+    gsteps = [bench.step("key_group_list", lambda: handle(Action.NAV_DOWN)) for _ in range(20)]
     res["key_step_group_list_max"] = round(max(gsteps), 1)
 
     # typing a filter in a group, then in the mixed All
-    t0 = time.perf_counter()
-    handle(Action.NAV_TEXT, "k")
-    bench.app.processEvents()
-    res["filter_group_1char"] = round((time.perf_counter() - t0) * 1000, 1)
-    handle(Action.NAV_BACKSPACE)
+    bench.step("filter_group_1char", lambda: handle(Action.NAV_TEXT, "k"))
+    bench.step("filter_group_clear", lambda: handle(Action.NAV_BACKSPACE))
     bench.idle()
 
     handle(Action.NAV_LEFT)
@@ -441,20 +444,14 @@ def run(args) -> int:
     drawer._select(col, first_all)
     bench.timed("all_open", lambda: handle(Action.NAV_RIGHT), _drawer_ready(window))
     bench.idle()
-    t0 = time.perf_counter()
-    handle(Action.NAV_TEXT, "k")
-    bench.app.processEvents()
-    res["filter_all_1char"] = round((time.perf_counter() - t0) * 1000, 1)
-    t0 = time.perf_counter()
-    handle(Action.NAV_TEXT, "a")
-    bench.app.processEvents()
-    res["filter_all_2char"] = round((time.perf_counter() - t0) * 1000, 1)
-    handle(Action.ESCAPE)
-    handle(Action.ESCAPE)
+    bench.step("filter_all_1char", lambda: handle(Action.NAV_TEXT, "k"))
+    bench.step("filter_all_2char", lambda: handle(Action.NAV_TEXT, "a"))
+    bench.step("filter_all_clear", lambda: handle(Action.ESCAPE))
+    bench.step("drawer_close", lambda: handle(Action.ESCAPE))
     bench.idle()
     res["drawer_open_again"] = None
     bench.timed("drawer_open_again", lambda: handle(Action.OPEN_DRAWER), _drawer_ready(window))
-    handle(Action.ESCAPE)
+    bench.step("drawer_close_again", lambda: handle(Action.ESCAPE))
     bench.idle()
 
     # -- the guide over the group the zap context holds -------------------------------------
@@ -494,6 +491,8 @@ def run(args) -> int:
 
     bench.idle(0.2)
     res["max_gui_stall_ms"] = round(bench.max_gap, 1)
+    res["worst_stall_step"] = bench.worst_step
+    res["stalls_over_100ms"] = bench.stalls
     import gc
 
     gc.collect()

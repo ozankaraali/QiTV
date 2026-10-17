@@ -19,7 +19,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import QObject, QTimer
 
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, payloads
 from services.provider_ids import ALL_PROVIDERS, with_provider
 from services.zapping import ZapContext
 
@@ -401,5 +401,5 @@ class ProviderFlow(QObject):
     def _group_channels(self, group_key: str) -> list[dict]:
         if group_key in _PINNED_GROUPS:
             nodes = self.nav.children(NavNode("group", group_key, group_key)) or []
-            return [n.payload for n in nodes if isinstance(n.payload, dict)]
+            return payloads(nodes)
         return list(self.catalog.items("live", group_key) or [])
