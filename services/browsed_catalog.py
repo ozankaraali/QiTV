@@ -197,7 +197,7 @@ class BrowsedCatalog(QObject):
         catalog = self._cat()
         return catalog.current_provider_name() if catalog is not None else ""
 
-    def provider(self, name: str) -> dict:
+    def provider_entry(self, name: str) -> dict:
         """The settings of any provider by name (KeyError when it is not in the list)."""
         return self._catalogs.provider(name)
 

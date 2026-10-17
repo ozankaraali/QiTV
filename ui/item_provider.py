@@ -28,7 +28,7 @@ def provider_dict(catalog, item: dict) -> dict:
         return catalog.current_provider()
     name = provider_of(item)
     try:
-        return catalog.provider(name)
+        return catalog.provider_entry(name)
     except KeyError:
         return {"name": name}
 

@@ -164,13 +164,11 @@ class LiveControls(QObject):
         """The simultaneous streams of the item's provider (the browsed one without an item):
         None when unlimited or unknown."""
         if item is None:
-            return self._tuner.budget.limit_for(
-                self.catalog.current_provider(), self.catalog.max_connections()
-            )
-        return self._tuner.budget.limit_for(
-            item_provider.provider_dict(self.catalog, item),
-            item_provider.max_connections(self.catalog, item),
-        )
+            provider, reported = self.catalog.current_provider(), self.catalog.max_connections()
+        else:
+            provider = item_provider.provider_dict(self.catalog, item)
+            reported = item_provider.max_connections(self.catalog, item)
+        return self._tuner.budget.limit_for(provider, reported)
 
     def limit_text(self, limit: Optional[int]) -> str:
         return f"Your provider allows {_streams(limit)} at a time" if limit else LIMITED_TEXT
