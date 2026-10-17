@@ -53,6 +53,7 @@ from services.navigation import (
     NavModel,
     NavNode,
 )
+from services.provider_ids import provider_of
 from services.text_fold import fold
 from services.zapping import ZapContext
 from ui.keymap import key_hint
@@ -171,6 +172,18 @@ def _crumb_key(index: int | None) -> str:
 def _leaves_drawer(node: NavNode) -> bool:
     """An action row, or a section the Library shows: chosen, it is handed to the shell."""
     return node.layer == "action" or (node.layer == "section" and node.key in LIBRARY_SECTIONS)
+
+
+def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
+    """Whether `node` is the row a focus key names: an id, or (provider, id) for a channel
+    that may share its id with another provider's."""
+    if isinstance(wanted, tuple):
+        provider, key = wanted
+        payload = node.payload
+        return node.key == key and (
+            not provider or (isinstance(payload, dict) and provider_of(payload) == provider)
+        )
+    return node.key == wanted
 
 
 def _selectable(node: NavNode) -> bool:
@@ -366,7 +379,7 @@ class Drawer(Overlay):
         self.focus_side = "right"
         self.filter_text = ""
         self._filter_key: tuple | None = None
-        self._pending_key: str | None = None
+        self._pending_key: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
         self._preview_node: NavNode | None = None
         self._preview_timer = QTimer(self)
@@ -384,7 +397,9 @@ class Drawer(Overlay):
 
     # ---- public API -------------------------------------------------------------------------
 
-    def open_drawer(self, focus_key: str | None = None, focus_side: str = "right") -> None:
+    def open_drawer(
+        self, focus_key: str | tuple[str, str] | None = None, focus_side: str = "right"
+    ) -> None:
         """Open on the NavModel's path, focusing the right column (or the left one)."""
         self.focus_side = focus_side
         self.filter_text = ""
@@ -699,7 +714,7 @@ class Drawer(Overlay):
         else:
             matched = False
             if self._pending_key is not None:
-                match = next((n for n in nodes if n.key == self._pending_key), None)
+                match = next((n for n in nodes if _is_focus_key(n, self._pending_key)), None)
                 if match is not None:
                     col.current = match
                     matched = True

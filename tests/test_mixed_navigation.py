@@ -150,6 +150,40 @@ class MixedNavigationTests(unittest.TestCase):
         drawer._on_row_clicked("right", row)
         self.assertEqual((drawer.highlighted().title, self.nav.path, played), ("All", path, []))
 
+    def test_a_page_jump_that_lands_on_a_heading_goes_on_past_it(self):
+        self.open_all()
+        drawer = self.drawer()
+        drawer.open_drawer()
+        drawer.move_by(4)  # row 4 is Harbor IPTV's heading
+        self.assertEqual(drawer.highlighted().title, "TR: Haber")
+        drawer.move_by(-1)  # row 4 again, going up
+        self.assertEqual(drawer.highlighted().title, "Sports")
+
+    def test_a_slow_provider_does_not_blank_the_mixed_list(self):
+        self.nav.open(self.nav.children(None)[0])  # All providers
+        self.view.is_loading = lambda: True  # one provider is still setting up
+        self.assertFalse(self.nav.is_loading(self.nav.path[0]))
+        drawer = self.drawer()
+        drawer.open_drawer()
+        self.assertIsNone(drawer.message_for("right"))
+        self.assertIn("Live TV", [n.title for n in drawer._columns["right"].nodes])
+        self.nav.reset_to("live", ALL_GROUP_ID)
+        drawer.open_drawer()
+        names = {provider_of(n.payload) for n in drawer._columns["right"].nodes}
+        self.assertEqual(names, {"Demo TV", "Harbor IPTV"})
+
+    def test_focus_finds_the_row_of_the_provider_that_plays(self):
+        self.open_all()
+        self.nav.reset_to("live", ALL_GROUP_ID)
+        drawer = self.drawer()
+        drawer.open_drawer(focus_key=("Harbor IPTV", "1"))  # Harbor's News, id 1 like Demo's
+        shown = drawer.highlighted()
+        self.assertEqual((provider_of(shown.payload), shown.key), ("Harbor IPTV", "1"))
+        drawer.open_drawer(focus_key=("Demo TV", "1"))
+        self.assertEqual(provider_of(drawer.highlighted().payload), "Demo TV")
+        drawer.open_drawer(focus_key="1")  # an unstamped channel: by id, as before
+        self.assertEqual(provider_of(drawer.highlighted().payload), "Demo TV")
+
     def test_a_filter_matches_groups_not_headings(self):
         self.open_all()
         drawer = self.drawer()

@@ -323,7 +323,9 @@ class NavModel(QObject):
 
     def is_loading(self, node: NavNode) -> bool:
         """True while `node`'s children are on their way, or while a provider sets up."""
-        if self.catalog.is_loading():
+        # In "All providers" one provider's setup must not hold the others' lists back: a
+        # section is loading until some provider has answered for it.
+        if not self.all_mode() and self.catalog.is_loading():
             return True
         key = self._node_key(node)
         if key is None:
@@ -534,7 +536,9 @@ class NavModel(QObject):
     def _on_section_failed(self, section: str, message: str) -> None:
         # While a provider sets up, the catalog still holds the previous provider's groups:
         # that is not a failed refresh. It stays an error until providerReady clears it.
-        loading = message == PROVIDER_LOADING_MESSAGE or self.catalog.is_loading()
+        loading = message == PROVIDER_LOADING_MESSAGE or (
+            not self.all_mode() and self.catalog.is_loading()
+        )
         if not loading and self.catalog.groups(section):
             # A saved catalog could not be refreshed: keep showing it as a loaded
             # section, and say so instead of hiding it behind an error row.
