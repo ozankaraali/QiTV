@@ -39,19 +39,24 @@ duration, or what the helper measured on a raw TS source that arrives in bursts 
 providers' restreams send ~10 s at once every ~10 s); 0.0 for a steady source, and for a
 raw TS one until its first clear burst was followed by the next (from the second burst on;
 `services.live.worker.BurstMeter`). With bursts the lag is a sawtooth as tall as a burst,
-so the lag used (and reported) is its mean, in closed form: the current
-lag plus the time since the edge last moved, less half a burst (see `_lag`); the step a
-landing burst adds is eased in over a few bursts, since it holds the jitter of when a
-burst lands (see `_smooth`). Held against the instantaneous peak, the rate would change at
-every burst and settle only once the lag before each burst is under 0.75 s. A source that
-sends nothing for a burst plus 2 s (a steady one: 2 s) has stalled: the timeline says so
-(`stalled`; the transport reads "Reconnecting…"), the time since the edge moved counts up
-to there only, and StayLive takes it as buffering, as it does a VLC whose clock stood still
-for 0.5 s while it reports Playing (libVLC 3 does when starved): no rate change, no reopen,
-and the easing starts afresh once the edge moves again. Stay-live slows down only to build a
-bursty source's room: at 0.95x while the mean lag is under a burst, which is under half a
-burst left when a burst lands (the player would meet the edge just before each one), until
-it is a burst (`StayLive`; not while paused, time-shifted or at a chosen speed). On some
+so the lag used (and reported) is its mean (2.1, `LagFilter`): per tick in closed form, the
+current lag plus the time since the edge last moved, less half a burst (see `_lag`), averaged
+over a dozen bursts of the live edge's own history, so arrivals that are late, early or unlike
+(the public HLS channel: 6 s, every sixth time 12 s, every 7 s) do not move it; the position (VLC's
+side) is never averaged. The burst stay-live steers by has hysteresis (a burst the helper
+measures for a moment is none: `LagFilter.burst`); the timeline's target, the stall bound
+and Go live follow the helper's at once. Held against the instantaneous peak, the rate would
+change at every burst. A source that sends nothing for a burst plus 2 s (a steady one: 2 s)
+has stalled: the timeline says so (`stalled`; the transport reads "Reconnecting…"), the lag
+is the closed form with the time since the edge moved counted up to there only, and
+StayLive takes it as buffering, as it does a VLC whose clock stood still for 0.5 s while it
+reports Playing (libVLC 3 does when starved): no rate change, no reopen, and the filter
+starts afresh once the edge moves again. StayLive changes the rate only for a lag outside its
+dead band for 15 s, by one gentle nudge (1.03x or 0.97x, ramped, sized to end at the target;
+one per 5 minutes), sooner and beyond that budget only far behind (1.10x) or with under half
+a second of room when a burst lands (0.95x, 2.0.1's case); not while paused, time-shifted or
+at a chosen speed. The timeline's `shown` is the lag as the indicator shows it (`SettledLag`:
+half seconds, changed after 3 s), `nudge` the rate a nudge ramps to. On some
 channels VLC cannot play at any rate but 1x: its position crawls. While stay-live's rate is
 not 1x, VLC's progress is checked against rate x wall time (`RateHealth`), counted only while
 VLC plays and at least `_MEASURE_AHEAD_S` of media is ahead at both ends of a tick, and from
@@ -75,7 +80,7 @@ trouble that ran out a cushion counts: the lag had reached the current target (l
 `_BELOW_TARGET_S`) since the tune. A tune starts from the oldest buffered point, often with
 less, and a starvation before the first cushion says nothing about the target. Each
 5 minutes of playing at the edge without trouble (not paused, not time-shifted) take 0.5 s
-off. A raised target is built at 0.95x (`StayLive.build`) unless the rate is locked;
+off. A raised target is built by a nudge below 1x (as above) unless the rate is locked;
 otherwise the lag grows only as VLC waits. What a channel taught (Auto's extra, a locked
 rate) is kept per channel (`start(channel=...)`, in the
 `LiveTuning` given): its next tune starts there, a locked rate under any latency (for a day:
@@ -129,7 +134,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 import logging
-import math
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -141,8 +145,10 @@ from services.live.stay_live import (
     LATENCIES,
     TARGETS,
     AutoTarget,
+    LagFilter,
     Mode,
     RateHealth,
+    SettledLag,
     StayLive,
 )
 from services.live.timeline import Span
@@ -169,9 +175,8 @@ _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
 _JUMP_S = 1.0  # get_time deltas further than this from wall clock x rate are not trusted
 _EXPIRED_S = 0.5  # a position this far before the oldest buffered point is gone
 _REWIND_MARGIN_S = 5.0  # an evicted position reopens this far past the oldest point
-_EASE_BURSTS = 4  # how many bursts the step of a landing burst is eased in over
 _BELOW_TARGET_S = 0.25  # Go live never lands a mean lag further below the target
-_NUDGE_S = 0.75  # StayLive nudges the rate beyond the target plus this
+_NUDGE_S = 0.75  # Go live lands at most this far above the target (when a start is there)
 _STALL_S = 2.0  # an edge this much later than a burst (steady: at all) is a stalled source
 _FROZEN_S = 0.5  # a VLC clock standing still this long while Playing is starved
 _OPEN_SEED_S = 0.5  # VLC's open time (play() to Playing) before any was measured
@@ -297,8 +302,10 @@ class LiveSession(QObject):
         self._opened_at: Optional[float] = None  # a pipeline play() not yet Playing
         self._ready_seen = False  # the session is ready: Stable may still wait for its cushion
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
-        # Bursty sources: (estimate, correction, when, position) at the last tick.
-        self._smoothed: Optional[tuple[float, float, float, float]] = None
+        # The mean lag over the source's arrival rhythm, and the lag as shown (2.1).
+        self._filter = LagFilter()
+        self._settled = SettledLag()
+        self._was_stalled = False  # the source had stalled at the last tick
         # Rate health: VLC's progress at stay-live's rates other than 1x (see _check_rate).
         self._health = RateHealth()
         self._crawl = RateHealth(_CRAWL_WINDOW_S, windows=_CRAWL_WINDOWS)  # HLS at 1x
@@ -403,7 +410,10 @@ class LiveSession(QObject):
         self._limited = None
         self._deferred = None
         self._after_update = self._retry = self._failing_since = None
-        self._edge_seen = self._smoothed = None
+        self._edge_seen = None
+        self._filter = LagFilter()  # a new source: its burst too is known afresh
+        self._settled.reset()
+        self._was_stalled = False
         self._rewound = False
         self._base = self._elapsed = 0.0
         self._last_ms, self._last_wall = 0, self._clock()
@@ -622,7 +632,10 @@ class LiveSession(QObject):
         self._after_update = self._retry = self._failing_since = None
         self._deferred = None
         self._snapshot_cache = {}
-        self._edge_seen = self._smoothed = None  # the reopened session starts afresh
+        self._edge_seen = None  # the reopened session starts afresh
+        self._filter = LagFilter()
+        self._settled.reset()
+        self._was_stalled = False
         self._recovery_timer.start(_RECOVERY_MS)
 
     def _stop_timers(self) -> None:
@@ -854,7 +867,9 @@ class LiveSession(QObject):
         if self._phase is not _Phase.PIPELINE:
             return  # it crawled at 1x: it plays directly now
         stalled = self._stalled(snapshot)
-        lag = max(0.0, self._smooth(snapshot, position, self._lag(snapshot, position), stalled))
+        self._observe(snapshot, stalled)
+        lag = max(0.0, self._mean_lag(snapshot, position))
+        self._settled.update(self._clock(), lag)
         # An ended source has no live edge left to stay near, and a paused player stays
         # where the pause leaves it (StayLive is SHIFTED then, or CATCHING_UP at a speed
         # the user chose while paused, which applies on resume). A stalled source and a
@@ -862,14 +877,14 @@ class LiveSession(QObject):
         # change and no reopen while nothing arrives.
         if not self._ended and not self._paused:
             self._back_off(snapshot, position, stalled, lag)
-            self._stay.target = self._target(snapshot)
-            self._stay.burst = _number(snapshot.get("burst_s"))
-            auto = self._auto
-            self._stay.build = self._stay.target if auto is not None and auto.adjusted else 0.0
+            self._stay.target = self._control_target()
+            self._stay.slack = self._target(snapshot) - self._stay.target
+            self._stay.burst = self._filter.burst
+            self._stay.spread = self._filter.spread()
             buffering = (
                 stalled or self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
             )
-            decision = self._stay.update(lag, buffering)
+            decision = self._stay.update(lag, buffering, now=self._clock())
             self._set_rate(decision.rate)
             if decision.reopen_live:
                 self._go_live(unpause=False)
@@ -1004,35 +1019,29 @@ class LiveSession(QObject):
         playing = self._playback.state() is PlaybackState.PLAYING
         return playing and self._clock() - self._clock_moved >= _FROZEN_S
 
-    def _smooth(
-        self, snapshot: Mapping[str, Any], position: float, lag: float, stalled: bool = False
-    ) -> float:
-        """For a bursty source, `lag` with the steps a burst brings eased over a few bursts.
+    def _observe(self, snapshot: Mapping[str, Any], stalled: bool) -> None:
+        """Give the lag filter this tick's live edge. A stalled source adds nothing (its
+        standing edge is no rhythm), and the filter starts afresh once it sends again: it may
+        come back ahead or behind where it was, a step taken in at once, not as a drift."""
+        if stalled:
+            self._was_stalled = True
+            return
+        if self._was_stalled:
+            self._was_stalled = False
+            self._filter.reset()
+        self._filter.add(
+            self._clock(),
+            self._live_edge(snapshot),
+            _number(snapshot.get("burst_s")),
+            self._since_edge_moved(snapshot),
+        )
 
-        Between bursts the mean lag changes by exactly the wall time less the play time
-        (pausing, catching up), and that passes unchanged. A landing burst adds a step: the
-        interval since the last one less the media it brought, which is how late or early it
-        lands or is seen (a state message or a tick). Such steps are noise around the
-        long-term mean, so they are taken in over `_EASE_BURSTS` bursts: otherwise arrival
-        jitter would nudge the rate again across StayLive's 1.0/1.05 band (0.2-0.75 s, spec
-        values) after every catch-up. A stall is no such noise: while it lasts nothing is
-        eased, and easing starts afresh once the edge moves again; so it does when a steady
-        source turns bursty (again).
-        """
-        burst = _number(snapshot.get("burst_s"))
-        if burst <= 0 or stalled:
-            # A steady source (a raw TS one may turn steady and later bursty again) eases
-            # nothing; a stall is no such noise either. Either way the easing starts afresh.
-            self._smoothed = None
-            return lag
-        now, correction = self._clock(), 0.0
-        if self._smoothed is not None:
-            last, correction, when, last_position = self._smoothed
-            elapsed = now - when
-            step = (lag - last) - (elapsed - (position - last_position))
-            correction = (correction - step) * math.exp(-elapsed / (burst * _EASE_BURSTS))
-        self._smoothed = (lag, correction, now, position)
-        return lag + correction
+    def _mean_lag(self, snapshot: Mapping[str, Any], position: float) -> float:
+        """The mean lag behind the live edge (`LagFilter`); before its first edge, and while
+        the source stalls (its edge stands; the filter would carry it on at real time), the
+        lag in closed form (`_lag`)."""
+        lag = None if self._was_stalled else self._filter.lag(self._clock(), position)
+        return self._lag(snapshot, position) if lag is None else lag
 
     def _since_edge_moved(self, snapshot: Mapping[str, Any]) -> float:
         edge, now = self._live_edge(snapshot), self._clock()
@@ -1041,11 +1050,8 @@ class LiveSession(QObject):
         return now - self._edge_moved
 
     def _reported_lag(self, snapshot: Mapping[str, Any], position: float) -> float:
-        """The lag StayLive saw at the last tick; the estimate before any tick."""
-        if self._smoothed is not None and _number(snapshot.get("burst_s")) > 0:
-            last, correction, _, _ = self._smoothed
-            return max(0.0, last + correction)
-        return max(0.0, self._lag(snapshot, position))
+        """The mean lag now: what StayLive acts on."""
+        return max(0.0, self._mean_lag(snapshot, position))
 
     def _emit_timeline(self) -> None:
         """The timeline's state. Under Auto latency `auto` is True and `adjusted` says the
@@ -1055,15 +1061,20 @@ class LiveSession(QObject):
         edge = self._live_edge(snapshot)
         position = min(self._base + self._elapsed, edge)
         auto = self._auto
+        lag = self._reported_lag(snapshot, position)
+        shown = self._settled.value
         self.timelineChanged.emit(
             {
                 "start": self._buffer_start(snapshot),
                 "end": _number(snapshot.get("end")),
                 "position": position,
                 "live_edge": edge,
-                "lag": self._reported_lag(snapshot, position),
+                "lag": lag,
+                # The lag as the Stay live indicator shows it: settled, in half seconds.
+                "shown": shown if shown is not None else SettledLag.rounded(lag),
                 "mode": self._stay.mode.value,
                 "rate": self._rate,
+                "nudge": self._stay.nudge,  # the rate a nudge ramps to (1.0: none)
                 "paused": self._paused,
                 "ended": self._ended,
                 "target": self._target(snapshot),
@@ -1086,6 +1097,14 @@ class LiveSession(QObject):
         """The latency's target, or the burst when that is larger; under Auto, plus what the
         channel added (`AutoTarget`)."""
         burst = _number(snapshot.get("burst_s"))
+        if self._auto is not None:
+            return self._auto.target(burst)
+        return max(TARGETS[self._latency], burst)
+
+    def _control_target(self) -> float:
+        """The target stay-live steers to: as `_target`, for the source's burst as the lag
+        filter classifies it (a burst the helper measures for a moment and drops is none)."""
+        burst = self._filter.burst
         if self._auto is not None:
             return self._auto.target(burst)
         return max(TARGETS[self._latency], burst)
@@ -1179,7 +1198,8 @@ class LiveSession(QObject):
         self._base, self._elapsed = self._start_of(seq), 0.0
         self._last_ms, self._last_wall = 0, self._clock()
         self._clock_moved = self._opened_at = self._last_wall
-        self._smoothed = None  # the old average says nothing about the new position
+        self._stay.absorb()  # the position starts afresh: a step, not a drift
+        self._settled.reset()  # and the lag shows where it landed at once
         self._rate_mark = self._rate_from = None  # rate health counts once this one plays
         self._health.reset()
         self._crawl.reset()
