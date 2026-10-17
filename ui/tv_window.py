@@ -1,7 +1,8 @@
 """The single TV window: the player and Library pages, the overlays and the menus (spec §5, §8).
 
-Two pages share the window (a QStackedWidget): the player (the native video surfaces, with the
-overlay host glued over them) and the Library (Movies and Series, spec §5.4). The player has
+Two pages share the window (a PageStack, ui/page_stack.py): the player (the native video
+surfaces, with the overlay host glued over them) and the Library (Movies and Series, spec
+§5.4); with the Library open, what plays goes on in a corner of it. The player has
 two surfaces, each with its own player, live session and tuner (spec §7, Phase 4): the PiP
 frame (ui/pip.py) fills the page with the large one and puts the other in a corner while
 picture in picture is open; the SessionManager says which is large. The moves between
@@ -48,7 +49,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
-    QStackedWidget,
     QWidget,
 )
 
@@ -84,6 +84,7 @@ from ui.logos import LogoCache, PosterCache
 from ui.macos_window import reclaim_first_responder
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
+from ui.overlays.corner_controls import CornerControls
 from ui.overlays.drawer import Drawer
 from ui.overlays.guide import Guide
 from ui.overlays.mixer import Mixer
@@ -93,6 +94,7 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import ZapBanner
+from ui.page_stack import PageStack
 from ui.pip import PipFrame
 from ui.pointer import PointerHider
 from ui.settings_dialog import OptionsDialog
@@ -324,13 +326,9 @@ class TVWindow(QMainWindow):
         self.posters = PosterCache(image_manager, config_manager, self)
         self.library_page = LibraryScreen(self.posters, self.logos)
         self.library_toast = Toast(self.library_page)  # the overlay host hides with the player
-        self.pages = QStackedWidget(self)
-        # The dark theme borders every QStackedWidget: the page and its overlays (the guide's
-        # dimming) would sit 1 px inside the window, leaving its outer pixel line uncovered.
-        self.pages.setObjectName("pages")
-        self.pages.setStyleSheet("QStackedWidget#pages { border: none; }")
-        self.pages.addWidget(self.player_page)
-        self.pages.addWidget(self.library_page)
+        # Both pages are always the stack's children: the player page is the whole picture, the
+        # Library, or a small one in a corner over the Library while it plays on.
+        self.pages = PageStack(self.player_page, self.library_page, config_manager, self)
         self.setCentralWidget(self.pages)
         # Glued to the page, not a surface: either surface may be the large one.
         self.host = OverlayHost(self, self.player_page)  # shown only while the page is
@@ -413,6 +411,7 @@ class TVWindow(QMainWindow):
         host = self.host
         self.pip_label = PipLabel(host)
         self.mixer = Mixer(host)
+        self.corner_controls = CornerControls(host)
         self.overlays = Overlays(
             banner=ZapBanner(host),
             column=ChannelColumn(self.logos, now_provider, parent=host),
@@ -441,6 +440,7 @@ class TVWindow(QMainWindow):
             self.overlays.guide,
             self.overlays.next_card,
             self.overlays.welcome,
+            self.corner_controls,
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
@@ -501,6 +501,13 @@ class TVWindow(QMainWindow):
         # ‹ Library on the player controls: back to the Library a title came from, as Esc.
         self.overlays.transport.libraryRequested.connect(self.screens.back_to_library)
         self.overlays.guide.searchRequested.connect(self.screens.open_search)
+        # The corner player (the Library with what plays in a corner of it): ⤢ and a click on
+        # it bring the player back, × stops it, the speaker mutes.
+        self.pages.modeChanged.connect(self._on_page_mode)
+        self.pages.cornerClicked.connect(self.screens.back_to_player)
+        self.corner_controls.backRequested.connect(self.screens.back_to_player)
+        self.corner_controls.stopRequested.connect(self.screens.stop_corner)
+        self.corner_controls.soundRequested.connect(self._on_corner_sound)
         # The Library's ⛶: the menu bar, with View → Fullscreen, hides in fullscreen.
         self.library_page.nav.fullscreenRequested.connect(self.toggle_fullscreen)
         self.overlays.welcome.addRequested.connect(self.add_provider)
@@ -543,6 +550,24 @@ class TVWindow(QMainWindow):
     def leave_mini_player(self) -> None:
         """Back to the normal window (nothing when it is not the mini player)."""
         self._leave_mini()
+
+    def _on_page_mode(self, mode: str) -> None:
+        """The pages moved: in the corner only its controls stay on the host, and the picture-
+        in-picture frame leaves the mouse to the corner player."""
+        corner = mode == PageStack.CORNER
+        self.pip_frame.set_interactive(not corner)
+        self.host.show_only(self.corner_controls if corner else None)
+        if corner:
+            self.corner_controls.set_muted(self.controller.main_muted())
+            self.corner_controls.show()
+        else:
+            self.corner_controls.hide()
+            if mode == PageStack.PLAYER and not self.pip_frame.small_rect().isEmpty():
+                self.pip_label.show()  # the corner hid it; the PiP only shows it when it opens
+
+    def _on_corner_sound(self) -> None:
+        self.controller.handle(Action.MUTE)
+        self.corner_controls.set_muted(self.controller.main_muted())
 
     # ---- input --------------------------------------------------------------------------------
 
