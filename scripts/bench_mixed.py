@@ -175,6 +175,7 @@ class Bench:
         self.clock.start()
         self._last_beat = 0
         self.max_gap = 0.0
+        self.sampled: dict[str, int] = {}
         self.label = "start"  # the step running now, for the stall report
         self.worst_step = ""
         self.stalls: list[tuple[int, str]] = []
@@ -282,6 +283,28 @@ TRACED = {  # where the GUI thread spends its time: "module:Class.method"
     "services.browsed_catalog:BrowsedCatalog._mixed_groups": 0,
     "services.browsed_catalog:BrowsedCatalog._versions": 0,
     "services.browsed_catalog:BrowsedCatalog.source": 0,
+    "services.library:LibraryModel._loaded_items": 0,
+    "services.library:LibraryModel._new_items": 0,
+    "services.library:LibraryModel._pinned_genres": 0,
+    "services.library:LibraryModel._fingerprint": 0,
+    "services.library:LibraryModel.genres": 0,
+    "services.library:LibraryModel.items": 0,
+    "services.library:LibraryModel.letter_index": 0,
+    "services.library:LibraryModel.available_sorts": 0,
+    "services.library:LibraryModel._on_section_ready": 0,
+    "services.library:LibraryModel.set_section": 0,
+    "ui.library_controller:LibraryController._on_model_changed": 0,
+    "ui.library_controller:LibraryController._refresh_grid": 0,
+    "ui.library_controller:LibraryController.open": 0,
+    "ui.library.genre_list:GenreList.set_genres": 0,
+    "ui.library.poster_grid:PosterGrid.set_sections": 0,
+    "ui.library.poster_grid:PosterGrid.set_letter_index": 0,
+    "ui.library_controller:LibraryController._show_hits": 0,
+    "ui.library.search_session:SearchSession._set_hits": 0,
+    "ui.library.search_session:SearchSession._on_done": 0,
+    "services.search:build_index": 0,
+    "services.search:search_index": 0,
+    "services.provider_manager:ProviderManager.get_all_providers_cached_content": 0,
 }  # fmt: skip
 TRACE: dict[str, list] = {}
 
@@ -327,6 +350,32 @@ def dump_trace(label: str) -> None:
         TRACE[key] = [0.0, 0]
 
 
+def start_sampler(bench: "Bench") -> None:
+    """While the GUI thread is late for its beat, note where every thread is (--sample)."""
+    import threading
+    import traceback
+
+    seen: dict[str, int] = {}
+
+    def loop() -> None:
+        main_id = threading.main_thread().ident
+        while True:
+            time.sleep(0.01)
+            late = (bench.clock.nsecsElapsed() - bench._last_beat) / 1e6
+            if not bench.recording or late < 60:
+                continue
+            for ident, frame in sys._current_frames().items():
+                where = traceback.extract_stack(frame)[-3:]
+                text = " < ".join(
+                    f"{os.path.basename(f.filename)}:{f.lineno} {f.name}" for f in where
+                )
+                key = ("MAIN " if ident == main_id else "other ") + bench.label + " | " + text
+                seen[key] = seen.get(key, 0) + 1
+
+    threading.Thread(target=loop, daemon=True).start()
+    bench.sampled = seen
+
+
 def _drawer_ready(window) -> Callable[[], bool]:
     drawer = window.overlays.drawer
     nav = window.nav
@@ -358,6 +407,7 @@ def run(args) -> int:
     from ui.keymap import Action
     from ui.tv_window import TVWindow
 
+    sys.setswitchinterval(args.switch)  # as main.py sets it
     if args.trace:
         install_trace()
     app = QApplication.instance() or QApplication(sys.argv)
@@ -377,8 +427,25 @@ def run(args) -> int:
     window.resize(1280, 720)
     window.show()
     bench = Bench(app, window)
+    import gc
+
+    gc_times: list[tuple[int, int, str]] = []
+    gc_start: list[float] = []
+
+    def watch_gc(phase: str, info: dict) -> None:
+        if phase == "start":
+            gc_start.append(time.perf_counter())
+        elif gc_start:
+            ms = (time.perf_counter() - gc_start.pop()) * 1000
+            if ms > 20:
+                gc_times.append((round(ms), info.get("generation", -1), bench.label))
+
+    gc.callbacks.append(watch_gc)
+    if args.sample:
+        start_sampler(bench)
     bench.profile = set(args.profile)
     res = bench.results
+    res["gc_over_20ms"] = gc_times
     names = window.catalogs.names()
     bench.settle(lambda: all(window.catalogs.is_ready(n) for n in names), 60)
     bench.idle(0.5)
@@ -492,6 +559,8 @@ def run(args) -> int:
     bench.idle(0.2)
     res["max_gui_stall_ms"] = round(bench.max_gap, 1)
     res["worst_stall_step"] = bench.worst_step
+    for key, count in sorted(bench.sampled.items(), key=lambda kv: -kv[1])[:25]:
+        print(f"sample {count:3d}  {key}", file=sys.stderr)
     res["stalls_over_100ms"] = bench.stalls
     import gc
 
@@ -537,6 +606,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--films", type=int, default=20000)
     parser.add_argument("--out", required=True)
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--switch", type=float, default=0.0005, help="sys.setswitchinterval(s)")
+    parser.add_argument("--sample", action="store_true", help="show where threads are in a stall")
     parser.add_argument("--trace", action="store_true", help="time the hot functions per step")
     parser.add_argument(
         "--profile", action="append", default=[], metavar="STEP", help="print a cProfile of STEP"

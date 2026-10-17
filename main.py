@@ -116,6 +116,10 @@ def main() -> int:
     qt_platform = qt_platform_override(platform.system(), os.environ)
     if qt_platform:
         os.environ["QT_QPA_PLATFORM"] = qt_platform
+    # A worker thread busy in Python (a search over 200,000 titles) otherwise keeps the GUI
+    # thread waiting up to 5 ms at every callback it makes: a 0.5 ms switch interval keeps
+    # the window responsive while it works.
+    sys.setswitchinterval(0.0005)
     app = QApplication(sys.argv)
 
     # Optional: capture Qt warnings to help debug thread/timer issues
