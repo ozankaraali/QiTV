@@ -20,13 +20,16 @@ class _KeepBases(dict):
 _KEEP_BASES = _KeepBases()
 
 
-def fold_all(texts: list[str]) -> list[str]:
-    """fold() of every text; one pass over the joined texts is far quicker than a call each
-    (200,000 channel names), and each text is folded on its own, as it would be alone."""
-    folded = fold("\n".join(texts)).split("\n")
-    if len(folded) == len(texts):
-        return folded
-    return [fold(text) for text in texts]  # a text held a line break itself
+def fold_all(texts: list[str], chunk: int = 4096) -> list[str]:
+    """fold() of every text; a pass over the joined texts is far quicker than a call each
+    (200,000 channel names), and each text is folded on its own, as it would be alone. Done
+    `chunk` texts at a time, so that another thread is never kept waiting for long."""
+    folded: list[str] = []
+    for start in range(0, len(texts), chunk):
+        part = texts[start : start + chunk]
+        done = fold("\n".join(part)).split("\n")
+        folded.extend(done if len(done) == len(part) else (fold(text) for text in part))
+    return folded
 
 
 def fold(text: str) -> str:

@@ -703,6 +703,62 @@ class MixedProvidersTests(unittest.TestCase):
         self.assertEqual(model.genre_id, "*")
 
 
+class AllListsEverythingTests(unittest.TestCase):
+    """The loaded titles come from All alone when All holds them (200,000 channels' worth of
+    genre lists repeating it cost a third of a second), but not for a portal that gives its
+    titles genre by genre."""
+
+    def catalog(self, kind, groups=None, entries=None):
+        cat = FakeCatalog(
+            {"movies": groups or [("*", "All", 3), ("1", "Drama", 2), ("2", "Comedy", 1)]},
+            {
+                ("movies", "*"): [movie(1), movie(2), movie(3)],
+                ("movies", "1"): [movie(1), movie(2)],
+                ("movies", "2"): [movie(9, "Only in a genre")],
+            },
+        )
+        cat.provider_type = lambda: kind
+        if entries is not None:
+            cat.provider_entry = lambda name: {"type": entries[name]}
+        asked = []
+        items = cat.items
+        cat.items = lambda section, gid: asked.append(gid) or items(section, gid)
+        return cat, asked
+
+    def test_xtream_loads_what_all_lists_and_reads_no_genre(self):
+        cat, asked = self.catalog("XTREAM")
+        model, _cfg = build(cat)
+        self.assertEqual([m["id"] for m in model._loaded_items()], ["1", "2", "3"])
+        self.assertNotIn("2", asked)
+
+    def test_a_portal_adds_its_genres_to_all(self):
+        cat, _asked = self.catalog("STB")
+        model, _cfg = build(cat)
+        self.assertEqual([m["id"] for m in model._loaded_items()], ["1", "2", "3", "9"])
+
+    def test_all_providers_use_all_unless_one_is_a_portal(self):
+        groups = [("*", "All", 3), ("P", "P", None), ("1", "Drama", 2), ("2", "Comedy", 1)]
+        for kinds, expected in (
+            ({"P": "XTREAM"}, ["1", "2", "3"]),
+            ({"P": "STB"}, ["1", "2", "3", "9"]),
+        ):
+            cat, _asked = self.catalog("ALL", groups, kinds)
+            cat.mixed = True
+            cat.headers = {"P"}
+            model, _cfg = build(cat)
+            provider_groups = cat.groups
+
+            def with_providers(section, _groups=provider_groups):
+                return [
+                    Group(**{**vars(g), "provider": "P" if g.id == "P" else ""})
+                    for g in _groups(section)
+                ]
+
+            cat.groups = with_providers
+            model._memo.clear()
+            self.assertEqual([m["id"] for m in model._loaded_items()], expected, kinds)
+
+
 class LargeGenreTests(unittest.TestCase):
     def test_opening_a_large_genre_parses_each_added_date_once(self):
         items = [movie(i, added=str(1700000000 + i)) for i in range(3000)]

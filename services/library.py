@@ -20,8 +20,7 @@ from PySide6.QtCore import QObject, Signal
 
 from services import favorites
 from services.catalog import ALL_GROUP_ID
-from services.navigation import item_key
-from services.provider_ids import ALL_PROVIDERS, provider_of, with_provider
+from services.provider_ids import ALL_PROVIDERS, PROVIDER_KEY, provider_of, with_provider
 from services.text_fold import fold
 from services.watch_state import WatchState
 
@@ -91,6 +90,11 @@ _title = title_of  # the earlier private name
 def _added(item: dict) -> Optional[float]:
     """The unix time of ``added`` (a unix time or ``YYYY-MM-DD[ HH:MM:SS]``), else None."""
     raw = item.get("added")
+    if raw.__class__ is str and raw.isdecimal():  # a unix time as text, the usual case
+        value = int(raw)
+        if value <= 0:
+            return None
+        return value / 1000 if value > 1e11 else float(value)
     if raw is None or isinstance(raw, bool):
         return None
     text = str(raw).strip()
@@ -479,18 +483,48 @@ class LibraryModel(QObject):
         return self._content_id(item, {"episode": "episode", "series": "serie"}.get(kind, "movie"))
 
     # --- loaded items / pinned --------------------------------------------------------
+    def _all_lists_everything(self, groups: list) -> bool:
+        """Whether the All genre holds every title: every provider lists All (an STB portal
+        gives its titles genre by genre, so its genres add to it)."""
+        if not groups or groups[0].id != ALL_GROUP_ID or groups[0].count is None:
+            return False
+        if self._catalog.items(self._section, ALL_GROUP_ID) is None:
+            return False
+        try:
+            names = [g.provider for g in groups if g.header]
+            if names:
+                return all(
+                    str(self._catalog.provider_entry(n).get("type", "")).upper() != "STB"
+                    for n in names
+                )
+            return str(self._catalog.provider_type()).upper() != "STB"
+        except AttributeError, KeyError:
+            return False
+
     def _loaded_items(self) -> list[dict]:
         if not self._available:
             return []
 
         def build() -> list[dict]:
+            missing = object()
             seen: set[tuple[str, str]] = set()
+            same: set[int] = set()  # a genre lists the dicts All does: told apart by identity
             out: list[dict] = []
-            for group in self._catalog.groups(self._section):
+            groups = self._catalog.groups(self._section)
+            if self._all_lists_everything(groups):
+                groups = groups[:1]  # the genres only repeat what All lists
+            for group in groups:
                 if group.count is None:  # not fetched yet; a provider's heading
                     continue
                 for item in self._catalog.items(self._section, str(group.id)) or []:
-                    key = (provider_of(item), item_key(item))
+                    if id(item) in same:
+                        continue
+                    same.add(id(item))
+                    # (provider_of(item), navigation.item_key(item)) inlined: 40,000 titles a time
+                    ident = item.get("id", missing)
+                    if ident is missing:
+                        ident = item.get("cmd", item.get("name", ""))
+                    key = (item.get(PROVIDER_KEY) or "", str(ident))
                     if key not in seen:
                         seen.add(key)
                         out.append(item)

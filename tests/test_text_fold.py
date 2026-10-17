@@ -50,6 +50,11 @@ class FoldTests(unittest.TestCase):
         self.assertEqual(fold_all(["a", "B"]), ["a", "b"])
         self.assertEqual(fold_all([]), [])
 
+    def test_fold_all_in_chunks_equals_one_pass(self):
+        texts = [f"Kanal {n} Café İz" if n % 3 else f"News {n}" for n in range(25)]
+        self.assertEqual(fold_all(texts, chunk=4), [fold(t) for t in texts])
+        self.assertEqual(fold_all(texts, chunk=1000), [fold(t) for t in texts])
+
     def test_fold_all_keeps_the_rows_when_a_text_has_a_line_break(self):
         texts = ["One\nTwo", "Three", "Fôur"]
         self.assertEqual(fold_all(texts), [fold(t) for t in texts])
