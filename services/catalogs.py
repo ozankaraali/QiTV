@@ -11,6 +11,7 @@ each catalog gets its own pinned `ProviderManager` (and `EpgManager`) over that 
 from __future__ import annotations
 
 from datetime import datetime
+import gc
 import itertools
 import logging
 from typing import Callable, Iterator, Optional
@@ -180,6 +181,7 @@ class Catalogs(QObject):
 
     def _on_ready(self, name: str) -> None:
         self._ready.add(name)
+        gc.freeze()  # the provider's catalog (up to 57,000 channels) is not scanned again
         self.providerReady.emit(name)
         self.contentChanged.emit(name)
         catalog = self._by_name.get(name)
