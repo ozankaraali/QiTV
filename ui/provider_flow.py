@@ -223,7 +223,8 @@ class ProviderFlow(QObject):
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._closed():
             return
-        self._drop_links()
+        if self._provider is None or name == self._provider:
+            self._drop_links()  # a browsed provider's failure drops nothing of another's
         self._end_loading()
         self._error(f"{name}: {message}" if name else message)
         # The sources, on the failed one, with a row to connect again: never a black screen.

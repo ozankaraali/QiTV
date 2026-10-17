@@ -1206,22 +1206,17 @@ class TVController(QObject):
     def _settle_links(self, provider_changed: bool) -> Optional[Target]:
         """A provider became ready: the newest choice to ask again, its links dropped.
 
-        A setup makes the catalog drop link results requested before it, so a request still
-        in flight may never settle. A changed provider's channels are the old one's: nothing
-        is asked again, the zapping, the Next card and the guide start over, and the small
-        picture closes.
+        A setup makes that provider's catalog drop the link results requested before it, so
+        a request still in flight may never settle: it is asked again. A different provider
+        becoming the one the list shows changes nothing that plays or waits: no catalog
+        dropped anything, so no link is dropped and none is asked again.
         """
+        if provider_changed:
+            return None
         pending = self._lanes.pending()
         if self._is_stay(pending):
             pending = None  # the playing channel was the newest choice: nothing to ask again
-        self._drop_links(ask_again=not provider_changed)
-        if provider_changed:
-            self.zap.reset()
-            self._channel = None
-            pending = None
-            self._autoplay.drop()
-            self._guide.close()  # its channels are the old provider's
-            self._close_pip()  # the small picture's channel and stream are too
+        self._drop_links(ask_again=True)
         return pending
 
     def _drop_links(self, *, ask_again: bool) -> None:

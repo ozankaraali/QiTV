@@ -633,6 +633,32 @@ class PipTests(PipCase):
         self.assertIs(self.sessions.large(), self.pip_slot)
 
 
+class BrowsingProviderPipTests(PipCase):
+    """Choosing another provider in the list changes the list only."""
+
+    def test_browsing_another_provider_stops_nothing(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        before = self.counts()
+        self.controller.select_provider("Backup")
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")
+        self.assertTrue(self.sessions.pip_open())
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(self.zap.context.group_key, "10")
+        self.controller.handle(Action.CH_NEXT)  # the zap list is still the playing provider's
+        self.assertEqual(self.requested()[-1], "Three")
+
+    def test_a_link_on_its_way_still_arrives_after_browsing(self):
+        self.tune(0)
+        self.controller.select_provider("Backup")
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: self.live.named("start")))
+        self.assertEqual(self.live.named("start")[0][0], "http://stream/1")
+
+
 class MixedProviderPipTests(PipCase):
     """The small picture's limit and slot are those of its channel's own provider."""
 

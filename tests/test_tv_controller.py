@@ -798,17 +798,28 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.toast.messages(), [("MPV Media Player is not installed.", "error")])
         self.assertEqual(self.watch.plays, [])
 
-    def test_provider_change_drops_pending_tunes(self):
+    def test_browsing_another_provider_keeps_the_pending_tune(self):
         self.catalog.providerReady.emit("Home")
-        self.tune(0)  # the catalog drops its result once the provider changes
+        self.tune(0)  # a link on its way
         self.controller.select_provider("Backup")
         self.assertEqual(self.catalog.selected[-1], "Backup")
-        self.tune(1)  # an old-provider channel, queued behind the dropped request
         self.catalog.provider = "Backup"
         self.catalog.providerReady.emit("Backup")
-        self.assertEqual(self.requested(), ["One"])
-        self.tune(2)  # the pipeline is free again
-        self.assertEqual(self.requested(), ["One", "Three"])
+        self.assertEqual(self.requested(), ["One"])  # nothing asked again, nothing dropped
+        self.ready("http://stream/1")  # the link still arrives
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+
+    def test_browsing_another_provider_keeps_the_zap_list_and_the_guide(self):
+        self.catalog.providerReady.emit("Home")
+        self.play(0)
+        self.controller.handle(Action.GUIDE)
+        self.catalog.provider = "Backup"
+        self.catalog.providerReady.emit("Backup")
+        self.assertEqual(self.zap.context.group_key, "10")
+        self.assertEqual(len(self.zap.context.channels), len(CHANNELS))
+        self.assertTrue(self.guide.visible)
+        self.assertEqual(self.guide.named("close_guide"), [])
+        self.assertEqual(self.session.stops, 0)
 
     def test_provider_refresh_requests_the_pending_tune_again(self):
         self.catalog.providerReady.emit("Home")
@@ -1655,7 +1666,7 @@ class ReviewFixTests(ControllerTestCase):
         self.catalog.linkReady.emit(1, "http://stream/3")
         self.assertEqual(self.requested(), ["Three", "Four"])
 
-    def test_another_provider_resets_zapping(self):
+    def test_another_provider_in_the_list_keeps_zapping(self):
         self.catalog.providerReady.emit("Home")
         self.play(0)
         self.play(1)  # previous channel: One
@@ -1663,7 +1674,7 @@ class ReviewFixTests(ControllerTestCase):
         self.catalog.providerReady.emit("Backup")
         self.controller.handle(Action.PREVIOUS)
         self.controller.handle(Action.CH_NEXT)
-        self.assertEqual(self.requested(), ["One", "Two"])  # nothing of Home's is tuned
+        self.assertEqual(self.requested(), ["One", "Two", "One", "Two"])  # Home's list walks on
 
     def test_link_failure_while_loading_waits_for_the_provider(self):
         self.catalog.providerReady.emit("Home")

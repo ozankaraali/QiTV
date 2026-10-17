@@ -497,6 +497,16 @@ class NavModelTests(unittest.TestCase):
         self.assertIsNone(self.nav.provider_error(home))
         self.assertEqual(self.nav.path, [home])
 
+    def test_a_provider_error_of_another_provider_survives_a_ready(self):
+        backup = self.nav.children(None)[1]
+        self.catalog.providerFailed.emit("Backup", "down")
+        self.catalog.providerReady.emit("Home")
+        self.assertEqual(self.nav.provider_error(backup), "down")
+        self.assertTrue(self.nav.needs_setup(backup))
+
+    def test_a_ready_provider_needs_no_setup(self):
+        self.assertFalse(self.nav.needs_setup(self.nav.children(None)[1]))
+
     def test_the_ready_current_provider_is_not_set_up_again(self):
         self.catalog.providerReady.emit("Home")
         self.nav.open(self.nav.children(None)[0])

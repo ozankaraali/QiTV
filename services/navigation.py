@@ -294,11 +294,9 @@ class NavModel(QObject):
         return self._provider_errors.get(node.key) if node.layer == "source" else None
 
     def needs_setup(self, node: NavNode) -> bool:
-        """Opening this source starts a provider setup: another provider, or a failed one."""
+        """Opening this source starts a provider setup again: its last one failed."""
         if node.layer != "source":
             return False
-        if node.key != self.catalog.current_provider_name():
-            return True
         return node.key in self._provider_errors and not self.catalog.is_loading()
 
     def retry(self, node: NavNode) -> None:
@@ -377,12 +375,14 @@ class NavModel(QObject):
 
     def open(self, node: NavNode) -> None:
         if node.layer == "source":
-            # The current provider is set up again when its last setup failed.
-            if self.needs_setup(node):
-                self._provider_errors.pop(node.key, None)
-                self.catalog.select_provider(node.key)
-                self.providerRequested.emit(node.key)
+            # Another provider is only shown (its setup runs once, if it has not); the
+            # current one is set up again when its last setup failed. A ready provider
+            # answers at once and reopens its list, so the path is set first.
             self._path = [node]
+            if self.needs_setup(node) or node.key != self.catalog.current_provider_name():
+                self._provider_errors.pop(node.key, None)
+                self.providerRequested.emit(node.key)
+                self.catalog.select_provider(node.key)
         else:
             depth = {"section": 1, "group": 2, "item": 3, "season": 4, "episode": 5}[node.layer]
             self._path = self._path[:depth] + [node]
@@ -532,7 +532,7 @@ class NavModel(QObject):
         self._pending.clear()
         self._requested_sections.clear()
         self._errors.clear()
-        self._provider_errors.clear()
+        self._provider_errors.pop(name, None)
         self._ready_sections.clear()
         self._pending_group = None
         if not self._path or self._path[0].key != name:
