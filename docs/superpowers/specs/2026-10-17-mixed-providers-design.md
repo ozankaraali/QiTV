@@ -1,8 +1,9 @@
-# Mixing providers: every item from its own provider (design)
+# QiTV 2.1: mixed providers and uninterrupted playback (design)
 
 Status: agreed in conversation with the owner on 2026-10-17, ready for a plan.
-Branch: `tv/vlc`. Builds on the 2.0 TV shell (`2026-10-15-tv-on-vlc-design.md`); it replaces
-that spec's rule that changing provider stops what plays (R5's provider part).
+Branch: `tv/vlc`, shipping as 2.1. Builds on the 2.0 TV shell
+(`2026-10-15-tv-on-vlc-design.md`); it replaces that spec's rule that changing provider,
+opening the Library or searching stops what plays (R5).
 
 ## Why
 
@@ -22,11 +23,18 @@ whichever account has it. In their words:
   vendor 3 channel 5 before"
 - on the Library: "library already has all channel search, it shouldnt be hard to implement
   all there either" (confirmed: the Library gets "All providers" too)
+- on stars: "your faves also kept mapped"
+- on scale: "it can be more than 2 vendors, so effectively you may need to store/navigate
+  200+k channels for 4 vendors for example, that's why we download and cache"
+- on playback: "I expect to have noninterrupted video play. so if someone watches tv and
+  decides to search, or go watch movies, we take playing video as inner pip(s)." (in this
+  release, not a later one)
 
 Success: with two accounts set up, the owner watches a channel from one in the big picture
 and a channel from the other in the PiP, swaps them, zaps on either, browses any provider (or
-all of them) without anything stopping, and finds channels, films and series from every
-account in one list, one Library and one history.
+all of them), searches and goes through the Library without the video ever stopping, and
+finds channels, films and series from every account (four or more of them) in one list, one
+Library and one history.
 
 ## Goals
 
@@ -72,9 +80,12 @@ account in one list, one Library and one history.
     Library's quick search, which already covers every provider's channels, films and series
     (`TVPages.open_search`). A hit from another provider now plays from its own provider, with
     no provider switch (today `LibraryController` switches first: "Switching to …"). Typing in
-    the drawer keeps filtering the focused column, mixed lists included. Opening the search
-    still stops playback, as today; keeping the picture playing while searching (a mini player
-    in the search and the Library) is the next project, not this one.
+    the drawer keeps filtering the focused column, mixed lists included.
+12. **Playback never stops for navigation.** Opening the search or the Library no longer stops
+    what plays (today `TVPages._enter_library` → `stop_for_library`). The picture(s) that were
+    playing come along as small pictures inside the Library page ("inner PiP(s)"): the big
+    picture, and the PiP too when there was one. They keep playing, with the sound that was
+    on. See "Inner pictures" below for the details.
 11. **Stream limits stay per provider.** The connection budget already counts per provider
     (`services/connection_budget.py`): two pictures from two providers that each allow one
     stream both play.
@@ -84,7 +95,6 @@ account in one list, one Library and one history.
 - No merging of groups or genres across providers by name, and no de-duplication of items
   that several providers carry.
 - No new STB keep-alive: QiTV sends none today (checked), and a second STB sign-in adds none.
-- No mini player in the search or the Library (the next project).
 
 ## Anti-goals (a failure even if the feature works)
 
@@ -98,10 +108,12 @@ account in one list, one Library and one history.
 - **One account's trouble breaks the others.** A provider that fails to sign in or refresh
   keeps its saved items listed; playing one says that provider couldn't be reached, and the
   other providers keep working.
-- **It gets slow with big accounts.** One of the owner's accounts has 57,359 live channels;
-  two such accounts give 100,000+ channels in "All", in search and in the drawer. The 2.0
-  performance pass measured 2,500 channels / 20,000 films; the drawer, the Library, search and
-  the guide stay usable at this size, measured before and after.
+- **It gets slow with big accounts.** One of the owner's accounts has 57,359 live channels,
+  and the owner expects four or more providers: 200,000+ channels in "All", in search and in
+  the drawer, plus their films and series. Lists come from each provider's downloaded cache
+  (as now), never from the network while browsing. The 2.0 performance pass measured 2,500
+  channels / 20,000 films; the drawer, the Library, search and the guide stay usable at
+  200,000+ channels across 4 providers, measured before and after.
 
 ## Calls made in the conversation (agent's, not contradicted by the owner)
 
@@ -130,6 +142,30 @@ account in one list, one Library and one history.
   source last browsed (a provider or All providers), and a launch reopens them there.
   "Start with last channel" tunes the last channel from its own provider.
 
+## Inner pictures (goal 12)
+
+The owner chose "the TV shrinks" (layout B in the mockup review): "it is basically a native
+resize trick feel, like we put your mainscreen here while you navigate". The player as it
+was, the big picture with its PiP inside it, is resized into a corner of the Library page,
+about a quarter of the window; nothing is rearranged or reopened.
+
+Agent's calls, not contradicted by the owner:
+
+- **One frame, one set of buttons**: sound, ⤢ back to the full TV, × stop. Draggable to another
+  corner (the PiP's snapping rules). The PiP inside it keeps its place within the picture,
+  scaled with it.
+- **Back to TV.** ⤢, a click on the frame, Esc or ‹ (as today's way back) returns to the
+  player page with both pictures where they were; nothing restarts.
+- **Playing a movie or an episode from the Library.** It takes the big picture. What was the
+  big picture becomes the small picture (the PiP) and keeps playing; a previous small picture
+  closes, since QiTV has two players. If the movie's provider has no free stream, the small
+  picture holding that provider's stream closes to make room, and a notice says so.
+- **Search the same.** The search lives in the Library page, so the same corner player shows
+  there; picking a channel hit tunes it in the big picture as a channel pick does.
+- **Stream limits and the time-shift ring** are those of the pictures that keep playing:
+  nothing reopens, and a live picture keeps its ring (going back shows it where it was).
+- **Mouse rule.** The corner player's buttons are at least 28 px (the mouse audit).
+
 ## Where the code assumes one provider today
 
 Reading aids for the plan, not a design (counts of `current_provider`/`current_provider_name`
@@ -145,7 +181,11 @@ current provider; `links_dropped` closes the PiP on a provider setup), `ui/tv_co
 `ui/tv_menus.py`, `ui/export_flow.py`, `ui/settings_dialog.py` (2 each). `StbHandshake` in
 `services/provider_manager.py` already signs in to a portal on its own (Settings' Verify uses
 it in isolation). Streams are opened with the VLC user agent only (`ui/live_tuner.py`), so no
-provider headers travel with a stream.
+provider headers travel with a stream. For goal 12: the video surfaces are native child widgets
+of the player page (`ui/video_surface.py`, `ui/pip.py`'s frame, the overlay host glued over
+them), and the Library is another page of the window's stack (`ui/tv_pages.py`); on macOS a
+native view must stay attached while it moves over the Library page (the mini player mode,
+`MINI_WIDTH_FRACTION`, already resizes the whole window around a playing picture).
 
 ## Constraints
 
@@ -164,13 +204,16 @@ provider headers travel with a stream.
   provider, browsing another provider while both pictures keep playing, swap then Enter
   (the list opens at the big picture's channel), zapping and numbers in mixed and own lists,
   the mixed history and ⟲ across providers, the star migration, a provider that fails to sign
-  in, and the one-provider behaviour unchanged.
-- Performance: a synthetic catalog with two providers of ~57,000 channels each (and their
-  films): the drawer, the "All" group, the Library's "All providers", search and the guide,
-  before and after.
+  in, the one-provider behaviour unchanged, and the inner pictures (opening the search and the
+  Library with one and two pictures playing, back to TV, a movie taking the big picture,
+  stream limits honoured, nothing restarted).
+- Performance: a synthetic catalog with 4 providers and 200,000+ channels in all (and their
+  films and series): the drawer, the "All" group, the Library's "All providers", search and
+  the guide, before and after; memory at start and after browsing.
 - Real: the owner's two accounts (2 streams and 1 stream): big picture from one, PiP from the
-  other, browse the other provider and the Library meanwhile, swap, zap on both, quit, with
-  never more streams open than each allows.
+  other, browse the other provider, search and the Library meanwhile (the pictures keep
+  playing inside), play a film, swap, zap on both, quit, with never more streams open than
+  each allows.
 
 ## Left to the builder
 
