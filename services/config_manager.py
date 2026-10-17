@@ -146,6 +146,8 @@ class ConfigManager:
     TIMESHIFT_RAM_CHOICES = (128, 256, 512)
     DEFAULT_OPTION_PIP_CORNER = "br"  # picture in picture: the small picture's corner
     PIP_CORNER_CHOICES = ("br", "bl", "tr", "tl")
+    DEFAULT_OPTION_CORNER_PLAYER_CORNER = "bottom-right"  # what plays, small, over the Library
+    CORNER_PLAYER_CORNER_CHOICES = ("top-left", "top-right", "bottom-left", "bottom-right")
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
     TV_DEFAULTS_VERSION = 2
     DEFAULT_TV_WINDOW = {"x": 80, "y": 80, "width": 1280, "height": 720}
@@ -396,6 +398,11 @@ class ConfigManager:
         "pip_corner",
         DEFAULT_OPTION_PIP_CORNER,
         coerce=_one_of(PIP_CORNER_CHOICES, DEFAULT_OPTION_PIP_CORNER),
+    )
+    corner_player_corner = _config_property(
+        "corner_player_corner",
+        DEFAULT_OPTION_CORNER_PLAYER_CORNER,
+        coerce=_one_of(CORNER_PLAYER_CORNER_CHOICES, DEFAULT_OPTION_CORNER_PLAYER_CORNER),
     )
     pip_volume = _config_property(
         "pip_volume", DEFAULT_OPTION_PIP_VOLUME, coerce=int, clamp=(0, 100)

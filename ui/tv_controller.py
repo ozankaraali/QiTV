@@ -440,6 +440,42 @@ class TVController(QObject):
         self._live_controls.stop_tune()
         self._current, self._cid = None, None
 
+    def playing(self) -> bool:
+        """Something plays, or its stream is opening."""
+        return not self._closed and self._has_media()
+
+    def enter_library_playing(self) -> None:
+        """The window opens the Library with the player in a corner (2.1): what plays keeps
+        playing and nothing stops.
+
+        The drawer, the zap column and banner, the controls, the mixer, the guide, a number being
+        typed and the Next card close (the overlays are gone from the corner player). Until
+        leave_library_playing(), a provider change neither tunes the last channel nor opens
+        the drawer, as in the Library.
+        """
+        if self._closed:
+            return
+        self._flow.enter_library()
+        self._guide.close()
+        if self._digits:
+            self.zap.cancel_digits()
+        overlays = self.overlays
+        overlays.column.close()
+        overlays.drawer.close_drawer()
+        overlays.banner.dismiss()
+        overlays.transport.dismiss()
+        self._mixer.hide()
+        self._autoplay.drop()  # the Next card, and a wait for the next season
+
+    def leave_library_playing(self) -> None:
+        """The player page is back from the corner: live TV and the drawer act as before."""
+        if not self._closed:
+            self._flow.leave_library()
+
+    def main_muted(self) -> bool:
+        """Whether the large picture is muted."""
+        return self._mixer.main_muted()
+
     def resume_live(self) -> None:
         """Back to live TV from the Library (R5): the last live channel again, else the drawer
         (see ProviderFlow.resume_live)."""

@@ -55,6 +55,7 @@ from ui.keymap import SHORTCUTS, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.overlays.zap_banner import BannerInfo
+from ui.page_stack import PageStack
 from ui.settings_dialog import OptionsDialog
 from ui.shortcuts_dialog import ShortcutsDialog, table_rows
 from ui.tv_menus import ISSUES_URL, AboutDialog
@@ -207,17 +208,17 @@ class TVWindowTests(WindowCase):
         window = self.window
         self.assertIsInstance(window.host, OverlayHost)
         self.assertIs(window.centralWidget(), window.pages)
-        self.assertEqual(
-            [window.pages.widget(i) for i in range(window.pages.count())],
-            [window.player_page, window.library_page],
-        )
+        self.assertIsInstance(window.pages, PageStack)
+        self.assertIs(window.player_page.parentWidget(), window.pages)
+        self.assertIs(window.library_page.parentWidget(), window.pages)
+        self.assertEqual(window.pages.mode(), PageStack.PLAYER)
         self.assertIs(window.pages.currentWidget(), window.player_page)
         # The video container a second (PiP) surface can join: the surface fills it.
         self.assertIs(window.surface.parentWidget(), window.player_page)
         self.assertEqual(window.surface.geometry(), window.player_page.rect())
 
     def test_the_player_page_and_its_overlays_reach_the_windows_edges_under_the_theme(self):
-        # The dark theme gives every QStackedWidget a 1-px border: the page and the overlay host
+        # The dark theme gave the old QStackedWidget a 1-px border: the page and the overlay host
         # sat 1 px inside it, and the guide's dimming left the outer pixel line undimmed.
         previous = self.app.styleSheet()
         self.addCleanup(self.app.setStyleSheet, previous)
@@ -225,7 +226,6 @@ class TVWindowTests(WindowCase):
         self.show()
         window = self.window
         window.host.sync_geometry()
-        self.assertEqual(window.pages.frameWidth(), 0)
         self.assertEqual(window.player_page.geometry(), window.pages.rect())
         whole = QRect(window.pages.mapToGlobal(QPoint(0, 0)), window.pages.size())
         self.assertEqual(window.host.geometry(), whole)
@@ -1485,9 +1485,15 @@ class TwoProviderCase(WindowCase):
         session = self.window.session
         self.assertTrue(wait_until(lambda: session.state() == PlaybackState.IDLE))
 
+    def stop_corner_player(self):
+        """Back in the Library, a movie plays on in the corner: × stops it, then it is idle."""
+        if self.window.pages.mode() == PageStack.CORNER:
+            self.window.screens.stop_corner()
+        self.wait_idle()
+
 
 class LibraryWindowTests(TwoProviderCase):
-    def test_view_movies_opens_the_library_stops_live_and_hides_the_overlays(self):
+    def test_view_movies_opens_the_library_and_the_channel_plays_on_in_a_corner(self):
         plays = self.play_spy()
         self.open_first_channel()
         window = self.window
@@ -1500,14 +1506,21 @@ class LibraryWindowTests(TwoProviderCase):
         actions = self.menu_actions()
         actions["Movies"].trigger()
         self.assertIs(window.pages.currentWidget(), window.library_page)
-        self.wait_idle()
-        self.assertFalse(window.host.isVisible())
-        # The stream's slot goes back once the release gate has let go of it.
-        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == []))
+        self.assertEqual(window.pages.mode(), PageStack.CORNER)
+        if INSTANCE is not None:
+            self.assertIn(window.session.state(), (PlaybackState.OPENING, PlaybackState.PLAYING))
+        # Only the corner player's controls stay on the host; the stream keeps its slot.
+        self.assertEqual(window.host.visible_overlays(), [window.corner_controls])
+        self.assertEqual(plays, [channel_urls()[0]])
         self.assertTrue(window.library_toast.isVisible())  # messages show on the Library
         for text in ("Guide", "Channel List", "Play/Pause", "Mute", "Previous Channel"):
             self.assertFalse(actions[text].isEnabled(), text)  # the player's keys
         self.assertTrue(actions["Fullscreen"].isEnabled())
+        window.screens.stop_corner()  # ×: it stops, the Library stays
+        self.wait_idle()
+        self.assertEqual(window.pages.mode(), PageStack.LIBRARY)
+        self.assertFalse(window.host.isVisible())
+        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == []))
 
     def test_live_tv_tunes_the_last_channel_again(self):
         plays = self.play_spy()
@@ -1516,6 +1529,7 @@ class LibraryWindowTests(TwoProviderCase):
         self.assertTrue(wait_until(lambda: plays == [first]))
         actions = self.menu_actions()
         actions["Movies"].trigger()
+        self.window.screens.stop_corner()  # it would play on in the corner otherwise
         self.wait_idle()
         actions["Live TV"].trigger()
         self.assertIs(self.window.pages.currentWidget(), self.window.player_page)
@@ -1597,7 +1611,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertIs(window.pages.currentWidget(), window.library_page)
         self.assertEqual(grid.current_index(), 1)
         self.assertIs(grid.item(1), current)  # the same title, not a reloaded list
-        self.wait_idle()
+        self.stop_corner_player()
 
     def test_the_library_button_returns_to_the_library_where_it_was(self):
         # 2.0.1 review I1: ‹ Library on the player controls does what Esc does after a movie.
@@ -1615,7 +1629,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertIs(window.pages.currentWidget(), window.library_page)
         self.assertEqual(grid.current_index(), 1)
         self.assertIs(grid.item(1), current)  # the same title, not a reloaded list
-        self.wait_idle()
+        self.stop_corner_player()
 
     def test_the_library_button_returns_to_the_series_on_its_episode(self):
         plays = self.play_spy()
@@ -1645,7 +1659,7 @@ class XtreamLibraryTests(TwoProviderCase):
         QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
         self.assertEqual(heard.events, [])
         self.assertEqual(len(plays), 1)
-        self.wait_idle()
+        self.stop_corner_player()
 
     def test_a_posters_right_click_menu_copies_its_link_and_says_so_on_the_library(self):
         # Owner (2026-10-15): a Library title offers the channels' Play in VLC/MPV and link.

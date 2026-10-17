@@ -51,6 +51,7 @@ class OverlayHost(QWidget):
         self._surface = surface
         self._overlays: list[QWidget] = []
         self._hole = QRect()  # the PiP (see set_hole)
+        self._only: QWidget | None = None  # see show_only
         self._attached_id = 0
         # macOS: from a minimize until the platform reports the window restored, the window
         # counts as in the Dock here, whatever Qt's state says (see _update_visibility).
@@ -107,6 +108,16 @@ class OverlayHost(QWidget):
     def overlay_changed(self) -> None:
         self._update_mask()
         self._update_visibility()
+
+    def show_only(self, widget: QWidget | None) -> None:
+        """Hide every overlay but `widget`, and keep them hidden whenever they ask to show
+        (the corner player: only its controls over the small video). None: all as before.
+        What was hidden stays hidden; each overlay shows again when it is next wanted."""
+        self._only = widget
+        if widget is not None:
+            for overlay in self._overlays:
+                if overlay is not widget and isValid(overlay):
+                    overlay.hide()
 
     def visible_overlays(self) -> list[QWidget]:
         return [w for w in self._overlays if isValid(w) and w.isVisibleTo(self)]
@@ -223,6 +234,8 @@ class OverlayHost(QWidget):
                 # X11 window managers can report a restore before the window's state settles:
                 # look once more when the events are through (the Linux smoke's restore check).
                 self._settle_check.start()
+        elif obj in self._overlays and kind == QEvent.Type.Show and self._not_shown_now(obj):
+            obj.hide()
         elif obj in self._overlays and kind in (QEvent.Type.Resize, QEvent.Type.Move):
             self._update_mask()
         elif (
@@ -232,6 +245,9 @@ class OverlayHost(QWidget):
         ):
             self._raise_on_top()  # an overlay raised itself over the toast
         return False
+
+    def _not_shown_now(self, widget: QWidget) -> bool:
+        return self._only is not None and widget is not self._only
 
     # Clicks that reach the host itself (on transparent parts of overlays that let them through,
     # and the Back/Forward buttons, which the overlays pass on).
