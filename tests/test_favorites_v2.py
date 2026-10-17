@@ -87,6 +87,29 @@ class StarsPerProviderTests(unittest.TestCase):
         self.assertTrue(all(isinstance(e, str) for e in self.config.favorites))
         self.assertEqual(self.config.favorites, ["News", "Film", "Sports"])
 
+    def test_migrate_repairs_favorites_that_hold_entries(self):
+        held = [
+            {"name": "News", "provider": "*"},
+            {"name": "News", "provider": "Demo TV", "off": True},
+            {"name": "Sports", "provider": "Harbor IPTV"},
+        ]
+        self.config.favorites = [dict(e) for e in held]
+        self.assertTrue(favorites.migrate(self.config))
+        self.assertEqual(self.config.favorites, ["News", "Sports"])
+        self.assertEqual(self.config.provider_favorites, held)
+        self.assertFalse(favorites.is_favorite(self.config, self.item("News", "Demo TV")))
+        self.assertTrue(favorites.is_favorite(self.config, self.item("Sports", "Harbor IPTV")))
+        self.assertFalse(favorites.migrate(self.config))
+
+    def test_migrate_repairs_favorites_when_provider_favorites_exists(self):
+        held = [{"name": "Sports", "provider": "Harbor IPTV"}]
+        self.config.provider_favorites = [dict(e) for e in held]
+        self.config.favorites = [dict(e) for e in held]
+        self.assertTrue(favorites.migrate(self.config))
+        self.assertTrue(all(isinstance(e, str) for e in self.config.favorites))
+        self.assertEqual(self.config.favorites, ["Sports"])
+        self.assertEqual(self.config.provider_favorites, held)
+
     def test_an_unstamped_toggle_stars_and_unstars_everywhere(self):
         self.assertTrue(favorites.toggle(self.config, self.item("News")))
         self.assertEqual(self.config.favorites, ["News"])
