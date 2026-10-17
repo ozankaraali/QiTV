@@ -312,7 +312,7 @@ class NavModel(QObject):
         if not name or not own_id:
             return False  # the mixed All, or a provider's heading: the sections as a whole
         try:
-            return self.catalog.provider(name).get("type") == "STB"
+            return self.catalog.provider_entry(name).get("type") == "STB"
         except KeyError:
             return False
 

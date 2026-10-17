@@ -28,6 +28,9 @@ from services.provider_manager import ProviderManager
 
 
 class FakeEpg:
+    def __init__(self, name=""):
+        self.name = name  # the recording factory notes whose guide is loaded
+
     def release(self):
         pass
 
@@ -102,7 +105,7 @@ class BrowsedCatalogTests(unittest.TestCase):
             self.registry,
             runner=ImmediateRunner(),
             factory=self.factory,
-            make_epg=lambda manager: FakeEpg(),
+            make_epg=lambda manager: FakeEpg(manager._pinned_provider),
         )
         self.addCleanup(self.catalogs.shutdown)
 
