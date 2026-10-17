@@ -1613,8 +1613,12 @@ class TVController(QObject):
         if not self.catalog.provider_names():
             self._flow.welcome()
             return
-        # Where the big picture's channel was picked (after a swap, the new large one's).
+        # Where the big picture's channel was picked (after a swap, the new large one's); while
+        # the fast-zap column is open the user is choosing in it, so the list opens at the zap's
+        # own channel and group, as before 2.1.
         shown = self._current if self._current is not None and self._current.live else None
+        if self.overlays.column.isVisible():
+            shown = None
         if shown is not None:
             self.nav.reveal(
                 shown.source,
