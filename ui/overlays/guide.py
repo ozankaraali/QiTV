@@ -316,7 +316,8 @@ class Guide(Overlay):
 
     def visible_channels(self) -> list[dict]:
         """The channels of the rows on screen (their programmes are looked up)."""
-        return self._channels[self._visible_rows(self._layout())]
+        rows = self._visible_rows(self._layout())
+        return self._channels[rows.start : rows.stop]
 
     # ---- state ------------------------------------------------------------------------------
 
