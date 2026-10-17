@@ -200,9 +200,14 @@ class NodeSeq(Sequence):
                 narrowed = seq.matching(needle)
                 self._narrowed = (needle, narrowed)
                 return narrowed
-        folded = self._folded_titles(wait=False)
-        if folded is None:  # still folding in the background: show the list as it is
-            return self
+        if self._folded is None:
+            # Never folded on the GUI thread (200,000 titles): start it in the background if
+            # it has not, and show the list as it is until it ends.
+            if self._folding is None:
+                self._fold_in_background()
+            if self._folded is None:
+                return self
+        folded = self._folded
         rows = [row for row, title in enumerate(folded) if needle in title]
         narrowed = NodeSeq(
             [self.items[row] for row in rows],

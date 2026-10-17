@@ -65,6 +65,7 @@ class NodeSeqTests(unittest.TestCase):
 
     def test_matching_folds_narrows_and_remembers_the_source_rows(self):
         seq = NodeSeq(channels(30))
+        seq._folded_titles()  # (folded ahead, as the drawer does a moment after showing)
         cafe = seq.matching("cafe")  # "Café" folds to "cafe"
         self.assertEqual([n.key for n in cafe], [str(n) for n in range(3, 31, 3)])
         self.assertEqual([cafe.source_row(r) for r in range(3)], [2, 5, 8])
@@ -89,10 +90,22 @@ class NodeSeqTests(unittest.TestCase):
         self.assertIs(seq._folded_titles(), folded)
         self.assertEqual([n.key for n in seq.matching("cafe 3")], ["3", "30"])
 
+    def test_filtering_before_any_fold_starts_it_in_the_background_not_here(self):
+        seq = NodeSeq(channels(30))
+        started = []
+        with mock.patch.object(NodeSeq, "_fold_in_background", lambda s: started.append(s)):
+            self.assertIs(seq.matching("cafe"), seq)  # unfiltered; nothing folded on this thread
+        self.assertEqual(started, [seq])
+        self.assertIsNone(seq._folded)
+        seq._folded_titles()  # the background fold ends
+        self.assertEqual(len(seq.matching("cafe")), 10)
+
     def test_filtering_while_the_titles_are_still_folding_shows_the_list_as_it_is(self):
         seq = NodeSeq(channels(30))
-        with seq._lock:  # the background fold holds it
-            self.assertIs(seq.matching("cafe"), seq)
+        seq._folding = object()  # a fold is under way
+        self.assertIs(seq.matching("cafe"), seq)
+        seq._folding = None
+        seq._folded_titles()
         self.assertEqual(len(seq.matching("cafe")), 10)
 
     def test_numbers_and_their_width(self):
@@ -129,6 +142,10 @@ class LazyDrawerTests(DrawerTests):
         patch = mock.patch.object(navigation, "LAZY_ROWS", 1)
         patch.start()
         self.addCleanup(patch.stop)
+        # the titles are folded in the background a moment after a list shows: here, at once
+        fold = mock.patch.object(NodeSeq, "_fold_in_background", lambda seq: seq._folded_titles())
+        fold.start()
+        self.addCleanup(fold.stop)
         super().setUp()
 
 

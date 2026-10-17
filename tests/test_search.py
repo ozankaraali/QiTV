@@ -182,13 +182,24 @@ class LoadedContentTests(unittest.TestCase):
         self.addCleanup(manager._cache_writer.shutdown, wait=True)
         manager.providers = [{"name": "P", "type": "XTREAM", "url": "https://example.test/b"}]
 
-        class Growing(dict):
-            def items(self):
-                for pair in list(super().items()):
-                    self["series"] = {}  # added meanwhile
-                    yield pair
+        class Meanwhile(str):
+            """A key that adds a section to its dict when the loader compares it (as the GUI
+            thread could between two of the loader's steps)."""
 
-        held = {"P": Growing(itv=[{"name": "A"}], vod=[{"name": "B"}])}
+            target: dict = {}
+
+            def __ne__(self, other):
+                self.target.setdefault("series", {})
+                return str.__ne__(self, other)
+
+            __hash__ = str.__hash__
+
+        class Growing(dict):
+            pass
+
+        grown = Growing({Meanwhile("itv"): [{"name": "A"}], "vod": [{"name": "B"}]})
+        Meanwhile.target = grown
+        held = {"P": grown}
         found = dict(manager.get_all_providers_cached_content(held))
         self.assertEqual(set(found["P"]), {"itv", "vod"})
 
