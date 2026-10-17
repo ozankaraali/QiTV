@@ -20,6 +20,7 @@ from PySide6.QtCore import QObject
 
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode
+from services.provider_ids import ALL_PROVIDERS, with_provider
 from services.zapping import ZapContext
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,10 @@ class ProviderFlow(QObject):
         self._autotune: Optional[tuple[dict, str]] = None
         self._in_library = False  # the window shows the Library: nothing live starts
         self._live_on_ready = False  # back from the Library during a setup: tune once ready
+        # The last channel of a provider other than the one browsed: (provider, stamped item),
+        # tuned once that provider's own catalog has its channels.
+        self._foreign: Optional[tuple[str, dict]] = None
+        self._foreign_asked = False
 
     def wire(self) -> None:
         catalog = self.catalog
@@ -73,6 +78,10 @@ class ProviderFlow(QObject):
         catalog.sectionReady.connect(self._on_section_ready)
         catalog.sectionFailed.connect(self._on_section_failed)
         self.nav.providerRequested.connect(self._on_provider_requested)
+        hub = self._hub()
+        if hub is not None:
+            hub.contentChanged.connect(self._try_foreign)
+            hub.providerFailed.connect(self._on_foreign_failed)
 
     # ---- the shell's calls --------------------------------------------------------------------
 
@@ -97,6 +106,7 @@ class ProviderFlow(QObject):
         self._in_library = True
         self._live_on_ready = False
         self._autotune = None
+        self._foreign = None
 
     def in_library(self) -> bool:
         """The window shows the Library (from enter_library until the player is back)."""
@@ -109,6 +119,7 @@ class ProviderFlow(QObject):
     def drop_autotune(self) -> None:
         """A choice made before the live section loaded comes first."""
         self._autotune = None
+        self._foreign = None
 
     def resume_live(self) -> None:
         """Back to live TV from the Library (R5): the last live channel again, else the drawer.
@@ -135,10 +146,13 @@ class ProviderFlow(QObject):
             return
         if last is not None and self._tune_last(*last):
             return
+        if last is None and self._start_foreign(self._foreign_channel(name)):
+            return
         self._open_drawer()
 
     def shutdown(self) -> None:
         self._autotune = None
+        self._foreign = None
         self._loading = False
 
     # ---- hints --------------------------------------------------------------------------------
@@ -189,22 +203,94 @@ class ProviderFlow(QObject):
             idle and not self._in_library and (back_to_live or self.config.start_with_last_channel)
         )
         self._autotune = last if wanted else None
+        self._foreign = None
+        if wanted and last is None:
+            self._start_foreign(self._foreign_channel(name))
         self._await_live = True
         if last is not None:
             self.nav.reset_to("live", last[1])
         else:
             self.nav.reset_to("live")
 
-    def _last_channel(self, provider: str) -> Optional[tuple[dict, str]]:
-        """The last live channel watched on `provider` and its group, from the config."""
+    def _last_record(self) -> Optional[tuple[str, dict, str]]:
+        """(provider, item, group) of the last live channel from the config, if any."""
         record = self.config.last_live_channel
         if (
             isinstance(record, dict)
-            and record.get("provider_name") == provider
             and isinstance(record.get("item"), dict)
+            and isinstance(record.get("provider_name"), str)
         ):
-            return record["item"], str(record.get("group_id") or ALL_GROUP_ID)
+            return record["provider_name"], record["item"], str(record.get("group_id") or "")
         return None
+
+    def _last_channel(self, provider: str) -> Optional[tuple[dict, str]]:
+        """The last live channel watched on `provider` and its group, from the config.
+
+        When the list mixes every provider, the last channel of any provider still in the
+        list (stamped with it), looked up among all of them.
+        """
+        last = self._last_record()
+        if last is None:
+            return None
+        owner, item, group = last
+        if provider == ALL_PROVIDERS and owner in self.catalog.provider_names():
+            return with_provider(item, owner), ALL_GROUP_ID
+        if owner == provider:
+            return item, group or ALL_GROUP_ID
+        return None
+
+    def _foreign_channel(self, browsed: str) -> Optional[tuple[str, dict]]:
+        """The last live channel when it belongs to another provider than the one browsed."""
+        last = self._last_record()
+        mixed = getattr(self.catalog, "all_providers", lambda: False)()
+        if last is None or self._hub() is None or mixed or browsed == ALL_PROVIDERS:
+            return None
+        owner, item, _group = last
+        if owner == browsed or owner not in self.catalog.provider_names():
+            return None
+        return owner, with_provider(item, owner)
+
+    def _hub(self):
+        """The catalogs hub behind the page's view (None for a single plain catalog)."""
+        return getattr(self.catalog, "catalogs", None)
+
+    def _start_foreign(self, foreign: Optional[tuple[str, dict]]) -> bool:
+        """Tune `foreign` from its own provider's catalog once it has its channels."""
+        if foreign is None:
+            return False
+        self._foreign, self._foreign_asked = foreign, False
+        self._hub().ensure(foreign[0])
+        self._try_foreign()
+        return True
+
+    def _try_foreign(self, *_args) -> None:
+        if self._foreign is None or self._closed():
+            return
+        hub = self._hub()
+        owner, item = self._foreign
+        if not hub.is_ready(owner):
+            return
+        catalog = hub.catalog(owner)
+        if not catalog.has_content("live"):
+            if not self._foreign_asked:
+                self._foreign_asked = True
+                catalog.request_section("live")
+            return
+        self._foreign = None
+        if self._has_media() or self._in_library:
+            return  # something else was chosen meanwhile
+        channels = list(catalog.items("live", ALL_GROUP_ID) or [])
+        found = next((c for c in channels if ZapContext.same(c, item)), None)
+        if found is None:
+            logger.info("The last channel %r is no longer listed", item.get("name"))
+            self._open_drawer_if_idle()
+            return
+        self._tune(found, ALL_GROUP_ID, channels)
+
+    def _on_foreign_failed(self, name: str, _message: str) -> None:
+        if self._foreign is not None and self._foreign[0] == name:
+            self._foreign = None
+            self._open_drawer_if_idle()
 
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._closed():
@@ -237,6 +323,8 @@ class ProviderFlow(QObject):
             return  # back to live TV decides (resume_live)
         if autotune is not None and self._tune_last(*autotune):
             return
+        if self._foreign is not None:
+            return  # the last channel of another provider is on its way
         self._open_drawer_if_idle()
 
     def _on_section_failed(self, section: str, message: str) -> None:
