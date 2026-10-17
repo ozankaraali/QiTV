@@ -44,10 +44,12 @@ class TVPages(QObject):
         self._return_to_library = False  # the movie playing came from the Library
         # After ‹ Library, ⌕ and the Movies/Series rows: see back_to_library.
         self._second_click = SecondClickGuard(self)
-        self.library_model = LibraryModel(window.catalog, window.config_manager, window.watch, self)
+        self.library_model = LibraryModel(
+            window.library_catalog, window.config_manager, window.watch, self
+        )
         self.library_controller = LibraryController(
             config=window.config_manager,
-            catalog=window.catalog,
+            catalog=window.library_catalog,
             model=self.library_model,
             watch=window.watch,
             screen=window.library_page,
@@ -60,7 +62,7 @@ class TVPages(QObject):
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)
-        window.catalog.providerFailed.connect(self._on_provider_failed)
+        window.library_catalog.providerFailed.connect(self._on_provider_failed)
         window.overlays.drawer.libraryRequested.connect(self.open_library)
 
     # ---- pages --------------------------------------------------------------------------------
@@ -235,8 +237,10 @@ class TVPages(QObject):
         window = self._window
         if window.closing():
             return
-        section = self.library_controller.section if self.library_shown() else None
-        window.exports.export(kind, section or "live")
+        shown = self.library_shown()
+        section = self.library_controller.section if shown else None
+        catalog = window.library_catalog if shown else window.catalog
+        window.exports.export(kind, section or "live", catalog)
 
     # ---- messages -----------------------------------------------------------------------------
 

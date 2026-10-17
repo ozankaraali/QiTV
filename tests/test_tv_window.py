@@ -148,6 +148,10 @@ class WindowCase(unittest.TestCase):
     def prepare_config(self) -> None:
         """Change the configuration before the window is built."""
 
+    def tv_catalog(self):
+        """The CatalogService behind the TV page (the window's catalog is a browsed view)."""
+        return self.window.catalogs.catalog(self.window.catalog.source())
+
     def close_window(self):
         # One close(); the window's retry timer runs the steps (stop, threads, release). The
         # timer check also covers windows that were never shown.
@@ -282,7 +286,7 @@ class TVWindowTests(WindowCase):
         # An XMLTV download or an STB crawl held the close for up to 30 s (H10).
         window = self.window
         with (
-            mock.patch.object(window.catalog.runner, "cancel_all", create=True) as catalog,
+            mock.patch.object(self.tv_catalog().runner, "cancel_all", create=True) as catalog,
             mock.patch.object(window.jobs, "cancel_all", create=True) as library,
         ):
             self.close_window()
@@ -726,7 +730,7 @@ class TVWindowTests(WindowCase):
 
     def test_close_stops_the_catalog_before_new_jobs_can_start(self):
         # A provider setup still running when the close begins must not start an EPG load.
-        catalog = self.window.catalog
+        catalog = self.tv_catalog()
         gate = threading.Event()
         self.addCleanup(gate.set)
         create_setup = catalog.factory.provider_setup
@@ -770,7 +774,7 @@ class TVWindowTests(WindowCase):
             return next(waits, False)
 
         with (
-            mock.patch.object(window.catalog, "shutdown", side_effect=lambda: calls.append("x")),
+            mock.patch.object(window.catalogs, "shutdown", side_effect=lambda: calls.append("x")),
             mock.patch.object(window.session, "stop", side_effect=lambda: calls.append("stop")),
             mock.patch.object(
                 window.session,
@@ -781,7 +785,7 @@ class TVWindowTests(WindowCase):
                 self.image_manager, "save_index", side_effect=lambda: calls.append("images")
             ),
             mock.patch.object(
-                self.epg_manager, "save_index", side_effect=lambda: calls.append("epg")
+                window.catalogs, "save_epg_indexes", side_effect=lambda: calls.append("epg")
             ),
             mock.patch("ui.tv_window.has_pending_threads", side_effect=pending),
         ):
@@ -942,7 +946,7 @@ class StuckWorker(QObject):
         time.sleep(30)
 
 
-window.catalog.runner.run_worker(StuckWorker(), lambda *a: None, lambda *a: None)
+window.catalogs.catalog(window.catalog.source()).runner.run_worker(StuckWorker(), lambda *a: None, lambda *a: None)
 window.show()
 QTimer.singleShot(300, window.close)
 print("exec returned", app.exec(), flush=True)
@@ -1227,7 +1231,7 @@ class LivePipelineWindowTests(WindowCase):
 
             return call
 
-        live, engine, catalog = window.live_session, window.engine, window.catalog
+        live, engine, catalog = window.live_session, window.engine, window.catalogs
         for obj, name in ((live, "stop"), (engine, "shutdown"), (catalog, "shutdown")):
             patcher = mock.patch.object(
                 obj, name, spy(f"{type(obj).__name__}.{name}", getattr(obj, name))
@@ -1240,7 +1244,7 @@ class LivePipelineWindowTests(WindowCase):
         with self.assertNoLogs("services.live.live_session", "WARNING"):  # no close-cap warning
             self.close_window()  # it also checks that no background thread is left
         self.assertEqual(
-            order[:3], ["LiveSession.stop", "LiveEngine.shutdown", "CatalogService.shutdown"]
+            order[:3], ["LiveSession.stop", "LiveEngine.shutdown", "Catalogs.shutdown"]
         )
 
     def test_a_windows_self_update_stops_the_pipeline_before_waiting_for_threads(self):
@@ -2112,7 +2116,7 @@ class OptionsDialogTests(WindowCase):
         dialog.epg_url_input.setText("http://epg.invalid/guide.xml")
         with (
             mock.patch.object(self.window.catalog, "refresh_epg") as refresh_epg,
-            mock.patch.object(self.epg_manager, "set_current_epg") as set_current_epg,
+            mock.patch.object(self.tv_catalog().epg_manager, "set_current_epg") as set_current_epg,
         ):
             dialog.save_settings()
         refresh_epg.assert_called_once_with(force=True)

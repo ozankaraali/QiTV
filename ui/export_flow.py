@@ -61,7 +61,7 @@ class ExportFlow(QObject):
     def __init__(
         self,
         *,
-        provider_manager,
+        catalog,  # the TV page's (export() may name the Library's)
         config,
         runner,
         notify: Notify,
@@ -69,7 +69,7 @@ class ExportFlow(QObject):
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
-        self._provider_manager = provider_manager
+        self._catalog = catalog
         self._config = config
         self._runner = runner
         self._notify = notify
@@ -82,14 +82,15 @@ class ExportFlow(QObject):
         """An export runs (also while a cancelled one winds down)."""
         return self._cancel is not None
 
-    def export(self, kind: ExportKind, section: str) -> None:
-        """Check, ask for a path, then export. `section` is what the screen shows."""
+    def export(self, kind: ExportKind, section: str, catalog=None) -> None:
+        """Check, ask for a path, then export. `section` is what the screen shows and
+        `catalog` the page's browsed catalog (its provider is what is exported)."""
         if self._closed:
             return
         if self.running():
             self._notify(BUSY_TEXT, "info", INFO_MS)
             return
-        manager = self._provider_manager
+        manager = (catalog or self._catalog).provider_manager
         provider = dict(manager.current_provider or {})
         content = manager.current_provider_content or {}
         reason = export_available(kind, provider, section, content)

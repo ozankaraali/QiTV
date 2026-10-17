@@ -234,6 +234,11 @@ class ProviderManager(QObject):
                     self.current_provider = provider
                     break
 
+        if not self.current_provider and self._pinned_provider:
+            # A provider deleted in Settings must not be served as another one.
+            logger.warning("The pinned provider is no longer in the list")
+            raise LookupError("This provider is no longer in your list.")
+
         # if provider not found, set the first one
         if not self.current_provider:
             self.current_provider = self.providers[0]
