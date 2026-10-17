@@ -444,6 +444,10 @@ class BrowsedCatalog(QObject):
         self._memo[("all", section)] = (versions, result)
         return result
 
+    def loaded_contents(self) -> dict[str, dict]:
+        """The content each provider's catalog holds now (read only), by provider name."""
+        return self._catalogs.loaded_contents()
+
     def seasons(self, series: dict) -> Optional[list[dict]]:
         catalog = self._for(series)
         return catalog.seasons(series) if catalog is not None else None

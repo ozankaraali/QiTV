@@ -100,6 +100,14 @@ class CatalogsTests(unittest.TestCase):
         self.assertTrue(self.catalogs.is_ready("Harbor IPTV"))
         self.assertFalse(self.catalogs.is_ready("Demo TV"))
 
+    def test_the_ready_providers_hold_their_content_for_search_to_read(self):
+        self.assertEqual(self.catalogs.loaded_contents(), {})  # nothing is set up yet
+        self.catalogs.ensure("Harbor IPTV")
+        QTest.qWait(30)
+        loaded = self.catalogs.loaded_contents()
+        self.assertEqual(list(loaded), ["Harbor IPTV"])
+        self.assertEqual(loaded["Harbor IPTV"]["itv"]["contents"][0]["name"], "Four")
+
     def test_link_ids_are_unique_across_providers(self):
         ids = {
             self.catalogs.request_link(with_provider({"cmd": "x"}, n), section="live")

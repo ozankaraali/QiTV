@@ -261,16 +261,20 @@ class ProviderManager(QObject):
         progress_callback.emit("Provider setup complete.")
         return accepted
 
-    def get_all_providers_cached_content(self):
+    def get_all_providers_cached_content(self, loaded=None):
         """Return cached content for all configured providers.
 
         Returns list of (provider_name, content_dict) tuples.
-        Only includes providers that have been loaded/cached.
+        Only includes providers that have been loaded/cached. `loaded` maps a provider's name
+        to the content its catalog holds in memory: that is used instead of reading (and
+        parsing) the provider's cache file again, which for 200,000 channels takes seconds.
         """
         results = []
         for provider in self.providers:
             name = provider.get("name", "Unknown")
-            cache = self._load_provider_cache(provider)
+            cache = loaded.get(name) if loaded else None
+            if cache is None:
+                cache = self._load_provider_cache(provider)
             # Playlists offer live channels only; an older catalog may have stored the
             # playlist again under "vod" or "series".
             playlist = str(provider.get("type", "")).upper() not in ("STB", "XTREAM")

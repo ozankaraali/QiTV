@@ -166,6 +166,18 @@ class Catalogs(QObject):
     def is_ready(self, name: str) -> bool:
         return name in self._ready
 
+    def loaded_contents(self) -> dict[str, dict]:
+        """The content the catalogs of the ready providers hold in memory, by provider name:
+        what Search reads instead of parsing every cache file again (read only)."""
+        loaded: dict[str, dict] = {}
+        for name in self.names():
+            catalog = self._by_name.get(name)
+            if catalog is not None and name in self._ready:
+                content = catalog.provider_manager.current_provider_content
+                if isinstance(content, dict) and content:
+                    loaded[name] = content
+        return loaded
+
     def _on_ready(self, name: str) -> None:
         self._ready.add(name)
         self.providerReady.emit(name)
