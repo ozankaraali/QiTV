@@ -980,25 +980,33 @@ class SmallWidthLayoutTests(unittest.TestCase):
                     self.assertFalse(t.grab().isNull())
 
     def test_without_room_for_minus_and_plus_the_speed_shows_alone(self):
-        # A mini player, shifted, with Go live: the number alone, readable; it goes back to 1x.
+        # Shifted, with Go live, in narrow windows: − 1.25x +, else the number alone (readable,
+        # it goes back to 1x), else nothing. Where each starts depends on the font's widths.
         t = Transport(idle_ms=3000)
         self.addCleanup(t.close)
-        t.setGeometry(0, 0, 300, 169)
         t.set_pip_state(True, False)
         t.show_timeshift("One", "")
-        t.update_timeline(self.state("shifted", 300.0, 1.5), [])
-        rects = t._layout()
-        self.assertNotIn("slower", rects)
-        self.assertNotIn("faster", rects)
-        fm = QFontMetricsF(t._chip_font(Units(300)))
-        self.assertGreaterEqual(rects["speed"].width(), fm.horizontalAdvance("1.25x"))
-        self.assertFalse(rects["speed"].intersects(rects["golive"]))
-        for name in ("speed", "golive"):  # as tall as their text at the font's floor
-            self.assertGreaterEqual(rects[name].height(), fm.height(), name)
-        spy = QSignalSpy(t.speedRequested)
-        QTest.mouseClick(t, Qt.LeftButton, Qt.NoModifier, rects["speed"].center().toPoint())
-        self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [1.0])
-        self.assertFalse(t.grab().isNull())
+        states = {}
+        for width in range(300, 642, 2):
+            t.setGeometry(0, 0, width, round(width * 9 / 16))
+            t.update_timeline(self.state("shifted", 300.0, 1.5), [])
+            rects = t._layout()
+            shown = tuple(n for n in ("slower", "speed", "faster") if n in rects)
+            states[width] = shown
+            with self.subTest(width=width, shown=shown):
+                self.assertIn(shown, (("slower", "speed", "faster"), ("speed",), ()))
+                fm = QFontMetricsF(t._chip_font(Units(width)))
+                self.assertGreaterEqual(rects["golive"].height(), fm.height())
+                if shown != ("speed",):
+                    continue
+                self.assertGreaterEqual(rects["speed"].width(), fm.horizontalAdvance("1.25x"))
+                self.assertGreaterEqual(rects["speed"].height(), fm.height())
+                self.assertFalse(rects["speed"].intersects(rects["golive"]))
+                spy = QSignalSpy(t.speedRequested)
+                QTest.mouseClick(t, Qt.LeftButton, Qt.NoModifier, rects["speed"].center().toPoint())
+                self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [1.0])
+                t.set_speed(1.5)
+        self.assertEqual(states[640], ("slower", "speed", "faster"))
 
     def test_the_title_rows_controls_stay_inside_at_any_width(self):
         for width in self.WIDTHS:
