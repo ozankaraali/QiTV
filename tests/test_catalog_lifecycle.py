@@ -298,7 +298,7 @@ class CatalogQueueTests(unittest.TestCase):
         runner.complete(4)
         started = [c[2]["category_id"] for c in factory.calls]
         self.assertEqual(started, ["1", "2", "5", "4", "3"])
-        self.assertEqual(service.items("movies", "3"), [{"id": 1}])
+        self.assertEqual(service.items("movies", "3"), [{"id": 1, "_provider": "S"}])
 
     def test_waiting_request_asked_again_is_not_duplicated_and_goes_next(self):
         runner = ManualRunner()
