@@ -159,6 +159,39 @@ class CachedContentTests(unittest.TestCase):
 
 
 class LoadedContentTests(unittest.TestCase):
+    def test_a_group_added_while_the_worker_reads_does_not_break_it(self):
+        from services.search import iter_items
+
+        content = {"contents": {"g1": [{"name": "A"}], "g2": [{"name": "B"}]}}
+        seen = []
+        for item in iter_items(content):
+            seen.append(item["name"])
+            content["contents"]["g3"] = [{"name": "C"}]  # the GUI thread loads a group
+        self.assertEqual(seen, ["A", "B"])
+
+    def test_a_section_added_while_the_loader_reads_does_not_break_it(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = SimpleNamespace(
+            get_config_dir=lambda: directory.name,
+            selected_provider_name="P",
+            prefer_https=False,
+            ssl_verify=True,
+        )
+        manager = ProviderManager(config)
+        self.addCleanup(manager._cache_writer.shutdown, wait=True)
+        manager.providers = [{"name": "P", "type": "XTREAM", "url": "https://example.test/b"}]
+
+        class Growing(dict):
+            def items(self):
+                for pair in list(super().items()):
+                    self["series"] = {}  # added meanwhile
+                    yield pair
+
+        held = {"P": Growing(itv=[{"name": "A"}], vod=[{"name": "B"}])}
+        found = dict(manager.get_all_providers_cached_content(held))
+        self.assertEqual(set(found["P"]), {"itv", "vod"})
+
     def test_a_providers_content_in_memory_is_not_read_from_disk_again(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

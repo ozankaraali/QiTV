@@ -37,7 +37,7 @@ def iter_items(content: Any) -> Iterator[dict]:
     if isinstance(contents, list):
         yield from (i for i in contents if isinstance(i, dict))
     elif isinstance(contents, dict):
-        for group in contents.values():
+        for group in list(contents.values()):  # (the GUI thread may add a group meanwhile)
             if isinstance(group, list):
                 yield from (i for i in group if isinstance(i, dict))
 

@@ -11,7 +11,6 @@ for nothing.
 from __future__ import annotations
 
 from dataclasses import replace
-import gc
 import itertools
 import logging
 from typing import Callable, Optional
@@ -180,7 +179,6 @@ class SearchSession(QObject):
         caches, index, hits = payload
         if snapshot == self._snapshot and self._index is None:
             self._caches, self._index = caches, index  # titles are folded once per snapshot
-            gc.freeze()  # 250,000 index rows the collector need not scan again
         if self._closed:
             return
         if self._queued:

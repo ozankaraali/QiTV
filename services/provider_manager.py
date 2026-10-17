@@ -280,7 +280,7 @@ class ProviderManager(QObject):
             playlist = str(provider.get("type", "")).upper() not in ("STB", "XTREAM")
             content = {
                 key: value
-                for key, value in cache.items()
+                for key, value in list(cache.items())
                 if key != "_cache" and not (playlist and key in ("vod", "series"))
             }
             if content:
