@@ -20,7 +20,13 @@ from PySide6.QtCore import QObject, Signal
 
 from services import favorites
 from services.catalog import ALL_GROUP_ID
-from services.provider_ids import ALL_PROVIDERS, PROVIDER_KEY, provider_of, with_provider
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    PROVIDER_KEY,
+    provider_of,
+    split_group_id,
+    with_provider,
+)
 from services.text_fold import fold
 from services.watch_state import WatchState
 
@@ -702,8 +708,9 @@ class LibraryModel(QObject):
         genre = str(item.get("genre") or item.get("genres_str") or "")
         current = self._genre
         # Else the genre the title is listed under; a shelf (Continue, New, My list) or a
-        # group such as "All" names none.
-        if not genre and current not in PINNED_TITLES and current not in _NOT_GENRES:
+        # group such as "All" names none (a provider's own too, under its heading).
+        own = split_group_id(current)[1] if current is not None else None
+        if not genre and current not in PINNED_TITLES and own not in _NOT_GENRES:
             genre = next((g.title for g in self.genres() if g.id == current), "")
         return Details(
             title=_title(item),

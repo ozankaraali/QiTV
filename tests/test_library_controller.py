@@ -1074,6 +1074,17 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.played_names(), ["Salt Roads"])
         self.assertEqual(self.catalog.current_provider_name(), ALL_PROVIDERS)
 
+    def test_all_providers_titles_have_their_menu_while_another_provider_sets_up(self):
+        # Sweep A6: in All providers is_loading() is true while any provider sets up, so no
+        # title had a menu meanwhile; a title's links wait for its own provider at the hub.
+        self.mix()
+        ctl = self.build()
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        self.catalog.loading = True
+        self.screen.grid.contextRequested.emit(1, QPoint(1, 2))
+        self.assertEqual([(i["name"], s) for i, s, _pos in self.menus], [("Salt Roads", "movies")])
+
     def test_choosing_all_providers_selects_the_mix(self):
         ctl = self.open_movies()
         menu = ctl._source_menu()

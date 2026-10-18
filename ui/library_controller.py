@@ -701,10 +701,11 @@ class LibraryController(QObject):
 
     def _menu(self, item: dict, section: str, provider: str, global_pos: QPoint) -> None:
         """The shell's menu for `item`, when its links can be asked of the provider shown (with
-        All providers, of any provider: a link goes to the title's own)."""
+        All providers, of any provider: a link goes to the title's own, and waits there for
+        its setup, whichever provider sets up)."""
         if (
             self._context_menu is not None
-            and not self._catalog.is_loading()
+            and (self._catalog.all_providers() or not self._catalog.is_loading())
             and (
                 provider == self._catalog.current_provider_name()
                 or (self._catalog.all_providers() and provider in self._catalog.provider_names())

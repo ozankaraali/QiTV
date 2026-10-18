@@ -299,6 +299,20 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertIsNot(second, first)
         self.assertEqual(len(second), 1 + 69)
 
+    def test_a_provider_rebuilt_after_an_edit_never_shows_its_old_lists(self):
+        # Sweep A6: the mixed lists were kept against the providers' content versions only;
+        # a catalog made anew (an edit while no page used it) counts from the start again,
+        # and its first versions matched the old lists'.
+        view = self.view(ALL_PROVIDERS)
+        self.assertIn("TR: Haber", [g.title for g in view.groups("live")])
+        old = self.catalogs.catalog("Harbor IPTV")
+        edited = {**self.registry.providers[1], "url": "http://127.0.0.1:9/other"}
+        self.registry.providers[1] = edited
+        self.catalogs.reload()  # no page of this hub is in use: Harbor is rebuilt
+        self.assertIsNot(self.catalogs.catalog("Harbor IPTV"), old)
+        self.assertNotIn("TR: Haber", [g.title for g in view.groups("live")])
+        self.assertEqual(len(view.items("live", ALL_GROUP_ID)), 24)
+
     def test_all_providers_mode_is_the_pages_setting(self):
         view = self.view(ALL_PROVIDERS)
         self.assertTrue(self.config.tv_all_providers)

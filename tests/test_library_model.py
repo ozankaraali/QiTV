@@ -681,6 +681,20 @@ class MixedProvidersTests(unittest.TestCase):
         self.assertTrue(model.is_favorite(salt))
         self.assertFalse(model.is_favorite(with_provider(movie(1, "Salt Roads"), DEMO_TV)))
 
+    def test_a_providers_all_or_titles_without_a_category_name_no_genre(self):
+        # Sweep A6: under a provider's heading (mixed ids) its "All" and its "Unknown
+        # Category" group named the strip's genre; with one provider they name none.
+        cat, ledger, *_ = mixed_catalog()
+        for own, title in (("*", "All"), ("None", "Unknown Category")):
+            gid = f"{DEMO_TV}{SEP}{own}"
+            cat.group_list["movies"].append((gid, title, 1))
+            cat.item_map[("movies", gid)] = [ledger]
+            model, _ = build(cat)
+            model.select_genre(gid)
+            self.assertEqual(model.details(movie(9)).genre, "")
+        model.select_genre(f"{DEMO_TV}{SEP}d")
+        self.assertEqual(model.details(movie(9)).genre, "Drama")
+
     def test_the_strip_names_the_provider_only_while_mixed(self):
         cat, ledger, *_ = mixed_catalog()
         model, _ = build(cat)

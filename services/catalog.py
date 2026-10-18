@@ -347,6 +347,7 @@ class CatalogService(QObject):
         self._epg_ready = False
         # False: this provider's guide is not in use, so it is not loaded (the hub sets it).
         self.epg_enabled = True
+        self._epg_releases = 0  # release_epg() calls: a load running across one is not ready
         self._ready_provider: Optional[str] = None
         # Serial provider-state queue: setups and EPG loads never overlap.
         self._state_job: Optional[str] = None  # "provider" or "epg" while one runs
@@ -526,13 +527,19 @@ class CatalogService(QObject):
     def _start_epg(self, force: bool) -> None:
         self._state_job = "epg"
         worker = self.factory.epg(self.epg_manager, force)
-        self._start(worker, "epg", force, self._on_epg_ready, self._on_epg_error)
+        data = (force, self._epg_releases)
+        self._start(worker, "epg", data, self._on_epg_ready, self._on_epg_error)
 
     def _on_epg_ready(self, job: _Job, payload) -> None:
         if self._next_state_job() or not self._current(job):
             return
         if not self.epg_enabled:  # released while it loaded
             self.release_epg()
+            return
+        if job.data[1] != self._epg_releases:
+            # Released while it loaded, and in use again since: the guide it stored may be
+            # gone. It loads again (from the copy just saved).
+            self._request_epg(False)
             return
         self._epg_ready = True
         self.epgReady.emit()
@@ -546,6 +553,7 @@ class CatalogService(QObject):
         """Give the guide's memory back (the saved copy stays); refresh_epg() loads it again."""
         self._pending_epg = None
         self._epg_ready = False
+        self._epg_releases += 1
         if self.epg_manager is not None:
             self.epg_manager.release()
 

@@ -158,6 +158,7 @@ class Catalogs(QObject):
             return  # reload() is setting it up again with its new settings already
         catalog = self.catalog(name)
         self._started.add(name)
+        self._ready.discard(name)  # a link asked meanwhile waits for this setup
         catalog.select_provider(force_refresh=force_refresh)
 
     def sign_in_again(self, name: str) -> None:
@@ -184,6 +185,12 @@ class Catalogs(QObject):
     def is_ready(self, name: str) -> bool:
         return name in self._ready
 
+    def holds(self, request_id: int) -> bool:
+        """Whether link request `request_id` waits for its provider's setup. It is still held
+        while that provider's providerReady is emitted (it is answered right after): a view
+        that drops the requests a setup dropped keeps this one."""
+        return any(held[0] == request_id for waiting in self._waiting.values() for held in waiting)
+
     def loaded_contents(self) -> dict[str, dict]:
         """The content the catalogs of the ready providers hold in memory, by provider name:
         what Search reads instead of parsing every cache file again (read only)."""
@@ -200,7 +207,7 @@ class Catalogs(QObject):
         self._ready.add(name)
         self._renewing.discard(name)
         self._freeze_heap()
-        self.providerReady.emit(name)
+        self.providerReady.emit(name)  # the links held for it are still held (see holds)
         self.contentChanged.emit(name)
         catalog = self._by_name.get(name)
         for request_id, item, section, is_episode in self._waiting.pop(name, []):
@@ -212,8 +219,9 @@ class Catalogs(QObject):
         self._ready.discard(name)
         self._started.discard(name)  # the next request tries again
         self._renewing.discard(name)
+        held = self._waiting.pop(name, [])  # no longer held: they fail with the setup
         self.providerFailed.emit(name, message)
-        for request_id, *_ in self._waiting.pop(name, []):
+        for request_id, *_ in held:
             self.linkFailed.emit(request_id, message)
 
     # --- links and guides ---------------------------------------------------------------
@@ -330,6 +338,9 @@ class Catalogs(QObject):
         for request_id, *_ in self._waiting.pop(name, []):
             self.linkFailed.emit(request_id, UNKNOWN_PROVIDER_MESSAGE)
         self._stop(catalog)
+        # Its guide and its lists (57,000 channels, say) go now, whoever still holds it.
+        catalog.release_epg()
+        catalog.provider_manager.current_provider_content = {}
         catalog.deleteLater()
 
     @staticmethod

@@ -12,7 +12,8 @@ from test_catalog_service import FakeWorker
 
 from services.catalogs import Catalogs
 from services.jobs import ImmediateRunner
-from services.provider_ids import with_provider
+from services.provider_ids import provider_of, with_provider
+from ui.link_lanes import LinkLanes, Target
 
 
 class RecordingFactory(RealSetupFactory):
@@ -246,6 +247,161 @@ class CatalogsTests(unittest.TestCase):
         self.catalogs.ensure("Demo TV")
         QTest.qWait(50)
         self.assertEqual(self.factory.epg_loads, ["Demo TV"])
+
+    def test_a_guide_released_while_it_loads_and_wanted_again_loads_again(self):
+        # Sweep A3: the load that ran ended "ready" although its guide may have been
+        # released after it was stored: the guide stayed empty until the next refresh.
+        runner = HeldGuides()
+        catalogs = Catalogs(
+            self.config,
+            self.registry,
+            runner=runner,
+            factory=self.factory,
+            make_epg=self.make_epg,
+        )
+        self.addCleanup(catalogs.shutdown)
+        catalogs.use_guides({"Demo TV"})
+        catalog = catalogs.catalog("Demo TV")
+        self.assertTrue(catalog.epg_loading())
+        catalogs.use_guides(set())  # the drawer moved on: the guide gives its memory back
+        catalogs.use_guides({"Demo TV"})  # and back, before the load ended
+        runner.finish_guides()
+        self.assertFalse(catalog.epg_ready())
+        self.assertEqual(self.factory.epg_loads, ["Demo TV", "Demo TV"])  # loads it again
+        runner.finish_guides()
+        self.assertTrue(catalog.epg_ready())
+        self.assertEqual(self.factory.epg_loads, ["Demo TV", "Demo TV"])
+
+    def test_a_guide_released_while_it_loads_stays_released(self):
+        runner = HeldGuides()
+        catalogs = Catalogs(
+            self.config,
+            self.registry,
+            runner=runner,
+            factory=self.factory,
+            make_epg=self.make_epg,
+        )
+        self.addCleanup(catalogs.shutdown)
+        catalogs.use_guides({"Demo TV"})
+        catalogs.use_guides(set())
+        runner.finish_guides()
+        self.assertFalse(catalogs.catalog("Demo TV").epg_ready())
+        self.assertEqual(self.factory.epg_loads, ["Demo TV"])
+
+    def test_a_dropped_catalog_gives_its_guide_and_lists_back(self):
+        # Sweep A3: the hub forgot a removed provider's catalog, but the pages' views still
+        # held it, and with it its guide and its channel lists, until QiTV quit.
+        self.catalogs.ensure("Harbor IPTV")
+        QTest.qWait(30)
+        catalog = self.catalogs.catalog("Harbor IPTV")
+        epg = self.epgs[-1]
+        self.assertTrue(catalog.has_content("live"))
+        self.delete_provider("Harbor IPTV")
+        self.catalogs.reload()
+        self.assertEqual(epg.released, 1)
+        self.assertEqual(catalog.provider_manager.current_provider_content, {})
+
+
+class HeldGuides(ImmediateRunner):
+    """Runs every job at once except guide loads, which wait for finish_guides()."""
+
+    def __init__(self):
+        self.guides: list[tuple] = []
+
+    def run_worker(self, worker, on_finished, on_error=None, context=None):
+        if getattr(context, "kind", "") == "epg":
+            self.guides.append((worker, on_finished, on_error, context))
+            return worker
+        return super().run_worker(worker, on_finished, on_error, context)
+
+    def finish_guides(self) -> None:
+        guides, self.guides = self.guides, []
+        for job in guides:
+            super().run_worker(*job)
+
+
+class LinksDuringSetupTests(unittest.TestCase):
+    """Links asked while their provider sets up (first use, a refresh) wait for it."""
+
+    ONE = with_provider({"id": 1, "cmd": "http://127.0.0.1:9/live/1.ts"}, "Demo TV")
+    TWO = with_provider({"id": 2, "cmd": "http://127.0.0.1:9/live/2.ts"}, "Demo TV")
+    setUpClass = CatalogsTests.setUpClass
+    make_epg = CatalogsTests.make_epg
+
+    def setUp(self):
+        CatalogsTests.setUp(self)  # type: ignore[arg-type]
+        self.runner = HeldSetups()
+        self.hub = Catalogs(
+            self.config,
+            self.registry,
+            runner=self.runner,
+            factory=self.factory,
+            make_epg=self.make_epg,
+        )
+        self.addCleanup(self.hub.shutdown)
+        self.hub_links, self.hub_failures = [], []
+        self.hub.linkReady.connect(lambda rid, url: self.hub_links.append((rid, url)))
+        self.hub.linkFailed.connect(lambda rid, msg: self.hub_failures.append((rid, msg)))
+
+    def lanes(self):
+        """The TV shell's link lanes over the hub; like the controller, the provider's
+        providerReady and providerFailed drop its requests (they are asked again)."""
+        lanes = LinkLanes(self.hub)
+        self.dropped = []
+        for signal in (self.hub.providerReady, self.hub.providerFailed):
+            signal.connect(
+                lambda name, *_: self.dropped.append(lanes.drop_provider(name, provider_of))
+            )
+        self.tunes, self.side = [], []
+        lanes.tuneReady.connect(lambda target, url: self.tunes.append(url))
+        lanes.tuneFailed.connect(lambda target, message: self.tunes.append(message))
+        lanes.sideFailed.connect(lambda target, message: self.side.append(message))
+        return lanes
+
+    def test_a_link_asked_during_a_refresh_waits_for_it(self):
+        # Sweep A2: a refresh left the provider "ready", so a link asked meanwhile failed
+        # with "The provider is still loading" instead of waiting for the refresh.
+        self.hub.ensure("Demo TV")
+        self.runner.held.add("Demo TV")
+        self.hub.select("Demo TV", force_refresh=True)  # ↻: its channels and guide again
+        self.assertFalse(self.hub.is_ready("Demo TV"))
+        request = self.hub.request_link(self.ONE, section="live")
+        QTest.qWait(30)
+        self.assertEqual(self.hub_failures, [])
+        self.runner.release("Demo TV")
+        QTest.qWait(30)
+        self.assertEqual(self.hub_links, [(request, "http://127.0.0.1:9/live/1.ts")])
+        self.assertEqual(self.hub_failures, [])
+
+    def test_links_held_for_a_setup_reach_their_lanes_once(self):
+        # Sweep A2: the shell dropped every request of a provider that became ready (its
+        # catalog drops what it was asked before), also those the hub held for the setup:
+        # a tune was asked twice (two STB links) and a menu's link was lost without a word.
+        self.runner.held.add("Demo TV")
+        demo = self.hub.catalog("Demo TV")
+        asked = []
+        ask = demo.request_link
+        demo.request_link = lambda item, **kwargs: asked.append(item) or ask(item, **kwargs)
+        lanes = self.lanes()
+        lanes.request(Target(self.ONE, "live", "One"))
+        lanes.request_side(Target(self.TWO, "live", "Two"), self.side.append, play=False)
+        self.runner.release("Demo TV")
+        QTest.qWait(30)
+        self.assertEqual(self.dropped, [None])  # nothing to ask again: the hub answers them
+        self.assertEqual(self.tunes, ["http://127.0.0.1:9/live/1.ts"])
+        self.assertEqual(self.side, ["http://127.0.0.1:9/live/2.ts"])
+        self.assertEqual(len(asked), 2)
+
+    def test_links_held_for_a_failed_setup_are_dropped_with_it(self):
+        self.runner.held.add("Demo TV")
+        self.factory.provider_setup = lambda manager, force: FakeWorker(fail="Portal down")
+        lanes = self.lanes()
+        lanes.request(Target(self.ONE, "live", "One"))
+        self.runner.release("Demo TV")
+        QTest.qWait(30)
+        self.assertEqual([t.title for t in self.dropped if t is not None], ["One"])
+        self.assertEqual(self.tunes, [])  # the shell says why (the provider failed)
+        self.assertEqual([rid for rid, _ in self.hub_failures], [1])
 
 
 if __name__ == "__main__":

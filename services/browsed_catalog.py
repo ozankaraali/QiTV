@@ -133,7 +133,12 @@ class BrowsedCatalog(QObject):
 
     def _on_providers_changed(self) -> None:
         """Settings edited the provider list: in all mode the page lists every provider, so a
-        new one, or one rebuilt with its new settings, is set up (its lists join the others)."""
+        new one, or one rebuilt with its new settings, is set up (its lists join the others).
+        The catalogs the hub dropped are let go, and what was built from them."""
+        created = set(self._catalogs.created())
+        for name in [n for n in self._attached if n not in created]:
+            del self._attached[name]
+        self._memo.clear()
         if self.all_providers():
             for name in self._catalogs.names():
                 self._catalogs.ensure(name)
@@ -180,6 +185,9 @@ class BrowsedCatalog(QObject):
         if self._attached.get(name) is catalog:
             return
         self._attached[name] = catalog
+        # A new catalog (a provider added, or rebuilt after an edit) counts its content
+        # versions afresh: the mixed lists built before must not match them by chance.
+        self._memo.clear()
         for signal_name in FORWARDED_SIGNALS:
             getattr(catalog, signal_name).connect(self._forwarder(name, signal_name))
 
@@ -453,6 +461,8 @@ class BrowsedCatalog(QObject):
         )
 
     def _mixed_groups(self, section: str) -> list[Group]:
+        """The mixed All, then each provider's heading and its groups (mixed ids); a provider
+        whose only group is its All lists that one under its heading."""
         versions = self._versions()
         hit = self._memo.get(("groups", section))
         if hit is not None and hit[0] == versions:
@@ -461,11 +471,14 @@ class BrowsedCatalog(QObject):
         total, any_all = 0, False
         for name in self._having(section):
             rows.append(Group(section, mixed_group_id(name, ""), name, None, name, True))
-            for group in self._catalogs.catalog(name).groups(section):
+            own = self._catalogs.catalog(name).groups(section)
+            alone = all(group.id == ALL_GROUP_ID for group in own)  # no groups but its All
+            for group in own:
                 if group.id == ALL_GROUP_ID:
                     any_all = True
                     total += group.count or 0
-                    continue
+                    if not alone:
+                        continue  # in the mixed All; its groups list it under its heading
                 rows.append(
                     Group(section, mixed_group_id(name, group.id), group.title, group.count, name)
                 )
@@ -524,6 +537,10 @@ class BrowsedCatalog(QObject):
     # --- links and guide -------------------------------------------------------------------
     def request_link(self, item: dict, *, section: str, is_episode: bool = False) -> int:
         return self._catalogs.request_link(item, section=section, is_episode=is_episode)
+
+    def holds(self, request_id: int) -> bool:
+        """Whether a link request waits for its provider's setup (see Catalogs.holds)."""
+        return self._catalogs.holds(request_id)
 
     def programmes(self, channel: dict, now: datetime, limit: int = 8) -> list[Programme]:
         return self._catalogs.programmes(channel, now, limit)

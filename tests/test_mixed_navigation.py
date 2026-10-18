@@ -19,7 +19,13 @@ from services.catalogs import Catalogs
 from services.jobs import ImmediateRunner
 from services.m3u import parse_m3u
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
-from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, mixed_group_id, provider_of
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    ALL_PROVIDERS_TITLE,
+    mixed_group_id,
+    provider_of,
+    with_provider,
+)
 from services.zapping import ZapContext
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import Drawer
@@ -256,7 +262,12 @@ class MixedNavigationTests(unittest.TestCase):
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
         recent = next(n for n in nav.children(nav.path[-1]) if n.key == RECENT_GROUP)
-        self.assertEqual(nav.children(recent)[0].payload, {"id": 5, "name": "Demo 5"})
+        # Sweep A7: an entry older than 2.1 (no provider in it) names its provider too, as
+        # with two (the drawer's focus key names the provider of what plays).
+        self.assertEqual(
+            nav.children(recent)[0].payload, with_provider({"id": 5, "name": "Demo 5"}, "Demo TV")
+        )
+        self.assertEqual(config.watch_history[0]["item_data"], {"id": 5, "name": "Demo 5"})
         self.assertFalse(nav.shows_provider(recent))  # one provider: nothing to tell apart
 
     # ---- where a channel names its provider -------------------------------------------------------
@@ -426,6 +437,22 @@ class MixedNavigationTests(unittest.TestCase):
         groups = self.live_groups()
         harbor_group = next(n for n in groups if n.key == mixed_group_id("Harbor IPTV", "41"))
         self.assertEqual(len(self.nav.children(harbor_group)), 41)
+
+    def test_a_provider_whose_only_group_is_all_lists_it_under_its_heading(self):
+        # Sweep A6: a playlist without group titles had an empty heading; its channels were
+        # only in the mixed All, among the others'.
+        plain = live_content(["Plain 1", "Plain 2"], {})
+        _config, _view, nav = self.build(
+            [DEMO, HARBOR], {"Demo TV": plain, "Harbor IPTV": harbor_content()}
+        )
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        rows = self.rows_under(nav, "Demo TV")
+        self.assertEqual([(n.layer, n.title, n.count) for n in rows[:1]], [("group", "All", 2)])
+        self.assertEqual([n.title for n in nav.children(rows[0])], ["Plain 1", "Plain 2"])
+        self.assertEqual((rows[1].layer, rows[1].title), ("header", "Harbor IPTV"))
+        mixed_all = nav.children(nav.path[1])[0]
+        self.assertEqual((mixed_all.key, mixed_all.count), (ALL_GROUP_ID, 2 + 69))
 
 
 if __name__ == "__main__":

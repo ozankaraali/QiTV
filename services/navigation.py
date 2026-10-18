@@ -659,7 +659,9 @@ class NavModel(QObject):
             key = (provider, item_key(item))
             if key not in seen:
                 seen.add(key)
-                result.append(with_provider(item, provider) if len(known) > 1 else item)
+                # Stamped also with one provider (an entry older than 2.1 has no stamp): the
+                # drawer finds the channel that plays by its provider and id.
+                result.append(with_provider(item, provider))
             if len(result) >= _RECENT_LIMIT:
                 break
         return result

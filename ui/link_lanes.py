@@ -177,15 +177,21 @@ class LinkLanes(QObject):
 
     def drop_provider(self, name: str, owner: Callable[[dict], str]) -> Optional[Target]:
         """Forget the requests of provider `name` (`owner` names an item's provider), whose
-        setup dropped their results; other providers' requests stay. Returns the tune in
+        setup dropped their results; other providers' requests stay, and so do those the
+        catalog held for the setup (`holds`: they are answered now). Returns the tune in
         flight that was dropped, if it was `name`'s."""
+        holds = getattr(self.catalog, "holds", None)
+
+        def dropped_by_setup(request_id: int, item: dict) -> bool:
+            return owner(item) == name and not (holds is not None and holds(request_id))
+
         dropped = None
         inflight = self._inflight
-        if inflight is not None and owner(inflight[1].item) == name:
+        if inflight is not None and dropped_by_setup(inflight[0], inflight[1].item):
             dropped = inflight[1]
             self._inflight = None
         side = self._side
-        if side is not None and owner(side[1].target.item) == name:
+        if side is not None and dropped_by_setup(side[0], side[1].target.item):
             self._side = None
         self._side_queue = deque(j for j in self._side_queue if owner(j.target.item) != name)
         self._next_side()
