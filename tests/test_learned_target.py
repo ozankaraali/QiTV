@@ -247,7 +247,7 @@ class ClosedLoop:
         target, burst = self.target, self.burst
         if not moved and not self.stalled and now - self.moved_at > burst + STALL_S:
             self.stalled, self.stall_low, self.stall_dry = True, lag, False
-            target.arrivals.stall() if target else self.auto.trouble(burst)
+            target.stalled(burst) if target else self.auto.trouble(burst)
         if self.stalled:
             self.stall_low = min(self.stall_low, lag)
         if lag < self.caching and not self.inside:
@@ -353,13 +353,16 @@ class ArrivalModelTests(unittest.TestCase):
                 ("0.05-0.2 s downloads", downloaded(six_and_twelve(600), seed)),
                 ("1-3 s downloads", downloaded(six_and_twelve(600), seed, (1.0, 3.0))),
             ):
-                for burst in (6.0, 12.0):  # whatever the playlist announces
-                    with self.subTest(seed=seed, batches=name, burst=burst):
-                        target = LearnedTarget()
-                        Source(target.arrivals).run(pieces, 600)
-                        self.assertGreaterEqual(target.target(burst), 7.5)
-                        self.assertLessEqual(target.target(burst), 9.0)
-                        self.assertTrue(target.adjusted(burst))
+                with self.subTest(seed=seed, batches=name):
+                    target = LearnedTarget()
+                    Source(target.arrivals).run(pieces, 600)
+                    # Announced as 6 s segments: the learned need lifts it above its burst.
+                    self.assertGreaterEqual(target.target(6.0), 7.5)
+                    self.assertLessEqual(target.target(6.0), 9.0)
+                    self.assertTrue(target.adjusted(6.0))
+                    # Announced as 12 s: never under its burst (as 2.0.2), nothing to add.
+                    self.assertEqual(target.target(12.0), 12.0)
+                    self.assertFalse(target.adjusted(12.0))
 
     def test_ten_s_every_twelve_needs_more_than_the_batch_interval_before_any_starvation(self):
         # TARGETDURATION 10 whose batches land every 12 s: Auto's 2.0.2 target was 10 (the
@@ -487,16 +490,18 @@ class ArrivalModelTests(unittest.TestCase):
         # two segments is the source's rhythm, not a stall (trouble is judged against the
         # gaps between batches after a still edge), and the troughs before them set the dips.
         # The gap term holds the idle time and a piece (6 s and 7 s), above the dips' 3.2 s
-        # and 4.0 s.
+        # and 4.0 s. The target stays at the burst (a segmented source never goes under it,
+        # so a lost segment is held out as in 2.0.2); the need would hold the rhythm alone.
         for seg, took, need in ((15.0, (10.2, 10.8), 6.0), (20.0, (13.5, 14.5), 7.0)):
             for seed in range(4):
                 with self.subTest(seg=seg, seed=seed):
                     target = LearnedTarget()
                     pieces = downloaded(regular(seg, seg, 600), seed, took)
                     source = Source(target.arrivals).run(pieces, 600)
-                    self.assertAlmostEqual(target.target(seg), need, delta=0.5)
-                    self.assertGreater(target.target(seg), truth(source.levels))
-                    self.assertEqual(dry_runs(source.levels, target.target(seg)), 0)
+                    self.assertAlmostEqual(target.need(seg), need, delta=0.5)
+                    self.assertGreater(target.need(seg), truth(source.levels))
+                    self.assertEqual(dry_runs(source.levels, target.need(seg)), 0)
+                    self.assertEqual(target.target(seg), seg)
 
     def test_a_download_twice_as_fast_still_needs_its_whole_cycle(self):
         for seed in range(4):
@@ -1009,42 +1014,45 @@ class LearnedTargetTests(unittest.TestCase):
         fresh.starved()
         self.assertIsNone(fresh.learned().need)  # too few batches to be worth keeping
 
-    def test_the_cap_leaves_room_for_a_lost_segment(self):
-        self.assertEqual(learned_target(6.0, 20.0), 10.0)  # today's cap
-        self.assertEqual(learned_target(6.0, 20.0, burst=15.0), 16.0)  # a segment and 1 s
-        self.assertEqual(learned_target(16.0, 20.0, burst=15.0), 18.0)  # need + 2 s still
-
-    def test_a_starving_segmented_source_has_a_segment_covered_at_once(self):
-        # 15 s segments downloading at 1.45x (a need of 6 s): VLC running dry there gets a
-        # whole segment of margin at once (2.0.2's footing); where the need already holds a
-        # segment (a fast download), and for a source without a burst, the usual step.
-        target = LearnedTarget()
-        Source(target.arrivals).run(downloaded(regular(15.0, 15.0, 600.0), 0, (10.2, 10.8)), 600)
-        self.assertAlmostEqual(target.need(15.0), 6.0, delta=0.5)
-        self.assertAlmostEqual(target.room(15.0), 16.0 - target.need(15.0))
-        target.starved(15.0)
-        self.assertAlmostEqual(target.target(15.0), 16.0)
-        fast = LearnedTarget()
-        Source(fast.arrivals).run(downloaded(regular(15.0, 15.0, 600.0), 0, (0.5, 2.0)), 600)
-        need = fast.need(15.0)
-        self.assertGreaterEqual(need, 16.0)
-        fast.starved(15.0)
-        self.assertAlmostEqual(fast.target(15.0), need + math.log2(3), delta=0.05)
+    def test_a_segmented_source_never_goes_under_its_burst(self):
+        self.assertEqual(learned_target(2.0, 0.0), 2.5)  # steady: the floor
+        self.assertEqual(learned_target(6.0, 0.0, burst=15.0), 15.0)  # a slow download
+        self.assertEqual(learned_target(8.0, 0.0, burst=6.0), 8.0)  # uneven batches: above
+        self.assertEqual(learned_target(6.0, 20.0), 10.0)  # today's cap ...
+        self.assertEqual(learned_target(6.0, 20.0, burst=15.0), 17.0)  # ... burst + 2 s ...
+        self.assertEqual(learned_target(16.0, 20.0, burst=15.0), 18.0)  # ... or need + 2 s
+        target = LearnedTarget(Learned(need=6.0))  # 15 s segments downloading at 1.45x
+        self.assertEqual(target.target(15.0), 15.0)
+        self.assertFalse(target.adjusted(15.0))
+        self.assertAlmostEqual(target.room(15.0), 2.0)
+        target.starved(15.0)  # trouble adds the usual step, on top of the burst
+        self.assertAlmostEqual(target.target(15.0), 15.0 + math.log2(3))
+        self.assertTrue(target.adjusted(15.0))
         steady = LearnedTarget(Learned(need=6.0))
-        steady.starved()
+        steady.starved()  # a steady source keeps its whole learned target
         self.assertAlmostEqual(steady.target(), 6.0 + math.log2(3))
 
-    def test_a_lost_segment_costs_at_most_one_rebuffer(self):
+    def test_a_segmented_source_stalling_is_trouble_at_once(self):
+        # As 2.0.2 counted it: a segment late or lost raises the margin before VLC runs dry.
+        segmented = LearnedTarget(Learned(need=6.0))
+        segmented.stalled(15.0)
+        self.assertAlmostEqual(segmented.target(15.0), 15.0 + math.log2(3))
+        segmented.stalled(15.0)
+        self.assertAlmostEqual(segmented.target(15.0), 17.0)  # 2.0.2's cap: burst + 2 s
+        steady = LearnedTarget(Learned(need=6.0))
+        steady.stalled()  # a steady source's stall is only noted
+        self.assertEqual(steady.target(), 6.0)
+        self.assertTrue(steady.arrivals._stalled)
+
+    def test_lost_segments_cost_no_more_than_in_two_zero_two(self):
         # HLS 15 s segments downloading at 1.45x, one lost every 3-5 minutes, VLC holding the
-        # target: the first loss runs VLC dry once (2.0.2 held the burst all along: never),
-        # its starvation covers a segment at once, and the later losses are held out.
+        # target: at its burst (2.0.2's footing) every loss is held out, as then.
         for seed in range(2):
             with self.subTest(seed=seed):
                 pieces = lossy_hls(seed, 3600.0, 15.0, (10.2, 10.8))
                 dry, targets = closed_loop(pieces, 3600.0, 15.0)
                 old, _ = closed_loop(pieces, 3600.0, 15.0, learned=False)
-                self.assertEqual(old, [])
-                self.assertLessEqual(len(dry), 1)
+                self.assertLessEqual(len(dry), len(old))
                 moves = sum(1 for a, b in zip(targets, targets[1:]) if abs(a - b) > 0.5)
                 self.assertLessEqual(moves, 3)
                 self.assertLess(sum(targets) / len(targets), 22.0)  # a segment, not more

@@ -49,17 +49,17 @@ less one starvation says) and, once `HOLD_S` of it passed since the last starvat
 or trouble the margin got VLC through (`absorbed`: its headroom fell within the margin),
 tempers the belief: the log of the believed rate over the accepted one shrinks with a
 half-life of playing time, so the margin itself halves every `HALF_LIFE_S` of quiet; under
-`MARGIN_MIN_S` it is none. The hold left is remembered with the rest. A source that reports a
-burst (HLS: its target duration) most likely runs dry for want of a whole segment (one the
-playlist slid past): its starvation lifts the margin at once to cover one, the target to the
-burst plus `CAP_BURST_S` (as 2.0.2 held such a channel always), so a lost segment costs one
-rebuffer. More trouble only raises the margin, quiet only lowers it.
+`MARGIN_MIN_S` it is none. The hold left is remembered with the rest. More trouble only
+raises the margin, quiet only lowers it.
 
-`learned_target()` adds the two: max(floor, need) + margin, at most today's cap (2.0.2's
-`AutoTarget`) with the need in the place of the burst, max(Stable's 6 s + 4 s, need + 2 s),
-or the burst the source reports plus `CAP_BURST_S` (room for the margin to cover a lost
-segment where the need is well under a segment: a slow download). The margin adds to the
-floor, not to a need under it: trouble at the floor raises the target at once.
+`learned_target()` adds the two: max(floor, burst, need) + margin, at most today's cap
+(2.0.2's `AutoTarget`) with the larger of the burst and the need: max(Stable's 6 s + 4 s,
+that + 2 s). A segmented source (one that reports a burst: HLS's target duration, a measured
+raw TS burst) never goes under its burst, as in 2.0.2: a segment the playlist slid past is
+held out as it was then, and what was learned only raises the target (uneven batches, late
+reloads). A steady source (no burst) has the whole learned target, from the floor up. The
+margin adds to max(floor, burst, need), not to a need under it: trouble at the floor raises
+the target at once.
 `LearnedTarget` holds one channel's model and prior; `Learned` is what it remembers
 (`services.live.tuning`) when it says something about the next tune, and a 2.0.2 `extra`
 reads as a prior that needed that much.
@@ -101,10 +101,8 @@ fades between; `HALF_LIFE_S` (30 minutes of playing) then halves it, so one star
 gone within the hour after the hold and the cap's within two; a near-miss counts up to
 `NEAR_WEIGHT` (half) a starvation, and `NEAR_CALM_S` (5 s) keeps
 a source that arrives every tick from counting one dip many times; `MARGIN_MIN_S` (0.5 s, the
-step the lag is shown in) is the least margin that counts; `MARGIN_MAX_S` (7.5 s, the most
-today's cap ever allowed over Normal's 2.5 s) is the room when the caller gives none, and how
-much a 2.0.2 extra can say; `MARGIN_ABS_S` (`NEED_MAX_S`) bounds any margin, the cap's room
-being the real bound; `CAP_BURST_S` (1 s) is what the cap leaves above a reported burst.
+step the lag is shown in) is the least margin that counts; `MARGIN_MAX_S` (7.5 s) is the most
+today's cap ever allows over Normal's 2.5 s.
 
 Pure logic: no clock of its own, no Qt, no I/O.
 """
@@ -165,10 +163,8 @@ NEAR_S = 0.5
 NEAR_WEIGHT = 0.5
 NEAR_CALM_S = 5.0
 MARGIN_MIN_S = 0.5
-MARGIN_MAX_S = CAP_MIN_S - FLOOR_S  # the room when none is given: today's cap over Normal's
-MARGIN_ABS_S = NEED_MAX_S  # no margin beyond this, whatever room the cap leaves
-CAP_BURST_S = 1.0  # the cap also lets the target reach the burst the source reports + this
-EVENTS_MAX = 1e20  # a restored state beyond these makes no sense (100 h x 2^60 x accepted)
+MARGIN_MAX_S = CAP_MIN_S - FLOOR_S
+EVENTS_MAX = 10_000.0  # a restored state beyond these makes no sense
 HOURS_MAX = 100.0
 
 
@@ -202,17 +198,26 @@ def _trouble(gap: float, usual: float) -> bool:
 
 
 def learned_target(need: float, margin: float, floor: float = FLOOR_S, burst: float = 0.0) -> float:
-    """max(floor, need) + margin, at most max(`CAP_MIN_S`, need + `CAP_ABOVE_S`, burst +
-    `CAP_BURST_S`) (today's cap with the need for the burst, and room for the margin to
-    cover a whole lost segment of the burst the source reports), never under max(floor,
-    need)."""
-    base = max(floor, need)
+    """max(floor, burst, need) + margin, at most today's cap: max(`CAP_MIN_S`, max(burst,
+    need) + `CAP_ABOVE_S`); never under max(floor, burst, need). A segmented source (one that
+    reports a burst: HLS's target duration, a measured raw TS burst) never goes under its
+    burst, as in 2.0.2; what was learned only raises it."""
+    base = _base(need, floor, burst)
     return max(base, min(base + max(0.0, margin), _cap(need, burst)))
 
 
+def _burst(burst: float) -> float:
+    return float(burst) if _finite(burst) and burst > 0 else 0.0
+
+
+def _base(need: float, floor: float, burst: float) -> float:
+    """The target before any margin: the floor, the burst a segmented source reports, the
+    need, whichever is largest."""
+    return max(floor, _burst(burst), need)
+
+
 def _cap(need: float, burst: float = 0.0) -> float:
-    burst = float(burst) if _finite(burst) and burst > 0 else 0.0
-    return max(CAP_MIN_S, need + CAP_ABOVE_S, burst + CAP_BURST_S if burst else 0.0)
+    return max(CAP_MIN_S, max(_burst(burst), need) + CAP_ABOVE_S)
 
 
 @dataclass(frozen=True)
@@ -634,7 +639,7 @@ class StarvationPrior:
         ):
             self.hours = max(float(hours), PRIOR_H)
             ratio = float(events) / (self.hours * ACCEPTED_PER_H)
-            self.risk = min(max(0.0, math.log2(ratio)), MARGIN_ABS_S / RISK_STEP_S)
+            self.risk = min(max(0.0, math.log2(ratio)), MARGIN_MAX_S / RISK_STEP_S)
 
     @classmethod
     def from_extra(cls, extra: Optional[float]) -> StarvationPrior:
@@ -660,8 +665,8 @@ class StarvationPrior:
 
     def margin(self) -> float:
         """The seconds that bring the believed rate down to `ACCEPTED_PER_H` (none under
-        `MARGIN_MIN_S`, never beyond the room counted with)."""
-        margin = min(MARGIN_ABS_S, RISK_STEP_S * self.risk)
+        `MARGIN_MIN_S`, at most `MARGIN_MAX_S`)."""
+        margin = min(MARGIN_MAX_S, RISK_STEP_S * self.risk)
         return margin if margin >= MARGIN_MIN_S - 1e-9 else 0.0
 
     def starved(self, margin: Optional[float] = None, room: float = MARGIN_MAX_S) -> None:
@@ -670,11 +675,6 @@ class StarvationPrior:
         margin then holds for `HOLD_S` of playing."""
         self._count(self._weight(margin, room), room)
         self._hold = HOLD_S
-
-    def at_least(self, margin: float) -> None:
-        """Believe at least `margin` (seconds) is needed: never lowers the belief."""
-        if _finite(margin) and margin > 0:
-            self.risk = max(self.risk, min(margin, MARGIN_ABS_S) / RISK_STEP_S)
 
     def absorbed(self, headroom: float, margin: Optional[float] = None) -> None:
         """Trouble came (a stall, say) and VLC did not run dry, its headroom never under
@@ -725,12 +725,12 @@ class StarvationPrior:
         """What one starvation with `margin` in force (None: `margin()`) stands for with none."""
         if margin is None or not _finite(margin):
             margin = self.margin()
-        most = min(max(0.0, room), MARGIN_ABS_S)
+        most = min(max(0.0, room), MARGIN_MAX_S)
         return float(2.0 ** (min(max(0.0, margin), most) / RISK_STEP_S))
 
     def _count(self, starvations: float, room: float) -> None:
         """Count `starvations` (as with no margin), never beyond what `room` answers."""
-        most = min(max(0.0, room), MARGIN_ABS_S) / RISK_STEP_S
+        most = min(max(0.0, room), MARGIN_MAX_S) / RISK_STEP_S
         risk = math.log2(2.0**self.risk + starvations / (self.hours * ACCEPTED_PER_H))
         self.risk = max(self.risk, min(risk, most))
 
@@ -745,6 +745,8 @@ class LearnedTarget:
     What the caller passes:
 
     - `starved()`: VLC ran dry after it had its cushion (as 2.0.2's `_back_off` counts it).
+    - `stalled()`: the session's stall bound passed (the source silent its burst + 2 s)
+      after VLC had its cushion, once per stall, in place of `arrivals.stall()`.
     - `near_miss(headroom)`: when a batch began (`arrivals.add` True), the headroom VLC had
       on the tick before: the live edge less VLC's position, in seconds. The model ignores
       it until the tune saw `MIN_GAPS` batches (VLC is still filling its cushion then); the
@@ -781,33 +783,39 @@ class LearnedTarget:
         return self.arrivals.need(burst)
 
     def target(self, burst: float = 0.0) -> float:
-        """The target for a source reporting `burst` (0.0: steady; it matters only until the
-        batches are measured)."""
+        """The target for a source reporting `burst` (0.0: steady). A segmented source (`burst`
+        over 0: HLS's target duration, a measured raw TS burst) never goes under its burst;
+        before the batches are measured the burst also stands in for the need."""
         return learned_target(self.need(burst), self.prior.margin(), self.floor, burst)
 
     def margin(self, burst: float = 0.0) -> float:
-        """The margin in force: what the target holds above max(floor, need), after the cap."""
-        return self.target(burst) - max(self.floor, self.need(burst))
+        """The margin in force: what the target holds above max(floor, burst, need), after the
+        cap."""
+        return self.target(burst) - _base(self.need(burst), self.floor, burst)
 
     def room(self, burst: float = 0.0) -> float:
-        """The most margin the cap allows over max(floor, need)."""
+        """The most margin the cap allows over max(floor, burst, need)."""
         need = self.need(burst)
-        return _cap(need, burst) - max(self.floor, need)
+        return _cap(need, burst) - _base(need, self.floor, burst)
 
     def adjusted(self, burst: float = 0.0) -> bool:
-        """The target is above the floor (the indicator's "· adjusted")."""
-        return self.target(burst) > self.floor + 1e-9
+        """What was learned raised the target above the floor, or above the burst of a
+        segmented source (the indicator's "· adjusted")."""
+        return self.target(burst) > max(self.floor, _burst(burst)) + 1e-9
 
     def starved(self, burst: float = 0.0) -> None:
-        """VLC ran dry with the target for `burst` in force. A source that reports a burst
-        (HLS: its target duration) most likely ran dry for want of a whole segment (one the
-        playlist slid past): its margin covers one at once, the target reaching `burst` +
-        `CAP_BURST_S` (within the cap), as 2.0.2 held such a channel always; it fades as any
-        margin. (Only a source whose need is under that, a slow download, gains from it.)"""
+        """VLC ran dry with the target for `burst` in force."""
         self.prior.starved(self.margin(burst), self.room(burst))
-        if _finite(burst) and burst > 0:
-            base = max(self.floor, self.need(burst))
-            self.prior.at_least(min(self.room(burst), burst + CAP_BURST_S - base))
+
+    def stalled(self, burst: float = 0.0) -> None:
+        """The source stalled (the session's stall bound passed) while VLC had its cushion.
+        A segmented source's stall is a segment late or lost: as 2.0.2 did, it is trouble at
+        once, one step of margin before VLC can run dry (within the cap: at most its burst +
+        `CAP_ABOVE_S`, 2.0.2's). A steady source's is only noted (`ArrivalModel.stall`): its
+        trouble counts when VLC runs dry."""
+        self.arrivals.stall()
+        if _burst(burst) > 0:
+            self.prior.starved(self.margin(burst), self.room(burst))
 
     def near_miss(self, headroom: float, burst: float = 0.0) -> None:
         """VLC had only `headroom` seconds left when a batch landed. Not counted before the
