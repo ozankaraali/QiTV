@@ -53,13 +53,18 @@ landing is within the band or `_JUMP_CLOSER_S` nearer than the lag; if it is not
 `_JUMP_WAIT_S` it waits at the rate it has for the next keyframes to bring one (one provider's
 4K channel has one every 10 s). A catch-up already under way (one started within the minute)
 ends in such a jump once the minute passed. When no jump can do better than the lag less
-`_GRAIN_S`, the lag is the keyframes' grain, not drift: the nudge stays gentle. Never while a
-stream just opened (`hold_reopen`); the reopen beyond the target plus 20 s stays as it was.
+`_GRAIN_S`, the lag is the keyframes' grain, not drift: the nudge stays gentle (and the band
+is not widened for it). Never while a stream just opened (`hold_reopen`, which the wait does
+not count); the reopen beyond the target plus 20 s stays as it was. A locked rate jumps too
+(it changes no rate), and a gentle nudge a jump cut counts against the budget. A jump or Go
+live that lands short builds nothing (`landed(build=False)`): it was picked at the target in
+a full buffer, so its shortfall is the pick's error, tolerated but for too little room and
+trouble.
 
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in
 2.0.2: 4.5 s of media in 37 s). `RateHealth` notices that from VLC's progress, and the caller
 then calls `lock_rate()`: from there on stay-live keeps 1x and only reopens at live when the
-lag is beyond the target plus 20 s, as before.
+lag is beyond the target plus 20 s, as before, or far behind by a jump (2.1 stage 5).
 
 "Auto" latency (`AUTO`, `AutoTarget`) learns what each channel adds to the target in force: it
 starts at nothing, rises with each starvation or stall and falls again while the channel plays
@@ -350,9 +355,15 @@ class LagFilter:
 
     def lag(self, now: float, position: float) -> Optional[float]:
         """The mean lag at `now` for the player at `position`; None before any edge."""
+        edge = self.edge(now)
+        return None if edge is None else edge - position
+
+    def edge(self, now: float) -> Optional[float]:
+        """Where the live edge is on average at `now` (what `lag` measures from; a start a
+        jump picks lands that far behind it, 2.1 stage 5); None before any edge."""
         if self._weight <= 0:
             return None
-        return self.level() + now - position
+        return self.level() + now
 
     def spread(self) -> float:
         return self._spread
@@ -477,6 +488,9 @@ class StayLive:
         self._landing = 0.0  # seconds of playing left in which that floor holds
         self._start = 0.0  # seconds of playing in which a shortfall is the start's
         self._accepting = False  # the start's build ran: what is still short is accepted
+        # A jump or Go live landed (no build): what is short of the band is its pick's, not
+        # missing room; only too little room (`_short`) or trouble acts on it.
+        self._tolerant = False
 
     @property
     def nudge(self) -> float:
@@ -502,7 +516,8 @@ class StayLive:
         """VLC cannot play this channel at any rate but 1x (`RateHealth`): keep 1x from now.
 
         Stay-live then changes no rate: no nudge, only the reopen at live when the lag is
-        beyond the target plus 20 s. A speed the user chooses still applies.
+        beyond the target plus 20 s, or a jump far behind (`_far_locked`). A speed the user
+        chooses still applies.
         """
         self.rate_locked = True
         self._rate = 1.0
@@ -516,7 +531,7 @@ class StayLive:
         self._outside, self._side, self._urgent = 0.0, 0, False
         self._waited = 0.0
 
-    def landed(self, excess: float) -> None:
+    def landed(self, excess: float, *, build: bool = True) -> None:
         """A stream opened at the start Go live picks (after `user_go_live()` for a Go live):
         its mean lag lands `excess` seconds above the target (below it when negative).
 
@@ -524,11 +539,15 @@ class StayLive:
         from there, following the lag down: the landing a keyframe interval allowed is taken
         off by a gentle nudge. Short of it, or should the target rise within `_START_S` of
         playing, the room is built once at `_GENTLE_DOWN` for at most `_START_BUILD_S`, then
-        the rest is accepted.
+        the rest is accepted. Without `build` (a jump, Go live: picked at the target with the
+        buffer full, 2.1 stage 5 review I3) a shortfall is the pick's, not missing room: it is
+        tolerated until the next landing, but for too little room (`_short`, 2.0.1) and VLC
+        running dry (`trouble()`).
         """
         self._floor = max(0.0, excess)
-        self._start = self._landing = _START_S
-        self._accepting = False
+        self._landing = _START_S
+        self._start = _START_S if build else 0.0
+        self._accepting, self._tolerant = False, not build
         self._jump_age = self._waited = 0.0  # a jump: the next one a minute on at the earliest
 
     def landed_further(self, excess: float) -> None:
@@ -561,6 +580,7 @@ class StayLive:
         self._nudge = None
         self._owed = False
         self._uncharged = None
+        self._tolerant = False
 
     def user_seeked_back(self) -> None:
         self._leave_live()
@@ -578,7 +598,7 @@ class StayLive:
         self._uncharged = None
         if not keep_landing:
             self._floor = self._start = self._landing = 0.0  # its own landing follows
-            self._accepting = False
+            self._accepting = self._tolerant = False
         self.absorb()
 
     def user_speed(self, rate: float) -> None:
@@ -620,7 +640,7 @@ class StayLive:
         self._start = max(0.0, self._start - dt)
         self._landing = max(0.0, self._landing - dt)
         if self._owed:  # VLC ran dry: the owed slow-down builds a start's shortfall, all of it
-            self._start, self._accepting = 0.0, False
+            self._start, self._accepting, self._tolerant = 0.0, False, False
             if self._nudge is not None:
                 self._nudge.limit = None
         if lag_s > self.target + _REOPEN + self._landed():
@@ -631,19 +651,40 @@ class StayLive:
                 return Decision(1.0)
             self._reopened = True
             return Decision(1.0, reopen_live=True)
-        if self.rate_locked:
-            return Decision(self._rate)  # 1x: set by lock_rate(), never changed after
-        if self._wide and self._budget_free(now):
-            self._wide = 0.0
         if self._reopened:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
+        if self.rate_locked:
+            # 1x: set by lock_rate(), never changed after; far behind, a jump changes no
+            # rate (review I2: the channel stay-live cannot nudge needs it most).
+            if self._far_locked(dt, lag_s):
+                return self._jump(now)
+            return Decision(self._rate)
+        if self._wide and self._budget_free(now):
+            self._wide = 0.0
         if self._owed:
             self._pay(lag_s, dt)
         if self._steer(dt, lag_s, now) if self._nudge is not None else self._watch(dt, lag_s, now):
-            self._rate, self._nudge = 1.0, None  # a catch-up it replaces ends here
-            self._reopened = True
-            return Decision(1.0, reopen_live=True, jump=True)
+            return self._jump(now)
         return Decision(self._rate)
+
+    def _jump(self, now: float) -> Decision:
+        """Reopen at live instead (`_far_move`): a catch-up it replaces ends here, and a
+        gentle nudge it cut counts against the budget (it ran)."""
+        nudge = self._nudge
+        if nudge is not None and nudge.peak in (_GENTLE_UP, _GENTLE_DOWN) and nudge.limit is None:
+            self._nudged_at = now
+        self._rate, self._nudge = 1.0, None
+        self._reopened = True
+        return Decision(1.0, reopen_live=True, jump=True)
+
+    def _far_locked(self, dt: float, lag: float) -> bool:
+        """At a locked 1x: far behind for `_URGENT_S`, a jump that helps (`_far_move`)."""
+        if lag - self._centre(1) <= _FAR_S + self._landed():
+            self.absorb()
+            return False
+        self._side, self._urgent = 1, True
+        self._outside += dt
+        return self._outside >= _URGENT_S - 1e-9 and self._far_move(lag, dt) == "jump"
 
     def _landed(self) -> float:
         """What far behind and the reopen at live count from: the landing above the target,
@@ -689,12 +730,15 @@ class StayLive:
     def _far_move(self, lag: float, dt: float) -> str:
         """Far behind: "jump" (a clean jump lands within the band or `_JUMP_CLOSER_S` nearer,
         and nothing jumped within `_JUMP_GAP_S`), "wait" (one may, but none helps yet: the
-        next keyframes may bring one, for `_JUMP_WAIT_S`; a stream that just opened is waited
-        for too), "gentle" (no jump does better than the lag less `_GRAIN_S`: that lag is the
-        keyframes' grain) or "fast" (1.10x)."""
+        next keyframes may bring one, for `_JUMP_WAIT_S` counted once no stream just opened;
+        one that did is waited for, the wait not counting meanwhile), "gentle" (no jump does
+        better than the lag less `_GRAIN_S`: that lag is the keyframes' grain) or "fast"
+        (1.10x)."""
         landing = self.jump_lag() if self.jump_lag is not None else None
         if landing is not None and self._jump_age >= _JUMP_GAP_S - 1e-9:
-            if not self.hold_reopen and self._helps(landing, lag):
+            if self.hold_reopen:
+                return "wait"
+            if self._helps(landing, lag):
                 return "jump"
             if self._waited < _JUMP_WAIT_S - 1e-9:
                 self._waited += dt
@@ -725,7 +769,8 @@ class StayLive:
             self._accepting = False  # back at the target: a later shortfall is a real one
         far = behind > _FAR_S + self._landed()  # a landing above the target is no drift
         short = ahead < -_BAND_S and self._short(lag) and not self._accepting
-        under = short or (ahead < -self.band(-1) and not self._accepting)
+        tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick
+        under = short or (ahead < -self.band(-1) and not tolerated)
         side = 1 if far or behind > self.band(1) else -1 if under else 0
         error = behind if side > 0 else ahead
         if not far:
@@ -741,6 +786,7 @@ class StayLive:
         self._urgent = urgent
         if self._outside < (_URGENT_S if urgent else _PERSIST_S) - 1e-9:
             return False
+        grain = False
         if far:
             move = self._far_move(lag, dt)
             if move in ("jump", "wait"):
@@ -748,11 +794,15 @@ class StayLive:
             if move == "gentle":
                 # The keyframes' grain: a lasting lag like any other (behind: nothing short).
                 far = urgent = self._urgent = False
+                grain = True
                 if self._outside < _PERSIST_S - 1e-9:
                     return False
         if not urgent and not self._budget_free(now):
-            # Spent: tolerate this much rather than a second nudge within the budget.
-            self._wide = abs(error) + _WIDEN_S
+            # Spent: tolerate this much rather than a second nudge within the budget. Not the
+            # keyframes' grain: that lag is no drift, and a band that wide (both sides) would
+            # tolerate a shortfall as large; the band stays as it was.
+            if not grain:
+                self._wide = abs(error) + _WIDEN_S
             self.absorb()
             return False
         if start:

@@ -2140,13 +2140,133 @@ class SafeJumpTests(LiveSessionCase):
         self.engine.buffer(sid, spans, live_edge=20.0)
         for t, seq in (
             (0.5, 0),  # a keyframe start holds it
-            (5.0, 4),  # no keyframe there: the keyframe 3 s on, 2 s beyond the intra picture's
-            (6.5, 4),  # an intra picture holds it, a keyframe start 1.5 s on
-            (13.0, 4),  # the clean start nearest, 5 s back
+            (5.0, 0),  # no clean start holds it: the one before it (review I1: never after)
+            (6.5, 3),  # an intra picture holds it (the keyframe start after it waits)
+            (7.9, 3),
+            (13.0, 4),  # the clean start before it, 5 s back
         ):
             with self.subTest(t=t):
                 self.live.seek_to(t)
                 self.assertEqual(self.playback.plays[-1], self.stream(sid, seq))
+        # Nothing clean at or before it within 10 s: a clean start just after it (2 s).
+        spans = [Span(k, 2.0 * k, 2.0 * k + 2.0, False, "none") for k in range(10)]
+        spans[6] = Span(6, 12.0, 14.0, False, "key")
+        self.engine.buffer(sid, spans, live_edge=20.0)
+        self.live.seek_to(10.5)
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 6))
+
+    def gop20(self):
+        """A keyframe every 20 s, a forced cut ("none") 10 s after each, to 100 s."""
+        sid = self.ready(segments(0, 10, length=10.0), live_edge=100.0)
+        kinds = ("key", "none")
+        spans = [Span(k, 10.0 * k, 10.0 * k + 10.0, False, kinds[k % 2]) for k in range(10)]
+        self.engine.buffer(sid, spans, live_edge=100.0)
+        return sid
+
+    def play(self, seconds):
+        self.playback.set_state(PlaybackState.PLAYING)
+        for _ in range(round(seconds / 0.25)):
+            self.clock.now += 0.25
+            self.playback.ms += 250
+            self.live._tick()
+
+    def test_back_steps_on_long_keyframe_intervals_always_move_back(self):
+        # Review I1: 20 s GOPs, playing at 42: ← asked for 32 (no clean start there), and the
+        # keyframe at 40, 8 s on, won every time: four presses, four opens at 40.
+        sid = self.gop20()
+        self.live.seek_to(45.0)
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 4))  # from 40
+        landed = []
+        for _ in range(4):
+            self.play(2.0)
+            before = self.live.position()
+            self.live.seek_relative(-10.0)
+            landed.append(self.live.position())
+            self.assertLess(landed[-1], before - 5.0)  # back, roughly 10 s each
+        self.assertEqual(landed, [30.0, 20.0, 10.0, 0.0])
+
+    def test_a_forward_step_never_lands_at_or_behind_where_it_plays(self):
+        sid = self.gop20()
+        self.live.seek_to(41.0)
+        self.play(1.0)  # at 42
+        self.live.seek_relative(10.0)  # 52: the start after it is a forced cut
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 5))  # not back at 40
+        self.assertEqual(self.live.position(), 50.0)
+
+    def test_an_evicted_position_reopens_no_earlier_than_the_margin(self):
+        # Review: a keyframe at the oldest point, starts without one after it: the reopen 5 s
+        # past the oldest point went back to it, which the next eviction may beat.
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(1.0)
+        spans = [Span(50, 100.0, 102.0, False, "key")]
+        spans += [Span(50 + k, 100.0 + 2 * k, 102.0 + 2 * k, False, "none") for k in range(1, 6)]
+        self.engine.buffer(sid, spans, live_edge=112.0)
+        self.playback.set_state(PlaybackState.ENDED)
+        self.playback.ended.emit()
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 52))  # holding 105
+        self.assertEqual(self.notices, [REWOUND])
+
+    def test_on_an_audio_only_stream_far_behind_jumps(self):
+        # Review: every start is "none" there, so it never jumped (1.10x every time).
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        none = [Span(s.seq, s.start, s.end, False, "none") for s in self.engine.spans(sid)]
+        self.engine.buffer(sid, none, live_edge=feed.edge, open_seq=2, video=False)
+        feed.push = lambda: self.engine.buffer(  # every state: audio only
+            sid,
+            [Span(k, 2.0 * k, 2.0 * k + 2.0, False, "none") for k in range(int(feed.edge // 2))],
+            live_edge=feed.edge,
+            open_seq=int(feed.edge // 2),
+            open_quality="none",
+            video=False,
+        )
+        feed.run(65.0)
+        self.assertIsNotNone(self.far_behind(feed, 10.0))
+        feed.run(20.0)
+        self.assertEqual(self.playback.rates, [])
+
+    def test_go_live_lands_where_stay_live_then_measures_it(self):
+        # Review I3's measurement (a sparse-PCR channel, 8 landings): Go live and jumps landed
+        # 1.7-2.3 s off their pick either way. The pick read the mean lag from the arrival
+        # now (the helper's 12 s target duration; the batches were 10 s, some 6 s apart),
+        # stay-live from the lag filter's mean over a dozen of them. The pick reads the
+        # filter's mean edge too, once it has one.
+        real = StayLive.landed
+        spy = mock.patch.object(StayLive, "landed", autospec=True, side_effect=real)
+        landed = self.enterContext(spy)
+        for phase in (0.0, 1.5, 3.0, 4.5, 6.0, 7.5, 9.0):
+            with self.subTest(phase=phase):
+                self.live = self.make()
+                sid = self.start(latency=AUTO)
+                # Batches 7-13 s apart (no stall: one would restart the filter's mean).
+                feed = Feed(self, sid, burst=10.0, edge=40.0, hls=True, jitter=3.0, seed=3)
+                feed.ready(backlog_after_start=False)
+                feed.burst = 12.0  # reported: the playlist's target duration
+                feed.run(60.0 + phase)
+                self.live._open_s = 0.0  # VLC opens at once here
+                self.live.go_live()
+                feed.sync()
+                predicted = landed.call_args.args[1] + self.live._target(self.live._snapshot())
+                feed.run(8.0)
+                # The mean wanders a little as batches land (before: up to 2.2 s off).
+                self.assertAlmostEqual(self.timelines[-1]["lag"], predicted, delta=0.6)
+                self.live.stop()
+                self.engine.answer()
+
+    def test_a_jump_that_lands_short_changes_no_rate(self):
+        # Review I3: each jump on a sparse-PCR channel read 1.2-1.4 s short once VLC played,
+        # and 0.97x for 20 s followed (six rate changes).
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        feed.run(66.0)  # (the phase where the pick is at the target: 2.65 s)
+        self.live._open_s += 1.3  # VLC opens at once: the jump lands 1.1-1.3 s short of it
+        self.assertIsNotNone(self.far_behind(feed, 10.0))
+        feed.run(120.0)
+        self.assertEqual(self.playback.rates, [])  # before: 0.97x for 20 s
+        lag = self.timelines[-1]["lag"]
+        self.assertLess(lag, TARGETS["normal"] - 0.9)  # short, as it landed
+        self.assertGreater(lag, 0.5)  # with room: no 0.95x
 
     def test_a_seek_with_no_clean_start_near_opens_where_it_was_asked_and_says_so(self):
         sid = self.ready(segments(0, 20), live_edge=40.0)
@@ -2271,11 +2391,13 @@ class RateHealthTests(LiveSessionCase):
         feed = Feed(self, sid, burst=0.0, edge=12.0, crawl=True).ready().run(10.0)
         rates = list(self.playback.rates)
         self.assertEqual((rates[0], rates[-1], changes(rates)), (1.0333, 1.0, 2))  # far: 1.10x
+        self.assertGreater(self.timelines[-1]["lag"], TARGETS["normal"] + 8.0)  # far behind
         feed.run(120.0)
         self.assertEqual(self.playback.rates, rates)
-        self.assertEqual(len(self.playback.plays), 1)
-        # It stays behind its target: only a lag beyond the target plus 20 s goes live.
-        self.assertGreater(self.timelines[-1]["lag"], TARGETS["normal"] + 3.0)
+        # 2.1 stage 5 (review I2): far behind, once a minute passed since the tune, one jump
+        # to live, which changes no rate (before, it stayed far behind until 20 s beyond).
+        self.assertEqual(len(self.playback.plays), 2)
+        self.assertLess(abs(self.timelines[-1]["lag"] - TARGETS["normal"]), 1.0)
 
     def test_a_channel_that_plays_any_rate_keeps_stay_live_as_before(self):
         sid = self.start()

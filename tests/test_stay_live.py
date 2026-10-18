@@ -961,11 +961,12 @@ class LandingTests(unittest.TestCase):
         self.assertLessEqual(sum(1 for rate in rates if rate < 1.0) * TICK, 20.0)
 
 
-def steer(stay, lag, seconds, *, clock, landing=None):
+def steer(stay, lag, seconds, *, clock, landing=None, actual=None):
     """Play `seconds` at stay-live's rates from `lag` (the source steady), where a jump to live
-    would land at `landing(now, lag)` (None: stay-live is not told). A jump lands there and is
-    reported to stay-live as the caller does (`user_go_live()`, then `landed()`). Returns the
-    lag, the rates and the times of the jumps."""
+    would land at `landing(now, lag)` (None: stay-live is not told). A jump lands there (or at
+    `actual(now, lag)`: the prediction erred) and is reported to stay-live as the caller does
+    (`user_go_live()`, then `landed()` with the predicted landing). Returns the lag, the rates
+    and the times of the jumps."""
     rates, jumps = [], []
     if landing is not None:
         stay.jump_lag = lambda: landing(clock.now, lag)
@@ -976,9 +977,10 @@ def steer(stay, lag, seconds, *, clock, landing=None):
         if decision.reopen_live:
             jumps.append(now)
             if decision.jump:
-                lag = landing(now, lag)
+                predicted = landing(now, lag)
+                lag = predicted if actual is None else actual(now, lag)
                 stay.user_go_live()
-                stay.landed(lag - stay.target)
+                stay.landed(predicted - stay.target, build=False)  # a jump builds nothing
             continue
         lag -= (decision.rate - 1.0) * TICK
     return lag, rates, jumps
@@ -1093,6 +1095,76 @@ class JumpTests(unittest.TestCase):
         stay.hold_reopen = False
         lag, rates, jumps = steer(stay, lag, 1.0, clock=clock, landing=lambda *_: T)
         self.assertEqual(len(jumps), 1)
+
+    def test_a_locked_rate_still_jumps_far_behind_and_never_changes_the_rate(self):
+        # Review I2: a channel VLC cannot play at another rate sat up to 20 s behind.
+        stay, clock = live(), Clock()
+        stay.lock_rate()
+        lag, rates, jumps = steer(stay, T + 15.0, 20.0, clock=clock, landing=lambda *_: T)
+        self.assertEqual((len(jumps), set(rates)), (1, {1.0}))
+        self.assertLessEqual(jumps[0] - 1000.0, 3.25)
+        stay, clock = live(), Clock()  # no jump that helps: 1x, as before
+        stay.lock_rate()
+        _, rates, jumps = steer(stay, T + 15.0, 60.0, clock=clock, landing=lambda *_: T + 13.0)
+        self.assertEqual((jumps, set(rates)), ([], {1.0}))
+
+    def test_a_jump_or_go_live_that_lands_short_changes_no_rate(self):
+        # Review I3: on a sparse-PCR channel each jump read 1.2-1.4 s short once VLC played,
+        # and the start's 0.97x build followed (six rate changes). A jump is made with the
+        # ring full and picked at the target: its shortfall is no missing room.
+        stay, clock = live(12.0, burst=10.0), Clock()
+        lag, rates, jumps = steer(
+            stay, 24.0, 200.0, clock=clock, landing=lambda *_: 12.0, actual=lambda *_: 10.7
+        )
+        self.assertEqual((len(jumps), set(rates), lag), (1, {1.0}, 10.7))
+        stay, clock = live(), Clock()  # the viewer's Go live
+        stay.user_go_live()
+        stay.landed(-1.3, build=False)
+        _, rates = drive(stay, T - 1.3, 200.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
+
+    def test_a_short_landing_without_a_build_keeps_the_room_rules(self):
+        stay, clock = live(7.0, burst=7.0), Clock()
+        stay.landed(-3.5, build=False)
+        _, rates = drive(stay, 3.6, 20.0, clock=clock)  # under 0.5 s before each burst
+        self.assertEqual(min(rates), 0.95)  # 2.0.1's protection
+        stay, clock = live(7.0, burst=7.0), Clock()
+        stay.landed(-1.3, build=False)
+        drive(stay, 5.7, 20.0, clock=clock)
+        stay.trouble()  # VLC ran dry
+        lag, rates = drive(stay, 5.7, 120.0, clock=clock)
+        self.assertEqual(min(rates), 0.95)  # the owed slow-down
+        self.assertAlmostEqual(lag, 7.0, delta=0.15)
+
+    def test_the_keyframes_grain_never_widens_the_band(self):
+        # Review: a "gentle" verdict while the budget is spent widened the band to the far
+        # lag (8 s and more), on both sides. The band stays as it was.
+        stay, clock = live(), Clock()
+        drive(stay, T + 2.0, 120.0, clock=clock)  # the budget is spent
+        _, rates, jumps = steer(
+            stay, T + 9.0, 60.0, clock=clock, landing=lambda now, lag: lag - 0.5
+        )
+        self.assertEqual((jumps, set(rates)), ([], {1.0}))
+        self.assertLess(stay.band(-1), 2.0)
+
+    def test_a_just_opened_stream_does_not_use_up_the_wait(self):
+        stay, clock = live(), Clock()
+        stay.hold_reopen = True
+        lag, rates, _ = steer(stay, T + 10.0, 10.0, clock=clock, landing=lambda *_: T + 7.0)
+        stay.hold_reopen = False
+        _, rates, jumps = steer(stay, lag, 20.0, clock=clock, landing=lambda *_: T + 7.0)
+        first = next(i for i, rate in enumerate(rates) if rate != 1.0)
+        self.assertGreaterEqual(first * TICK, 12.0 - 0.25)  # the whole wait, after the hold
+
+    def test_a_gentle_nudge_a_jump_cut_counts_against_the_budget(self):
+        stay, clock = live(), Clock()
+        stay.landed(9.7)
+        lag, rates, jumps = steer(
+            stay, T + 9.7, 80.0, clock=clock, landing=keyframes(10.0, since=1003.0)
+        )
+        self.assertEqual((len(jumps), max(rates)), (1, 1.03))  # it ran, then the jump
+        _, rates = drive(stay, T + 2.0, 120.0, clock=clock)  # a drift after it
+        self.assertEqual(set(rates), {1.0})  # within the budget's 5 minutes: tolerated
 
     def test_a_tune_or_go_live_counts_as_a_jump(self):
         for opened in ("tune", "go live"):

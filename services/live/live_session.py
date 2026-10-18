@@ -42,8 +42,9 @@ timestamp jump the helper reports having left out of its timeline (`breaks` in i
 HLS discontinuity or a reconnect whose timestamps jumped 3 s or more; the position goes on
 at the rate); it never runs backwards. Seeking
 reopens the stream at a segment (about 2 s granularity) where playback starts cleanly (2.1
-stage 5, `_seek_start`: a keyframe, else an intra picture, within 10 s of the point asked; a
-start without either only when none is that near) and keeps the pause intent: a
+stage 5, `_seek_start`: a keyframe, else an intra picture, at or within 10 s before the point
+asked, or within 2 s after it; a start without either only when none is that near; a step
+back or on opens before or after where it plays) and keeps the pause intent: a
 reopened stream is paused again as soon as it plays (port map §8.19). A seek to within the
 target of the live edge goes live instead, still keeping the pause; only `go_live()` (the
 Go live button) unpauses. A pause, from any mode (a catch-up included), sets 1x and makes
@@ -125,7 +126,8 @@ rate) is kept per channel (`start(channel=...)`, in the
 then the store reads it as none, so a tune tries other rates again). Go live
 picks among every segment start, the open one included, by the lag it would give once VLC
 plays it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 s; for a
-bursty source the mean; see `_live_start`): never below the target less a quarter second,
+bursty source the mean; while playing, from the lag filter's mean edge, as stay-live then
+measures it; see `_live_start`): never below the target less a quarter second,
 since stay-live wins buffer back only that slowly, and only for a bursty source; the nearest
 the target within stay-live's band; else the nearest above it ("behind live" for a moment
 while stay-live catches up). Every such open (a tune, Go live, stay-live's reopen) starts
@@ -285,7 +287,8 @@ class _Progress(NamedTuple):
 
 
 class _Retry(Enum):
-    LIVE = "live"
+    LIVE = "live"  # a recovery's or the RAM ring's go live (a short landing is built)
+    GO_LIVE = "go_live"  # the Go live button's, a seek to the edge (nothing is built)
     REOPEN = "reopen"  # stay-live's own reopen at live (a Go live right after it is merged)
     RESUME = "resume"
     FIRST = "first"  # the tune's first open: its start is picked again
@@ -573,6 +576,10 @@ class LiveSession(QObject):
             self._playback.set_paused(False)
 
     def seek_to(self, t: float) -> None:
+        self._seek(t)
+
+    def _seek(self, t: float, *, lo: float = -math.inf, hi: float = math.inf) -> None:
+        """Seek to `t`, opening a segment that starts in [`lo`, `hi`) (a step's direction)."""
         if self._phase is not _Phase.PIPELINE or self._sid is None:
             return
         snapshot = self._snapshot()
@@ -583,25 +590,43 @@ class LiveSession(QObject):
         if self._deferred is not None:
             self._after_update = t  # the spans still describe the lost disk ring
             return
-        span = self._seek_start(t)
-        if span is None:  # nothing buffered yet
+        span = self._seek_start(t, lo=lo, hi=hi)
+        if span is None:  # nothing buffered yet (or nothing that way)
             return
         self._stay.user_seeked_back()
         self._open_at(span.seq)
 
     def seek_relative(self, dt: float) -> None:
-        self.seek_to(self.position() + dt)
+        """A step back or on (←/→): it opens a segment starting before where it plays, or
+        after it (review I1: a keyframe after the point asked could take a step back to
+        where it played, again and again)."""
+        position = self.position()
+        if dt < 0:
+            self._seek(position + dt, hi=position)
+        elif dt > 0:
+            self._seek(position + dt, lo=position + 1e-6)
 
     def go_live(self) -> None:
         """The Go live button: back to the live edge at 1x, playing (not paused)."""
         self._go_live(unpause=True, merge=True)
 
-    def _go_live(self, *, unpause: bool, reopen: bool = False, merge: bool = False) -> None:
+    def _go_live(
+        self,
+        *,
+        unpause: bool,
+        reopen: bool = False,
+        merge: bool = False,
+        build: Optional[bool] = None,
+    ) -> None:
         """Reopen at the live target behind the edge, at 1x; a paused one stays paused.
         `reopen`: stay-live's own, far behind. `merge` (the Go live button, a seek to the
         edge): within `_REOPEN_HOLD_S` of stay-live's reopen nothing more opens (it is at
         live already: one open, not two). A recovery or the RAM ring's reopen always opens.
-        Stay-live hears where an open landed (`StayLive.landed`)."""
+        Stay-live hears where an open landed (`StayLive.landed`); `build` (default: neither
+        `reopen` nor `merge`) whether a shortfall then is missing room, built once: a
+        recovery's or the RAM ring's fresh buffer may hold little, while Go live and a jump
+        pick at the target in a full one (review I3)."""
+        build = not (reopen or merge) if build is None else build
         landing: Optional[float] = None
         merged = False
         try:
@@ -629,7 +654,9 @@ class LiveSession(QObject):
                     return  # stay-live reopened at live a moment ago
                 pick = self._live_start()
                 if pick is None or not self._open_at(pick[0]):
-                    self._retry = _Retry.REOPEN if reopen else _Retry.LIVE  # the tick tries
+                    # The tick tries again, as the same kind of open.
+                    retry = _Retry.LIVE if build else _Retry.GO_LIVE
+                    self._retry = _Retry.REOPEN if reopen else retry
                 else:
                     landing = pick[1] - self._target(self._snapshot())
                     if reopen:
@@ -642,7 +669,7 @@ class LiveSession(QObject):
             else:
                 self._stay.user_go_live(keep_landing=merged)  # nothing opened: it stays
                 if landing is not None:
-                    self._stay.landed(landing)
+                    self._stay.landed(landing, build=build)
 
     def set_speed(self, rate: float) -> None:
         if self._phase is not _Phase.PIPELINE or rate <= 0 or self._stay.mode is Mode.LIVE:
@@ -1134,7 +1161,10 @@ class LiveSession(QObject):
                 if not self._gave_up():
                     self._open_first_again()
             elif not self._gave_up():
-                self._go_live(unpause=False, reopen=self._retry is _Retry.REOPEN)
+                retry = self._retry
+                self._go_live(
+                    unpause=False, reopen=retry is _Retry.REOPEN, build=retry is _Retry.LIVE
+                )
             if self._phase is not _Phase.PIPELINE:
                 return  # it fell back
             if self._retry is not None:
@@ -1551,15 +1581,23 @@ class LiveSession(QObject):
         Every start, the open segment's too (where the closed ones end; on a bursty source
         the newest GOP stays open until the next burst), by the lag it would give once VLC
         plays it (the edge moves on while VLC opens): for a bursty source the mean over a
-        burst (`_lag`), for a steady source the lag itself."""
+        burst (`_lag`), for a steady source the lag itself. While playing, from where the lag
+        filter has the live edge on average (2.1 stage 5, review I3): the mean stay-live then
+        measures the landing with. Taken from the arrival now, a batch earlier or later than
+        its rhythm (a sparse-PCR channel's 10 s batches, some 6 s apart, under a 12 s target
+        duration) moved landings 1.7-2.3 s off either way."""
         assert self._sid is not None
-        edge = self._live_edge(snapshot) + ahead
         starts = [(span.start, span.seq) for span in self._engine.spans(self._sid)]
         open_seq = snapshot.get("open")
         if isinstance(open_seq, int):
             starts.append((_number(snapshot.get("end")), open_seq))
-        shift = self._burst_shift(snapshot) + self._open_s
-        return sorted((edge - start + shift, seq) for start, seq in starts)
+        mean = None
+        if ahead <= 0 and not self._was_stalled and self._phase is _Phase.PIPELINE:
+            mean = self._filter.edge(self._clock())  # None before its first edge
+        if mean is None:
+            mean = self._live_edge(snapshot) + ahead + self._burst_shift(snapshot)
+        edge = mean + self._open_s
+        return sorted((edge - start, seq) for start, seq in starts)
 
     def _live_start(
         self, *, cushion: bool = False, ahead: float = 0.0
@@ -1621,41 +1659,50 @@ class LiveSession(QObject):
         if pick is None:
             return None
         seq, lag = pick
-        if self._qualities(self._snapshot()).get(seq, 0) >= _QUALITY_RANK["none"]:
+        snapshot = self._snapshot()
+        audio_only = snapshot.get("video") is False  # every start is "none", and clean
+        if not audio_only and self._qualities(snapshot).get(seq, 0) >= _QUALITY_RANK["none"]:
             return None  # only starts that break the picture are far enough behind
         return lag
 
-    def _seek_start(self, t: float) -> Optional[Span]:
-        """Where a seek to `t` opens (2.1 stage 5): the segment holding `t` when it starts
-        cleanly (a keyframe; an intra picture unless a keyframe start is within
-        `_KEY_REACH_S` of `t`); else the clean start nearest `t` within `_SEEK_REACH_S`, a
-        keyframe's if one is at most `_KEY_REACH_S` further. The segment holding `t` without
-        either only when no clean start is that near. None while nothing is closed."""
+    def _seek_start(
+        self, t: float, *, lo: float = -math.inf, hi: float = math.inf
+    ) -> Optional[Span]:
+        """Where a seek to `t` opens (2.1 stage 5), among segments starting in [`lo`, `hi`):
+        the clean start (a keyframe, or an intra picture) latest at or before `t` within
+        `_SEEK_REACH_S`, a keyframe's if one is at most `_KEY_REACH_S` further back; without
+        one, a clean start after `t` within `_KEY_REACH_S` (a keyframe's first); without
+        either, the segment holding `t` (or, out of bounds, the first in them after `t`).
+        None while nothing is closed (or nothing is in bounds)."""
         assert self._sid is not None
         spans = self._engine.spans(self._sid)
-        holding = _locate(spans, t)
-        if holding is None:
+        if not spans:
             return None
+        t = min(max(t, spans[0].start), spans[-1].end)
+        inside = [span for span in spans if lo <= span.start < hi]
         ranks = self._qualities(self._snapshot())
-
-        def away(span: Span) -> float:
-            return 0.0 if span is holding else abs(span.start - t)
-
-        clean = [
-            span
-            for span in spans
-            if ranks.get(span.seq, 0) < _QUALITY_RANK["none"] and away(span) <= _SEEK_REACH_S
-        ]
-        if not clean:
+        key, none = _QUALITY_RANK["key"], _QUALITY_RANK["none"]
+        clean = [span for span in inside if ranks.get(span.seq, 0) < none]
+        before = [span for span in clean if t - _SEEK_REACH_S <= span.start <= t]
+        if before:
+            latest = max(span.start for span in before)
+            keys = [
+                span
+                for span in before
+                if ranks.get(span.seq, 0) == key and span.start >= latest - _KEY_REACH_S
+            ]
+            return max(keys or before, key=lambda span: span.start)
+        after = [span for span in clean if t < span.start <= t + _KEY_REACH_S]
+        if after:
+            keys = [span for span in after if ranks.get(span.seq, 0) == key]
+            return min(keys or after, key=lambda span: span.start)
+        holding = _locate(spans, t)
+        if holding is not None and lo <= holding.start < hi:
             return holding
-        nearest = min(away(span) for span in clean)
-        keys = [
-            span
-            for span in clean
-            if ranks.get(span.seq, 0) == _QUALITY_RANK["key"]
-            and away(span) <= nearest + _KEY_REACH_S
-        ]
-        return min(keys or clean, key=away)
+        later = [span for span in inside if span.start > t]
+        if later:
+            return min(later, key=lambda span: span.start)
+        return max(inside, key=lambda span: span.start) if inside else None
 
     def _say_unclean(self, seq: int) -> None:
         """Opening at `seq`, a start without a keyframe or an intra picture: the pickers take
@@ -1738,7 +1785,11 @@ class LiveSession(QObject):
         start = self._buffer_start()
         expired = position < start - _EXPIRED_S
         at = start + _REWIND_MARGIN_S if expired else max(position, start)
-        span = self._seek_start(at)  # where playback starts cleanly, as a seek there
+        # Where playback starts cleanly, as a seek there; past the ring, never before the
+        # segment the margin reaches (an earlier keyframe would give the margin back).
+        holding = _locate(self._engine.spans(self._sid), at) if expired else None
+        lo = holding.start if holding is not None else -math.inf
+        span = self._seek_start(at, lo=lo)
         seq = span.seq if span is not None else self._oldest_seq()
         if seq is None or not self._open_at(seq):
             self._retry = _Retry.RESUME
