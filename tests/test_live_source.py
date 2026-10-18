@@ -1079,8 +1079,8 @@ high.m3u8
         server = self.server({"/live.ts": (200, sized, warming_up)})
         answered = []
 
-        def on_answer():
-            answered.append(time.monotonic())
+        def on_answer(answering):
+            answered.append((answering, time.monotonic()))
             threading.Timer(0.3, released.set).start()  # the body follows a while later
 
         started = time.monotonic()
@@ -1091,9 +1091,38 @@ high.m3u8
             stop=threading.Event(),
             on_answer=on_answer,
         )
-        self.assertEqual(len(answered), 1)
-        self.assertLess(answered[0] - started, 2.0)  # not after the body's 5 s
+        self.assertEqual([answering for answering, _at in answered], [True])
+        self.assertLess(answered[0][1] - started, 2.0)  # not after the body's 5 s
         self.assertEqual(drain(source), [self.video])
+
+    def test_an_answer_is_taken_back_once_its_body_fails_or_turns_out_a_playlist(self):
+        # 2.1 review M2/M4: the GUI waits longer only while a raw-TS answer stands. One whose
+        # body ends before its first byte is taken back before it is asked for again, and so is
+        # one whose body is a playlist after all (an HLS channel waits longer only once segment
+        # bytes flow).
+        def empty_first(_request, count):
+            return (200, {}, b"") if count == 1 else (200, {}, self.video)
+
+        server = self.server(
+            {
+                "/cold.ts": empty_first,
+                "/play": (200, {}, leaf("video.ts")),  # neither its type nor its path says so
+                "/video.ts": (200, {}, self.video),
+            }
+        )
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            for path, calls in (("/cold.ts", [True, False, True]), ("/play", [True, False])):
+                with self.subTest(path):
+                    answered = []
+                    source = open_source(
+                        server.url + path,
+                        headers={},
+                        verify_ssl=True,
+                        stop=threading.Event(),
+                        on_answer=answered.append,
+                    )
+                    self.assertEqual(drain(source), [self.video])
+                    self.assertEqual(answered, calls)
 
     def test_an_answer_that_names_a_playlist_is_no_cold_restream(self):
         # The longer wait is for raw TS (cold restreams): an HLS playlist that answers says
@@ -1115,7 +1144,7 @@ high.m3u8
                     headers={},
                     verify_ssl=True,
                     stop=threading.Event(),
-                    on_answer=lambda: answered.append(True),
+                    on_answer=answered.append,
                 )
                 self.assertEqual(drain(source), [self.video])
                 self.assertEqual(answered, [])
@@ -1138,6 +1167,39 @@ high.m3u8
                 with self.subTest(path):
                     self.assertEqual(media(server.url + path), [self.video])
                     self.assertEqual(server.counts[path], 2)
+
+    def test_a_limit_met_on_asking_again_reports_the_first_failure(self):
+        # 2.1 review M1: a panel that counted the first answer may refuse the next with its
+        # limit. The channel then plays directly as before 2.1 (the first failure stands, and
+        # the GUI's direct-play retries follow), and nothing more is asked.
+        def counted(_request, count):
+            return (200, {}, b"") if count == 1 else (509, {}, b"")
+
+        server = self.server({"/counted.ts": counted})
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            with self.assertRaises(SourceError) as raised:
+                media(server.url + "/counted.ts")
+        self.assertEqual(raised.exception.kind, "network")
+        self.assertNotEqual(str(raised.exception), STREAM_LIMIT)
+        self.assertEqual(server.counts["/counted.ts"], 2)
+
+    def test_a_host_that_does_not_resolve_is_not_asked_again(self):
+        # A DNS failure is no restream warming up: the fallback comes at once, not 3.5 s later.
+        from urllib3.exceptions import MaxRetryError, NameResolutionError
+
+        failure = requests.exceptions.ConnectionError(
+            MaxRetryError(None, "/", NameResolutionError("nowhere.invalid", None, OSError()))
+        )
+        with patch.object(source_module._Http, "get", side_effect=failure) as get:
+            with self.assertRaises(SourceError) as raised:
+                open_source(
+                    "http://nowhere.invalid/live.ts",
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                )
+        self.assertEqual(raised.exception.kind, "network")
+        self.assertEqual(get.call_count, 1)
 
     def test_a_first_answer_that_keeps_failing_ends_with_its_own_error(self):
         server = self.server(
@@ -1337,7 +1399,10 @@ high.m3u8
             "/400.ts": (answer(400, b"<h1>Max connections reached for this line</h1>"), True),
             "/401.ts": (answer(401, b"Your connection limit is exceeded"), True),
             "/404.ts": (answer(404, b"Not found"), False),
-            "/500.ts": (answer(500, b"max connections"), False),  # only a 4xx body is read
+            # A 5xx that names the limit is no limit refusal (direct play follows, as before
+            # 2.1), but it is never asked for again either.
+            "/500.ts": (answer(500, b"max connections"), False),
+            "/503.ts": (answer(503, b"<h1>Max connections reached for this line</h1>"), False),
         }
         server = self.server({path: route for path, (route, _limited) in cases.items()})
         with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
@@ -1352,7 +1417,7 @@ high.m3u8
                     else:
                         self.assertEqual(str(error) == STREAM_LIMIT, limited)
                     self.assertNotIn("127.0.0.1", str(error))
-        self.assertEqual(server.counts["/509.ts"], 1)  # a limit is never retried
+                    self.assertEqual(server.counts[path], 1)  # a limit is never asked again
 
     # ---- live HLS --------------------------------------------------------------------------
 

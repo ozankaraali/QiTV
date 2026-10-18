@@ -26,7 +26,8 @@ Commands (parent to helper):
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
 additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
-and once the source answered (`answered`, 2.1: its headers came, before its first byte),
+and once a raw-TS source answered (`answered`, 2.1: its headers came, before its first byte;
+taken back once its body failed or turned out a playlist),
 each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality)`
 (`Span`'s fields; an engine from before 2.1 would not take the fifth, but the helper and the
 engine always ship in one build, and the engine still takes four);
@@ -440,10 +441,6 @@ class _Session:
             source.close()
             raise _Cancelled()
         self._adopt(self._make_ring())
-        if self._answered:
-            # An answer the open found a playlist behind: the parent's longer wait is raw
-            # TS's, an HLS channel's only once segment bytes flow (its state says `hls`).
-            self._notify(force=True)
         segmenter = self._segmenter
         try:
             for item in source.chunks():
@@ -602,13 +599,15 @@ class _Session:
         else:
             self._skipping = True  # the open segment lost its start: wait for the next
 
-    def _on_answer(self) -> None:
+    def _on_answer(self, answered: bool) -> None:
         """The source's response headers came, before its first byte (2.1): an on-demand
-        restream may hold its body back for seconds (VLC's second request then finds it warm),
-        so the parent waits for it as for bytes that are not playable yet. Reported at once,
-        before any ring exists."""
-        if not self._answered:
-            self._answered = True
+        raw-TS restream may hold its body back for seconds (VLC's second request then finds it
+        warm), so the parent waits for it as for bytes that are not playable yet. Taken back
+        (False) once that body failed, before the open asks again, or turned out a playlist (an
+        HLS channel waits longer only once segment bytes flow). Reported at once, before any
+        ring exists."""
+        if answered != self._answered:
+            self._answered = answered
             self._notify(force=True)
 
     def _fail(self, kind: str, message: str, status: int | None = None) -> None:

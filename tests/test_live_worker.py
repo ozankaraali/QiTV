@@ -862,10 +862,10 @@ class LiveWorkerTests(unittest.TestCase):
         helper.wait_for(lambda message: message == ("ready", sid))
         self.assertIs(helper.of(sid, "state")[-1][2]["answered"], True)
 
-    def test_an_answer_that_turns_out_hls_says_so_before_any_segment_byte(self):
-        # A playlist the answer did not name as one (no type, no .m3u8 path): its open says it
-        # is HLS at once, so the GUI keeps the longer wait for raw TS (an HLS channel waits
-        # longer only once segment bytes flow).
+    def test_an_answer_that_turns_out_hls_is_taken_back_before_any_segment_byte(self):
+        # A playlist the answer did not name as one (no type, no .m3u8 path): its open takes
+        # the answer back as the playlist comes, so the GUI keeps the longer wait for raw TS
+        # (an HLS channel waits longer only once segment bytes flow; review M4).
         go = threading.Event()
         self.addCleanup(go.set)
 
@@ -884,8 +884,7 @@ class LiveWorkerTests(unittest.TestCase):
         )
         helper = self.helper()
         sid = helper.open(source.url + "/user/secret/play")
-        state = helper.wait_for(lambda m: m[:2] == ("state", sid) and m[2]["hls"])
-        self.assertIs(state[2]["answered"], True)
+        state = helper.wait_for(lambda m: m[:2] == ("state", sid) and not m[2]["answered"])
         self.assertEqual(state[2]["received"], 0)
         self.assertEqual(helper.of(sid, "ready"), [])
         go.set()

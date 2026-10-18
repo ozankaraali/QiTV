@@ -51,7 +51,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
-from urllib3.exceptions import ReadTimeoutError
+from urllib3.exceptions import NameResolutionError, ReadTimeoutError
 from urllib3.util.ssl_ import create_urllib3_context, resolve_cert_reqs, resolve_ssl_version
 
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
@@ -253,13 +253,30 @@ def _refusal(response: Any) -> str | None:
         return STREAM_LIMIT
     if not 400 <= status < 500:
         return None
+    if _names_limit(response):
+        return STREAM_LIMIT
+    return STREAM_REFUSED if status == 403 else None
+
+
+def _names_limit(response: Any) -> bool:
+    """Whether an error answer's body (its first `_LIMIT_BODY_BYTES`) names the connection
+    limit. The body never reaches a log."""
     try:
         body = response.raw.read1(_LIMIT_BODY_BYTES, decode_content=True) or b""
     except Exception:
         body = b""
-    if _LIMIT_WORDS.search(body):
-        return STREAM_LIMIT
-    return STREAM_REFUSED if status == 403 else None
+    return bool(_LIMIT_WORDS.search(body))
+
+
+class _LimitAnswer(requests.exceptions.HTTPError):
+    """A 5xx answer whose body names the connection limit (2.1 review I1): it is no limit
+    refusal (the channel plays directly, as before), but the open never asks it again."""
+
+
+def _dns_failed(error: Exception) -> bool:
+    """Whether a connection failed because the host does not resolve: nothing warms up."""
+    reason = getattr(error.args[0], "reason", None) if error.args else None
+    return isinstance(reason, NameResolutionError)
 
 
 def _sized(response: Any) -> bool:
@@ -610,8 +627,13 @@ class _Http:
                 return
         self.close()
 
-    def get(self, url: str, headers: Mapping[str, str] | None = None) -> Any:
-        """Send one GET; the response stays registered so ``close()`` can interrupt it."""
+    def get(
+        self, url: str, headers: Mapping[str, str] | None = None, *, read_5xx: bool = False
+    ) -> Any:
+        """Send one GET; the response stays registered so ``close()`` can interrupt it.
+
+        With ``read_5xx`` (the open), a 5xx answer's body is read for limit words too: one
+        naming the limit raises `_LimitAnswer`, which is never asked again."""
         if urlsplit(url).scheme.lower() not in ("http", "https"):
             raise SourceError("unsupported", _NON_HTTP)
         if self.closed:
@@ -640,9 +662,13 @@ class _Http:
             response.raise_for_status()
         except requests.exceptions.HTTPError as error:
             refusal = _refusal(response)
+            status = _status(error) or 0
+            limited = not refusal and read_5xx and status >= 500 and _names_limit(response)
             self.release(response)
             if refusal:
                 raise SourceError("http", refusal, _status(error)) from None
+            if limited:
+                raise _LimitAnswer(response=response) from None
             raise
         except BaseException:
             self.release(response)
@@ -1465,46 +1491,63 @@ def _names_a_playlist(url: str, response: Any) -> bool:
 
 
 def _answer(
-    http: _Http, url: str, on_answer: Callable[[], None] | None
+    http: _Http, url: str, on_answer: Callable[[bool], None] | None
 ) -> tuple[Any, bytes, bytes | None]:
     """The entry URL's response, its first bytes and, for a playlist, all of it. As its
-    headers come, ``on_answer`` hears that the channel answered, unless the answer names an HLS
-    playlist (`_names_a_playlist`): an on-demand raw-TS restream may hold its body back for
-    seconds, while an HLS channel is waited for longer only once segment bytes flow. A body
-    that ends before its first byte is a broken one."""
-    response = http.get(url)
+    headers come, ``on_answer(True)`` hears that the channel answered, unless the answer names
+    an HLS playlist (`_names_a_playlist`): an on-demand raw-TS restream may hold its body back
+    for seconds, while an HLS channel is waited for longer only once segment bytes flow. A body
+    that fails, or ends before its first byte (a broken one), or turns out a playlist takes the
+    answer back (``on_answer(False)``)."""
+    response = http.get(url, read_5xx=True)
+    report = on_answer if not _names_a_playlist(url, response) else None
     try:
-        if on_answer is not None and not _names_a_playlist(url, response):
-            on_answer()
+        if report is not None:
+            report(True)
         prefix, content = _sniff(http, response)
         if not prefix:
             raise _ReadError("network")
     except BaseException:
         http.release(response)
+        if report is not None:
+            report(False)  # taken back: asked again, or the end (review M2)
         raise
+    if report is not None and content is not None:
+        report(False)  # a playlist after all: no cold raw-TS restream (review M4)
     return response, prefix, content
 
 
 def _first_answer(
-    http: _Http, url: str, on_answer: Callable[[], None] | None
+    http: _Http, url: str, on_answer: Callable[[bool], None] | None
 ) -> tuple[Any, bytes, bytes | None]:
     """`_answer`, asked for again after each of the first `_OPEN_RETRIES` reconnect delays
     while it fails in passing (a 5xx or 408, a broken or refused connection, a body that ends
     before its first byte): an on-demand restream may refuse the request that starts it and
     serve the next, which VLC's own retry finds. Then the last failure stands as it is (an
-    "http" one keeps its status); an answer that means it (a 4xx, a limit, TLS) and a timeout
-    (the full 60 s were waited already) at once."""
+    "http" one keeps its status). At once: an answer that means it (a 4xx, a limit, a 5xx whose
+    body names the limit, TLS), a timeout (the full 60 s were waited already) and a host that
+    does not resolve. A limit refusal met on asking again leaves the first failure standing
+    (the panel counted the first answer; the channel plays directly, as before 2.1)."""
     delays = iter(_RECONNECT_DELAYS[:_OPEN_RETRIES])
+    first: Exception | None = None
     while True:
         try:
             return _answer(http, url, on_answer)
         except Exception as error:
             if http.closed:
                 raise _Closed() from None
+            if first is not None and isinstance(error, SourceError) and str(error) in REFUSALS:
+                # A panel that counted the first answer refuses the next for its limit: the
+                # first failure stands, so the channel plays directly as before (review M1).
+                raise first from None
+            first = first or error
             timed_out = isinstance(error, requests.exceptions.Timeout) or (
                 isinstance(error, _ReadError) and error.kind == "timeout"
             )
-            delay = next(delays, None) if _retryable(error) and not timed_out else None
+            passing = _retryable(error) and not timed_out and not isinstance(error, _LimitAnswer)
+            if isinstance(error, requests.exceptions.ConnectionError) and _dns_failed(error):
+                passing = False
+            delay = next(delays, None) if passing else None
             if delay is None:
                 raise
             log.info("The channel's first answer failed (%s); asking again.", type(error).__name__)
@@ -1518,7 +1561,7 @@ def _open_http(
     live_delay: float,
     target: float | None,
     extra: float,
-    on_answer: Callable[[], None] | None = None,
+    on_answer: Callable[[bool], None] | None = None,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
@@ -1541,15 +1584,16 @@ def open_source(
     target: float | None = None,
     extra: float = 0.0,
     allow_local: bool = False,
-    on_answer: Callable[[], None] | None = None,
+    on_answer: Callable[[bool], None] | None = None,
 ) -> Source:
     """Open ``url``, sniff it, and return a TS or HLS source.
 
     One request, unless the first answer fails in passing: a 5xx or 408, a broken or refused
     connection, or a body that ends before its first byte is asked for again after each of the
-    first three reconnect delays (`_first_answer`). ``on_answer`` is called as an answer's
-    headers come, before its first byte, which an on-demand restream may hold back for seconds;
-    not for an answer that names an HLS playlist by its content type or path.
+    first three reconnect delays (`_first_answer`). ``on_answer(True)`` is called as an
+    answer's headers come, before its first byte, which an on-demand raw-TS restream may hold
+    back for seconds (not for an answer that names an HLS playlist by its content type or
+    path); ``on_answer(False)`` takes it back once its body failed or turned out a playlist.
 
     Provider ``headers``: only ``User-Agent`` (default ``VLC/3.0.20``) and ``Referer`` are
     used, and each goes with every request: playlists and segments, on any origin, and their
