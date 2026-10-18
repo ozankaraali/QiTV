@@ -580,9 +580,7 @@ class _Backoff:
 class _Http:
     """One Session per source, interruptible from any thread by ``close()`` or ``stop``."""
 
-    def __init__(
-        self, url: str, headers: Mapping[str, str], verify_ssl: bool, stop: threading.Event
-    ) -> None:
+    def __init__(self, headers: Mapping[str, str], verify_ssl: bool, stop: threading.Event) -> None:
         self._interrupter = _Interrupter()
         self._lock = threading.Lock()
         self._closed_event = threading.Event()
@@ -595,14 +593,15 @@ class _Http:
         self.closed = False
         provided = {name.lower(): value for name, value in headers.items() if value}
         self.user_agent = provided.get("user-agent") or DEFAULT_USER_AGENT
-        self._referer = provided.get("referer")
-        self._entries = {_origin(url)}
+        referer = provided.get("referer")
         self.session = requests.Session()
         adapter = _InterruptibleAdapter(self._interrupter)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         self.session.hooks["response"].append(_close_redirect_body)
         self.session.headers["User-Agent"] = self.user_agent
+        if referer:  # an M3U channel's http-referrer (2.1): every request, as VLC sends it
+            self.session.headers["Referer"] = referer
         threading.Thread(target=self._watch, name="qitv-live-source-stop", daemon=True).start()
 
     def _watch(self) -> None:
@@ -618,16 +617,13 @@ class _Http:
         if self.closed:
             raise _Closed()
         self._owner = threading.get_ident()
-        sent = dict(headers or {})
-        if self._referer and _origin(url) in self._entries:
-            sent["Referer"] = self._referer  # requests keeps it across this request's hops
         try:
             response = self.session.get(
                 url,
                 stream=True,
                 timeout=(_TIMEOUT, _TIMEOUT),
                 verify=self._verify_ssl,
-                headers=sent,
+                headers=dict(headers or {}),
             )
         except Exception:
             if self.closed:
@@ -652,10 +648,6 @@ class _Http:
             self.release(response)
             raise
         return response
-
-    def add_entry(self, url: str) -> None:
-        """Send the Referer to ``url``'s origin too (the media playlist found at open)."""
-        self._entries.add(_origin(url))
 
     def release(self, response: Any) -> None:
         with self._lock:
@@ -1536,7 +1528,6 @@ def _open_http(
     finally:
         http.release(response)
     playlist, base, separate = _media_playlist(http, content, final)
-    http.add_entry(base)  # reloads and same-origin segments keep the provider's Referer
     return HlsSource(http, playlist, base, live_delay, target, extra, separate_audio=separate)
 
 
@@ -1561,12 +1552,10 @@ def open_source(
     not for an answer that names an HLS playlist by its content type or path.
 
     Provider ``headers``: only ``User-Agent`` (default ``VLC/3.0.20``) and ``Referer`` are
-    used. The User-Agent goes with every request. The Referer goes only with requests to
-    an entry origin (scheme, host and port) and those requests' redirect hops; the entry
-    origins are the URL's own and, for HLS, that of the media playlist reached at open
-    (so reloads and same-origin segments keep it after a cross-origin redirect). Every
-    other provider header (Host, Range, Connection, Content-Length, Cookie,
-    Authorization, ...) is dropped.
+    used, and each goes with every request: playlists and segments, on any origin, and their
+    redirect hops (2.1: an M3U channel's http-referrer, which a CDN's hotlink check may read,
+    as VLC sends it). Every other provider header (Host, Range, Connection, Content-Length,
+    Cookie, Authorization, ...) is dropped.
 
     A live HLS session starts at the first segment from which the playlist's remaining
     EXTINF durations add up to at least ``live_delay`` seconds (at least one segment); given
@@ -1590,7 +1579,7 @@ def open_source(
         return _open_local(url, scheme)
     if scheme not in ("http", "https"):
         raise SourceError("unsupported")
-    http = _Http(url, headers, verify_ssl, stop)
+    http = _Http(headers, verify_ssl, stop)
     try:
         return _open_http(http, url, live_delay, target, extra, on_answer)
     except Exception as error:

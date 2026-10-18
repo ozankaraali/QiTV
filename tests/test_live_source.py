@@ -1888,7 +1888,9 @@ high.m3u8
                 if accepted:
                     self.assertTrue(any("French" in line for line in logs), logs)
 
-    def test_only_the_user_agent_reaches_other_origins_and_referer_stays_with_the_entry(self):
+    def test_the_user_agent_and_referer_reach_every_origin_and_no_other_header_does(self):
+        # 2.1: an M3U channel's http-referrer goes with its playlists and segments alike,
+        # wherever they are (a CDN's hotlink check reads it), as VLC sends it.
         cdn = self.server({"/segment/a.ts": (200, {}, self.video)})
 
         def live(_request, count):
@@ -1917,14 +1919,11 @@ high.m3u8
                     self.assertNotIn(name, received)
                 self.assertTrue(received["Host"].startswith("127.0.0.1:"))
                 self.assertNotEqual(received.get("Connection"), "close")
-        # The entry, its redirect hop and the final media playlist's origin (here the hop:
-        # reloads and segments) carry the Referer; other origins do not.
-        self.assertEqual(entry.requests[0][1].get("Referer"), "http://portal.invalid/")
         hop_paths = [path for path, _received in hop.requests]
         self.assertEqual(hop_paths, ["/live.m3u8", "/live.m3u8", "/b.ts"])
-        for _path, received in hop.requests:
-            self.assertEqual(received.get("Referer"), "http://portal.invalid/")
-        self.assertNotIn("Referer", cdn.requests[0][1])
+        for server in (entry, hop, cdn):  # the cdn holds a segment of its own
+            for _path, received in server.requests:
+                self.assertEqual(received.get("Referer"), "http://portal.invalid/")
 
     def test_keep_alive_connections_are_reused_for_reloads_and_segments(self):
         def playlist(_request, count):

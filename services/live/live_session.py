@@ -383,6 +383,7 @@ class LiveSession(QObject):
         self._url = ""
         self._latency = "normal"
         self._user_agent: Optional[str] = None
+        self._referrer: Optional[str] = None
         self._open_args: dict[str, Any] = {}
         self._stay = StayLive()
         self._snapshot_cache: dict[str, Any] = {}
@@ -494,11 +495,14 @@ class LiveSession(QObject):
         max_bytes: int,
         ram_bytes: Optional[int] = None,
         channel: str = "",
+        referrer: Optional[str] = None,
     ) -> None:
         """`ram_bytes`: the memory a disk buffer that fails goes on in (the helper's default
-        when None). `channel`: the channel's key in the tuning store ("": nothing kept)."""
+        when None). `channel`: the channel's key in the tuning store ("": nothing kept).
+        `referrer`: the channel's M3U http-referrer, for a direct play (`headers` carry it to
+        the helper as Referer)."""
         self.stop()
-        self._url, self._user_agent = url, user_agent
+        self._url, self._user_agent, self._referrer = url, user_agent, referrer
         self._channel = channel
         memory = self._tuning.get(channel) if self._tuning is not None else None
         self._memory = memory or Tuning()
@@ -799,9 +803,7 @@ class LiveSession(QObject):
         self._phase = _Phase.DIRECT
         self._mode = "direct"
         self._direct_at = self._clock()
-        self._playback.play(
-            self._url, kind=PlayKind.LIVE, latency=self._latency, user_agent=self._user_agent
-        )
+        self._play_provider()
         self._set_rate(1.0)
         self.notice.emit(self._fallback_notice)
         self.modeChanged.emit(self._mode)
@@ -1170,9 +1172,19 @@ class LiveSession(QObject):
     def _retry_direct(self) -> None:
         if self._phase is _Phase.DIRECT:
             self._direct_at = self._clock()
-            self._playback.play(
-                self._url, kind=PlayKind.LIVE, latency=self._latency, user_agent=self._user_agent
-            )
+            self._play_provider()
+
+    def _play_provider(self) -> None:
+        """The provider's stream in VLC itself, with the channel's agent and, when its M3U
+        names one, its referrer (2.1; the loopback stream needs neither)."""
+        extra: dict[str, Any] = {"referrer": self._referrer} if self._referrer else {}
+        self._playback.play(
+            self._url,
+            kind=PlayKind.LIVE,
+            latency=self._latency,
+            user_agent=self._user_agent,
+            **extra,
+        )
 
     def _on_interrupted(self) -> None:
         if self._phase is not _Phase.PIPELINE:

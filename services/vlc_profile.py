@@ -31,14 +31,21 @@ def classify(url: str, is_live: Optional[bool]) -> PlayKind:
 
 
 def media_options(
-    kind: PlayKind, *, latency: str = "normal", user_agent: Optional[str] = None
+    kind: PlayKind,
+    *,
+    latency: str = "normal",
+    user_agent: Optional[str] = None,
+    referrer: Optional[str] = None,
 ) -> list[str]:
+    """`referrer`: the channel's M3U http-referrer (2.1), sent with VLC's own requests."""
     options = [
         f":http-user-agent={user_agent or DEFAULT_USER_AGENT}",
         # No ":avcodec-hw" here: a media option overrides the instance's, and the decoder is
         # Settings' choice (services.playback.decoder_args).
         ":avcodec-fast",
     ]
+    if referrer:
+        options.append(f":http-referrer={referrer}")
     if kind is PlayKind.LIVE_PIPELINE:
         # Loopback segments arrive on time from QiTV's own server, so VLC only needs a small
         # buffer and must not retry on its own: the pipeline reconnects upstream.

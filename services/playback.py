@@ -271,12 +271,15 @@ class PlaybackSession(QObject):
         latency: str = "normal",
         user_agent: Optional[str] = None,
         start_ms: Optional[int] = None,
+        referrer: Optional[str] = None,
     ) -> None:
         if self._released:
             return
         self._cancel_pending()
         self._url, self._kind = url, kind
-        self._options = media_options(kind, latency=latency, user_agent=user_agent)
+        self._options = media_options(
+            kind, latency=latency, user_agent=user_agent, referrer=referrer
+        )
         self._start_ms = start_ms if start_ms and start_ms > 0 else None
         self._stalls, self._restarted = 0, False
         self._start_media()
@@ -668,6 +671,7 @@ class Session(Protocol):
         latency: str = "normal",
         user_agent: Optional[str] = None,
         start_ms: Optional[int] = None,
+        referrer: Optional[str] = None,
     ) -> None: ...
 
     def stop(self) -> None: ...
@@ -745,6 +749,7 @@ class NullSession(QObject):
         latency: str = "normal",
         user_agent: Optional[str] = None,
         start_ms: Optional[int] = None,
+        referrer: Optional[str] = None,
     ) -> None:
         self.errorOccurred.emit(NO_VLC_MESSAGE)
 

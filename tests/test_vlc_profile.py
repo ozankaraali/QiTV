@@ -89,6 +89,16 @@ class MediaOptionsTests(unittest.TestCase):
             ":http-user-agent=Custom/1", media_options(PlayKind.LIVE, user_agent="Custom/1")
         )
 
+    def test_referrer(self):
+        # A channel's M3U http-referrer goes with VLC's own requests; without one, none.
+        for kind in PlayKind:
+            self.assertFalse(any(o.startswith(":http-referrer") for o in media_options(kind)))
+        options = media_options(PlayKind.LIVE, referrer="https://site.test/live/")
+        self.assertIn(":http-referrer=https://site.test/live/", options)
+        self.assertEqual(
+            [o for o in options if not o.startswith(":http-referrer")], media_options(PlayKind.LIVE)
+        )
+
     def test_common_options(self):
         for kind in PlayKind:
             options = media_options(kind)

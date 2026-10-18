@@ -1,3 +1,4 @@
+import json
 import os
 from types import SimpleNamespace
 import unittest
@@ -7,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from services.catalog import ALL_GROUP_ID, Group
-from services.m3u import decode_playlist, parse_m3u
+from services.m3u import decode_playlist, parse_m3u, split_cached_groups
 from services.navigation import FAVORITES_GROUP, NavModel
 from services.zapping import ZapContext
 from tests.test_catalog_service import make_service
@@ -39,6 +40,55 @@ class ParseM3uLineEndingTests(unittest.TestCase):
 
     def test_utf8_bom(self):
         self._assert_clean("\ufeff" + "\r\n".join(ENTRY))
+
+
+class ParseM3uHttpOptionTests(unittest.TestCase):
+    """A channel's http-user-agent and http-referrer, from #EXTVLCOPT lines or #EXTINF
+    attributes (iptv-org writes both), stay on its item, cached playlists included."""
+
+    def test_extvlcopt_lines_give_the_agent_and_referrer(self):
+        data = "\n".join(
+            [
+                "#EXTM3U",
+                '#EXTINF:-1 group-title="News",Channel One',
+                "#EXTVLCOPT:http-referrer=https://site.test/live/",
+                "#EXTVLCOPT:http-user-agent=UA/1 (X; Y)",
+                "http://stream.test/1.m3u8",
+            ]
+        )
+        [item] = parse_m3u(data)
+        self.assertEqual(item["referrer"], "https://site.test/live/")
+        self.assertEqual(item["user_agent"], "UA/1 (X; Y)")
+
+    def test_extinf_attributes_give_them_too(self):
+        data = (
+            "#EXTM3U\n"
+            '#EXTINF:-1 http-referrer="https://site.test/" http-user-agent="UA/2",Two\n'
+            "http://stream.test/2.m3u8\n"
+        )
+        [item] = parse_m3u(data)
+        self.assertEqual((item["referrer"], item["user_agent"]), ("https://site.test/", "UA/2"))
+
+    def test_a_channel_without_them_is_as_before(self):
+        data = "#EXTM3U\n#EXTINF:-1,Plain\nhttp://stream.test/3.ts\n#EXTINF:-1,Next\nhttp://s/4\n"
+        plain, following = parse_m3u(data)
+        self.assertNotIn("referrer", plain)
+        self.assertIsNone(plain["user_agent"])
+        self.assertNotIn("referrer", following)  # nothing carries over to the next channel
+
+    def test_a_cached_playlist_keeps_them(self):
+        data = (
+            "#EXTM3U\n"
+            '#EXTINF:-1 group-title="A;B",One\n#EXTVLCOPT:http-referrer=https://site.test/\n'
+            "http://stream.test/1.m3u8\n"
+        )
+        payload = json.loads(json.dumps(parse_m3u(data, categorize=True)))
+        [item] = payload["contents"]
+        self.assertEqual(item["referrer"], "https://site.test/")
+        # A playlist cached before "A;B" titles were split is rebuilt from its items alike.
+        payload["categories"] = [{"id": "A;B", "title": "A;B"}]
+        [rebuilt] = split_cached_groups(payload)["contents"]
+        self.assertEqual(rebuilt["referrer"], "https://site.test/")
 
 
 class ParseM3uUnicodeTests(unittest.TestCase):

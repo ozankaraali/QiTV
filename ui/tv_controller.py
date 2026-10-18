@@ -84,7 +84,7 @@ from ui.context_actions import ContextActions, Launcher, is_channel
 from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
 from ui.link_lanes import LinkLanes, Target
-from ui.live_controls import LiveControls
+from ui.live_controls import LiveControls, stream_options
 from ui.live_tuner import LiveTuner
 from ui.mixer_controls import MixerControls
 from ui.overlays.channel_column import ChannelColumn
@@ -1020,10 +1020,7 @@ class TVController(QObject):
 
                 def play_direct() -> None:
                     session.play(
-                        url,
-                        kind=kind,
-                        latency=self.config.live_latency,
-                        user_agent=item.get("user_agent"),
+                        url, kind=kind, latency=self.config.live_latency, **stream_options(item)
                     )
                     self._reset_speed(session)
 

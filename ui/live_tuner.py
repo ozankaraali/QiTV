@@ -61,6 +61,7 @@ class LiveStart:
     user_agent: str
     verify_ssl: bool
     channel: str = ""  # its key for what it taught (services.live.tuning; "": none)
+    referrer: str = ""  # the channel's M3U http-referrer (2.1; "": none)
 
 
 def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) -> dict[str, Any]:
@@ -68,15 +69,19 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
 
     The time-shift buffer is on disk with the user's consent (`disk=False`: in memory all
     the same), else the memory per stream (`timeshift_ram_mib`). A disk buffer that fails
-    goes on in that memory (`ram_bytes`). A channel with a key passes it (`channel`).
+    goes on in that memory (`ram_bytes`). A channel with a key passes it (`channel`), one whose
+    M3U names a referrer passes that (`referrer`, and its `Referer` header for the helper).
     """
     consent = bool(config.timeshift_enabled)
     disk = consent if disk is None else disk and consent
     ram = getattr(config, "timeshift_ram_mib", DEFAULT_RAM_MIB)
     mib = config.timeshift_max_mib if disk else ram
+    headers = {"User-Agent": start.user_agent}
+    if start.referrer:
+        headers["Referer"] = start.referrer  # the helper's requests, playlists and segments
     kwargs = {
         "url": start.url,
-        "headers": {"User-Agent": start.user_agent},
+        "headers": headers,
         "verify_ssl": start.verify_ssl,
         "latency": config.live_latency,
         "user_agent": start.user_agent,
@@ -87,6 +92,8 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
         kwargs["ram_bytes"] = ram * 1024 * 1024
     if start.channel:
         kwargs["channel"] = start.channel
+    if start.referrer:
+        kwargs["referrer"] = start.referrer  # a direct play's
     return kwargs
 
 

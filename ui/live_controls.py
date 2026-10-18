@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, SignalInstance
@@ -50,6 +50,15 @@ RECONNECTING_TEXT = "Reconnecting…"
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 # Never opened again: on-demand content, and a file listed as a channel ends for good.
 _NOT_LIVE = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
+
+
+def stream_options(item: dict) -> dict[str, Any]:
+    """A channel's own HTTP options for VLC's direct play: its agent, and the referrer its M3U
+    names (2.1, `:http-referrer`); an item without one plays exactly as before."""
+    options: dict[str, Any] = {"user_agent": item.get("user_agent")}
+    if item.get("referrer"):
+        options["referrer"] = item["referrer"]
+    return options
 
 
 def _streams(count: int) -> str:
@@ -196,7 +205,8 @@ class LiveControls(QObject):
         user_agent = target.item.get("user_agent") or DEFAULT_USER_AGENT
         verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
         channel = channel_key(str(provider.get("name", "")), target.item)
-        return LiveStart(url, user_agent, verify_ssl, channel)
+        referrer = str(target.item.get("referrer") or "")
+        return LiveStart(url, user_agent, verify_ssl, channel, referrer)
 
     def pipeline_live(self) -> bool:
         """The current channel plays from the time-shift buffer."""
@@ -249,10 +259,7 @@ class LiveControls(QObject):
             return  # something else plays now
         logger.info("Opening %s again after its stream ended", target.title)
         session.play(
-            url,
-            kind=kind,
-            latency=self.config.live_latency,
-            user_agent=target.item.get("user_agent"),
+            url, kind=kind, latency=self.config.live_latency, **stream_options(target.item)
         )
 
     def _cancel_reopen(self) -> None:

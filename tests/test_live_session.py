@@ -207,9 +207,11 @@ class FakePlayback(QObject):
         self.ms = 0
         self.current = PlaybackState.IDLE
         self.fail_on_play = False
+        self.http = []  # (user_agent, referrer) of each play
 
-    def play(self, url, *, kind, latency="normal", user_agent=None, start_ms=None):
+    def play(self, url, *, kind, latency="normal", user_agent=None, start_ms=None, referrer=None):
         self.plays.append((url, kind, latency))
+        self.http.append((user_agent, referrer))
         self.ms = 0
         self.set_state(PlaybackState.OPENING)
         if self.fail_on_play:
@@ -586,6 +588,32 @@ class NoRewindReasonTests(LiveSessionCase):
 
 
 class StartTests(LiveSessionCase):
+    def test_a_channels_referrer_goes_with_its_direct_play_only(self):
+        # 2.1: the M3U's http-referrer reaches the provider; the loopback stream needs none.
+        for referrer in ("https://site.test/", None):
+            with self.subTest(referrer=referrer):
+                self.live = self.make(ready_timeout_ms=50)
+                extra = {} if referrer is None else {"referrer": referrer}
+                self.live.start(
+                    URL,
+                    headers={"User-Agent": "QiTV-Test"},
+                    verify_ssl=True,
+                    latency="normal",
+                    user_agent="QiTV-Test",
+                    disk=False,
+                    max_bytes=128 * MiB,
+                    **extra,
+                )
+                sid = self.engine.last_sid
+                self.engine.buffer(sid, [], open_seq=0, live_edge=2.0)
+                self.engine.sessionReady.emit(sid)
+                self.engine.sessionFailed.emit(sid, "network", "x")  # at the edge: direct
+                self.wait_until(lambda: sid in self.engine.closed)
+                self.engine.answer()
+                self.assertEqual(self.playback.plays[-1], DIRECT)
+                self.assertEqual(self.playback.http[0], ("QiTV-Test", None))  # the loopback
+                self.assertEqual(self.playback.http[-1], ("QiTV-Test", referrer))
+
     def test_a_disk_buffer_carries_its_memory_fallback_size(self):
         # The helper's disk-failure fallback follows timeshift_ram_mib, not 128 MiB (H12).
         self.live.start(

@@ -2512,6 +2512,7 @@ class PipelineTuneTests(PipelineCase):
         kwargs = self.starts()[0][1]
         self.assertEqual(kwargs["headers"], {"User-Agent": "Box/1.0"})
         self.assertEqual(kwargs["user_agent"], "Box/1.0")
+        self.assertNotIn("referrer", kwargs)
         self.assertFalse(kwargs["verify_ssl"])
         self.assertEqual((kwargs["disk"], kwargs["max_bytes"]), (True, 4096 * MIB))
 
@@ -3108,6 +3109,17 @@ class PipelineErrorTests(PipelineCase):
         self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
 
 
+class PipelineReferrerTests(PipelineCase):
+    def test_an_m3u_channels_referrer_goes_with_its_tune(self):
+        channel = dict(CHANNELS[0], user_agent="UA/1", referrer="https://site.test/")
+        self.controller.tune(channel, group_key="10", channels=[channel])
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: self.starts()))
+        kwargs = self.starts()[0][1]
+        self.assertEqual(kwargs["headers"], {"User-Agent": "UA/1", "Referer": "https://site.test/"})
+        self.assertEqual((kwargs["user_agent"], kwargs["referrer"]), ("UA/1", "https://site.test/"))
+
+
 class ReconnectTests(PipelineCase):
     """A live channel played directly whose stream ends (2.0.1, L2b): an on-demand restream
     may show its placeholder and end. It opens again in the same player, so in the same
@@ -3194,6 +3206,19 @@ class DirectReconnectTests(ControllerTestCase):
         self.session.ended.emit()
         self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
         self.assertEqual(self.session.stops, 0)  # the slot was never given back
+
+    def test_an_m3u_channels_agent_and_referrer_go_with_its_play_and_reopen(self):
+        # 2.1: #EXTVLCOPT http-user-agent and http-referrer reach VLC's own requests.
+        channel = dict(CHANNELS[0], user_agent="UA/1", referrer="https://site.test/")
+        self.controller.tune(channel, group_key="10", channels=[channel])
+        self.ready("http://stream/1")
+        url, kwargs = self.session.plays[-1]
+        self.assertEqual((kwargs["user_agent"], kwargs["referrer"]), ("UA/1", "https://site.test/"))
+        self.session.ended.emit()
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == 2))
+        self.assertEqual(self.session.plays[-1], (url, kwargs))  # the reopen, alike
+        self.play(1)  # a channel without them plays as before
+        self.assertNotIn("referrer", self.session.plays[-1][1])
 
     def test_a_file_listed_as_a_channel_is_not_reconnected(self):
         self.tune(0)

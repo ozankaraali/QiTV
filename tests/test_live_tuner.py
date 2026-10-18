@@ -230,6 +230,14 @@ class SlotRoleTests(unittest.TestCase):
         self.assertEqual(self.tuner.stream.purpose, "pip")
         self.assertIsNone(LiveTuner(self.session, self.config, None, self.budget).stream)
 
+    def test_a_channels_referrer_goes_with_its_start(self):
+        # 2.1: an M3U channel's http-referrer: the helper's requests and VLC's direct play.
+        start = LiveStart(URL, "UA/1", True, referrer="https://site.test/")
+        kwargs = start_kwargs(start, self.config)
+        self.assertEqual(kwargs["headers"], {"User-Agent": "UA/1", "Referer": "https://site.test/"})
+        self.assertEqual(kwargs["referrer"], "https://site.test/")
+        self.assertNotIn("referrer", start_kwargs(LiveStart(URL, "UA/1", True), self.config))
+
     def test_start_kwargs_are_a_main_tunes(self):
         self.start_pipeline()
         kwargs = start_kwargs(LiveStart(URL, "QiTV", True), self.config)
