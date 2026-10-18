@@ -399,14 +399,20 @@ class LinksDuringSetupTests(unittest.TestCase):
         self.hub.linkFailed.connect(lambda rid, msg: self.hub_failures.append((rid, msg)))
 
     def lanes(self):
-        """The TV shell's link lanes over the hub; like the controller, the provider's
-        providerReady and providerFailed drop its requests (they are asked again)."""
+        """The TV shell's link lanes over the hub, settled as the controller settles them on
+        the provider's providerReady and providerFailed (`dropped`: the tunes it drops)."""
         lanes = LinkLanes(self.hub)
-        self.dropped = []
-        for signal in (self.hub.providerReady, self.hub.providerFailed):
-            signal.connect(
-                lambda name, *_: self.dropped.append(lanes.drop_provider(name, provider_of))
-            )
+        self.dropped, self.side_lost = [], []
+
+        def failed(name, _message):
+            dropped, lost = lanes.provider_failed(name, provider_of)
+            self.dropped.append(dropped)
+            self.side_lost.append(lost)
+
+        self.hub.providerReady.connect(
+            lambda name: self.dropped.append(lanes.provider_ready(name, provider_of))
+        )
+        self.hub.providerFailed.connect(failed)
         self.tunes, self.side = [], []
         lanes.tuneReady.connect(lambda target, url: self.tunes.append(url))
         lanes.tuneFailed.connect(lambda target, message: self.tunes.append(message))
@@ -439,24 +445,41 @@ class LinksDuringSetupTests(unittest.TestCase):
         demo.request_link = lambda item, **kwargs: asked.append(item) or ask(item, **kwargs)
         lanes = self.lanes()
         lanes.request(Target(self.ONE, "live", "One"))
-        lanes.request_side(Target(self.TWO, "live", "Two"), self.side.append, play=False)
+        two = Target(self.TWO, "live", "Two")
+        lanes.request_side(two, self.side.append, play=False)
+        lanes.request_side(Target(self.ONE, "live", "One"), self.side.append, play=False)
+        lanes.request_side(two, self.side.append, play=False)  # the PiP asks again: one ask
         self.runner.release("Demo TV")
         QTest.qWait(30)
         self.assertEqual(self.dropped, [None])  # nothing to ask again: the hub answers them
         self.assertEqual(self.tunes, ["http://127.0.0.1:9/live/1.ts"])
-        self.assertEqual(self.side, ["http://127.0.0.1:9/live/2.ts"])
-        self.assertEqual(len(asked), 2)
+        # The menu's second link waited behind the first (sweep A, concern 3: it was lost).
+        self.assertEqual(
+            self.side, ["http://127.0.0.1:9/live/2.ts", "http://127.0.0.1:9/live/1.ts"]
+        )
+        self.assertEqual(len(asked), 3)
 
     def test_links_held_for_a_failed_setup_are_dropped_with_it(self):
         self.runner.held.add("Demo TV")
-        self.factory.provider_setup = lambda manager, force: FakeWorker(fail="Portal down")
+        setups = []
+
+        def failing_setup(manager, force):
+            setups.append(manager._pinned_provider)
+            return FakeWorker(fail="Portal down")
+
+        self.factory.provider_setup = failing_setup
         lanes = self.lanes()
         lanes.request(Target(self.ONE, "live", "One"))
+        lanes.request_side(Target(self.TWO, "live", "Two"), self.side.append, play=False)
+        lanes.request_side(Target(self.ONE, "live", "One"), self.side.append, play=False)
         self.runner.release("Demo TV")
         QTest.qWait(30)
         self.assertEqual([t.title for t in self.dropped if t is not None], ["One"])
+        self.assertEqual(self.side_lost, [True])  # the shell says so, once
         self.assertEqual(self.tunes, [])  # the shell says why (the provider failed)
-        self.assertEqual([rid for rid, _ in self.hub_failures], [1])
+        self.assertEqual(self.side, [])
+        self.assertEqual([rid for rid, _ in self.hub_failures], [1, 2])  # nothing more asked
+        self.assertEqual(setups, ["Demo TV"])  # and no sign-in again
 
 
 if __name__ == "__main__":

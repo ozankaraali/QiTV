@@ -1302,7 +1302,7 @@ class TVController(QObject):
         playing channel was it). Other providers' requests are not touched."""
         if self._closed:
             return
-        dropped = self._lanes.drop_provider(name, self._link_owner)
+        dropped = self._lanes.provider_ready(name, self._link_owner)  # a menu's links go on
         if dropped is not None:
             newest = self._lanes.queued or dropped
             if self._is_stay(newest):
@@ -1322,13 +1322,13 @@ class TVController(QObject):
 
     def _on_links_provider_failed(self, name: str, message: str) -> None:
         """Provider `name` failed: the link requests it dropped never settle, so they are
-        forgotten; the queued choice of another provider goes on. When the newest choice, or
-        the channel waiting to open small, was `name`'s, the failure is said ("{name}:
-        {message}", unless the flow says it: the list shows `name`) and INFO, ★ and the guide
-        follow what plays."""
+        forgotten; the queued choice of another provider goes on. When the newest choice, the
+        channel waiting to open small or a menu's link was `name`'s, the failure is said once
+        ("{name}: {message}", unless the flow says it: the list shows `name`); INFO, ★ and the
+        guide follow what plays."""
         if self._closed:
             return
-        dropped = self._lanes.drop_provider(name, self._link_owner)
+        dropped, side_lost = self._lanes.provider_failed(name, self._link_owner)
         queued = self._lanes.queued
         newest = queued or dropped
         lost = (
@@ -1347,9 +1347,10 @@ class TVController(QObject):
             name, self._link_owner, ask_again=False
         ):
             lost = True
-        if not lost:
+        if not lost and not side_lost:
             return
-        self._restore_channel()
+        if lost:
+            self._restore_channel()
         if not self._flow.shows_failure(name):
             self._error(f"{name}: {message}" if name else message)
 

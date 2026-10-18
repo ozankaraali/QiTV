@@ -3658,6 +3658,45 @@ class ContextMenuTests(ControllerTestCase):
         self.catalog.linkFailed.emit(3, "No stream")
         self.assertEqual(self.toast.messages()[-1], ("Four: No stream", "error"))
 
+    def harbor_nodes(self):
+        """Three and Four of another provider than the one the list shows."""
+        return [
+            NavNode("item", str(c["id"]), c["name"], {**c, "_provider": "Harbor IPTV"})
+            for c in CHANNELS[2:4]
+        ]
+
+    def test_menu_links_waiting_for_a_providers_setup_are_all_asked_once_it_is_ready(self):
+        # Sweep (A concern 3): of two menu actions, the one waiting behind the other was
+        # dropped without a word when their provider's setup ended.
+        self.choose(self.menu_for(self.channels[2]), "Copy stream link")
+        self.choose(self.menu_for(self.channels[3]), "Copy stream link")  # waits behind Three
+        self.catalog.hub_ready("Home")  # a setup ended: Three's answer never comes
+        self.assertEqual(self.requested(), ["Three", "Three"])  # asked again, first
+        self.catalog.linkReady.emit(2, "http://stream/3")
+        self.assertEqual(QGuiApplication.clipboard().text(), "http://stream/3")
+        self.assertEqual(self.requested(), ["Three", "Three", "Four"])  # then the next, in order
+        self.catalog.linkReady.emit(3, "http://stream/4")
+        self.assertEqual(QGuiApplication.clipboard().text(), "http://stream/4")
+
+    def test_menu_links_of_a_provider_whose_setup_failed_are_dropped_and_said_once(self):
+        three, four = self.harbor_nodes()
+        self.choose(self.menu_for(three), "Copy stream link")
+        self.choose(self.menu_for(four), "Copy stream link")
+        self.assertEqual(self.requested(), ["Three"])
+        self.catalog.catalogs.providerFailed.emit("Harbor IPTV", "Portal down")  # the hub's
+        self.assertEqual(self.toast.messages(), [("Harbor IPTV: Portal down", "error")])
+        self.catalog.linkFailed.emit(1, "Portal down")  # what the hub held fails: said already
+        self.assertEqual(len(self.toast.messages()), 1)
+        self.assertEqual(self.requested(), ["Three"])  # Four is never asked: no sign-in again
+        self.assertEqual(self.catalog.setups, [])
+
+    def test_menu_links_of_the_shown_provider_that_failed_are_said_once(self):
+        self.choose(self.menu_for(self.channels[2]), "Copy stream link")
+        self.choose(self.menu_for(self.channels[3]), "Copy stream link")
+        self.catalog.hub_failed("Home", "Portal down")  # the flow says it
+        self.assertEqual(self.toast.messages(), [("Home: Portal down", "error")])
+        self.assertEqual(self.requested(), ["Three"])
+
     def test_play_in_vlc_stops_the_in_app_stream_first(self):
         self.play(0)
         stops = self.session.stops
