@@ -12,13 +12,24 @@ from timer_fixtures import elapse
 
 from services.jobs import ImmediateRunner
 from services.library import LibraryModel
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    ALL_PROVIDERS_TITLE,
+    provider_of,
+    with_provider,
+)
 from services.thread_cleanup import has_pending_threads
 from services.watch_state import WatchState
 from ui.keymap import Action
 from ui.library.library_screen import LIVE_TILE, GridPosters, LibraryScreen
 from ui.library.poster_grid import FAVORITE
 from ui.library.search_session import SEARCH_PROMPT
-from ui.library_controller import RETRY_TEXT, SEARCH_DEBOUNCE_MS, LibraryController
+from ui.library_controller import (
+    RETRY_TEXT,
+    SEARCH_DEBOUNCE_MS,
+    UNKNOWN_PROVIDER_NOTICE,
+    LibraryController,
+)
 from ui.theme import PALETTE, qcolor
 
 app = QApplication.instance() or QApplication([])
@@ -39,6 +50,55 @@ class FakePosters(QObject):
 
     def pixmap(self, url):
         return self.pixmaps.get(url)
+
+
+class FakeProviderCatalog(QObject):
+    """One provider's own catalog, as the hub hands it out."""
+
+    sectionReady = Signal(str)
+    sectionFailed = Signal(str, str)
+
+    def __init__(self, name, hub):
+        super().__init__()
+        self.name = name
+        self.hub = hub
+        self.loaded = set()  # sections with content
+
+    def has_content(self, section):
+        return section in self.loaded
+
+    def request_section(self, section, *, force=False):
+        self.hub.section_requests.append((self.name, section))
+
+
+class FakeCatalogs(QObject):
+    """The Catalogs hub: which providers are ready, who was asked to set up."""
+
+    providerReady = Signal(str)
+    providerFailed = Signal(str, str)
+    providersChanged = Signal()
+
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+        self.ready = {"P"}  # the provider shown is up
+        self.ensured = []
+        self.section_requests = []
+        self._by_name = {}
+
+    def names(self):
+        return list(self.owner.names)
+
+    def is_ready(self, name):
+        return name in self.ready
+
+    def ensure(self, name):
+        self.ensured.append(name)
+
+    def catalog(self, name):
+        if name not in self._by_name:
+            self._by_name[name] = FakeProviderCatalog(name, self)
+        return self._by_name[name]
 
 
 class FakeCatalog(QObject):
@@ -66,6 +126,9 @@ class FakeCatalog(QObject):
         self.requests = []
         self.selected = []
         self.loading = False  # a provider setup is running (CatalogService.is_loading)
+        self.mixed = False  # All providers
+        self.headers = set()  # ids of the provider headings among the groups
+        self.catalogs = FakeCatalogs(self)
         self.providerReady.connect(self._settled)
         self.providerFailed.connect(self._settled)
 
@@ -83,6 +146,9 @@ class FakeCatalog(QObject):
     def current_provider_name(self):
         return self.name
 
+    def all_providers(self):
+        return self.mixed
+
     def provider_names(self):
         return list(self.names)
 
@@ -97,7 +163,10 @@ class FakeCatalog(QObject):
         for gid, title in self.group_list.get(section, []):
             items = self.item_map.get((section, gid))
             count = None if items is None else len(items)
-            out.append(SimpleNamespace(section=section, id=gid, title=title, count=count))
+            header = gid in self.headers
+            out.append(
+                SimpleNamespace(section=section, id=gid, title=title, count=count, header=header)
+            )
         return out
 
     def items(self, section, gid):
@@ -127,6 +196,8 @@ class FakeCatalog(QObject):
     def select_provider(self, name=None, *, force_refresh=False):
         self.selected.append(name)
         self.loading = True
+        if name in self.names:  # the shown provider changes at once, as BrowsedCatalog's does
+            self.name = name
 
 
 class FakeProviderManager:
@@ -468,7 +539,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.catalog.sectionReady.emit("series")
         grid = self.screen.grid
         grid.contextRequested.emit(grid.current_index(), QPoint(1, 2))
-        self.assertEqual(self.menus, [(ep, "series", QPoint(1, 2))])
+        self.assertEqual(self.menus, [(with_provider(ep, "P"), "series", QPoint(1, 2))])
 
     def test_only_the_current_providers_films_have_a_menu(self):
         # Links are asked of the provider QiTV is on: another's title, a channel or a title
@@ -631,50 +702,13 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(grid._poster_url(grid.item(0)), "http://logos.invalid/1")
 
     # 6 -----------------------------------------------------------------------------------
-    def test_a_hit_from_another_provider_plays_once_that_provider_is_ready(self):
-        ctl = self.build()
-        ctl.open_search()
-        self.type_text("salt lake")
-        elapse(WAIT_MS)
-        self.assertEqual(self.grid_names(), ["Salt Lake"])
-        ctl.handle(Action.NAV_DOWN)
-        ctl.handle(Action.NAV_ACTIVATE)
-        self.assertEqual(self.catalog.selected, ["Q"])
-        self.assertEqual(self.played, [])
-        self.catalog.name = "Q"
-        self.catalog.providerReady.emit("Q")
-        self.assertEqual((self.played[-1][0]["name"], self.played[-1][1]), ("Salt Lake", "movie"))
-        self.catalog.providerReady.emit("Q")
-        self.assertEqual(len(self.played), 1)  # nothing plays twice
-
-    def test_a_different_provider_becoming_ready_drops_the_pending_hit(self):
-        ctl = self.build()
-        ctl.open_search()
-        self.type_text("salt lake")
-        elapse(WAIT_MS)
-        ctl.handle(Action.NAV_DOWN)
-        ctl.handle(Action.NAV_ACTIVATE)
-        self.catalog.providerReady.emit("P")
-        self.catalog.name = "Q"
-        self.catalog.providerReady.emit("Q")
-        self.assertEqual(self.played, [])
-
-    def test_a_failed_switch_drops_the_pending_hit_and_allows_another_try(self):
-        ctl = self.build()
-        notices = []
-        ctl.notice.connect(notices.append)
-        ctl.open_search()
-        self.type_text("salt lake")
-        elapse(WAIT_MS)
-        ctl.handle(Action.NAV_DOWN)
-        ctl.handle(Action.NAV_ACTIVATE)
-        self.catalog.providerFailed.emit("Q", "Couldn't reach the provider")
-        self.assertEqual(notices, ["Switching to Q…", "Q: Couldn't reach the provider"])
-        ctl.handle(Action.NAV_ACTIVATE)
-        self.assertEqual(self.catalog.selected, ["Q", "Q"])
-        self.catalog.name = "Q"
-        self.catalog.providerReady.emit("Q")
-        self.assertEqual(len(self.played), 1)
+    def make_ready(self, name):
+        """Provider `name` finished its setup: the hub says so, and so does the shown catalog
+        when it is the one shown."""
+        self.catalog.catalogs.ready.add(name)
+        self.catalog.catalogs.providerReady.emit(name)
+        if name == self.catalog.name:
+            self.catalog.providerReady.emit(name)
 
     def search_salt(self):
         ctl = self.build()
@@ -688,27 +722,87 @@ class LibraryControllerTests(unittest.TestCase):
         self.screen.grid.set_current_index(self.grid_names().index(name))
         ctl.handle(Action.NAV_ACTIVATE)
 
-    def test_a_second_enter_during_the_switch_plays_once(self):  # review (a)
-        ctl = self.search_salt()
-        self.activate_name(ctl, "Salt Lake")
-        self.catalog.name = "Q"  # the provider manager names Q before it is ready
-        ctl.handle(Action.NAV_ACTIVATE)
-        self.assertEqual(self.played, [])
-        self.assertEqual(self.catalog.selected, ["Q"])
-        self.catalog.providerReady.emit("Q")
-        self.assertEqual([i["name"] for i, _k, _c in self.played], ["Salt Lake"])
+    def played_names(self):
+        return [i["name"] for i, _k, _c in self.played]
 
-    def test_the_latest_activation_wins_during_a_switch(self):  # review (b)
+    def test_a_hit_from_another_provider_plays_once_that_provider_is_ready(self):
+        ctl = self.build()
+        notices = []
+        ctl.notice.connect(notices.append)
+        ctl.open_search()
+        self.type_text("salt lake")
+        elapse(WAIT_MS)
+        self.assertEqual(self.grid_names(), ["Salt Lake"])
+        ctl.handle(Action.NAV_DOWN)
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.catalog.catalogs.ensured, ["Q"])  # its own setup, beside
+        self.assertEqual(self.catalog.selected, [])  # nothing is switched
+        self.assertEqual(notices, [])
+        self.assertEqual(self.played, [])
+        self.make_ready("Q")
+        self.assertEqual((self.played[-1][0]["name"], self.played[-1][1]), ("Salt Lake", "movie"))
+        self.assertEqual(provider_of(self.played[-1][0]), "Q")
+        self.make_ready("Q")
+        self.assertEqual(len(self.played), 1)  # nothing plays twice
+
+    def test_a_title_from_another_provider_plays_without_switching(self):
+        # Q is ready already: the title runs at once, the Library stays on P.
         ctl = self.search_salt()
         notices = []
         ctl.notice.connect(notices.append)
-        self.activate_name(ctl, "Salt Lake")  # Q
-        self.activate_name(ctl, "Salt Roads")  # back to P, the provider still named current
+        self.catalog.catalogs.ready.add("Q")
+        self.activate_name(ctl, "Salt Lake")
+        self.assertEqual(notices, [])
+        self.assertEqual(self.catalog.selected, [])
+        self.assertEqual(self.catalog.current_provider_name(), "P")
+        self.assertEqual(provider_of(self.played[-1][0]), "Q")
+
+    def test_a_provider_becoming_ready_that_is_not_waited_for_changes_nothing(self):
+        ctl = self.build()
+        ctl.open_search()
+        self.type_text("salt lake")
+        elapse(WAIT_MS)
+        ctl.handle(Action.NAV_DOWN)
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.make_ready("P")
         self.assertEqual(self.played, [])
-        self.assertEqual(self.catalog.selected, ["Q", "P"])
-        self.assertEqual(notices, ["Switching to Q…", "Switching to P…"])
-        self.catalog.providerReady.emit("P")  # the superseded Q setup never reports
-        self.assertEqual([i["name"] for i, _k, _c in self.played], ["Salt Roads"])
+        self.make_ready("Q")
+        self.assertEqual(self.played_names(), ["Salt Lake"])
+
+    def test_a_failed_provider_drops_the_pending_hit_and_allows_another_try(self):
+        ctl = self.build()
+        notices = []
+        ctl.notice.connect(notices.append)
+        ctl.open_search()
+        self.type_text("salt lake")
+        elapse(WAIT_MS)
+        ctl.handle(Action.NAV_DOWN)
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.catalog.catalogs.providerFailed.emit("Q", "Couldn't reach the provider")
+        self.assertEqual(notices, ["Q: Couldn't reach the provider"])
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.catalog.catalogs.ensured, ["Q", "Q"])
+        self.make_ready("Q")
+        self.assertEqual(len(self.played), 1)
+
+    def test_a_second_enter_while_waiting_plays_once(self):  # review (a)
+        ctl = self.search_salt()
+        self.activate_name(ctl, "Salt Lake")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.played, [])
+        self.make_ready("Q")
+        self.assertEqual(self.played_names(), ["Salt Lake"])
+
+    def test_the_latest_activation_wins_while_waiting(self):  # review (b)
+        ctl = self.search_salt()
+        self.catalog.catalogs.ready.discard("P")  # P is still setting up too
+        self.activate_name(ctl, "Salt Lake")  # Q
+        self.activate_name(ctl, "Salt Roads")  # P, the provider the Library shows
+        self.assertEqual(self.played, [])
+        self.make_ready("Q")  # the superseded title is not played
+        self.assertEqual(self.played, [])
+        self.make_ready("P")
+        self.assertEqual(self.played_names(), ["Salt Roads"])
 
     def test_leaving_the_library_drops_the_pending_hit(self):  # review (c)
         ctl = self.build()
@@ -721,52 +815,47 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.handle(Action.ESCAPE)  # clears the query
         ctl.handle(Action.ESCAPE)  # leaves search: no section, so back to TV
         self.assertEqual(self.backs, [True])
-        self.catalog.name = "Q"
-        self.catalog.providerReady.emit("Q")
+        self.make_ready("Q")
         self.assertEqual(self.played, [])
 
     def test_leave_drops_the_pending_hit(self):
         ctl = self.search_salt()
         self.activate_name(ctl, "Salt Lake")
         ctl.leave()  # the window left the Library (a menu, the drawer)
-        self.catalog.name = "Q"
-        self.catalog.providerReady.emit("Q")
+        self.make_ready("Q")
         self.assertEqual(self.played, [])
 
-    def test_a_current_provider_play_drops_the_pending_hit(self):
+    def test_a_ready_provider_play_drops_the_pending_hit(self):
         ctl = self.search_salt()
         self.activate_name(ctl, "Salt Lake")
-        self.catalog.loading = False  # Q's setup failed silently elsewhere; P stays current
-        self.catalog.providerFailed.emit("Q", "Couldn't reach the provider")
-        self.activate_name(ctl, "Salt Roads")
-        self.assertEqual([i["name"] for i, _k, _c in self.played], ["Salt Roads"])
-        self.catalog.name = "Q"
-        self.catalog.providerReady.emit("Q")
+        self.activate_name(ctl, "Salt Roads")  # P is ready: it plays at once
+        self.assertEqual(self.played_names(), ["Salt Roads"])
+        self.make_ready("Q")
         self.assertEqual(len(self.played), 1)
 
-    def test_a_title_of_the_provider_loading_at_startup_waits_without_a_second_setup(self):
+    def test_a_title_of_the_provider_still_loading_waits_for_it(self):
         ctl = self.open_movies()
         notices = []
         ctl.notice.connect(notices.append)
-        self.catalog.loading = True  # P's setup is still running (startup, Settings)
+        self.catalog.catalogs.ready.discard("P")  # P's setup is still running (startup)
         ctl.handle(Action.NAV_ACTIVATE)
         self.assertEqual(self.catalog.selected, [])
         self.assertEqual(notices, [])
         self.assertEqual(self.played, [])
-        self.catalog.providerReady.emit("P")
-        self.assertEqual([i["name"] for i, _k, _c in self.played], ["Dune Songs"])
+        self.make_ready("P")
+        self.assertEqual(self.played_names(), ["Dune Songs"])
 
-    def test_the_source_menu_can_pick_the_old_provider_during_a_switch(self):
+    def test_choosing_the_librarys_source_keeps_a_waiting_title(self):
         ctl = self.search_salt()
-        self.activate_name(ctl, "Salt Lake")  # switching to Q; P is still named current
+        self.activate_name(ctl, "Salt Lake")  # waits for Q
         actions = ctl._source_menu().actions()
         self.addCleanup(actions[0].parent().deleteLater)
-        actions[0].trigger()  # P after all
-        self.assertEqual(self.catalog.selected, ["Q", "P"])
-        actions[0].trigger()  # already the target: no second setup
-        self.assertEqual(self.catalog.selected, ["Q", "P"])
-        self.catalog.providerReady.emit("P")
-        self.assertEqual(self.played, [])  # the Q hit was dropped
+        actions[1].trigger()  # the Library goes to Q
+        self.assertEqual(self.catalog.selected, ["Q"])
+        actions[1].trigger()  # already there: no second setup
+        self.assertEqual(self.catalog.selected, ["Q"])
+        self.make_ready("Q")
+        self.assertEqual(self.played_names(), ["Salt Lake"])  # still played, once
 
     def history_series_view(self, position):
         latest = {**episodes("2")[1], "season": "2"}  # S2 E2
@@ -825,17 +914,33 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.handle(Action.NAV_DOWN)  # the results
         ctl.handle(Action.NAV_DOWN)  # R's copy, in the next section
         ctl.handle(Action.NAV_ACTIVATE)
-        self.assertEqual(self.catalog.selected, ["R"])
-        self.catalog.name = "R"
-        self.catalog.providerReady.emit("R")
-        self.assertIn(("section", "series"), self.catalog.requests)
+        self.assertEqual(self.catalog.catalogs.ensured, ["R"])
+        self.assertEqual(self.catalog.selected, [])
+        self.make_ready("R")
+        self.assertIn(("R", "series"), self.catalog.catalogs.section_requests)
         self.assertNotIn(("seasons", "77"), self.catalog.requests)
-        self.catalog.providerReady.emit("R")  # a repeat keeps the series waiting
-        self.catalog.sectionReady.emit("series")
+        self.make_ready("R")  # a repeat keeps the series waiting
+        self.catalog.catalogs.catalog("R").sectionReady.emit("series")
         self.assertIn(("seasons", "77"), self.catalog.requests)
         self.assertEqual(ctl.mode, "series")
         ctl.handle(Action.ESCAPE)
         self.assertEqual(ctl.mode, "search")
+
+    def test_a_series_hit_of_a_provider_rebuilt_since_still_opens(self):
+        # Sweep A review I1: the Library heard the section of the catalog it first asked (by
+        # name); once Settings rebuilt that provider's catalog (an edit while no page showed
+        # it), the new one's section came to no one: nothing opened and nothing was said.
+        self.test_a_series_hit_from_another_provider_waits_for_its_section()
+        ctl, hub = self.ctl, self.catalog.catalogs
+        del hub._by_name["R"]  # the hub dropped it; the next use builds a new one
+        hub.ready.discard("R")
+        hub.providersChanged.emit()
+        ctl.handle(Action.NAV_ACTIVATE)  # R's series hit again
+        self.make_ready("R")
+        rebuilt = hub.catalog("R")
+        rebuilt.sectionReady.emit("series")
+        self.assertEqual(self.catalog.requests.count(("seasons", "77")), 2)
+        self.assertEqual(ctl.mode, "series")
 
     def test_a_pending_series_whose_section_fails_is_dropped(self):
         self.pm.caches.append(("R", {"series": [dict(SERIES)]}))
@@ -849,27 +954,159 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.handle(Action.NAV_DOWN)
         ctl.handle(Action.NAV_DOWN)
         ctl.handle(Action.NAV_ACTIVATE)
-        self.catalog.name = "R"
-        self.catalog.providerReady.emit("R")
-        self.catalog.sectionFailed.emit("series", "Couldn't reach the provider")
+        self.make_ready("R")
+        remote = self.catalog.catalogs.catalog("R")
+        remote.sectionFailed.emit("series", "Couldn't reach the provider")
         self.assertEqual(notices[-1], "Couldn't load that series")
-        self.catalog.sectionReady.emit("series")
+        remote.sectionReady.emit("series")
         self.assertNotIn(("seasons", "77"), self.catalog.requests)
         self.assertEqual(ctl.mode, "search")
 
-    def test_source_menu_lists_providers_and_switches(self):
+    def test_a_provider_that_left_the_list_says_so(self):
+        ctl = self.search_salt()
+        notices = []
+        ctl.notice.connect(notices.append)
+        self.activate_name(ctl, "Salt Lake")
+        self.catalog.names.remove("Q")  # removed in Settings while the results were up
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(notices[-1], UNKNOWN_PROVIDER_NOTICE)
+
+    def test_a_waiting_title_whose_provider_is_removed_is_dropped(self):
+        ctl = self.search_salt()
+        notices = []
+        ctl.notice.connect(notices.append)
+        self.activate_name(ctl, "Salt Lake")  # waits for Q
+        self.catalog.catalogs.providersChanged.emit()  # Q is still listed: it keeps waiting
+        self.assertEqual(notices, [])
+        self.catalog.names.remove("Q")
+        self.catalog.catalogs.providersChanged.emit()
+        self.assertEqual(notices, [UNKNOWN_PROVIDER_NOTICE])
+        self.make_ready("Q")
+        self.assertEqual(self.played, [])
+
+    def test_an_unstamped_continue_title_plays_at_the_provider_that_played_it(self):
+        # History from earlier builds has no stamp: Continue stamps it, so the link is asked
+        # of its own provider, not of the TV page's.
+        ep = {**episodes("1")[0], "season": "1"}
+        self.config.watch_history.append(
+            {"item_data": ep, "item_type": "episode", "provider_name": "P"}
+        )
+        cid = WatchState.content_id("P", ep, item_type="episode")
+        self.config.playback_positions[cid] = {"position": 60_000, "duration": 1_200_000}
+        self.config.selected_provider_name = "Q"  # the TV page is elsewhere
+        ctl = self.build()
+        ctl.open("series")
+        self.catalog.sectionReady.emit("series")
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(provider_of(self.played[-1][0]), "P")
+
+    def test_source_menu_lists_providers_and_all_providers_and_switches(self):
         ctl = self.open_movies()
         menu = ctl._source_menu()
         self.addCleanup(menu.deleteLater)
-        actions = menu.actions()
-        self.assertEqual([a.text() for a in actions], ["P", "Q"])
-        self.assertEqual([a.isChecked() for a in actions], [True, False])
+        actions = [a for a in menu.actions() if not a.isSeparator()]
+        self.assertEqual([a.text() for a in actions], ["P", "Q", "All providers"])
+        self.assertEqual([a.isChecked() for a in actions], [True, False, False])
         actions[1].trigger()
         self.assertEqual(self.catalog.selected, ["Q"])
         self.catalog.name = "Q"
         self.catalog.providerReady.emit("Q")
         self.assertEqual(self.catalog.requests[-1], ("section", "movies"))  # re-opened
         self.assertEqual(self.screen.nav._source, "Q")
+
+    def test_one_provider_has_no_all_providers_entry(self):
+        self.catalog.names = ["P"]
+        ctl = self.open_movies()
+        menu = ctl._source_menu()
+        self.addCleanup(menu.deleteLater)
+        self.assertEqual([a.text() for a in menu.actions()], ["P"])
+
+    def mix(self):
+        """The Library over both providers (All providers), movies of each under its heading."""
+        sep = "\x1f"
+        ledger = with_provider(movie(1, "Ledger Nights"), "P")
+        salt = with_provider(movie(1, "Salt Roads"), "Q")
+        cat = self.catalog
+        cat.mixed, cat.name = True, ALL_PROVIDERS
+        cat.headers = {f"P{sep}", f"Q{sep}"}
+        cat.group_list = {
+            "movies": [
+                ("*", "All"),
+                (f"P{sep}", "P"),
+                (f"P{sep}d", "Drama"),
+                (f"Q{sep}", "Q"),
+                (f"Q{sep}c", "Comedy"),
+            ]
+        }
+        cat.item_map = {
+            ("movies", "*"): [ledger, salt],
+            ("movies", f"P{sep}d"): [ledger],
+            ("movies", f"Q{sep}c"): [salt],
+        }
+        return ledger, salt
+
+    def test_all_providers_genres_sit_under_each_providers_name(self):
+        self.mix()
+        ctl = self.build()
+        ctl.open("movies")
+        cat = self.catalog
+        cat.sectionReady.emit("movies")
+        self.assertEqual(
+            self.screen.genres.rows(), ["GENRES · 3", "All", "P", "Drama", "Q", "Comedy"]
+        )
+        self.assertEqual(self.screen.nav._source, ALL_PROVIDERS_TITLE)
+        ctl.handle(Action.NAV_LEFT)  # genres: the headings are not stops
+        self.assertEqual(self.screen.genres.current_id(), "*")
+        ctl.handle(Action.NAV_DOWN)
+        self.assertEqual(self.screen.genres.current_id(), f"P{chr(31)}d")
+        ctl.handle(Action.NAV_DOWN)
+        self.assertEqual(self.screen.genres.current_id(), f"Q{chr(31)}c")
+
+    def test_all_providers_titles_name_their_provider_and_play_at_their_own(self):
+        ledger, salt = self.mix()
+        ctl = self.build()
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        self.assertEqual(self.grid_names(), ["Ledger Nights", "Salt Roads"])
+        self.assertEqual(self.model.details(salt).provider, "Q")
+        self.catalog.catalogs.ready.add("Q")
+        self.screen.grid.set_current_index(1)
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.catalog.selected, [])
+        self.assertEqual(provider_of(self.played[-1][0]), "Q")
+        self.assertEqual(self.catalog.catalogs.ensured, [])  # Q was ready: nothing started
+
+    def test_all_providers_titles_wait_for_their_provider_without_switching(self):
+        self.mix()
+        ctl = self.build()
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        self.screen.grid.set_current_index(1)  # Salt Roads at Q, not ready
+        ctl.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.catalog.catalogs.ensured, ["Q"])
+        self.assertEqual(self.catalog.selected, [])
+        self.assertEqual(self.played, [])
+        self.make_ready("Q")
+        self.assertEqual(self.played_names(), ["Salt Roads"])
+        self.assertEqual(self.catalog.current_provider_name(), ALL_PROVIDERS)
+
+    def test_all_providers_titles_have_their_menu_while_another_provider_sets_up(self):
+        # Sweep A6: in All providers is_loading() is true while any provider sets up, so no
+        # title had a menu meanwhile; a title's links wait for its own provider at the hub.
+        self.mix()
+        ctl = self.build()
+        ctl.open("movies")
+        self.catalog.sectionReady.emit("movies")
+        self.catalog.loading = True
+        self.screen.grid.contextRequested.emit(1, QPoint(1, 2))
+        self.assertEqual([(i["name"], s) for i, s, _pos in self.menus], [("Salt Roads", "movies")])
+
+    def test_choosing_all_providers_selects_the_mix(self):
+        ctl = self.open_movies()
+        menu = ctl._source_menu()
+        self.addCleanup(menu.deleteLater)
+        [a for a in menu.actions() if a.text() == "All providers"][0].trigger()
+        self.assertEqual(self.catalog.selected, [ALL_PROVIDERS])
 
     # 7 -----------------------------------------------------------------------------------
     def test_ctrl_d_toggles_the_favorite_and_the_strip_star_turns_accent(self):

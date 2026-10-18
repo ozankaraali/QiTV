@@ -30,24 +30,32 @@ SessionManager: each player has its own LiveTuner, and `session`, `live` and the
 are always the large picture's, so zapping, the banner, the transport, seek and Go live act
 on it. A swap re-points them (`_use_slot`) and trades what each picture showed (its target
 and zap group); nothing is stopped or restarted. A zap onto the channel the small picture
-shows swaps instead of opening it twice. Movies, episodes, files and the Library close the
-small picture first: it is for live TV.
+shows swaps instead of opening it twice. A movie or an episode started from the Library while
+a channel plays takes the large picture and the channel goes small without reopening (a
+previous small picture closes first; when the title's provider has no second stream the
+channel closes instead, and a small picture plays on), and takes it back if the title's link
+or its playback fails; what follows the title (Next, autoplay, another title) keeps the
+channel small. A swap drops the Next card, and a title that ended small offers it once
+swapped large. Files and a title with no channel streaming close the small picture first: it
+is for live TV.
 
 Provider setups (the loading and welcome hints, the last channel, the drawer on an idle player)
-are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4, R5) stops
-what plays (`stop_for_library`); back to live TV (`resume_live`) tunes the last channel. The
+are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4) keeps what
+plays going in a corner of it (`enter_library_playing`; `stop_for_library` is the corner's ×, or
+nothing playing); back to live TV (`resume_live`) tunes the last channel when nothing plays. The
 window wires this controller before the Library's: a Library play that waited for its provider
 runs from the Library's providerReady slot, after this controller settled the provider change.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
 import logging
-import time
 from pathlib import Path
+import time
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer
@@ -59,18 +67,27 @@ from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
 from services.live.live_session import LiveSession
-from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, item_key, item_title
+from services.navigation import (
+    FAVORITES_GROUP,
+    RECENT_GROUP,
+    NavNode,
+    item_key,
+    item_title,
+    payloads,
+)
 from services.next_episode import play_context
+from services.provider_ids import ALL_PROVIDERS, provider_of, split_group_id
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot
 from services.vlc_profile import classify
 from services.zapping import ZapContext
+from ui import item_provider
 from ui.autoplay import FINISHED_TEXT, Autoplay
 from ui.context_actions import ContextActions, Launcher, is_channel
 from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
 from ui.link_lanes import LinkLanes, Target
-from ui.live_controls import LiveControls
+from ui.live_controls import LiveControls, stream_options
 from ui.live_tuner import LiveTuner
 from ui.mixer_controls import MixerControls
 from ui.overlays.channel_column import ChannelColumn
@@ -101,6 +118,7 @@ _ON_DEMAND_STOPS = frozenset({"ended", "error"})  # a movie or episode still cur
 _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
+_DRAWER_ROWS = 40  # rows of a mixed list whose providers load their guides
 _PINNED_TITLES = {FAVORITES_GROUP: "Favorites", RECENT_GROUP: "Recent"}
 
 
@@ -176,6 +194,7 @@ class TVController(QObject):
         self._started = False
         self._wired = False
         self._closed = False
+        self._guides_applied: Optional[set[str]] = None  # what the hub was last told
         self._lanes = LinkLanes(catalog, self)
         # The live channel's time-shift side: pipeline tunes, its controls and reports.
         self._live_controls = LiveControls(
@@ -207,11 +226,8 @@ class TVController(QObject):
             config=config,
             overlays=overlays,
             closed=lambda: self._closed,
-            settle_links=self._settle_links,
-            request=self._request,
             has_media=self._has_media,
             links_busy=lambda: self._lanes.busy(),
-            drop_links=lambda: self._drop_links(ask_again=False),
             tune=lambda channel, key, channels: self.tune(
                 channel, group_key=key, channels=channels
             ),
@@ -224,6 +240,15 @@ class TVController(QObject):
         )
         self._current: Optional[Target] = None  # handed to the player
         self._current_url = ""  # its link (a swap records the picture made large)
+        # The title the channel playing large went small for, until its link comes: its failure
+        # gives the channel the large picture back.
+        self._freed_for: Optional[Target] = None
+        # That title never came while the small picture changed channel (no swap then): the
+        # new small channel gives the large picture back once it starts.
+        self._give_back_later = False
+        # A title on its way that closes a channel (its provider has no stream for both) once
+        # its link comes; said then (PipControls.make_room), never if the link fails.
+        self._room_for: Optional[Target] = None
         self._cid: Optional[str] = None  # resume key of the VOD being played
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
         self._digits = ""  # number entry under way
@@ -292,6 +317,7 @@ class TVController(QObject):
                 parent=self,
             )
             self._pip.changed.connect(self._mixer.refresh)
+            self._pip.changed.connect(self._update_guides)
         self._column_wheel = PointerInput(self)
         # While a live link resolves, the banner is shown again before it fades (Minor 11).
         self._tuning = QTimer(self, interval=TUNING_KEEP_MS)
@@ -309,18 +335,29 @@ class TVController(QObject):
         if not self._started:
             self._started = True
             self.wire()
+        self._update_guides()  # before any provider's setup starts a guide load
         self._flow.start()
 
     def _wire(self) -> None:
         catalog, zap, session = self.catalog, self.zap, self.session
         column, drawer = self.overlays.column, self.overlays.drawer
         transport = self.overlays.transport
+        # Links settle per provider, on the hub's signals (every provider's, not just the
+        # shown one's); the flow's own slots, on the shown provider's, run after.
+        hub = getattr(catalog, "catalogs", catalog)
+        hub.providerReady.connect(self._on_links_provider_ready)
+        hub.providerFailed.connect(self._on_links_provider_failed)
         self._flow.wire()
         self._lanes.tuneReady.connect(self._on_tune_ready)
         self._lanes.tuneFailed.connect(self._on_tune_failed)
         self._lanes.tuneDropped.connect(self._on_tune_dropped)
         self._lanes.sideFailed.connect(self._on_side_failed)
         catalog.epgReady.connect(self._on_epg_ready)
+        catalog.providerReady.connect(lambda *_: self._update_guides())
+        self.nav.changed.connect(self._update_guides)
+        self.overlays.guide.rowsMoved.connect(self._update_guides)
+        self.overlays.guide.closed.connect(self._update_guides)
+        self.overlays.drawer.closed.connect(self._update_guides)
         self.nav.notice.connect(self._on_notice)
         zap.tuneRequested.connect(self._on_zap_tune)
         zap.columnRequested.connect(self._on_column_requested)
@@ -330,8 +367,13 @@ class TVController(QObject):
         self._connect_session(session, True)
         for name, player in self._players():
             player.stateChanged.connect(partial(self._states.__setitem__, name))
+            player.positionChanged.connect(partial(self._on_small_position, name))
+            player.errorOccurred.connect(partial(self._on_small_error, name))
         if self.sessions is not None:
             self.sessions.largeChanged.connect(self._on_large_changed)
+            self.sessions.largeChanged.connect(lambda *_: self._update_guides())
+            self.sessions.pipStarted.connect(self._on_pip_started)
+            self.sessions.pipStateChanged.connect(self._on_pip_state)
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
@@ -409,7 +451,8 @@ class TVController(QObject):
             self._request(replace(target, zapped=False, retried=False, start_over=False))
 
     def stop_for_library(self) -> None:
-        """The window opens the Library (spec §5.4, R5): stop what plays, waiting for nothing.
+        """Stop what plays, waiting for nothing: the corner player's ×, or the Library opened
+        with nothing playing (spec §5.4; what plays goes on in the corner otherwise).
 
         A link still on its way never opens, the guide, the Next card and the other player
         overlays close, and the stream's budget slot goes back once LiveTuner's release gate
@@ -439,6 +482,52 @@ class TVController(QObject):
         self._close_pip()  # both pictures stop
         self._live_controls.stop_tune()
         self._current, self._cid = None, None
+
+    def playing(self) -> bool:
+        """Something plays, or its stream is opening; or the channel plays small while the
+        title it went small for is on its way."""
+        return not self._closed and (self._has_media() or self._title_on_its_way())
+
+    def _title_on_its_way(self) -> bool:
+        sessions = self.sessions
+        return self._freed_for is not None and sessions is not None and sessions.pip_open()
+
+    def enter_library_playing(self) -> None:
+        """The window opens the Library with the player in a corner (2.1): what plays keeps
+        playing and nothing stops.
+
+        The drawer, the zap column and banner, the controls, the mixer, the guide, a number being
+        typed and the Next card close (the overlays are gone from the corner player). Until
+        leave_library_playing(), a provider change neither tunes the last channel nor opens
+        the drawer, as in the Library.
+        """
+        if self._closed:
+            return
+        self._flow.enter_library()
+        if self._title_on_its_way():
+            # The title the channel went small for is dropped, as a link on its way is when the
+            # Library opens: the channel takes the large picture back and plays on.
+            self._lanes.drop_tune()
+            self._give_large_back(self._freed_for)
+        self._guide.close()
+        if self._digits:
+            self.zap.cancel_digits()
+        overlays = self.overlays
+        overlays.column.close()
+        overlays.drawer.close_drawer()
+        overlays.banner.dismiss()
+        overlays.transport.dismiss()
+        self._mixer.hide()
+        self._autoplay.drop()  # the Next card, and a wait for the next season
+
+    def leave_library_playing(self) -> None:
+        """The player page is back from the corner: live TV and the drawer act as before."""
+        if not self._closed:
+            self._flow.leave_library()
+
+    def main_muted(self) -> bool:
+        """Whether the large picture is muted."""
+        return self._mixer.main_muted()
 
     def resume_live(self) -> None:
         """Back to live TV from the Library (R5): the last live channel again, else the drawer
@@ -572,8 +661,9 @@ class TVController(QObject):
             else:
                 self._open_drawer()
         elif action is Action.OPEN_DRAWER:
+            from_column = self.overlays.column.isVisible()
             self.overlays.column.close()
-            self._open_drawer()
+            self._open_drawer(from_column=from_column)
         elif action in (Action.SEEK_BACK, Action.SEEK_FWD):
             back = action is Action.SEEK_BACK
             if not self._live_controls.seek_live(back):
@@ -707,9 +797,14 @@ class TVController(QObject):
         self._cancel_external()  # a newer choice: the settling external launch is dropped
         self._lanes.supersede()  # and an external play still waiting for its link
         context = self.zap.context
+        picked = item_provider.pick_source(self.catalog, channel, group_key)
         if group_key != context.group_key or context.index_of(channel) < 0:
             # Numbers reach every live channel, not only the group's (TV numbers are global).
-            self.zap.set_context(ZapContext(group_key, channels, fallback=self._all_live()))
+            self.zap.set_context(
+                ZapContext(group_key, channels, fallback=self._all_live(), source=picked)
+            )
+        elif not from_zap or not context.source:
+            context.source = picked  # a zap keeps the list its group was picked from
         playing = self._playing_live()
         stay = playing is not None and ZapContext.same(channel, playing.item)
         if not stay and self._pip_takes(channel, group_key, channels):
@@ -718,6 +813,7 @@ class TVController(QObject):
             self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
         self.overlays.column.close()
         self._channel = channel
+        self._update_guides()
         self._show_banner(channel)
         if stay:
             # The channel already playing was chosen again: never restart it, and drop a
@@ -727,11 +823,20 @@ class TVController(QObject):
             self.zap.tuned(channel)
             return
         title = str(channel.get("name") or "")
-        self._request(Target(channel, "live", title, group_key=group_key, zapped=from_zap))
+        self._request(
+            Target(
+                channel,
+                "live",
+                title,
+                group_key=group_key,
+                source=self.zap.context.source or picked,
+                zapped=from_zap,
+            )
+        )
         self._tuning_since = time.monotonic()
         self._tuning.start(TUNING_KEEP_MS)
 
-    def play_item(self, node: NavNode, siblings: list[NavNode], parent: NavNode) -> None:
+    def play_item(self, node: NavNode, siblings: Sequence[NavNode], parent: NavNode) -> None:
         """A drawer row was chosen. Only channels play from the drawer: Movies and Series
         open the Library, whose titles and episodes play through play_vod()."""
         if self._closed:
@@ -741,41 +846,96 @@ class TVController(QObject):
             return
         # The whole group, not just the rows the drawer's filter shows: ↑/↓ walk the group.
         nodes = self.nav.children(parent) or siblings
-        channels = [n.payload for n in nodes if isinstance(n.payload, dict)]
+        channels = payloads(nodes)
         self.tune(node.payload, group_key=parent.key, channels=channels)
         self.overlays.drawer.close_drawer()
 
-    def play_vod(self, item: dict, kind: str, context: Optional[dict] = None) -> None:
+    def play_vod(
+        self,
+        item: dict,
+        kind: str,
+        context: Optional[dict] = None,
+        *,
+        from_library: Optional[bool] = None,
+    ) -> None:
         """Play a movie or an episode where it stopped (the drawer and the Library).
 
         `kind` is "movie" or "episode". `context` is the Library's play context: start_over
         plays from the start; an episode's series and season, or a movie's genre_items, give
         Next and autoplay what follows. Its link is the tune slot's, and it opens once what
-        plays now (a live channel too) is released.
+        plays now (a live channel too) is released. `from_library` says the title was chosen in
+        the Library: TVPages knows it before it switches pages (which ends the flow's Library
+        state); None reads the flow.
         """
         if self._closed:
             return
+        if from_library is None:
+            from_library = self._flow.in_library()
         self._flow.leave_library()
         context = play_context(context)
         episode = kind == "episode"
         series = context["series"]
-        self._close_pip()  # picture in picture is for live TV
-        self._lanes.supersede()  # a newer choice than an external play waiting for its link
-        self._request(
-            Target(
-                item,
-                "series" if episode else "movies",
-                item_title(item, episode=episode),
-                subtitle=item_title(series) if episode and isinstance(series, dict) else "",
-                context=context,
-                start_over=bool(context["start_over"]),
-            )
+        title = item_title(item, episode=episode)
+        beside = self._title_beside_channel()  # what plays large is a title, a channel small
+        target = Target(
+            item,
+            "series" if episode else "movies",
+            title,
+            subtitle=item_title(series) if episode and isinstance(series, dict) else "",
+            context=context,
+            start_over=bool(context["start_over"]),
         )
+        if self._pip is not None:
+            self._pip.forget_room()  # what an older title would have closed
+        kept = False
+        if beside and self._pip is not None:
+            self._pip.keep_beside(item, title)  # Next, autoplay, another title: it plays on
+        elif from_library:
+            kept = self._keep_channel_small(item, title)  # it closes the small picture, or not
+        else:
+            self._close_pip()  # picture in picture is for live TV
+        self._freed_for = target if kept else None
+        self._room_for = target if self._pip is not None and self._pip.has_room() else None
+        self._lanes.supersede()  # a newer choice than an external play waiting for its link
+        self._request(target)
+
+    def _title_beside_channel(self) -> bool:
+        """A movie or an episode is the large picture's (playing, ended or failed) while the
+        small picture shows a channel (the one kept small for a title from the Library)."""
+        current, sessions = self._current, self.sessions
+        return (
+            current is not None
+            and not current.live
+            and not current.local
+            and sessions is not None
+            and sessions.pip_open()
+        )
+
+    def _keep_channel_small(self, item: dict, title: str) -> bool:
+        """A title from the Library while a channel plays large (corner player): the channel
+        goes small without reopening and the title opens in the freed large slot.
+
+        False: the channel was not kept and the caller plays as before. With no channel
+        streaming large the small picture closed (it is for live TV); when the channel's
+        provider has no stream for the title, the channel closes for it and a small picture of
+        another provider plays on (PipControls.keep_large_small).
+        """
+        pip = self._pip
+        if pip is None or self.sessions is None or self._playing_live() is None:
+            self._close_pip()
+            return False
+        if self._tuner.settling() or not self._tuner.running():
+            self._close_pip()
+            return False  # a channel still opening has nothing to keep
+        self._cancel_external()
+        self._lanes.drop_tune()  # a choice on its way for the large picture is superseded
+        return pip.keep_large_small(item, title)
 
     def _all_live(self) -> list[dict]:
         return list(self.catalog.items("live", ALL_GROUP_ID) or [])
 
     def _request(self, target: Target) -> None:
+        self._give_back_later = False  # the large picture has a newer choice
         self._cancel_external()
         self._flow.drop_autotune()  # a choice made before the live section loaded comes first
         self._autoplay.drop()  # a newer choice than what the Next card offers
@@ -825,12 +985,18 @@ class TVController(QObject):
             return
         if message == PROVIDER_LOADING_MESSAGE:
             # A provider setup is running; providerReady asks again for the newest choice:
-            # one queued meanwhile is newer than the target that just failed.
-            if self._lanes.queued is None:
+            # one queued meanwhile is newer than the target that just failed. Only that
+            # provider's ready asks it: another provider's newer choice goes on now.
+            queued = self._lanes.queued
+            if queued is None:
                 self._lanes.queued = target
+            elif self._link_owner(queued.item) != self._link_owner(target.item):
+                self._follow_queue(target)
             return
         if self._follow_queue(target):
             return  # the failed target was superseded: no error for it
+        self._forget_room(target)
+        self._give_large_back(target)
         self._restore_channel()
         self._error(f"{target.title}: {message}")
 
@@ -877,6 +1043,34 @@ class TVController(QObject):
         if banner.isVisible() and channel is not None:  # never one that was dismissed
             banner.show_info(self.banner_info(channel))
 
+    def _give_large_back(self, target: Optional[Target]) -> None:
+        """`target` never came (its link or its provider failed): when the channel playing
+        large went small for it, the pictures swap back and the empty one closes."""
+        if target is not None and target is self._freed_for:
+            self._freed_for = None
+            sessions = self.sessions
+            if not self.swap() and sessions is not None and sessions.changing():
+                self._give_back_later = True  # once the small picture's channel starts
+
+    def _forget_room(self, target: Optional[Target]) -> None:
+        """`target` never came: the channel it would have closed plays on, unsaid."""
+        if target is not None and target is self._room_for and self._pip is not None:
+            self._room_for = None
+            self._pip.forget_room()
+
+    def _on_pip_started(self) -> None:
+        """The small picture's stream started: a swap back that waited for its channel change
+        gives it the large picture now, while that is still empty."""
+        if not self._give_back_later or self._closed:
+            return
+        self._give_back_later = False
+        if self._current is None and not self._lanes.busy() and self._tuner.idle():
+            self.swap()  # the empty picture, small now, closes
+
+    def _on_pip_state(self, open_: bool) -> None:
+        if not open_:
+            self._give_back_later = False
+
     def _restore_channel(self) -> None:
         """After a failed tune, INFO and the drawer follow the channel still playing."""
         current = self._current
@@ -884,9 +1078,13 @@ class TVController(QObject):
 
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item
+        self._freed_for = None  # it came: the large picture is the title's
+        if target is self._room_for and self._pip is not None:
+            self._room_for = None
+            self._pip.make_room()  # before it opens: a closing small picture is waited for
         launcher = self._external_launcher()
-        # Direct plays book the slot under the catalog's provider, as pipeline tunes do.
-        provider_name = self.catalog.current_provider_name()
+        # Direct plays book the slot under the item's own provider, as pipeline tunes do.
+        provider_name = item_provider.provider_name(self.catalog, item)
         self._audio_id = self._subtitle_id = None
         self._live_controls.new_target()  # the old channel's ticks and held notice
         if launcher is not None:
@@ -912,10 +1110,7 @@ class TVController(QObject):
 
                 def play_direct() -> None:
                     session.play(
-                        url,
-                        kind=kind,
-                        latency=self.config.live_latency,
-                        user_agent=item.get("user_agent"),
+                        url, kind=kind, latency=self.config.live_latency, **stream_options(item)
                     )
                     self._reset_speed(session)
 
@@ -935,6 +1130,8 @@ class TVController(QObject):
                 self._reset_speed(session)
 
             self._tuner.open(self._guarded(target, open_vod), direct=True, provider=provider_name)
+            if self._current is not None and self._current is not target:
+                return  # its open failed at once: the channel kept small took the picture back
             if start:
                 self._toast(f"Resumed at {fmt_duration(start)}")
             self.overlays.banner.dismiss()  # the transport takes the bottom of the video
@@ -953,6 +1150,8 @@ class TVController(QObject):
                 # What played before was stopped to open this: nothing is current now.
                 self._current, self._cid = None, None
                 self._log_failure(f"play {target.title}", e)
+                if not target.live:
+                    self._give_small_channel_large()
                 self._restore_channel()
                 self._error(f"{target.title}: {e}")
 
@@ -993,7 +1192,7 @@ class TVController(QObject):
     def _record_watched(self, target: Target, url: str) -> None:
         try:
             self.watch.record_play(
-                self.catalog.current_provider_name(),
+                item_provider.provider_name(self.catalog, target.item),
                 target.item,
                 item_type=target.item_type,
                 link=url,
@@ -1045,7 +1244,8 @@ class TVController(QObject):
     def open_pip(self, channel: dict, *, group_key: str, channels: list[dict]) -> None:
         """Open `channel` small (the drawer's menu or Ctrl/⌘+P), or show it in the PiP."""
         if self._pip is not None and not self._closed:
-            context = ZapContext(group_key, channels, fallback=self._all_live())
+            source = item_provider.pick_source(self.catalog, channel, group_key)
+            context = ZapContext(group_key, channels, fallback=self._all_live(), source=source)
             self._pip.open_channel(channel, context)
 
     def _pip_takes(self, channel: dict, group_key: str, channels: list[dict]) -> bool:
@@ -1062,7 +1262,12 @@ class TVController(QObject):
             return False
         if self._tuner.settling():
             self._tuner.stop()  # the zap still waiting is abandoned: nothing to keep small
-        pip.view(small.name).context = ZapContext(group_key, channels, fallback=self._all_live())
+        pip.view(small.name).context = ZapContext(
+            group_key,
+            channels,
+            fallback=self._all_live(),
+            source=item_provider.pick_source(self.catalog, channel, group_key),
+        )
         self.overlays.column.close()
         if self.swap():
             return True
@@ -1084,17 +1289,20 @@ class TVController(QObject):
             return
         new, old = sessions.large(), sessions.other()
         view = pip.take_large(
-            old.name, new.name, self._current, self.zap.context, self._current_url
+            old.name, new.name, self._current, self.zap.context, self._current_url, self._cid
         )
         shown = self._current if self._current is not None and self._current.live else None
         old.channel = shown.item if shown is not None else None  # what the small one shows
         old.group_key = shown.group_key if shown is not None else None
         self._use_slot(new)
-        self._current, self._cid, self._current_url = view.target, None, view.url
+        # A movie's resume key comes back with its slot: its position is saved again.
+        self._current, self._cid, self._current_url = view.target, view.cid, view.url
         self._restore_channel()
         self._state = self._states.get(new.name, "idle")
         self._audio_id = self._subtitle_id = None
         self._tuning.stop()
+        self._autoplay.drop()  # the Next card, and its wait, were the other picture's
+        self._freed_for = None  # a title on its way for the large picture was dropped
         if self._digits:
             self.zap.cancel_digits()
         context = view.context
@@ -1112,6 +1320,13 @@ class TVController(QObject):
                 # then announces the channel (they share the bottom of the video).
                 self._live_controls.show_live_transport(current)
             self._show_banner(channel)
+        elif self._current is not None:  # a movie or an episode: its own controls again
+            current = self._current
+            self.overlays.banner.dismiss()
+            transport.set_next_available(self._autoplay.has_next(current))
+            transport.show_vod(current.title, current.subtitle)
+            if self._state == "ended":
+                self._autoplay.on_ended(current)  # it ended small: what follows, as at its end
         pip.after_swap()
         if self._tuner_of(old).idle():
             pip.close()  # the old large picture was between two channels: nothing to show
@@ -1166,39 +1381,144 @@ class TVController(QObject):
 
     # ---- catalog events -----------------------------------------------------------------------
 
-    def _settle_links(self, provider_changed: bool) -> Optional[Target]:
-        """A provider became ready: the newest choice to ask again, its links dropped.
+    def _link_owner(self, item: dict) -> str:
+        """The provider a link request for `item` goes to (an unstamped item: the shown one)."""
+        name = provider_of(item)
+        if name:
+            return name
+        name = self.catalog.current_provider_name()
+        if name == ALL_PROVIDERS:
+            name = str(getattr(self.config, "selected_provider_name", "") or "")
+        return name
 
-        A setup makes the catalog drop link results requested before it, so a request still
-        in flight may never settle. A changed provider's channels are the old one's: nothing
-        is asked again, the zapping, the Next card and the guide start over, and the small
-        picture closes.
-        """
-        pending = self._lanes.pending()
-        if self._is_stay(pending):
-            pending = None  # the playing channel was the newest choice: nothing to ask again
-        self._drop_links(ask_again=not provider_changed)
-        if provider_changed:
-            self.zap.reset()
-            self._channel = None
-            pending = None
-            self._autoplay.drop()
-            self._guide.close()  # its channels are the old provider's
-            self._close_pip()  # the small picture's channel and stream are too
-        return pending
-
-    def _drop_links(self, *, ask_again: bool) -> None:
-        """Forget every link request; the PiP's asks again when `ask_again`."""
-        self._lanes.drop()
+    def _on_links_provider_ready(self, name: str) -> None:
+        """Provider `name` was set up: its catalog dropped the link results requested
+        before, so its request in flight is asked again (the newest choice, unless the
+        playing channel was it). Other providers' requests are not touched."""
+        if self._closed:
+            return
+        dropped = self._lanes.provider_ready(name, self._link_owner)  # a menu's links go on
+        if dropped is not None:
+            self._ask_again(self._lanes.queued or dropped)
+        elif self._lanes.in_flight() is None:
+            # A tune that failed because this provider was loading waits queued for it (never
+            # asked while another provider's tune is in flight: it follows that one).
+            queued = self._lanes.queued
+            if queued is not None and self._link_owner(queued.item) == name:
+                self._ask_again(queued)
         if self._pip is not None:
-            self._pip.links_dropped(ask_again)
+            self._pip.provider_settled(name, self._link_owner, ask_again=True)
+
+    def _on_links_provider_failed(self, name: str, message: str) -> None:
+        """Provider `name` failed: the link requests it dropped never settle, so they are
+        forgotten; the queued choice of another provider goes on. When the newest choice, the
+        channel waiting to open small or a menu's link was `name`'s, the failure is said once
+        ("{name}: {message}", unless the flow says it: the list shows `name`); INFO, ★ and the
+        guide follow what plays."""
+        if self._closed:
+            return
+        dropped, side_lost = self._lanes.provider_failed(name, self._link_owner)
+        queued = self._lanes.queued
+        newest = queued or dropped
+        lost = (
+            newest is not None
+            and not self._is_stay(newest)
+            and self._link_owner(newest.item) == name
+        )
+        if queued is not None and self._link_owner(queued.item) == name:
+            self._lanes.take_queued()
+        elif queued is not None and dropped is not None:
+            self._ask_again(queued)
+        if self._pip is not None and self._pip.provider_settled(
+            name, self._link_owner, ask_again=False
+        ):
+            lost = True
+        if not lost and not side_lost:
+            return
+        if lost:
+            self._forget_room(newest)
+            self._give_large_back(newest)
+            self._restore_channel()
+        if not self._flow.shows_failure(name):
+            self._error(f"{name}: {message}" if name else message)
+
+    def _ask_again(self, newest: Target) -> None:
+        """A provider settled the newest choice's request: it asks for its link (again), or,
+        when it is the marker that keeps the playing channel (see _tune), it is dropped."""
+        if self._is_stay(newest):
+            self._lanes.take_queued()
+        else:
+            self._request(newest)
 
     def _live_section_loaded(self) -> None:
         context = self.zap.context
         if context.group_key == ALL_GROUP_ID and not context.channels:
             # A search's channel tuned before the live section loaded: ↑/↓ walk it now.
             channels = self._all_live()
-            self.zap.set_context(ZapContext(ALL_GROUP_ID, channels, fallback=channels))
+            self.zap.set_context(
+                ZapContext(ALL_GROUP_ID, channels, fallback=channels, source=context.source)
+            )
+
+    def guides_in_use(self) -> set[str]:
+        """The providers whose guides are needed now: the big and small pictures', the one
+        the TV page browses, and in all mode those of the channels on screen (the drawer's
+        group, the open guide's rows). Others stay unloaded: accounts hold 57,000+ channels."""
+        names: set[str] = set()
+        items = [self._channel, self._current.item if self._current is not None else None]
+        sessions = self.sessions
+        if sessions is not None and (sessions.pip_open() or sessions.pip_opening()):
+            items.append(sessions.other().channel)
+        names.update(provider_of(item) for item in items if item)
+        source = self.catalog.current_provider_name()
+        if source != ALL_PROVIDERS:
+            names.add(source)
+        elif self._guide.is_open():
+            names.update(provider_of(c) for c in self._guide.visible_channels())
+        elif self.overlays.drawer.isVisible():
+            names.update(self._drawer_providers())
+        names.discard("")
+        return names
+
+    def _guide_context(self) -> ZapContext:
+        """What the guide lists: the zap group's channels, but in all mode the live group the
+        drawer shows when it is another one (its channels may be any provider's)."""
+        context = self.zap.context
+        if not self.nav.all_mode():
+            return context
+        group = self._drawer_group()
+        if group is None or group.key == context.group_key:
+            return context
+        channels = self.catalog.items("live", group.key)
+        if not channels:
+            return context
+        return ZapContext(group.key, list(channels), fallback=self._all_live())
+
+    def _drawer_group(self) -> Optional[NavNode]:
+        """The live group the drawer's path ends in (None: not in a live group)."""
+        group = next((n for n in self.nav.path if n.layer == "group"), None)
+        if group is None or self.nav.section_of(group) != "live":
+            return None
+        return group
+
+    def _drawer_providers(self) -> set[str]:
+        """The providers of the live group the drawer shows: a provider's own group, or, in a
+        mixed list, those of its first rows (the drawer's scroll position is not known)."""
+        group = self._drawer_group()
+        if group is None:
+            return set()
+        provider, _ = split_group_id(group.key)
+        if provider:
+            return {provider}
+        rows = self.catalog.items("live", group.key) or []
+        return {provider_of(c) for c in rows[:_DRAWER_ROWS]}
+
+    def _update_guides(self) -> None:
+        if self._closed:
+            return
+        names = self.guides_in_use()
+        if names != self._guides_applied:
+            self._guides_applied = names
+            self.catalog.use_guides(names)
 
     def _on_epg_ready(self) -> None:
         if not self._closed:
@@ -1235,7 +1555,10 @@ class TVController(QObject):
             self.overlays.banner.dismiss()
             context = self.zap.context
             column.open(
-                self._group_title(context.group_key), context.channels, context.current_index
+                self._group_title(context.group_key),
+                context.channels,
+                context.current_index,
+                self.nav.shows_provider(NavNode("group", context.group_key, "")),
             )
         else:
             column.close()
@@ -1286,6 +1609,24 @@ class TVController(QObject):
                 self._log_failure("save the playback position", e)
         self.overlays.transport.update_position(position_ms, length_ms)
 
+    def _on_small_position(self, name: str, position_ms: int, length_ms: int) -> None:
+        """A movie or an episode swapped small still plays: its position is saved under its
+        own resume key (and its end marks it finished), as while it was large."""
+        cid = self._pip.small_resume_key(name) if self._pip is not None else None
+        if self._closed or cid is None:
+            return
+        try:
+            self.watch.update_position(cid, position_ms, length_ms)
+        except Exception as e:
+            self._log_failure("save the playback position", e)
+
+    def _on_small_error(self, name: str, message: str) -> None:
+        """A movie or an episode swapped small failed to play: said as the large picture says
+        it (a channel's player errors are its live session's to recover or report)."""
+        target = self._pip.small_title(name) if self._pip is not None else None
+        if not self._closed and target is not None:
+            self._error(f"{target.title}: {message}")
+
     def _on_error(self, message: str) -> None:
         if self._closed or self._tuner.running():
             return  # LiveSession recovers pipeline errors and reports the rest (failed)
@@ -1293,8 +1634,21 @@ class TVController(QObject):
         if current is not None and self._live_controls.may_retry(current):
             self._live_controls.retry(current)  # STB play tokens expire: a fresh link first
             return
-        title = self._current.title if self._current is not None else ""
+        title = current.title if current is not None else ""
+        if current is not None and not current.live:
+            self._give_small_channel_large()
         self._error(f"{title}: {message}" if title else message)
+
+    def _give_small_channel_large(self) -> None:
+        """The movie or the episode playing large failed: a channel shown small beside it
+        (kept small for a title from the Library) takes the big picture back, and the failed
+        title closes; the caller says why."""
+        sessions, pip = self.sessions, self._pip
+        small = sessions.small() if sessions is not None else None
+        if pip is None or small is None or small.channel is None:
+            return
+        if self.swap():
+            pip.close()  # the failed title, small now
 
     def _on_ended(self) -> None:
         if self._closed or self._current is None:
@@ -1425,19 +1779,38 @@ class TVController(QObject):
         if banner.isVisible() and banner.info is not None and banner.info.logo is None:
             banner.show_info(self.banner_info(channel))
 
-    def _open_drawer(self) -> None:
+    def _open_drawer(self, from_column: bool = False) -> None:
         if not self.catalog.provider_names():
             self._flow.welcome()
             return
-        self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
-        channel = self._channel or self.zap.context.current()
-        self.overlays.drawer.open_drawer(focus_key=item_key(channel) if channel else None)
+        # Where the big picture's channel was picked (after a swap, the new large one's); while
+        # the fast-zap column is open the user is choosing in it, so the list opens at the zap's
+        # own channel and group, as before 2.1.
+        shown = self._current if self._current is not None and self._current.live else None
+        if from_column or self.overlays.column.isVisible():
+            shown = None
+        if shown is not None:
+            self.nav.reveal(
+                shown.source,
+                "live",
+                shown.group_key or self.zap.context.group_key,
+                shown.item,
+            )
+        else:
+            self.nav.reset_to("live", self.zap.context.group_key or ALL_GROUP_ID)
+        channel = shown.item if shown is not None else self._channel or self.zap.context.current()
+        focus = None
+        if channel:
+            provider = provider_of(channel)
+            focus = (provider, item_key(channel)) if provider else item_key(channel)
+        self.overlays.drawer.open_drawer(focus_key=focus)
+        self._update_guides()  # the drawer is visible now: its group's providers are in use
 
     def _open_guide(self) -> None:
         """The guide over live TV: the zap group's channels, on the one tuned last."""
         if self._on_demand():
             return  # it lists live channels
-        context = self.zap.context
+        context = self._guide_context()
         if not self._guide.open(context, self._channel or context.current(), self._all_live):
             return
         if self._digits:
@@ -1623,7 +1996,12 @@ class TVController(QObject):
         return self._autoplay.card_open()
 
     def _toast(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
-        self.overlays.toast.show_message(text, kind, ms)
+        """The player's toast; while the Library shows, the Library's (the player's page, in
+        its corner or hidden, shows no toast then): e.g. a playback error in the corner."""
+        toast = self.overlays.library_toast
+        if toast is None or not self._flow.in_library():
+            toast = self.overlays.toast
+        toast.show_message(text, kind, ms)
 
     def _notify(self, text: str, kind: str) -> None:
         """A toast for the shell's helpers: errors stay up longer."""
@@ -1638,11 +2016,7 @@ class TVController(QObject):
     def _menu_notify(self, text: str, kind: str) -> None:
         """A context menu's message: on the Library's toast while the Library shows (the
         player's page, with its toast, is hidden then), else on the player's."""
-        toast = self.overlays.library_toast
-        if toast is not None and self._flow.in_library():
-            toast.show_message(text, kind, ERROR_MS if kind == "error" else INFO_MS)
-        else:
-            self._notify(text, kind)
+        self._notify(text, kind)
 
     def _menu_error(self, text: str) -> None:
         """An external play or a context menu's link failed: _error's text, on _menu_notify's

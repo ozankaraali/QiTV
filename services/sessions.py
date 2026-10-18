@@ -19,7 +19,8 @@ stream once. Opening the small slot:
   back once its streams are closed, and only then asks for a new one: the old stream is
   always released before the new one opens;
 - when the small stream cannot start, fails for good (`LiveSession.failed`) or loses its slot
-  on a channel change, PiP closes and `pipFailed` says why in a fixed message.
+  on a channel change, PiP closes and `pipFailed` says why in a fixed message (`failure` keeps
+  what the stream itself said, for the shell's STB retry).
 A swap waits for nothing: while the small slot's channel change is still on its way, it is
 refused (False).
 
@@ -134,6 +135,7 @@ class _Open:
 class SessionManager(QObject):
     largeChanged = Signal(str)  # name of the slot that is now large
     pipStateChanged = Signal(bool)  # PiP open/closed
+    pipStarted = Signal()  # the small slot's stream started: PiP opened, or its channel changed
     denied = Signal(int)  # limit (budget refused PiP)
     # A fixed message: the PiP's live session did not start or failed for good (the limit
     # message for a provider refusal), or the budget refused a channel change of a PiP it had
@@ -157,6 +159,9 @@ class SessionManager(QObject):
         self._open = False  # pipStateChanged(True) was emitted, and no close since
         self._pending: Optional[_Open] = None
         self._limit: Optional[int] = None  # the provider limit of the PiP stream that starts
+        # What the last pipFailed stood for: the small stream's own failure (LiveSession's
+        # message, a refusal one of REFUSALS); "" when its start raised or the budget refused.
+        self.failure = ""
         self._levels = {main.name: MAIN_LEVEL, pip.name: PIP_LEVEL}
         self._muted = {main.name: False, pip.name: True}
         self._tuners: dict[str, SlotTuner] = {}
@@ -194,6 +199,11 @@ class SessionManager(QObject):
     def pip_open(self) -> bool:
         return self._open
 
+    def changing(self) -> bool:
+        """The open PiP's channel change waits for its slot or the old stream's release (a
+        swap is refused meanwhile)."""
+        return self._pending is not None and self._open
+
     def pip_opening(self) -> bool:
         """A PiP was asked for and has not opened (nor been refused) yet."""
         return self._pending is not None and not self._open
@@ -226,6 +236,33 @@ class SessionManager(QObject):
             self._set_mute(large, True)  # the new small slot
             self._set_mute(small, users_mute)
         self.largeChanged.emit(small.name)
+        return True
+
+    def demote_large(self) -> bool:
+        """Make the large picture small while PiP is closed, without reopening its stream.
+
+        The roles trade as in swap(), but the slot that becomes large is the closed one (idle,
+        or still releasing what it played): the caller opens something in it, and it waits for
+        the release as any open does. The small slot opens muted and the user's mute of the
+        large picture moves to the new large slot. False (and nothing changes) when PiP is
+        open or opening, or the large slot streams nothing.
+        """
+        if self._open or self._pending is not None:
+            return False
+        large = self._large
+        stream = self._tuners[large.name].stream
+        if stream is None or not stream.running():
+            return False
+        freed = self.other()
+        self._large = freed
+        self._tuners[freed.name].set_purpose(MAIN_PURPOSE)
+        self._tuners[large.name].set_purpose(PURPOSE)
+        users_mute = self._muted[large.name]
+        self._set_mute(large, True)  # the PiP is small and muted, as it opens
+        self._set_mute(freed, users_mute)
+        self._open = True
+        self.largeChanged.emit(freed.name)  # the shell trades what each picture shows first
+        self.pipStateChanged.emit(True)
         return True
 
     # ---- the small slot -----------------------------------------------------------------------
@@ -318,6 +355,7 @@ class SessionManager(QObject):
         if opening:
             self._open = True
             self.pipStateChanged.emit(True)
+        self.pipStarted.emit()
 
     def _on_main_failed(self, message: str) -> None:
         self._on_failed(self._main, message)
@@ -333,9 +371,10 @@ class SessionManager(QObject):
         stream = self._tuners[slot.name].stream
         if slot is self._large or stream is None or not stream.running():
             return
-        self._fail(limit_message(self._limit) if message in REFUSALS else PIP_FAILED)
+        self._fail(limit_message(self._limit) if message in REFUSALS else PIP_FAILED, message)
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str, failure: str = "") -> None:
+        self.failure = failure
         self.close_pip()
         self.pipFailed.emit(message)
 

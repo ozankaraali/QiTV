@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, SignalInstance
@@ -32,6 +32,7 @@ from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
+from ui import item_provider
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, LiveTuner
 from ui.overlays.transport import Transport
@@ -48,6 +49,15 @@ RECONNECTING_TEXT = "Reconnecting…"
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 # Never opened again: on-demand content, and a file listed as a channel ends for good.
 _NOT_LIVE = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
+
+
+def stream_options(item: dict) -> dict[str, Any]:
+    """A channel's own HTTP options for VLC's direct play: its agent, and the referrer its M3U
+    names (2.1, `:http-referrer`); an item without one plays exactly as before."""
+    options: dict[str, Any] = {"user_agent": item.get("user_agent")}
+    if item.get("referrer"):
+        options["referrer"] = item["referrer"]
+    return options
 
 
 def _streams(count: int) -> str:
@@ -158,11 +168,15 @@ class LiveControls(QObject):
             return False
         return urlsplit(url).scheme.lower() in _PIPELINE_SCHEMES
 
-    def limit(self) -> Optional[int]:
-        """The provider's simultaneous streams: None when unlimited or unknown."""
-        return self._tuner.budget.limit_for(
-            self.catalog.current_provider(), self.catalog.max_connections()
-        )
+    def limit(self, item: Optional[dict] = None) -> Optional[int]:
+        """The simultaneous streams of the item's provider (the browsed one without an item):
+        None when unlimited or unknown."""
+        if item is None:
+            provider, reported = self.catalog.current_provider(), self.catalog.max_connections()
+        else:
+            provider = item_provider.provider_dict(self.catalog, item)
+            reported = item_provider.max_connections(self.catalog, item)
+        return self._tuner.budget.limit_for(provider, reported)
 
     def limit_text(self, limit: Optional[int]) -> str:
         return f"Your provider allows {_streams(limit)} at a time" if limit else LIMITED_TEXT
@@ -173,8 +187,8 @@ class LiveControls(QObject):
         False when the provider's limit is taken by other streams (Phase 4: picture in
         picture): the toast says so and the running channel goes on.
         """
-        name = self.catalog.current_provider_name()
-        limit = self.limit()
+        name = item_provider.provider_name(self.catalog, target.item)
+        limit = self.limit(target.item)
         if self._tuner.refused(name, limit):
             logger.info("Not opening %s: the provider allows %s streams", target.title, limit)
             self._restore_channel()
@@ -186,11 +200,12 @@ class LiveControls(QObject):
     def live_start(self, target: Target, url: str) -> LiveStart:
         """How the pipeline asks for `target`'s link: its agent and the provider's TLS check;
         and the channel's key for what it taught stay-live (Auto's target, a locked rate)."""
-        provider = self.catalog.current_provider()
+        provider = item_provider.provider_dict(self.catalog, target.item)
         user_agent = target.item.get("user_agent") or DEFAULT_USER_AGENT
         verify_ssl = bool(provider.get("ssl_verify", self.config.ssl_verify))
         channel = channel_key(str(provider.get("name", "")), target.item)
-        return LiveStart(url, user_agent, verify_ssl, channel)
+        referrer = str(target.item.get("referrer") or "")
+        return LiveStart(url, user_agent, verify_ssl, channel, referrer)
 
     def pipeline_live(self) -> bool:
         """The current channel plays from the time-shift buffer."""
@@ -208,7 +223,7 @@ class LiveControls(QObject):
             current is not None
             and current.live
             and not current.retried
-            and self.catalog.provider_type() == "STB"
+            and item_provider.provider_type(self.catalog, current.item) == "STB"
             and not self._lanes.busy()
         )
 
@@ -243,10 +258,7 @@ class LiveControls(QObject):
             return  # something else plays now
         logger.info("Opening %s again after its stream ended", target.title)
         session.play(
-            url,
-            kind=kind,
-            latency=self.config.live_latency,
-            user_agent=target.item.get("user_agent"),
+            url, kind=kind, latency=self.config.live_latency, **stream_options(target.item)
         )
 
     def _cancel_reopen(self) -> None:
@@ -256,6 +268,7 @@ class LiveControls(QObject):
     def retry(self, current: Target) -> None:
         logger.info("Making the link of %s again after a playback failure", current.title)
         self.stop_tune()  # it failed: its slot goes back, also if the new link does not come
+        item_provider.sign_in_again(self.catalog, current.item)  # its own portal's session
         self._request(replace(current, retried=True))
 
     # ---- LiveSession's reports ----------------------------------------------------------------
@@ -326,7 +339,8 @@ class LiveControls(QObject):
         self._error(f"{title}: {message}" if title else message)
 
     def _refusal_text(self, message: str) -> str:
-        limit = self.limit()
+        current = self._current()
+        limit = self.limit(current.item if current is not None else None)
         if message != STREAM_REFUSED:
             return self.limit_text(limit)
         if limit:

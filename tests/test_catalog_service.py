@@ -243,7 +243,7 @@ class CatalogServiceTests(unittest.TestCase):
         ready = collect(service.groupReady)
         service.request_group("movies", "5")
         self.assertEqual(ready, [("movies", "5")])
-        self.assertEqual(service.items("movies", "5"), [{"id": 9, "name": "F"}])
+        self.assertEqual(service.items("movies", "5"), [{"id": 9, "name": "F", "_provider": "S"}])
         self.assertEqual(service.groups("movies"), [Group("movies", "5", "Films", 1)])
         kwargs = factory.calls[-1][2]
         self.assertEqual(kwargs["url"], "http://portal/server/load.php")
@@ -427,7 +427,7 @@ class CatalogServiceTests(unittest.TestCase):
         service.request_group("movies", "5")
         self.assertEqual(len(runner.jobs), 1)
         runner.complete(0)
-        self.assertEqual(service.items("movies", "5"), [{"id": 1}])
+        self.assertEqual(service.items("movies", "5"), [{"id": 1, "_provider": "S"}])
 
     def test_group_result_with_unloaded_section_fails(self):
         # Formerly dropped silently, which left the drawer loading forever (finding m1).

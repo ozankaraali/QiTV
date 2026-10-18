@@ -35,6 +35,7 @@ from services.config_manager import ConfigManager, get_app_version
 from services.epg_manager import EpgManager
 from services.image_manager import ImageManager
 from services.playback import NO_VLC_MESSAGE, PlaybackState, create_instance
+from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from services.provider_manager import ProviderManager
 from services.thread_cleanup import has_pending_threads
 from services.vlc_profile import PlayKind
@@ -55,6 +56,7 @@ from ui.keymap import SHORTCUTS, shortcut_keys
 from ui.overlay_host import OverlayHost
 from ui.overlays.drawer import ERROR_TEXT
 from ui.overlays.zap_banner import BannerInfo
+from ui.page_stack import PageStack
 from ui.settings_dialog import OptionsDialog
 from ui.shortcuts_dialog import ShortcutsDialog, table_rows
 from ui.tv_menus import ISSUES_URL, AboutDialog
@@ -147,6 +149,10 @@ class WindowCase(unittest.TestCase):
     def prepare_config(self) -> None:
         """Change the configuration before the window is built."""
 
+    def tv_catalog(self):
+        """The CatalogService behind the TV page (the window's catalog is a browsed view)."""
+        return self.window.catalogs.catalog(self.window.catalog.source())
+
     def close_window(self):
         # One close(); the window's retry timer runs the steps (stop, threads, release). The
         # timer check also covers windows that were never shown.
@@ -207,17 +213,17 @@ class TVWindowTests(WindowCase):
         window = self.window
         self.assertIsInstance(window.host, OverlayHost)
         self.assertIs(window.centralWidget(), window.pages)
-        self.assertEqual(
-            [window.pages.widget(i) for i in range(window.pages.count())],
-            [window.player_page, window.library_page],
-        )
+        self.assertIsInstance(window.pages, PageStack)
+        self.assertIs(window.player_page.parentWidget(), window.pages)
+        self.assertIs(window.library_page.parentWidget(), window.pages)
+        self.assertEqual(window.pages.mode(), PageStack.PLAYER)
         self.assertIs(window.pages.currentWidget(), window.player_page)
         # The video container a second (PiP) surface can join: the surface fills it.
         self.assertIs(window.surface.parentWidget(), window.player_page)
         self.assertEqual(window.surface.geometry(), window.player_page.rect())
 
     def test_the_player_page_and_its_overlays_reach_the_windows_edges_under_the_theme(self):
-        # The dark theme gives every QStackedWidget a 1-px border: the page and the overlay host
+        # The dark theme gave the old QStackedWidget a 1-px border: the page and the overlay host
         # sat 1 px inside it, and the guide's dimming left the outer pixel line undimmed.
         previous = self.app.styleSheet()
         self.addCleanup(self.app.setStyleSheet, previous)
@@ -225,7 +231,6 @@ class TVWindowTests(WindowCase):
         self.show()
         window = self.window
         window.host.sync_geometry()
-        self.assertEqual(window.pages.frameWidth(), 0)
         self.assertEqual(window.player_page.geometry(), window.pages.rect())
         whole = QRect(window.pages.mapToGlobal(QPoint(0, 0)), window.pages.size())
         self.assertEqual(window.host.geometry(), whole)
@@ -282,7 +287,7 @@ class TVWindowTests(WindowCase):
         # An XMLTV download or an STB crawl held the close for up to 30 s (H10).
         window = self.window
         with (
-            mock.patch.object(window.catalog.runner, "cancel_all", create=True) as catalog,
+            mock.patch.object(self.tv_catalog().runner, "cancel_all", create=True) as catalog,
             mock.patch.object(window.jobs, "cancel_all", create=True) as library,
         ):
             self.close_window()
@@ -726,7 +731,7 @@ class TVWindowTests(WindowCase):
 
     def test_close_stops_the_catalog_before_new_jobs_can_start(self):
         # A provider setup still running when the close begins must not start an EPG load.
-        catalog = self.window.catalog
+        catalog = self.tv_catalog()
         gate = threading.Event()
         self.addCleanup(gate.set)
         create_setup = catalog.factory.provider_setup
@@ -770,7 +775,7 @@ class TVWindowTests(WindowCase):
             return next(waits, False)
 
         with (
-            mock.patch.object(window.catalog, "shutdown", side_effect=lambda: calls.append("x")),
+            mock.patch.object(window.catalogs, "shutdown", side_effect=lambda: calls.append("x")),
             mock.patch.object(window.session, "stop", side_effect=lambda: calls.append("stop")),
             mock.patch.object(
                 window.session,
@@ -781,7 +786,7 @@ class TVWindowTests(WindowCase):
                 self.image_manager, "save_index", side_effect=lambda: calls.append("images")
             ),
             mock.patch.object(
-                self.epg_manager, "save_index", side_effect=lambda: calls.append("epg")
+                window.catalogs, "save_epg_indexes", side_effect=lambda: calls.append("epg")
             ),
             mock.patch("ui.tv_window.has_pending_threads", side_effect=pending),
         ):
@@ -942,7 +947,7 @@ class StuckWorker(QObject):
         time.sleep(30)
 
 
-window.catalog.runner.run_worker(StuckWorker(), lambda *a: None, lambda *a: None)
+window.catalogs.catalog(window.catalog.source()).runner.run_worker(StuckWorker(), lambda *a: None, lambda *a: None)
 window.show()
 QTimer.singleShot(300, window.close)
 print("exec returned", app.exec(), flush=True)
@@ -1227,7 +1232,7 @@ class LivePipelineWindowTests(WindowCase):
 
             return call
 
-        live, engine, catalog = window.live_session, window.engine, window.catalog
+        live, engine, catalog = window.live_session, window.engine, window.catalogs
         for obj, name in ((live, "stop"), (engine, "shutdown"), (catalog, "shutdown")):
             patcher = mock.patch.object(
                 obj, name, spy(f"{type(obj).__name__}.{name}", getattr(obj, name))
@@ -1240,7 +1245,7 @@ class LivePipelineWindowTests(WindowCase):
         with self.assertNoLogs("services.live.live_session", "WARNING"):  # no close-cap warning
             self.close_window()  # it also checks that no background thread is left
         self.assertEqual(
-            order[:3], ["LiveSession.stop", "LiveEngine.shutdown", "CatalogService.shutdown"]
+            order[:3], ["LiveSession.stop", "LiveEngine.shutdown", "Catalogs.shutdown"]
         )
 
     def test_a_windows_self_update_stops_the_pipeline_before_waiting_for_threads(self):
@@ -1485,9 +1490,15 @@ class TwoProviderCase(WindowCase):
         session = self.window.session
         self.assertTrue(wait_until(lambda: session.state() == PlaybackState.IDLE))
 
+    def stop_corner_player(self):
+        """Back in the Library, a movie plays on in the corner: × stops it, then it is idle."""
+        if self.window.pages.mode() == PageStack.CORNER:
+            self.window.screens.stop_corner()
+        self.wait_idle()
+
 
 class LibraryWindowTests(TwoProviderCase):
-    def test_view_movies_opens_the_library_stops_live_and_hides_the_overlays(self):
+    def test_view_movies_opens_the_library_and_the_channel_plays_on_in_a_corner(self):
         plays = self.play_spy()
         self.open_first_channel()
         window = self.window
@@ -1500,14 +1511,21 @@ class LibraryWindowTests(TwoProviderCase):
         actions = self.menu_actions()
         actions["Movies"].trigger()
         self.assertIs(window.pages.currentWidget(), window.library_page)
-        self.wait_idle()
-        self.assertFalse(window.host.isVisible())
-        # The stream's slot goes back once the release gate has let go of it.
-        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == []))
+        self.assertEqual(window.pages.mode(), PageStack.CORNER)
+        if INSTANCE is not None:
+            self.assertIn(window.session.state(), (PlaybackState.OPENING, PlaybackState.PLAYING))
+        # Only the corner player's controls stay on the host; the stream keeps its slot.
+        self.assertEqual(window.host.visible_overlays(), [window.corner_controls])
+        self.assertEqual(plays, [channel_urls()[0]])
         self.assertTrue(window.library_toast.isVisible())  # messages show on the Library
         for text in ("Guide", "Channel List", "Play/Pause", "Mute", "Previous Channel"):
             self.assertFalse(actions[text].isEnabled(), text)  # the player's keys
         self.assertTrue(actions["Fullscreen"].isEnabled())
+        window.screens.stop_corner()  # ×: it stops, the Library stays
+        self.wait_idle()
+        self.assertEqual(window.pages.mode(), PageStack.LIBRARY)
+        self.assertFalse(window.host.isVisible())
+        self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == []))
 
     def test_live_tv_tunes_the_last_channel_again(self):
         plays = self.play_spy()
@@ -1516,6 +1534,7 @@ class LibraryWindowTests(TwoProviderCase):
         self.assertTrue(wait_until(lambda: plays == [first]))
         actions = self.menu_actions()
         actions["Movies"].trigger()
+        self.window.screens.stop_corner()  # it would play on in the corner otherwise
         self.wait_idle()
         actions["Live TV"].trigger()
         self.assertIs(self.window.pages.currentWidget(), self.window.player_page)
@@ -1556,12 +1575,38 @@ class LibraryWindowTests(TwoProviderCase):
         def entries():
             return [(a.text(), a.isChecked()) for a in menu.actions()]
 
-        self.assertEqual(entries(), [(PROVIDER_NAME, True), (XTREAM, False)])
+        self.assertEqual(
+            entries(), [(ALL_PROVIDERS_TITLE, False), (PROVIDER_NAME, True), (XTREAM, False)]
+        )
         group = menu.actions()[0].actionGroup()
         self.assertTrue(group is not None and group.isExclusive())
-        menu.actions()[1].trigger()
+        menu.actions()[2].trigger()
         self.wait_ready(XTREAM)
-        self.assertTrue(wait_until(lambda: entries() == [(PROVIDER_NAME, False), (XTREAM, True)]))
+        self.assertTrue(
+            wait_until(
+                lambda: entries()
+                == [(ALL_PROVIDERS_TITLE, False), (PROVIDER_NAME, False), (XTREAM, True)]
+            )
+        )
+
+    def test_the_providers_menu_chooses_all_providers_and_a_provider_from_there(self):
+        # Final review M5: the browsed source is checked (never a provider that loads), and a
+        # provider can be chosen from All providers.
+        self.show()
+        self.wait_for_drawer()
+        menu = self.window.menus.providers_menu
+        catalog = self.window.catalog
+
+        def checked():
+            return [a.text() for a in menu.actions() if a.isChecked()]
+
+        menu.actions()[0].trigger()
+        self.assertTrue(wait_until(lambda: catalog.source() == ALL_PROVIDERS))
+        self.assertTrue(wait_until(lambda: checked() == [ALL_PROVIDERS_TITLE]))
+        menu.actions()[2].trigger()
+        self.assertTrue(wait_until(lambda: catalog.source() == XTREAM))
+        self.wait_ready(XTREAM)
+        self.assertTrue(wait_until(lambda: checked() == [XTREAM]))
 
     def test_esc_while_exporting_cancels_the_export_only(self):
         self.show()
@@ -1597,7 +1642,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertIs(window.pages.currentWidget(), window.library_page)
         self.assertEqual(grid.current_index(), 1)
         self.assertIs(grid.item(1), current)  # the same title, not a reloaded list
-        self.wait_idle()
+        self.stop_corner_player()
 
     def test_the_library_button_returns_to_the_library_where_it_was(self):
         # 2.0.1 review I1: ‹ Library on the player controls does what Esc does after a movie.
@@ -1615,7 +1660,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertIs(window.pages.currentWidget(), window.library_page)
         self.assertEqual(grid.current_index(), 1)
         self.assertIs(grid.item(1), current)  # the same title, not a reloaded list
-        self.wait_idle()
+        self.stop_corner_player()
 
     def test_the_library_button_returns_to_the_series_on_its_episode(self):
         plays = self.play_spy()
@@ -1641,11 +1686,11 @@ class XtreamLibraryTests(TwoProviderCase):
         # A double-click's second click lands on the Library under the pointer (an episode
         # there would play): it reaches nothing (2.0.1 review M1).
         point = window.mapFromGlobal(at)
-        heard = MouseHeard(window.childAt(point))
+        heard = MouseHeard(window.childAt(point) or window.library_page)
         QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
         self.assertEqual(heard.events, [])
         self.assertEqual(len(plays), 1)
-        self.wait_idle()
+        self.stop_corner_player()
 
     def test_a_posters_right_click_menu_copies_its_link_and_says_so_on_the_library(self):
         # Owner (2026-10-15): a Library title offers the channels' Play in VLC/MPV and link.
@@ -1686,8 +1731,8 @@ class XtreamLibraryTests(TwoProviderCase):
         self.wait_for_titles()
 
     def test_a_search_hit_on_another_provider_plays_once_it_is_ready(self):
-        # Review Focus 4: the play waits for its provider, and the shell's own provider
-        # change (it drops older requests) never drops it.
+        # Review Focus 4: the play waits for its provider (set up beside the shown one in 2.1,
+        # no provider change), and an older request being dropped never drops it.
         plays = self.play_spy()
         self.show()
         self.wait_ready(XTREAM)
@@ -1696,7 +1741,7 @@ class XtreamLibraryTests(TwoProviderCase):
         actions["Movies"].trigger()
         self.wait_for_titles()  # cached: the search reads every provider's saved catalog
         self.provider_manager._cache_writer.submit(lambda: None).result(timeout=5)
-        window.menus.providers_menu.actions()[0].trigger()
+        window.menus.providers_menu.actions()[1].trigger()  # after All providers
         self.wait_ready(PROVIDER_NAME)
         actions["Search"].trigger()
         self.assertEqual(window.library_controller.mode, "search")
@@ -1711,7 +1756,8 @@ class XtreamLibraryTests(TwoProviderCase):
         )
         QTest.keyClick(window, Qt.Key.Key_Down)  # from the field to the results
         QTest.keyClick(window, Qt.Key.Key_Return)
-        self.wait_ready(XTREAM)
+        # 2.1: the hit's own provider is set up beside the shown one (the TV page stays on
+        # PROVIDER_NAME) and the play runs once that provider is ready.
         self.assertTrue(wait_until(lambda: len(plays) == 1, LIBRARY_WAIT_MS))
         self.assertTrue(plays[0].endswith("/102.mp4"), plays)
         elapse(300)
@@ -2093,12 +2139,35 @@ class OptionsDialogTests(WindowCase):
         expected = sum(f.stat().st_size for f in cache.rglob("*") if f.is_file()) / (1024 * 1024)
         self.assertAlmostEqual(self.dialog().get_cache_size(), expected, places=3)
 
+    def test_an_edit_that_keeps_the_connection_reloads_nothing_and_the_list_stays(self):
+        # Polish: one provider, only its stream limit changed. Its cache was cleared, its
+        # channels downloaded again, and the open drawer jumped back to live.
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # into the highlighted group (All)
+        nav = self.window.nav
+        self.assertTrue(wait_until(lambda: [n.layer for n in nav.path][-1:] == ["group"]))
+        path = nav.path
+        catalog = self.tv_catalog()
+        cache = catalog.provider_manager._provider_cache_name(PROVIDER_NAME)
+        dialog = self.dialog()
+        dialog.max_streams_input.setValue(2)
+        with mock.patch.object(catalog, "select_provider", wraps=catalog.select_provider) as setup:
+            dialog.save_settings()
+            QTest.qWait(200)  # a setup would have finished by now
+        setup.assert_not_called()
+        self.assertTrue(os.path.exists(cache))
+        self.assertEqual(nav.path, path)
+        self.assertTrue(drawer.isVisible())
+        self.assertEqual(self.provider_manager.providers[0]["max_streams"], 2)
+        self.assertEqual(catalog.current_provider()["max_streams"], 2)  # the budget reads it
+
     def test_an_epg_change_reloads_the_guide_in_the_background(self):
         dialog = self.dialog()
         dialog.epg_url_input.setText("http://epg.invalid/guide.xml")
         with (
             mock.patch.object(self.window.catalog, "refresh_epg") as refresh_epg,
-            mock.patch.object(self.epg_manager, "set_current_epg") as set_current_epg,
+            mock.patch.object(self.tv_catalog().epg_manager, "set_current_epg") as set_current_epg,
         ):
             dialog.save_settings()
         refresh_epg.assert_called_once_with(force=True)

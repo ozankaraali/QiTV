@@ -37,7 +37,7 @@ def iter_items(content: Any) -> Iterator[dict]:
     if isinstance(contents, list):
         yield from (i for i in contents if isinstance(i, dict))
     elif isinstance(contents, dict):
-        for group in contents.values():
+        for group in list(contents.values()):  # (the GUI thread may add a group meanwhile)
             if isinstance(group, list):
                 yield from (i for i in group if isinstance(i, dict))
 
@@ -98,23 +98,28 @@ def search_caches(
 
 
 class SearchWorker(QObject):
-    """JobRunner worker: loads every provider's cached content (disk) unless given, then searches."""
+    """JobRunner worker: gathers every provider's cached content (a catalog's own in memory, else
+    the disk) unless given, then searches."""
 
     finished = Signal(object)  # (caches, index, hits)
     error = Signal(str)
 
-    def __init__(self, provider_manager, text: str, caches=None, index=None):
+    def __init__(self, provider_manager, text: str, caches=None, index=None, loaded=None):
         super().__init__()
         self._provider_manager = provider_manager
         self._text = text
         self._caches = caches
         self._index = index
+        self._loaded = loaded  # provider name -> content its catalog holds (read only)
 
     def run(self) -> None:
         caches = self._caches
         index = self._index
         if index is None:
             if caches is None:
-                caches = self._provider_manager.get_all_providers_cached_content()
+                if self._loaded:
+                    caches = self._provider_manager.get_all_providers_cached_content(self._loaded)
+                else:
+                    caches = self._provider_manager.get_all_providers_cached_content()
             index = build_index(caches)
         self.finished.emit((caches, index, search_index(index, self._text)))

@@ -49,6 +49,13 @@ STATE_KEYS = {
     "burst_s",
     "received",
     "hls",
+    "breaks",
+    "caught_up",
+    "backlog_s",
+    "finite",
+    "open_quality",
+    "video",
+    "answered",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -100,6 +107,18 @@ time.sleep(60)
 """
 
 
+def second_pat(data):
+    """The offset of the second PAT packet: where a stream cut half a second in begins (its
+    program tables come every half second)."""
+    seen = 0
+    for at in range(0, len(data), 188):
+        if data[at + 1] & 0x1F == 0 and data[at + 2] == 0:
+            seen += 1
+            if seen == 2:
+                return at
+    raise AssertionError("no second PAT")
+
+
 def helper_with_a_lingering_thread(conn, root):
     """The real helper in a process that also runs a non-daemon thread, as any imported
     module could start, or a parent's unguarded __main__ module that spawn runs again."""
@@ -121,9 +140,11 @@ class Helper:
         self.messages = []
         self.base_url = self.wait_for(lambda message: message[0] == "hello", timeout=60)[1]
 
-    def open(self, url, ring=RAM, live_delay=6.0):
+    def open(self, url, ring=RAM, live_delay=6.0, start=None):
+        """`start`: the session's target and extra (2.1 stage 3); None sends the 2.0 command."""
         sid = secrets.token_hex(8)
-        self.conn.send(("open", sid, url, {"User-Agent": "QiTV-test"}, True, ring, live_delay))
+        command = ("open", sid, url, {"User-Agent": "QiTV-test"}, True, ring, live_delay)
+        self.conn.send(command if start is None else (*command, start))
         return sid
 
     def close(self, sid):
@@ -375,6 +396,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(snapshot["open"], 0)
         self.assertEqual(snapshot["burst_s"], 0.0)
         self.assertIs(snapshot["hls"], False)  # raw MPEG-TS
+        self.assertIs(snapshot["video"], True)  # a video PID: its starts may be keyframes
         with urlopen(helper.stream_url(sid, snapshot["oldest"]), timeout=10) as response:
             self.assertEqual(response.headers["Content-Type"], "video/mp2t")
             body = response.read()  # the stream ends once the finite source has ended
@@ -386,6 +408,52 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(source.counts[SECRET_PATH], 1)
         self.assertEqual(source.requests[0][1].get("User-Agent"), "QiTV-test")
         self.assert_no_credentials(helper)
+
+    def test_a_timestamp_jump_left_out_of_the_timeline_is_reported(self):
+        # 2.1 stage 2: the player's clock jumps by what the timeline leaves out (a reconnect
+        # after an outage, an HLS discontinuity): where on the timeline, and how much. A step
+        # under 3 s stays media and is not reported.
+        helper = self.helper()
+        for path, jump, reported in (("/jump.ts", 5.0, [(4.0, 5.0)]), ("/step.ts", 2.0, [])):
+            with self.subTest(jump=jump):
+                first = make_stream(4)
+                second = make_stream(4, pts_start=900000 + round((4 + jump) * 90000))
+                source = self.source({path: (200, {}, first + second)})
+                sid = helper.open(source.url + path)
+                helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
+                breaks = helper.of(sid, "state")[-1][2]["breaks"]
+                self.assertEqual(len(breaks), len(reported))
+                for (where, seconds), (at, left_out) in zip(breaks, reported):
+                    self.assertAlmostEqual(where, at, delta=0.05)
+                    self.assertAlmostEqual(seconds, left_out, delta=0.05)
+
+    def test_reported_jumps_stay_as_long_as_the_ring_holds_their_media(self):
+        # A flaky raw-TS source that reconnects every few seconds: 20 jumps of 5 s, 2 s of
+        # media apart. A viewer far behind must still find each break the ring still holds
+        # (a count of eight dropped them); those whose media was evicted go with it, but for
+        # those just before the ring's start (2.1 stage 5: a sparse-PCR clock's 2 s step and
+        # a second more), which a player still reading evicted media may reach.
+        pieces = b"".join(
+            make_stream(2, pts_start=900000 + round(k * 7.0 * 90000)) for k in range(21)
+        )
+        source = self.source({"/flaky.ts": (200, {}, pieces)})
+        helper = self.helper()
+        for name, ring in (("all held", RAM), ("evicting", {"kind": "ram", "max_bytes": 1 << 18})):
+            with self.subTest(ring=name):
+                sid = helper.open(source.url + "/flaky.ts", ring=ring)
+                helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
+                snapshot = helper.of(sid, "state")[-1][2]
+                breaks = snapshot["breaks"]
+                self.assertTrue(all(abs(seconds - 5.0) < 0.05 for _, seconds in breaks))
+                if name == "all held":
+                    self.assertEqual(len(breaks), 20)
+                    self.assertEqual([round(where) for where, _ in breaks], list(range(2, 42, 2)))
+                else:
+                    self.assertLess(len(breaks), 20)
+                    slack = worker._BREAK_SLACK_S
+                    self.assertTrue(all(where >= snapshot["start"] - slack for where, _ in breaks))
+                    self.assertLess(breaks[0][0], snapshot["start"])  # one just before it
+                    self.assertEqual(round(breaks[-1][0]), 40)
 
     def test_a_finite_source_ends_after_its_last_segment(self):
         first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
@@ -412,6 +480,7 @@ class LiveWorkerTests(unittest.TestCase):
                 self.assertIsNone(snapshot["open"])
                 self.assertEqual(snapshot["burst_s"], burst)
                 self.assertIs(snapshot["hls"], hls)  # 2.0.2: stay-live keeps HLS at 1x
+                self.assertIs(snapshot["caught_up"], hls)  # HLS: every listed segment came
                 self.assertGreater(snapshot["bytes"], 0)
                 self.assertEqual(helper.of(sid, "error"), [])
                 buffered = spans(helper, sid)
@@ -423,7 +492,145 @@ class LiveWorkerTests(unittest.TestCase):
                     self.assertAlmostEqual(before[2], after[1])
                 self.assertAlmostEqual(buffered[-1][2] - buffered[0][1], seconds, delta=0.25)
                 self.assertAlmostEqual(snapshot["end"], buffered[-1][2])
+                self.assertEqual({item[4] for item in buffered}, {"key"})  # IDR starts
         self.assert_no_credentials(helper)
+
+    def test_an_hls_batch_reports_its_live_edge_once_delivered(self):
+        # 2.1 stage 3: states are throttled to four a second, so the end of a batch that
+        # arrived within a quarter second waited for the next batch (a 2 s keyframe interval
+        # of a public HLS channel for 7 s): the start was chosen on a stale edge.
+        routes = {
+            "/user/secret/live.m3u8": (200, {}, leaf("a.ts", "b.ts", ended=False)),
+            "/user/secret/a.ts": (200, {}, make_stream(4)),
+            "/user/secret/b.ts": (200, {}, make_stream(4, pts_start=900000 + 4 * 90000)),
+        }
+        source = self.source(routes)
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/live.m3u8", live_delay=100.0)
+        state = helper.wait_for(
+            lambda message: message[:2] == ("state", sid) and message[2]["caught_up"], timeout=5
+        )
+        self.assertGreater(state[2]["live_edge"], 7.9)  # all 8 s, not the last cut's 6 s
+        self.assertIs(helper.of(sid, "state")[0][2]["caught_up"], False)
+
+    def backlog_states(self, names, *, extinf, seconds, missing=(), cut_first=False):
+        """The states of an HLS session whose live playlist lists `names` (each `extinf` long
+        by its EXTINF, `seconds` of media; those in `missing` answer 404) until caught up.
+        `cut_first`: the first segment begins half a second in, before its first keyframe
+        (keyframes every 2 s)."""
+        text = f"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{extinf}\n"
+        text += "#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:{extinf},\n{name}\n" for name in names)
+        routes = {"/user/secret/live.m3u8": (200, {}, text.encode())}
+        start = 900000
+        for name in names:
+            if name in missing:
+                routes[f"/user/secret/{name}"] = (404, {}, b"Not found")
+                continue
+            body = make_stream(seconds, pts_start=start, gop_s=2.0 if cut_first else 1.0)
+            if cut_first and name == names[0]:
+                body = body[second_pat(body) :]
+            routes[f"/user/secret/{name}"] = (200, {}, body)
+            start += round(seconds * 90000)
+        source = self.source(routes)
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/live.m3u8", live_delay=100.0)
+        helper.wait_for(
+            lambda message: message[:2] == ("state", sid) and message[2]["caught_up"], timeout=5
+        )
+        states = [message[2] for message in helper.of(sid, "state")]
+        return [state for state in states if state["oldest"] is not None]
+
+    def test_an_hls_backlog_reports_the_media_still_to_come(self):
+        # 2.1 stage 3: live edge + backlog_s is where the edge will be once every listed
+        # segment arrived, so a tune can start before all of them did; measured once a
+        # segment came whole, not the first (before: None).
+        playable = self.backlog_states(["a.ts", "b.ts", "c.ts", "d.ts"], extinf=4, seconds=4)
+        self.assertGreater(len(playable), 2)
+        self.assertIsNone(playable[0]["backlog_s"])
+        measured = [state for state in playable if state["backlog_s"] is not None]
+        self.assertGreater(len(measured), 1)
+        for state in measured:
+            # Each segment measures a frame short (the edge stands at its last frame's
+            # start): the prediction errs low, on the side that keeps room.
+            predicted = state["live_edge"] + state["backlog_s"]
+            self.assertAlmostEqual(predicted, 16.0, delta=0.2, msg=state)
+        self.assertEqual(playable[-1]["backlog_s"], 0.0)
+        self.assertEqual(playable[-1]["open_quality"], "key")  # the open segment's start
+        self.assertIs(playable[-1]["finite"], False)
+
+    def test_an_hls_backlog_follows_the_media_not_a_wrong_extinf(self):
+        # Review I3: EXTINF 10 on segments of 8 s moved the start 2 s a segment.
+        playable = self.backlog_states(["a.ts", "b.ts", "c.ts", "d.ts"], extinf=10, seconds=8)
+        measured = [state for state in playable if state["backlog_s"] is not None]
+        self.assertGreater(len(measured), 1)
+        for state in measured:
+            predicted = state["live_edge"] + state["backlog_s"]
+            self.assertAlmostEqual(predicted, 32.0, delta=0.5, msg=state)
+
+    def test_a_first_segment_without_a_keyframe_at_its_start_is_not_measured(self):
+        # Re-review minor 3: its media counts from its first keyframe (1.5 s in here), so it
+        # read short against its EXTINF and pulled the prediction low.
+        playable = self.backlog_states(
+            ["a.ts", "b.ts", "c.ts", "d.ts"], extinf=8, seconds=8, cut_first=True
+        )
+        final = playable[-1]["live_edge"]
+        self.assertAlmostEqual(final, 30.0, delta=0.1)  # the first 2 s are before a keyframe
+        measured = [state for state in playable if state["backlog_s"] is not None]
+        self.assertTrue(measured)
+        for state in measured:
+            predicted = state["live_edge"] + state["backlog_s"]
+            self.assertAlmostEqual(predicted, final, delta=0.5, msg=state)
+
+    def test_a_missing_segment_leaves_the_backlog(self):
+        # Review I3: a 404 segment was counted in, and never came: the start landed short.
+        playable = self.backlog_states(
+            ["a.ts", "b.ts", "c.ts", "d.ts"], extinf=4, seconds=4, missing=("c.ts",)
+        )
+        final = playable[-1]["live_edge"]
+        self.assertAlmostEqual(final, 12.0, delta=0.1)
+        for state in playable:
+            if state["backlog_s"] is not None:
+                predicted = state["live_edge"] + state["backlog_s"]
+                self.assertLessEqual(predicted, final + 4.1, msg=state)  # c.ts while it fails
+        late = [state for state in playable if state["live_edge"] > 8.0]
+        self.assertTrue(late)
+        for state in late:  # once c.ts failed: what d.ts brings
+            self.assertAlmostEqual(state["live_edge"] + state["backlog_s"], final, delta=0.1)
+
+    def test_a_finished_playlist_says_so_and_has_no_backlog(self):
+        # Review I1: a finished (ENDLIST) playlist plays from its beginning.
+        names = ["a.ts", "b.ts", "c.ts"]
+        routes = {"/user/secret/clip.m3u8": (200, {}, leaf(*names))}
+        for number, name in enumerate(names):
+            body = make_stream(4, pts_start=900000 + number * 4 * 90000)
+            routes[f"/user/secret/{name}"] = (200, {}, body)
+        source = self.source(routes)
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/clip.m3u8", live_delay=100.0)
+        helper.wait_for(lambda message: message == ("ended", sid))
+        # Once its bytes came: the answer's state before them knows no source yet (2.1).
+        states = [message[2] for message in helper.of(sid, "state") if message[2]["received"]]
+        self.assertTrue(states)
+        self.assertTrue(all(state["finite"] for state in states))
+        self.assertTrue(all(state["backlog_s"] == 0.0 for state in states))
+
+    def test_the_sessions_target_sets_how_far_back_hls_starts(self):
+        names = [f"s{number}.ts" for number in range(6)]
+        routes = {"/user/secret/live.m3u8": (200, {}, leaf(*names, ended=False))}
+        routes.update({f"/user/secret/{name}": (200, {}, make_stream(4)) for name in names})
+        helper = self.helper()
+        for start, fetched in ((None, 2), ({"target": 2.5, "extra": 0.0}, 3)):
+            with self.subTest(start=start):
+                source = self.source(dict(routes))
+                sid = helper.open(source.url + "/user/secret/live.m3u8", start=start)
+                helper.wait_for(
+                    lambda message: message[:2] == ("state", sid) and message[2]["caught_up"]
+                )
+                segments = [path for path, _ in source.requests if path.endswith(".ts")]
+                # 2.0: 6 s back (two 4 s segments); 2.1: three target durations (12 s).
+                self.assertEqual(len(segments), fetched)
+                helper.close(sid)
 
     def test_hls_segments_packaged_on_their_own_are_served_with_running_counters(self):
         # 2.0.2: a CDN that packages each HLS segment on its own restarts every PID's
@@ -558,8 +765,15 @@ class LiveWorkerTests(unittest.TestCase):
             "scrambled": make_stream(4, scrambled=True),
             "too-short": b"<html>nope</html>",
             "fragmented-hls": fragmented,
+            # Its audio only in a separate playlist: the video's segments carry none.
+            "separate-audio-hls": (
+                b'#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="a",DEFAULT=YES,'
+                b'URI="a.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="a"\nv.m3u8\n'
+            ),
         }
         routes = {f"/user/secret/{name}": (200, {}, body) for name, body in bodies.items()}
+        routes["/user/secret/v.m3u8"] = (200, {}, leaf("v.ts"))
+        routes["/user/secret/v.ts"] = (200, {}, make_stream(4, audio=False))
         # A live input that turns out scrambled: its upstream is released at the error.
         hung_up = threading.Event()
         live = make_stream(30, scrambled=True)
@@ -610,13 +824,80 @@ class LiveWorkerTests(unittest.TestCase):
             for message in helper.messages[: helper.messages.index(ready)]
             if message[:2] == ("state", sid) and message[2]["oldest"] is None
         ]
-        self.assertGreaterEqual(len(early), 2, "no state while bytes arrived before ready")
         self.assertEqual(set(early[0]), STATE_KEYS)
-        received = [snapshot["received"] for snapshot in early]
-        self.assertGreater(received[0], 0)
+        # The answer's state may come first, before any byte (2.1).
+        received = [snapshot["received"] for snapshot in early if snapshot["received"]]
+        self.assertGreaterEqual(len(received), 2, "no state while bytes arrived before ready")
         self.assertEqual(received, sorted(received))
         self.assertEqual(helper.of(sid, "state")[-1][2]["oldest"], 0)  # then playable
         self.assertGreaterEqual(helper.of(sid, "state")[-1][2]["received"], 8 * 20 * 188)
+
+    def test_an_answer_before_any_byte_is_reported_at_once(self):
+        # An on-demand restream answers at once and starts its body seconds later: the GUI
+        # hears of the answer before the first byte, and waits for it rather than playing the
+        # channel directly at its ready timeout.
+        go = threading.Event()
+        self.addCleanup(go.set)
+
+        def body(request):
+            try:
+                go.wait(10)
+                request.wfile.write(make_stream(4))
+                request.wfile.flush()
+                self.stop.wait(10)
+            except OSError:
+                pass
+
+        source = self.source({SECRET_PATH: (200, {}, body)})
+        helper = self.helper()
+        sid = helper.open(source.url + SECRET_PATH)
+        state = helper.wait_for(lambda message: message[:2] == ("state", sid))
+        snapshot = state[2]
+        self.assertEqual(set(snapshot), STATE_KEYS)
+        self.assertIs(snapshot["answered"], True)
+        self.assertEqual(snapshot["received"], 0)
+        self.assertIsNone(snapshot["oldest"])
+        self.assertEqual(helper.of(sid, "ready"), [])
+        go.set()
+        helper.wait_for(lambda message: message == ("ready", sid))
+        self.assertIs(helper.of(sid, "state")[-1][2]["answered"], True)
+
+    def test_an_answer_that_turns_out_hls_is_taken_back_before_any_segment_byte(self):
+        # A playlist the answer did not name as one (no type, no .m3u8 path): its open takes
+        # the answer back as the playlist comes, so the GUI keeps the longer wait for raw TS
+        # (an HLS channel waits longer only once segment bytes flow; review M4).
+        go = threading.Event()
+        self.addCleanup(go.set)
+
+        def segment(request):
+            try:
+                go.wait(10)
+                request.wfile.write(make_stream(4))
+            except OSError:
+                pass
+
+        source = self.source(
+            {
+                "/user/secret/play": (200, {}, leaf("a.ts", ended=False)),
+                "/user/secret/a.ts": (200, {}, segment),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/play")
+        state = helper.wait_for(lambda m: m[:2] == ("state", sid) and not m[2]["answered"])
+        self.assertEqual(state[2]["received"], 0)
+        self.assertEqual(helper.of(sid, "ready"), [])
+        go.set()
+
+    def test_an_http_failure_says_its_status(self):
+        # The GUI logs why a channel played directly: the kind, and an HTTP status.
+        source = self.source({SECRET_PATH: (404, {}, b"")})
+        helper = self.helper()
+        sid = helper.open(source.url + SECRET_PATH)
+        error = helper.wait_for(lambda message: message[:2] == ("error", sid))
+        self.assertEqual(error[2], "http")
+        self.assertEqual(error[4:], (404,))
+        self.assert_no_credentials(helper)
 
     def test_a_source_that_sends_nothing_is_a_network_failure(self):
         source = self.source({SECRET_PATH: (200, {}, b"")})
@@ -1084,6 +1365,30 @@ class InProcessHelper:
         self.loop.join(5)
         self.helper.shutdown()
         self.parent.close()
+
+
+class StartQualityTests(unittest.TestCase):
+    """In process: the spans message carries how cleanly each segment starts."""
+
+    def test_each_addition_ends_with_its_segments_start_quality(self):
+        # One IDR every 15 s: IDR starts at 0 and 15 s, a forced cut without one at 10 s.
+        upstream = LocalSource({SECRET_PATH: (200, {}, make_stream(24, gop_s=15.0))})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "q", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))
+        helper.wait_for(lambda message: message == ("ended", "q"))
+        buffered = rebuild(m for m in helper.messages if m[:2] == ("state", "q"))
+        # (seq, start, end, discontinuity) as before, then the start quality.
+        self.assertEqual([item[0] for item in buffered], [0, 1, 2])
+        self.assertEqual([round(item[1], 3) for item in buffered], [0.0, 10.0, 15.0])
+        self.assertEqual(
+            [item[3:] for item in buffered],
+            [
+                (False, "key"),
+                (False, "none"),
+                (False, "key"),
+            ],
+        )
 
 
 class ClosedAfterReleaseTests(unittest.TestCase):

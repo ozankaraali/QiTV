@@ -1,7 +1,9 @@
 """The TV window's two pages, the player and the Library (spec §5.4, R5), and the moves between.
 
 Opening the Library (View → Movies, Series or Search, Ctrl/⌘+F, Movies or Series chosen in
-the drawer) stops what plays and shows the Library page. A title played from the Library
+the drawer) shows the Library page; what plays goes on in a corner of it (the PageStack's
+corner mode: ⤢, a click on it, Esc at the Library's top level or ‹ bring the player back,
+× stops it), and with nothing playing the player page is hidden. A title played from the Library
 switches to the player; Esc on it, with nothing open on the player, or "‹ Library" on the player
 controls shows the Library again as it was (its genre, title and scroll, or the series view on
 its season and episode). Live TV (the menu, the Library's tab, Esc at its top
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import QFileDialog, QWidget
 from services.exporter import ExportKind
 from services.library import LibraryModel
 from ui.library_controller import LibraryController
+from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
 from ui.tv_controller import ERROR_MS, INFO_MS, scrub
 
@@ -41,10 +44,12 @@ class TVPages(QObject):
         self._return_to_library = False  # the movie playing came from the Library
         # After ‹ Library, ⌕ and the Movies/Series rows: see back_to_library.
         self._second_click = SecondClickGuard(self)
-        self.library_model = LibraryModel(window.catalog, window.config_manager, window.watch, self)
+        self.library_model = LibraryModel(
+            window.library_catalog, window.config_manager, window.watch, self
+        )
         self.library_controller = LibraryController(
             config=window.config_manager,
-            catalog=window.catalog,
+            catalog=window.library_catalog,
             model=self.library_model,
             watch=window.watch,
             screen=window.library_page,
@@ -57,26 +62,61 @@ class TVPages(QObject):
             parent=self,
         )
         self.library_controller.notice.connect(self.notify)
-        window.catalog.providerFailed.connect(self._on_provider_failed)
+        window.library_catalog.providerFailed.connect(self._on_provider_failed)
         window.overlays.drawer.libraryRequested.connect(self.open_library)
 
     # ---- pages --------------------------------------------------------------------------------
 
     def library_shown(self) -> bool:
+        """The Library is the page in front (also while the player sits in its corner)."""
         return self._window.pages.currentWidget() is self._window.library_page
 
-    def _show_page(self, page: QWidget) -> None:
+    def _show_page(self, page: QWidget, *, corner: bool = False) -> None:
+        """Show the player page, or the Library with the player in its corner or hidden."""
         window = self._window
-        if page is window.pages.currentWidget():
+        stack = window.pages
+        library = page is window.library_page
+        wanted = (
+            (PageStack.CORNER if corner else PageStack.LIBRARY) if library else PageStack.PLAYER
+        )
+        if stack.mode() == wanted:
             return
-        if self.library_shown():
+        if self.library_shown() and not library:
             self.library_controller.leave()  # a play waiting for its provider is dropped
         self._second_click.disarm()  # it kept a click off the page shown before
-        window.pages.setCurrentWidget(page)
-        window.menus.set_player_enabled(page is not window.library_page)
+        if library:
+            stack.show_library(corner=corner)
+        else:
+            if stack.mode() == PageStack.CORNER:
+                window.controller.leave_library_playing()
+            stack.show_player()
+        window.menus.set_player_enabled(not library)
+
+    def back_to_player(self) -> None:
+        """⤢, a click on the corner player: the player page again, what plays as it was.
+
+        A double-click's second click would land on the player page under the pointer (a
+        double-click there toggles fullscreen): it reaches nothing (see back_to_library).
+        """
+        if not self._window.closing() and self._window.pages.mode() == PageStack.CORNER:
+            self._show_page(self._window.player_page)
+            self._second_click.arm()
+
+    def stop_corner(self) -> None:
+        """× on the corner player: what plays stops (today's stop for the Library) and the
+        Library stays, full size. A double-click's second click would land on the Library
+        under the pointer (a press on a poster or ▶ plays it): it reaches nothing."""
+        window = self._window
+        if window.closing() or window.pages.mode() != PageStack.CORNER:
+            return
+        self._set_return_to_library(False)
+        window.controller.stop_for_library()
+        self._show_page(window.library_page)
+        self._second_click.arm()
 
     def open_library(self, section: str) -> None:
-        """Movies or Series: live playback stops first (R5).
+        """Movies or Series: what plays goes on in a corner of the Library (nothing playing: the
+        Library has the whole window).
 
         From the channel list's Movies and Series rows the Library shows at once, so a
         double-click's second click reaches nothing (see back_to_library). Keys and the menu
@@ -100,6 +140,10 @@ class TVPages(QObject):
     def _enter_library(self) -> None:
         window = self._window
         window.leave_mini_player()  # the Library is a full window: never inside the corner
+        if window.controller.playing():
+            window.controller.enter_library_playing()  # it plays on, in a corner of the Library
+            self._show_page(window.library_page, corner=True)
+            return
         self._set_return_to_library(False)
         window.controller.stop_for_library()
         self._show_page(window.library_page)
@@ -114,9 +158,10 @@ class TVPages(QObject):
         window = self._window
         if window.closing():
             return
+        from_library = self.library_shown()  # the page switch ends the controller's Library state
         self._show_page(window.player_page)
         self._set_return_to_library(True)
-        window.controller.play_vod(item, kind, context)
+        window.controller.play_vod(item, kind, context, from_library=from_library)
 
     def tune_live(self, channel: dict) -> None:
         """A live channel from the Library's search."""
@@ -131,6 +176,9 @@ class TVPages(QObject):
         """Live TV: the last channel again (R5), or the drawer."""
         window = self._window
         if window.closing():
+            return
+        if window.pages.mode() == PageStack.CORNER:
+            self.back_to_player()  # the live channel plays on: Esc and ‹ bring it back
             return
         self._show_page(window.player_page)
         self._set_return_to_library(False)
@@ -198,8 +246,10 @@ class TVPages(QObject):
         window = self._window
         if window.closing():
             return
-        section = self.library_controller.section if self.library_shown() else None
-        window.exports.export(kind, section or "live")
+        shown = self.library_shown()
+        section = self.library_controller.section if shown else None
+        catalog = window.library_catalog if shown else window.catalog
+        window.exports.export(kind, section or "live", catalog)
 
     # ---- messages -----------------------------------------------------------------------------
 

@@ -32,6 +32,7 @@ from services.live import source as source_module
 from services.live.source import (
     STREAM_LIMIT,
     STREAM_REFUSED,
+    CaughtUp,
     Discontinuity,
     SourceError,
     _scheme,
@@ -67,11 +68,14 @@ def hls(sequence, names, *, target=1, ended=False, extra=""):
     return (text + ("#EXT-X-ENDLIST\n" if ended else "")).encode()
 
 
-def drain(source):
-    """Every item from ``chunks()``, with adjacent byte blocks joined."""
+def drain(source, *, caught_up=False):
+    """Every item from ``chunks()``, with adjacent byte blocks joined; `CaughtUp` markers
+    (the helper's cue to report its live edge, no media) only with `caught_up`."""
     parts = []
     try:
         for item in source.chunks():
+            if isinstance(item, CaughtUp) and not caught_up:
+                continue
             if isinstance(item, bytes) and parts and isinstance(parts[-1], bytes):
                 parts[-1] += item
             else:
@@ -110,7 +114,7 @@ def plain(data):
     return bytes(out)
 
 
-def media(url, *, headers=None, verify_ssl=True, stop=None, **options):
+def media(url, *, headers=None, verify_ssl=True, stop=None, caught_up=False, **options):
     source = open_source(
         url,
         headers=headers or {},
@@ -118,7 +122,7 @@ def media(url, *, headers=None, verify_ssl=True, stop=None, **options):
         stop=stop or threading.Event(),
         **options,
     )
-    return drain(source)
+    return drain(source, caught_up=caught_up)
 
 
 @contextmanager
@@ -494,7 +498,11 @@ unsupported.m3u8
         self.assertEqual(server.counts["/media/low.m3u8"], 0)
         self.assertEqual(server.counts["/media/unsupported.m3u8"], 0)
 
-    def test_an_external_audio_group_is_unsupported(self):
+    def test_an_external_audio_group_is_unsupported_unless_the_variant_carries_audio(self):
+        # A TS-only fetcher cannot mux a separate audio playlist. Some multi-track restream
+        # servers name each track's playlist and still mux the first audio into the video's,
+        # though: whether the variant carries audio of its own, its first segment's program
+        # tables tell (2.1: public channels VLC played were refused for their master alone).
         master = b'''#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="languages",NAME="English",LANGUAGE="eng",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="languages",NAME="French",LANGUAGE="fra",DEFAULT=NO,AUTOSELECT=YES,URI="audio/fr.m3u8"
@@ -503,22 +511,39 @@ low.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=200000,CODECS="mp2v,mp4a.40.2",AUDIO="languages"
 high.m3u8
 '''
-        server = self.server(
-            {
-                "/master.m3u8": (200, {}, master),
-                "/high.m3u8": (200, {}, leaf("video.ts")),
-                "/audio/en.m3u8": (200, {}, leaf("en.ts")),
-                "/video.ts": (200, {}, self.video),
-            }
-        )
-        with self.assertRaises(SourceError) as raised:
-            open_source(
-                server.url + "/master.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
-            )
-        self.assertEqual(raised.exception.kind, "unsupported")
-        self.assertEqual(server.counts["/master.m3u8"], 1)
-        self.assertEqual(server.counts["/high.m3u8"], 0)
-        self.assertEqual(server.counts["/audio/en.m3u8"], 0)
+        video_only = ts_fixtures.make_stream(4, audio=False)
+        for name, segment, plays in (
+            ("its own audio", self.video, True),
+            ("video only", video_only, False),
+        ):
+            with self.subTest(name):
+                server = self.server(
+                    {
+                        "/master.m3u8": (200, {}, master),
+                        "/high.m3u8": (200, {}, leaf("video.ts", "next.ts")),
+                        "/audio/en.m3u8": (200, {}, leaf("en.ts")),
+                        "/video.ts": (200, {}, segment),
+                        "/next.ts": (200, {}, segment),
+                    }
+                )
+                source = open_source(
+                    server.url + "/master.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+                )
+                if plays:
+                    self.assertEqual(drain(source), joined(segment, segment))
+                    self.assertEqual(server.counts["/next.ts"], 1)
+                else:
+                    parts = []
+                    with self.assertRaises(SourceError) as raised:
+                        parts.extend(source.chunks())
+                    self.assertEqual(raised.exception.kind, "unsupported")
+                    self.assertIn("separate", str(raised.exception))
+                    self.assertEqual(parts, [])  # not one byte of it
+                    self.assertEqual(server.counts["/next.ts"], 0)
+                self.assertEqual(server.counts["/master.m3u8"], 1)
+                self.assertEqual(server.counts["/high.m3u8"], 1)
+                self.assertEqual(server.counts["/audio/en.m3u8"], 0)  # never fetched
+                self.assertEqual(server.counts["/video.ts"], 1)
 
     def test_live_leaf_reloads_real_redirect_url_and_tolerates_segment_gap(self):
         def playlist(_request, count):
@@ -1023,6 +1048,181 @@ high.m3u8
                 self.assertGreaterEqual(waited, 0.25)
                 self.assertLess(waited, 1.3, "the stalled connection was kept too long")
 
+    def test_raw_ts_follows_redirects_to_another_port(self):
+        # An Xtream load balancer answers a channel's link with a 302 to a stream server on
+        # another port, which may redirect once more.
+        stream = self.server({"/live/play/1.ts": (200, {}, self.video)})
+        hop = self.server(
+            {"/balance/1.ts": (302, {"Location": stream.url + "/live/play/1.ts"}, b"")}
+        )
+        entry = self.server(
+            {"/live/user/secret/1.ts": (302, {"Location": hop.url + "/balance/1.ts"}, b"")}
+        )
+        parts = media(entry.url + "/live/user/secret/1.ts", headers={"User-Agent": "Provider/3.0"})
+        self.assertEqual(parts, [self.video])
+        for server in (entry, hop, stream):
+            self.assertEqual(len(server.requests), 1)
+            self.assertEqual(server.requests[0][1]["User-Agent"], "Provider/3.0")
+
+    def test_the_open_says_the_channel_answered_before_its_first_byte(self):
+        # An on-demand restream answers at once and starts its body seconds later (VLC's
+        # second request then finds it warm): the open says so as the headers come, so the
+        # helper can tell the GUI to wait for the body rather than play directly.
+        released = threading.Event()
+        self.addCleanup(released.set)
+
+        def warming_up(request):
+            released.wait(5)
+            request.wfile.write(self.video)
+
+        sized = {"Content-Length": str(len(self.video))}
+        server = self.server({"/live.ts": (200, sized, warming_up)})
+        answered = []
+
+        def on_answer(answering):
+            answered.append((answering, time.monotonic()))
+            threading.Timer(0.3, released.set).start()  # the body follows a while later
+
+        started = time.monotonic()
+        source = open_source(
+            server.url + "/live.ts",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            on_answer=on_answer,
+        )
+        self.assertEqual([answering for answering, _at in answered], [True])
+        self.assertLess(answered[0][1] - started, 2.0)  # not after the body's 5 s
+        self.assertEqual(drain(source), [self.video])
+
+    def test_an_answer_is_taken_back_once_its_body_fails_or_turns_out_a_playlist(self):
+        # 2.1 review M2/M4: the GUI waits longer only while a raw-TS answer stands. One whose
+        # body ends before its first byte is taken back before it is asked for again, and so is
+        # one whose body is a playlist after all (an HLS channel waits longer only once segment
+        # bytes flow).
+        def empty_first(_request, count):
+            return (200, {}, b"") if count == 1 else (200, {}, self.video)
+
+        server = self.server(
+            {
+                "/cold.ts": empty_first,
+                "/play": (200, {}, leaf("video.ts")),  # neither its type nor its path says so
+                "/video.ts": (200, {}, self.video),
+            }
+        )
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            for path, calls in (("/cold.ts", [True, False, True]), ("/play", [True, False])):
+                with self.subTest(path):
+                    answered = []
+                    source = open_source(
+                        server.url + path,
+                        headers={},
+                        verify_ssl=True,
+                        stop=threading.Event(),
+                        on_answer=answered.append,
+                    )
+                    self.assertEqual(drain(source), [self.video])
+                    self.assertEqual(answered, calls)
+
+    def test_an_answer_that_names_a_playlist_is_no_cold_restream(self):
+        # The longer wait is for raw TS (cold restreams): an HLS playlist that answers says
+        # nothing until segment bytes flow, by its content type or its path.
+        playlist = leaf("video.ts")
+        server = self.server(
+            {
+                "/live.m3u8": (200, {}, playlist),
+                "/play": (200, {"Content-Type": "application/vnd.apple.mpegurl"}, playlist),
+                "/legacy": (200, {"Content-Type": "audio/x-mpegURL"}, playlist),
+                "/video.ts": (200, {}, self.video),
+            }
+        )
+        for path in ("/live.m3u8", "/play", "/legacy"):
+            with self.subTest(path):
+                answered = []
+                source = open_source(
+                    server.url + path,
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                    on_answer=answered.append,
+                )
+                self.assertEqual(drain(source), [self.video])
+                self.assertEqual(answered, [])
+
+    def test_a_first_answer_that_failed_in_passing_is_asked_for_again(self):
+        # An on-demand restream may refuse the request that starts it, with a 5xx or a body
+        # that ends before its first byte, and serve the next one, as VLC's own retry finds.
+        def once(first):
+            return lambda _request, count: first if count == 1 else (200, {}, self.video)
+
+        cases = {
+            "/busy.ts": (503, {}, b""),
+            "/gateway.ts": (502, {}, b""),
+            "/empty.ts": (200, {}, b""),  # Content-Length: 0
+            "/closed.ts": (200, {}, lambda _request: None),  # no length: the FIN at once
+        }
+        server = self.server({path: once(first) for path, first in cases.items()})
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            for path in cases:
+                with self.subTest(path):
+                    self.assertEqual(media(server.url + path), [self.video])
+                    self.assertEqual(server.counts[path], 2)
+
+    def test_a_limit_met_on_asking_again_reports_the_first_failure(self):
+        # 2.1 review M1: a panel that counted the first answer may refuse the next with its
+        # limit. The channel then plays directly as before 2.1 (the first failure stands, and
+        # the GUI's direct-play retries follow), and nothing more is asked.
+        def counted(_request, count):
+            return (200, {}, b"") if count == 1 else (509, {}, b"")
+
+        server = self.server({"/counted.ts": counted})
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            with self.assertRaises(SourceError) as raised:
+                media(server.url + "/counted.ts")
+        self.assertEqual(raised.exception.kind, "network")
+        self.assertNotEqual(str(raised.exception), STREAM_LIMIT)
+        self.assertEqual(server.counts["/counted.ts"], 2)
+
+    def test_a_host_that_does_not_resolve_is_not_asked_again(self):
+        # A DNS failure is no restream warming up: the fallback comes at once, not 3.5 s later.
+        from urllib3.exceptions import MaxRetryError, NameResolutionError
+
+        failure = requests.exceptions.ConnectionError(
+            MaxRetryError(None, "/", NameResolutionError("nowhere.invalid", None, OSError()))
+        )
+        with patch.object(source_module._Http, "get", side_effect=failure) as get:
+            with self.assertRaises(SourceError) as raised:
+                open_source(
+                    "http://nowhere.invalid/live.ts",
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                )
+        self.assertEqual(raised.exception.kind, "network")
+        self.assertEqual(get.call_count, 1)
+
+    def test_a_first_answer_that_keeps_failing_ends_with_its_own_error(self):
+        server = self.server(
+            {
+                "/down.ts": (503, {}, b""),
+                "/silent.ts": (200, {}, b""),
+                "/missing.ts": (404, {}, b""),
+            }
+        )
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            for path, kind, status, asked in (
+                ("/down.ts", "http", 503, 4),  # the first answer and the first three delays
+                ("/silent.ts", "network", None, 4),
+                ("/missing.ts", "http", 404, 1),  # an answer that means it: never again
+            ):
+                with self.subTest(path):
+                    with self.assertRaises(SourceError) as raised:
+                        media(server.url + path)
+                    self.assertEqual(
+                        (raised.exception.kind, raised.exception.status), (kind, status)
+                    )
+                    self.assertEqual(server.counts[path], asked)
+
     def test_raw_ts_reconnect_gives_up_after_six_tries(self):
         half = len(self.video) // 2 // 188 * 188
 
@@ -1199,7 +1399,10 @@ high.m3u8
             "/400.ts": (answer(400, b"<h1>Max connections reached for this line</h1>"), True),
             "/401.ts": (answer(401, b"Your connection limit is exceeded"), True),
             "/404.ts": (answer(404, b"Not found"), False),
-            "/500.ts": (answer(500, b"max connections"), False),  # only a 4xx body is read
+            # A 5xx that names the limit is no limit refusal (direct play follows, as before
+            # 2.1), but it is never asked for again either.
+            "/500.ts": (answer(500, b"max connections"), False),
+            "/503.ts": (answer(503, b"<h1>Max connections reached for this line</h1>"), False),
         }
         server = self.server({path: route for path, (route, _limited) in cases.items()})
         with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
@@ -1214,7 +1417,7 @@ high.m3u8
                     else:
                         self.assertEqual(str(error) == STREAM_LIMIT, limited)
                     self.assertNotIn("127.0.0.1", str(error))
-        self.assertEqual(server.counts["/509.ts"], 1)  # a limit is never retried
+                    self.assertEqual(server.counts[path], 1)  # a limit is never asked again
 
     # ---- live HLS --------------------------------------------------------------------------
 
@@ -1232,6 +1435,138 @@ high.m3u8
                 timer.join()
                 fetched = [path[1:] for path, _headers in server.requests if path.endswith(".ts")]
                 self.assertEqual(fetched, names[first:])
+
+    def test_live_hls_starts_far_enough_back_for_the_sessions_target(self):
+        # 2.1 stage 3: a sparse-PCR channel's 10 s segments fetched from 6 s before the end
+        # gave one segment, and VLC ran dry before the next landed. Now: at least three
+        # target durations (or HOLD-BACK), and room for a start at the target (the segment
+        # duration under Auto, plus what Auto added) and one more segment.
+        names = [f"s{number}.ts" for number in range(8)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        cases = (
+            # (target duration, HOLD-BACK, target, extra, first segment fetched)
+            (10, None, 2.5, 0.0, 5),  # 30 s: three segments
+            (10, None, 2.5, 4.0, 4),  # Auto learned 4 s more: 34 s
+            (6, None, 2.5, 0.0, 5),  # 18 s, which holds a start at 6 s plus a segment
+            (10, 45.0, 2.5, 0.0, 3),  # the playlist's HOLD-BACK
+            (10, 10.0, 2.5, 0.0, 5),  # a HOLD-BACK too short for the target: 25 s
+            (2, None, 6.0, 0.0, 2),  # Stable's 6 s target on 2 s segments: 6 + 3 < 12
+            (10, 500.0, 2.5, 0.0, 0),  # more than the playlist lists: all of it
+        )
+        for duration, hold_back, target, extra, first in cases:
+            with self.subTest(duration=duration, hold_back=hold_back, extra=extra):
+                control = (
+                    "" if hold_back is None else f"#EXT-X-SERVER-CONTROL:HOLD-BACK={hold_back}\n"
+                )
+                routes["/live.m3u8"] = (200, {}, hls(0, names, target=duration, extra=control))
+                server = self.server(routes)
+                stop = threading.Event()
+                timer = threading.Timer(0.5, stop.set)  # before the first reload
+                timer.start()
+                delay = 12.0 if target == 6.0 else 6.0
+                media(
+                    server.url + "/live.m3u8",
+                    stop=stop,
+                    live_delay=delay,
+                    target=target,
+                    extra=extra,
+                )
+                timer.join()
+                self.assertEqual(requested_segments(server), names[first:])
+
+    def test_hls_says_whether_its_playlist_is_finished_and_which_segments_came_whole(self):
+        # Review I1: a finished (ENDLIST) playlist plays from its beginning; I3: a segment
+        # that failed leaves the backlog, and the media/EXTINF ratio counts whole ones only.
+        names = ["a.ts", "b.ts", "c.ts"]
+        routes = {"/a.ts": (200, {}, self.video), "/c.ts": (200, {}, self.video)}
+        routes["/b.ts"] = (404, {}, b"Not found")
+        for ended in (True, False):
+            with self.subTest(ended=ended):
+                routes["/live.m3u8"] = (200, {}, hls(0, names, target=2, ended=ended))
+                server = self.server(dict(routes))
+                stop = threading.Event()
+                timer = threading.Timer(0.5, stop.set)  # before the first reload
+                timer.start()
+                source = open_source(
+                    server.url + "/live.m3u8",
+                    headers={},
+                    verify_ssl=True,
+                    stop=stop,
+                    live_delay=100.0,
+                )
+                seen = []
+                try:
+                    for item in source.chunks():
+                        if isinstance(item, bytes):
+                            seen.append((source.segment_serial, source.last_whole))
+                finally:
+                    source.close()
+                    timer.join()
+                self.assertIs(source.finite, ended)
+                self.assertEqual(seen[0], (1, None))  # a.ts is under way
+                self.assertEqual(seen[-1], (3, (1, 2.0)))  # c.ts: a.ts came whole, b.ts not
+                self.assertEqual(source.segment_s, 0.0)
+
+    def test_a_failed_segment_leaves_the_backlog(self):
+        names = ["a.ts", "b.ts"]
+        routes = {"/a.ts": (200, {}, self.video), "/b.ts": (404, {}, b"Not found")}
+        routes["/live.m3u8"] = (200, {}, hls(0, names, target=2, ended=True))
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        failed = []
+        real_skip = source._skip
+
+        def skip(*args, **kwargs):
+            real_skip(*args, **kwargs)
+            failed.append((source.segment_serial, source.segment_s))
+
+        source._skip = skip
+        try:
+            for _ in source.chunks():
+                pass
+        finally:
+            source.close()
+        self.assertEqual(failed, [(2, 0.0)])
+
+    def test_live_hls_says_how_much_listed_media_is_still_to_come(self):
+        # 2.1 stage 3: the helper predicts the live edge once the backlog fetched at the
+        # start has arrived, so the start need not wait for all of it.
+        names = ["a.ts", "b.ts", "c.ts"]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/live.m3u8"] = (200, {}, hls(0, names, target=2, ended=True))
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        seen = []
+        try:
+            for item in source.chunks():
+                listed = (source.segment_serial, source.segment_s, source.rest_s)
+                if not seen or seen[-1] != listed:
+                    seen.append(listed)
+        finally:
+            source.close()
+        # (the segment fetched, its EXTINF, the EXTINF of the listed ones after it)
+        self.assertEqual(seen, [(1, 2.0, 4.0), (2, 2.0, 2.0), (3, 2.0, 0.0), (3, 0.0, 0.0)])
+
+    def test_live_hls_says_when_it_delivered_every_listed_segment(self):
+        # The helper reports its live edge on it: the end of a batch is otherwise reported
+        # only with the next one (its state messages are throttled to four a second).
+        copies = [hls(0, ["a.ts", "b.ts"]), hls(1, ["b.ts", "c.ts"], ended=True)]
+
+        def playlist(_request, count):
+            return 200, {}, copies[min(count, 2) - 1]
+
+        routes = {f"/{name}.ts": (200, {}, self.video) for name in "abc"}
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        parts = media(server.url + "/live.m3u8", live_delay=100.0, caught_up=True)
+        markers = [type(part).__name__ for part in parts if not isinstance(part, bytes)]
+        self.assertEqual(markers, ["CaughtUp", "CaughtUp"])
+        self.assertIsInstance(parts[1], CaughtUp)  # right after a.ts and b.ts
+        self.assertIsInstance(parts[-1], CaughtUp)  # and after c.ts
 
     def test_a_media_sequence_restart_resumes_at_the_new_live_start(self):
         cases = {
@@ -1443,6 +1778,7 @@ high.m3u8
                 for item in source.chunks():
                     items.append(item)
         self.assertEqual(raised.exception.kind, "timeout")
+        self.assertIsInstance(items.pop(), CaughtUp)  # a.ts was all the playlist listed
         self.assertEqual(b"".join(items), self.video)
         self.assertGreaterEqual(server.counts["/live.m3u8"], 2)
 
@@ -1590,23 +1926,25 @@ high.m3u8
 
         muxed = 'NAME="English",LANGUAGE="eng"'
         french = 'NAME="French",LANGUAGE="fra",URI="audio/fr.m3u8"'
+        video_only = ts_fixtures.make_stream(4, audio=False)
         cases = (
-            ("muxed default", [muxed + ",DEFAULT=YES", french], True),
-            ("muxed first", [muxed, french], True),
-            ("external first", [french, muxed], False),
+            ("muxed default", [muxed + ",DEFAULT=YES", french], self.video, True),
+            ("muxed first", [muxed, french], self.video, True),
+            ("external first", [french, muxed], video_only, False),
+            ("external first, the variant's own", [french, muxed], self.video, True),
         )
-        for name, renditions, accepted in cases:
+        for name, renditions, segment, accepted in cases:
             with self.subTest(name):
                 server = self.server(
                     {
                         "/master.m3u8": (200, {}, master(renditions)),
                         "/video.m3u8": (200, {}, leaf("video.ts")),
-                        "/video.ts": (200, {}, self.video),
+                        "/video.ts": (200, {}, segment),
                     }
                 )
                 with source_logs() as logs:
                     if accepted:
-                        self.assertEqual(media(server.url + "/master.m3u8"), [self.video])
+                        self.assertEqual(media(server.url + "/master.m3u8"), [segment])
                     else:
                         with self.assertRaises(SourceError) as raised:
                             media(server.url + "/master.m3u8")
@@ -1615,7 +1953,9 @@ high.m3u8
                 if accepted:
                     self.assertTrue(any("French" in line for line in logs), logs)
 
-    def test_only_the_user_agent_reaches_other_origins_and_referer_stays_with_the_entry(self):
+    def test_the_user_agent_and_referer_reach_every_origin_and_no_other_header_does(self):
+        # 2.1: an M3U channel's http-referrer goes with its playlists and segments alike,
+        # wherever they are (a CDN's hotlink check reads it), as VLC sends it.
         cdn = self.server({"/segment/a.ts": (200, {}, self.video)})
 
         def live(_request, count):
@@ -1644,14 +1984,11 @@ high.m3u8
                     self.assertNotIn(name, received)
                 self.assertTrue(received["Host"].startswith("127.0.0.1:"))
                 self.assertNotEqual(received.get("Connection"), "close")
-        # The entry, its redirect hop and the final media playlist's origin (here the hop:
-        # reloads and segments) carry the Referer; other origins do not.
-        self.assertEqual(entry.requests[0][1].get("Referer"), "http://portal.invalid/")
         hop_paths = [path for path, _received in hop.requests]
         self.assertEqual(hop_paths, ["/live.m3u8", "/live.m3u8", "/b.ts"])
-        for _path, received in hop.requests:
-            self.assertEqual(received.get("Referer"), "http://portal.invalid/")
-        self.assertNotIn("Referer", cdn.requests[0][1])
+        for server in (entry, hop, cdn):  # the cdn holds a segment of its own
+            for _path, received in server.requests:
+                self.assertEqual(received.get("Referer"), "http://portal.invalid/")
 
     def test_keep_alive_connections_are_reused_for_reloads_and_segments(self):
         def playlist(_request, count):

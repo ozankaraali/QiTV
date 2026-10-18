@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from services.jobs import ImmediateRunner
 from services.library import LibraryModel
+from services.provider_ids import provider_of
 from services.watch_state import WatchState
 from ui.library.search_session import (
     DEBOUNCE_MS,
@@ -32,6 +33,9 @@ class Catalog(QObject):
 
     def current_provider_name(self):
         return "P"
+
+    def all_providers(self):
+        return False
 
     def content_version(self):
         return 1
@@ -57,7 +61,7 @@ class Providers:
         self.caches = caches
         self.loads = 0
 
-    def get_all_providers_cached_content(self):
+    def get_all_providers_cached_content(self, loaded=None):
         self.loads += 1
         return list(self.caches)
 
@@ -124,6 +128,20 @@ class SearchSessionTests(unittest.TestCase):
         self.assertEqual(self.names(), ["Salt Roads"])
         self.assertEqual(self.providers.loads, 1)
 
+    def test_the_first_search_gets_the_content_the_catalogs_hold_the_next_do_not(self):
+        held = {"P": {"vod": []}}
+        session = SearchSession(
+            self.providers, self.runner, self.model, self.watch, loaded=lambda: held
+        )
+        self.addCleanup(session.shutdown)
+        session.set_query("salt")
+        session.run_now()
+        self.assertIs(self.runner.jobs[-1][0]._loaded, held)
+        self.runner.finish(len(self.runner.jobs) - 1)  # (a fake manager: no loaded argument)
+        session.set_query("salt r")
+        session.run_now()
+        self.assertIsNone(self.runner.jobs[-1][0]._loaded)  # the folded index is kept
+
     def test_sections_are_titled_by_provider_and_section(self):
         self.session.set_query("salt")
         self.session.run_now()
@@ -136,6 +154,18 @@ class SearchSessionTests(unittest.TestCase):
         self.assertEqual(
             self.session.poster_url(item, lambda url: "logo:" + url), "logo:http://logos.invalid/1"
         )
+
+    def test_hits_are_stamped_with_their_provider(self):
+        self.session.set_query("salt")
+        self.session.run_now()
+        self.runner.finish(0)
+        hits = self.session.hits
+        self.assertEqual([provider_of(h.item) for h in hits], ["P", "P", "Q"])
+        self.assertEqual([h.provider for h in hits], ["P", "P", "Q"])
+        shown = [item for _title, items in self.session.sections() for item in items]
+        self.assertEqual([provider_of(i) for i in shown], ["P", "P", "Q"])
+        self.assertIs(self.session.hit_for(shown[2]), hits[2])
+        self.assertNotIn("_provider", CACHES[1][1]["vod"][0])  # the cache itself is untouched
 
     def test_one_character_shows_the_prompt_without_searching(self):
         self.session.set_query("s")

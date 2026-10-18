@@ -1,7 +1,8 @@
 """Virtualized channel rows: model, delegate and list view for the fast-zap column."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import logging
+import math
 
 from PySide6.QtCore import (
     QAbstractListModel,
@@ -12,9 +13,10 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QFont, QFontMetrics, QMouseEvent, QPainter, QPixmap
+from PySide6.QtGui import QFont, QFontMetrics, QFontMetricsF, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate
 
+from services.provider_ids import provider_of
 from services.zapping import ZapContext
 from ui.overlays.painting import Units, draw_logo, draw_progress, elided, fill_round
 from ui.pointer import NAV_BUTTONS
@@ -38,6 +40,44 @@ def number_column_width(units, digits: int) -> float:
 LogoRole = Qt.UserRole + 2
 NowRole = Qt.UserRole + 3
 ProgressRole = Qt.UserRole + 4
+ProviderRole = Qt.UserRole + 5  # the provider's name, in the lists that mix providers
+
+
+def tag_font(units) -> QFont:
+    """The provider tag's font: the transport chips' (1.2u, demi-bold)."""
+    return units.font(1.2, QFont.Weight.DemiBold)
+
+
+def tag_layout(
+    units, name_font: QFont, tag_font_: QFont, name: str, tag: str, width: float
+) -> tuple[float, float, float]:
+    """(name width, tag x offset, tag chip width) for a channel's name and its provider's tag
+    in `width`, measured with QFontMetricsF. The name elides first: the tag keeps its full text
+    and goes right after the name, and is cut only when it alone is wider than the row. The
+    name and the tag never overlap and both stay inside `width`."""
+    pad, gap = 0.8 * units.u, 0.8 * units.u
+    chip = min(QFontMetricsF(tag_font_).horizontalAdvance(tag) + 2 * pad, max(0.0, width))
+    room = math.floor(max(0.0, width - chip - gap))
+    name_w = float(min(math.ceil(QFontMetricsF(name_font).horizontalAdvance(name)), room))
+    return name_w, (name_w + gap if name_w > 0 else 0.0), chip
+
+
+LOGO_ROWS_MAX = 5000  # past this many rows the model does not index them by logo
+
+
+class LazyNumbers:
+    """The numbers of a very long list of rows, worked out when a row asks (a list of 200,000
+    would cost as much to make as to show). `digits` is the longest number's length and
+    `signature` tells one set of numbers from another."""
+
+    digits = 0
+    signature: tuple = ()
+
+    def __len__(self) -> int:
+        raise NotImplementedError
+
+    def __getitem__(self, row: int) -> str | None:
+        raise NotImplementedError
 
 
 class ChannelRowsModel(QAbstractListModel):
@@ -45,6 +85,7 @@ class ChannelRowsModel(QAbstractListModel):
     LogoRole = LogoRole
     NowRole = NowRole
     ProgressRole = ProgressRole
+    ProviderRole = ProviderRole
 
     def __init__(
         self,
@@ -56,35 +97,51 @@ class ChannelRowsModel(QAbstractListModel):
         self._logos = logos
         self._now_provider = now_provider
         self._items: list[dict] = []
-        self._numbers: list[str | None] | None = None
+        self._numbers: Sequence[str | None] | None = None
+        self.show_provider = False  # rows name their provider (a list that mixes providers)
         self.number_digits = 0  # the longest number shown (the number column's width)
-        self._rows_by_logo: dict[str, list[int]] = {}
+        self._rows_by_logo: dict[str, list[int]] | None = {}  # None: too many rows to index
         self._now_cache: dict[int, tuple[str, float]] = {}
         if logos is not None:
             logos.logoReady.connect(self._on_logo_ready)
 
-    def set_channels(self, items: list[dict], numbers: list[str | None] | None = None) -> None:
+    def set_channels(
+        self,
+        items: list[dict],
+        numbers: list[str | None] | None = None,
+        show_provider: bool = False,
+    ) -> None:
         """Show `items`; `numbers` gives each row's number (default: their own).
 
         When no channel has a number, the list position stands in, as on the banner and
         for number entry (ZapContext.by_number).
         """
         self.beginResetModel()
+        self.show_provider = show_provider
         self._items = list(items)
         if numbers is None and self._items:
             if not any(ZapContext.number_of(item) for item in self._items):
                 numbers = [str(row + 1) for row in range(len(self._items))]
-        self._numbers = list(numbers) if numbers is not None else None
-        shown = (
-            self._numbers if self._numbers is not None else [i.get("number") for i in self._items]
-        )
-        # The number column fits the longest number shown (a provider's 9521 has four digits).
-        self.number_digits = max((len(str(n)) for n in shown if n is not None), default=0)
-        self._rows_by_logo = {}
-        for row, item in enumerate(self._items):
-            url = item.get("logo")
-            if url:
-                self._rows_by_logo.setdefault(url, []).append(row)
+        if isinstance(numbers, LazyNumbers):
+            self._numbers = numbers
+            self.number_digits = numbers.digits
+        else:
+            self._numbers = list(numbers) if numbers is not None else None
+            shown = (
+                self._numbers
+                if self._numbers is not None
+                else [i.get("number") for i in self._items]
+            )
+            # The number column fits the longest number shown (a provider's 9521: four digits).
+            self.number_digits = max((len(str(n)) for n in shown if n is not None), default=0)
+        if len(self._items) > LOGO_ROWS_MAX:
+            self._rows_by_logo = None
+        else:
+            self._rows_by_logo = {}
+            for row, item in enumerate(self._items):
+                url = item.get("logo")
+                if url:
+                    self._rows_by_logo.setdefault(url, []).append(row)
         self._now_cache.clear()
         self.endResetModel()
 
@@ -120,6 +177,8 @@ class ChannelRowsModel(QAbstractListModel):
             return item.get("name", "")
         if role == NumberRole:
             return self._numbers[row] if self._numbers is not None else item.get("number")
+        if role == ProviderRole:
+            return provider_of(item) if self.show_provider else ""
         if role == NowRole:
             return self._now(row)[0]
         if role == ProgressRole:
@@ -136,6 +195,10 @@ class ChannelRowsModel(QAbstractListModel):
         return None
 
     def _on_logo_ready(self, url: str) -> None:
+        if self._rows_by_logo is None:  # a long list: the view repaints the rows it shows
+            if self._items:
+                self.dataChanged.emit(self.index(0), self.index(len(self._items) - 1), [LogoRole])
+            return
         for row in self._rows_by_logo.get(url, ()):
             idx = self.index(row)
             self.dataChanged.emit(idx, idx, [LogoRole])
@@ -212,13 +275,35 @@ class ChannelRowDelegate(QStyledItemDelegate):
         if has_bar:
             total += gap + bar_h
         y = rect.y() + (rect.height() - total) / 2
-        p.setFont(units.font(1.6, QFont.Weight.DemiBold))
+        name_font = units.font(1.6, QFont.Weight.DemiBold)
+        p.setFont(name_font)
         p.setPen(qcolor(PALETTE.text))
-        p.drawText(
-            QRectF(x, y, width, name_h),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            elided(p, name, width),
-        )
+        tag = str(index.data(ProviderRole) or "")
+        if tag:
+            # The provider's name follows the channel's, in a chip; the name elides first.
+            chip_font = tag_font(units)
+            name_w, chip_dx, chip_w = tag_layout(units, name_font, chip_font, name, tag, width)
+            p.drawText(
+                QRectF(x, y, name_w, name_h),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                elided(p, name, name_w),
+            )
+            chip_h = min(name_h, QFontMetricsF(chip_font).height() + 0.4 * u)
+            chip = QRectF(x + chip_dx, y + (name_h - chip_h) / 2, chip_w, chip_h)
+            fill_round(p, chip, qcolor(PALETTE.text, 0.10), chip_h / 2)
+            p.setFont(chip_font)
+            p.setPen(qcolor(PALETTE.text, 0.75))
+            p.drawText(
+                chip.adjusted(0.8 * u, 0, -0.8 * u, 0),
+                Qt.AlignCenter,
+                QFontMetricsF(chip_font).elidedText(tag, Qt.ElideRight, max(0.0, chip_w - 1.6 * u)),
+            )
+        else:
+            p.drawText(
+                QRectF(x, y, width, name_h),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                elided(p, name, width),
+            )
         y += name_h
         if now:
             p.setFont(units.font(1.25))
@@ -243,6 +328,10 @@ class ChannelListView(QListView):
         self.setFrameShape(QFrame.NoFrame)
         self.setFocusPolicy(Qt.NoFocus)
         self.setUniformItemSizes(True)
+        # A single pass asks the model for every row (200,000 channels: ~1 s on the GUI
+        # thread at each reset); batches lay out the rows near the top first, the rest between
+        # events, and scrollTo/indexAt lay out as far as they need.
+        self.setLayoutMode(QListView.LayoutMode.Batched)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setSelectionMode(QAbstractItemView.SingleSelection)

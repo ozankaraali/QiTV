@@ -33,7 +33,7 @@ from ts_fixtures import make_stream
 
 from services.live import engine as engine_module
 from services.live.engine import LiveEngine
-from services.live.timeline import Span
+from services.live.timeline import START_KEY, START_NONE, START_OPEN, Span
 from services.thread_cleanup import has_pending_threads
 
 REPO = Path(__file__).resolve().parents[1]
@@ -52,6 +52,13 @@ STATE_KEYS = {
     "burst_s",
     "received",
     "hls",
+    "breaks",
+    "caught_up",
+    "backlog_s",
+    "finite",
+    "open_quality",
+    "video",
+    "answered",
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
@@ -174,6 +181,78 @@ class RamFallbackSizeTests(unittest.TestCase):
         self.assertEqual(
             supervisor._records["s1"].command[5], {"kind": "ram", "max_bytes": 512 * MIB}
         )
+
+
+class StartTargetTests(unittest.TestCase):
+    """2.1 stage 3: the session's target reaches the helper, so an HLS source starts far
+    enough back for a start at it; a reopen keeps it."""
+
+    def test_the_open_command_carries_the_target_and_extra(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        engine.open_session(URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB)
+        self.assertEqual(len(commands.get_nowait()), 7)  # 2.0's command: live_delay only
+        engine.open_session(
+            URL_FOR_RING,
+            headers={},
+            verify_ssl=True,
+            disk=True,
+            max_bytes=MIB,
+            target=2.5,
+            extra=3.0,
+        )
+        command = commands.get_nowait()
+        self.assertEqual(command[6:], (6.0, {"target": 2.5, "extra": 3.0}))
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        supervisor._relay = lambda message: None
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        supervisor._receive(("error", "s1", "disk", "The disk buffer failed."))
+        self.assertEqual(supervisor._records["s1"].command[6:], command[6:])
+
+
+class FailureReasonTests(unittest.TestCase):
+    """2.1: why a channel plays directly is logged, by kind and HTTP status only."""
+
+    def test_an_http_failure_is_relayed_and_logged_with_its_status(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        relayed = []
+        supervisor._relay = relayed.append
+        command = ("open", "s1", URL_FOR_RING, {}, True, {"kind": "ram", "max_bytes": MIB}, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        failure = ("error", "s1", "http", "The channel could not be reached over HTTP.", 503)
+        with self.assertLogs("services.live.engine", "INFO") as logs:
+            supervisor._receive(failure)
+        self.assertEqual(relayed, [failure])
+        self.assertTrue(supervisor._records["s1"].failed)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("http", logs.output[0])
+        self.assertIn("503", logs.output[0])
+        self.assertNotIn("provider.test", logs.output[0])
+
+    def test_a_failure_without_a_status_is_logged_by_its_kind(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        relayed = []
+        supervisor._relay = relayed.append
+        command = ("open", "s1", URL_FOR_RING, {}, True, {"kind": "ram", "max_bytes": MIB}, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        failure = ("error", "s1", "network", "The channel sent no data.")
+        with self.assertLogs("services.live.engine", "INFO") as logs:
+            supervisor._receive(failure)
+        self.assertEqual(relayed, [failure])
+        self.assertIn("network", logs.output[0])
 
 
 class StalledUpstream:
@@ -311,6 +390,36 @@ class Signals:
         ]
 
 
+class SpanMessageTests(unittest.TestCase):
+    """In process, without a helper: the spans the state messages rebuild."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_spans_carry_the_start_quality_and_additions_without_one_start_on_a_key(self):
+        engine = LiveEngine(tempfile.gettempdir())  # never started: no helper, no buffer
+        self.addCleanup(engine.shutdown)
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB
+        )
+        additions = [
+            (0, 0.0, 2.0, False, START_OPEN),
+            (1, 2.0, 12.0, False, START_NONE),
+            (2, 12.0, 14.0, True),  # as an older helper sent it
+        ]
+        engine._on_message(("state", sid, {"oldest": 0}, 0, additions))
+        engine._on_message(("state", sid, {"oldest": 1}, 1, [(3, 14.0, 16.0, False, START_KEY)]))
+        self.assertEqual(
+            engine.spans(sid),
+            [
+                Span(1, 2.0, 12.0, False, START_NONE),
+                Span(2, 12.0, 14.0, True, START_KEY),
+                Span(3, 14.0, 16.0, False, START_KEY),
+            ],
+        )
+
+
 class LiveEngineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -378,6 +487,7 @@ class LiveEngineTests(unittest.TestCase):
         self.assertEqual(counts, sorted(counts), "spans shrank without eviction")
         spans = engine.spans(sid)
         self.assertTrue(all(isinstance(span, Span) for span in spans))
+        self.assertEqual({span.start_quality for span in spans}, {START_KEY})  # IDR starts
         self.assertEqual([span.seq for span in spans], list(range(len(spans))))
         for before, after in zip(spans, spans[1:]):
             self.assertAlmostEqual(before.end, after.start)

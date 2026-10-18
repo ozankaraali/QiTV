@@ -6,7 +6,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, qInstallMessageHandler
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QFontMetrics, QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 from shiboken6 import delete, isValid
@@ -577,6 +577,16 @@ class PipLabelTests(LabelCase):
         self.assertEqual(
             label.info(), ("A considerably longer channel name that cannot fit", "−03:20")
         )
+
+    def test_a_title_alone_ends_at_the_pills_padding(self):
+        # Polish: a movie swapped small shows its title without a state (no live wording).
+        _, label = self.make()
+        label.set_info("Demo film", "")
+        self.assertEqual(label.shown_text(), ("Demo film", ""))
+        layout = label._layout()
+        title = QFontMetrics(layout.name_font).horizontalAdvance("Demo film")
+        self.assertAlmostEqual(label.pill_rect().width(), 2 * layout.pad + title)
+        self.assertLess(label.pill_rect().right(), label.button_rect("swap").left())
 
     def test_a_mini_player_keeps_the_pill_inside_the_small_rect(self):
         host = QWidget()

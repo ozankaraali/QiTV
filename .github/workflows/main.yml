@@ -21,7 +21,7 @@ jobs:
   # The unit tests run once, on Linux, beside the builds; each build still smoke-tests its
   # packaged app (real playback with the bundled libVLC) on its own platform.
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,7 +48,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   build-linux:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to 26.04 from 2026-10-19, and a build on a newer glibc
+    # would not start on older distributions.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -400,7 +402,7 @@ jobs:
   release:
     needs: [tests, build-linux, build-windows, build-macos-universal, build-macos-intel]
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

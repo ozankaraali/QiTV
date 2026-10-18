@@ -7,6 +7,8 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from services.provider_ids import provider_of
+
 
 class ZapContext:
     """The ordered channels ↑/↓ moves through: the group the current channel was tuned from."""
@@ -16,8 +18,11 @@ class ZapContext:
         group_key: str = "",
         channels: Optional[list[dict]] = None,
         fallback: Optional[list[dict]] = None,
+        source: str = "",
     ):
         self.group_key = group_key
+        # The list the group was picked from (a provider or ALL_PROVIDERS); "" when unknown.
+        self.source = source
         self.channels = list(channels or [])
         # Searched by number entry when the group has no match (the shell passes every
         # live channel: TV numbers are global, not per group).
@@ -28,11 +33,16 @@ class ZapContext:
     def same(a: Optional[dict], b: Optional[dict]) -> bool:
         """Channel identity: the stream address when both have one, else id, else name.
 
+        Items stamped with different providers are never the same channel.
+
         M3U ids are list positions, so after a playlist change an id can name another
         channel; the address survives reordering.
         """
         if not a or not b:
             return False
+        provider_a, provider_b = provider_of(a), provider_of(b)
+        if provider_a and provider_b and provider_a != provider_b:
+            return False  # the same address or id at two providers is two channels
         cmd_a, cmd_b = str(a.get("cmd") or "").strip(), str(b.get("cmd") or "").strip()
         if cmd_a and cmd_b:
             return cmd_a == cmd_b

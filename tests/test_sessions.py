@@ -394,6 +394,20 @@ class RoleTests(_Fixture):
         self.pump()
         self.assertTrue(self.manager.swap())
 
+    def test_the_small_streams_start_is_said_on_open_and_after_a_change(self):
+        # Review M3: the shell's swap back waits for a change on its way to start.
+        started = []
+        self.manager.pipStarted.connect(lambda: started.append(self.manager.changing()))
+        self.swapped()
+        self.assertEqual(started, [False])  # it opened
+        self.main.live.auto_release = False
+        self.open(C)
+        self.assertTrue(self.manager.changing())
+        self.main.live.released.emit()
+        self.pump()
+        self.assertEqual(started, [False, False])  # the change started
+        self.assertFalse(self.manager.changing())
+
     def test_a_player_still_letting_go_of_a_direct_play_delays_the_new_channel(self):
         self.swapped()
         self.main_tuner.holding = True  # e.g. a channel the main player played directly
@@ -578,6 +592,8 @@ class PipFailureTests(_Fixture):
         self.assertEqual(self.failures, [PIP_FAILED])
         self.assertEqual(self.pip_states(), [True, False])
         self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+        # What the stream said, for the shell's STB retry (never shown).
+        self.assertEqual(self.manager.failure, "http://user:secret@provider.test/2.ts: 404")
 
     def test_a_failure_inside_start_leaves_pip_closed(self):
         self.pip.live.fail_inside_start = "Video needs VLC"
@@ -649,6 +665,7 @@ class PipLifecycleTests(_Fixture):
         with self.assertLogs("services.sessions", "WARNING") as logs:
             self.open_granted(B)
         self.assertEqual(self.failures, [PIP_FAILED])
+        self.assertEqual(self.manager.failure, "")  # not the stream's: nothing to retry
         self.assertNotIn("secret", " ".join(logs.output))
         self.assertEqual(self.pip_states(), [])
         self.assertFalse(self.manager.pip_open())

@@ -3,7 +3,8 @@
 An export first checks that it can run (`export_available`), then asks where to save, then runs
 ExportWorker off the GUI thread on a snapshot of the provider's loaded content. Its progress is
 a lasting toast; Esc cancels it (the window asks `cancel()` first). The worker's messages are
-fixed strings, so they are shown as they are.
+fixed strings, so they are shown as they are. While the page shows "All providers" the export
+is still one provider's (the one the page returns to): the save dialog and the result name it.
 """
 
 from __future__ import annotations
@@ -31,8 +32,11 @@ BUSY_TEXT = "An export is already running"
 STARTED_TEXT = "Exporting…"
 PROGRESS_TEXT = "Exporting… {done}/{total}"
 DONE_TEXT = "Exported {n} items to {filename}"
+PROVIDER_DONE_TEXT = "Exported {n} items from {name} to {filename}"  # in All providers
 FILE_FILTER = "M3U files (*.m3u)"
 DIALOG_TITLE = "Export"
+PROVIDER_DIALOG_TITLE = "Export {name}'s {what}"  # in All providers
+_WHAT = {"live": "channels", "movies": "movies", "series": "series"}
 INFO_MS = 3000
 ERROR_MS = 6000
 PROGRESS_MS = 10 * 60 * 1000  # stays up between progress reports; the last report replaces it
@@ -45,6 +49,15 @@ def default_path(provider_name: str, kind: ExportKind) -> str:
     """~/Downloads/<provider>-<kind>.m3u, the provider name made safe for a file name."""
     name = _UNSAFE.sub("_", provider_name).strip(" ._") or "QiTV"
     return str(Path.home() / "Downloads" / f"{name}-{kind.value}.m3u")
+
+
+def _what(kind: ExportKind, section: str) -> str:
+    """What an export holds, for its dialog's title: "channels", "movies" or "series"."""
+    if kind is ExportKind.ALL_LIVE:
+        return "channels"
+    if kind is ExportKind.COMPLETE_SERIES:
+        return "series"
+    return _WHAT.get(section, "items")
 
 
 def _snapshot(value: Any) -> Any:
@@ -61,7 +74,7 @@ class ExportFlow(QObject):
     def __init__(
         self,
         *,
-        provider_manager,
+        catalog,  # the TV page's (export() may name the Library's)
         config,
         runner,
         notify: Notify,
@@ -69,27 +82,30 @@ class ExportFlow(QObject):
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
-        self._provider_manager = provider_manager
+        self._catalog = catalog
         self._config = config
         self._runner = runner
         self._notify = notify
         self._dialog_parent = dialog_parent
         self._cancel: Optional[threading.Event] = None  # set while an export runs
         self._path = ""
+        self._named = ""  # the provider the result names (All providers), else ""
         self._closed = False
 
     def running(self) -> bool:
         """An export runs (also while a cancelled one winds down)."""
         return self._cancel is not None
 
-    def export(self, kind: ExportKind, section: str) -> None:
-        """Check, ask for a path, then export. `section` is what the screen shows."""
+    def export(self, kind: ExportKind, section: str, catalog=None) -> None:
+        """Check, ask for a path, then export. `section` is what the screen shows and
+        `catalog` the page's browsed catalog (its provider is what is exported)."""
         if self._closed:
             return
         if self.running():
             self._notify(BUSY_TEXT, "info", INFO_MS)
             return
-        manager = self._provider_manager
+        page = catalog or self._catalog
+        manager = page.provider_manager
         provider = dict(manager.current_provider or {})
         content = manager.current_provider_content or {}
         reason = export_available(kind, provider, section, content)
@@ -97,8 +113,13 @@ class ExportFlow(QObject):
             self._notify(reason, "info", INFO_MS)
             return
         name = str(provider.get("name") or "")
+        # All providers lists every provider, but the export is this one's: say whose.
+        named = name if getattr(page, "all_providers", lambda: False)() else ""
+        title = DIALOG_TITLE
+        if named:
+            title = PROVIDER_DIALOG_TITLE.format(name=named, what=_what(kind, section))
         path, _filter = QFileDialog.getSaveFileName(
-            self._dialog_parent, DIALOG_TITLE, default_path(name, kind), FILE_FILTER
+            self._dialog_parent, title, default_path(name, kind), FILE_FILTER
         )
         if not path or self._closed or self.running():
             return
@@ -114,7 +135,7 @@ class ExportFlow(QObject):
             headers=dict(manager.headers or {}),
             cancel=cancel,
         )
-        self._cancel, self._path = cancel, path
+        self._cancel, self._path, self._named = cancel, path, named
         worker.progress.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
         self._notify(STARTED_TEXT, "info", PROGRESS_MS)
         self._runner.run_worker(worker, self._on_finished, self._on_error)
@@ -141,8 +162,14 @@ class ExportFlow(QObject):
 
     def _on_finished(self, _context, count) -> None:
         path, self._cancel = self._path, None
-        if not self._closed:
-            self._notify(DONE_TEXT.format(n=count, filename=Path(path).name), "info", INFO_MS)
+        if self._closed:
+            return
+        filename = Path(path).name
+        if self._named:
+            text = PROVIDER_DONE_TEXT.format(n=count, name=self._named, filename=filename)
+        else:
+            text = DONE_TEXT.format(n=count, filename=filename)
+        self._notify(text, "info", INFO_MS)
 
     def _on_error(self, _context, message: str) -> None:
         self._cancel = None

@@ -326,12 +326,11 @@ class OptionsDialog(QDialog):
         )
         self.settings_layout.addRow("Live latency", self.live_latency_combo)
 
-        self.hardware_decoding_checkbox = QCheckBox(
-            "Hardware video decoding (experimental)", self.settings_tab
-        )
+        self.hardware_decoding_checkbox = QCheckBox("Hardware video decoding", self.settings_tab)
         self.hardware_decoding_checkbox.setToolTip(
-            "Decode video with your graphics chip instead of the processor. It uses less CPU,"
-            " but some TV channels stutter or freeze with it. Applies after QiTV restarts."
+            "Decode video with your graphics chip instead of the processor: it uses less CPU."
+            " A channel whose picture freezes while its sound plays switches to software"
+            " decoding by itself, for a day. Applies after QiTV restarts."
         )
         self.hardware_decoding_checkbox.setChecked(self.config_manager.hardware_decoding)
         self.settings_layout.addRow(self.hardware_decoding_checkbox)
@@ -882,6 +881,14 @@ class OptionsDialog(QDialog):
         self.load_providers()
         self.providers_modified = True
 
+    def _manager_of(self, name):
+        """The provider's own ProviderManager when its catalog exists (it holds the provider's
+        queued cache writes), else the list's: a catalog is never made just for this."""
+        catalogs = self.parent().catalogs
+        if name in catalogs.created():
+            return catalogs.catalog(name).provider_manager
+        return self.provider_manager
+
     def browse_epg_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self)
         if file_path:
@@ -959,12 +966,17 @@ class OptionsDialog(QDialog):
 
         self.providers_modified = self.providers != self._original_providers
         if self.providers_modified:
-            self.provider_manager.providers = deepcopy(self.providers)
+            # In place: the providers' own managers share this list.
+            self.provider_manager.providers[:] = deepcopy(self.providers)
             self.provider_manager.save_providers()
         for name in changed_names:
             # The selected provider is invalidated after setup is serialized by the parent.
+            # The others' caches go before the catalogs reload: an edited provider in use is
+            # set up again at once and must not lose the lists its new sign-in brings.
             if name != self.selected_provider_name:
-                self.provider_manager.invalidate_provider_cache(name)
+                self._manager_of(name).invalidate_provider_cache(name)
+        if self.providers_modified:
+            self.parent().providers_saved()  # catalogs of removed or edited providers go
 
         if current_provider_changed or force_provider_refresh:
             self.parent().set_provider(force_update=force_provider_refresh)
@@ -972,7 +984,7 @@ class OptionsDialog(QDialog):
             self.parent().reload_epg()  # in the background; the guide repaints when ready
         elif self.xmltv_mapping_modified:
             if self.config_manager.epg_source != "STB":
-                self.epg_manager.reindex_programs()
+                (self.parent().catalog.epg_manager or self.epg_manager).reindex_programs()
 
         self.accept()
 

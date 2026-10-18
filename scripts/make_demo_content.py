@@ -1082,7 +1082,8 @@ class Shooter:
 
     def capture(self, name: str) -> None:
         """The window's grab, each player's decoded picture where it shows, and the overlay
-        host's grab over them (as scripts/smoke_tv.py composes its screenshots)."""
+        host's grab over them (as scripts/smoke_tv.py composes its screenshots). The player
+        page shows full size, or in the Library's corner while what plays goes on there."""
         from PySide6.QtCore import QPoint, QRectF
         from PySide6.QtGui import QImage, QPainter
 
@@ -1094,7 +1095,7 @@ class Shooter:
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.drawPixmap(0, 0, pixmap)
-        if not w.screens.library_shown():
+        if w.player_page.isVisible():
             for frame, target in self._video_layers():
                 painter.drawImage(QRectF(target), frame)
             host = w.host
@@ -1283,7 +1284,8 @@ class Shooter:
         self._key(K.Key_P)  # closes the small picture
         yield 1000
 
-        # 5. The Library on the demo library: a genre, the half-watched film's details.
+        # 5. The Library on the demo library: a genre, the half-watched film's details, and the
+        # channel playing on in the corner.
         w.controller.select_provider(LIBRARY_PROVIDER)
         yield from self._wait(
             lambda: w.catalog.current_provider_name() == LIBRARY_PROVIDER
@@ -1300,7 +1302,10 @@ class Shooter:
         yield SETTLE_MS
         yield from self._shoot(SHOT_LIBRARY)
 
-        # 6. The series, on its half-watched episode.
+        # 6. The series, on its half-watched episode, with the corner player stopped (×): it
+        # would cover the episodes' ✓ and Start over.
+        w.screens.stop_corner()
+        yield 500
         w.screens.open_library("series")
         yield from self._wait(lambda: bool(self._grid_items()), LOAD_TIMEOUT_MS, "the series")
         yield from self._pick_genre("21")

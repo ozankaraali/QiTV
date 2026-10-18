@@ -1,4 +1,6 @@
-from datetime import datetime, timedelta
+import copy
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime, parsedate_to_datetime
 import gzip
 import hashlib
 import itertools
@@ -6,6 +8,8 @@ import logging
 import os
 import pickle
 import shutil
+import tempfile
+import threading
 from typing import Any, Dict, List, Optional, Set
 import xml.etree.ElementTree as ET
 import zipfile
@@ -36,6 +40,12 @@ requests = lazy_module("requests")
 _INDEX_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
+def _http_date(moment: datetime) -> str:
+    """An index time (GMT, naive) as an HTTP date: "Sun, 06 Nov 1994 08:49:37 GMT", in English
+    whatever the locale (strftime follows it, and servers ignore a date in another language)."""
+    return format_datetime(moment.replace(tzinfo=timezone.utc), usegmt=True)
+
+
 def _cache_key(source: str) -> str:
     """Name an EPG source's cache entry (index key and pickle file stem)."""
     return hashlib.md5(source.encode()).hexdigest()
@@ -43,6 +53,19 @@ def _cache_key(source: str) -> str:
 
 def _xtream_cache_key(provider_url: str, username: str) -> str:
     return _cache_key(f"{provider_url}:{username}")
+
+
+def _source_date(last_modified: Optional[str]) -> datetime:
+    """A downloaded guide's date as the index keeps it (UTC, naive: the next refresh asks
+    If-Modified-Since with it): the server's Last-Modified, or the download time when the
+    server sends none or one that doesn't parse."""
+    try:
+        date = parsedate_to_datetime(last_modified or "")
+    except TypeError, ValueError:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+    if date.tzinfo is not None:
+        date = date.astimezone(timezone.utc).replace(tzinfo=None)
+    return date
 
 
 def _file_stamp(path: str) -> tuple[int, int, int]:
@@ -157,12 +180,50 @@ _UNREADABLE_GUIDE = (
 )
 
 
+# Every provider's manager saves the one shared index: loader threads run at once, so the
+# read, merge and replace of one save finish before the next begins.
+_INDEX_SAVE_LOCK = threading.Lock()
+
+# The URL guide is global: each provider in use loads it with its own manager, on its own
+# loader thread. One download of a source at a time, so no two write (or remove) its
+# `<hash>.xml` and `.download` files at once (Windows fails to remove a file open elsewhere).
+_SOURCE_LOCKS: Dict[str, threading.Lock] = {}
+_SOURCE_LOCKS_GUARD = threading.Lock()
+
+
+def _source_lock(cache_key: str) -> threading.Lock:
+    with _SOURCE_LOCKS_GUARD:
+        return _SOURCE_LOCKS.setdefault(cache_key, threading.Lock())
+
+
+# The last guide each source got from any manager of this process, by (cache folder, cache
+# key): (how many were stored, its index entry). A manager whose index predates it takes it
+# instead of fetching the source again; one that waited for another's download knows by
+# the count whether that one stored anything (the index file is never read for it outside
+# _INDEX_SAVE_LOCK: on Windows a save's replace fails while it is open).
+_STORED: Dict[tuple[str, str], tuple[int, Dict[str, Any]]] = {}
+
+
+def _stored(where: tuple[str, str]) -> tuple[int, Optional[Dict[str, Any]]]:
+    with _SOURCE_LOCKS_GUARD:
+        count, entry = _STORED.get(where, (0, None))
+        return count, (dict(entry) if entry is not None else None)
+
+
+def _note_stored(where: tuple[str, str], entry: Dict[str, Any]) -> None:
+    with _SOURCE_LOCKS_GUARD:
+        _STORED[where] = (_STORED.get(where, (0, None))[0] + 1, dict(entry))
+
+
 class EpgManager:
     def __init__(self, config_manager, provider_manager):
         self.config_manager = config_manager
         self.provider_manager = provider_manager
 
         self.index: Dict[str, Any] = {}
+        # The index as last read from or written to the shared file: save_index() writes only
+        # what this manager changed since, so providers' managers keep each other's entries.
+        self._index_base: Dict[str, Any] = {}
         # The guide is replaced, never emptied and refilled: a loader thread builds the new
         # one and swaps it in (see _publish), while the GUI thread keeps reading.
         self.epg: MultiKeyDict = MultiKeyDict()
@@ -200,6 +261,11 @@ class EpgManager:
         """
         self._epg_source = cache_key
         self.epg = guide
+
+    def release(self) -> None:
+        """Show an empty guide and free the memory of the one held; the disk cache stays."""
+        self._publish(None, MultiKeyDict())
+        self._saved = None
 
     def _load_cached_epg(self, cache_key):
         """Load a previously indexed EPG from disk; return False if it is missing.
@@ -259,6 +325,10 @@ class EpgManager:
             "date": (source_date or now).strftime(_INDEX_TIME_FORMAT),
             "last_access": now.strftime(_INDEX_TIME_FORMAT),
         }
+        _note_stored(self._where(cache_key), self.index[cache_key])
+
+    def _where(self, cache_key: str) -> tuple[str, str]:
+        return (self._cache_dir(), cache_key)
 
     def _source_failed(self, cache_key):
         """Loading this source failed or found no guide.
@@ -301,14 +371,21 @@ class EpgManager:
             self._publish(None, MultiKeyDict())
 
     def _load_index(self):
-        index_file = self._index_file()
         self.index.clear()
-        if os.path.exists(index_file):
+        self.index.update(self._read_index_file())
+        self._index_base = copy.deepcopy(self.index)
+
+    def _read_index_file(self) -> Dict[str, Any]:
+        index_file = self._index_file()
+        if not os.path.exists(index_file):
+            return {}
+        try:
             with open(index_file, "r", encoding="utf-8") as f:
-                try:
-                    self.index = json.loads(f.read())
-                except (json.JSONDecodeError, IOError) as e:
-                    logger.warning(f"Error loading index file: {e}")
+                data = json.loads(f.read())
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Error loading index file: {e}")
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def clear_index(self):
         cache_dir = self._cache_dir()
@@ -404,9 +481,37 @@ class EpgManager:
         self._publish(self._epg_source, new_epg)
 
     def save_index(self):
-        index_file = self._index_file()
-        with open(index_file, "w", encoding="utf-8") as f:
-            f.write(json.dumps(self.index, option=json.OPT_INDENT_2).decode("utf-8"))
+        """Write this manager's changes into the index file every provider's manager shares.
+
+        The file is read again first and only the entries changed (or removed) here since this
+        manager last read or wrote it are updated, so a stale copy never wipes another
+        provider's entries. The write goes through a temporary file.
+        """
+        with _INDEX_SAVE_LOCK:
+            merged = self._read_index_file()
+            for key, value in self.index.items():
+                if key not in self._index_base or self._index_base[key] != value:
+                    merged[key] = value
+            for key in self._index_base:
+                if key not in self.index:
+                    merged.pop(key, None)
+            index_file = self._index_file()
+            handle, temporary = tempfile.mkstemp(
+                dir=os.path.dirname(index_file), prefix="index-", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(merged, option=json.OPT_INDENT_2).decode("utf-8"))
+                os.replace(temporary, index_file)
+            except BaseException:
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+                raise
+        self._index_base = copy.deepcopy(merged)
+        for key, value in merged.items():  # other providers' entries are known here now
+            self.index.setdefault(key, value)
 
     # The _refresh_epg_* helpers refetch a cached source once it is out of date and
     # return True when they did so.
@@ -438,7 +543,7 @@ class EpgManager:
                 return True
         return False
 
-    def _refresh_epg_url(self, url):
+    def _refresh_epg_url(self, url, seen=None):
         url_hash = _cache_key(url)
         epg_info = self.index.get(url_hash)
         if epg_info:
@@ -450,7 +555,7 @@ class EpgManager:
                 # Request the URL with "If-Modified-Since" header
                 headers = {
                     **CLIENT_HEADERS,
-                    "If-Modified-Since": epg_date.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+                    "If-Modified-Since": _http_date(epg_date),
                 }
                 r = requests.get(
                     url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify
@@ -460,7 +565,7 @@ class EpgManager:
                     epg_info["last_access"] = current_time.strftime(_INDEX_TIME_FORMAT)
                     return False
                 # EPG is not fresh, fetch it
-                self._fetch_epg_from_url(url)
+                self._fetch_epg_from_url(url, seen)
                 return True
         return False
 
@@ -518,6 +623,7 @@ class EpgManager:
 
     def _set_epg_from_file(self, xmltv_file):
         xmltv_filehash = _cache_key(xmltv_file)
+        self._take_shared_entry(xmltv_filehash)
         if xmltv_filehash in self.index:
             if self.index[xmltv_filehash] is None:
                 return
@@ -529,14 +635,16 @@ class EpgManager:
 
     def _set_epg_from_url(self, url):
         url_hash = _cache_key(url)
+        seen = _stored(self._where(url_hash))[0]  # before the entry is taken: none is missed
+        self._take_shared_entry(url_hash)
         if url_hash in self.index:
             if self.index[url_hash] is None:
                 return
-            if self._refresh_epg_url(url):
+            if self._refresh_epg_url(url, seen):
                 return
             if self._load_cached_epg(url_hash):
                 return
-        self._fetch_epg_from_url(url)
+        self._fetch_epg_from_url(url, seen)
 
     def _fetch_epg_from_file(self, xmltv_filehash, xmltv_file):
         guide = self._index_programs(xmltv_file)
@@ -646,7 +754,37 @@ class EpgManager:
 
         self.save_index()
 
-    def _fetch_epg_from_url(self, url):
+    def _fetch_epg_from_url(self, url, seen=None):
+        """Download the URL guide, one manager at a time. `seen`: how many guides of it this
+        process had stored when the load began (default: now); one stored since by another
+        provider's manager, while this one waited, is read instead."""
+        url_hash = _cache_key(url)
+        where = self._where(url_hash)
+        before = _stored(where)[0] if seen is None else seen
+        with _source_lock(url_hash):
+            if cancel_requested():
+                raise Cancelled()  # it waited for another manager's download: not a failure
+            if _stored(where)[0] != before:
+                self._take_shared_entry(url_hash, newest=True)
+                if self._load_cached_epg(url_hash):
+                    return
+            self._download_epg_from_url(url)
+
+    def _take_shared_entry(self, cache_key, *, newest=False):
+        """A URL or local file guide is every provider's: another provider's manager may have
+        stored it since this one read the shared index. Its entry is taken when it is newer
+        than this manager's, or as the `newest` (an entry saying the source has no guide is
+        never stored: each manager finds that out)."""
+        _count, shared = _stored(self._where(cache_key))
+        if shared is None:
+            return
+        mine = self.index.get(cache_key)
+        if not newest and isinstance(mine, dict):
+            if mine.get("last_access", "") >= shared.get("last_access", ""):
+                return
+        self.index[cache_key] = shared
+
+    def _download_epg_from_url(self, url):
         r = requests.get(
             url,
             stream=True,
@@ -668,14 +806,8 @@ class EpgManager:
                 guide = self._index_programs(xmltv_file_path)
                 os.remove(xmltv_file_path)
                 if guide:
-                    last_modified = datetime.strptime(
-                        r.headers.get(
-                            "Last-Modified",
-                            datetime.now().strftime("%a, %d %b %Y %H:%M:%S %Z"),
-                        ),
-                        "%a, %d %b %Y %H:%M:%S %Z",
-                    )
-                    self._store_guide(url_hash, guide, last_modified)
+                    source_date = _source_date(r.headers.get("Last-Modified"))
+                    self._store_guide(url_hash, guide, source_date)
                 else:
                     self._source_failed(url_hash)
         self.save_index()

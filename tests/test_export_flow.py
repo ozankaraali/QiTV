@@ -41,7 +41,7 @@ class ExportFlowTests(unittest.TestCase):
         self.runner = HeldRunner()
         self.toasts = []
         self.flow = ExportFlow(
-            provider_manager=self.manager,
+            catalog=SimpleNamespace(provider_manager=self.manager),
             config=self.config,
             runner=self.runner,
             notify=lambda text, kind, ms: self.toasts.append((text, kind, ms)),
@@ -82,6 +82,20 @@ class ExportFlowTests(unittest.TestCase):
         on_finished(None, 2)
         self.assertFalse(self.flow.running())
         self.assertEqual(self.toasts[-1], ("Exported 2 items to home.m3u", "info", 3000))
+
+    def test_the_dialog_and_the_result_name_the_provider_in_all_providers(self):
+        # Final review M6: All providers lists every provider; the export is one provider's.
+        self.flow._catalog = SimpleNamespace(
+            provider_manager=self.manager, all_providers=lambda: True
+        )
+        ask = self.start()
+        self.assertEqual(ask.call_args[0][1], "Export Home's channels")
+        self.runner.jobs[0][1](None, 2)
+        self.assertEqual(self.toasts[-1], ("Exported 2 items from Home to home.m3u", "info", 3000))
+
+    def test_one_provider_shown_keeps_the_plain_dialog(self):
+        ask = self.start()
+        self.assertEqual(ask.call_args[0][1], "Export")
 
     def test_progress_is_a_lasting_toast(self):
         self.start()

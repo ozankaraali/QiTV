@@ -38,6 +38,7 @@ def parse_m3u(data: str, categorize: bool = False):
             tvg_logo_match = re.search(r'tvg-logo="([^"]+)"', line)
             group_title_match = re.search(r'group-title="([^"]+)"', line)
             user_agent_match = re.search(r'user-agent="([^"]+)"', line)
+            referrer_match = re.search(r'http-referrer="([^"]+)"', line)
             item_name_match = re.search(r",([^,]+)$", line)
 
             tvg_id = tvg_id_match.group(1) if tvg_id_match else None
@@ -55,10 +56,16 @@ def parse_m3u(data: str, categorize: bool = False):
                 "logo": tvg_logo,
                 "user_agent": user_agent,
             }
+            if referrer_match:  # only then: a channel without one stays as it was
+                item["referrer"] = referrer_match.group(1)
 
         elif line.startswith("#EXTVLCOPT:http-user-agent="):
             user_agent = line.split("=", 1)[1]
             item["user_agent"] = user_agent
+
+        elif line.startswith("#EXTVLCOPT:http-referrer="):
+            # VLC's own option name; requests and VLC send it as the Referer header.
+            item["referrer"] = line.split("=", 1)[1].strip()
 
         elif line.startswith("http"):
             # Round-trip through urlparse: it drops stray tabs and other control whitespace.

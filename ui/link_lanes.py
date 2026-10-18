@@ -38,6 +38,7 @@ class Target:
     section: str  # "live", "movies" or "series" (an episode)
     title: str
     group_key: str = ""
+    source: str = ""  # the TV page's source when it was picked (a provider or ALL_PROVIDERS)
     subtitle: str = ""
     zapped: bool = False  # chosen by a zap step (↑/↓, digits, previous), not picked
     retried: bool = False  # its link was made again after a playback failure (STB tokens)
@@ -96,17 +97,30 @@ class LinkLanes(QObject):
     # ---- the tune lane ------------------------------------------------------------------------
 
     def request(self, target: Target) -> None:
-        """Ask for `target`'s link; while one is in flight it becomes the queued target."""
+        """Ask for `target`'s link; while one is in flight it becomes the queued target. One
+        the catalog holds for its provider's setup asks nothing of a portal yet: it is
+        dropped (`forget`) and the newer choice is asked at once."""
         if self._closed:
             return
-        if self._inflight is not None:
-            self.queued = target  # replaces any older queued target
-            return
+        inflight = self._inflight
+        if inflight is not None:
+            if not self._held(inflight[0]):
+                self.queued = target  # replaces any older queued target
+                return
+            forget = getattr(self.catalog, "forget", None)
+            if forget is not None:
+                forget(inflight[0])
+            self._inflight = None
         self.queued = None  # the target sent now is the newest choice
         request_id = self.catalog.request_link(
             target.item, section=target.section, is_episode=target.section == "series"
         )
         self._inflight = (request_id, target, self._generation)
+
+    def _held(self, request_id: int) -> bool:
+        """Whether the catalog holds the request for its provider's setup (see `holds`)."""
+        holds = getattr(self.catalog, "holds", None)
+        return holds is not None and bool(holds(request_id))
 
     def in_flight(self) -> Optional[Target]:
         return self._inflight[1] if self._inflight is not None else None
@@ -139,8 +153,14 @@ class LinkLanes(QObject):
         if play:
             generation = self.supersede()
             self.queued = None  # an older choice: the tune in flight then lands stale
+        elif self._side_pending(target):
+            return  # asked again for the very same target (the PiP after a setup): one is enough
         self._side_queue.append(_SideJob(target, then, generation))
         self._next_side()
+
+    def _side_pending(self, target: Target) -> bool:
+        jobs = [self._side[1]] if self._side is not None else []
+        return any(job.target is target for job in [*jobs, *self._side_queue])
 
     def _next_side(self) -> None:
         if self._closed or self._side is not None:
@@ -173,6 +193,56 @@ class LinkLanes(QObject):
         self.drop_tune()
         self._side = None
         self._side_queue.clear()
+
+    def provider_ready(self, name: str, owner: Callable[[dict], str]) -> Optional[Target]:
+        """Provider `name` was set up (`owner` names an item's provider): what its catalog
+        was asked before the setup gets no answer. The tune in flight is forgotten and
+        returned (the shell asks again for the newest choice); the side request in flight is
+        asked again before those waiting behind it, which all stay, in order. Requests the
+        catalog held for the setup (`holds`) are answered now and stay; other providers'
+        requests are not touched."""
+
+        def dropped_by_setup(request_id: int, item: dict) -> bool:
+            return owner(item) == name and not self._held(request_id)
+
+        dropped = None
+        inflight = self._inflight
+        if inflight is not None and dropped_by_setup(inflight[0], inflight[1].item):
+            dropped = inflight[1]
+            self._inflight = None
+        side = self._side
+        if side is not None and dropped_by_setup(side[0], side[1].target.item):
+            self._side = None
+            self._side_queue.appendleft(side[1])
+        self._next_side()
+        return dropped
+
+    def provider_failed(
+        self, name: str, owner: Callable[[dict], str]
+    ) -> tuple[Optional[Target], bool]:
+        """Provider `name`'s setup failed: none of its requests is answered, and asking for
+        those waiting in line would sign it in again. All of them are forgotten; other
+        providers' requests go on. Returns the tune in flight that was dropped (if `name`'s)
+        and whether side requests were (a menu's links, the PiP's), so the shell says so."""
+        dropped = None
+        inflight = self._inflight
+        if inflight is not None and owner(inflight[1].item) == name:
+            dropped = inflight[1]
+            self._inflight = None
+        lost = False
+        side = self._side
+        if side is not None and owner(side[1].target.item) == name:
+            self._side = None
+            lost = not self._superseded(side[1])
+        kept: deque[_SideJob] = deque()
+        for job in self._side_queue:
+            if owner(job.target.item) != name:
+                kept.append(job)
+            elif not self._superseded(job):
+                lost = True
+        self._side_queue = kept
+        self._next_side()
+        return dropped, lost
 
     def close(self) -> None:
         self._closed = True

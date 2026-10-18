@@ -5,9 +5,13 @@ context and hands them to `handle`, which routes them to the focused zone: the t
 genre column, the grid, the series view or the search field.
 
 Search lives in a SearchSession. Every activation (a title, an episode, a search hit) goes
-through one PendingAction: it runs at once when its provider is ready, otherwise the catalog
-switches to that provider and it runs once the provider is ready. Leaving the Library, or
-playing something else, drops it.
+through one PendingAction: it runs at once when the title's own provider is ready, otherwise
+that provider's setup starts beside whatever the Library or the TV page shows and the action
+runs once it is ready (no source switch, no notice). Leaving the Library, or playing something
+else, drops it.
+
+The Library's source is a provider or All providers (the source menu); it never touches the
+TV page's source and never stops what plays.
 
 A right-click on a film's poster or an episode row asks the shell for its menu (Play in VLC,
 Play in MPV, Copy stream link: `context_menu(item, section, global position)`, section "movies"
@@ -34,7 +38,8 @@ from services.library import (
     history_season,
 )
 from services.navigation import episode_key
-from services.pending_action import LOAD, RUN, SWITCH, Pending, PendingAction
+from services.pending_action import LOAD, RUN, Pending, PendingAction
+from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, provider_of
 from services.search import Hit
 from services.watch_state import RESUME_MAX_RATIO, WatchState
 from ui.keymap import Action
@@ -55,6 +60,7 @@ LOADING_TEXT = "Loading…"
 EMPTY_TEXT = "Nothing here"
 RETRY_TEXT = "Couldn't load — press Enter to retry"
 SERIES_FAILED_NOTICE = "Couldn't load that series"
+UNKNOWN_PROVIDER_NOTICE = "That title's provider is no longer in your list"
 ZONES = ("nav", "genres", "grid", "series", "search")
 _MOVES = {
     Action.NAV_LEFT: (-1, 0),
@@ -124,8 +130,19 @@ class LibraryController(QObject):
         self._series_back = "browse"
         self._history_episode: Optional[dict] = None  # the series' newest watched episode
         # search and cross-provider activations
-        self._search = SearchSession(provider_manager, jobs, model, watch, self)
+        self._search = SearchSession(
+            provider_manager,
+            jobs,
+            model,
+            watch,
+            self,
+            loaded=getattr(catalog, "loaded_contents", None),
+        )
         self._pending = PendingAction()
+        self._ran_for = ""  # the shown provider whose ready just ran the pending action
+        # The catalog whose section signals are followed, by provider: a catalog the hub
+        # rebuilds (an edit in Settings) is a new object, followed when it is next asked.
+        self._watched_sections: dict[str, object] = {}
         self._wire()
 
     # ---- wiring -------------------------------------------------------------------------------
@@ -136,9 +153,10 @@ class LibraryController(QObject):
         model.failed.connect(self._on_model_failed)
         model.notice.connect(self.notice)
         catalog.providerReady.connect(self._on_provider_ready)
-        catalog.providerFailed.connect(self._on_provider_failed)
-        catalog.sectionReady.connect(self._on_section_ready)
-        catalog.sectionFailed.connect(self._on_section_failed)
+        # An activation waits for its own provider, which need not be the one shown.
+        catalog.catalogs.providerReady.connect(self._on_pending_ready)
+        catalog.catalogs.providerFailed.connect(self._on_provider_failed)
+        catalog.catalogs.providersChanged.connect(self._on_providers_changed)
         catalog.seasonsReady.connect(self._on_seasons_ready)
         catalog.seasonsFailed.connect(self._on_seasons_failed)
         catalog.episodesReady.connect(self._on_episodes_ready)
@@ -213,8 +231,17 @@ class LibraryController(QObject):
     def _sync_nav(self, active: str) -> None:
         nav = self._screen.nav
         nav.set_tabs(self._catalog.sections())
-        nav.set_source_name(self._catalog.current_provider_name())
+        nav.set_source_name(self._source_title())
         nav.set_active(active)
+
+    def _source_title(self) -> str:
+        """The Library's source as the user reads it: a provider's name, or All providers."""
+        name = self._catalog.current_provider_name()
+        return ALL_PROVIDERS_TITLE if name == ALL_PROVIDERS else name
+
+    def _series_owner(self) -> str:
+        """The provider of the series open (the one shown while none is)."""
+        return self._series_provider or self._catalog.current_provider_name()
 
     def _go_back_to_tv(self) -> None:
         self.leave()
@@ -456,23 +483,28 @@ class LibraryController(QObject):
     def _source_menu(self) -> QMenu:
         menu = QMenu(self._screen)
         current = self._catalog.current_provider_name()
-        for name in self._catalog.provider_names():
+        names = self._catalog.provider_names()
+        for name in names:
             action = menu.addAction(name)
             action.setCheckable(True)
             action.setChecked(name == current)
             action.triggered.connect(lambda _checked=False, n=name: self._choose_source(n))
+        if len(names) > 1:  # with one provider there is nothing to mix
+            menu.addSeparator()
+            action = menu.addAction(ALL_PROVIDERS_TITLE)
+            action.setCheckable(True)
+            action.setChecked(current == ALL_PROVIDERS)
+            action.triggered.connect(lambda _checked=False: self._choose_source(ALL_PROVIDERS))
         return menu
 
     def _choose_source(self, name: str) -> None:
         if self._closed:
             return
-        catalog = self._catalog
-        loading = catalog.loading_provider() if catalog.is_loading() else None
-        heading_to = self._pending.target or loading or catalog.current_provider_name()
-        if name == heading_to:  # already there, or already on the way
+        if name == self._catalog.current_provider_name():  # already there, or on the way
             return
-        self._pending.switching(name)
-        self._catalog.select_provider(name)  # the model re-opens its section when ready
+        # The Library's own source: the TV page and what plays are not touched, and a title
+        # waiting for its provider still waits. The model re-opens its section when ready.
+        self._catalog.select_provider(name)
 
     # ---- model --------------------------------------------------------------------------------
 
@@ -511,7 +543,7 @@ class LibraryController(QObject):
             grid.set_header("", "", [], "")
             grid.set_sections([])
             grid.set_letter_index(None)
-            grid.set_message(f"{self._catalog.current_provider_name()} has no {label}")
+            grid.set_message(f"{self._source_title()} has no {label}")
             return
         items = model.items()
         sorts: list[tuple[str, str]] = []
@@ -574,23 +606,40 @@ class LibraryController(QObject):
     # ---- activation ---------------------------------------------------------------------------
 
     def _request(self, provider: str, run: Callable[[], None], section: Optional[str] = None):
-        """Run `run` now when `provider` is ready, else once it is (one action waits).
+        """Run `run` now when `provider` (the title's own) is ready, else once it is.
 
-        While a provider switch is under way every activation waits, even one for the
-        provider the catalog already names: the provider manager names it before it is ready.
+        One action waits. A provider that is not ready starts its setup beside what is shown
+        (`ensure`): nothing is selected and nothing is announced. A title of the provider the
+        Library shows needs no section loaded first; a title of another waits for `section`.
         """
-        loading = self._catalog.is_loading()
-        step = self._pending.activate(
-            Pending(provider, run, section),
-            current=self._catalog.current_provider_name(),
-            loading=loading,
-            loading_provider=self._catalog.loading_provider() if loading else None,
+        catalogs = self._catalog.catalogs
+        if provider not in catalogs.names():
+            self.notice.emit(UNKNOWN_PROVIDER_NOTICE)
+            return
+        ready = catalogs.is_ready(provider)
+        loaded = (
+            section is None
+            or provider == self._catalog.current_provider_name()
+            or (ready and catalogs.catalog(provider).has_content(section))
         )
+        step = self._pending.activate(Pending(provider, run, section), ready=ready, loaded=loaded)
         if step == RUN:
             run()
-        elif step == SWITCH:
-            self.notice.emit(f"Switching to {provider}…")
-            self._catalog.select_provider(provider)
+            return
+        catalogs.ensure(provider)
+        if step == LOAD and section is not None:
+            self._load_section(provider, section)
+
+    def _load_section(self, provider: str, section: str) -> None:
+        """Ask `provider` for `section`; the pending action runs when it arrives."""
+        catalog = self._catalog.catalogs.catalog(provider)
+        if self._watched_sections.get(provider) is not catalog:
+            self._watched_sections[provider] = catalog
+            catalog.sectionReady.connect(lambda s, p=provider: self._on_section_ready(p, s))
+            catalog.sectionFailed.connect(
+                lambda s, message, p=provider: self._on_section_failed(p, s, message)
+            )
+        catalog.request_section(section)
 
     def _browse_provider(self) -> str:
         """The provider of the titles the browse grid and the model show."""
@@ -607,7 +656,7 @@ class LibraryController(QObject):
         item = self._screen.grid.item(index)
         if item is None:
             return
-        provider = self._browse_provider()
+        provider = provider_of(item) or self._browse_provider()
         kind = self._model.item_kind(item)
         if kind == "series":
             self._request(provider, lambda: self._open_series(item, provider, back="browse"))
@@ -646,19 +695,23 @@ class LibraryController(QObject):
         kind = self._model.item_kind(item)
         if kind != "series":  # a series plays nothing: its episodes have the menu
             section = "series" if kind == "episode" else "movies"
-            self._menu(item, section, self._browse_provider(), global_pos)
+            self._menu(item, section, provider_of(item) or self._browse_provider(), global_pos)
 
     def _on_episode_context(self, _season: dict, episode: dict, global_pos: QPoint) -> None:
         if not self._closed:
-            provider = self._series_provider or self._catalog.current_provider_name()
-            self._menu(episode, "series", provider, global_pos)
+            self._menu(episode, "series", self._series_owner(), global_pos)
 
     def _menu(self, item: dict, section: str, provider: str, global_pos: QPoint) -> None:
-        """The shell's menu for `item`, when its links can be asked of the current provider."""
+        """The shell's menu for `item`, when its links can be asked of the provider shown (with
+        All providers, of any provider: a link goes to the title's own, and waits there for
+        its setup, whichever provider sets up)."""
         if (
             self._context_menu is not None
-            and not self._catalog.is_loading()
-            and provider == self._catalog.current_provider_name()
+            and (self._catalog.all_providers() or not self._catalog.is_loading())
+            and (
+                provider == self._catalog.current_provider_name()
+                or (self._catalog.all_providers() and provider in self._catalog.provider_names())
+            )
         ):
             self._context_menu(item, section, global_pos)
 
@@ -666,22 +719,48 @@ class LibraryController(QObject):
         back = "search" if self._grid_content == "search" else "browse"
         self._open_series(series, provider, back=back)
 
+    def _on_pending_ready(self, name: str) -> None:
+        """A provider (any) became ready: the action waiting for it runs or loads its section."""
+        if self._closed:
+            return
+        step, action = self._pending.on_ready(name)
+        if action is None:
+            return
+        if step == RUN:
+            if self._catalog.all_providers() or name == self._catalog.current_provider_name():
+                self._ran_for = name  # the catalog shown reports this ready too
+            action.payload()
+        elif step == LOAD and action.section is not None:
+            self._load_section(name, action.section)
+
     def _on_provider_ready(self, name: str) -> None:
+        """The provider shown (with All providers: any provider, or the mix) is ready."""
         if self._closed:
             return
         self._search.drop_snapshot()
-        if self._opened is not None:
+        mixed = self._catalog.all_providers()
+        if self._opened is not None and (not mixed or name == ALL_PROVIDERS):
             self._opened = (name, self._model.section)  # the model re-opens its section
-        step, action = self._pending.on_ready(name)
-        if self._mode == "series" and (step is None or self._series_provider != name):
-            self._leave_series()  # the old provider's series
+        ran, self._ran_for = self._ran_for == name, ""
+        # The old provider's series goes, unless this ready just opened one (or providers mix).
+        if self._mode == "series" and not mixed and not (ran and self._series_provider == name):
+            self._leave_series()
         self._sync_nav("search" if self._mode == "search" else self._model.section)
         if self._grid_content == "search":
             self._search.rerun()
-        if step == RUN and action is not None:
-            action.payload()
-        elif step == LOAD and action is not None and action.section is not None:
-            self._catalog.request_section(action.section)
+
+    def _on_providers_changed(self) -> None:
+        """The provider list changed: a title waiting for a provider that is gone is dropped,
+        and the catalogs the hub dropped are let go (a rebuilt one is followed when asked)."""
+        created = getattr(self._catalog.catalogs, "created", None)
+        if created is not None:
+            alive = set(created())
+            for provider in [p for p in self._watched_sections if p not in alive]:
+                del self._watched_sections[provider]
+        action = self._pending.action
+        if not self._closed and action and action.provider not in self._catalog.catalogs.names():
+            self._pending.cancel()
+            self.notice.emit(UNKNOWN_PROVIDER_NOTICE)
 
     def _on_provider_failed(self, name: str, message: str) -> None:
         if self._closed:
@@ -689,17 +768,17 @@ class LibraryController(QObject):
         if self._pending.on_failed(name) is not None:
             self.notice.emit(f"{name}: {message}" if name else message)
 
-    def _on_section_ready(self, section: str) -> None:
+    def _on_section_ready(self, provider: str, section: str) -> None:
         if self._closed:
             return
-        action = self._pending.on_section_ready(
-            section, current=self._catalog.current_provider_name()
-        )
+        action = self._pending.on_section_ready(provider, section)
         if action is not None:
             action.payload()
 
-    def _on_section_failed(self, section: str, message: str) -> None:
-        if self._pending.on_section_failed(section) is not None:
+    def _on_section_failed(self, provider: str, section: str, message: str) -> None:
+        if self._closed:
+            return
+        if self._pending.on_section_failed(provider, section) is not None:
             logger.info("A pending %s section failed to load (%s)", section, message)
             self.notice.emit(SERIES_FAILED_NOTICE)
 
@@ -717,7 +796,7 @@ class LibraryController(QObject):
         view.set_series(series, details)
         view.set_progress_provider(self._episode_progress)
         self._history_episode = history_episode(
-            self._config.watch_history, self._catalog.current_provider_name(), series
+            self._config.watch_history, self._series_owner(), series
         )
         seasons = self._catalog.seasons(series)
         if seasons is None:
@@ -742,7 +821,7 @@ class LibraryController(QObject):
         view = self._screen.series
         current = history_season(
             self._config.watch_history,
-            self._catalog.current_provider_name(),
+            self._series_owner(),
             self._series,
             seasons,
         )
@@ -810,14 +889,12 @@ class LibraryController(QObject):
         series = self._series
         episodes = self._catalog.episodes(series, season) if series is not None else None
         context = _context(start_over=start_over, series=series, season=season, episodes=episodes)
-        provider = self._series_provider or self._catalog.current_provider_name()
+        provider = self._series_owner()
         self._request(provider, lambda: self._play(episode, "episode", context))
 
     def _episode_progress(self, episode: dict) -> Optional[float]:
         """Resume progress, or the watched share (≥ 90%) that shows the check mark."""
-        cid = WatchState.content_id(
-            self._catalog.current_provider_name(), episode, item_type="episode"
-        )
+        cid = WatchState.content_id(self._series_owner(), episode, item_type="episode")
         saved = (self._config.playback_positions or {}).get(cid) or {}
         position, duration = int(saved.get("position") or 0), int(saved.get("duration") or 0)
         if position <= 0 or duration <= 0:

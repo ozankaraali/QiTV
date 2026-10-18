@@ -186,6 +186,7 @@ class Guide(Overlay):
     closed = Signal()
     searchRequested = Signal()  # the header's ⌕
     fullscreenRequested = Signal()  # the header's ⛶
+    rowsMoved = Signal()  # other rows are on screen now (opened, scrolled)
 
     def __init__(
         self,
@@ -235,6 +236,7 @@ class Guide(Overlay):
         self.show()
         self.raise_()
         self.update()
+        self.rowsMoved.emit()
 
     def close_guide(self) -> None:
         self._repaint.stop()
@@ -312,6 +314,11 @@ class Guide(Overlay):
     def window_start(self) -> datetime:
         return self._window_start
 
+    def visible_channels(self) -> list[dict]:
+        """The channels of the rows on screen (their programmes are looked up)."""
+        rows = self._visible_rows(self._layout())
+        return self._channels[rows.start : rows.stop]
+
     # ---- state ------------------------------------------------------------------------------
 
     def _set_current(self, row: int) -> None:
@@ -321,6 +328,7 @@ class Guide(Overlay):
             self._ensure_visible()
             if self._top != top:
                 self.update()  # the rows scrolled
+                self.rowsMoved.emit()
                 return
             # Only the two rows' highlight and the footer change: repaint just them.
             layout = self._layout()

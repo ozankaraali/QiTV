@@ -3,34 +3,50 @@
 P (or the transport's Second channel) opens the channel tuned before the current one small,
 or closes the small picture; the drawer's context menu and Ctrl/⌘+P open the drawer's
 channel. S (or a click on the small picture) swaps; one that has to wait for the large
-picture's channel to open says "Switching…". Its link is asked for on LinkLanes' side lane, one at a time: a choice made while
-one is on its way waits, replacing an older one that waits, and a link that lands after the
-PiP was closed, or after the large picture took its channel, opens nothing. SessionManager
-opens it in the slot that is not large, with a main tune's start arguments; its refusals
-and failures are toasted here.
+picture's channel to open says "Switching…". Its link is asked for on LinkLanes' side lane,
+one at a time: a choice made while one is on its way waits, replacing an older one that
+waits, and a link that lands after the PiP was closed, or after the large picture took its
+channel, opens nothing. SessionManager opens it in the slot that is not large, with a main
+tune's start arguments; its refusals and failures are toasted here, except that an STB
+channel failing small gets a fresh link once (its portal signed in again when the page
+browses another provider), as the large picture's does, and opens small again.
+
+A movie or an episode from the Library takes the large picture and keeps its channel small
+(`keep_large_small`); what takes the title's place there (Next, autoplay, another title)
+keeps the small picture beside it (`keep_beside`). When the title's provider has no second
+stream for a channel, that channel closes for it only once the title's link comes
+(`make_room`: "Closed … to play …"); if the link fails, nothing closes.
 
 The PiP frame and label follow the manager: the second surface shows at its corner while
 PiP is open, and the label names the small picture's channel and state ("Connecting…" until
-it plays; "−MM:SS" once time-shifted beyond its target, else "LIVE"). The label's × closes
-the small picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small
-picture, swaps (the shell's `swap`).
+it plays; "−MM:SS" once time-shifted beyond its target, else "LIVE"); a movie or an episode
+swapped small shows its title alone, and "Finished" once it ended there (swapped large
+again, the Next card offers what follows, as at its end). The label's × closes the small
+picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small picture,
+swaps (the shell's `swap`).
 
-What each slot shows (its target and the zap group it came from) is kept here, so a swap
-can give the shell the new large picture's (`take_large`).
+What each slot shows (its target, the zap group it came from and, for a movie or an episode,
+its resume key) is kept here, so a swap can give the shell the new large picture's
+(`take_large`).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 import logging
 from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
+from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
+from services.navigation import payloads
 from services.sessions import PURPOSE, SessionManager, Slot, limit_message
 from services.zapping import ZapContext
+from ui import item_provider
+from ui.autoplay import FINISHED_TEXT
 from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
@@ -51,12 +67,21 @@ ERROR_MS = 6000
 
 
 @dataclass
+class _Room:
+    """What a title on its way closes once its link comes, and the toast that says so."""
+
+    note: str  # "Closed {channel} to play {title}: {provider} allows {limit} stream(s)"
+    close_small: bool  # the small picture closes then (else the large channel, as it opens)
+
+
+@dataclass
 class SlotView:
     """What a slot plays, for the shell: its target and the zap group it was tuned from."""
 
     target: Optional[Target] = None
     context: Optional[ZapContext] = None
     url: str = ""  # its link: the watch history records it when it becomes large
+    cid: Optional[str] = None  # a movie's or an episode's resume key (it stays with the slot)
 
 
 class PipControls(QObject):
@@ -121,6 +146,9 @@ class PipControls(QObject):
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
         self._timelines: dict[str, dict] = {}  # each slot's last timeline since it opened
+        self._closed_view: Optional[SlotView] = None  # what the small picture showed last
+        self._ended: set[str] = set()  # the slots whose player's title ended
+        self._room: Optional[_Room] = None  # what a title on its way closes when it comes
 
     def wire(self) -> None:
         sessions = self.sessions
@@ -130,6 +158,7 @@ class PipControls(QObject):
         sessions.slotTimeline.connect(self._on_timeline)
         for slot in (sessions.large(), sessions.other()):
             slot.live.modeChanged.connect(self._refresh_label)
+            slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
         self._lanes.sideFailed.connect(self._on_link_failed)
         self._transport.pipRequested.connect(self.toggle_previous)
         self._transport.set_pip_state(True, False)
@@ -167,11 +196,33 @@ class PipControls(QObject):
         return self._views.setdefault(name, SlotView())
 
     def take_large(
-        self, old: str, new: str, target: Optional[Target], context, url: str
+        self,
+        old: str,
+        new: str,
+        target: Optional[Target],
+        context,
+        url: str,
+        cid: Optional[str] = None,
     ) -> SlotView:
-        """A swap: keep the old large slot's target, zap group and link; the new large one's."""
-        self._views[old] = SlotView(target, context, url)
+        """A swap: keep the old large slot's target, zap group, link and resume key; the new
+        large one's."""
+        self._views[old] = SlotView(target, context, url, cid)
         return self.view(new)
+
+    def small_title(self, name: str) -> Optional[Target]:
+        """The movie or the episode slot `name` plays small (None: it is large, or plays a
+        channel)."""
+        small = self.sessions.small()
+        target = self.view(name).target if small is not None and small.name == name else None
+        return target if target is not None and not target.live else None
+
+    def small_resume_key(self, name: str) -> Optional[str]:
+        """The resume key of the movie or episode slot `name` plays small (None: it is large,
+        or plays a channel)."""
+        small = self.sessions.small()
+        if small is None or small.name != name:
+            return None
+        return self.view(name).cid
 
     # ---- keys, clicks and the menu ------------------------------------------------------------
 
@@ -205,9 +256,12 @@ class PipControls(QObject):
         nav = self._nav
         group = next((n for n in reversed(nav.path) if n.layer == "group"), None)
         nodes = nav.children(group) if group is not None else []
-        channels = [n.payload for n in nodes if isinstance(n.payload, dict)] or [node.payload]
+        channels = payloads(nodes) or [node.payload]
         key = group.key if group is not None else ALL_GROUP_ID
-        self.open_channel(node.payload, ZapContext(key, channels, fallback=self._all_live()))
+        source = item_provider.pick_source(self.catalog, node.payload, key)
+        self.open_channel(
+            node.payload, ZapContext(key, channels, fallback=self._all_live(), source=source)
+        )
 
     def _previous_channel(self) -> tuple[Optional[dict], Optional[ZapContext]]:
         """The channel tuned before the large picture's, with the zap group to walk."""
@@ -218,8 +272,11 @@ class PipControls(QObject):
         context = zap.context
         if context.index_of(channel) < 0:
             channels = self._all_live()
-            context = ZapContext(ALL_GROUP_ID, channels, fallback=channels)
-        return channel, ZapContext(context.group_key, context.channels, fallback=context.fallback)
+            source = item_provider.pick_source(self.catalog, channel, ALL_GROUP_ID)
+            context = ZapContext(ALL_GROUP_ID, channels, fallback=channels, source=source)
+        return channel, ZapContext(
+            context.group_key, context.channels, fallback=context.fallback, source=context.source
+        )
 
     # ---- opening and closing ------------------------------------------------------------------
 
@@ -249,11 +306,14 @@ class PipControls(QObject):
             return
         if self.small_showing(channel) is not None:
             return  # already small
-        if self._limit_reached():
+        if self._limit_reached(channel):
             return
         title = str(channel.get("name") or "")
         group = context.group_key if context is not None else ""
-        target = Target(channel, "live", title, group_key=group)
+        source = (context.source if context is not None else "") or item_provider.pick_source(
+            self.catalog, channel, group
+        )
+        target = Target(channel, "live", title, group_key=group, source=source)
         self._wanted = (target, context if context is not None else ZapContext())
         self._request(target)
 
@@ -267,26 +327,111 @@ class PipControls(QObject):
             return True
         return False
 
-    def links_dropped(self, ask_again: bool) -> None:
-        """The shell dropped every link request (a provider setup or failure): none comes.
-
-        `ask_again`: the provider is the same, so the channel waiting to open asks anew;
-        else it is forgotten.
-        """
-        self._link = None
+    def provider_settled(self, name: str, owner: Callable[[dict], str], *, ask_again: bool) -> bool:
+        """Provider `name`'s setup dropped its link requests: none comes. The channel waiting
+        to open asks anew when it is `name`'s and `ask_again` (a setup that finished), else it
+        is forgotten when it is `name`'s (a failure: True, the shell says why); another
+        provider's request stays."""
+        link = self._link
         wanted = self._wanted
         if wanted is None:
-            return
-        if ask_again and not self._closed():
-            self._request(wanted[0])
-        else:
+            if link is not None and owner(link.item) == name:
+                self._link = None
+            return False
+        if link is not None:
+            if owner(link.item) != name:
+                return False  # another provider's request is still coming
+            self._link = None
+        elif owner(wanted[0].item) != name:
+            return False
+        if owner(wanted[0].item) == name and not ask_again:
             self._wanted = None
+            return True
+        if not self._closed():
+            self._request(wanted[0])
+        return False
 
-    def _limit_reached(self) -> bool:
-        """The provider's limit leaves no stream for a small picture: say so before asking
-        for a link (an STB portal mints one per request, and allows one stream)."""
-        provider = self.catalog.current_provider()
-        limit = self._budget.limit_for(provider, self.catalog.max_connections())
+    def keep_large_small(self, item: dict, title: str) -> bool:
+        """A movie or an episode from the Library takes the large picture: the channel that
+        was large moves to the small one without reopening, and a previous small picture
+        closes first (its stream is released before the title opens, as any open waits).
+
+        False when the channel is not kept and the caller plays as before: no channel plays
+        large or the channels play in an external player (the small picture closes: it is for
+        live TV), or the title's provider has no second stream, in which case the channel
+        closes for it as the title opens (said then: `make_room`) and a small picture,
+        another provider's, plays on.
+        """
+        self._room = None
+        channel = self._large_channel()
+        if channel is None or self._external():
+            self.close()
+            return False
+        note = self._no_second_stream(channel, item, title)
+        if note:
+            self._room = _Room(note, close_small=False)
+            return False
+        self.close()
+        return self.sessions.demote_large()
+
+    def keep_beside(self, item: dict, title: str) -> None:
+        """A movie or an episode takes the place of the one playing large (Next, autoplay,
+        another from the Library): the small picture plays on beside it, unless its channel is
+        of the title's provider, which allows fewer than two streams; then it closes for the
+        title once the title's link comes (`make_room`)."""
+        self._room = None
+        small = self.sessions.small()
+        channel = small.channel if small is not None else None
+        if channel is None:
+            self.close()
+            return
+        note = self._no_second_stream(channel, item, title)
+        if note:
+            self._room = _Room(note, close_small=True)
+
+    def has_room(self) -> bool:
+        """The title chosen last closes a channel once its link comes."""
+        return self._room is not None
+
+    def make_room(self) -> None:
+        """The title's link came: the channel it has no stream for closes (the small picture
+        now; the large one as the title opens), and the toast says so."""
+        room, self._room = self._room, None
+        if room is None:
+            return
+        if room.close_small:
+            self.close()
+        self._toast(room.note)
+
+    def forget_room(self) -> None:
+        """The title never came (or another was chosen): nothing closes for it."""
+        self._room = None
+
+    def _no_second_stream(self, channel: dict, item: dict, title: str) -> str:
+        """When `channel` is of the title's provider, which allows fewer than two streams,
+        the toast that says it closes for the title; else ""."""
+        provider = item_provider.provider_dict(self.catalog, item)
+        name = str(provider.get("name", ""))
+        limit = self._budget.limit_for(provider, item_provider.max_connections(self.catalog, item))
+        if (
+            limit is None
+            or limit >= 2
+            or item_provider.provider_name(self.catalog, channel) != name
+        ):
+            return ""
+        plural = "s" if limit != 1 else ""
+        return (
+            f"Closed {channel.get('name') or ''} to play {title}: "
+            f"{name} allows {limit} stream{plural}"
+        )
+
+    def _limit_reached(self, channel: dict) -> bool:
+        """The limit of the channel's own provider leaves no stream for a small picture: say
+        so before asking for a link (an STB portal mints one per request, and allows one)."""
+        provider = item_provider.provider_dict(self.catalog, channel)
+        limit = self._budget.limit_for(
+            provider, item_provider.max_connections(self.catalog, channel)
+        )
         if limit is None:
             return False
         name = str(provider.get("name", ""))
@@ -298,6 +443,8 @@ class PipControls(QObject):
 
     def close(self) -> None:
         """Close the small picture, or forget the one waiting to open."""
+        if self._room is not None and self._room.close_small:
+            self._room = None  # closed already: nothing to close, or say, for the title
         self._wanted = None
         self._link = None  # a late link for it is ignored (it is no longer `_link`)
         sessions = self.sessions
@@ -321,8 +468,12 @@ class PipControls(QObject):
             self._request(wanted[0])  # chosen since: only the newest is opened
             return
         self._wanted = None
-        if self._vod() or ZapContext.same(target.item, self._large_channel()):
-            return  # a movie started, or the large picture took the channel, meanwhile
+        # A movie started, or the large picture took the channel, meanwhile: nothing opens.
+        # A retried channel was small beside a movie (nothing else opens small then): again.
+        if (self._vod() and not target.retried) or ZapContext.same(
+            target.item, self._large_channel()
+        ):
+            return
         self._open(target, wanted[1], url)
 
     def _on_link_failed(self, target: Target, _message: str) -> None:
@@ -340,13 +491,14 @@ class PipControls(QObject):
         sessions = self.sessions
         slot = sessions.other()
         self._views[slot.name] = SlotView(target, context, url)
+        self._closed_view = None
         self._timelines.pop(slot.name, None)
         # The small picture keeps its time-shift in memory: one disk ring at most (M5 ruling).
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
         sessions.open_pip(
             target.item,
-            provider=self.catalog.current_provider(),
-            xtream_max=self.catalog.max_connections(),
+            provider=item_provider.provider_dict(self.catalog, target.item),
+            xtream_max=item_provider.max_connections(self.catalog, target.item),
             start_kwargs=kwargs,
         )
         slot.group_key = target.group_key
@@ -366,7 +518,7 @@ class PipControls(QObject):
                 label.show()
         else:
             closed = sessions.other()
-            self._views.pop(closed.name, None)
+            self._closed_view = self._views.pop(closed.name, None)  # a failure may retry it
             self._timelines.pop(closed.name, None)
             if frame is not None:
                 frame.set_large(sessions.large().name)  # the picture that stayed (as it was)
@@ -388,8 +540,53 @@ class PipControls(QObject):
             self._toast(limit_message(limit), "error", ERROR_MS)
 
     def _on_failed(self, message: str) -> None:
-        if not self._closed():
-            self._toast(message, "error", ERROR_MS)
+        """The small picture closed for a failure: an STB channel's link is made again once
+        (its play token, or its portal's session, may have expired), else it says why."""
+        if self._closed():
+            return
+        view = self._views.get(self.sessions.other().name) or self._closed_view
+        self._closed_view = None
+        if view is not None and self._may_retry(view.target):
+            self._retry(view)
+            return
+        self._toast(message, "error", ERROR_MS)
+
+    def _may_retry(self, target: Optional[Target]) -> bool:
+        """As the large picture (LiveControls.may_retry): once per channel opened small, never
+        for the provider's limit, nor when another channel was chosen small since."""
+        failure = self.sessions.failure  # "": its start raised, or the budget refused
+        return (
+            target is not None
+            and target.live
+            and not target.retried
+            and bool(failure)
+            and failure != STREAM_LIMIT
+            and self._wanted is None
+            and self._link is None
+            and item_provider.provider_type(self.catalog, target.item) == "STB"
+        )
+
+    def _retry(self, view: SlotView) -> None:
+        target = view.target
+        assert target is not None
+        logger.info("Making the link of %s again after the small picture failed", target.title)
+        item_provider.sign_in_again(self.catalog, target.item)
+        again = replace(target, retried=True)
+        self._wanted = (again, view.context if view.context is not None else ZapContext())
+        self._request(again)
+
+    def _on_player_state(self, name: str, state: str) -> None:
+        """A player's state: a title that ended small says "Finished" on the label."""
+        ended = state == "ended"
+        if ended == (name in self._ended):
+            return
+        if ended:
+            self._ended.add(name)
+        else:
+            self._ended.discard(name)
+        small = self.sessions.small()
+        if small is not None and small.name == name:
+            self._refresh_label()
 
     def _on_timeline(self, name: str, state: dict) -> None:
         self._timelines[name] = state
@@ -406,10 +603,12 @@ class PipControls(QObject):
             return
         target = self.view(small.name).target
         name = target.title if target is not None else str((small.channel or {}).get("name", ""))
-        label.set_info(name, self._state_text(small))
+        label.set_info(name, self._state_text(small, live=target is None or target.live))
         label.set_audible(not self.sessions.muted(small.name))
 
-    def _state_text(self, slot: Slot) -> str:
+    def _state_text(self, slot: Slot, *, live: bool = True) -> str:
+        if not live:  # a movie or an episode swapped small plays on: its title alone
+            return FINISHED_TEXT if slot.name in self._ended else ""
         mode = slot.live.mode
         timeline = self._timelines.get(slot.name)
         if mode == "pipeline" and timeline is not None:

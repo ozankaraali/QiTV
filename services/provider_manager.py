@@ -7,6 +7,7 @@ import string
 import tempfile
 import threading
 import time
+from typing import Optional
 from urllib.parse import urlencode
 
 from PySide6.QtCore import QObject, Signal
@@ -64,9 +65,18 @@ class ProviderManager(QObject):
 
     CONTENT_CACHE_TTL = 6 * 60 * 60
 
-    def __init__(self, config_manager):
+    def __init__(
+        self,
+        config_manager,
+        provider_name: Optional[str] = None,
+        providers: Optional[list] = None,
+    ):
+        """`provider_name` pins this manager to one provider whatever the config selects;
+        `providers` shares that list (so pinned managers agree) instead of reading index.json.
+        """
         super().__init__()
         self.config_manager = config_manager
+        self._pinned_provider = provider_name
         self.provider_dir = os.path.join(config_manager.get_config_dir(), "cache", "provider")
         os.makedirs(self.provider_dir, exist_ok=True)
         self.index_file = os.path.join(self.provider_dir, "index.json")
@@ -80,7 +90,10 @@ class ProviderManager(QObject):
         self._cache_lock = threading.Lock()
         self._cache_generations = {}
         self._pending_cache_snapshots = {}
-        self._load_providers()
+        if providers is not None:
+            self.providers = providers
+        else:
+            self._load_providers()
 
     def _provider_cache_name(self, provider_name):
         hashed_name = hashlib.sha256(provider_name.encode("utf-8")).hexdigest()
@@ -214,11 +227,17 @@ class ProviderManager(QObject):
         progress_callback.emit("Searching for provider...")
         self.current_provider = {}
         # search for provider in the list
-        if self.config_manager.selected_provider_name:
+        wanted = self._pinned_provider or self.config_manager.selected_provider_name
+        if wanted:
             for provider in self.providers:
-                if provider["name"] == self.config_manager.selected_provider_name:
+                if provider["name"] == wanted:
                     self.current_provider = provider
                     break
+
+        if not self.current_provider and self._pinned_provider:
+            # A provider deleted in Settings must not be served as another one.
+            logger.warning("The pinned provider is no longer in the list")
+            raise LookupError("This provider is no longer in your list.")
 
         # if provider not found, set the first one
         if not self.current_provider:
@@ -242,22 +261,26 @@ class ProviderManager(QObject):
         progress_callback.emit("Provider setup complete.")
         return accepted
 
-    def get_all_providers_cached_content(self):
+    def get_all_providers_cached_content(self, loaded=None):
         """Return cached content for all configured providers.
 
         Returns list of (provider_name, content_dict) tuples.
-        Only includes providers that have been loaded/cached.
+        Only includes providers that have been loaded/cached. `loaded` maps a provider's name
+        to the content its catalog holds in memory: that is used instead of reading (and
+        parsing) the provider's cache file again, which for 200,000 channels takes seconds.
         """
         results = []
         for provider in self.providers:
             name = provider.get("name", "Unknown")
-            cache = self._load_provider_cache(provider)
+            cache = loaded.get(name) if loaded else None
+            if cache is None:
+                cache = self._load_provider_cache(provider)
             # Playlists offer live channels only; an older catalog may have stored the
             # playlist again under "vod" or "series".
             playlist = str(provider.get("type", "")).upper() not in ("STB", "XTREAM")
             content = {
                 key: value
-                for key, value in cache.items()
+                for key, value in list(cache.items())
                 if key != "_cache" and not (playlist and key in ("vod", "series"))
             }
             if content:

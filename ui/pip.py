@@ -124,6 +124,7 @@ class PipFrame(QObject):
         self._swap_clock = QElapsedTimer()
         self._reported = QRect()
         self._closed = False
+        self._interactive = True  # False: the player is a thumbnail over the Library
         self._lift = 0  # pixels a bottom corner's PiP rises (the transport shows)
         self._lifting = QVariantAnimation(self)
         self._lifting.setDuration(LIFT_MS)
@@ -182,6 +183,15 @@ class PipFrame(QObject):
         self._lifting.setEndValue(target)
         self._lifting.start()
 
+    def set_interactive(self, interactive: bool) -> None:
+        """Whether the small surface takes the mouse (a click swaps, a drag moves it). Off
+        while the whole player sits in a corner of the Library: its presses are the corner
+        player's."""
+        self._interactive = interactive
+        if not interactive:
+            self._press = None
+            self._swap_at = None
+
     def close(self) -> None:
         """Stop watching the player page and the surfaces (the window's shutdown)."""
         if self._closed:
@@ -194,7 +204,7 @@ class PipFrame(QObject):
 
     # The label's pill covers part of the small surface; it forwards its presses (globals).
     def pill_press(self, position: QPoint) -> None:
-        if self._shown and not self._closed:
+        if self._shown and not self._closed and self._interactive:
             self._begin(self._small(), position, surface_events=False)
 
     def pill_move(self, position: QPoint) -> None:
@@ -282,7 +292,7 @@ class PipFrame(QObject):
         if kind in _LAYOUT_EVENTS:
             if watched is self._container:
                 self._layout()
-        elif kind in _MOUSE_EVENTS and isinstance(event, QMouseEvent):
+        elif kind in _MOUSE_EVENTS and isinstance(event, QMouseEvent) and self._interactive:
             return self._mouse(watched, event)
         return False
 

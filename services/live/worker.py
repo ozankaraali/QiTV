@@ -15,17 +15,25 @@ by a parent's unguarded `__main__` module, which spawn runs again in the child) 
 interpreter's own teardown.
 
 Commands (parent to helper):
-- `("open", sid, url, headers, verify_ssl, ring, live_delay)`, where `ring` is
+- `("open", sid, url, headers, verify_ssl, ring, live_delay[, start])`, where `ring` is
   `{"kind": "ram", "max_bytes": n}` or `{"kind": "disk", "root": path, "dir": name,
-  "max_bytes": n}` (`root` defaults to the helper's own root);
+  "max_bytes": n}` (`root` defaults to the helper's own root) and `start` (2.1 stage 3) is
+  `{"target": seconds, "extra": seconds}`: the session's target and what it adds to it, so an
+  HLS source starts far enough back for a start at that target (`HlsSource._depth`);
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
 - `("shutdown",)`.
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
-additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet;
+additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
+and once a raw-TS source answered (`answered`, 2.1: its headers came, before its first byte;
+taken back once its body failed or turned out a playlist),
+each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality)`
+(`Span`'s fields; an engine from before 2.1 would not take the fifth, but the helper and the
+engine always ship in one build, and the engine still takes four);
 `("ready", sid)` once the first segment is open (its state comes first);
-`("error", sid, kind, message)`; `("ended", sid)`; `("closed", sid)`. Error messages are
+`("error", sid, kind, message[, status])`, an HTTP failure's status last (2.1: the parent
+logs why a channel played directly); `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
 - a `SourceError` kind ("unsupported", "network", "tls", "timeout", "http"; "unsupported"
   also for input the segmenter or the RAM ring cannot take): the input ended for good;
@@ -67,7 +75,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from services.live.timeline import Timeline
+from services.live.timeline import StartQuality, Timeline
 from services.live.ts import Data, Event, Opened, Segmenter, Unsupported
 
 if TYPE_CHECKING:
@@ -90,7 +98,16 @@ _NO_MEDIA = "The channel ended before any video could be buffered."
 _NO_DATA = "The channel sent no data."
 _DISK_FAILED = "The temporary playback buffer could not be created."
 
-_Addition = tuple[int, float, float, bool]  # seq, start, end, discontinuity
+# seq, start, end, discontinuity, start_quality
+_Addition = tuple[int, float, float, bool, StartQuality]
+# PTS jumps the timeline left out, in the state while the ring holds them (2.1 stage 2; and
+# `_BREAK_SLACK_S` after), at
+# most this many (a memory bound: a flaky source that reconnects every few seconds)
+_BREAKS_KEPT = 64
+# A break stays this long after the ring's start passed it (2.1 stage 5): a player still
+# playing evicted media it read before may reach it yet (a sparse-PCR clock's 2 s step and a
+# second more).
+_BREAK_SLACK_S = 3.0
 
 # BurstMeter (see its docstring):
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
@@ -104,6 +121,9 @@ _BURST_SPREAD = 1.5  # two bursts in a row are alike when neither is larger by m
 _BURST_RUN = 3  # the estimate is the largest of this many latest bursts
 _STEADY_BURSTS = 3.0  # this many estimates' worth of seconds without a gap: steady again
 _STEADY_UNCONFIRMED = 1.0  # the same for an estimate from one burst no other has confirmed
+# An HLS backlog's EXTINF is scaled by the media/EXTINF ratio measured, kept within these:
+_RATIO_MIN = 0.5
+_RATIO_MAX = 2.0
 
 
 class BurstMeter:
@@ -205,6 +225,12 @@ class BurstMeter:
 
 class _Cancelled(Exception):
     """The session was closed: unwind without sending anything or writing to a ring."""
+
+
+def _error(sid: str, kind: str, text: str, status: int | None) -> tuple[Any, ...]:
+    """An "error" message; an HTTP failure's status follows its text (the GUI logs it)."""
+    message = ("error", sid, kind, text)
+    return message if status is None else (*message, status)
 
 
 def _close_ring(ring: Ring) -> None:
@@ -322,6 +348,7 @@ class _Session:
         verify_ssl: bool,
         ring: dict[str, Any],
         live_delay: float,
+        start: dict[str, float] | None = None,
     ) -> None:
         self.sid = sid
         self.stop = threading.Event()
@@ -336,6 +363,7 @@ class _Session:
         self._verify_ssl = verify_ssl
         self._ring_spec = ring
         self._live_delay = live_delay
+        self._start = start or {}
         self._source: Source | None = None
         self._ring: Ring | None = None
         self._disk = False
@@ -346,7 +374,13 @@ class _Session:
         self._timeline = Timeline()
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
         self._received = 0  # bytes from the source, those before the first keyframe too
+        self._answered = False  # the source's response headers came (bytes may not have yet)
+        self._caught_up = False  # HLS: every segment its playlist listed was delivered once
+        self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
+        self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
         self._pending: list[_Addition] = []
+        # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
+        self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
 
@@ -382,8 +416,9 @@ class _Session:
 
     def _ingest(self) -> None:
         from services.live.ring import RingError
-        from services.live.source import Discontinuity, SourceError, open_source
+        from services.live.source import CaughtUp, Discontinuity, SourceError, open_source
 
+        target = self._start.get("target")
         try:
             source = open_source(
                 self._url,
@@ -391,9 +426,12 @@ class _Session:
                 verify_ssl=self._verify_ssl,
                 stop=self.stop,
                 live_delay=self._live_delay,
+                target=float(target) if isinstance(target, (int, float)) else None,
+                extra=float(self._start.get("extra") or 0.0),
+                on_answer=self._on_answer,
             )
         except SourceError as error:
-            self._send(("error", self.sid, error.kind, str(error)))
+            self._send(_error(self.sid, error.kind, str(error), error.status))
             return
         with self.lock:
             cancelled = self.cancelled
@@ -409,7 +447,13 @@ class _Session:
                 self._check()
                 if isinstance(item, Discontinuity):
                     segmenter.discontinuity()
+                elif isinstance(item, CaughtUp):
+                    # The batch's end, which the throttle may have held back, and the start's
+                    # backlog has landed: the parent chooses where to start on this.
+                    self._caught_up = True
+                    self._notify(force=True)
                 else:
+                    self._follow(source)  # before its bytes: where an HLS segment begins
                     self._received += len(item)
                     self._apply(segmenter.feed(item))
                     self._measure()
@@ -418,7 +462,7 @@ class _Session:
             self._check()
             self._apply(segmenter.finish())
         except SourceError as error:
-            self._fail(error.kind, str(error))
+            self._fail(error.kind, str(error), error.status)
             return
         except Unsupported:
             self._fail("unsupported", _UNSUPPORTED)
@@ -511,9 +555,28 @@ class _Session:
                 if not self._skipping:
                     closing = event.seq
                     self._write(lambda ring: ring.complete(closing))
-                span = timeline.on_closed(event.seq, event.next_first_pts, event.wall)
-                self._pending.append((span.seq, span.start, span.end, span.discontinuity))
+                span = timeline.on_closed(
+                    event.seq, event.next_first_pts, event.wall, event.start_quality
+                )
+                self._pending.append(
+                    (span.seq, span.start, span.end, span.discontinuity, span.start_quality)
+                )
                 self._notify(force=True)
+        self._take_breaks()
+
+    def _take_breaks(self) -> None:
+        """Where the segmenter left a PTS jump out of the timeline, and how much (the player's
+        clock jumps by it there, while the media does not), reported at once."""
+        dropped = self._segmenter.dropped
+        if not dropped:
+            return
+        timeline = self._timeline
+        starts = {span.seq: span.start for span in timeline.spans()}
+        for seq, offset, seconds in dropped:
+            # A closed segment's start, else the open one's (where the closed ones end).
+            self._breaks.append((starts.get(seq, timeline.end) + (offset or 0.0), seconds))
+        dropped.clear()
+        self._notify(force=True)
 
     def _write(self, action: Callable[[Ring], None], *, new_segment: bool = False) -> None:
         from services.live.ring import RamRing, RingError
@@ -536,7 +599,18 @@ class _Session:
         else:
             self._skipping = True  # the open segment lost its start: wait for the next
 
-    def _fail(self, kind: str, message: str) -> None:
+    def _on_answer(self, answered: bool) -> None:
+        """The source's response headers came, before its first byte (2.1): an on-demand
+        raw-TS restream may hold its body back for seconds (VLC's second request then finds it
+        warm), so the parent waits for it as for bytes that are not playable yet. Taken back
+        (False) once that body failed, before the open asks again, or turned out a playlist (an
+        HLS channel waits longer only once segment bytes flow). Reported at once, before any
+        ring exists."""
+        if answered != self._answered:
+            self._answered = answered
+            self._notify(force=True)
+
+    def _fail(self, kind: str, message: str, status: int | None = None) -> None:
         """Report a failure that ends the input; the buffered part stays playable."""
         if self._ring is not None:
             self._check()  # a cancelled session never touches its ring again
@@ -548,7 +622,42 @@ class _Session:
                 _LOG.info("The last live segment was dropped (%s).", type(error).__name__)
             self._ended = True  # readers stop at the end of the buffer instead of waiting
             self._notify(force=True)
-        self._send(("error", self.sid, kind, message))
+        self._send(_error(self.sid, kind, message, status))
+
+    def _follow(self, source: Source) -> None:
+        """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and
+        measure the one before if it arrived whole: its media against its EXTINF. Not the
+        first that brought media (it began at edge 0.0): the timeline starts at its first
+        keyframe, so whatever came before that would read as missing media."""
+        serial = getattr(source, "segment_serial", 0)
+        if serial == self._segment[0]:
+            return
+        edge = self._live_edge()
+        previous, began = self._segment
+        whole = getattr(source, "last_whole", None)
+        measurable = began > 0.0 and edge > began
+        if isinstance(whole, tuple) and whole[0] == previous and whole[1] > 0 and measurable:
+            media, extinf = self._measured
+            self._measured = (media + edge - began, extinf + whole[1])
+        self._segment = (serial, edge)
+
+    def _backlog(self, source: Source | None) -> float | None:
+        """HLS: the media its playlist listed still to come: what the segment being fetched
+        holds beyond the live edge and the listed ones after it, by their EXTINF scaled by
+        the media/EXTINF ratio of the whole segments so far (2.1 stage 3: EXTINF 10 on 8 s
+        segments moved the start). None until one was measured; 0.0 for a finished playlist
+        (it plays from its beginning) and for raw TS."""
+        fetching = getattr(source, "segment_s", None)
+        rest = getattr(source, "rest_s", None)
+        if not isinstance(fetching, float) or not isinstance(rest, float):
+            return 0.0
+        if getattr(source, "finite", False) is True:
+            return 0.0
+        media, extinf = self._measured
+        if extinf <= 0:
+            return None if fetching + rest > 0 else 0.0
+        ratio = min(max(media / extinf, _RATIO_MIN), _RATIO_MAX)
+        return max(0.0, self._segment[1] + fetching * ratio - self._live_edge()) + rest * ratio
 
     def _live_edge(self) -> float:
         # On the segment's own PTS axis and the stall-free clock: no stall or jump inflates it.
@@ -570,22 +679,25 @@ class _Session:
             return
         self._last_notify = now
         ring, timeline, source = self._ring, self._timeline, self._source
-        if ring is None:
-            return
-        oldest = ring.oldest_seq
-        # Spans of evicted segments leave the timeline (all of them while the ring is empty).
-        evicted = oldest - 1 if oldest is not None else timeline.newest_seq
-        first = timeline.oldest_seq
-        if first is not None and evicted is not None and first <= evicted:
-            timeline.on_evicted(evicted)
+        # No ring yet while the source opens: only its answer can be news then.
+        oldest = ring.oldest_seq if ring is not None else None
+        if ring is not None:
+            # Spans of evicted segments leave the timeline (all of them while it is empty).
+            evicted = oldest - 1 if oldest is not None else timeline.newest_seq
+            first = timeline.oldest_seq
+            if first is not None and evicted is not None and first <= evicted:
+                timeline.on_evicted(evicted)
+        breaks = self._breaks
+        while breaks and breaks[0][0] < timeline.start - _BREAK_SLACK_S:
+            breaks.popleft()  # its media went a while ago: no player can reach it any more
         snapshot = {
             "oldest": oldest,
-            "newest": ring.newest_seq,
-            "open": ring.open_seq,
+            "newest": ring.newest_seq if ring is not None else None,
+            "open": ring.open_seq if ring is not None else None,
             "start": timeline.start,
             "end": timeline.end,
             "live_edge": self._live_edge(),
-            "bytes": ring.bytes,
+            "bytes": ring.bytes if ring is not None else 0,
             "ended": self._ended,
             # HLS: the target duration, which a reload may change; raw TS: what the meter
             # measured (0.0 for a steady source). The larger, should both apply.
@@ -595,6 +707,24 @@ class _Session:
             # An HLS source: the parent keeps its player at 1x (VLC crawls once its rate
             # was changed on such a stream; 2.0.2).
             "hls": bool(source is not None and source.hls),
+            # PTS jumps the timeline left out: (timeline position, seconds), the latest last.
+            "breaks": list(self._breaks),
+            # HLS: every segment its playlist listed has arrived, once at least (the backlog
+            # fetched at the start has landed). Never for raw TS, whose end is not known.
+            "caught_up": self._caught_up,
+            # HLS: the live edge once every listed segment arrived is this much further (2.1
+            # stage 3: a tune need not wait for all of its backlog); 0.0 for raw TS.
+            "backlog_s": self._backlog(source),
+            # HLS: the playlist is finished (ENDLIST): a clip, played from its beginning.
+            "finite": bool(source is not None and getattr(source, "finite", False) is True),
+            # How cleanly playback starts at the open segment ("key", "open", "none"; None:
+            # none is open), as `start_quality` tells it for the closed ones.
+            "open_quality": self._segmenter.open_quality,
+            # The program has a video PID (2.1 stage 5): an audio-only stream's starts are
+            # all "none", which is no reason to say anything.
+            "video": self._segmenter.video_pid is not None,
+            # The source answered (2.1): its headers came, though no byte may have yet.
+            "answered": self._answered,
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
@@ -671,7 +801,8 @@ class _Helper:
         name = command[0] if isinstance(command, tuple) and command else None
         try:
             if name in ("open", "close"):
-                if len(command) != (7 if name == "open" else 2) or not isinstance(command[1], str):
+                sizes = (7, 8) if name == "open" else (2,)
+                if len(command) not in sizes or not isinstance(command[1], str):
                     # A plain reply: a malformed session id is never echoed back.
                     self.send(("error", None, "crashed", _INTERNAL))
                 elif name == "open":
@@ -694,11 +825,14 @@ class _Helper:
         verify_ssl: bool,
         ring: dict[str, Any],
         live_delay: float,
+        start: dict[str, float] | None = None,
     ) -> None:
         if not _SESSION_ID.fullmatch(sid) or sid in self._sessions:
             self.send(("error", sid, "crashed", _INTERNAL))
             return
-        session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay)
+        if start is not None and not isinstance(start, dict):
+            raise TypeError("start must be a mapping")
+        session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay, start)
         self._sessions[sid] = session
         session.thread.start()
 

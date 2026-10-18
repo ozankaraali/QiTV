@@ -1,18 +1,26 @@
 """A guide refresh never blanks Now/Next, and a failed refresh keeps the guide it had."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 import pickle
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import requests
 
-from services import epg_manager as epg_manager_module
-from services import epg_store as epg_store_module
-from services.epg_manager import _INDEX_TIME_FORMAT, EpgManager, _cache_key, _xtream_cache_key
+from services import epg_manager as epg_manager_module, epg_store as epg_store_module
+from services.epg_manager import (
+    _INDEX_TIME_FORMAT,
+    EpgManager,
+    _cache_key,
+    _http_date,
+    _xtream_cache_key,
+)
 from services.multikeydict import MultiKeyDict
 
 CHANNEL = {"xmltv_id": "news.test", "name": "News"}
@@ -99,6 +107,35 @@ class _GuideCase(unittest.TestCase):
         old = (datetime.now() - timedelta(days=2)).strftime(_INDEX_TIME_FORMAT)
         manager.index[self.key]["date"] = old
         manager.save_index()
+
+
+class IfModifiedSinceTests(unittest.TestCase):
+    def test_the_date_is_an_english_http_date(self):
+        self.assertEqual(
+            _http_date(datetime(1994, 11, 6, 8, 49, 37)), "Sun, 06 Nov 1994 08:49:37 GMT"
+        )
+        self.assertEqual(
+            _http_date(datetime(2026, 3, 4, 23, 5, 9)), "Wed, 04 Mar 2026 23:05:09 GMT"
+        )
+
+    def test_the_date_does_not_follow_the_locale(self):
+        # Qt switches the process to the system locale on Unix: strftime then names the day
+        # and month in that language, which servers ignore.
+        import locale
+
+        previous = locale.setlocale(locale.LC_TIME)
+        self.addCleanup(locale.setlocale, locale.LC_TIME, previous)
+        for name in ("tr_TR.UTF-8", "de_DE.UTF-8", "fr_FR.UTF-8", "tr_TR", "de_DE"):
+            try:
+                locale.setlocale(locale.LC_TIME, name)
+                break
+            except locale.Error:
+                continue
+        else:
+            self.skipTest("no non-English locale installed")
+        self.assertEqual(
+            _http_date(datetime(2026, 3, 4, 23, 5, 9)), "Wed, 04 Mar 2026 23:05:09 GMT"
+        )
 
 
 class EpgRefreshTests(_GuideCase):
@@ -370,6 +407,240 @@ class SavedGuideTests(_GuideCase):
         self.expire(manager)
         self.load(manager, "New")
         self.assertEqual(self.cache_files(), [f"{self.key}.guide", "index.json"])
+
+
+class SharedIndexTests(_GuideCase):
+    """Every provider's manager shares one index file: saving never wipes another's entries."""
+
+    def test_two_managers_saving_in_turn_keep_each_others_entries(self):
+        first, second = self.manager(), self.manager()  # both read the empty index
+        first.index["a"] = {"date": "2026-10-15 20:00:00", "last_access": "2026-10-15 20:00:00"}
+        second.index["b"] = None
+        first.save_index()
+        second.save_index()  # its copy never saw "a"
+        third = self.manager()
+        self.assertEqual(set(third.index), {"a", "b"})
+        self.assertIsNone(third.index["b"])
+
+    def test_a_removed_entry_is_removed_from_the_file(self):
+        first = self.manager()
+        first.index["a"] = None
+        first.save_index()
+        second = self.manager()
+        del second.index["a"]
+        second.index["b"] = None
+        second.save_index()
+        self.assertEqual(set(self.manager().index), {"b"})
+
+    def test_a_single_managers_existing_index_reads_unchanged(self):
+        first = self.manager()
+        first.index["a"] = None
+        first.save_index()
+        self.assertEqual(self.manager().index, {"a": None})
+
+    def test_concurrent_saves_keep_every_managers_entries(self):
+        managers = [self.manager() for _ in range(6)]
+        barrier = threading.Barrier(len(managers))
+        errors = []
+
+        def save(n, manager):
+            manager.index[f"k{n}"] = None
+            barrier.wait()
+            try:
+                manager.save_index()
+            except Exception as e:  # noqa: BLE001 - the test reports any failure
+                errors.append(e)
+
+        threads = [threading.Thread(target=save, args=(n, m)) for n, m in enumerate(managers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(set(self.manager().index), {f"k{n}" for n in range(6)})
+        leftovers = [
+            f for f in os.listdir(os.path.dirname(managers[0]._index_file())) if f.endswith(".tmp")
+        ]
+        self.assertEqual(leftovers, [])
+
+
+class SharedUrlGuideTests(_GuideCase):
+    """The URL guide is global: each provider in use loads it with its own manager."""
+
+    def test_two_managers_download_a_shared_url_guide_once(self):
+        # Final review M4: both wrote the same <hash>.xml.download (a forced refresh).
+        # Sweep A9: the one that waited downloaded and parsed it again; it reads the guide
+        # the other just stored.
+        self.config.epg_source = "URL"
+        self.config.epg_url = "http://127.0.0.1:9/guide.xml"
+        managers = [self.manager(), self.manager()]
+        guard, active, overlaps, errors = threading.Lock(), [0], [], []
+        barrier = threading.Barrier(len(managers))
+
+        class Slow(_Response):
+            def __init__(self, body):
+                super().__init__(body)
+                self.headers = {"Last-Modified": "Sun, 18 Oct 2026 02:00:00 GMT"}
+
+            def iter_content(self, size):
+                with guard:
+                    active[0] += 1
+                    overlaps.append(active[0])
+                time.sleep(0.05)
+                yield self.content
+                with guard:
+                    active[0] -= 1
+
+        def refresh(manager):
+            barrier.wait()
+            try:
+                manager.force_refresh_current_epg()
+            except Exception as e:  # noqa: BLE001 - the test reports any failure
+                errors.append(e)
+
+        get = lambda url, **kwargs: Slow(xmltv("New"))  # noqa: E731
+        with patch("services.epg_manager.requests.get", side_effect=get):
+            threads = [threading.Thread(target=refresh, args=(m,)) for m in managers]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(overlaps, [1])  # one download, never two at once
+        self.assertEqual([self.titles(m) for m in managers], [["New"], ["New"]])
+        cache = os.path.dirname(managers[0]._index_file())
+        self.assertEqual([f for f in os.listdir(cache) if f.endswith((".xml", ".download"))], [])
+
+    def test_a_manager_reads_the_url_guide_another_stored_since_it_read_the_index(self):
+        # Sweep A9: each provider's manager read the shared index when its catalog was made;
+        # the guide another provider downloaded later was downloaded and parsed again.
+        self.config.epg_source = "URL"
+        self.config.epg_url = "http://127.0.0.1:9/guide.xml"
+        first, second = self.manager(), self.manager()
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("New"))) as get:
+            first.set_current_epg()
+            second.set_current_epg()
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(self.titles(second), ["New"])
+
+    def test_a_waiter_downloads_when_nothing_was_stored_while_it_waited(self):
+        # Sweep A review M3: the waiter took any change of the shared index entry while it
+        # waited (here a third manager saving when it last read the guide, while the download
+        # it waited for failed) for a guide just stored, and downloaded nothing.
+        self.config.epg_source = "URL"
+        self.config.epg_url = "http://127.0.0.1:9/guide.xml"
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("Old"))):
+            self.manager().set_current_epg()
+        waiter, third = self.manager(), self.manager()
+        key, lock = _cache_key(self.config.epg_url), epg_manager_module._source_lock
+
+        def meanwhile(cache_key):
+            third.index[key]["last_access"] = "2099-01-01 00:00:00"
+            third.save_index()
+            return lock(cache_key)
+
+        get = patch("services.epg_manager.requests.get", side_effect=serving(xmltv("New")))
+        with patch.object(epg_manager_module, "_source_lock", side_effect=meanwhile), get as got:
+            waiter.force_refresh_current_epg()
+        self.assertEqual(got.call_count, 1)
+        self.assertEqual(self.titles(waiter), ["New"])
+
+    def test_a_local_file_guide_is_parsed_once_for_two_managers(self):
+        path = os.path.join(self.config.get_config_dir(), "guide.xml")
+        with open(path, "wb") as f:
+            f.write(xmltv("Local"))
+        self.config.epg_source = "Local File"
+        self.config.epg_file = path
+        first, second = self.manager(), self.manager()
+        parse, parsed = EpgManager._index_programs, []
+
+        def counting(manager, xmltv_file):
+            parsed.append(xmltv_file)
+            return parse(manager, xmltv_file)
+
+        with patch.object(EpgManager, "_index_programs", counting):
+            first.set_current_epg()
+            second.set_current_epg()
+        self.assertEqual(parsed, [path])
+        self.assertEqual(self.titles(second), ["Local"])
+
+    def test_a_shared_url_guide_that_failed_for_one_manager_is_tried_by_the_next(self):
+        self.config.epg_source = "URL"
+        self.config.epg_url = "http://127.0.0.1:9/guide.xml"
+        first, second = self.manager(), self.manager()
+        with patch("services.epg_manager.requests.get", side_effect=serving(b"<tv></tv>")):
+            first.set_current_epg()  # an answer without programmes: no guide
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("New"))) as get:
+            second.set_current_epg()
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(self.titles(second), ["New"])
+
+
+class UrlGuideDateTests(_GuideCase):
+    """A URL guide is stored whatever its server says of its date (pre-existing: without a
+    Last-Modified header the store raised ValueError, and the guide was never kept)."""
+
+    def serve(self, last_modified):
+        """Serve one guide on 127.0.0.1 with `last_modified` (None: no such header) as the
+        URL guide; returns the requests it gets."""
+        body, seen = xmltv("Served"), []
+
+        class Guide(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/xml")
+                self.send_header("Content-Length", str(len(body)))
+                if last_modified is not None:
+                    self.send_header("Last-Modified", last_modified)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Guide)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.config.epg_source = "URL"
+        self.config.epg_url = f"http://127.0.0.1:{server.server_port}/guide.xml"
+        return seen
+
+    def stored_date(self, manager):
+        manager_key = _cache_key(self.config.epg_url)
+        self.assertTrue(os.path.exists(manager._guide_path(manager_key)))
+        return datetime.strptime(manager.index[manager_key]["date"], _INDEX_TIME_FORMAT)
+
+    def assert_download_time(self, date):
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        self.assertLess(abs(date - now), timedelta(minutes=1))
+
+    def test_a_guide_from_a_server_without_last_modified_is_stored(self):
+        seen = self.serve(None)
+        manager = self.manager()
+        manager.set_current_epg()
+        self.assertEqual(self.titles(manager), ["Served"])
+        self.assert_download_time(self.stored_date(manager))  # in UTC, as Last-Modified is
+        again = self.manager()  # the next start reads the saved guide
+        again.set_current_epg()
+        self.assertEqual(self.titles(again), ["Served"])
+        self.assertEqual(seen, ["/guide.xml"])
+
+    def test_an_unreadable_last_modified_is_taken_as_the_download_time(self):
+        self.serve("yesterday")
+        manager = self.manager()
+        manager.set_current_epg()
+        self.assertEqual(self.titles(manager), ["Served"])
+        self.assert_download_time(self.stored_date(manager))
+
+    def test_the_servers_last_modified_is_the_guides_date(self):
+        self.serve("Sun, 18 Oct 2026 02:00:00 GMT")
+        manager = self.manager()
+        manager.set_current_epg()
+        self.assertEqual(self.stored_date(manager), datetime(2026, 10, 18, 2, 0, 0))
 
 
 if __name__ == "__main__":

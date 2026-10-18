@@ -158,13 +158,87 @@ class CachedContentTests(unittest.TestCase):
         self.assertEqual(set(cached["Portal"]), {"itv", "vod", "series"})
 
 
+class LoadedContentTests(unittest.TestCase):
+    def test_a_group_added_while_the_worker_reads_does_not_break_it(self):
+        from services.search import iter_items
+
+        content = {"contents": {"g1": [{"name": "A"}], "g2": [{"name": "B"}]}}
+        seen = []
+        for item in iter_items(content):
+            seen.append(item["name"])
+            content["contents"]["g3"] = [{"name": "C"}]  # the GUI thread loads a group
+        self.assertEqual(seen, ["A", "B"])
+
+    def test_a_section_added_while_the_loader_reads_does_not_break_it(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = SimpleNamespace(
+            get_config_dir=lambda: directory.name,
+            selected_provider_name="P",
+            prefer_https=False,
+            ssl_verify=True,
+        )
+        manager = ProviderManager(config)
+        self.addCleanup(manager._cache_writer.shutdown, wait=True)
+        manager.providers = [{"name": "P", "type": "XTREAM", "url": "https://example.test/b"}]
+
+        class Meanwhile(str):
+            """A key that adds a section to its dict when the loader compares it (as the GUI
+            thread could between two of the loader's steps)."""
+
+            target: dict = {}
+
+            def __ne__(self, other):
+                self.target.setdefault("series", {})
+                return str.__ne__(self, other)
+
+            __hash__ = str.__hash__
+
+        class Growing(dict):
+            pass
+
+        grown = Growing({Meanwhile("itv"): [{"name": "A"}], "vod": [{"name": "B"}]})
+        Meanwhile.target = grown
+        held = {"P": grown}
+        found = dict(manager.get_all_providers_cached_content(held))
+        self.assertEqual(set(found["P"]), {"itv", "vod"})
+
+    def test_a_providers_content_in_memory_is_not_read_from_disk_again(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        config = SimpleNamespace(
+            get_config_dir=lambda: directory.name,
+            selected_provider_name="Portal",
+            prefer_https=False,
+            ssl_verify=True,
+        )
+        manager = ProviderManager(config)
+        self.addCleanup(manager._cache_writer.shutdown, wait=True)
+        manager.providers = [
+            {"name": "List", "type": "M3UPLAYLIST", "url": "https://example.test/a"},
+            {"name": "Portal", "type": "XTREAM", "url": "https://example.test/b"},
+        ]
+        disk = {"List": {"itv": [{"name": "On disk"}]}, "Portal": {"itv": [{"name": "Old"}]}}
+        held = {"Portal": {"itv": [{"name": "Held"}], "vod": [{"name": "Film"}], "_cache": {}}}
+        with mock.patch.object(
+            manager, "_load_provider_cache", side_effect=lambda p: dict(disk[p["name"]])
+        ) as load:
+            found = dict(manager.get_all_providers_cached_content(held))
+        self.assertEqual([c["name"] for c in found["Portal"]["itv"]], ["Held"])
+        self.assertEqual(set(found["Portal"]), {"itv", "vod"})
+        self.assertEqual(found["List"]["itv"][0]["name"], "On disk")
+        self.assertEqual([c.args[0]["name"] for c in load.call_args_list], ["List"])
+
+
 class FakeProviders:
     def __init__(self, caches):
         self.caches = caches
         self.calls = 0
+        self.loaded = None
 
-    def get_all_providers_cached_content(self):
+    def get_all_providers_cached_content(self, loaded=None):
         self.calls += 1
+        self.loaded = loaded
         return self.caches
 
 
@@ -183,6 +257,14 @@ class SearchWorkerTests(unittest.TestCase):
         self.assertEqual(caches, self.caches)
         self.assertEqual(titles(hits), ["Salt Roads"])
         self.assertEqual(manager.calls, 1)
+
+    def test_the_content_catalogs_hold_goes_to_the_loader(self):
+        manager = FakeProviders(self.caches)
+        held = {"P": {"vod": [{"id": "1", "name": "Salt Roads"}]}}
+        ImmediateRunner().run_worker(
+            SearchWorker(manager, "salt", loaded=held), lambda ctx, payload: None
+        )
+        self.assertIs(manager.loaded, held)
 
     def test_given_caches_skip_the_loader(self):
         manager = FakeProviders([])

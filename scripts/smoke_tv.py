@@ -20,7 +20,8 @@ Channel 3 of the playlist, and the app has time-shift consent (its buffer on dis
 to it: it must play from the loopback stream; a 4 s pause leaves it at least 3 s behind live;
 L (Go live) is live within 6 s, at most target + 0.75 s (stay-live's band) + the newest
 segment's length (the starts it can land on are a segment apart) + 0.5 s (VLC's open) behind,
-and at the end of the 6 s stay-live is closing in (rate above 1x) or inside the band; ← moves
+and at the end of the 6 s it holds there or closes in (2.1's stay-live keeps 1x inside its dead
+band and nudges only after 15 s outside it: not drifting away is enough); ← moves
 the position back 8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live;
 then Down zaps to Channel 4 (a second such source) and Up back to Channel 3 as soon as
 Channel 4's upstream delivers: each source, and both together, never had more than one
@@ -175,6 +176,11 @@ WINDOW_CHANGES = (
 SCENARIO_CHECK = "the smoke scenario runs to the end"
 # The packaged app only: everything libVLC loaded (libvlc, libvlccore, plugins) is the app's own.
 BUNDLED_VLC_CHECK = "the packaged app plays with its own libVLC and plugins"
+# 2.1: the smoke plays with hardware decoding, the default; a runner without a graphics chip
+# decodes in software (VLC falls back by itself). A picture that froze sends its stream to
+# software once, never again and again (services.picture_watch); where VLC can make no video
+# output (offscreen) no freeze is judged at all.
+DECODING_CHECK = "no stream falls back to software decoding more than once"
 
 MUTE_ENV = "QITV_SMOKE_MUTE"  # "1"/"0": dummy audio output or real sound; unset: dummy unless CI
 
@@ -197,6 +203,11 @@ FRESH_TIMELINE_MS = 2_000  # LiveSession emits its timeline every 250 ms
 GO_LIVE_MS = 6_000
 GO_LIVE_BAND_S = 0.75  # the top of stay-live's band above the target
 GO_LIVE_OPEN_S = 0.5  # VLC opening the reopened stream
+GO_LIVE_HOLD_S = 0.5  # how far the lag may rise after landing (VLC's position jitters)
+# Or holding still at the end: over its last GO_LIVE_STILL_S the lag rises at most this fast (a
+# slow runner's VLC takes longer to open, so the lag settles higher than where it landed).
+GO_LIVE_STILL_S = 3.0
+GO_LIVE_DRIFT_S_PER_S = 0.06
 HISTORY_S = 14.0  # buffered behind the position before the seek: 10 s back stays inside it
 HISTORY_TIMEOUT_MS = 20_000
 SEEK_BACK = (8.0, 12.0)  # seconds the position may move back for ← (10 s, segment-aligned)
@@ -211,7 +222,7 @@ TUNED_CHECK = f"{PIPELINE_PREFIX}{LIVE_CHANNEL} plays from the loopback time-shi
 ON_DISK_CHECK = f"{PIPELINE_PREFIX}its buffer is on disk in the timeshift directory"
 PAUSE_CHECK = f"{PIPELINE_PREFIX}a 4 s pause leaves it at least 3 s behind live"
 GO_LIVE_CHECK = (
-    f"{PIPELINE_PREFIX}Go live is live within 6 s, at most a segment past the band, and closing in"
+    f"{PIPELINE_PREFIX}Go live is live within 6 s, at most a segment past the band, and holding"
 )
 SEEK_CHECK = f"{PIPELINE_PREFIX}seeking back 10 s moves the position back 8-12 s"
 SPEED_CHECK = f"{PIPELINE_PREFIX}1.5x is applied while time-shifted"
@@ -339,6 +350,15 @@ def pip_gate_checks(directsound: bool) -> list[str]:
 
 
 # ---- the report -------------------------------------------------------------------------------
+
+
+def _slope(points: list[tuple[float, float]]) -> float:
+    """The least-squares slope of (t, value) points (0 when they share one t)."""
+    n = len(points)
+    mt = sum(t for t, _ in points) / n
+    mv = sum(v for _, v in points) / n
+    var = sum((t - mt) ** 2 for t, _ in points)
+    return sum((t - mt) * (v - mv) for t, v in points) / var if var else 0.0
 
 
 class Report:
@@ -501,7 +521,9 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool, pip: bo
         with tempfile.TemporaryDirectory(
             prefix="qitv-smoke-", ignore_cleanup_errors=True
         ) as config:
-            env = dict(os.environ, QITV_CONFIG_DIR=config)
+            # QITV_SMOKE: the app is the smoke test (CI's packaged run sets it already), so
+            # hardware decoding's watchdog judges only players that had a video output.
+            env = dict(os.environ, QITV_CONFIG_DIR=config, QITV_SMOKE="1")
             env[VLC_LOG_ENV] = str(out / VLC_LOG)
             process = subprocess.Popen(
                 _child_command(args), cwd=None if _frozen() else ROOT, env=env
@@ -1029,6 +1051,12 @@ class Driver:
         self.slot_timeline: list[tuple[float, str, dict[str, Any]]] = []  # (when, slot, state)
         self.helper_updates: list[tuple[float, str]] = []  # (when, session id)
         self.plays: dict[str, dict[str, int]] = {}  # slot -> {"play": n, "open": n}
+        # Hardware decoding's software fallbacks per stream ("<player> <url>": at most once).
+        self.froze: dict[str, int] = {}
+        for name, session in (("main", window.session), ("pip", window.pip_session)):
+            froze = getattr(session, "pictureFroze", None)
+            if froze is not None:
+                froze.connect(lambda name=name, session=session: self._froze(name, session))
         self.finished = False
         self.problem = ""
         self._steps = self._scenario()
@@ -1037,6 +1065,11 @@ class Driver:
 
     def start(self) -> None:
         self._run()
+
+    def _froze(self, name: str, session: Any) -> None:
+        stream = f"{name} {session.url}"
+        self.froze[stream] = self.froze.get(stream, 0) + 1
+        logger.info("The %s player's picture froze: it decodes in software now", name)
 
     def _run(self) -> None:
         try:
@@ -1427,7 +1460,7 @@ class Driver:
         self._capture(PIPELINE_SCREENSHOTS[0])  # Space shows the transport: the time-shift bar
 
         # 4. Go live (L): live within 6 s, at most a segment past stay-live's band (plus VLC's
-        # open), and closing in by the end of the 6 s. VLC's position jitters by about half a
+        # open), and still there or closer by the end of the 6 s. VLC's position jitters by about half a
         # second, so the lag is judged against bounds, not step by step.
         report.step("pipeline 4. Go live")
         pressed = time.monotonic()
@@ -1534,7 +1567,19 @@ class Driver:
             ((t, s) for t, s in window if s["mode"] == "live" and s["lag"] <= bound), None
         )
         last_t, last = window[-1]
-        closing = last["rate"] > 1.0 or last["lag"] <= target + GO_LIVE_BAND_S
+        tail = [(t, float(s["lag"])) for t, s in window if t >= last_t - GO_LIVE_STILL_S]
+        still = len(tail) >= 4 and _slope(tail) <= GO_LIVE_DRIFT_S_PER_S
+        # Closing in, inside the band, or holding where it landed or settled (2.1: 1x inside the
+        # dead band, a nudge only after 15 s outside it): never drifting away from live.
+        closing = (
+            last["rate"] > 1.0
+            or last["lag"] <= target + GO_LIVE_BAND_S
+            or (
+                landed is not None
+                and last["lag"] <= bound
+                and (last["lag"] <= landed[1]["lag"] + GO_LIVE_HOLD_S or still)
+            )
+        )
         lags = [round(float(s["lag"]), 3) for _, s in window]
         lowest = min(lags)
         facts["go_live"] = {
@@ -1562,7 +1607,7 @@ class Driver:
         detail = (
             f"{arrived} ({bounds}); min lag {lowest:.3f}; after {last_t:.2f} s lag "
             f"{last['lag']:.3f}, rate {last['rate']}, mode {last['mode']}"
-            f"{'' if closing else ' (not closing in)'}; lags: {lags}"
+            f"{'' if closing else ' (drifting away)'}; lags: {lags}"
         )
         return landed is not None and closing, detail
 
@@ -2069,6 +2114,9 @@ class Driver:
         report.data["libvlc_loaded"] = facts
         if _frozen():
             report.check(BUNDLED_VLC_CHECK, "error" not in facts and _bundled(facts), facts)
+        hardware = self.window.config_manager.hardware_decoding
+        report.data["decoding"] = {"hardware": hardware, "software_fallbacks": dict(self.froze)}
+        report.check(DECODING_CHECK, all(n <= 1 for n in self.froze.values()), self.froze)
         report.data["close_requested_at"] = time.time()
         report.save()
         self.window.close()

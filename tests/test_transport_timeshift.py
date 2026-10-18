@@ -222,7 +222,7 @@ class TimeShiftCase(unittest.TestCase):
         t = self.make()
         t.show_timeshift("104", "Nature")
         t.update_timeline(at_edge(), PROGRAMME)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.9 s behind source"))
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 1 s behind source"))
         layout = t._layout()
         self.assertNotIn("seek", layout)
         self.assertNotIn("golive", layout)
@@ -235,13 +235,46 @@ class TimeShiftCase(unittest.TestCase):
         t = self.make()
         t.show_timeshift("104", "Nature")
         t.update_timeline(at_edge(lag=3.2, rate=1.05), PROGRAMME)
-        self.assertEqual(t.texts()[1], "Stay live ● 3.2 s behind source · catching up 1.05×")
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 3 s behind source · catching up 1.05×")
         t.update_timeline(at_edge(lag=2.6, rate=1.0), PROGRAMME)
-        self.assertEqual(t.texts()[1], "Stay live ● 2.6 s behind source")
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 2.5 s behind source")
         t.show_live_edge(3.0, True)
         self.assertIn("catching up", t.texts()[1])
         t.show_live_edge(0.9, False)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.9 s behind source"))
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 1 s behind source"))
+
+    def test_the_indicator_shows_the_settled_lag_and_the_nudge_not_its_ramp(self):
+        # 2.1: the session's "shown" lag (settled, in half seconds) is what the row reads, and
+        # a nudge reads as the rate it ramps to while the rate steps there and back.
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        t.update_timeline(dict(at_edge(lag=7.3), shown=7.0), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 7 s behind source")
+        for rate in (1.01, 1.02, 1.03, 1.02, 1.01):
+            t.update_timeline(dict(at_edge(lag=8.6, rate=rate), shown=8.5, nudge=1.03), PROGRAMME)
+            self.assertEqual(t.texts()[1], "Stay live ● ≈ 8.5 s behind source · catching up 1.03×")
+        t.update_timeline(dict(at_edge(lag=3.1, rate=0.98), shown=3.0, nudge=0.95), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 3 s behind source · adding buffer 0.95×")
+        t.update_timeline(dict(at_edge(lag=7.3, rate=1.0), shown=7.5, nudge=1.0), PROGRAMME)
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 7.5 s behind source")
+
+    def test_the_dot_is_green_only_at_normal_speed(self):
+        # 2.1: amber whenever stay-live's rate is not 1x, a slower one (0.95x) included.
+        t = self.make()
+        t.show_timeshift("104", "Nature")
+        for rate, nudge, colour in (
+            (1.0, 1.0, PALETTE.ok),
+            (0.95, 0.95, PALETTE.warn),
+            (0.99, 0.95, PALETTE.warn),  # ramping out of a nudge: still amber
+            (1.03, 1.03, PALETTE.warn),
+            (1.0, 1.0, PALETTE.ok),
+        ):
+            with self.subTest(rate=rate, nudge=nudge):
+                t.update_timeline(dict(at_edge(lag=6.0, rate=rate), nudge=nudge), PROGRAMME)
+                colors = self.dot_colors(t)
+                self.assertIn(colour.lower(), colors)
+                other = PALETTE.warn if colour == PALETTE.ok else PALETTE.ok
+                self.assertNotIn(other.lower(), colors)
 
     def test_auto_shows_the_lag_and_says_when_its_target_was_adjusted(self):
         # 2.0.2: under Auto latency the row shows the measured lag, and "adjusted" once the
@@ -250,19 +283,19 @@ class TimeShiftCase(unittest.TestCase):
         t.show_timeshift("104", "Nature")
         auto = {"auto": True, "target": 2.5, "adjusted": False}
         t.update_timeline(dict(at_edge(lag=2.6), **auto), PROGRAMME)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 2.6 s behind"))
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 2.5 s behind"))
         auto = {"auto": True, "target": 4.5, "adjusted": True}
         t.update_timeline(dict(at_edge(lag=7.2), **auto), PROGRAMME)
-        self.assertEqual(t.texts()[1], "Stay live ● 7.2 s behind · adjusted")
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 7 s behind · adjusted")
         t.update_timeline(dict(at_edge(lag=7.0, rate=1.05), **auto), PROGRAMME)
-        self.assertEqual(t.texts()[1], "Stay live ● 7.0 s behind · adjusted · catching up 1.05×")
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 7 s behind · adjusted · catching up 1.05×")
         t.update_timeline(dict(at_edge(lag=4.9), stalled=True, **auto), PROGRAMME)
         self.assertEqual(t.texts()[1], "Stay live ● Reconnecting…")
         t.update_timeline(dict(at_edge(lag=2.6), target=2.5), PROGRAMME)  # a fixed latency
-        self.assertEqual(t.texts()[1], "Stay live ● 2.6 s behind source")
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 2.5 s behind source")
         t.update_timeline(dict(at_edge(lag=4.9), **auto), PROGRAMME)
         t.show_live_edge(1.2, False)  # no timeline: the lag, as before
-        self.assertEqual(t.texts()[1], "Stay live ● 1.2 s behind source")
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 1 s behind source")
 
     def test_a_narrow_transport_shortens_the_auto_text_as_the_others(self):
         t = self.make()
@@ -299,7 +332,7 @@ class TimeShiftCase(unittest.TestCase):
         self.assertNotIn(PALETTE.ok.lower(), colors)
         self.assertIn(PALETTE.warn.lower(), colors)
         t.update_timeline(dict(at_edge(lag=2.6), stalled=False), PROGRAMME)
-        self.assertEqual(t.texts()[1], "Stay live ● 2.6 s behind source")
+        self.assertEqual(t.texts()[1], "Stay live ● ≈ 2.5 s behind source")
 
     def test_a_stall_while_shifted_keeps_the_bar(self):
         t = self.shifted()
@@ -310,7 +343,7 @@ class TimeShiftCase(unittest.TestCase):
         t = self.shifted()
         t.show_live_edge(1.2, False)
         self.assertNotIn("seek", t._layout())
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 1.2 s behind source"))
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 1 s behind source"))
 
     def test_live_mode_shows_the_edge_row_whatever_the_lag(self):
         # After Go live on a long-GOP source the lag sits above the target while stay-live closes it.
@@ -319,7 +352,7 @@ class TimeShiftCase(unittest.TestCase):
         layout = t._layout()
         self.assertNotIn("seek", layout)
         self.assertNotIn("golive", layout)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 20.0 s behind source · catching up 1.1×"))
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 20 s behind source · catching up 1.1×"))
         t.update_timeline(at_edge(lag=20.0), PROGRAMME)
         self.assertNotIn("seek", t._layout())
         self.assertNotIn("catching up", t.texts()[1])
@@ -348,13 +381,13 @@ class TimeShiftCase(unittest.TestCase):
         t = self.shifted()
         for bad in (float("inf"), float("nan"), -4.0):
             t.update_timeline(at_edge(lag=bad), PROGRAMME)
-            self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.0 s behind source"), bad)
+            self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 0 s behind source"), bad)
             self.assertFalse(t.grab().isNull())
             t.update_timeline(timeline(lag=bad), PROGRAMME)
             self.assertEqual(t.texts()[1], "−00:00 behind live", bad)
             self.assertFalse(t.grab().isNull())
         t.show_live_edge(float("inf"), False)
-        self.assertEqual(t.texts(), ("LIVE", "Stay live ● 0.0 s behind source"))
+        self.assertEqual(t.texts(), ("LIVE", "Stay live ● ≈ 0 s behind source"))
 
     def test_tick_labels_elide_and_never_overlap(self):
         t = self.make()

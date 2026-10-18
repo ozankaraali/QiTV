@@ -30,7 +30,9 @@ A session whose input is over (it ended, or it failed for good) is not reopened,
 restart never opens a second provider connection behind the GUI's back. It stays known
 until `close_session`; its buffer is gone after a death, but it hears nothing about it.
 
-`sessionFailed(sid, kind, message)` carries a fixed message; each kind has one meaning:
+`sessionFailed(sid, kind, message)` carries a fixed message (a final failure is logged by its
+kind and the HTTP status the helper sends after the message, 2.1: why a channel plays
+directly); each kind has one meaning:
 - "disk": a notice, the only non-final kind. The disk buffer failed; the session goes on in
   RAM, and so does a reopen.
 - "unsupported", "network", "tls", "timeout", "http": the input ended for good (the stream
@@ -108,7 +110,7 @@ def _fallback_bytes(ring: dict[str, Any]) -> int:
 class _Record:
     """The supervisor's view of a session: what reopens it and what it reported."""
 
-    command: _Command  # ("open", sid, url, headers, verify_ssl, ring, live_delay)
+    command: _Command  # ("open", sid, url, headers, verify_ssl, ring, live_delay, start)
     sent: bool = False  # the current helper has the session
     failed: bool = False  # a final failure was reported for the current or last helper
     over: bool = False  # its input ended or its source failed for good: never reopened
@@ -256,7 +258,7 @@ class _Supervisor(QThread):
         if record.closing:
             return  # the GUI closed it: only "closed" is still of interest
         if name == "error":
-            if len(message) != 4:
+            if len(message) not in (4, 5):  # an HTTP failure's status last (2.1)
                 return
             if message[2] == "disk":
                 # The only non-final error: the helper went on in RAM, and so does a reopen.
@@ -265,6 +267,13 @@ class _Supervisor(QThread):
             else:
                 # Final, "crashed" included: a reopen would only retry what failed.
                 record.failed = record.over = True
+                # Why the channel will play directly: its kind and HTTP status, never a URL.
+                status = message[4] if len(message) == 5 else None
+                _LOG.info(
+                    "A live session's input failed for good: %s%s.",
+                    message[2],
+                    f", HTTP {status}" if isinstance(status, int) else "",
+                )
         elif name == "ended":
             record.over = True
         elif name not in ("state", "ready"):
@@ -510,8 +519,13 @@ class LiveEngine(QObject):
         max_bytes: int,
         live_delay: float = 6.0,
         ram_bytes: int | None = None,
+        target: float | None = None,
+        extra: float = 0.0,
     ) -> str:
-        """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None)."""
+        """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None).
+        `target` and `extra`: the target the session steers to and what it adds to it (Auto's
+        learned extra), so an HLS source starts far enough back for it (2.1 stage 3); without
+        `target`, `live_delay` seconds back."""
         sid = secrets.token_hex(8)
         if self._shut:
             return sid
@@ -521,7 +535,17 @@ class LiveEngine(QObject):
             if ram_bytes is not None:
                 ring["ram_bytes"] = int(ram_bytes)
         self._sessions[sid] = _View()
-        command = ("open", sid, url, dict(headers), bool(verify_ssl), ring, float(live_delay))
+        command: _Command = (
+            "open",
+            sid,
+            url,
+            dict(headers),
+            bool(verify_ssl),
+            ring,
+            float(live_delay),
+        )
+        if target is not None:
+            command = (*command, {"target": float(target), "extra": float(extra)})
         self._commands.put(command)
         return sid
 
@@ -533,6 +557,8 @@ class LiveEngine(QObject):
         self._commands.put(("close", sid))
 
     def spans(self, sid: str) -> list[Span]:
+        """The session's closed segments, oldest first; each says how cleanly playback starts
+        at it (`Span.start_quality`)."""
         view = self._sessions.get(sid)
         return list(view.spans) if view is not None else []
 
@@ -594,7 +620,8 @@ class LiveEngine(QObject):
             return
         elif name == "state":
             _, _, snapshot, first, additions = message
-            # Ported from main: drop spans older than `first`, append the additions.
+            # Ported from main: drop spans older than `first`, append the additions. An
+            # addition without a start quality (four fields) starts on a keyframe, as before.
             spans = view.spans
             if first is None:
                 spans.clear()

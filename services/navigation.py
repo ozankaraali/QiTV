@@ -3,19 +3,36 @@
 The sources column ends with three action rows, Settings, Add provider and Open file: rows to
 choose, not providers or layers to open (the drawer hands them to the shell, as it does the
 Library's sections).
+
+In "All providers" each provider's groups follow a heading row with its name; a provider with
+no groups there yet has a notice row under its heading instead ("Loading…" while it sets up or
+its list comes, or why its setup failed). One provider's setup ending there is new content, not
+a change of source: the path stays where it is.
 """
 
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass
+import itertools
 import logging
+import threading
 from typing import Any, Callable, Optional, cast
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from services import favorites
-from services.catalog import PROVIDER_LOADING_MESSAGE
+from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
+from services.provider_ids import (
+    ALL_PROVIDERS,
+    ALL_PROVIDERS_TITLE,
+    mixed_group_id,
+    provider_of,
+    split_group_id,
+    with_provider,
+)
+from services.text_fold import fold_all
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +46,10 @@ FAVORITES_GROUP = "@favorites"
 RECENT_GROUP = "@recent"
 _RECENT_LIMIT = 20
 _MEMO_LIMIT = 64  # memoized child lists kept (least recently used are dropped)
+FOLD_AHEAD_MS = 400  # a long list folds its titles this long after it is shown
+LAZY_ROWS = 2000  # a list of items this long gets its nodes made on demand (see NodeSeq)
+LOADING_NOTICE = "Loading…"  # under a provider's heading in "All providers" while it loads
+_UNREADABLE = ("header", "notice")  # rows that only label: never opened or played
 
 
 @dataclass(frozen=True)
@@ -39,11 +60,20 @@ class NavNode:
     payload: Any = None
     count: Optional[int] = None
 
-    def __hash__(self):  # payload dicts are unhashable; identity is layer + key
-        return hash((self.layer, self.key))
+    def _identity(self) -> tuple:
+        # Payload dicts are unhashable: identity is layer + key, and for a channel or title
+        # its provider (the same id at two providers is two rows in a mixed list).
+        return (
+            self.layer,
+            self.key,
+            provider_of(self.payload) if isinstance(self.payload, dict) else "",
+        )
+
+    def __hash__(self):
+        return hash(self._identity())
 
     def __eq__(self, other):
-        return isinstance(other, NavNode) and (self.layer, self.key) == (other.layer, other.key)
+        return isinstance(other, NavNode) and self._identity() == other._identity()
 
 
 ACTION_ROWS = (  # the drawer paints their icons (a gear, a plus, a file)
@@ -89,6 +119,234 @@ def _item_node(item: dict, layer: str = "item") -> NavNode:
     return NavNode(layer, key, item_title(item, episode=episode), item)
 
 
+class _Folded(QObject):
+    folded = Signal(object)  # the token of the NodeSeq whose titles are folded
+
+
+_fold_notifier: Optional[_Folded] = None
+
+
+def fold_notifier() -> _Folded:
+    """Emits `folded(token)` on the GUI thread when a long list's titles are folded (the token
+    tells which list). Made on first use, which must be on the GUI thread (the drawer makes it):
+    the signal is queued to it from the fold's. It lives as long as the app, so a fold thread
+    never lets go of the last reference to it."""
+    global _fold_notifier
+    if _fold_notifier is None:
+        _fold_notifier = _Folded()
+    return _fold_notifier
+
+
+class _Fold:
+    """A list's folded titles, made once under a lock (by the fold thread, or by a caller that
+    waits for it). Plain data: the fold thread holds this, never the NodeSeq."""
+
+    __slots__ = ("titles", "lock")
+
+    def __init__(self, titles: Optional[list[str]]):
+        self.titles = titles
+        self.lock = threading.Lock()
+
+    def make(self, items: list[dict], wait: bool = True) -> Optional[list[str]]:
+        if not self.lock.acquire(blocking=wait):
+            return None
+        try:
+            if self.titles is None:
+                titles = [i.get("name") or i.get("title") or "Untitled" for i in items]
+                try:
+                    self.titles = fold_all(titles)
+                except TypeError:  # a title that is not text
+                    self.titles = fold_all([str(title) for title in titles])
+            return self.titles
+        finally:
+            self.lock.release()
+
+
+def _fold_and_tell(fold: _Fold, items: list[dict], token: int) -> None:
+    """The fold thread: folds `items`' titles into `fold`, then tells the GUI thread. It holds
+    neither the NodeSeq nor anything Qt it could be the last to let go of: a list replaced
+    while it folds goes on the GUI thread, then and there."""
+    try:
+        fold.make(items)
+    except Exception:
+        logger.exception("Folding the titles failed")  # a later filter tries again
+        return
+    notifier = _fold_notifier  # (made on the GUI thread, and kept: never dropped here)
+    if notifier is not None:
+        notifier.folded.emit(token)
+
+
+class NodeSeq(Sequence):
+    """The item nodes of a long list (one provider's 57,000 channels, or all four's 200,000),
+    made when a row is asked for: the drawer shows a screenful at a time, and making every
+    node up front cost seconds. It reads like a list of NavNodes and is not changed once made.
+
+    `items` are the dicts behind the rows (the models take them as they are); `matching()` is
+    the same list narrowed by the drawer's filter.
+    """
+
+    _tokens = itertools.count(1)
+
+    def __init__(
+        self,
+        items: list[dict],
+        origin: Optional[list[int]] = None,
+        folded: Optional[list[str]] = None,
+    ):
+        self.items = items
+        self.token = next(self._tokens)  # tells one list from another without comparing rows
+        self._origin = origin  # each item's row in the list this one was narrowed from
+        self._fold = _Fold(folded)
+        self._folding: Optional[threading.Thread] = None  # the last fold thread started
+        self._fold_due = False
+        self._made: dict[int, NavNode] = {}
+        self._rows: dict[NavNode, int] = {}  # the nodes made so far -> their rows
+        self._absent: set[NavNode] = set()  # nodes looked for here and not found
+        self._narrowed: Optional[tuple[str, NodeSeq]] = None
+        self._digits: Optional[int] = None
+        self._numbered: Optional[bool] = None
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, row):  # type: ignore[override]
+        if isinstance(row, slice):
+            return [self[i] for i in range(*row.indices(len(self.items)))]
+        if row < 0:
+            row += len(self.items)
+        node = self._made.get(row)
+        if node is None:
+            if not 0 <= row < len(self.items):
+                raise IndexError(row)
+            node = self._made[row] = _item_node(self.items[row])
+            self._rows[node] = row
+        return node
+
+    def __iter__(self):
+        for row, item in enumerate(self.items):
+            yield self._made.get(row) or _item_node(item)
+
+    def source_row(self, row: int) -> int:
+        """Row `row`'s position in the list this one was narrowed from (its own if none)."""
+        return self._origin[row] if self._origin is not None else row
+
+    def row_of(self, node: NavNode) -> Optional[int]:
+        """The row holding `node` (any node of the same item), None if it is not listed."""
+        row = self._rows.get(node)
+        if row is not None or node.layer != "item" or node in self._absent:
+            return row
+        # A node from an older list: find it by its id and provider, and keep it as made.
+        provider = provider_of(node.payload) if isinstance(node.payload, dict) else ""
+        for at, item in enumerate(self.items):
+            if item_key(item) == node.key and provider_of(item) == provider:
+                return self._rows.setdefault(self[at], at)
+        self._absent.add(node)
+        return None
+
+    def find_focus(self, wanted: "str | tuple[str, str]") -> Optional[NavNode]:
+        """The first row an id, or a (provider, id) pair, names (without making every node)."""
+        provider, key = wanted if isinstance(wanted, tuple) else ("", wanted)
+        for row, item in enumerate(self.items):
+            if item_key(item) == key and (not provider or provider_of(item) == provider):
+                return self[row]
+        return None
+
+    def matching(self, needle: str) -> "NodeSeq":
+        """The rows whose folded title contains `needle` (already folded); typing on narrows
+        the rows of the filter before."""
+        if not needle:
+            return self
+        if self._narrowed is not None:
+            before, seq = self._narrowed
+            if before == needle:
+                return seq
+            if needle.startswith(before):
+                narrowed = seq.matching(needle)
+                self._narrowed = (needle, narrowed)
+                return narrowed
+        if self._folded is None:
+            # Never folded on the GUI thread (200,000 titles): start it in the background if
+            # it has not (or a fold failed), and show the list as it is until it ends.
+            self._fold_in_background()
+            if self._folded is None:
+                return self
+        folded = self._folded
+        rows = [row for row, title in enumerate(folded) if needle in title]
+        narrowed = NodeSeq(
+            [self.items[row] for row in rows],
+            [self.source_row(row) for row in rows],
+            [folded[row] for row in rows],
+        )
+        self._narrowed = (needle, narrowed)
+        return narrowed
+
+    def fold_ahead(self, after_ms: int = FOLD_AHEAD_MS) -> None:
+        """Fold the titles in the background a moment from now (not while the list is still
+        opening), so the first letter typed to filter finds them done: a quarter of a second
+        for 200,000 channels. Asking again starts nothing."""
+        if self._folded is None and not self._fold_under_way() and not self._fold_due:
+            self._fold_due = True
+            # A bound method: the timer holds the list weakly, so one dropped meanwhile (the
+            # drawer moved on) is never folded. A lambda here would keep it until then.
+            QTimer.singleShot(after_ms, self._fold_in_background)
+
+    def _fold_in_background(self) -> None:
+        """Start folding the titles in a thread, unless they are folded or a fold runs. The
+        thread is given the titles and where to put them, never this list (see
+        _fold_and_tell); `fold_notifier()` tells when it ends."""
+        if self._folded is None and not self._fold_under_way():
+            self._folding = threading.Thread(
+                target=_fold_and_tell, args=(self._fold, self.items, self.token), daemon=True
+            )
+            self._folding.start()
+
+    def _fold_under_way(self) -> bool:
+        return self._folding is not None and self._folding.is_alive()
+
+    @property
+    def _folded(self) -> Optional[list[str]]:
+        return self._fold.titles
+
+    def _folded_titles(self, wait: bool = True) -> Optional[list[str]]:
+        """The folded titles, folded here if no thread has (waiting for one that folds)."""
+        return self._fold.make(self.items, wait)
+
+    def numbered(self) -> bool:
+        """Whether any channel has a number (else the position stands in for it)."""
+        if self._numbered is None:
+            self._numbered = any(_number(item) for item in self.items)
+        return self._numbered
+
+    def number_digits(self) -> int:
+        """The most digits any channel's number has."""
+        if self._digits is None:
+            numbers = {item.get("number") for item in self.items}
+            self._digits = max((len(text) for text in map(_text, numbers) if text), default=0)
+        return self._digits
+
+
+def _text(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _number(item: dict) -> str:
+    return _text(item.get("number"))
+
+
+def payloads(nodes: Sequence) -> list[dict]:
+    """The dicts behind a column's nodes (the channels of a group)."""
+    if isinstance(nodes, NodeSeq):
+        return list(nodes.items)
+    return [n.payload for n in nodes if isinstance(n.payload, dict)]
+
+
+def _item_nodes(items: list[dict]) -> "Sequence[NavNode]":
+    """Nodes for a group's items: a long list makes them on demand."""
+    if len(items) >= LAZY_ROWS:
+        return NodeSeq(items)
+    return [_item_node(i) for i in items]
+
+
 class NavModel(QObject):
     changed = Signal()
     # A message for the shell to toast, e.g. that a saved catalog is shown because its
@@ -107,7 +365,11 @@ class NavModel(QObject):
         self._provider_errors: dict[str, str] = {}  # providers whose last setup failed
         self._requested_sections: set[str] = set()  # asked for, neither ready nor failed yet
         self._ready_sections: set[str] = set()
+        # All providers: sections a provider refused while it set up (asked again when it is
+        # ready), the others' groups staying listed meanwhile.
+        self._refused_sections: set[str] = set()
         self._pending_group: Optional[tuple[str, str]] = None
+        self._revealed: Optional[dict] = None  # the row the list opened on (see reveal)
         # children() results, keyed by parent and stamped with what they depend on.
         self._memo: OrderedDict[tuple, tuple[tuple, Any]] = OrderedDict()
         self._events = 0  # bumped by every catalog event handled here, and by retry()
@@ -129,7 +391,11 @@ class NavModel(QObject):
     # --- structure ---------------------------------------------------------------------
     def _source(self) -> NavNode:
         name = self.catalog.current_provider_name()
-        return NavNode("source", name, name, name)
+        return NavNode("source", name, ALL_PROVIDERS_TITLE if name == ALL_PROVIDERS else name, name)
+
+    def all_mode(self) -> bool:
+        """Whether the channel list shows every provider (the "All providers" source)."""
+        return self.catalog.current_provider_name() == ALL_PROVIDERS
 
     def section_of(self, node: Optional[NavNode] = None) -> Optional[str]:
         chain = self._path if node is None else self._path + [node]
@@ -142,7 +408,12 @@ class NavModel(QObject):
         self, parent: Optional[NavNode]
     ) -> Optional[list[NavNode]]:
         if parent is None:
-            sources = [NavNode("source", n, n, n) for n in self.catalog.provider_names()]
+            names = self.catalog.provider_names()
+            sources = [NavNode("source", n, n, n) for n in names]
+            if len(names) >= 2:  # one provider has nothing to mix
+                sources.insert(
+                    0, NavNode("source", ALL_PROVIDERS, ALL_PROVIDERS_TITLE, ALL_PROVIDERS)
+                )
             return sources + list(ACTION_ROWS)
         if parent.layer == "source":
             return [
@@ -172,10 +443,32 @@ class NavModel(QObject):
         if ("section", parent.key) in self._errors:
             return []
         pinned = self._pinned_groups() if parent.key == "live" else []
-        groups = [
-            NavNode("group", g.id, g.title, g, g.count) for g in self.catalog.groups(parent.key)
-        ]
+        groups: list[NavNode] = []
+        listed = self.catalog.groups(parent.key)
+        for at, g in enumerate(listed):
+            if not g.header:
+                groups.append(NavNode("group", g.id, g.title, g, g.count))
+                continue
+            groups.append(NavNode("header", g.id, g.title, g))  # a provider's heading
+            if at + 1 == len(listed) or listed[at + 1].header:  # none of its groups yet
+                notice = self._provider_notice(g.provider, parent.key)
+                if notice:
+                    groups.append(NavNode("notice", f"{g.id}notice", notice, g))
         return pinned + groups
+
+    def _provider_notice(self, name: str, section: str) -> str:
+        """All providers: the row under the heading of a provider without groups: why its
+        setup (or its list) failed, "Loading…" while its list is not loaded, else none."""
+        error = self._provider_errors.get(name)
+        section_error = getattr(self.catalog, "section_error", None)
+        if not error and section_error is not None:
+            error = section_error(name, section)
+        if error:
+            return error
+        loaded = getattr(self.catalog, "provider_loaded", None)
+        if loaded is None or loaded(name, section):
+            return ""
+        return LOADING_NOTICE
 
     def _series_children(self, parent: NavNode) -> Optional[list[NavNode]]:
         if parent.layer == "item" and self.section_of(parent) == "series":
@@ -209,7 +502,7 @@ class NavModel(QObject):
             if key and key[0] == "group":
                 return self._load(key, lambda: self.catalog.request_group(section, group.key))
             return self._load(("section", section), lambda: self.catalog.request_section(section))
-        return [_item_node(i) for i in items]
+        return _item_nodes(items)
 
     # --- memoization -------------------------------------------------------------------
     def _data_version(self) -> object:
@@ -218,7 +511,7 @@ class NavModel(QObject):
         return version() if callable(version) else self._events
 
     def _favorites_fingerprint(self) -> tuple:
-        return tuple(favorites.names(self.config))
+        return favorites.fingerprint(self.config)
 
     def _history_fingerprint(self) -> tuple:
         history = self.config.watch_history or []
@@ -238,7 +531,7 @@ class NavModel(QObject):
         entry = self._memo.get(key)
         if entry is not None and entry[0] == deps:
             self._memo.move_to_end(key)
-            return list(entry[1])
+            return entry[1] if isinstance(entry[1], NodeSeq) else list(entry[1])
         value = compute()
         if value is None:
             self._memo.pop(key, None)
@@ -247,7 +540,7 @@ class NavModel(QObject):
         self._memo.move_to_end(key)
         while len(self._memo) > _MEMO_LIMIT:
             self._memo.popitem(last=False)
-        return list(value)
+        return value if isinstance(value, NodeSeq) else list(value)
 
     def _load(self, key: tuple, request) -> Optional[list[NavNode]]:
         if key in self._errors:
@@ -262,7 +555,7 @@ class NavModel(QObject):
             return ("section", node.key)
         if node.layer == "group":
             section = self.section_of(node) or "live"
-            if self.catalog.provider_type() == "STB":
+            if self._group_is_fetched_alone(node.key):
                 return ("group", section, node.key)
             return ("section", section)
         if node.layer == "item":
@@ -272,6 +565,19 @@ class NavModel(QObject):
             return ("episodes", series.key, node.key) if series else None
         return None
 
+    def _group_is_fetched_alone(self, group_id: str) -> bool:
+        """Whether a group's items are fetched on their own (an STB provider's), not with
+        the whole section; in "All providers" the group's id names its provider."""
+        if self.catalog.provider_type() != "ALL":
+            return self.catalog.provider_type() == "STB"
+        name, own_id = split_group_id(group_id)
+        if not name or not own_id:
+            return False  # the mixed All, or a provider's heading: the sections as a whole
+        try:
+            return self.catalog.provider_entry(name).get("type") == "STB"
+        except KeyError:
+            return False
+
     def load_error(self, node: NavNode) -> Optional[str]:
         """Why `node`'s children failed to load; None while they may still come."""
         key = self._node_key(node)
@@ -280,7 +586,9 @@ class NavModel(QObject):
 
     def is_loading(self, node: NavNode) -> bool:
         """True while `node`'s children are on their way, or while a provider sets up."""
-        if self.catalog.is_loading():
+        # In "All providers" one provider's setup must not hold the others' lists back: a
+        # section is loading until some provider has answered for it.
+        if not self.all_mode() and self.catalog.is_loading():
             return True
         key = self._node_key(node)
         if key is None:
@@ -294,11 +602,9 @@ class NavModel(QObject):
         return self._provider_errors.get(node.key) if node.layer == "source" else None
 
     def needs_setup(self, node: NavNode) -> bool:
-        """Opening this source starts a provider setup: another provider, or a failed one."""
+        """Opening this source starts a provider setup again: its last one failed."""
         if node.layer != "source":
             return False
-        if node.key != self.catalog.current_provider_name():
-            return True
         return node.key in self._provider_errors and not self.catalog.is_loading()
 
     def retry(self, node: NavNode) -> None:
@@ -316,10 +622,13 @@ class NavModel(QObject):
         self.changed.emit()
 
     def _all_live_items(self) -> list[dict]:
+        """Every live channel once; the same id at two providers is two channels."""
         seen, result = set(), []
         for group in self.catalog.groups("live"):
+            if group.header:
+                continue
             for item in self.catalog.items("live", group.id) or []:
-                key = item_key(item)
+                key = (provider_of(item), item_key(item))
                 if key not in seen:
                     seen.add(key)
                     result.append(item)
@@ -331,26 +640,31 @@ class NavModel(QObject):
         return cast(list[dict], self._cached(("@favorites",), deps, self._compute_favorites))
 
     def _recent_items(self) -> list[dict]:
-        deps = (self._history_fingerprint(), self.catalog.current_provider_name())
+        deps = (self._history_fingerprint(), tuple(self.catalog.provider_names()))
         return cast(list[dict], self._cached(("@recent",), deps, self._compute_recent))
 
     def _compute_favorites(self) -> list[dict]:
-        kept = set(favorites.names(self.config))
-        if not kept:
+        is_kept = favorites.matcher(self.config)
+        if is_kept is None:
             return []
-        return [i for i in self._all_live_items() if favorites.favorite_key(i) in kept]
+        return [i for i in self._all_live_items() if is_kept(i)]
 
     def _compute_recent(self) -> list[dict]:
-        provider = self.catalog.current_provider_name()
+        # What was watched at any provider in the list, newest first (a removed provider's
+        # entries can no longer play).
+        known = set(self.catalog.provider_names())
         seen, result = set(), []
         for entry in self.config.watch_history or []:
-            if entry.get("provider_name") != provider or entry.get("item_type") != "channel":
+            provider = entry.get("provider_name")
+            if provider not in known or entry.get("item_type") != "channel":
                 continue
             item = entry.get("item_data") or {}
-            key = item_key(item)
+            key = (provider, item_key(item))
             if key not in seen:
                 seen.add(key)
-                result.append(item)
+                # Stamped also with one provider (an entry older than 2.1 has no stamp): the
+                # drawer finds the channel that plays by its provider and id.
+                result.append(with_provider(item, provider))
             if len(result) >= _RECENT_LIMIT:
                 break
         return result
@@ -369,6 +683,15 @@ class NavModel(QObject):
             pinned.append(NavNode("group", RECENT_GROUP, "⟲ Recent", None, len(recent)))
         return pinned
 
+    def shows_provider(self, parent: Optional[NavNode]) -> bool:
+        """Whether the channels under `parent` name their provider: ★ Favorites and
+        ⟲ Recent when there are several providers, and All in "All providers"."""
+        if parent is None or parent.layer != "group" or len(self.catalog.provider_names()) < 2:
+            return False
+        if parent.key in (FAVORITES_GROUP, RECENT_GROUP):
+            return True
+        return parent.key == ALL_GROUP_ID and self.all_mode()
+
     # --- movement ----------------------------------------------------------------------
     def is_playable(self, node: NavNode) -> bool:
         if node.layer == "episode":
@@ -376,13 +699,17 @@ class NavModel(QObject):
         return node.layer == "item" and self.section_of(node) in ("live", "movies")
 
     def open(self, node: NavNode) -> None:
+        if node.layer in _UNREADABLE:
+            return  # a provider's heading (or its notice) in the mixed lists only labels
         if node.layer == "source":
-            # The current provider is set up again when its last setup failed.
-            if self.needs_setup(node):
-                self._provider_errors.pop(node.key, None)
-                self.catalog.select_provider(node.key)
-                self.providerRequested.emit(node.key)
+            # Another provider is only shown (its setup runs once, if it has not); the
+            # current one is set up again when its last setup failed. A ready provider
+            # answers at once and reopens its list, so the path is set first.
             self._path = [node]
+            if self.needs_setup(node) or node.key != self.catalog.current_provider_name():
+                self._provider_errors.pop(node.key, None)
+                self.providerRequested.emit(node.title)
+                self.catalog.select_provider(node.key)
         else:
             depth = {"section": 1, "group": 2, "item": 3, "season": 4, "episode": 5}[node.layer]
             self._path = self._path[:depth] + [node]
@@ -403,6 +730,7 @@ class NavModel(QObject):
         return True
 
     def reset_to(self, section: str = "live", group_id: Optional[str] = None) -> None:
+        self._revealed = None
         source = self._source()
         section_node = NavNode("section", section, SECTION_TITLES.get(section, section), section)
         self._path = [source, section_node]
@@ -411,6 +739,51 @@ class NavModel(QObject):
         if group_id is not None and not self._resolve_group(section, group_id):
             self._pending_group = (section, group_id)
         self.changed.emit()
+
+    def reveal(self, source: str, section: str, group_key: str, item: dict) -> None:
+        """Open the list where `item` was picked: its source, section and group (the channel
+        list opening at the big picture's channel). A source other than the page's is only
+        shown (navigation: nothing that plays stops); `revealed()` is the row to highlight.
+
+        In "All providers" a provider's own group (picked before the page showed every
+        provider) is that provider's group there; a group that does not hold `item` (a
+        number typed outside it tunes any channel) gives way to All."""
+        names = self.catalog.provider_names()
+        if source and source != self.catalog.current_provider_name():
+            if source == ALL_PROVIDERS and len(names) < 2:
+                pass  # the providers changed since: keep what the list shows
+            elif source == ALL_PROVIDERS or source in names:
+                self._provider_errors.pop(source, None)
+                self.catalog.select_provider(source)
+        group_id = group_key or ALL_GROUP_ID
+        owner = provider_of(item)
+        own_group = group_id not in (ALL_GROUP_ID, FAVORITES_GROUP, RECENT_GROUP)
+        if own_group and owner and self.all_mode() and not split_group_id(group_id)[0]:
+            group_id = mixed_group_id(owner, group_id)
+        self.reset_to(section, group_id)
+        if group_id != ALL_GROUP_ID and len(self._path) == 3 and not self._lists(item):
+            self.reset_to(section, ALL_GROUP_ID)
+        self._revealed = item
+
+    def _lists(self, item: dict) -> bool:
+        """Whether the group the path ends at lists `item` (True while its rows load): a row
+        with its key, of its provider (a row or an item without one may be any's)."""
+        nodes = self.children(self._path[-1])
+        if nodes is None:
+            return True
+        provider, key = provider_of(item), item_key(item)
+
+        def same_provider(payload: Any) -> bool:
+            theirs = provider_of(payload) if isinstance(payload, dict) else ""
+            return not provider or not theirs or theirs == provider
+
+        if isinstance(nodes, NodeSeq):
+            return any(item_key(i) == key and same_provider(i) for i in nodes.items)
+        return any(n.key == key and same_provider(n.payload) for n in nodes)
+
+    def revealed(self) -> Optional[dict]:
+        """The item the list was last opened on by reveal(); None after any other reset."""
+        return self._revealed
 
     def _request_section(self, section: str) -> None:
         """Ask for a section; it is loading until sectionReady or sectionFailed."""
@@ -472,20 +845,41 @@ class NavModel(QObject):
         self.changed.emit()
 
     def _on_section_failed(self, section: str, message: str) -> None:
+        if message == PROVIDER_LOADING_MESSAGE and self.all_mode():
+            # All providers: one provider still sets up (its part is asked again once it is
+            # ready); the others' groups stay listed.
+            self._refused_sections.add(section)
+            if any(not g.header for g in self.catalog.groups(section)):
+                return
+        elif self.all_mode():
+            self._events += 1  # a provider's notice row says why its list failed now
         # While a provider sets up, the catalog still holds the previous provider's groups:
         # that is not a failed refresh. It stays an error until providerReady clears it.
-        loading = message == PROVIDER_LOADING_MESSAGE or self.catalog.is_loading()
+        loading = message == PROVIDER_LOADING_MESSAGE or (
+            not self.all_mode() and self.catalog.is_loading()
+        )
         if not loading and self.catalog.groups(section):
             # A saved catalog could not be refreshed: keep showing it as a loaded
             # section, and say so instead of hiding it behind an error row.
             logger.info("Refreshing section %s failed; showing the saved catalog", section)
             self._on_section_ready(section)
-            title = SECTION_TITLES.get(section, section.title())
-            self.notice.emit(f"Couldn't refresh {title}; showing saved channels")
+            if self._shows_saved(section):
+                title = SECTION_TITLES.get(section, section.title())
+                self.notice.emit(f"Couldn't refresh {title}; showing saved channels")
             return
         if self._pending_group and self._pending_group[0] == section:
             self._pending_group = None
         self._fail(("section", section), message)
+
+    def _shows_saved(self, section: str) -> bool:
+        """Whether the list whose refresh just failed shows from its saved copy. In "All
+        providers" the others' groups keep the section listed: only the failing provider's
+        saved list counts (one without any has its heading's notice say why)."""
+        owner = getattr(self.catalog, "forwarding_from", None)
+        loaded = getattr(self.catalog, "provider_loaded", None)
+        if not self.all_mode() or owner is None or loaded is None or not owner():
+            return True
+        return bool(loaded(owner(), section))
 
     def _on_group_ready(self, section: str, group_id: str) -> None:
         self._settled(("group", section, group_id))
@@ -516,25 +910,73 @@ class NavModel(QObject):
         self._fail(("episodes", series_id, season_id), message)
 
     def _on_provider_failed(self, name: str, message: str) -> None:
+        if self._one_of_all(name):
+            self._settle_provider(name, ready=False)
+            self._provider_errors[name] = message or "Couldn't connect"
+            self.changed.emit()
+            return
         # Requests made for the setup's provider will never settle: none is loading now,
         # and a request refused because the setup ran is not loading either.
         self._events += 1
         self._pending.clear()
         self._requested_sections.clear()
+        self._refused_sections.clear()
         for key in [k for k, m in self._errors.items() if m == PROVIDER_LOADING_MESSAGE]:
             del self._errors[key]
         self._provider_errors[name] = message or "Couldn't connect"
         self.changed.emit()
 
     def _on_provider_ready(self, name: str) -> None:
+        if self._one_of_all(name):
+            sections = self._settle_provider(name, ready=True)
+            self._provider_errors.pop(name, None)
+            # Its lists may be new, stale or not loaded yet: the sections this list has asked
+            # for are asked of it again (the others answered already; its heading says
+            # "Loading…" meanwhile when it has no groups).
+            for section in sorted(sections):
+                self.catalog.request_section(section, provider=name)
+            self.changed.emit()
+            return
         self._memo.clear()
         self._events += 1
         self._pending.clear()
         self._requested_sections.clear()
+        self._refused_sections.clear()
         self._errors.clear()
-        self._provider_errors.clear()
+        self._provider_errors.pop(name, None)
         self._ready_sections.clear()
         self._pending_group = None
         if not self._path or self._path[0].key != name:
             self._path = [self._source()]
         self.changed.emit()
+
+    def _one_of_all(self, name: str) -> bool:
+        """Whether `name` is one provider of "All providers" (not the page's own source)."""
+        return name != ALL_PROVIDERS and self.all_mode()
+
+    def _settle_provider(self, name: str, *, ready: bool) -> set[str]:
+        """All providers: provider `name`'s setup ended (`ready`, or failed). Its requests made
+        before it never settle and those it refused meanwhile are not loading any more; the
+        other providers' state and the path (group, filter, the row revealed) stay. Returns the
+        sections this list has asked for, to ask of it again once it is ready (a section that
+        failed included: it may have that section now). Sections refused meanwhile are kept
+        while another provider still sets up: it is asked for them once it is ready (a list
+        without a cache, or without channels, would say "Loading…" for good)."""
+        self._events += 1
+        sections = self._ready_sections | self._requested_sections | self._refused_sections
+        if not self.catalog.is_loading():
+            self._refused_sections.clear()
+        for key in [k for k in self._pending if self._owned_by(k, name)]:
+            self._pending.discard(key)
+        for key, message in list(self._errors.items()):
+            refused = message == PROVIDER_LOADING_MESSAGE
+            if refused or self._owned_by(key, name) or (ready and key[0] == "section"):
+                del self._errors[key]
+                if key[0] == "section":
+                    sections.add(key[1])
+        return sections
+
+    @staticmethod
+    def _owned_by(key: tuple, name: str) -> bool:
+        """Whether a request key is for one of provider `name`'s own groups."""
+        return key[0] == "group" and split_group_id(key[2])[0] == name

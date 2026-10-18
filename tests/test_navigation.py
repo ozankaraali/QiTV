@@ -18,6 +18,7 @@ from services.navigation import (
     NavModel,
     NavNode,
 )
+from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 
 
 class FakeCatalog(QObject):
@@ -130,11 +131,24 @@ class NavModelTests(unittest.TestCase):
         )
         self.nav = NavModel(self.catalog, self.config)
 
+    def test_reveal_opens_the_list_at_the_item_s_source_section_and_group(self):
+        self.catalog.select_provider = lambda name=None, **kw: setattr(
+            self.catalog, "provider", name
+        )
+        item = {"id": 2, "name": "Two"}
+        self.nav.reveal("Backup", "live", "10", item)
+        self.assertEqual(self.catalog.provider, "Backup")
+        self.assertEqual([n.key for n in self.nav.path][:2], ["Backup", "live"])
+        self.assertIs(self.nav.revealed(), item)
+        self.nav.reset_to("live")
+        self.assertIsNone(self.nav.revealed())
+
     def test_root_is_sources_then_the_settings_rows(self):
         rows = self.nav.children(None)
         self.assertEqual(
             [(n.layer, n.key, n.title) for n in rows],
             [
+                ("source", ALL_PROVIDERS, ALL_PROVIDERS_TITLE),
                 ("source", "Home", "Home"),
                 ("source", "Backup", "Backup"),
                 ("action", SETTINGS_ROW, "Settings"),  # icons are painted, not glyphs
@@ -143,16 +157,16 @@ class NavModelTests(unittest.TestCase):
                 ("action", OPEN_FILE_ROW, "Open file"),
             ],
         )
-        self.assertFalse(any(self.nav.is_playable(n) or self.nav.needs_setup(n) for n in rows[2:]))
+        self.assertFalse(any(self.nav.is_playable(n) or self.nav.needs_setup(n) for n in rows[3:]))
 
     def test_open_other_source_selects_provider(self):
-        backup = self.nav.children(None)[1]
+        backup = self.nav.children(None)[2]
         self.nav.open(backup)
         self.assertEqual(self.catalog.selected, ["Backup"])
         self.assertEqual(self.nav.path, [backup])
 
     def test_sections_and_pinned_live_groups(self):
-        home = self.nav.children(None)[0]
+        home = self.nav.children(None)[1]
         self.nav.open(home)
         sections = self.nav.children(home)
         self.assertEqual([n.title for n in sections], ["Live TV", "Movies", "Series"])
@@ -168,7 +182,7 @@ class NavModelTests(unittest.TestCase):
     def test_a_favorite_without_a_name_is_found_by_its_title(self):
         self.catalog.live["10"].append({"id": 3, "title": "Three"})
         self.config.favorites = ["Three"]
-        home = self.nav.children(None)[0]
+        home = self.nav.children(None)[1]
         self.nav.open(home)
         live = self.nav.children(home)[0]
         favorites = self.nav.children(self.nav.children(live)[0])
@@ -214,7 +228,7 @@ class NavModelTests(unittest.TestCase):
         self.assertEqual(self.nav.path[0].key, "Backup")
 
     def test_up_at_root_returns_false(self):
-        home = self.nav.children(None)[0]
+        home = self.nav.children(None)[1]
         self.nav.open(home)
         self.nav.open(self.nav.children(home)[0])
         self.assertTrue(self.nav.up())
@@ -302,7 +316,7 @@ class NavModelTests(unittest.TestCase):
         self.assertTrue(changes)
 
     def test_pinned_groups_are_memoized(self):
-        home = self.nav.children(None)[0]
+        home = self.nav.children(None)[1]
         self.nav.open(home)
         live = self.nav.children(home)[0]
         self.nav.open(live)
@@ -326,7 +340,7 @@ class NavModelTests(unittest.TestCase):
         self.assertEqual([n.title for n in self.nav.children(group)], ["Three"])
 
     def test_a_zap_does_not_rescan_favorites_or_rebuild_groups(self):
-        home = self.nav.children(None)[0]
+        home = self.nav.children(None)[1]
         self.nav.open(home)
         live = self.nav.children(home)[0]
         self.nav.open(live)
@@ -488,7 +502,7 @@ class NavModelTests(unittest.TestCase):
     def test_a_failed_provider_is_set_up_again_when_its_source_is_opened(self):
         requested = []
         self.nav.providerRequested.connect(requested.append)
-        home = self.nav.children(None)[0]
+        home = self.nav.children(None)[1]
         self.catalog.providerFailed.emit("Home", "Couldn't reach the provider")
         self.assertEqual(self.nav.provider_error(home), "Couldn't reach the provider")
         self.nav.open(home)  # the current provider, but not ready: set it up again
@@ -497,20 +511,30 @@ class NavModelTests(unittest.TestCase):
         self.assertIsNone(self.nav.provider_error(home))
         self.assertEqual(self.nav.path, [home])
 
+    def test_a_provider_error_of_another_provider_survives_a_ready(self):
+        backup = self.nav.children(None)[2]
+        self.catalog.providerFailed.emit("Backup", "down")
+        self.catalog.providerReady.emit("Home")
+        self.assertEqual(self.nav.provider_error(backup), "down")
+        self.assertTrue(self.nav.needs_setup(backup))
+
+    def test_a_ready_provider_needs_no_setup(self):
+        self.assertFalse(self.nav.needs_setup(self.nav.children(None)[1]))
+
     def test_the_ready_current_provider_is_not_set_up_again(self):
         self.catalog.providerReady.emit("Home")
-        self.nav.open(self.nav.children(None)[0])
+        self.nav.open(self.nav.children(None)[1])
         self.assertEqual(self.catalog.selected, [])
 
     def test_a_running_setup_is_not_started_again(self):
-        home = self.nav.children(None)[0]
+        home = self.nav.children(None)[1]
         self.catalog.providerFailed.emit("Home", "down")
         self.catalog.loading = True  # e.g. Settings started a refresh meanwhile
         self.nav.open(home)
         self.assertEqual(self.catalog.selected, [])
 
     def test_provider_ready_clears_a_provider_error(self):
-        home = self.nav.children(None)[0]
+        home = self.nav.children(None)[1]
         self.catalog.providerFailed.emit("Home", "down")
         self.catalog.providerReady.emit("Home")
         self.assertIsNone(self.nav.provider_error(home))

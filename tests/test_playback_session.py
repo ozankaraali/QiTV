@@ -476,6 +476,19 @@ class PlayerJobTests(unittest.TestCase):
     def opened(self):
         return [call[1] for call in self.player.calls if call[0] == "set_media" and call[1]]
 
+    def test_a_channels_agent_and_referrer_are_options_of_its_media(self):
+        medias = []
+        media_new = _FakeInstance.media_new
+
+        def capture(instance, url):
+            medias.append(media_new(instance, url))
+            return medias[-1]
+
+        with mock.patch.object(_FakeInstance, "media_new", capture):
+            self.session.play(A, kind=PlayKind.LIVE, user_agent="UA/1", referrer="https://s.test/")
+        self.assertIn(":http-user-agent=UA/1", medias[-1].options)
+        self.assertIn(":http-referrer=https://s.test/", medias[-1].options)
+
     def test_the_first_play_opens_on_the_gui_thread(self):
         self.play(A)
         self.assertEqual(self.runner.jobs, [])

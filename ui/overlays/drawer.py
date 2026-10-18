@@ -14,6 +14,7 @@ pick another. A head cut short ("…") goes a layer up. ⌕ (Search, as Ctrl/⌘
 ⚙ (Settings) end it; each takes clicks over at least MIN_HIT_PX and names its key when hovered.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import logging
 
@@ -52,7 +53,10 @@ from services.navigation import (
     SETTINGS_ROW,
     NavModel,
     NavNode,
+    NodeSeq,
+    fold_notifier,
 )
+from services.provider_ids import provider_of
 from services.text_fold import fold
 from services.zapping import ZapContext
 from ui.keymap import key_hint
@@ -61,6 +65,7 @@ from ui.overlays.channel_rows import (
     ChannelListView,
     ChannelRowDelegate,
     ChannelRowsModel,
+    LazyNumbers,
     column_focused,
 )
 from ui.overlays.painting import Units, draw_icon, elided, fill_round
@@ -173,16 +178,57 @@ def _leaves_drawer(node: NavNode) -> bool:
     return node.layer == "action" or (node.layer == "section" and node.key in LIBRARY_SECTIONS)
 
 
+def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
+    """Whether `node` is the row a focus key names: an id, or (provider, id) for a channel
+    that may share its id with another provider's."""
+    if isinstance(wanted, tuple):
+        provider, key = wanted
+        payload = node.payload
+        return node.key == key and (
+            not provider or (isinstance(payload, dict) and provider_of(payload) == provider)
+        )
+    return node.key == wanted
+
+
+def _selectable(node: NavNode) -> bool:
+    """Whether a row can hold the highlight: a provider's heading (or its notice) cannot."""
+    return node.layer not in ("header", "notice")
+
+
 def _is_live_item(nav: NavModel, node: NavNode) -> bool:
     return node.layer == "item" and nav.section_of(node) == "live"
 
 
-def _numbers(group: list[NavNode], shown: list[NavNode]) -> list[str | None]:
+class _SeqNumbers(LazyNumbers):
+    """The numbers of a long group's shown rows, looked up row by row (see _numbers)."""
+
+    def __init__(self, group: NodeSeq, shown: NodeSeq) -> None:
+        self._shown = shown
+        self._own = group.numbered()
+        if self._own:
+            self.digits = shown.number_digits()
+        else:  # positions stand in: the last row's is the longest
+            last = shown.source_row(len(shown) - 1) + 1 if len(shown) else 0
+            self.digits = len(str(last)) if last else 0
+        self.signature = (group.token, shown.token)
+
+    def __len__(self) -> int:
+        return len(self._shown)
+
+    def __getitem__(self, row: int) -> str | None:
+        if self._own:
+            return ZapContext.number_of(self._shown.items[row]) or None
+        return str(self._shown.source_row(row) + 1)
+
+
+def _numbers(group, shown):
     """The numbers of the `shown` rows of a live group, the filter aside.
 
     When no channel of the group has a number, its position in the group stands in, as on
     the banner and for number entry.
     """
+    if isinstance(group, NodeSeq) and isinstance(shown, NodeSeq):
+        return _SeqNumbers(group, shown)
     channels = [n.payload for n in group if isinstance(n.payload, dict)]
     if any(ZapContext.number_of(c) for c in channels):
         return [
@@ -193,14 +239,21 @@ def _numbers(group: list[NavNode], shown: list[NavNode]) -> list[str | None]:
     return [position.get(node) for node in shown]
 
 
-def _shown_rows(nodes: list[NavNode], live: bool, numbers: list[str | None] | None) -> tuple:
+def _shown_rows(
+    nodes,
+    live: bool,
+    numbers,
+    tagged: bool = False,
+) -> tuple:
     """What a column's list shows for `nodes`: equal values show the same rows.
 
     A row shows its node's title, count and icon, and a live channel its item (by identity:
     a refreshed catalog brings new item dicts) and number.
     """
+    if isinstance(nodes, NodeSeq):  # a long list is told by its identity, not row by row
+        return (live, ("rows", nodes.token), getattr(numbers, "signature", None), tagged)
     rows = tuple((n.layer, n.key, n.title, n.count, id(n.payload)) for n in nodes)
-    return (live, rows, tuple(numbers) if numbers is not None else None)
+    return (live, rows, tuple(numbers) if numbers is not None else None, tagged)
 
 
 class _NodeModel(ChannelRowsModel):
@@ -208,16 +261,24 @@ class _NodeModel(ChannelRowsModel):
 
     def __init__(self, logos, now_provider, parent=None) -> None:
         super().__init__(logos, now_provider, parent)
-        self._nodes: list[NavNode] = []
+        self._nodes: Sequence[NavNode] = []
 
     def set_nodes(
-        self, nodes: list[NavNode], live: bool, numbers: list[str | None] | None = None
+        self,
+        nodes,
+        live: bool,
+        numbers=None,
+        tagged: bool = False,
     ) -> None:
-        self._nodes = list(nodes)
-        rows = [
-            n.payload if live and isinstance(n.payload, dict) else {"name": n.title} for n in nodes
-        ]
-        self.set_channels(rows, numbers if live else [None] * len(rows))
+        self._nodes = nodes if isinstance(nodes, NodeSeq) else list(nodes)
+        if live and isinstance(nodes, NodeSeq):
+            rows = nodes.items  # a long list shows the dicts themselves
+        else:
+            rows = [
+                n.payload if live and isinstance(n.payload, dict) else {"name": n.title}
+                for n in nodes
+            ]
+        self.set_channels(rows, numbers if live else [None] * len(rows), tagged and live)
 
     def data(self, index, role=Qt.DisplayRole):
         row = index.row()
@@ -248,7 +309,34 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         rect = QRectF(option.rect)
         selected = bool(option.state & QStyle.State_Selected)
         focused = column_focused(option.widget)
+        node = index.data(NodeRole)
         p.save()
+        if isinstance(node, NavNode) and node.layer == "header":
+            # A provider's heading: small, quiet, with a rule; it is never highlighted.
+            p.setFont(units.font(1.1, QFont.Weight.DemiBold))
+            p.setPen(qcolor(PALETTE.text, 0.5))
+            left = rect.x() + 1.2 * u
+            width = max(0.0, rect.right() - 1.2 * u - left)
+            p.drawText(
+                QRectF(left, rect.y(), width, rect.height()),
+                Qt.AlignLeft | Qt.AlignBottom,
+                elided(p, str(index.data(Qt.DisplayRole) or "").upper(), width),
+            )
+            p.restore()
+            return
+        if isinstance(node, NavNode) and node.layer == "notice":
+            # Under a provider's heading: it loads, or why it failed; never highlighted.
+            p.setFont(units.font(1.2))
+            p.setPen(qcolor(PALETTE.text, 0.5))
+            left = rect.x() + 1.2 * u
+            width = max(0.0, rect.right() - 1.2 * u - left)
+            p.drawText(
+                QRectF(left, rect.y(), width, rect.height()),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                elided(p, str(index.data(Qt.DisplayRole) or ""), width),
+            )
+            p.restore()
+            return
         if selected:
             box = rect.adjusted(0.3 * u, 0.2 * u, -0.3 * u, -0.2 * u)
             fill_round(
@@ -294,6 +382,29 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         p.restore()
 
 
+class _RowIndex:
+    """Each node's row in a column; a long list of channels makes its nodes on demand."""
+
+    def __init__(self, nodes) -> None:
+        self._seq = nodes if isinstance(nodes, NodeSeq) else None
+        self._map = None if self._seq is not None else {n: i for i, n in enumerate(nodes)}
+
+    def get(self, node, default=None):
+        if node is None:
+            return default
+        row = self._seq.row_of(node) if self._seq is not None else self._map.get(node)  # type: ignore[union-attr]
+        return default if row is None else row
+
+    def __contains__(self, node) -> bool:
+        return self.get(node) is not None
+
+    def __getitem__(self, node) -> int:
+        row = self.get(node)
+        if row is None:
+            raise KeyError(node)
+        return row
+
+
 class _Column:
     def __init__(self, side: str, drawer: "Drawer", logos, now_provider) -> None:
         self.side = side
@@ -308,8 +419,8 @@ class _Column:
         self.view.customContextMenuRequested.connect(lambda pos: drawer._on_row_context(side, pos))
         self.view.viewport().installEventFilter(drawer)  # a right press must not select
         self.parent: NavNode | None = None
-        self.nodes: list[NavNode] = []
-        self.rows: dict[NavNode, int] = {}
+        self.nodes: Sequence[NavNode] = []
+        self.rows = _RowIndex([])
         self.current: NavNode | None = None
         self.message: str | None = None
         self.rect = QRect()
@@ -338,7 +449,7 @@ class Drawer(Overlay):
         self.focus_side = "right"
         self.filter_text = ""
         self._filter_key: tuple | None = None
-        self._pending_key: str | None = None
+        self._pending_key: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
         self._preview_node: NavNode | None = None
         self._preview_timer = QTimer(self)
@@ -350,13 +461,17 @@ class Drawer(Overlay):
         # Hover over the header buttons (a move elsewhere goes on to the host, as without it).
         self.setMouseTracking(True)
         nav.changed.connect(self._on_nav_changed)
+        # A long list's titles folded in the background: a filter typed meanwhile applies now.
+        fold_notifier().folded.connect(self._on_folded)
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
 
     # ---- public API -------------------------------------------------------------------------
 
-    def open_drawer(self, focus_key: str | None = None, focus_side: str = "right") -> None:
+    def open_drawer(
+        self, focus_key: str | tuple[str, str] | None = None, focus_side: str = "right"
+    ) -> None:
         """Open on the NavModel's path, focusing the right column (or the left one)."""
         self.focus_side = focus_side
         self.filter_text = ""
@@ -390,7 +505,22 @@ class Drawer(Overlay):
             return
         self._pending_key = None
         row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))  # type: ignore[arg-type]
-        self._select(col, min(len(col.nodes) - 1, max(0, row + delta)))
+        target = self._selectable_row(col, min(len(col.nodes) - 1, max(0, row + delta)), delta)
+        if target is not None:
+            self._select(col, target)
+
+    @staticmethod
+    def _selectable_row(col: _Column, row: int, delta: int) -> int | None:
+        """`row`, or the nearest row that can hold the highlight: onward in the direction
+        of `delta`, else back (Up/Down step over a provider's heading); None if there is none."""
+        step = 1 if delta > 0 else -1
+        for direction in (step, -step):
+            at = row
+            while 0 <= at < len(col.nodes):
+                if _selectable(col.nodes[at]):
+                    return at
+                at += direction
+        return None
 
     def page(self, delta: int) -> None:
         col = self._columns[self.focus_side]
@@ -435,7 +565,8 @@ class Drawer(Overlay):
         if node is None:
             return
         if self.focus_side == "right" and self._nav.is_playable(node):
-            self.playRequested.emit(node, list(col.nodes), self._nav.path[-1])
+            nodes = col.nodes if isinstance(col.nodes, NodeSeq) else list(col.nodes)
+            self.playRequested.emit(node, nodes, self._nav.path[-1])
         else:
             self.right()
 
@@ -562,8 +693,8 @@ class Drawer(Overlay):
 
     def _on_row_clicked(self, side: str, row: int) -> None:
         col = self._columns[side]
-        if not 0 <= row < len(col.nodes):
-            return
+        if not 0 <= row < len(col.nodes) or not _selectable(col.nodes[row]):
+            return  # a heading does nothing
         if side != self.focus_side:
             self.focus_side = side
             self._refresh()
@@ -586,6 +717,12 @@ class Drawer(Overlay):
         row = col.view.indexAt(pos).row()
         if 0 <= row < len(col.nodes) and col.nodes[row].layer in _CONTEXT_LAYERS:
             self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
+
+    def _on_folded(self, token: int) -> None:
+        # (A list still unfiltered for want of its folded titles is the column's own list.)
+        shown = any(getattr(col.nodes, "token", None) == token for col in self._columns.values())
+        if shown and self.isVisible() and self.filter_text:
+            self._refresh()
 
     def _on_nav_changed(self) -> None:
         if self.isVisible():
@@ -610,7 +747,7 @@ class Drawer(Overlay):
         self,
         col: _Column,
         parent: NavNode | None,
-        children: list[NavNode] | None,
+        children: Sequence[NavNode] | None,
         needle: str,
     ) -> None:
         parent_changed = parent != col.parent
@@ -631,21 +768,27 @@ class Drawer(Overlay):
         else:
             col.message = None
         nodes = children or []
+        if isinstance(nodes, NodeSeq):
+            nodes.fold_ahead()  # typing to filter will find the titles folded
         if col.side == self.focus_side and needle:
-            nodes = [n for n in nodes if needle in fold(n.title)]
+            if isinstance(nodes, NodeSeq):
+                nodes = nodes.matching(needle)
+            else:
+                nodes = [n for n in nodes if _selectable(n) and needle in fold(n.title)]
         if col.message is None and not nodes:
             col.message = EMPTY_TEXT
         live = bool(nodes) and _is_live_item(self._nav, nodes[0])
         numbers = _numbers(children or [], nodes) if live else None
         # The same rows again (e.g. the section reported ready once more): the list keeps its
         # model, so it is neither laid out nor repainted from scratch.
-        shown = _shown_rows(nodes, live, numbers)
+        tagged = live and self._nav.shows_provider(parent)
+        shown = _shown_rows(nodes, live, numbers, tagged)
         if shown != col.shown:
             col.shown = shown
             col.nodes = nodes
-            col.rows = {n: i for i, n in enumerate(nodes)}
+            col.rows = _RowIndex(nodes)
             col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
-            col.model.set_nodes(nodes, live, numbers)
+            col.model.set_nodes(nodes, live, numbers, tagged)
         else:
             col.model.refresh_now()  # a refresh still looks "now" up again (the EPG loaded)
         if col.side == "left":
@@ -655,17 +798,22 @@ class Drawer(Overlay):
         else:
             matched = False
             if self._pending_key is not None:
-                match = next((n for n in nodes if n.key == self._pending_key), None)
+                pending = self._pending_key
+                match = (
+                    nodes.find_focus(pending)
+                    if isinstance(nodes, NodeSeq)
+                    else next((n for n in nodes if _is_focus_key(n, pending)), None)
+                )
                 if match is not None:
                     col.current = match
                     matched = True
             if not matched and (parent_changed or col.current not in col.rows):
-                col.current = nodes[0] if nodes else None
+                col.current = next((n for n in nodes if _selectable(n)), None)
             if children is not None:
                 self._pending_key = None  # a stale focus key must not outlive the first fill
         self._show_current(col)
 
-    def _choose_left(self, col: _Column, nodes: list[NavNode]) -> None:
+    def _choose_left(self, col: _Column, nodes: Sequence[NavNode]) -> None:
         path = self._nav.path
         end = path[-1] if path else None
         if self._left_choice is not None and self._left_choice not in col.rows:

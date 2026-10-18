@@ -18,6 +18,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.library import Details, LibraryModel
+from services.provider_ids import with_provider
 from services.search import MIN_CHARS, Hit, SearchWorker
 from services.text_fold import fold
 from services.watch_state import WatchState
@@ -41,10 +42,18 @@ class SearchSession(QObject):
     changed = Signal()  # the hits, or what to show instead of them, changed
 
     def __init__(
-        self, provider_manager, jobs, model: LibraryModel, watch: WatchState, parent=None
+        self,
+        provider_manager,
+        jobs,
+        model: LibraryModel,
+        watch: WatchState,
+        parent=None,
+        *,
+        loaded: Optional[Callable[[], dict]] = None,
     ) -> None:
         super().__init__(parent)
         self._provider_manager = provider_manager
+        self._loaded = loaded  # the content the catalogs hold: searched without a re-read
         self._jobs = jobs
         self._model = model
         self._watch = watch
@@ -156,7 +165,10 @@ class SearchSession(QObject):
         self._running = True
         if self._hits is None:
             self.changed.emit()  # "Searching…"
-        worker = SearchWorker(self._provider_manager, text, caches=self._caches, index=self._index)
+        loaded = self._loaded() if self._loaded is not None and self._index is None else None
+        worker = SearchWorker(
+            self._provider_manager, text, caches=self._caches, index=self._index, loaded=loaded
+        )
         self._jobs.run_worker(
             worker, self._on_done, self._on_error, context=(self._generation, self._snapshot)
         )
@@ -188,6 +200,8 @@ class SearchSession(QObject):
             self._set_hits([], failed=True)
 
     def _set_hits(self, hits: Optional[list[Hit]], *, failed: bool = False) -> None:
+        if hits:  # a hit's title is its provider's, wherever it is played from
+            hits = [replace(h, item=with_provider(h.item, h.provider)) for h in hits]
         self._hits = hits
         self._failed = failed
         sections: list[tuple[str, list[dict]]] = []
