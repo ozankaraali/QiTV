@@ -95,7 +95,9 @@ _DISK_FAILED = "The temporary playback buffer could not be created."
 
 # seq, start, end, discontinuity, start_quality
 _Addition = tuple[int, float, float, bool, StartQuality]
-_BREAKS_KEPT = 8  # the latest PTS jumps the timeline left out, in the state (2.1 stage 2)
+# PTS jumps the timeline left out, in the state while the ring holds them (2.1 stage 2), at
+# most this many (a memory bound: a flaky source that reconnects every few seconds)
+_BREAKS_KEPT = 64
 
 # BurstMeter (see its docstring):
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
@@ -604,6 +606,9 @@ class _Session:
         first = timeline.oldest_seq
         if first is not None and evicted is not None and first <= evicted:
             timeline.on_evicted(evicted)
+        breaks = self._breaks
+        while breaks and breaks[0][0] < timeline.start:
+            breaks.popleft()  # with the media it was in: no player can reach it any more
         snapshot = {
             "oldest": oldest,
             "newest": ring.newest_seq,

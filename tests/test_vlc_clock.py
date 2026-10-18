@@ -26,7 +26,7 @@ class Vlc:
         self.rate, self.every, self.phase = rate, every, phase
         self.speed = 1.0
         self.missing = None
-        self.jump_at, self.jump_by = math.inf, 0.0
+        self.jump_at, self.jump_by, self.pending = math.inf, 0.0, 0.0
         self.quanta = quanta
         self.rng = random.Random(seed)
         self.truth = 0.0
@@ -45,8 +45,9 @@ class Vlc:
                 continue
             self.truth += self.rate * self.speed * DT
             if self.truth >= self.jump_at:
-                self.offset += self.jump_by
+                self.pending += self.jump_by  # the next stamp VLC reads carries it
                 self.jump_at = math.inf
+            reading = self.reading
             if self.quanta is None:
                 k = math.floor((self.truth - self.phase) / self.every)
                 stamp = self.phase + k * self.every
@@ -58,6 +59,8 @@ class Vlc:
                 if self.next_update <= 1e-9:
                     self.reading = self.truth
                     self.next_update += self.rng.uniform(*self.quanta)
+            if self.reading != reading and self.pending:
+                self.offset, self.pending = self.offset + self.pending, 0.0
 
 
 class Harness:
@@ -308,6 +311,21 @@ class BreakTests(unittest.TestCase):
         run.until_step().until_step()
         run.run(10.0)
         self.assertLess(max(abs(e) for e in run.errors[-40:]), 0.5)
+
+    def test_a_reported_four_second_break_matches_on_a_two_second_clock(self):
+        run = self.stamps_jump(4.0, reported=4.0)
+        self.assertLess(max(abs(e) for e in run.errors), 0.5)
+
+    def test_a_real_skip_near_a_reported_break_of_another_size_is_taken(self):
+        # Stage 2 re-review: on a 2 s-step channel the amount matched within a whole step
+        # (2 s), so a real skip near a reported 4 s break was taken for it.
+        run = Harness(Vlc(), limit=1000.0).run(20.0)
+        run.breaks = [(run.vlc.truth + 1.0, 4.0)]
+        run.vlc.truth += 5.5  # VLC skips 5.5 s there
+        run.vlc.reading += 5.5
+        run.until_step().until_step()
+        run.run(10.0)
+        self.assertLess(max(abs(e) for e in run.errors[-20:]), 0.5)
 
     def test_a_real_skip_unlike_a_reported_break_is_taken(self):
         run = Harness(Vlc(), limit=1000.0).run(20.0)

@@ -285,7 +285,7 @@ class Feed:
         self.pcr, self.speed, self.speed_1x = pcr, speed, speed_1x
         self.missing, self.reported = None, []
         self.jump_at, self.jump_by, self.media_step = math.inf, 0.0, False
-        self.stamp = self.stamp_offset = 0.0
+        self.stamp = self.stamp_offset = self.pending_jump = 0.0
         self.meter = worker.BurstMeter() if metered else None
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
         self.jitter, self.rng = jitter, random.Random(seed)
@@ -328,7 +328,7 @@ class Feed:
             self.plays_seen = len(playback.plays)
             if playback.plays[-1][1] is PlayKind.LIVE_PIPELINE:
                 self.position, self.media = self.case.live.position(), 0.0
-                self.stamp = self.stamp_offset = 0.0
+                self.stamp = self.stamp_offset = self.pending_jump = 0.0
                 playback.set_state(PlaybackState.PLAYING)
 
     def run(self, seconds):
@@ -373,7 +373,7 @@ class Feed:
                 if state is not playback.current:
                     playback.set_state(state)
                 if self.position < self.jump_at <= self.position + advance:
-                    self.stamp_offset += self.jump_by  # its stamps jump here
+                    self.pending_jump += self.jump_by  # the next stamp VLC reads carries it
                     if self.media_step:  # and its place on the timeline, which kept it
                         self.position += self.jump_by
                 self.position += advance
@@ -384,6 +384,9 @@ class Feed:
                     while k > 0 and self.missing is not None and self.missing(k):
                         k -= 1
                     stamp = max(self.stamp, k * self.pcr)
+                if stamp != self.stamp and self.pending_jump:
+                    self.stamp_offset += self.pending_jump
+                    self.pending_jump = 0.0
                 self.stamp = stamp
                 playback.ms = round((stamp + self.stamp_offset) * 1000)
             if now >= self.next_tick - 1e-9:
@@ -2301,9 +2304,12 @@ class SparseClockTests(LiveSessionCase):
             feed.run(15.0)
         self.assertTrue(self.live._stay.rate_locked)
 
-    def stamps_jump(self, feed, by, *, ahead=4.0, reported=None, late=0.0, media=False):
+    def stamps_jump(
+        self, feed, by, *, ahead=4.0, reported=None, late=0.0, media=False, newer=0, every=30.0
+    ):
         """A few seconds ahead of VLC its stamps jump by `by`; the helper reports `reported`
-        seconds left out there, `late` seconds further on (or nothing). With `media` the
+        seconds left out there, `late` seconds further on (or nothing), and `newer` more
+        breaks `every` seconds after it (a flaky source: VLC far behind them). With `media` the
         timeline kept the step (under 3 s; or VLC really skipped): the media after it, already
         buffered, is that much later on the timeline. The position's errors from then on."""
         at = feed.position + ahead
@@ -2311,10 +2317,10 @@ class SparseClockTests(LiveSessionCase):
         if media:
             feed.edge += by
         if reported is not None:
-            feed.reported = [(at + late, reported)]
+            feed.reported = [(at + late + every * k, reported) for k in range(newer + 1)]
         feed.push()
         errors = self.errors(feed, 30.0)
-        self.assertGreater(self.playback.ms, round((feed.media + by - 1.0) * 1000))  # it did
+        self.assertEqual(feed.stamp_offset, by)  # VLC's clock did jump
         return errors
 
     def test_a_dropped_ten_second_jump_the_helper_reports_leaves_the_lag(self):
@@ -2329,6 +2335,16 @@ class SparseClockTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=1.0)
         self.assertTrue(all(rate >= 1.0 for rate in self.playback.rates))
 
+    def test_a_viewer_far_behind_still_matches_its_break_among_many(self):
+        # Stage 2 re-review: the helper kept the last eight breaks only, so a viewer minutes
+        # behind on a flaky reconnecting source took older jumps for skips.
+        feed = self.tune(edge=8.0)
+        feed.run(30.0)
+        lag = self.timelines[-1]["lag"]
+        errors = self.stamps_jump(feed, 10.0, reported=10.0, newer=19)
+        self.assertLess(max(abs(e) for e in errors), 0.5)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=1.0)
+
     def test_a_two_second_step_the_timeline_kept_is_followed(self):
         # Stage 2 re-review: the segmenter keeps a step under 3 s as media (a quick
         # reconnect, an HLS sequence gap on 2 s segments): VLC's clock and the timeline agree,
@@ -2337,7 +2353,8 @@ class SparseClockTests(LiveSessionCase):
         feed.run(30.0)
         lag = self.timelines[-1]["lag"]
         errors = self.stamps_jump(feed, 2.0, media=True)
-        self.assertLess(max(abs(e) for e in errors), 0.5)
+        # (VLC's clock shows the step with its next stamp, up to 2 s after VLC is past it.)
+        self.assertLess(max(abs(e) for e in errors[16 + 12 :]), 0.5)
         self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=1.0)
 
     def test_a_reconnect_reported_a_gop_late_still_matches(self):
@@ -2356,7 +2373,7 @@ class SparseClockTests(LiveSessionCase):
         feed.run(30.0)
         feed.reported = [(feed.position + 4.0, 10.0)]  # a 10 s break ahead ...
         errors = self.stamps_jump(feed, 5.0, media=True)  # ... and VLC skips 5 s there
-        self.assertLess(max(abs(e) for e in errors[24:]), 0.5)
+        self.assertLess(max(abs(e) for e in errors[16 + 16 :]), 0.5)
 
     def test_vlcs_clock_is_frozen_only_well_past_its_steps(self):
         feed = self.tune(edge=8.0)

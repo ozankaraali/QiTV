@@ -406,6 +406,30 @@ class LiveWorkerTests(unittest.TestCase):
                     self.assertAlmostEqual(where, at, delta=0.05)
                     self.assertAlmostEqual(seconds, left_out, delta=0.05)
 
+    def test_reported_jumps_stay_as_long_as_the_ring_holds_their_media(self):
+        # A flaky raw-TS source that reconnects every few seconds: 20 jumps of 5 s, 2 s of
+        # media apart. A viewer far behind must still find each break the ring still holds
+        # (a count of eight dropped them); those whose media was evicted go with it.
+        pieces = b"".join(
+            make_stream(2, pts_start=900000 + round(k * 7.0 * 90000)) for k in range(21)
+        )
+        source = self.source({"/flaky.ts": (200, {}, pieces)})
+        helper = self.helper()
+        for name, ring in (("all held", RAM), ("evicting", {"kind": "ram", "max_bytes": 1 << 18})):
+            with self.subTest(ring=name):
+                sid = helper.open(source.url + "/flaky.ts", ring=ring)
+                helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
+                snapshot = helper.of(sid, "state")[-1][2]
+                breaks = snapshot["breaks"]
+                self.assertTrue(all(abs(seconds - 5.0) < 0.05 for _, seconds in breaks))
+                if name == "all held":
+                    self.assertEqual(len(breaks), 20)
+                    self.assertEqual([round(where) for where, _ in breaks], list(range(2, 42, 2)))
+                else:
+                    self.assertLess(len(breaks), 20)
+                    self.assertTrue(all(where >= snapshot["start"] for where, _ in breaks))
+                    self.assertEqual(round(breaks[-1][0]), 40)
+
     def test_a_finite_source_ends_after_its_last_segment(self):
         first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)
         source = self.source(

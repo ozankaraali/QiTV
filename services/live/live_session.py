@@ -1311,7 +1311,8 @@ class LiveSession(QObject):
         playing = self._playback.state() is PlaybackState.PLAYING
         edge = self._live_edge(self._snapshot_cache)  # the most VLC can have played
         limit = edge - self._base if edge > self._base else math.inf
-        # The timestamp jumps the helper left out of its timeline, since the open.
+        # The timestamp jumps the helper left out of its timeline while its ring holds them,
+        # as positions since the open (those before it negative, never reached).
         breaks = [
             (_number(where) - self._base, _number(seconds))
             for where, seconds in self._snapshot_cache.get("breaks") or ()

@@ -75,9 +75,10 @@ _JUMP_STEPS = 1.5  # a reading further than this many quanta from the clock is a
 _JUMP_MIN_S = 1.0  # ... and further than this
 _LIMIT_SLACK_S = 1.0  # a reading this far past the buffered media is the stream's clock
 _BREAK_PAD_S = 1.0  # a reported break this near (and a quantum) is where the jump was ...
-_BREAK_AMOUNT_S = 0.5  # ... and it left out as much, within this (or a quantum)
+_BREAK_AMOUNT_S = 0.5  # ... and it left out as much, within this (or half a quantum)
 
-# The helper's breaks: (position since the open, seconds the timeline left out there).
+# The helper's breaks: (position since the open, seconds the timeline left out there; those
+# before the open have negative positions).
 Breaks = Sequence[tuple[float, float]]
 
 
@@ -257,11 +258,13 @@ class VlcClock:
     def _matches(breaks: Breaks, position: float, jump: float, quantum: float) -> bool:
         """A jump ahead of VLC's clock by `jump` at `position` is one the helper reported: as
         large as the segmenter leaves out (`JUMP_S`), where a break was reported (within a
-        quantum and `_BREAK_PAD_S`) and as large (within a quantum or `_BREAK_AMOUNT_S`).
-        A smaller jump the timeline kept as media, and so does VLC: it is followed."""
-        if jump < JUMP_S - max(_BREAK_AMOUNT_S, quantum):
+        quantum and `_BREAK_PAD_S`) and as large (within half a quantum or `_BREAK_AMOUNT_S`:
+        a real skip or a kept step near a reported break is VLC's, not the break). A smaller
+        jump the timeline kept as media, and so does VLC: it is followed."""
+        alike = max(_BREAK_AMOUNT_S, quantum / 2)
+        if jump < JUMP_S - alike:
             return False
-        near, alike = quantum + _BREAK_PAD_S, max(_BREAK_AMOUNT_S, quantum)
+        near = quantum + _BREAK_PAD_S
         return any(
             abs(where - position) <= near and abs(seconds - jump) <= alike
             for where, seconds in breaks
