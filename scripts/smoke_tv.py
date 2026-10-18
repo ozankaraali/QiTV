@@ -199,6 +199,10 @@ GO_LIVE_MS = 6_000
 GO_LIVE_BAND_S = 0.75  # the top of stay-live's band above the target
 GO_LIVE_OPEN_S = 0.5  # VLC opening the reopened stream
 GO_LIVE_HOLD_S = 0.5  # how far the lag may rise after landing (VLC's position jitters)
+# Or holding still at the end: over its last GO_LIVE_STILL_S the lag rises at most this fast (a
+# slow runner's VLC takes longer to open, so the lag settles higher than where it landed).
+GO_LIVE_STILL_S = 3.0
+GO_LIVE_DRIFT_S_PER_S = 0.06
 HISTORY_S = 14.0  # buffered behind the position before the seek: 10 s back stays inside it
 HISTORY_TIMEOUT_MS = 20_000
 SEEK_BACK = (8.0, 12.0)  # seconds the position may move back for ← (10 s, segment-aligned)
@@ -341,6 +345,15 @@ def pip_gate_checks(directsound: bool) -> list[str]:
 
 
 # ---- the report -------------------------------------------------------------------------------
+
+
+def _slope(points: list[tuple[float, float]]) -> float:
+    """The least-squares slope of (t, value) points (0 when they share one t)."""
+    n = len(points)
+    mt = sum(t for t, _ in points) / n
+    mv = sum(v for _, v in points) / n
+    var = sum((t - mt) ** 2 for t, _ in points)
+    return sum((t - mt) * (v - mv) for t, v in points) / var if var else 0.0
 
 
 class Report:
@@ -1536,15 +1549,17 @@ class Driver:
             ((t, s) for t, s in window if s["mode"] == "live" and s["lag"] <= bound), None
         )
         last_t, last = window[-1]
-        # Closing in, inside the band, or holding where it landed (2.1: 1x inside the dead band,
-        # a nudge only after 15 s outside it): never drifting away from live.
+        tail = [(t, float(s["lag"])) for t, s in window if t >= last_t - GO_LIVE_STILL_S]
+        still = len(tail) >= 4 and _slope(tail) <= GO_LIVE_DRIFT_S_PER_S
+        # Closing in, inside the band, or holding where it landed or settled (2.1: 1x inside the
+        # dead band, a nudge only after 15 s outside it): never drifting away from live.
         closing = (
             last["rate"] > 1.0
             or last["lag"] <= target + GO_LIVE_BAND_S
             or (
                 landed is not None
                 and last["lag"] <= bound
-                and last["lag"] <= landed[1]["lag"] + GO_LIVE_HOLD_S
+                and (last["lag"] <= landed[1]["lag"] + GO_LIVE_HOLD_S or still)
             )
         )
         lags = [round(float(s["lag"]), 3) for _, s in window]
