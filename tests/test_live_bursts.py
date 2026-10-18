@@ -211,6 +211,7 @@ class ModelPlayback(QObject):
     errorOccurred = Signal(str)
     ended = Signal()
     inputEnded = Signal()
+    pictureFroze = Signal()
 
     STEP_MS = 50
 
@@ -249,7 +250,7 @@ class ModelPlayback(QObject):
             self.starved_s += dt
         self.ms += advance * 1000.0
 
-    def play(self, url, *, kind, latency="normal", user_agent=None, start_ms=None):
+    def play(self, url, *, kind, latency="normal", user_agent=None, start_ms=None, software=False):
         self.plays.append((url, kind))
         self.ms, self._opened = 0.0, time.monotonic()
         self._set(PlaybackState.OPENING)

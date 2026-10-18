@@ -110,6 +110,12 @@ windows of `_CRAWL_WINDOW_S` in a row makes the channel play directly ("Plays wi
 for smoother playback", `CRAWLING`), and the channel's next tune plays directly at once (for
 a day: see `services.live.tuning`). A raw TS channel never does.
 
+With hardware decoding (Settings), a picture that stands still while the sound plays
+(`PlaybackSession.pictureFroze`, `services.picture_watch`) makes the channel decode in
+software from then on: a time-shift stream opens again where it plays (as after an
+interruption, on a clean start), a direct play has opened itself again; every later open of
+the tune, and the channel's tunes for a day (`LiveTuning`), ask for software decoding.
+
 "Auto" latency (2.1 stage 4b) steers by the channel's learned target
 (`services.live.learned_target.LearnedTarget`, one per tune from what the channel taught, a
 2.0.2 `extra` read as its prior, on Normal's floor): what its arrivals need (the live edge,
@@ -435,6 +441,7 @@ class LiveSession(QObject):
         self._direct_retries = 0  # tries a fallback's direct play has left (0: report errors)
         self._direct_at = -math.inf  # when the direct play() was last made
         self._limited: Optional[str] = None  # the provider's refusal (one of REFUSALS)
+        self._software = False  # hardware decoding froze this channel's picture
         self._phase = _Phase.IDLE
         self._mode = ""
         self._dead = False  # available(False): direct play for the rest of the run
@@ -516,6 +523,7 @@ class LiveSession(QObject):
         playback.ended.connect(self._on_interrupted)
         playback.errorOccurred.connect(self._on_error)
         playback.inputEnded.connect(self._on_input_ended)
+        playback.pictureFroze.connect(self._on_picture_froze)
 
     def _wire_engine(self, engine: LiveEngine, *, connect: bool) -> None:
         for signal, slot in (
@@ -585,6 +593,7 @@ class LiveSession(QObject):
         self._channel = channel
         memory = self._tuning.get(channel) if self._tuning is not None else None
         self._memory = memory or Tuning()
+        self._software = self._memory.software
         self._latency = latency if latency in LATENCIES else "normal"
         self._learned = self._new_learned() if self._latency == AUTO else None
         self._steered, self._steer_burst = SteeredTarget(), None
@@ -1281,8 +1290,21 @@ class LiveSession(QObject):
             kind=PlayKind.LIVE,
             latency=self._latency,
             user_agent=self._user_agent,
+            software=self._software,
             **extra,
         )
+
+    def _on_picture_froze(self) -> None:
+        """Hardware decoding froze the picture while the sound played: the channel decodes
+        in software from now, and for a day; a time-shift stream opens again where it plays
+        (a direct play opened itself again)."""
+        if self._phase not in (_Phase.PIPELINE, _Phase.DIRECT):
+            return  # nothing of this tune plays yet
+        self._software = True
+        self._learn(software=True)
+        if self._phase is _Phase.PIPELINE and self._retry is None and self._deferred is None:
+            # (A reopen still to be made, or the RAM ring's next state, opens in software.)
+            self._reopen_at_position()
 
     def _on_interrupted(self) -> None:
         if self._phase is not _Phase.PIPELINE:
@@ -1558,13 +1580,16 @@ class LiveSession(QObject):
             below = max(below, self._stay.dead_band())
         return self._cushion >= self._target(snapshot) - below or self._stay.shortfall_accepted
 
-    def _learn(self, *, direct: bool = False, learned_only: bool = False) -> None:
+    def _learn(
+        self, *, direct: bool = False, learned_only: bool = False, software: bool = False
+    ) -> None:
         """Keep what the channel taught (Auto's learned target, a locked rate, playing
-        directly) for its next tune. Under Auto the learned target, and no 2.0.2 `extra` (it
-        was read as the prior: left, it would be read so again); under another latency what
-        Auto learned before stays as it was. `learned_only` (the learned target's own saves:
-        trouble, a move worth saying, the tune's end): the lock and direct play as the store
-        has them now, so a lock restored at the tune and expired since is not set again."""
+        directly, decoding in software) for its next tune. Under Auto the learned target,
+        and no 2.0.2 `extra` (it was read as the prior: left, it would be read so again);
+        under another latency what Auto learned before stays as it was. `learned_only` (the learned target's own saves:
+        trouble, a move worth saying, the tune's end): the lock, direct play and software
+        decoding as the store has them now, so a lock restored at the tune and expired since
+        is not set again."""
         learned = self._learned
         if learned_only:
             if learned is None:
@@ -1572,15 +1597,24 @@ class LiveSession(QObject):
             stored = self._memory
             if self._tuning is not None and self._channel:
                 stored = self._tuning.get(self._channel)  # (an expired lock reads as none)
-            self._memory = Tuning(None, stored.rate_locked, stored.direct, learned.learned())
+            self._memory = Tuning(
+                None,
+                stored.rate_locked,
+                stored.direct,
+                learned.learned(),
+                software=stored.software,
+            )
             if self._tuning is not None:
                 self._tuning.remember(self._channel, self._memory)
             return
         locked, direct = self._stay.rate_locked, self._memory.direct or direct
+        software = self._memory.software or software
         if learned is not None:
-            self._memory = Tuning(None, locked, direct, learned.learned())
+            self._memory = Tuning(None, locked, direct, learned.learned(), software=software)
         else:
-            self._memory = Tuning(self._memory.extra, locked, direct, self._memory.learned)
+            self._memory = Tuning(
+                self._memory.extra, locked, direct, self._memory.learned, software=software
+            )
         if self._tuning is not None:
             self._tuning.remember(self._channel, self._memory)
 
@@ -2212,6 +2246,7 @@ class LiveSession(QObject):
                 kind=PlayKind.LIVE_PIPELINE,
                 latency=self._latency,
                 user_agent=self._user_agent,
+                software=self._software,
             )
             if self._rate != 1.0:
                 self._playback.set_rate(self._rate)  # for the new media too

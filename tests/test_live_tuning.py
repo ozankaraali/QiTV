@@ -218,6 +218,49 @@ class LiveTuningTests(unittest.TestCase):
         self.clock.now += tuning.DIRECT_S - 10
         self.assertEqual(store.get("a"), Tuning(direct=True))
 
+    def test_a_channel_decoded_in_software_tries_hardware_again_after_a_day(self):
+        # 2.1: hardware decoding froze its picture (services.picture_watch).
+        self.assertEqual(tuning.SOFTWARE_S, 24 * 60 * 60)
+        store = self.store()
+        store.remember("a", Tuning(extra=4.0, software=True))
+        set_at = self.clock.now
+        store.remember("a", Tuning(extra=5.5, software=True))  # a later lesson keeps its time
+        store.flush()
+        self.clock.now = set_at + tuning.SOFTWARE_S - 10
+        self.assertEqual(self.store().get("a"), Tuning(extra=5.5, software=True))  # the file
+        self.clock.now = set_at + tuning.SOFTWARE_S
+        self.assertEqual(store.get("a"), Tuning(extra=5.5))
+        store.remember("a", Tuning(software=True))  # it froze again
+        self.clock.now += tuning.SOFTWARE_S - 10
+        self.assertEqual(store.get("a"), Tuning(software=True))
+        self.clock.now -= 2 * tuning.SOFTWARE_S  # a time in the future counts as expired
+        self.assertEqual(store.get("a"), Tuning())
+
+    def test_software_decoding_alone_is_kept_and_a_wrong_flag_is_left_out(self):
+        channels = {
+            "soft": {"software": True, "used": self.clock.now},
+            "text": {"software": "yes", "used": self.clock.now},
+            "when": {"software": True, "used": self.clock.now, "software_at": "today"},
+        }
+        self.path.write_text(json.dumps({"version": 1, "channels": channels}))
+        store = self.store()
+        self.assertEqual(store.get("soft"), Tuning(software=True))
+        self.assertEqual(store.get("text"), Tuning())
+        self.assertEqual(store.get("when"), Tuning())
+        store.remember("plain", Tuning(extra=1.5))
+        store.flush()
+        written = json.loads(self.path.read_text())["channels"]
+        self.assertNotIn("software", written["plain"])  # only when it is so
+        self.assertEqual(written["soft"]["software_at"], written["soft"]["used"])
+
+    def test_software_decoding_is_not_pushed_out_by_learned_entries(self):
+        store = self.store(max_entries=2)
+        store.remember("soft", Tuning(software=True))
+        for key in ("a", "b"):
+            store.remember(key, Tuning(learned=Learned(need=8.0)))
+        self.assertEqual(store.get("soft"), Tuning(software=True))
+        self.assertEqual(store.get("a"), Tuning())
+
     def test_a_time_in_the_future_counts_as_expired(self):
         # The computer's clock was set back: a lock or direct play set "later" is not kept
         # until the clock passes it again (2.0.2 review, M2).
@@ -277,6 +320,8 @@ class LiveTuningTests(unittest.TestCase):
         store.remember("extra", Tuning(extra=3.0, learned=Learned(events=4.0)))
         store.remember("direct", Tuning(direct=True))
         store.remember("learned", Tuning(learned=Learned(need=13.0)))
+        store.remember("software", Tuning(software=True))
+        store.remember("both", Tuning(extra=2.0, software=True))
         store.flush()
         old = load_two_zero_eight()
         reader = old.LiveTuning(str(self.path), now=self.clock)
@@ -285,6 +330,8 @@ class LiveTuningTests(unittest.TestCase):
         self.assertEqual(reader.get("extra"), old.Tuning(extra=3.0))
         self.assertEqual(reader.get("direct"), old.Tuning(direct=True))
         self.assertEqual(reader.get("learned"), old.Tuning())  # what it can't hold: nothing
+        self.assertEqual(reader.get("software"), old.Tuning())
+        self.assertEqual(reader.get("both"), old.Tuning(extra=2.0))
         reader.remember("other", old.Tuning(extra=1.5))  # 2.0.8 writes back what it knows
         reader.flush()
         again = self.store()

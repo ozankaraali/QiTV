@@ -331,7 +331,9 @@ class OptionsDialog(QDialog):
         )
         self.hardware_decoding_checkbox.setToolTip(
             "Decode video with your graphics chip instead of the processor. It uses less CPU,"
-            " but some TV channels stutter or freeze with it. Applies after QiTV restarts."
+            " but some TV channels stutter or freeze with it: a channel whose picture freezes"
+            " while its sound plays goes back to software decoding by itself, for a day."
+            " Applies after QiTV restarts."
         )
         self.hardware_decoding_checkbox.setChecked(self.config_manager.hardware_decoding)
         self.settings_layout.addRow(self.hardware_decoding_checkbox)

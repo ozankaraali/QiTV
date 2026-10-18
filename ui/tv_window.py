@@ -375,8 +375,10 @@ class TVWindow(QMainWindow):
             logger.warning("libVLC is unavailable: channels cannot play")
             self.session = NullSession(self)
         else:
-            self.session = PlaybackSession(self._instance, self)
-            self.pip_session = PlaybackSession(self._instance, self)
+            # With hardware decoding, a frozen picture sends its stream to software (2.1).
+            hardware = config_manager.hardware_decoding
+            self.session = PlaybackSession(self._instance, self, hardware=hardware)
+            self.pip_session = PlaybackSession(self._instance, self, hardware=hardware)
             root = os.path.join(config_manager.get_config_dir(), TIMESHIFT_DIR)
             self.engine = LiveEngine(root, self)
             # What channels taught stay-live (Auto's target, a locked rate), kept for both.

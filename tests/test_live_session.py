@@ -197,11 +197,13 @@ class FakePlayback(QObject):
     errorOccurred = Signal(str)
     ended = Signal()
     inputEnded = Signal()
+    pictureFroze = Signal()
 
     def __init__(self):
         super().__init__()
         self.holding = False  # a stop leaves libVLC's input open until the test ends it
         self.plays = []  # (url, kind, latency)
+        self.software = []  # each play's software decoding
         self.stops = 0
         self.paused = []
         self.rates = []
@@ -211,9 +213,20 @@ class FakePlayback(QObject):
         self.fail_on_play = False
         self.http = []  # (user_agent, referrer) of each play
 
-    def play(self, url, *, kind, latency="normal", user_agent=None, start_ms=None, referrer=None):
+    def play(
+        self,
+        url,
+        *,
+        kind,
+        latency="normal",
+        user_agent=None,
+        start_ms=None,
+        referrer=None,
+        software=False,
+    ):
         self.plays.append((url, kind, latency))
         self.http.append((user_agent, referrer))
+        self.software.append(software)
         self.ms = 0
         self.set_state(PlaybackState.OPENING)
         if self.fail_on_play:
@@ -2850,6 +2863,82 @@ class CrawlFallbackTests(LiveSessionCase):
         self.assertGreater(feed.starved_s, 10.0)
         self.assertEqual(self.modes, ["pipeline"])
         self.assertNotIn(self.CRAWLING, self.notices)
+
+
+class SoftwareFallbackTests(LiveSessionCase):
+    """2.1: hardware decoding froze the channel's picture while its sound played
+    (`PlaybackSession.pictureFroze`, tests/test_video_decoding.py): the channel decodes in
+    software from then on, and for a day (`LiveTuning`): a time-shift stream opens again where
+    it plays; a direct play opened itself again."""
+
+    def setUp(self):
+        self.now = [1_000_000.0]
+        self.tuning = LiveTuning(None, now=lambda: self.now[0])
+        super().setUp()
+
+    def make(self, **kwargs):
+        kwargs.setdefault("tuning", self.tuning)
+        return super().make(**kwargs)
+
+    def tune(self, channel="A", *, edge=20.0):
+        self.start(channel=channel)
+        self.engine.answer()  # the channel before closes
+        return Feed(self, self.engine.last_sid, burst=0.0, edge=edge).ready()
+
+    def test_a_time_shift_stream_opens_again_where_it_plays_in_software(self):
+        feed = self.tune()
+        feed.run(10.0)
+        self.assertEqual(set(self.playback.software), {False})  # hardware first
+        plays, before = len(self.playback.plays), self.live.position()
+        self.playback.pictureFroze.emit()
+        self.assertEqual(len(self.playback.plays), plays + 1)
+        url, kind, _ = self.playback.plays[-1]
+        self.assertIs(kind, PlayKind.LIVE_PIPELINE)
+        self.assertTrue(self.playback.software[-1])
+        # Where it played: the segment holding the position (a keyframe start).
+        self.assertLessEqual(before - self.live.position(), 2.0)
+        self.assertGreaterEqual(before - self.live.position(), 0.0)
+        self.assertEqual(self.tuning.get("A"), Tuning(software=True))
+        feed.run(5.0)
+        self.live.go_live()  # every later open of the tune too
+        self.assertTrue(all(self.playback.software[plays:]))
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertEqual(self.notices, [])
+
+    def test_its_next_tune_decodes_in_software_and_a_day_later_tries_hardware(self):
+        self.tuning.remember("A", Tuning(software=True))
+        self.tune().run(5.0)
+        self.assertEqual(set(self.playback.software), {True})
+        self.tune("B").run(5.0)  # another channel: hardware
+        self.assertFalse(self.playback.software[-1])
+        self.now[0] += 24 * 60 * 60
+        plays = len(self.playback.plays)
+        self.tune().run(5.0)
+        self.assertEqual(set(self.playback.software[plays:]), {False})
+
+    def test_a_direct_play_that_froze_stays_in_software(self):
+        self.engine.lose()  # no helper: the channel plays directly
+        self.start(channel="A")
+        self.assertEqual((self.playback.plays[-1], self.playback.software[-1]), (DIRECT, False))
+        plays = len(self.playback.plays)
+        self.playback.pictureFroze.emit()
+        self.assertEqual(len(self.playback.plays), plays)  # it opened itself again
+        self.assertEqual(self.tuning.get("A"), Tuning(software=True))
+        self.start(channel="A")  # its next tune
+        self.assertEqual((self.playback.plays[-1], self.playback.software[-1]), (DIRECT, True))
+
+    def test_what_the_channel_taught_before_is_kept(self):
+        self.tuning.remember("A", Tuning(extra=1.5, rate_locked=True))
+        feed = self.tune()
+        feed.run(5.0)
+        self.playback.pictureFroze.emit()
+        self.assertEqual(self.tuning.get("A"), Tuning(1.5, True, software=True))
+
+    def test_a_freeze_heard_before_the_stream_plays_changes_nothing(self):
+        self.start(channel="A")
+        plays = len(self.playback.plays)
+        self.playback.pictureFroze.emit()  # a stale signal: nothing plays yet
+        self.assertEqual((len(self.playback.plays), self.tuning.get("A")), (plays, Tuning()))
 
 
 class StartCushionTests(LiveSessionCase):

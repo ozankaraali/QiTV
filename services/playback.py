@@ -15,6 +15,15 @@ audio_set_mute and audio_set_volume (measured with 3.0.20), so the session keeps
 asked for and applies it again once each media's output is open: it looks every
 _AUDIO_POLL_MS for _AUDIO_WATCH_MS, then at each regular poll while playing. Without an output
 `volume()` reports what was asked for, else the last level an open output reported.
+
+With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
+media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
+has the lab), the stream decodes in software from then on (`software_options()`, media options
+that override the instance's decoder), `pictureFroze` follows, and a stream other than a
+time-shift one opens again where it plays (a film at its position, a live stream live). A
+time-shift stream's position is LiveSession's: it reopens it. The same URL opened again in
+this player (a reconnect, a retry) decodes in software too; `play(software=True)` asks for it
+(a channel that froze before).
 """
 
 from __future__ import annotations
@@ -23,11 +32,13 @@ from enum import Enum
 import logging
 import os
 import platform
-from typing import Any, Optional, Protocol
+import time
+from typing import Any, Callable, Optional, Protocol
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
 from services.jobs import JobRunner
+from services.picture_watch import Counters, FrozenPicture
 from services.vlc_profile import PlayKind, media_options
 
 logger = logging.getLogger(__name__)
@@ -69,6 +80,8 @@ def decoder_args(hardware: bool) -> list[str]:
     The Mac's hardware decoder (VideoToolbox) showed about half the pictures of an interlaced
     TV channel and froze it at times; VLC's software decoder showed them all, as mpv does.
     `--no-videotoolbox` exists only where VLC has that module (an unknown option fails).
+    With hardware decoding, a stream whose picture freezes while its sound plays goes back
+    to software (2.1: `services.picture_watch`, `software_options()`).
     """
     if hardware:
         return []
@@ -76,6 +89,12 @@ def decoder_args(hardware: bool) -> list[str]:
     if platform.system() == "Darwin":
         args.append("--no-videotoolbox")
     return args
+
+
+def software_options() -> list[str]:
+    """Media options that decode one media in software on an instance that decodes in
+    hardware: `decoder_args(False)` as media options, which override the instance's."""
+    return [":" + arg[2:] for arg in decoder_args(hardware=False)]
 
 
 def default_args(hardware_decoding: bool = False) -> list[str]:
@@ -151,6 +170,9 @@ class PlaybackSession(QObject):
     # libVLC let go of its input after a stop: the stream's connection is closed. Only
     # while holds_input() is True after a stop() does one follow.
     inputEnded = Signal()
+    # Hardware decoding froze the picture while the sound played: the stream decodes in
+    # software now (reopened, unless it is a time-shift stream; see the module docstring).
+    pictureFroze = Signal()
 
     def __init__(
         self,
@@ -161,10 +183,19 @@ class PlaybackSession(QObject):
         open_timeout_ms: int = 20000,
         stall_ms: int = 6000,
         runner: Optional[Any] = None,
+        hardware: bool = False,
+        clock: Callable[[], float] = time.monotonic,
     ):
+        """`hardware`: `instance` decodes in hardware (Settings): a frozen picture falls back
+        to software (module docstring)."""
         super().__init__(parent)
         self._runner = runner if runner is not None else JobRunner(self)
         self._instance = instance
+        self._hardware = hardware
+        self._clock = clock
+        self._software = False  # this media decodes in software
+        self._froze_url: Optional[str] = None  # the stream whose picture froze here
+        self._frozen = FrozenPicture()
         self._player = instance.media_player_new()
         self._player.video_set_mouse_input(False)
         self._player.video_set_key_input(False)
@@ -227,6 +258,11 @@ class PlaybackSession(QObject):
     def kind(self) -> Optional[PlayKind]:
         return self._kind
 
+    @property
+    def hardware(self) -> bool:
+        """The instance decodes in hardware: frozen pictures are watched for."""
+        return self._hardware
+
     def state(self) -> PlaybackState:
         return self._state
 
@@ -272,7 +308,10 @@ class PlaybackSession(QObject):
         user_agent: Optional[str] = None,
         start_ms: Optional[int] = None,
         referrer: Optional[str] = None,
+        software: bool = False,
     ) -> None:
+        """`software`: decode this stream in software (with hardware decoding; a channel
+        whose picture froze before)."""
         if self._released:
             return
         self._cancel_pending()
@@ -282,6 +321,7 @@ class PlaybackSession(QObject):
         )
         self._start_ms = start_ms if start_ms and start_ms > 0 else None
         self._stalls, self._restarted = 0, False
+        self._software = software or url == self._froze_url
         self._start_media()
 
     def _start_media(self) -> None:
@@ -289,6 +329,7 @@ class PlaybackSession(QObject):
         self._poll.stop()
         self._set_seekable(False)
         self._ever_played = False
+        self._frozen.restart()
         self._last_time = -1
         self._audio_due = self._mute_wanted is not None or self._volume_wanted is not None
         self._set_state(PlaybackState.OPENING)
@@ -304,7 +345,10 @@ class PlaybackSession(QObject):
     def _open(self) -> None:
         """set_media and play on the GUI thread: only while libVLC holds no input to join."""
         media = self._instance.media_new(self._url)
-        for option in self._options:
+        options = list(self._options)
+        if self._software and self._hardware:
+            options += software_options()
+        for option in options:
             media.add_option(option)
         self._player.set_media(media)
         media.release()
@@ -580,7 +624,51 @@ class PlaybackSession(QObject):
                 self._start_ms = None
         if state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
             self.positionChanged.emit(self.time_ms(), self.length_ms())
+        if self._watch_picture(state):
+            return  # it decodes in software now
         self._watch_stall(state)
+
+    def _watch_picture(self, state: PlaybackState) -> bool:
+        """With hardware decoding, a picture that stands still while the sound plays sends
+        the stream to software (module docstring); True when it did."""
+        if not self._hardware or self._software:
+            return False
+        counters = self._counters()
+        playing = state is PlaybackState.PLAYING
+        if counters is None or not self._frozen.update(self._clock(), playing, counters):
+            return False
+        self._software = True
+        self._froze_url = self._url
+        logger.info(
+            "The picture stood still while the sound played (hardware decoding): "
+            "this %s decodes in software from now",
+            "time-shift stream" if self._kind is PlayKind.LIVE_PIPELINE else "stream",
+        )
+        if self._kind is not PlayKind.LIVE_PIPELINE:  # LiveSession reopens its own
+            if self._seekable and self.length_ms() > 0:
+                self._start_ms = self.time_ms() or None  # a film where it plays
+            self._start_media()
+        self.pictureFroze.emit()
+        return True
+
+    def _counters(self) -> Optional[Counters]:
+        """This media's statistics from libVLC (the player's media and its input item: never
+        the input lock a job may hold, and only called while none runs)."""
+        media = self._player.get_media()
+        if media is None:
+            return None
+        try:
+            stats = vlc.MediaStats()
+            if not media.get_stats(stats):
+                return None
+            return Counters(
+                int(stats.displayed_pictures),
+                int(stats.lost_pictures),
+                int(stats.decoded_video),
+                int(stats.decoded_audio),
+            )
+        finally:
+            media.release()
 
     def _watch_stall(self, state: PlaybackState) -> None:
         if self._kind not in (PlayKind.LIVE, PlayKind.UNKNOWN):
@@ -644,12 +732,16 @@ class Session(Protocol):
     ended: Any
     seekableChanged: Any
     inputEnded: Any
+    pictureFroze: Any
 
     @property
     def url(self) -> Optional[str]: ...
 
     @property
     def kind(self) -> Optional[PlayKind]: ...
+
+    @property
+    def hardware(self) -> bool: ...
 
     def state(self) -> PlaybackState: ...
 
@@ -672,6 +764,7 @@ class Session(Protocol):
         user_agent: Optional[str] = None,
         start_ms: Optional[int] = None,
         referrer: Optional[str] = None,
+        software: bool = False,
     ) -> None: ...
 
     def stop(self) -> None: ...
@@ -714,6 +807,7 @@ class NullSession(QObject):
     ended = Signal()
     seekableChanged = Signal(bool)
     inputEnded = Signal()
+    pictureFroze = Signal()
 
     @property
     def url(self) -> Optional[str]:
@@ -722,6 +816,10 @@ class NullSession(QObject):
     @property
     def kind(self) -> Optional[PlayKind]:
         return None
+
+    @property
+    def hardware(self) -> bool:
+        return False
 
     def state(self) -> PlaybackState:
         return PlaybackState.IDLE
@@ -750,6 +848,7 @@ class NullSession(QObject):
         user_agent: Optional[str] = None,
         start_ms: Optional[int] = None,
         referrer: Optional[str] = None,
+        software: bool = False,
     ) -> None:
         self.errorOccurred.emit(NO_VLC_MESSAGE)
 
