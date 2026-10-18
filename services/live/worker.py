@@ -97,9 +97,14 @@ _DISK_FAILED = "The temporary playback buffer could not be created."
 
 # seq, start, end, discontinuity, start_quality
 _Addition = tuple[int, float, float, bool, StartQuality]
-# PTS jumps the timeline left out, in the state while the ring holds them (2.1 stage 2), at
+# PTS jumps the timeline left out, in the state while the ring holds them (2.1 stage 2; and
+# `_BREAK_SLACK_S` after), at
 # most this many (a memory bound: a flaky source that reconnects every few seconds)
 _BREAKS_KEPT = 64
+# A break stays this long after the ring's start passed it (2.1 stage 5): a player still
+# playing evicted media it read before may reach it yet (a sparse-PCR clock's 2 s step and a
+# second more).
+_BREAK_SLACK_S = 3.0
 
 # BurstMeter (see its docstring):
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
@@ -661,8 +666,8 @@ class _Session:
         if first is not None and evicted is not None and first <= evicted:
             timeline.on_evicted(evicted)
         breaks = self._breaks
-        while breaks and breaks[0][0] < timeline.start:
-            breaks.popleft()  # with the media it was in: no player can reach it any more
+        while breaks and breaks[0][0] < timeline.start - _BREAK_SLACK_S:
+            breaks.popleft()  # its media went a while ago: no player can reach it any more
         snapshot = {
             "oldest": oldest,
             "newest": ring.newest_seq,
@@ -693,6 +698,9 @@ class _Session:
             # How cleanly playback starts at the open segment ("key", "open", "none"; None:
             # none is open), as `start_quality` tells it for the closed ones.
             "open_quality": self._segmenter.open_quality,
+            # The program has a video PID (2.1 stage 5): an audio-only stream's starts are
+            # all "none", which is no reason to say anything.
+            "video": self._segmenter.video_pid is not None,
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the

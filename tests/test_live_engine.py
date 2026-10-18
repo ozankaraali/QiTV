@@ -57,6 +57,7 @@ STATE_KEYS = {
     "backlog_s",
     "finite",
     "open_quality",
+    "video",
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024

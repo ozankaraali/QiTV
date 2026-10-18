@@ -54,6 +54,7 @@ STATE_KEYS = {
     "backlog_s",
     "finite",
     "open_quality",
+    "video",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -394,6 +395,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(snapshot["open"], 0)
         self.assertEqual(snapshot["burst_s"], 0.0)
         self.assertIs(snapshot["hls"], False)  # raw MPEG-TS
+        self.assertIs(snapshot["video"], True)  # a video PID: its starts may be keyframes
         with urlopen(helper.stream_url(sid, snapshot["oldest"]), timeout=10) as response:
             self.assertEqual(response.headers["Content-Type"], "video/mp2t")
             body = response.read()  # the stream ends once the finite source has ended
@@ -427,7 +429,9 @@ class LiveWorkerTests(unittest.TestCase):
     def test_reported_jumps_stay_as_long_as_the_ring_holds_their_media(self):
         # A flaky raw-TS source that reconnects every few seconds: 20 jumps of 5 s, 2 s of
         # media apart. A viewer far behind must still find each break the ring still holds
-        # (a count of eight dropped them); those whose media was evicted go with it.
+        # (a count of eight dropped them); those whose media was evicted go with it, but for
+        # those just before the ring's start (2.1 stage 5: a sparse-PCR clock's 2 s step and
+        # a second more), which a player still reading evicted media may reach.
         pieces = b"".join(
             make_stream(2, pts_start=900000 + round(k * 7.0 * 90000)) for k in range(21)
         )
@@ -445,7 +449,9 @@ class LiveWorkerTests(unittest.TestCase):
                     self.assertEqual([round(where) for where, _ in breaks], list(range(2, 42, 2)))
                 else:
                     self.assertLess(len(breaks), 20)
-                    self.assertTrue(all(where >= snapshot["start"] for where, _ in breaks))
+                    slack = worker._BREAK_SLACK_S
+                    self.assertTrue(all(where >= snapshot["start"] - slack for where, _ in breaks))
+                    self.assertLess(breaks[0][0], snapshot["start"])  # one just before it
                     self.assertEqual(round(breaks[-1][0]), 40)
 
     def test_a_finite_source_ends_after_its_last_segment(self):
