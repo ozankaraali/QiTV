@@ -188,6 +188,89 @@ def flips(model, pieces, until, every=5.0, start=300.0):
     return sum(1 for a, b in zip(needs, needs[1:]) if abs(a - b) > 0.5), needs
 
 
+def lossy_hls(seed, until, seg, took, every=(180.0, 300.0)):
+    """Segments every `seg` s downloading for a time in `took`; now and then (`every`) one never
+    comes (the playlist slid past it): its media is lost."""
+    rng = random.Random(seed)
+    pieces, start, lose = [], seg, rng.uniform(*every)
+    while start < until:
+        if start >= lose:
+            start, lose = start + seg, start + seg + rng.uniform(*every)
+            continue
+        seconds = rng.uniform(*took)
+        count = int(seconds / 0.02)
+        pieces += [(start + seconds * (k + 1) / count, seg / count) for k in range(count)]
+        start += seg
+    return pieces
+
+
+class ClosedLoop:
+    """VLC holding the target as its mean lag over the last `window`, wired as part B is told
+    (`LearnedTarget` docstring), or 2.0.2's `AutoTarget` (`learned` False). `dry`: when it ran
+    dry (from 30 s on); `targets`: the target every 30 s after ten minutes."""
+
+    def __init__(self, burst, learned=True, caching=0.3, window=60.0):
+        self.burst, self.caching, self.window = burst, caching, window
+        self.target = LearnedTarget() if learned else None
+        self.auto = None if learned else AutoTarget()
+        self.recent, self.total = deque(), 0.0
+        self.dry, self.targets, self.inside, self.previous = [], [], False, None
+        self.moved_at, self.stalled, self.stall_low, self.stall_dry = 0.0, False, 0.0, False
+
+    def run(self, pieces, until):
+        pending, edge, now = deque(sorted(pieces)), 20.0, 0.0
+        while now < until:
+            now, before = round(now + TICK, 6), edge
+            while pending and pending[0][0] <= now:
+                edge += pending.popleft()[1]
+            self.tick(now, edge, edge > before + 1e-3)
+        return self.dry, self.targets
+
+    def tick(self, now, edge, moved):
+        target, burst = self.target, self.burst
+        began = target.arrivals.add(START + now, edge) if target else False
+        held = target.target(burst) if target else self.auto.target(burst)
+        level = edge - now
+        self.recent.append((now, level))
+        self.total += level
+        while self.recent[0][0] < now - self.window:
+            self.total -= self.recent.popleft()[1]
+        lag = held - (self.total / len(self.recent) - level)
+        if now >= 30.0:
+            self.watch(now, lag, moved, began)
+        self.moved_at = now if moved else self.moved_at
+        self.previous = lag
+        if now >= 600.0 and abs(now % 30.0) < 1e-9:
+            self.targets.append(held)
+
+    def watch(self, now, lag, moved, began):
+        target, burst = self.target, self.burst
+        if not moved and not self.stalled and now - self.moved_at > burst + STALL_S:
+            self.stalled, self.stall_low, self.stall_dry = True, lag, False
+            target.arrivals.stall() if target else self.auto.trouble(burst)
+        if self.stalled:
+            self.stall_low = min(self.stall_low, lag)
+        if lag < self.caching and not self.inside:
+            self.inside, self.stall_dry = True, self.stall_dry or self.stalled
+            self.dry.append(now)
+            target.starved(burst) if target else self.auto.trouble(burst)
+        elif lag >= self.caching + TICK:
+            self.inside = False
+        if target and began and self.previous is not None and not self.inside:
+            target.near_miss(self.previous - self.caching, burst)
+        if moved and self.stalled:
+            self.stalled = False
+            if target and not self.stall_dry:
+                target.absorbed(self.stall_low - self.caching, burst)
+        if not self.inside:
+            target.played(TICK) if target else self.auto.quiet(TICK)
+
+
+def closed_loop(pieces, until, burst, learned=True):
+    """`ClosedLoop` over `pieces` until `until`: (when VLC ran dry, the target every 30 s)."""
+    return ClosedLoop(burst, learned).run(pieces, until)
+
+
 def starvations_learned(needed, told, hours=6):
     """Trouble every 10 min that a margin under `needed` can't hold out: starvations per hour
     after the first two (`told`: the trouble a margin held out is told as `absorbed()`)."""
@@ -523,6 +606,57 @@ class ArrivalModelTests(unittest.TestCase):
                     pieces = downloaded(regular(seg, seg, 920.0), seed, took)
                     count, _ = flips(ArrivalModel(), pieces, 920.0, start=200.0)
                     self.assertLessEqual(count, 2)
+
+    def test_a_slow_download_is_not_trusted_before_its_idle_times_were_seen(self):
+        # 15 s segments downloading at 1.45x come in ~1 s pieces: twenty of them before the
+        # second idle time. Until three batches after a still edge were seen, the burst
+        # stands in (no need of 2 s, and VLC running dry, half a minute in).
+        model = ArrivalModel()
+        source = Source(model).run(downloaded(regular(15.0, 15.0, 600.0), 0, (10.2, 10.8)), 40)
+        self.assertGreaterEqual(model.seen, lt.WARM_GAPS)
+        self.assertFalse(model.warm)
+        self.assertEqual(model.need(15.0), 15.0 + lt.MARGIN_S)
+        source.run(downloaded(regular(15.0, 15.0, 600.0), 0, (10.2, 10.8)), 600)
+        self.assertTrue(model.warm)
+        self.assertAlmostEqual(model.need(15.0), 6.0, delta=0.5)
+        flow = ArrivalModel()  # a flow never stands still: twenty batches in a row will do
+        Source(flow).run(flowing(30.0), 30.0)
+        self.assertTrue(flow.warm)
+
+    def test_lost_media_is_no_drift(self):
+        # A segment the playlist slid past leaves the edge a segment lower for good: a step
+        # down, not a pace off real time, so the dips stay on and the need stays put.
+        rng, stalls, t = random.Random(3), [], 0.0
+        while t < 3300.0:
+            t += rng.uniform(120.0, 300.0)
+            stalls.append((t, rng.uniform(6.0, 10.0)))
+        cases = (
+            ("HLS 15 s at 1.45x", lossy_hls(0, 3300.0, 15.0, (10.2, 10.8)), 3),
+            ("HLS 6 s slow", lossy_hls(1, 3300.0, 6.0, (3.0, 5.5)), 3),
+            (
+                "flowing, 1-s pauses, lost stalls",
+                flowing(3300.0, 2, pauses=0.08, pause=(0.8, 1.2), stalls=stalls),
+                15,
+            ),
+        )
+        for name, pieces, most in cases:
+            with self.subTest(source=name):
+                count, _ = flips(ArrivalModel(), pieces, 3300.0, every=30.0)
+                self.assertLessEqual(count, most)
+
+    def test_a_fast_channel_that_turns_to_a_flow_leaves_fast(self):
+        model = ArrivalModel()
+        source = Source(model).run(downloaded(regular(6.0, 6.0, 900.0), 0, (0.3, 1.5)), 900.0)
+        model.add(source.now + TICK, source.edge)  # (the fast class needs runs of a second)
+        until = 900.0 + 2 * lt.GAP_WINDOW_S + 60.0
+        flow = [(900.0 + t, media) for t, media in flowing(until - 900.0)]
+        source.run(
+            [p for p in flow if p[0] <= 900.0 + lt.GAP_WINDOW_S + 60.0],
+            900.0 + lt.GAP_WINDOW_S + 60.0,
+        )
+        self.assertIsNone(model._fast)  # its runs are gone: judged afresh, the flow cut again
+        source.run([p for p in flow if p[0] > 900.0 + lt.GAP_WINDOW_S + 60.0], until)
+        self.assertLessEqual(model.need(), lt.FLOOR_S)  # once the long batches left the window
 
     def test_a_reset_forgets_the_edge_but_keeps_what_was_learned(self):
         model = ArrivalModel()
@@ -874,6 +1008,46 @@ class LearnedTargetTests(unittest.TestCase):
         Source(fresh.arrivals).run(regular(7.0, 7.0, 35), 35)
         fresh.starved()
         self.assertIsNone(fresh.learned().need)  # too few batches to be worth keeping
+
+    def test_the_cap_leaves_room_for_a_lost_segment(self):
+        self.assertEqual(learned_target(6.0, 20.0), 10.0)  # today's cap
+        self.assertEqual(learned_target(6.0, 20.0, burst=15.0), 16.0)  # a segment and 1 s
+        self.assertEqual(learned_target(16.0, 20.0, burst=15.0), 18.0)  # need + 2 s still
+
+    def test_a_starving_segmented_source_has_a_segment_covered_at_once(self):
+        # 15 s segments downloading at 1.45x (a need of 6 s): VLC running dry there gets a
+        # whole segment of margin at once (2.0.2's footing); where the need already holds a
+        # segment (a fast download), and for a source without a burst, the usual step.
+        target = LearnedTarget()
+        Source(target.arrivals).run(downloaded(regular(15.0, 15.0, 600.0), 0, (10.2, 10.8)), 600)
+        self.assertAlmostEqual(target.need(15.0), 6.0, delta=0.5)
+        self.assertAlmostEqual(target.room(15.0), 16.0 - target.need(15.0))
+        target.starved(15.0)
+        self.assertAlmostEqual(target.target(15.0), 16.0)
+        fast = LearnedTarget()
+        Source(fast.arrivals).run(downloaded(regular(15.0, 15.0, 600.0), 0, (0.5, 2.0)), 600)
+        need = fast.need(15.0)
+        self.assertGreaterEqual(need, 16.0)
+        fast.starved(15.0)
+        self.assertAlmostEqual(fast.target(15.0), need + math.log2(3), delta=0.05)
+        steady = LearnedTarget(Learned(need=6.0))
+        steady.starved()
+        self.assertAlmostEqual(steady.target(), 6.0 + math.log2(3))
+
+    def test_a_lost_segment_costs_at_most_one_rebuffer(self):
+        # HLS 15 s segments downloading at 1.45x, one lost every 3-5 minutes, VLC holding the
+        # target: the first loss runs VLC dry once (2.0.2 held the burst all along: never),
+        # its starvation covers a segment at once, and the later losses are held out.
+        for seed in range(2):
+            with self.subTest(seed=seed):
+                pieces = lossy_hls(seed, 3600.0, 15.0, (10.2, 10.8))
+                dry, targets = closed_loop(pieces, 3600.0, 15.0)
+                old, _ = closed_loop(pieces, 3600.0, 15.0, learned=False)
+                self.assertEqual(old, [])
+                self.assertLessEqual(len(dry), 1)
+                moves = sum(1 for a, b in zip(targets, targets[1:]) if abs(a - b) > 0.5)
+                self.assertLessEqual(moves, 3)
+                self.assertLess(sum(targets) / len(targets), 22.0)  # a segment, not more
 
     def test_a_zap_away_and_back_keeps_the_hold(self):
         target = LearnedTarget()
