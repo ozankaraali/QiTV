@@ -313,6 +313,7 @@ class Feed:
         self.recover, self.frozen_until, self.dry, self.recoveries = recover, -1.0, False, 0
         self.pcr, self.speed, self.speed_1x = pcr, speed, speed_1x
         self.missing, self.reported = None, []
+        self.lead = 0.0  # after each open, VLC's clock reads this far ahead (`sync`)
         self.jump_at, self.jump_by, self.media_step = math.inf, 0.0, False
         self.stamp = self.stamp_offset = self.pending_jump = 0.0
         self.meter = worker.BurstMeter() if metered else None
@@ -367,7 +368,8 @@ class Feed:
             self.plays_seen = len(playback.plays)
             if playback.plays[-1][1] is PlayKind.LIVE_PIPELINE:
                 self.position, self.media = self.case.live.position(), 0.0
-                self.stamp = self.stamp_offset = self.pending_jump = 0.0
+                self.stamp = self.pending_jump = 0.0
+                self.stamp_offset = self.lead  # VLC's clock may start ahead of its picture
                 playback.set_state(PlaybackState.PLAYING)
 
     def run(self, seconds):
@@ -2253,6 +2255,37 @@ class SafeJumpTests(LiveSessionCase):
                 self.assertAlmostEqual(self.timelines[-1]["lag"], predicted, delta=0.6)
                 self.live.stop()
                 self.engine.answer()
+
+    def test_what_landings_miss_by_is_learned_for_the_channel(self):
+        # Review I3's measurement after the pick read the filter's mean: 8 landings on a
+        # sparse-PCR channel, every one 0.1-0.7 s short (mean 0.3). Learned from each clean
+        # landing (picked while playing, then 8 s at 1x), half of it at a time, bounded.
+        real = StayLive.landed
+        landed = self.enterContext(
+            mock.patch.object(StayLive, "landed", autospec=True, side_effect=real)
+        )
+        for lead, latency, settled in ((0.4, "normal", 0.1), (3.0, "stable", 1.6)):
+            with self.subTest(lead=lead):
+                self.live = self.make()
+                sid = self.start(latency=latency)
+                feed = Feed(self, sid, burst=0.0, edge=12.0).ready(backlog_after_start=False)
+                feed.lead = lead  # VLC's clock reads this much ahead after each open
+                feed.run(20.0)
+                errors = []
+                for _ in range(5):
+                    self.live.go_live()
+                    feed.sync()
+                    target = self.live._target(self.live._snapshot())
+                    predicted = landed.call_args.args[1] + target
+                    feed.run(15.0)
+                    errors.append(self.timelines[-1]["lag"] - predicted)
+                self.assertLess(errors[0], -lead + 0.15)  # the first misses by all of it
+                self.assertLess(abs(errors[-1]), settled)  # later ones by less (bounded)
+                self.assertLessEqual(abs(self.live._land_offset), live_session._LAND_OFFSET_MAX_S)
+                self.live.stop()
+                self.engine.answer()
+        self.live = self.make()  # each channel learns afresh
+        self.assertEqual(self.live._land_offset, 0.0)
 
     def test_a_jump_that_lands_short_changes_no_rate(self):
         # Review I3: each jump on a sparse-PCR channel read 1.2-1.4 s short once VLC played,

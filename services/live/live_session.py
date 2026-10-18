@@ -257,6 +257,12 @@ _SEEK_REACH_S = 10.0
 # ... and an intra picture's to a keyframe's at most this much further (a common keyframe
 # interval).
 _KEY_REACH_S = 2.0
+# What a pick misses its landing by, learned per channel (2.1 stage 5, review I3: a sparse-
+# PCR channel's landings were each 0.1-0.7 s short): a Go live or a jump picked from the lag
+# filter's mean is measured once VLC played it this long at 1x, untroubled ...
+_LAND_CHECK_S = 8.0
+_LAND_WEIGHT = 0.5  # ... and this share of what it missed by is learned ...
+_LAND_OFFSET_MAX_S = 1.5  # ... up to this much either way
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -395,6 +401,8 @@ class LiveSession(QObject):
         self._last_open = -math.inf  # when the last pipeline play() was made
         self._reopened_at = -math.inf  # when stay-live last reopened at live
         self._open_s = _OPEN_SEED_S  # VLC's open time, averaged over this object's opens
+        self._land_offset = 0.0  # what the channel's picks missed by (see _learn_landing)
+        self._land_check: Optional[tuple[float, float]] = None  # (opened, lag predicted)
         self._opened_at: Optional[float] = None  # a pipeline play() not yet Playing
         self._ready_seen = False  # the session is ready: the start may still be held
         self._ready_at = 0.0  # when it was
@@ -493,6 +501,7 @@ class LiveSession(QObject):
         self._auto = AutoTarget(self._memory.extra) if self._latency == AUTO else None
         self._auto_mark = self._troubled_at = None
         self._cushion = 0.0
+        self._land_offset, self._land_check = 0.0, None  # each channel's own
         self._open_args = {
             "headers": dict(headers),
             "verify_ssl": verify_ssl,
@@ -652,6 +661,7 @@ class LiveSession(QObject):
                 ):
                     merged = True
                     return  # stay-live reopened at live a moment ago
+                filtered = not self._was_stalled and self._filter.edge(self._clock()) is not None
                 pick = self._live_start()
                 if pick is None or not self._open_at(pick[0]):
                     # The tick tries again, as the same kind of open.
@@ -661,6 +671,8 @@ class LiveSession(QObject):
                     landing = pick[1] - self._target(self._snapshot())
                     if reopen:
                         self._reopened_at = self._clock()
+                    if filtered:  # picked from the filter's mean: what it misses is learned
+                        self._land_check = (self._clock(), pick[1])
         finally:
             # Always, so StayLive's edge-triggered reopen re-arms; but a pause that was kept
             # stays time-shifted: only the Go live button (it unpaused) returns to LIVE.
@@ -1209,6 +1221,7 @@ class LiveSession(QObject):
             buffering = (
                 stalled or self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
             )
+            self._learn_landing(lag, disturbed=buffering)
             decision = self._stay.update(lag, buffering, now=self._clock())
             self._set_rate(decision.rate)
             if decision.reopen_live:
@@ -1223,9 +1236,35 @@ class LiveSession(QObject):
                     return
         else:
             self._auto_mark = None  # paused (or ended): no quiet time for Auto
+            self._land_check = None
             if not live and not self._paused:
                 self._no_live_edge(snapshot, position)
         self._emit_timeline()
+
+    def _learn_landing(self, lag: float, *, disturbed: bool) -> None:
+        """A Go live or a jump picked from the lag filter's mean (`_start_lags`), once VLC
+        played it `_LAND_CHECK_S` at 1x in LIVE without a wait or a stall: `_LAND_WEIGHT` of
+        what its landing missed by (the mean lag now less the one predicted) is added to the
+        channel's offset, up to `_LAND_OFFSET_MAX_S` either way, so the next pick lands where
+        it aims (review I3: VLC's clock started a little ahead on a sparse-PCR channel). A
+        disturbance meanwhile measures nothing."""
+        check = self._land_check
+        if check is None:
+            return
+        if disturbed or self._rate != 1.0 or self._stay.mode is not Mode.LIVE:
+            self._land_check = None
+            return
+        opened, predicted = check
+        if self._clock() - opened < _LAND_CHECK_S - 1e-9:
+            return
+        self._land_check = None
+        offset = self._land_offset + _LAND_WEIGHT * (lag - predicted)
+        self._land_offset = max(-_LAND_OFFSET_MAX_S, min(_LAND_OFFSET_MAX_S, offset))
+        _LOG.debug(
+            "A landing missed its pick by %+.2f s; the channel's picks now add %+.2f s.",
+            lag - predicted,
+            self._land_offset,
+        )
 
     def _no_live_edge(self, snapshot: Mapping[str, Any], position: float) -> None:
         """The input ended, or the stream is a finished playlist (a clip): stay-live is not
@@ -1596,7 +1635,7 @@ class LiveSession(QObject):
             mean = self._filter.edge(self._clock())  # None before its first edge
         if mean is None:
             mean = self._live_edge(snapshot) + ahead + self._burst_shift(snapshot)
-        edge = mean + self._open_s
+        edge = mean + self._open_s + self._land_offset  # what the channel's picks missed by
         return sorted((edge - start, seq) for start, seq in starts)
 
     def _live_start(
@@ -1761,6 +1800,7 @@ class LiveSession(QObject):
         self._health.reset()
         self._crawl.reset()
         self._retry = None
+        self._land_check = None  # a landing still measured is no longer playing
         self._opening = True
         try:
             self._playback.play(
