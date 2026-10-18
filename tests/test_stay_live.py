@@ -963,16 +963,43 @@ class LandingTests(unittest.TestCase):
         self.assertEqual(min(rates), 0.95)
         self.assertAlmostEqual(lag, 10.0, delta=0.15)
 
-    def test_a_target_that_rises_in_the_first_minute_is_built_at_0_97(self):
-        # A raw TS source's bursts are measured only once a few have landed: the target
-        # rises from Normal's to the burst after the start.
-        stay, clock = live(), Clock()
-        stay.landed(0.0)
-        drive(stay, T, 20.0, clock=clock)
-        stay.target, stay.burst = 10.0, 10.0
-        _, rates = drive(stay, T, 120.0, clock=clock)
-        self.assertEqual(min(rates), 0.97)
-        self.assertLessEqual(sum(1 for rate in rates if rate < 1.0) * TICK, 20.0)
+    def test_a_target_that_rises_after_the_start_is_built_once_as_ever(self):
+        # 2.1 stage 5 (the landing rule for the start too): only the start's own shortfall is
+        # built at 0.97x for 20 s and the rest accepted. A target that rises above the one the
+        # tune aimed at (a higher latency, a burst measured after the start, Auto, a learned
+        # target) is built as without the start: once, by a gentle budgeted nudge (stage 3
+        # built 20 s of it, then accepted the rest: 3.0 s behind a 6 s target for good), or
+        # at 2.0.1's 0.95x where VLC would run dry before each burst.
+        for target, burst, rate in ((6.0, 0.0, 0.97), (10.0, 10.0, 0.95)):
+            with self.subTest(target=target, burst=burst):
+                stay, clock = live(), Clock()
+                stay.landed(0.0)  # the tune, at the target
+                drive(stay, T, 30.0, clock=clock)
+                stay.target, stay.burst = target, burst  # Normal to Stable, say
+                lag, rates = drive(stay, T, 400.0, clock=clock)
+                self.assertEqual(min(rates), rate)
+                self.assertEqual(changes(rates), 2)  # once
+                self.assertAlmostEqual(lag, target, delta=0.2)
+
+    def test_an_accepted_shortfall_is_built_once_the_target_rises(self):
+        stay, clock = live(7.0, burst=7.0), Clock()
+        stay.landed(-3.5)
+        lag, rates = drive(stay, 3.5, 60.0, clock=clock)  # built for 20 s, then accepted
+        self.assertTrue(stay.shortfall_accepted)
+        stay.target = 8.5  # Auto, or stage 4b's learned target, rises
+        lag, rates = drive(stay, lag, 300.0, clock=clock)
+        self.assertFalse(stay.shortfall_accepted)
+        self.assertEqual((min(rates), changes(rates)), (0.97, 2))
+        self.assertAlmostEqual(lag, 8.5, delta=0.2)
+
+    def test_a_start_with_no_more_room_is_built_once_however_long_it_plays(self):
+        # Why the rest is accepted (stage 3): a source that sent nothing further back gets
+        # one gentle build, never one after another.
+        stay, clock = live(7.0, burst=7.0), Clock()
+        stay.landed(-3.5)
+        lag, rates = drive(stay, 3.5, 900.0, clock=clock)
+        self.assertEqual(changes(rates), 2)
+        self.assertLess(lag, 7.0 - 2.5)
 
 
 def steer(stay, lag, seconds, *, clock, landing=None, actual=None):

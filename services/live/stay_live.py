@@ -499,11 +499,13 @@ class StayLive:
         self._start = 0.0  # seconds of playing in which a shortfall is the start's
         self._accepting = False  # the start's build ran: what is still short is accepted
         # A jump or Go live landed (no build): what is short of the band is its pick's, not
-        # missing room; only too little room (`_short`) or trouble acts on it. Only the
-        # landing's own shortfall: not once the target rose above the one it landed at, nor
-        # once the lag was back in the band after the stream played (`_tolerance`).
+        # missing room; only too little room (`_short`) or trouble acts on it.
         self._tolerant = False
-        self._tolerant_at = 0.0  # the target it landed at
+        # The start's build and what it accepts, and a jump's tolerance, are for the
+        # landing's own shortfall only: not once the target rose above the one it landed at
+        # (taken at the first update after it, when the caller has set the target in force),
+        # nor once the lag was back in the band after the stream played (`_own_shortfall`).
+        self._landed_at: Optional[float] = None
 
     @property
     def nudge(self) -> float:
@@ -550,20 +552,26 @@ class StayLive:
 
         Above it, for `_START_S` of playing, far behind (1.10x) and the reopen at live count
         from there, following the lag down: the landing a keyframe interval allowed is taken
-        off by a gentle nudge. Short of it, or should the target rise within `_START_S` of
-        playing, the room is built once at `_GENTLE_DOWN` for at most `_START_BUILD_S`, then
-        the rest is accepted. Without `build` (a jump, Go live: picked at the target with the
-        buffer full, 2.1 stage 5 review I3) the landing's own shortfall is the pick's, not
-        missing room: it is tolerated, but for too little room (`_short`, 2.0.1) and VLC
-        running dry (`trouble()`), until the next landing, a stall's end (`source_stepped()`),
-        a target above the one it landed at (re-review N1: built as without the landing), or
-        the lag in the band once the stream played (a later shortfall is drift).
+        off by a gentle nudge. Short of it within `_START_S` of playing, the room is built
+        once at `_GENTLE_DOWN` for at most `_START_BUILD_S`, then the rest is accepted (a
+        source that sent nothing further back gets one build, never one after another).
+        Without `build` (a jump, Go live: picked at the target with the buffer full, 2.1
+        stage 5 review I3) the landing's own shortfall is the pick's, not missing room: it is
+        tolerated, but for too little room (`_short`, 2.0.1) and VLC running dry
+        (`trouble()`), until the next landing or a stall's end (`source_stepped()`).
+
+        Either way only the landing's own shortfall (`_own_shortfall`): a target that rises
+        above the one it landed at (a higher latency, a burst measured after the start,
+        Auto, a learned target) ends the start's build window, what it accepted and a jump's
+        tolerance, so the rise is built once as without the landing (gently, budgeted; at
+        0.95x where VLC would run dry); and so does the lag back in the band once the stream
+        played (a later shortfall is drift).
         """
         self._floor = max(0.0, excess)
         self._landing = _START_S
         self._start = _START_S if build else 0.0
         self._accepting, self._tolerant = False, not build
-        self._tolerant_at = self.target
+        self._landed_at = None  # the target in force at the next update
         self._jump_age = self._waited = 0.0  # a jump: the next one a minute on at the earliest
 
     def source_stepped(self) -> None:
@@ -652,6 +660,8 @@ class StayLive:
                 self.user_go_live()
                 return Decision(1.0)
             return Decision(self._user_rate)
+        if self._landed_at is None:
+            self._landed_at = self.target  # the target a landing just now aimed at
         if buffering:
             # What the wait adds is a step, not a drift; but a VLC that runs dry again and
             # again is the urgent case itself: its count only pauses.
@@ -673,7 +683,7 @@ class StayLive:
                 return Decision(1.0)
             self._reopened = True
             return Decision(1.0, reopen_live=True)
-        self._tolerance(lag_s)
+        self._own_shortfall(lag_s)
         if self._reopened:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
         if self.rate_locked:
@@ -690,18 +700,20 @@ class StayLive:
             return self._jump(now)
         return Decision(self._rate)
 
-    def _tolerance(self, lag: float) -> None:
-        """A jump's or Go live's shortfall stays tolerated only while it is the landing's own:
-        not once the target rose above the one it landed at (a higher latency, a larger
-        burst, Auto: built as without the landing), nor once the lag is in the band after the
-        stream played (right after an open it reads where the pick aimed; a shortfall after
-        it is drift). Re-review N1."""
-        if not self._tolerant:
-            return
-        if self.target > self._tolerant_at + 1e-9:
-            self._tolerant = False
+    def _own_shortfall(self, lag: float) -> None:
+        """Only a landing's own shortfall is built at the start or tolerated (re-review N1,
+        then for the tune's build too): once the target rose above the one it landed at (a
+        higher latency, a larger burst, Auto, a learned target) the start's build window, what
+        its build accepted and a jump's tolerance end, so the rise is built once as without
+        the landing; once the lag is in the band after the stream played (right after an
+        open it reads where the pick aimed) what was accepted or tolerated ends, so a later
+        shortfall is drift."""
+        landed_at = self._landed_at
+        if landed_at is not None and self.target > landed_at + 1e-9:
+            self._start = 0.0
+            self._accepting = self._tolerant = False
         elif not self.hold_reopen and lag - self._centre(-1) >= -self.band(-1):
-            self._tolerant = False
+            self._accepting = self._tolerant = False
 
     def _jump(self, now: float) -> Decision:
         """Reopen at live instead (`_far_move`): a catch-up it replaces ends here, and a
@@ -801,8 +813,6 @@ class StayLive:
         """At 1x: count the time outside the band; start a nudge once it lasted. True: far
         behind, a jump to live instead (`_far_move`)."""
         behind, ahead = lag - self._centre(1), lag - self._centre(-1)
-        if self._accepting and ahead >= -self.band(-1):
-            self._accepting = False  # back at the target: a later shortfall is a real one
         far = behind > _FAR_S + self._landed()  # a landing above the target is no drift
         short = ahead < -_BAND_S and self._short(lag) and not self._accepting
         tolerated = self._accepting or self._tolerant  # a start's rest, a jump's pick

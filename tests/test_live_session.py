@@ -2315,6 +2315,18 @@ class SafeJumpTests(LiveSessionCase):
                 self.live.stop()
                 self.engine.answer()
 
+    def test_a_tune_then_a_higher_latency_is_built_to_it(self):
+        # The start's build and what it accepts are for the start's own shortfall: Normal to
+        # Stable 30 s after a tune at the target was built for 20 s, then 3.0 s behind a 6 s
+        # target was accepted for good.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=12.0).ready(backlog_after_start=False)
+        feed.run(30.0)
+        self.live.set_latency("stable")
+        feed.run(300.0)
+        self.assertEqual((min(self.playback.rates), changes(self.playback.rates)), (0.97, 2))
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["stable"], delta=0.5)
+
     def test_go_live_then_a_higher_latency_is_built_as_without_it(self):
         # Re-review N1: after a Go live the shortfall a higher target left was tolerated for
         # good (2.0 s behind a 6 s target for 5 minutes).
