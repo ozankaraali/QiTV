@@ -862,6 +862,34 @@ class LiveWorkerTests(unittest.TestCase):
         helper.wait_for(lambda message: message == ("ready", sid))
         self.assertIs(helper.of(sid, "state")[-1][2]["answered"], True)
 
+    def test_an_answer_that_turns_out_hls_says_so_before_any_segment_byte(self):
+        # A playlist the answer did not name as one (no type, no .m3u8 path): its open says it
+        # is HLS at once, so the GUI keeps the longer wait for raw TS (an HLS channel waits
+        # longer only once segment bytes flow).
+        go = threading.Event()
+        self.addCleanup(go.set)
+
+        def segment(request):
+            try:
+                go.wait(10)
+                request.wfile.write(make_stream(4))
+            except OSError:
+                pass
+
+        source = self.source(
+            {
+                "/user/secret/play": (200, {}, leaf("a.ts", ended=False)),
+                "/user/secret/a.ts": (200, {}, segment),
+            }
+        )
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/play")
+        state = helper.wait_for(lambda m: m[:2] == ("state", sid) and m[2]["hls"])
+        self.assertIs(state[2]["answered"], True)
+        self.assertEqual(state[2]["received"], 0)
+        self.assertEqual(helper.of(sid, "ready"), [])
+        go.set()
+
     def test_an_http_failure_says_its_status(self):
         # The GUI logs why a channel played directly: the kind, and an HTTP status.
         source = self.source({SECRET_PATH: (404, {}, b"")})

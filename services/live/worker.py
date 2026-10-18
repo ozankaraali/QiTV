@@ -440,6 +440,10 @@ class _Session:
             source.close()
             raise _Cancelled()
         self._adopt(self._make_ring())
+        if self._answered:
+            # An answer the open found a playlist behind: the parent's longer wait is raw
+            # TS's, an HLS channel's only once segment bytes flow (its state says `hls`).
+            self._notify(force=True)
         segmenter = self._segmenter
         try:
             for item in source.chunks():

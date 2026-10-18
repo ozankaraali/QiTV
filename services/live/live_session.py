@@ -30,9 +30,10 @@ before ready and a ready that does not come within `ready_timeout_ms` fall back 
 "Time-shift isn't available for this channel"; after `available(False)` every start plays
 directly for the rest of the run. A source that
 sent bytes by then without anything playable (no keyframe yet: an on-demand restream
-starting up, say), or that answered and holds its body back (2.1: headers at once, the body
-seconds later), gets until `ready_max_ms` from the start, with "Still loading…" at
-`ready_timeout_ms`; one that did not answer falls back at `ready_timeout_ms`. Each such
+starting up, say), or a raw-TS one that answered and holds its body back (2.1: headers at
+once, the body seconds later; an HLS channel only once segment bytes flow), gets until
+`ready_max_ms` from the start, with "Still loading…" at `ready_timeout_ms`; one that did not
+answer (or an HLS one without segment bytes) falls back at `ready_timeout_ms`. Each such
 fallback logs why (no URL; the engine logs an HTTP status).
 
 Position (spec §6.3; 2.1 stage 2): the start of the opened segment plus VLC's clock as
@@ -890,13 +891,16 @@ class LiveSession(QObject):
             self._fall_back(UNAVAILABLE)
 
     def _receiving(self) -> bool:
-        """The source sent bytes (the helper's state before ready says how many), or answered
-        and holds its body back (2.1: an on-demand restream that starts its body seconds after
-        its headers; VLC's second request then found it warm)."""
+        """The source sent bytes (the helper's state before ready says how many), or, raw TS
+        only, answered and holds its body back (2.1: an on-demand restream that starts its body
+        seconds after its headers; VLC's second request then found it warm)."""
         if self._ready_more_ms <= 0:
             return False
         snapshot = self._snapshot()
-        return _number(snapshot.get("received")) > 0 or snapshot.get("answered") is True
+        if _number(snapshot.get("received")) > 0:
+            return True
+        # Raw TS only: an HLS playlist that answered waits longer once segment bytes flow.
+        return snapshot.get("answered") is True and snapshot.get("hls") is not True
 
     def _unready_reason(self) -> str:
         """Why nothing could start from the buffer in time, for the log: no URL, no name."""
@@ -907,6 +911,8 @@ class LiveSession(QObject):
             return "the time-shift buffer held nothing to start from"
         if received > 0:
             return f"nothing playable came within {waited:.0f} s ({received} bytes)"
+        if snapshot.get("answered") is True and snapshot.get("hls") is True:
+            return f"its playlist answered but no segment byte came within {waited:.0f} s"
         if snapshot.get("answered") is True:
             return f"the channel answered but sent nothing within {waited:.0f} s"
         return f"the channel did not answer within {waited:.0f} s"

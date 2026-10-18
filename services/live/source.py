@@ -67,6 +67,12 @@ _STALL_TIMEOUT = 10.0
 _MANIFEST_LIMIT = 2 * 1024 * 1024
 _READ_SIZE = 64 * 1024
 _SNIFF_SIZE = 10
+_PLAYLIST_TYPES = (
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "audio/mpegurl",
+    "audio/x-mpegurl",
+)
 # A variant whose master names a separate default audio playlist: how much of its first
 # segment may pass before its program tables must have shown audio of its own.
 _AUDIO_LOOK = 64 * 1024
@@ -1456,15 +1462,27 @@ def _open_local(url: str, scheme: str) -> Source:
     raise SourceError("unsupported")
 
 
+def _names_a_playlist(url: str, response: Any) -> bool:
+    """Whether an answer says, before its body, that it is an HLS playlist: by its content
+    type, or by the path of the URL asked or reached."""
+    kind = str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
+    if kind in _PLAYLIST_TYPES:
+        return True
+    paths = (urlsplit(url).path, urlsplit(str(response.url)).path)
+    return any(path.lower().endswith((".m3u8", ".m3u")) for path in paths)
+
+
 def _answer(
     http: _Http, url: str, on_answer: Callable[[], None] | None
 ) -> tuple[Any, bytes, bytes | None]:
     """The entry URL's response, its first bytes and, for a playlist, all of it. As its
-    headers come, ``on_answer`` hears that the channel answered: an on-demand restream may
-    hold its body back for seconds. A body that ends before its first byte is a broken one."""
+    headers come, ``on_answer`` hears that the channel answered, unless the answer names an HLS
+    playlist (`_names_a_playlist`): an on-demand raw-TS restream may hold its body back for
+    seconds, while an HLS channel is waited for longer only once segment bytes flow. A body
+    that ends before its first byte is a broken one."""
     response = http.get(url)
     try:
-        if on_answer is not None:
+        if on_answer is not None and not _names_a_playlist(url, response):
             on_answer()
         prefix, content = _sniff(http, response)
         if not prefix:
@@ -1539,7 +1557,8 @@ def open_source(
     One request, unless the first answer fails in passing: a 5xx or 408, a broken or refused
     connection, or a body that ends before its first byte is asked for again after each of the
     first three reconnect delays (`_first_answer`). ``on_answer`` is called as an answer's
-    headers come, before its first byte, which an on-demand restream may hold back for seconds.
+    headers come, before its first byte, which an on-demand restream may hold back for seconds;
+    not for an answer that names an HLS playlist by its content type or path.
 
     Provider ``headers``: only ``User-Agent`` (default ``VLC/3.0.20``) and ``Referer`` are
     used. The User-Agent goes with every request. The Referer goes only with requests to

@@ -1095,6 +1095,31 @@ high.m3u8
         self.assertLess(answered[0] - started, 2.0)  # not after the body's 5 s
         self.assertEqual(drain(source), [self.video])
 
+    def test_an_answer_that_names_a_playlist_is_no_cold_restream(self):
+        # The longer wait is for raw TS (cold restreams): an HLS playlist that answers says
+        # nothing until segment bytes flow, by its content type or its path.
+        playlist = leaf("video.ts")
+        server = self.server(
+            {
+                "/live.m3u8": (200, {}, playlist),
+                "/play": (200, {"Content-Type": "application/vnd.apple.mpegurl"}, playlist),
+                "/legacy": (200, {"Content-Type": "audio/x-mpegURL"}, playlist),
+                "/video.ts": (200, {}, self.video),
+            }
+        )
+        for path in ("/live.m3u8", "/play", "/legacy"):
+            with self.subTest(path):
+                answered = []
+                source = open_source(
+                    server.url + path,
+                    headers={},
+                    verify_ssl=True,
+                    stop=threading.Event(),
+                    on_answer=lambda: answered.append(True),
+                )
+                self.assertEqual(drain(source), [self.video])
+                self.assertEqual(answered, [])
+
     def test_a_first_answer_that_failed_in_passing_is_asked_for_again(self):
         # An on-demand restream may refuse the request that starts it, with a 5xx or a body
         # that ends before its first byte, and serve the next one, as VLC's own retry finds.

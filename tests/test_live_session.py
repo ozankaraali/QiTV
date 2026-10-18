@@ -173,10 +173,12 @@ class FakeEngine(QObject):
         }
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
-    def answered(self, sid):
-        """The source answered, but no byte came yet: the helper's state before them (2.1)."""
+    def answered(self, sid, hls=False):
+        """The source answered, but no byte came yet: the helper's state before them (2.1);
+        with `hls`, its open found a playlist."""
         self.receive(sid, 0)
         self._snapshots[sid]["answered"] = True
+        self._snapshots[sid]["hls"] = hls
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def reset(self, sid):
@@ -781,6 +783,25 @@ class StartTests(LiveSessionCase):
         self.assert_falls_back(sid, UNAVAILABLE, 0)
         self.assertEqual(self.notices, [LOADING, UNAVAILABLE])
         self.assertTrue(any("answered but sent nothing" in line for line in logs.output))
+
+    def test_an_hls_playlist_that_answered_without_segment_bytes_waits_only_the_timeout(self):
+        """The longer wait is raw TS's (cold restreams): an HLS channel gets it only once
+        segment bytes flow, as 2.0.1's not-playable-yet rule."""
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=60_000)
+        sid = self.start()
+        self.engine.answered(sid, hls=True)
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            self.wait_until(lambda: self.engine.closed)  # not 60 s later
+        self.assert_falls_back(sid, UNAVAILABLE, 0)
+        self.assertEqual(self.notices, [UNAVAILABLE])
+        self.assertTrue(any("no segment" in line for line in logs.output), logs.output)
+        # Once segment bytes flow, an HLS channel waits as before.
+        self.engine.answer()
+        sid = self.start()
+        self.engine.answered(sid, hls=True)
+        self.engine.receive(sid, 188 * 20)
+        self.wait_until(lambda: self.notices[-1] == LOADING)
+        self.assertNotIn(sid, self.engine.closed)
 
     def test_a_fallback_before_ready_says_why_in_the_log(self):
         cases = (
