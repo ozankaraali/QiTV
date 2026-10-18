@@ -1027,6 +1027,94 @@ high.m3u8
                 self.assertGreaterEqual(waited, 0.25)
                 self.assertLess(waited, 1.3, "the stalled connection was kept too long")
 
+    def test_raw_ts_follows_redirects_to_another_port(self):
+        # An Xtream load balancer answers a channel's link with a 302 to a stream server on
+        # another port, which may redirect once more.
+        stream = self.server({"/live/play/1.ts": (200, {}, self.video)})
+        hop = self.server(
+            {"/balance/1.ts": (302, {"Location": stream.url + "/live/play/1.ts"}, b"")}
+        )
+        entry = self.server(
+            {"/live/user/secret/1.ts": (302, {"Location": hop.url + "/balance/1.ts"}, b"")}
+        )
+        parts = media(entry.url + "/live/user/secret/1.ts", headers={"User-Agent": "Provider/3.0"})
+        self.assertEqual(parts, [self.video])
+        for server in (entry, hop, stream):
+            self.assertEqual(len(server.requests), 1)
+            self.assertEqual(server.requests[0][1]["User-Agent"], "Provider/3.0")
+
+    def test_the_open_says_the_channel_answered_before_its_first_byte(self):
+        # An on-demand restream answers at once and starts its body seconds later (VLC's
+        # second request then finds it warm): the open says so as the headers come, so the
+        # helper can tell the GUI to wait for the body rather than play directly.
+        released = threading.Event()
+        self.addCleanup(released.set)
+
+        def warming_up(request):
+            released.wait(5)
+            request.wfile.write(self.video)
+
+        sized = {"Content-Length": str(len(self.video))}
+        server = self.server({"/live.ts": (200, sized, warming_up)})
+        answered = []
+
+        def on_answer():
+            answered.append(time.monotonic())
+            threading.Timer(0.3, released.set).start()  # the body follows a while later
+
+        started = time.monotonic()
+        source = open_source(
+            server.url + "/live.ts",
+            headers={},
+            verify_ssl=True,
+            stop=threading.Event(),
+            on_answer=on_answer,
+        )
+        self.assertEqual(len(answered), 1)
+        self.assertLess(answered[0] - started, 2.0)  # not after the body's 5 s
+        self.assertEqual(drain(source), [self.video])
+
+    def test_a_first_answer_that_failed_in_passing_is_asked_for_again(self):
+        # An on-demand restream may refuse the request that starts it, with a 5xx or a body
+        # that ends before its first byte, and serve the next one, as VLC's own retry finds.
+        def once(first):
+            return lambda _request, count: first if count == 1 else (200, {}, self.video)
+
+        cases = {
+            "/busy.ts": (503, {}, b""),
+            "/gateway.ts": (502, {}, b""),
+            "/empty.ts": (200, {}, b""),  # Content-Length: 0
+            "/closed.ts": (200, {}, lambda _request: None),  # no length: the FIN at once
+        }
+        server = self.server({path: once(first) for path, first in cases.items()})
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            for path in cases:
+                with self.subTest(path):
+                    self.assertEqual(media(server.url + path), [self.video])
+                    self.assertEqual(server.counts[path], 2)
+
+    def test_a_first_answer_that_keeps_failing_ends_with_its_own_error(self):
+        server = self.server(
+            {
+                "/down.ts": (503, {}, b""),
+                "/silent.ts": (200, {}, b""),
+                "/missing.ts": (404, {}, b""),
+            }
+        )
+        with patch.object(source_module, "_RECONNECT_DELAYS", FAST_RETRIES):
+            for path, kind, status, asked in (
+                ("/down.ts", "http", 503, 4),  # the first answer and the first three delays
+                ("/silent.ts", "network", None, 4),
+                ("/missing.ts", "http", 404, 1),  # an answer that means it: never again
+            ):
+                with self.subTest(path):
+                    with self.assertRaises(SourceError) as raised:
+                        media(server.url + path)
+                    self.assertEqual(
+                        (raised.exception.kind, raised.exception.status), (kind, status)
+                    )
+                    self.assertEqual(server.counts[path], asked)
+
     def test_raw_ts_reconnect_gives_up_after_six_tries(self):
         half = len(self.video) // 2 // 188 * 188
 

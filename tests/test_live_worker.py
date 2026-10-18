@@ -55,6 +55,7 @@ STATE_KEYS = {
     "finite",
     "open_quality",
     "video",
+    "answered",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -608,7 +609,9 @@ class LiveWorkerTests(unittest.TestCase):
         helper = self.helper()
         sid = helper.open(source.url + "/user/secret/clip.m3u8", live_delay=100.0)
         helper.wait_for(lambda message: message == ("ended", sid))
-        states = [message[2] for message in helper.of(sid, "state")]
+        # Once its bytes came: the answer's state before them knows no source yet (2.1).
+        states = [message[2] for message in helper.of(sid, "state") if message[2]["received"]]
+        self.assertTrue(states)
         self.assertTrue(all(state["finite"] for state in states))
         self.assertTrue(all(state["backlog_s"] == 0.0 for state in states))
 
@@ -814,13 +817,53 @@ class LiveWorkerTests(unittest.TestCase):
             for message in helper.messages[: helper.messages.index(ready)]
             if message[:2] == ("state", sid) and message[2]["oldest"] is None
         ]
-        self.assertGreaterEqual(len(early), 2, "no state while bytes arrived before ready")
         self.assertEqual(set(early[0]), STATE_KEYS)
-        received = [snapshot["received"] for snapshot in early]
-        self.assertGreater(received[0], 0)
+        # The answer's state may come first, before any byte (2.1).
+        received = [snapshot["received"] for snapshot in early if snapshot["received"]]
+        self.assertGreaterEqual(len(received), 2, "no state while bytes arrived before ready")
         self.assertEqual(received, sorted(received))
         self.assertEqual(helper.of(sid, "state")[-1][2]["oldest"], 0)  # then playable
         self.assertGreaterEqual(helper.of(sid, "state")[-1][2]["received"], 8 * 20 * 188)
+
+    def test_an_answer_before_any_byte_is_reported_at_once(self):
+        # An on-demand restream answers at once and starts its body seconds later: the GUI
+        # hears of the answer before the first byte, and waits for it rather than playing the
+        # channel directly at its ready timeout.
+        go = threading.Event()
+        self.addCleanup(go.set)
+
+        def body(request):
+            try:
+                go.wait(10)
+                request.wfile.write(make_stream(4))
+                request.wfile.flush()
+                self.stop.wait(10)
+            except OSError:
+                pass
+
+        source = self.source({SECRET_PATH: (200, {}, body)})
+        helper = self.helper()
+        sid = helper.open(source.url + SECRET_PATH)
+        state = helper.wait_for(lambda message: message[:2] == ("state", sid))
+        snapshot = state[2]
+        self.assertEqual(set(snapshot), STATE_KEYS)
+        self.assertIs(snapshot["answered"], True)
+        self.assertEqual(snapshot["received"], 0)
+        self.assertIsNone(snapshot["oldest"])
+        self.assertEqual(helper.of(sid, "ready"), [])
+        go.set()
+        helper.wait_for(lambda message: message == ("ready", sid))
+        self.assertIs(helper.of(sid, "state")[-1][2]["answered"], True)
+
+    def test_an_http_failure_says_its_status(self):
+        # The GUI logs why a channel played directly: the kind, and an HTTP status.
+        source = self.source({SECRET_PATH: (404, {}, b"")})
+        helper = self.helper()
+        sid = helper.open(source.url + SECRET_PATH)
+        error = helper.wait_for(lambda message: message[:2] == ("error", sid))
+        self.assertEqual(error[2], "http")
+        self.assertEqual(error[4:], (404,))
+        self.assert_no_credentials(helper)
 
     def test_a_source_that_sends_nothing_is_a_network_failure(self):
         source = self.source({SECRET_PATH: (200, {}, b"")})

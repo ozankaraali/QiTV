@@ -70,6 +70,9 @@ _SNIFF_SIZE = 10
 _PACKET = 188
 _BLOCK = 16
 _RECONNECT_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
+# A first answer that failed in passing is asked for again after the first this many reconnect
+# delays (3.5 s in all, inside the GUI's 6 s ready timeout).
+_OPEN_RETRIES = 3
 # Spent reconnect tries come back only once a new connection has carried this much.
 _HEALTHY_SECONDS = 2.0
 _HEALTHY_BYTES = 256 * 1024
@@ -1413,19 +1416,67 @@ def _open_local(url: str, scheme: str) -> Source:
     raise SourceError("unsupported")
 
 
-def _open_http(
-    http: _Http, url: str, live_delay: float, target: float | None, extra: float
-) -> Source:
+def _answer(
+    http: _Http, url: str, on_answer: Callable[[], None] | None
+) -> tuple[Any, bytes, bytes | None]:
+    """The entry URL's response, its first bytes and, for a playlist, all of it. As its
+    headers come, ``on_answer`` hears that the channel answered: an on-demand restream may
+    hold its body back for seconds. A body that ends before its first byte is a broken one."""
     response = http.get(url)
     try:
+        if on_answer is not None:
+            on_answer()
         prefix, content = _sniff(http, response)
-        if content is None:
-            return TsSource(http, url, response, prefix)  # it now owns the response
-        final = str(response.url)
+        if not prefix:
+            raise _ReadError("network")
     except BaseException:
         http.release(response)
         raise
-    http.release(response)
+    return response, prefix, content
+
+
+def _first_answer(
+    http: _Http, url: str, on_answer: Callable[[], None] | None
+) -> tuple[Any, bytes, bytes | None]:
+    """`_answer`, asked for again after each of the first `_OPEN_RETRIES` reconnect delays
+    while it fails in passing (a 5xx or 408, a broken or refused connection, a body that ends
+    before its first byte): an on-demand restream may refuse the request that starts it and
+    serve the next, which VLC's own retry finds. Then the last failure stands as it is (an
+    "http" one keeps its status); an answer that means it (a 4xx, a limit, TLS) and a timeout
+    (the full 60 s were waited already) at once."""
+    delays = iter(_RECONNECT_DELAYS[:_OPEN_RETRIES])
+    while True:
+        try:
+            return _answer(http, url, on_answer)
+        except Exception as error:
+            if http.closed:
+                raise _Closed() from None
+            timed_out = isinstance(error, requests.exceptions.Timeout) or (
+                isinstance(error, _ReadError) and error.kind == "timeout"
+            )
+            delay = next(delays, None) if _retryable(error) and not timed_out else None
+            if delay is None:
+                raise
+            log.info("The channel's first answer failed (%s); asking again.", type(error).__name__)
+        if http.wait(delay):
+            raise _Closed()
+
+
+def _open_http(
+    http: _Http,
+    url: str,
+    live_delay: float,
+    target: float | None,
+    extra: float,
+    on_answer: Callable[[], None] | None = None,
+) -> Source:
+    response, prefix, content = _first_answer(http, url, on_answer)
+    if content is None:
+        return TsSource(http, url, response, prefix)  # it now owns the response
+    try:
+        final = str(response.url)
+    finally:
+        http.release(response)
     playlist, base = _media_playlist(http, content, final)
     http.add_entry(base)  # reloads and same-origin segments keep the provider's Referer
     return HlsSource(http, playlist, base, live_delay, target, extra)
@@ -1441,8 +1492,14 @@ def open_source(
     target: float | None = None,
     extra: float = 0.0,
     allow_local: bool = False,
+    on_answer: Callable[[], None] | None = None,
 ) -> Source:
-    """Open ``url`` (one request), sniff it, and return a TS or HLS source.
+    """Open ``url``, sniff it, and return a TS or HLS source.
+
+    One request, unless the first answer fails in passing: a 5xx or 408, a broken or refused
+    connection, or a body that ends before its first byte is asked for again after each of the
+    first three reconnect delays (`_first_answer`). ``on_answer`` is called as an answer's
+    headers come, before its first byte, which an on-demand restream may hold back for seconds.
 
     Provider ``headers``: only ``User-Agent`` (default ``VLC/3.0.20``) and ``Referer`` are
     used. The User-Agent goes with every request. The Referer goes only with requests to
@@ -1476,7 +1533,7 @@ def open_source(
         raise SourceError("unsupported")
     http = _Http(url, headers, verify_ssl, stop)
     try:
-        return _open_http(http, url, live_delay, target, extra)
+        return _open_http(http, url, live_delay, target, extra, on_answer)
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:

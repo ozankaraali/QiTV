@@ -26,11 +26,13 @@ Commands (parent to helper):
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
 additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
+and once the source answered (`answered`, 2.1: its headers came, before its first byte),
 each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality)`
 (`Span`'s fields; an engine from before 2.1 would not take the fifth, but the helper and the
 engine always ship in one build, and the engine still takes four);
 `("ready", sid)` once the first segment is open (its state comes first);
-`("error", sid, kind, message)`; `("ended", sid)`; `("closed", sid)`. Error messages are
+`("error", sid, kind, message[, status])`, an HTTP failure's status last (2.1: the parent
+logs why a channel played directly); `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
 - a `SourceError` kind ("unsupported", "network", "tls", "timeout", "http"; "unsupported"
   also for input the segmenter or the RAM ring cannot take): the input ended for good;
@@ -224,6 +226,12 @@ class _Cancelled(Exception):
     """The session was closed: unwind without sending anything or writing to a ring."""
 
 
+def _error(sid: str, kind: str, text: str, status: int | None) -> tuple[Any, ...]:
+    """An "error" message; an HTTP failure's status follows its text (the GUI logs it)."""
+    message = ("error", sid, kind, text)
+    return message if status is None else (*message, status)
+
+
 def _close_ring(ring: Ring) -> None:
     try:
         ring.close()
@@ -365,6 +373,7 @@ class _Session:
         self._timeline = Timeline()
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
         self._received = 0  # bytes from the source, those before the first keyframe too
+        self._answered = False  # the source's response headers came (bytes may not have yet)
         self._caught_up = False  # HLS: every segment its playlist listed was delivered once
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
@@ -418,9 +427,10 @@ class _Session:
                 live_delay=self._live_delay,
                 target=float(target) if isinstance(target, (int, float)) else None,
                 extra=float(self._start.get("extra") or 0.0),
+                on_answer=self._on_answer,
             )
         except SourceError as error:
-            self._send(("error", self.sid, error.kind, str(error)))
+            self._send(_error(self.sid, error.kind, str(error), error.status))
             return
         with self.lock:
             cancelled = self.cancelled
@@ -451,7 +461,7 @@ class _Session:
             self._check()
             self._apply(segmenter.finish())
         except SourceError as error:
-            self._fail(error.kind, str(error))
+            self._fail(error.kind, str(error), error.status)
             return
         except Unsupported:
             self._fail("unsupported", _UNSUPPORTED)
@@ -588,7 +598,16 @@ class _Session:
         else:
             self._skipping = True  # the open segment lost its start: wait for the next
 
-    def _fail(self, kind: str, message: str) -> None:
+    def _on_answer(self) -> None:
+        """The source's response headers came, before its first byte (2.1): an on-demand
+        restream may hold its body back for seconds (VLC's second request then finds it warm),
+        so the parent waits for it as for bytes that are not playable yet. Reported at once,
+        before any ring exists."""
+        if not self._answered:
+            self._answered = True
+            self._notify(force=True)
+
+    def _fail(self, kind: str, message: str, status: int | None = None) -> None:
         """Report a failure that ends the input; the buffered part stays playable."""
         if self._ring is not None:
             self._check()  # a cancelled session never touches its ring again
@@ -600,7 +619,7 @@ class _Session:
                 _LOG.info("The last live segment was dropped (%s).", type(error).__name__)
             self._ended = True  # readers stop at the end of the buffer instead of waiting
             self._notify(force=True)
-        self._send(("error", self.sid, kind, message))
+        self._send(_error(self.sid, kind, message, status))
 
     def _follow(self, source: Source) -> None:
         """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and
@@ -657,25 +676,25 @@ class _Session:
             return
         self._last_notify = now
         ring, timeline, source = self._ring, self._timeline, self._source
-        if ring is None:
-            return
-        oldest = ring.oldest_seq
-        # Spans of evicted segments leave the timeline (all of them while the ring is empty).
-        evicted = oldest - 1 if oldest is not None else timeline.newest_seq
-        first = timeline.oldest_seq
-        if first is not None and evicted is not None and first <= evicted:
-            timeline.on_evicted(evicted)
+        # No ring yet while the source opens: only its answer can be news then.
+        oldest = ring.oldest_seq if ring is not None else None
+        if ring is not None:
+            # Spans of evicted segments leave the timeline (all of them while it is empty).
+            evicted = oldest - 1 if oldest is not None else timeline.newest_seq
+            first = timeline.oldest_seq
+            if first is not None and evicted is not None and first <= evicted:
+                timeline.on_evicted(evicted)
         breaks = self._breaks
         while breaks and breaks[0][0] < timeline.start - _BREAK_SLACK_S:
             breaks.popleft()  # its media went a while ago: no player can reach it any more
         snapshot = {
             "oldest": oldest,
-            "newest": ring.newest_seq,
-            "open": ring.open_seq,
+            "newest": ring.newest_seq if ring is not None else None,
+            "open": ring.open_seq if ring is not None else None,
             "start": timeline.start,
             "end": timeline.end,
             "live_edge": self._live_edge(),
-            "bytes": ring.bytes,
+            "bytes": ring.bytes if ring is not None else 0,
             "ended": self._ended,
             # HLS: the target duration, which a reload may change; raw TS: what the meter
             # measured (0.0 for a steady source). The larger, should both apply.
@@ -701,6 +720,8 @@ class _Session:
             # The program has a video PID (2.1 stage 5): an audio-only stream's starts are
             # all "none", which is no reason to say anything.
             "video": self._segmenter.video_pid is not None,
+            # The source answered (2.1): its headers came, though no byte may have yet.
+            "answered": self._answered,
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the

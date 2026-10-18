@@ -173,6 +173,12 @@ class FakeEngine(QObject):
         }
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
+    def answered(self, sid):
+        """The source answered, but no byte came yet: the helper's state before them (2.1)."""
+        self.receive(sid, 0)
+        self._snapshots[sid]["answered"] = True
+        self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
+
     def reset(self, sid):
         """The helper holding `sid` died: its spans and snapshot are gone."""
         self._spans.pop(sid, None)
@@ -750,6 +756,51 @@ class StartTests(LiveSessionCase):
         self.wait_until(lambda: self.engine.closed)
         self.assert_falls_back(sid, UNAVAILABLE, 0)
         self.assertEqual(self.notices, [LOADING, UNAVAILABLE])
+
+    def test_an_answer_without_bytes_yet_extends_the_wait_with_a_hint(self):
+        """An on-demand restream answers at once and starts its body seconds later (2.1, a
+        raw-TS channel VLC played at once right after the fallback)."""
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=60_000)
+        sid = self.start()
+        self.engine.answered(sid)
+        self.wait_until(lambda: self.notices)
+        self.assertEqual(self.notices, [LOADING])
+        self.assertEqual(self.engine.closed, [])  # still waiting
+        self.engine.receive(sid, 188 * 20)
+        self.engine.buffer(sid, [], open_seq=0, live_edge=2.0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 0)])
+        self.assertEqual(self.notices, [LOADING])
+
+    def test_an_answer_alone_is_waited_for_a_bounded_time(self):
+        self.live = self.make(ready_timeout_ms=50, ready_max_ms=250)
+        sid = self.start()
+        self.engine.answered(sid)
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            self.wait_until(lambda: self.engine.closed)
+        self.assert_falls_back(sid, UNAVAILABLE, 0)
+        self.assertEqual(self.notices, [LOADING, UNAVAILABLE])
+        self.assertTrue(any("answered but sent nothing" in line for line in logs.output))
+
+    def test_a_fallback_before_ready_says_why_in_the_log(self):
+        cases = (
+            ("nothing", None, "did not answer"),
+            ("bytes", lambda sid: self.engine.receive(sid, 188 * 20), "nothing playable"),
+            ("failure", lambda sid: self.engine.sessionFailed.emit(sid, "http", "x"), "(http)"),
+        )
+        for name, step, reason in cases:
+            with self.subTest(name):
+                self.live = self.make(ready_timeout_ms=50, ready_max_ms=150)
+                with self.assertLogs("services.live.live_session", "INFO") as logs:
+                    sid = self.start()
+                    if step is not None:
+                        step(sid)
+                    self.wait_until(lambda sid=sid: sid in self.engine.closed)
+                self.engine.answer()
+                lines = [line for line in logs.output if "directly" in line]
+                self.assertEqual(len(lines), 1, logs.output)
+                self.assertIn(reason, lines[0])
+                self.assertNotIn("://", lines[0])
 
     def test_the_next_channel_waits_only_the_ready_timeout_again(self):
         self.live = self.make(ready_timeout_ms=50, ready_max_ms=250)

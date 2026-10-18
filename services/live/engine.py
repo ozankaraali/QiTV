@@ -30,7 +30,9 @@ A session whose input is over (it ended, or it failed for good) is not reopened,
 restart never opens a second provider connection behind the GUI's back. It stays known
 until `close_session`; its buffer is gone after a death, but it hears nothing about it.
 
-`sessionFailed(sid, kind, message)` carries a fixed message; each kind has one meaning:
+`sessionFailed(sid, kind, message)` carries a fixed message (a final failure is logged by its
+kind and the HTTP status the helper sends after the message, 2.1: why a channel plays
+directly); each kind has one meaning:
 - "disk": a notice, the only non-final kind. The disk buffer failed; the session goes on in
   RAM, and so does a reopen.
 - "unsupported", "network", "tls", "timeout", "http": the input ended for good (the stream
@@ -256,7 +258,7 @@ class _Supervisor(QThread):
         if record.closing:
             return  # the GUI closed it: only "closed" is still of interest
         if name == "error":
-            if len(message) != 4:
+            if len(message) not in (4, 5):  # an HTTP failure's status last (2.1)
                 return
             if message[2] == "disk":
                 # The only non-final error: the helper went on in RAM, and so does a reopen.
@@ -265,6 +267,13 @@ class _Supervisor(QThread):
             else:
                 # Final, "crashed" included: a reopen would only retry what failed.
                 record.failed = record.over = True
+                # Why the channel will play directly: its kind and HTTP status, never a URL.
+                status = message[4] if len(message) == 5 else None
+                _LOG.info(
+                    "A live session's input failed for good: %s%s.",
+                    message[2],
+                    f", HTTP {status}" if isinstance(status, int) else "",
+                )
         elif name == "ended":
             record.over = True
         elif name not in ("state", "ready"):

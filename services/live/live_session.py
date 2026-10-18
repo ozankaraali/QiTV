@@ -30,8 +30,10 @@ before ready and a ready that does not come within `ready_timeout_ms` fall back 
 "Time-shift isn't available for this channel"; after `available(False)` every start plays
 directly for the rest of the run. A source that
 sent bytes by then without anything playable (no keyframe yet: an on-demand restream
-starting up, say) gets until `ready_max_ms` from the start, with "Still loading…" at
-`ready_timeout_ms`; one that sent nothing falls back at `ready_timeout_ms`.
+starting up, say), or that answered and holds its body back (2.1: headers at once, the body
+seconds later), gets until `ready_max_ms` from the start, with "Still loading…" at
+`ready_timeout_ms`; one that did not answer falls back at `ready_timeout_ms`. Each such
+fallback logs why (no URL; the engine logs an HTTP status).
 
 Position (spec §6.3; 2.1 stage 2): the start of the opened segment plus VLC's clock as
 `VlcClock` follows its `get_time()` readings: a clock at the rate set while VLC plays,
@@ -884,11 +886,30 @@ class LiveSession(QObject):
             self._ready_timer.start(self._ready_more_ms)
             self.notice.emit(LOADING)
         else:
+            _LOG.info("Playing the channel directly: %s.", self._unready_reason())
             self._fall_back(UNAVAILABLE)
 
     def _receiving(self) -> bool:
-        """The source sent bytes (the helper's state before ready says how many)."""
-        return self._ready_more_ms > 0 and _number(self._snapshot().get("received")) > 0
+        """The source sent bytes (the helper's state before ready says how many), or answered
+        and holds its body back (2.1: an on-demand restream that starts its body seconds after
+        its headers; VLC's second request then found it warm)."""
+        if self._ready_more_ms <= 0:
+            return False
+        snapshot = self._snapshot()
+        return _number(snapshot.get("received")) > 0 or snapshot.get("answered") is True
+
+    def _unready_reason(self) -> str:
+        """Why nothing could start from the buffer in time, for the log: no URL, no name."""
+        snapshot = self._snapshot()
+        received = int(_number(snapshot.get("received")))
+        waited = (self._ready_timeout_ms + (self._ready_more_ms if self._loading else 0)) / 1000
+        if self._ready_seen:
+            return "the time-shift buffer held nothing to start from"
+        if received > 0:
+            return f"nothing playable came within {waited:.0f} s ({received} bytes)"
+        if snapshot.get("answered") is True:
+            return f"the channel answered but sent nothing within {waited:.0f} s"
+        return f"the channel did not answer within {waited:.0f} s"
 
     def _play_first(self, *, waited: bool = False) -> None:
         """The tune's first play (2.1 stage 3), at the start Go live would pick: the nearest
@@ -1058,6 +1079,9 @@ class LiveSession(QObject):
             return
         # Every other kind is final: the session's input is over.
         if self._phase is _Phase.WAITING:
+            if not self._limited:  # a refusal plays nothing (`_refuse`)
+                # The engine logged its HTTP status, if it had one.
+                _LOG.info("Playing the channel directly: its time-shift input failed (%s).", kind)
             self._fall_back(UNAVAILABLE)
         elif (
             self._phase is _Phase.PIPELINE

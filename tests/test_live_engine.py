@@ -58,6 +58,7 @@ STATE_KEYS = {
     "finite",
     "open_quality",
     "video",
+    "answered",
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
@@ -212,6 +213,46 @@ class StartTargetTests(unittest.TestCase):
         supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
         supervisor._receive(("error", "s1", "disk", "The disk buffer failed."))
         self.assertEqual(supervisor._records["s1"].command[6:], command[6:])
+
+
+class FailureReasonTests(unittest.TestCase):
+    """2.1: why a channel plays directly is logged, by kind and HTTP status only."""
+
+    def test_an_http_failure_is_relayed_and_logged_with_its_status(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        relayed = []
+        supervisor._relay = relayed.append
+        command = ("open", "s1", URL_FOR_RING, {}, True, {"kind": "ram", "max_bytes": MIB}, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        failure = ("error", "s1", "http", "The channel could not be reached over HTTP.", 503)
+        with self.assertLogs("services.live.engine", "INFO") as logs:
+            supervisor._receive(failure)
+        self.assertEqual(relayed, [failure])
+        self.assertTrue(supervisor._records["s1"].failed)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("http", logs.output[0])
+        self.assertIn("503", logs.output[0])
+        self.assertNotIn("provider.test", logs.output[0])
+
+    def test_a_failure_without_a_status_is_logged_by_its_kind(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        relayed = []
+        supervisor._relay = relayed.append
+        command = ("open", "s1", URL_FOR_RING, {}, True, {"kind": "ram", "max_bytes": MIB}, 6.0)
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        failure = ("error", "s1", "network", "The channel sent no data.")
+        with self.assertLogs("services.live.engine", "INFO") as logs:
+            supervisor._receive(failure)
+        self.assertEqual(relayed, [failure])
+        self.assertIn("network", logs.output[0])
 
 
 class StalledUpstream:
