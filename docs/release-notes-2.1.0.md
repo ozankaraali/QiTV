@@ -14,7 +14,8 @@ instead of using others' distributions, which may have malware.**
   together, each with its provider's name beside it, and then each provider's own groups under
   its name, named as that provider names them. The Library has the same choice behind its
   provider button at the top right: one provider's films and series, or all of them, with each
-  provider's genres under its name and Continue, New and My list mixing them.
+  provider's genres under its name and Continue, New and My list mixing them. The menu bar's
+  Providers menu has All providers too and ticks the one the channel list shows.
 - **Every stream from its own provider.** A channel, film or episode always plays from the
   provider it came from, in the big picture and in picture-in-picture. Watch a channel from one
   account, open a channel from another account in picture-in-picture, swap them and change
@@ -62,10 +63,26 @@ instead of using others' distributions, which may have malware.**
   "≈ 7 s behind", in half seconds, and change only once the distance has stayed different for a
   few seconds. The dot beside it is amber whenever the speed isn't normal: "catching up" while
   QiTV plays faster, "adding buffer" while it plays slower.
-<!-- stay-live stages 2+ -->
+- **The distance shown is the real one.** On channels whose clock only moves every 2 seconds,
+  QiTV used to think it was about 11 seconds further behind than it was, stopped changing the
+  speed and soon gave up on the time-shift buffer. It now follows the player's own clock on every
+  channel, so the distance, Go live and the speed work there as on any other channel.
+- **Channels start where they should.** A channel now starts at the distance QiTV aims for, not
+  at the oldest part of what the provider sends. On a provider that sends 20 seconds at once, a
+  channel started about 19 seconds behind and then sped up for a minute; it now starts a few
+  seconds behind at normal speed. HLS channels fetch enough at the start to keep playing: on
+  channels that send 10-second pieces, the picture used to freeze and the sound drop out in the
+  first half minute.
+- **Clean jumps.** Go live, ← and →, and QiTV's own jumps start where the picture is complete
+  (a keyframe), so a jump no longer shows broken blocks or loses the sound for a moment. When a
+  channel has fallen far behind, QiTV jumps closer once instead of playing faster for a minute or
+  more, at most once a minute; a few seconds off, it still eases the speed gently as above.
+<!-- 4b: learned target bullet goes here if stage 4b ships -->
 
 ## Fixes
 
+- **Guides from a web address are kept.** A guide whose server sends no date, or a date QiTV
+  couldn't read, wasn't saved. It is now.
 - **Live TV comes back after a lost buffer.** When the time-shift buffer was lost and QiTV
   switched to playing the channel directly, a provider that allows one stream could still count
   the old connection for a few seconds and refuse the new one, which left the picture black.
@@ -86,7 +103,8 @@ instead of using others' distributions, which may have malware.**
 - **Groups are never merged.** Each provider keeps its own groups and genres, even when two use
   the same name, and a channel that two providers carry is listed for each.
 - **One account's trouble stays with it.** A provider that can't sign in or refresh keeps its
-  saved lists, and the other providers keep working.
+  saved lists, and the other providers keep working. A channel you play from it says which
+  provider failed and why.
 - **Each list remembers where you were.** The channel list and the Library each remember the
   provider (or All providers) you browsed last, also after a restart.
 - See the [2.0.8 notes](https://github.com/ozankaraali/QiTV/blob/main/docs/release-notes-2.0.8.md)
