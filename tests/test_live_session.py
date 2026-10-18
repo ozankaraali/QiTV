@@ -2220,6 +2220,39 @@ class CrawlFallbackTests(LiveSessionCase):
         self.assertNotIn(self.CRAWLING, self.notices)
 
 
+class StartCushionTests(LiveSessionCase):
+    """Ruling R33: a tune started at a pick chosen for the target has its cushion, so VLC
+    running dry right after it is trouble (Auto adds its step, the owed slow-down runs). A
+    start that deliberately took less (a steady source's oldest segment after a second, the
+    ready timeout's) has not."""
+
+    def test_running_dry_after_a_start_chosen_for_the_target_is_trouble(self):
+        # Measured on a public HLS channel: started for the 7 s target, the lag read 6.2 s
+        # once its rhythm was learned (never the 6.75 s the cushion needed); VLC ran dry
+        # before a 12 s batch, and Auto learned nothing.
+        sid = self.start(latency=AUTO)
+        feed = Feed(self, sid, burst=7.0, edge=24.0, hls=True).ready(backlog_after_start=False)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 7))  # 7.0 s
+        feed.sizes = iter([4.0, 4.0, 4.0, 12.0] + [7.0] * 100)  # short batches, then 12 s
+        feed.run(20.0)
+        self.assertLess(max(state["lag"] for state in self.timelines), 6.75)  # no cushion read
+        self.assertGreater(feed.starved_s, 0.5)  # VLC ran dry before the 12 s batch
+        self.assertEqual(self.timelines[-1]["target"], 8.5)  # Auto's step
+        feed.run(30.0)
+        self.assertEqual(min(self.playback.rates), 0.95)  # the owed slow-down
+
+    def test_a_timeout_start_that_took_less_has_no_cushion(self):
+        # Nothing as far back as the 7 s target came within the ready timeout: from the
+        # oldest, 0 s behind once playing; VLC runs dry before the next batch.
+        self.live = self.make(ready_timeout_ms=50)
+        sid = self.start(latency=AUTO)
+        feed = Feed(self, sid, burst=7.0, edge=3.0, hls=True).ready()
+        self.wait_until(lambda: self.playback.plays)
+        feed.run(12.0)
+        self.assertGreater(feed.starved_s, 0.5)
+        self.assertEqual(self.timelines[-1]["target"], 7.0)  # nothing ran out
+
+
 class BackOffTests(LiveSessionCase):
     """2.0.2 "Auto" latency: the channel's target starts at Normal's, rises 1.5 s with each
     starvation at the live edge or stall that ran out a cushion (the lag had reached the

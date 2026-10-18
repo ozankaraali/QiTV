@@ -107,9 +107,11 @@ starvation of VLC at the live edge (BUFFERING, or its clock standing still while
 within `_EDGE_S` of the edge) and each stall, while stay-live is LIVE, so the target moves at
 once, on long HLS segments too; trouble again within `_CALM_S` is the same one. Only
 trouble that ran out a cushion counts: the lag had reached the current target (less
-`_BELOW_TARGET_S`) since the tune, or stay-live accepted the start's shortfall (nothing
-further back was buffered); a starvation while a short start is still being built says
-nothing about the target. Each
+`_BELOW_TARGET_S`) since the tune, the tune started at a pick chosen for the target (ruling
+R33: its lag may read a little short once the source's rhythm is learned), or stay-live
+accepted the start's shortfall (nothing further back was buffered); a starvation after a
+start that took less on purpose, while it is still being built, says nothing about the
+target. Each
 5 minutes of playing at the edge without trouble (not paused, not time-shifted) take 0.5 s
 off. A raised target is built by a nudge below 1x (as above) unless the rate is locked;
 otherwise the lag grows only as VLC waits. What a channel taught (Auto's extra, a locked
@@ -398,7 +400,7 @@ class LiveSession(QObject):
         self._auto: Optional[AutoTarget] = None
         self._auto_mark: Optional[float] = None
         self._troubled_at: Optional[float] = None
-        self._cushion = 0.0  # the largest lag at the live edge since the tune
+        self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
         self._wire_engine(engine, connect=True)
         playback.stateChanged.connect(self._on_state)
         playback.ended.connect(self._on_interrupted)
@@ -865,12 +867,13 @@ class LiveSession(QObject):
                 return  # bounded by the ready timeout
             elif not hls and not self._landed(snapshot) and held < _SETTLE_MAX_S - 1e-9:
                 return
+        aimed = pick is not None  # chosen for the target, not the most there is
         if pick is None:
             pick = self._live_start(ahead=ahead, tune=True)  # the most buffer there is
         if pick is not None:
-            self._first_open(*pick)
+            self._first_open(*pick, aimed=aimed)
 
-    def _first_open(self, seq: int, lag: Optional[float]) -> None:
+    def _first_open(self, seq: int, lag: Optional[float], *, aimed: bool = False) -> None:
         """Play the tune from `seq`, its lag once playing `lag` (None: a finished playlist's
         beginning, no landing); a failed open picks again on the tick (`_Retry.FIRST`)."""
         self._ready_timer.stop()
@@ -878,17 +881,25 @@ class LiveSession(QObject):
         self._mode = "pipeline"
         self._edges = []
         self._tick_timer.start()
-        self._open_first(seq, lag)
+        self._open_first(seq, lag, aimed=aimed)
         self.modeChanged.emit(self._mode)
 
-    def _open_first(self, seq: int, lag: Optional[float]) -> None:
+    def _open_first(self, seq: int, lag: Optional[float], *, aimed: bool = False) -> None:
+        """Open the tune at `seq`. `aimed`: the start was chosen for the target, so its
+        cushion counts as reached (ruling R33): its lag may read a little short of it once
+        the source's rhythm is learned, and VLC running dry then is trouble all the same.
+        A start that took less on purpose (the oldest segment, nothing further back) has
+        none."""
         if not self._open_at(seq):
             self._retry = _Retry.FIRST
             return
         if lag is None:
             return
         snapshot = self._snapshot()
-        self._stay.landed(lag - self._target(snapshot))
+        target = self._target(snapshot)
+        self._stay.landed(lag - target)
+        if aimed:
+            self._cushion = max(self._cushion, target)
         self._reland_until = self._clock() + _RELAND_S
         self._reland_edge = self._live_edge(snapshot)
 
@@ -902,9 +913,10 @@ class LiveSession(QObject):
             return
         ahead = self._ahead(snapshot)
         pick = self._live_start(cushion=True, ahead=ahead, tune=True)
+        aimed = pick is not None
         pick = pick or self._live_start(ahead=ahead, tune=True)
         if pick is not None:
-            self._open_first(*pick)
+            self._open_first(*pick, aimed=aimed)
 
     def _ahead(self, snapshot: Mapping[str, Any]) -> float:
         """The media an HLS tune's backlog still brings (0.0 once every listed segment came,
