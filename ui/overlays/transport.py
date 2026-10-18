@@ -6,9 +6,10 @@ latency indicator (it reads "catching up" while stay-live nudges the rate up, "a
 while it nudges it down, and "Reconnecting…" while the source has stalled). It shows the settled
 lag (2.1: in half seconds, changed only once the lag moved for a few seconds): "≈ 2.5 s behind
 source"; under Auto latency "≈ 7 s behind", with "adjusted" while trouble holds the channel's
-learned target up (its starvation prior's margin; not what its arrivals need). Its dot is green while stay-live plays at 1x and amber whenever the rate is
-another (0.95x included) or the source stalled. The bar and the Go live chip show only when the
-viewer left live (shifted, or a chosen speed); a drag keeps the bar.
+learned target up (its starvation prior's margin; not what its arrivals need). Its dot is green
+while stay-live plays at 1x and amber whenever the rate is another (0.95x included) or the
+source stalled. The bar and the Go live chip show only when the viewer left live (shifted, or a
+chosen speed); a drag keeps the bar.
 
 Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
 TV while the window offers picture in picture the second channel (P), then "Open in external
