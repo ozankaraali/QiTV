@@ -30,7 +30,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QToolTip, QWidget
 
-from services.epg_view import Programme
+from services.epg_view import Programme, now_next, timeline
 from services.navigation import item_key
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
@@ -99,8 +99,7 @@ def box_span(
 
 
 class Span(NamedTuple):
-    programme: Programme
-    stop: datetime  # the programme's stop, cut back to the next programme's start
+    programme: Programme  # as the channel's timeline has it (its stop cut by an overlap)
     x: float
     width: float
 
@@ -112,16 +111,13 @@ def programme_spans(
     width: float,
     min_width: float,
 ) -> list[Span]:
-    """A row's boxes: overlaps end where the next programme starts; slivers are dropped."""
-    ordered = sorted(programmes, key=lambda p: p.start)
+    """A row's boxes, on the channel's timeline (overlaps end where the next programme starts,
+    as the details bar and the info line see them); slivers are dropped."""
     spans = []
-    for i, programme in enumerate(ordered):
-        stop = programme.stop
-        if i + 1 < len(ordered):
-            stop = min(stop, max(programme.start, ordered[i + 1].start))
-        span = box_span(programme.start, stop, window_start, left, width)
+    for programme in timeline(programmes):
+        span = box_span(programme.start, programme.stop, window_start, left, width)
         if span is not None and span[1] >= min_width:
-            spans.append(Span(programme, stop, *span))
+            spans.append(Span(programme, *span))
     return spans
 
 
@@ -137,9 +133,9 @@ def day_label(window_start: datetime, now: datetime) -> str:
 
 
 def footer_programme(programmes: list[Programme], now: datetime) -> Programme | None:
-    """The programme on now, else the first one still to come."""
-    on_now = next((p for p in programmes if p.is_on(now)), None)
-    return on_now or next((p for p in programmes if p.start >= now), None)
+    """The programme on now (the grid's box on now), else the first one still to come."""
+    on_now, upcoming = now_next(programmes, now)
+    return on_now or upcoming
 
 
 def wrap_lines(text: str, font: QFont, width: float, max_lines: int) -> list[str]:
@@ -623,7 +619,7 @@ class Guide(Overlay):
             box = QRectF(span.x, rect.top(), span.width, rect.height()).adjusted(
                 0.2 * u, 0.2 * u, -0.2 * u, -0.2 * u
             )
-            on_now = span.programme.start <= now < span.stop
+            on_now = span.programme.is_on(now)
             self._paint_box_fill(p, units, box, on_now)
             boxes.append((box, span.programme, on_now))
         return boxes

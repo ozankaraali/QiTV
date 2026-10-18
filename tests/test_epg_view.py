@@ -7,6 +7,7 @@ from services.epg_view import (
     now_next,
     parse_programme,
     programmes_for_channel,
+    timeline,
 )
 
 PLUS2 = timezone(timedelta(hours=2))
@@ -104,6 +105,81 @@ class ProgrammesForChannelTests(unittest.TestCase):
         self.assertEqual(
             programmes_for_channel(manager, {"id": 1}, datetime.now().astimezone()), []
         )
+
+
+def overlapping_guide():
+    """A guide merged from several feeds, as some providers send it: a placeholder over a day
+    long starts with a real programme (and is listed first), and the real ones follow."""
+    return [
+        xmltv("20261018231500 +0200", "20261020015950 +0200", "Placeholder"),
+        xmltv("20261018231500 +0200", "20261019010000 +0200", "Late Film"),
+        xmltv("20261019010000 +0200", "20261019023000 +0200", "Comedy Night"),
+        xmltv("20261019023000 +0200", "20261019050000 +0200", "Drama Hour"),
+    ]
+
+
+AT_0129 = datetime(2026, 10, 19, 1, 29, tzinfo=PLUS2)
+
+
+class TimelineTests(unittest.TestCase):
+    def test_an_overlap_ends_where_the_next_programme_starts(self):
+        result = timeline(normalize(overlapping_guide()))
+        self.assertEqual(
+            [(p.title, p.start.strftime("%H:%M"), p.stop.strftime("%H:%M")) for p in result],
+            [
+                ("Late Film", "23:15", "01:00"),
+                ("Comedy Night", "01:00", "02:30"),
+                ("Drama Hour", "02:30", "05:00"),
+            ],
+        )
+
+    def test_a_programme_without_overlap_is_kept_as_it_is(self):
+        programmes = normalize([xmltv("20261015200000 +0200", "20261015210000 +0200", "Prime")])
+        self.assertIs(timeline(programmes)[0], programmes[0])
+
+    def test_equal_starts_keep_the_one_listed_last(self):
+        a = xmltv("20261015200000 +0200", "20261015210000 +0200", "First")
+        b = xmltv("20261015200000 +0200", "20261015203000 +0200", "Second")
+        self.assertEqual([p.title for p in timeline(normalize([a, b]))], ["Second"])
+
+    def test_a_gap_stays_a_gap(self):
+        result = timeline(
+            normalize(
+                [
+                    xmltv("20261015200000 +0200", "20261015210000 +0200", "A"),
+                    xmltv("20261015220000 +0200", "20261015230000 +0200", "B"),
+                ]
+            )
+        )
+        self.assertEqual([p.stop.hour for p in result], [21, 23])
+
+
+class OverlappingGuideTests(unittest.TestCase):
+    """The info line, the banner and the guide's details bar show what the grid shows."""
+
+    def manager(self):
+        manager = type("M", (), {})()
+        manager.get_programs_for_channel = lambda channel, start, limit: overlapping_guide()
+        return manager
+
+    def test_now_and_next_follow_the_grid(self):
+        current, upcoming = now_next(normalize(overlapping_guide()), AT_0129)
+        self.assertEqual((current.title, upcoming.title), ("Comedy Night", "Drama Hour"))
+
+    def test_now_and_next_of_an_unresolved_list_follow_the_grid(self):
+        programmes = [parse_programme(raw) for raw in overlapping_guide()]
+        current, upcoming = now_next(programmes, AT_0129)
+        self.assertEqual((current.title, upcoming.title), ("Comedy Night", "Drama Hour"))
+
+    def test_the_first_programme_still_on_is_the_one_on_now(self):
+        result = programmes_for_channel(self.manager(), {"id": 1}, AT_0129, limit=1)
+        self.assertEqual([p.title for p in result], ["Comedy Night"])
+        self.assertTrue(result[0].is_on(AT_0129))
+
+    def test_the_guide_window_gets_the_grid_rows_programmes(self):
+        window_start = datetime(2026, 10, 19, 1, 0, tzinfo=PLUS2)
+        result = programmes_for_channel(self.manager(), {"id": 1}, window_start, limit=12)
+        self.assertEqual([p.title for p in result], ["Comedy Night", "Drama Hour"])
 
 
 class ProgrammeTests(unittest.TestCase):

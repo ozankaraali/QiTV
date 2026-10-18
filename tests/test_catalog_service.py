@@ -280,6 +280,26 @@ class CatalogServiceTests(unittest.TestCase):
         service.select_provider()
         self.assertEqual([p.title for p in service.programmes({"id": 1}, now)], ["On"])
 
+    def test_the_programme_on_now_is_the_grids_when_programmes_overlap(self):
+        # A placeholder over a day long, listed first, starts with a real programme: the
+        # info line (one programme asked) shows what the guide's grid shows, not it.
+        service, _, factory, epg = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})
+
+        def raw(start, stop, title):
+            return {"@start": start, "@stop": stop, "title": {"__text": title}}
+
+        epg.get_programs_for_channel = lambda c, s, l: [
+            raw("20261018211500 +0000", "20261019235950 +0000", "Placeholder"),
+            raw("20261018211500 +0000", "20261018230000 +0000", "Late Film"),
+            raw("20261018230000 +0000", "20261019003000 +0000", "Comedy Night"),
+        ]
+        factory.results["provider_setup"] = {"result": {"name": "X"}}
+        factory.results["epg"] = {"result": {}}
+        service.select_provider()
+        now = datetime(2026, 10, 18, 23, 29, tzinfo=timezone.utc)
+        on_now = service.programmes({"id": 1}, now, limit=1)
+        self.assertEqual([p.title for p in on_now], ["Comedy Night"])
+
     def test_is_live(self):
         service, *_ = make_service({"name": "X", "type": "XTREAM", "url": "h:1"})
         self.assertTrue(service.is_live("live"))

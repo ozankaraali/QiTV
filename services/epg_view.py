@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import logging
 from typing import Any, Iterable, Optional
@@ -78,15 +78,37 @@ def parse_programme(raw: dict) -> Optional[Programme]:
     return Programme(title or "Untitled", start, stop, description)
 
 
+def timeline(programmes: Iterable[Programme]) -> list[Programme]:
+    """One programme at a time, oldest first: what the guide's grid, its details bar, the info
+    line and the banner all show.
+
+    Some guides list several programmes at once for a channel (feeds merged by the provider,
+    or a placeholder a day long beside the real programmes). A programme ends where the next
+    one starts, and one left with no time at all (an equal start) is dropped: of programmes
+    starting together, the one listed last stays. A programme that overlaps nothing is kept
+    as it is.
+    """
+    ordered = sorted(programmes, key=lambda p: p.start)
+    result = []
+    for programme, following in zip(ordered, ordered[1:] + [None]):
+        if following is not None and following.start < programme.stop:
+            if following.start <= programme.start:
+                continue
+            programme = replace(programme, stop=following.start)
+        result.append(programme)
+    return result
+
+
 def normalize(raw_programmes: Optional[Iterable[dict]]) -> list[Programme]:
-    parsed = [p for p in (parse_programme(raw) for raw in raw_programmes or []) if p is not None]
-    parsed.sort(key=lambda p: p.start)
-    return parsed
+    """A channel's programmes as its timeline (see timeline)."""
+    parsed = (parse_programme(raw) for raw in raw_programmes or [])
+    return timeline(p for p in parsed if p is not None)
 
 
 def now_next(
     programmes: list[Programme], now: datetime
 ) -> tuple[Optional[Programme], Optional[Programme]]:
+    programmes = timeline(programmes)  # the grid's programme on now, whatever the list
     current = next((p for p in programmes if p.is_on(now)), None)
     boundary = current.stop if current else now
     upcoming = next((p for p in programmes if p.start >= boundary), None)
@@ -96,7 +118,8 @@ def now_next(
 def programmes_for_channel(
     epg_manager, channel: dict, now: datetime, limit: int = 8
 ) -> list[Programme]:
-    """Programmes that have not ended yet, oldest first; [] if the EPG is unavailable."""
+    """The channel's timeline (see timeline) without what has ended by `now` (the guide's grid
+    passes its window's start), oldest first; [] if the EPG is unavailable."""
     try:
         raw = epg_manager.get_programs_for_channel(channel, None, 0)
     except Exception as e:  # the manager may be reloading on a worker thread
