@@ -14,6 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMenu
 
 from services.connection_budget import ConnectionBudget
+from services.live.refusals import STREAM_LIMIT
 from services.live.tuning import channel_key
 from services.provider_ids import with_provider
 from services.sessions import PIP_FAILED, SessionManager, Slot
@@ -474,6 +475,7 @@ class PipTests(PipCase):
         self.assertEqual(self.label.info, ("Two", "−00:03"))
 
     def test_a_pip_failure_closes_it_and_says_why(self):
+        self.catalog.ptype = "M3UPLAYLIST"  # no link to make again
         self.start_large(0)
         self.open_small(CHANNELS[1])
         self.pip_live.failed.emit("http://user:secret@tv/2: 404")
@@ -919,6 +921,71 @@ class PipLinkSettlingTests(PipCase):
         self.assertEqual(len(self.catalog.links), count + 1)
         self.ready("http://stream/2")
         self.assertTrue(wait_until(lambda: self.pip_live.named("start")))
+
+
+class PipRetryTests(PipCase):
+    """An STB channel that fails small gets a fresh link once, as the large picture does
+    (sweep B7, ruling R11: the PiP toasted at once, so an expired portal session of a provider
+    shown only small needed the channel opened again by hand)."""
+
+    PORTAL_TWO = {**CHANNELS[1], "_provider": "Portal B"}  # an STB portal, not browsed
+
+    def setUp(self):
+        super().setUp()
+        self.start_large(0)
+
+    def fail_small(self, small, message="The stream could not be opened"):
+        small.live.failed.emit(message)
+        small.live.released.emit()  # its stream let go: a new open may start
+
+    def test_its_own_portal_signs_in_again_and_the_channel_opens_small_again(self):
+        small = self.open_small(self.PORTAL_TWO)
+        links = len(self.catalog.links)
+        self.fail_small(small)
+        self.assertEqual(self.toast.messages(), [])
+        self.assertEqual(self.catalog.setups, ["Portal B"])  # signed in again, then...
+        self.assertEqual(len(self.catalog.links), links + 1)  # ...a fresh link
+        self.assertEqual(self.catalog.links[-1][1], self.PORTAL_TWO)
+        self.ready("http://stream/2?play_token=new")
+        self.assertTrue(wait_until(lambda: len(small.live.named("start")) == 2))
+        self.assertEqual(small.live.named("start")[-1][0], "http://stream/2?play_token=new")
+        self.assertTrue(self.sessions.pip_open())
+        self.assertEqual(self.label.info[0], "Two")
+        small.live.play_pipeline()
+        self.fail_small(small)  # once per channel opened small
+        self.assertEqual(self.toast.messages(), [(PIP_FAILED, "error")])
+        self.assertEqual(len(self.catalog.links), links + 1)
+        self.assertFalse(self.sessions.pip_open())
+
+    def test_the_browsed_portal_makes_the_link_again_without_signing_in(self):
+        small = self.open_small(CHANNELS[1])
+        links = len(self.catalog.links)
+        self.fail_small(small)
+        self.assertEqual(self.catalog.setups, [])
+        self.assertEqual(len(self.catalog.links), links + 1)
+
+    def test_a_refusal_for_the_limit_is_never_retried(self):
+        small = self.open_small(self.PORTAL_TWO)
+        links = len(self.catalog.links)
+        self.fail_small(small, STREAM_LIMIT)
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.toast.messages()[-1][1], "error")
+
+    def test_another_providers_type_toasts_at_once(self):
+        small = self.open_small(HARBOR_TWO)  # an Xtream panel: no token to renew
+        links = len(self.catalog.links)
+        self.fail_small(small)
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.toast.messages(), [(PIP_FAILED, "error")])
+
+    def test_a_channel_chosen_small_since_is_not_replaced_by_the_retry(self):
+        small = self.open_small(self.PORTAL_TWO)
+        self.controller.open_pip(CHANNELS[2], group_key="10", channels=CHANNELS)  # its link...
+        links = len(self.catalog.links)
+        self.fail_small(small)  # ...is on its way: Three opens, not Two again
+        self.assertEqual(len(self.catalog.links), links)
+        self.ready("http://stream/3")
+        self.assertTrue(wait_until(lambda: small.live.named("start")[-1][0] == "http://stream/3"))
 
 
 class MixedProviderPipTests(PipCase):

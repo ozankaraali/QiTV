@@ -19,7 +19,8 @@ stream once. Opening the small slot:
   back once its streams are closed, and only then asks for a new one: the old stream is
   always released before the new one opens;
 - when the small stream cannot start, fails for good (`LiveSession.failed`) or loses its slot
-  on a channel change, PiP closes and `pipFailed` says why in a fixed message.
+  on a channel change, PiP closes and `pipFailed` says why in a fixed message (`failure` keeps
+  what the stream itself said, for the shell's STB retry).
 A swap waits for nothing: while the small slot's channel change is still on its way, it is
 refused (False).
 
@@ -157,6 +158,9 @@ class SessionManager(QObject):
         self._open = False  # pipStateChanged(True) was emitted, and no close since
         self._pending: Optional[_Open] = None
         self._limit: Optional[int] = None  # the provider limit of the PiP stream that starts
+        # What the last pipFailed stood for: the small stream's own failure (LiveSession's
+        # message, a refusal one of REFUSALS); "" when its start raised or the budget refused.
+        self.failure = ""
         self._levels = {main.name: MAIN_LEVEL, pip.name: PIP_LEVEL}
         self._muted = {main.name: False, pip.name: True}
         self._tuners: dict[str, SlotTuner] = {}
@@ -360,9 +364,10 @@ class SessionManager(QObject):
         stream = self._tuners[slot.name].stream
         if slot is self._large or stream is None or not stream.running():
             return
-        self._fail(limit_message(self._limit) if message in REFUSALS else PIP_FAILED)
+        self._fail(limit_message(self._limit) if message in REFUSALS else PIP_FAILED, message)
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str, failure: str = "") -> None:
+        self.failure = failure
         self.close_pip()
         self.pipFailed.emit(message)
 

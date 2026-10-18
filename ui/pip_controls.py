@@ -3,11 +3,14 @@
 P (or the transport's Second channel) opens the channel tuned before the current one small,
 or closes the small picture; the drawer's context menu and Ctrl/⌘+P open the drawer's
 channel. S (or a click on the small picture) swaps; one that has to wait for the large
-picture's channel to open says "Switching…". Its link is asked for on LinkLanes' side lane, one at a time: a choice made while
-one is on its way waits, replacing an older one that waits, and a link that lands after the
-PiP was closed, or after the large picture took its channel, opens nothing. SessionManager
+picture's channel to open says "Switching…". Its link is asked for on LinkLanes' side lane,
+one at a time: a choice made while one is on its way waits, replacing an older one that
+waits, and a link that lands after the PiP was closed, or after the large picture took its
+channel, opens nothing. SessionManager
 opens it in the slot that is not large, with a main tune's start arguments; its refusals
-and failures are toasted here.
+and failures are toasted here, except that an STB channel failing small gets a fresh link
+once (its portal signed in again when the page browses another provider), as the large
+picture's does, and opens small again.
 
 The PiP frame and label follow the manager: the second surface shows at its corner while
 PiP is open, and the label names the small picture's channel and state ("Connecting…" until
@@ -23,13 +26,14 @@ its resume key) is kept here, so a swap can give the shell the new large picture
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
+from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
 from services.sessions import PURPOSE, SessionManager, Slot, limit_message
@@ -126,6 +130,7 @@ class PipControls(QObject):
         self._wanted: Optional[tuple[Target, ZapContext]] = None  # its link is on its way
         self._link: Optional[Target] = None  # the one link request in flight
         self._timelines: dict[str, dict] = {}  # each slot's last timeline since it opened
+        self._closed_view: Optional[SlotView] = None  # what the small picture showed last
 
     def wire(self) -> None:
         sessions = self.sessions
@@ -418,6 +423,7 @@ class PipControls(QObject):
         sessions = self.sessions
         slot = sessions.other()
         self._views[slot.name] = SlotView(target, context, url)
+        self._closed_view = None
         self._timelines.pop(slot.name, None)
         # The small picture keeps its time-shift in memory: one disk ring at most (M5 ruling).
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
@@ -444,7 +450,7 @@ class PipControls(QObject):
                 label.show()
         else:
             closed = sessions.other()
-            self._views.pop(closed.name, None)
+            self._closed_view = self._views.pop(closed.name, None)  # a failure may retry it
             self._timelines.pop(closed.name, None)
             if frame is not None:
                 frame.set_large(sessions.large().name)  # the picture that stayed (as it was)
@@ -466,8 +472,40 @@ class PipControls(QObject):
             self._toast(limit_message(limit), "error", ERROR_MS)
 
     def _on_failed(self, message: str) -> None:
-        if not self._closed():
-            self._toast(message, "error", ERROR_MS)
+        """The small picture closed for a failure: an STB channel's link is made again once
+        (its play token, or its portal's session, may have expired), else it says why."""
+        if self._closed():
+            return
+        view = self._views.get(self.sessions.other().name) or self._closed_view
+        self._closed_view = None
+        if view is not None and self._may_retry(view.target):
+            self._retry(view)
+            return
+        self._toast(message, "error", ERROR_MS)
+
+    def _may_retry(self, target: Optional[Target]) -> bool:
+        """As the large picture (LiveControls.may_retry): once per channel opened small, never
+        for the provider's limit, nor when another channel was chosen small since."""
+        failure = self.sessions.failure  # "": its start raised, or the budget refused
+        return (
+            target is not None
+            and target.live
+            and not target.retried
+            and bool(failure)
+            and failure != STREAM_LIMIT
+            and self._wanted is None
+            and self._link is None
+            and item_provider.provider_type(self.catalog, target.item) == "STB"
+        )
+
+    def _retry(self, view: SlotView) -> None:
+        target = view.target
+        assert target is not None
+        logger.info("Making the link of %s again after the small picture failed", target.title)
+        item_provider.sign_in_again(self.catalog, target.item)
+        again = replace(target, retried=True)
+        self._wanted = (again, view.context if view.context is not None else ZapContext())
+        self._request(again)
 
     def _on_timeline(self, name: str, state: dict) -> None:
         self._timelines[name] = state

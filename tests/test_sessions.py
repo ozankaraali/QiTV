@@ -578,6 +578,8 @@ class PipFailureTests(_Fixture):
         self.assertEqual(self.failures, [PIP_FAILED])
         self.assertEqual(self.pip_states(), [True, False])
         self.assertEqual(self.budget.holders(PROVIDER), ["main"])
+        # What the stream said, for the shell's STB retry (never shown).
+        self.assertEqual(self.manager.failure, "http://user:secret@provider.test/2.ts: 404")
 
     def test_a_failure_inside_start_leaves_pip_closed(self):
         self.pip.live.fail_inside_start = "Video needs VLC"
@@ -649,6 +651,7 @@ class PipLifecycleTests(_Fixture):
         with self.assertLogs("services.sessions", "WARNING") as logs:
             self.open_granted(B)
         self.assertEqual(self.failures, [PIP_FAILED])
+        self.assertEqual(self.manager.failure, "")  # not the stream's: nothing to retry
         self.assertNotIn("secret", " ".join(logs.output))
         self.assertEqual(self.pip_states(), [])
         self.assertFalse(self.manager.pip_open())

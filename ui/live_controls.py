@@ -31,7 +31,6 @@ from services.epg_view import Programme
 from services.live.live_session import UNAVAILABLE, LiveSession
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
-from services.provider_ids import provider_of
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
 from ui import item_provider
 from ui.link_lanes import LinkLanes, Target
@@ -269,9 +268,7 @@ class LiveControls(QObject):
     def retry(self, current: Target) -> None:
         logger.info("Making the link of %s again after a playback failure", current.title)
         self.stop_tune()  # it failed: its slot goes back, also if the new link does not come
-        name = provider_of(current.item)
-        if name and name != self.catalog.current_provider_name():
-            self.catalog.sign_in_again(name)  # its own portal, not the browsed one
+        item_provider.sign_in_again(self.catalog, current.item)  # its own portal's session
         self._request(replace(current, retried=True))
 
     # ---- LiveSession's reports ----------------------------------------------------------------
