@@ -1345,6 +1345,23 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.playback.rates[:3], [0.99, 0.98, 0.97])  # three steps
         self.assertEqual(self.timelines[-1]["nudge"], 0.97)
 
+    def test_a_frame_more_at_a_segments_close_is_no_burst_landing(self):
+        # 2.1 stage 3: the helper reports a batch's end at once, so the next batch's first
+        # state (its last segment closing) moves the edge by one frame, 0.04 s, a moment
+        # before the batch. Taken for the batch, it dropped the mean lag by a burst and, on a
+        # public sparse-PCR channel, made the lag filter start afresh.
+        sid = self.ready(segments(0, 7), live_edge=14.5, burst=10.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        for _ in range(39):  # 9.75 s: the mean lag holds while the next burst is due
+            self.step(0.25)
+        before = self.timelines[-1]["lag"]
+        self.engine.buffer(sid, segments(0, 7), live_edge=14.54, burst=10.0)
+        self.step(0.25)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], before, delta=0.1)
+        self.engine.buffer(sid, segments(0, 12), live_edge=24.5, burst=10.0)  # the burst
+        self.step(0.25)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], before, delta=0.3)
+
     def test_bursts_settle_without_rate_flapping(self):
         sid = self.start()
         feed = Feed(self, sid, burst=6.0, edge=12.0).ready().run(120.0)

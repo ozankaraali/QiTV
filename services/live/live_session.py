@@ -229,6 +229,7 @@ _LOADING_AFTER_S = 1.0  # after this, bounded by the ready timeout
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) ...
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
 _FROZEN_HOLDS = 2.0  # VLC's clock still for a window and this many holds has played nothing
+_ARRIVAL_S = 0.1  # the live edge moving less is no arrival (a closing segment's last frame)
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -1256,8 +1257,13 @@ class LiveSession(QObject):
         return self._lag(snapshot, position) if lag is None else lag
 
     def _since_edge_moved(self, snapshot: Mapping[str, Any]) -> float:
+        """Seconds since media last arrived: the live edge moved by `_ARRIVAL_S` or more since
+        the last arrival. Less is the frame a segment adds as it closes (the helper reports a
+        batch's end at once, and the next batch's first state is its last segment closing:
+        taken for the batch, it dropped a bursty source's mean lag by a burst)."""
         edge, now = self._live_edge(snapshot), self._clock()
-        if edge != self._edge_seen:
+        seen = self._edge_seen
+        if seen is None or edge >= seen + _ARRIVAL_S or edge < seen:
             self._edge_seen, self._edge_moved = edge, now
         return now - self._edge_moved
 
