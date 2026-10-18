@@ -33,19 +33,19 @@ TICK = 0.25  # PlaybackSession's poll
 
 class Stream:
     """libVLC's media counters as each tick reads them: per second, `shown` pictures shown,
-    `lost` dropped as late, `video` blocks given to the video decoder, `audio` blocks of
-    audio decoded (a 25 fps channel with AAC at 48 kHz)."""
+    `lost` dropped as late, `video` blocks given to the video decoder, `played` audio buffers
+    played (a 25 fps channel with AAC at 48 kHz)."""
 
     def __init__(self, watch: FrozenPicture) -> None:
         self.watch, self.now, self.counts = watch, 0.0, [0.0, 0.0, 0.0, 0.0]
 
-    def play(self, seconds, *, shown=25, lost=0, video=25, audio=47, playing=True):
-        """Ticks for `seconds`; the times the watch said the picture froze."""
+    def play(self, seconds, *, shown=25, lost=0, video=25, played=47, playing=True, tick=TICK):
+        """Ticks for `seconds`, `tick` apart; the times the watch said the picture froze."""
         fired = []
-        for _ in range(round(seconds / TICK)):
-            self.now = round(self.now + TICK, 6)
-            for i, rate in enumerate((shown, lost, video, audio)):
-                self.counts[i] += rate * TICK
+        for _ in range(round(seconds / tick)):
+            self.now = round(self.now + tick, 6)
+            for i, rate in enumerate((shown, lost, video, played)):
+                self.counts[i] += rate * tick
             if self.watch.update(self.now, playing, Counters(*(int(c) for c in self.counts))):
                 fired.append(self.now)
         return fired
@@ -72,7 +72,7 @@ class FrozenPictureTests(unittest.TestCase):
         # Nothing arrives: VLC plays out its buffer, then nothing decodes, sound included.
         self.stream.play(5.0)
         self.stream.play(0.5, shown=0)
-        self.assertEqual(self.stream.play(10.0, shown=0, video=0, audio=0), [])
+        self.assertEqual(self.stream.play(10.0, shown=0, video=0, played=0), [])
 
     def test_an_audio_only_stream_is_no_frozen_picture(self):
         self.assertEqual(self.stream.play(30.0, shown=0, video=0), [])
@@ -111,6 +111,29 @@ class FrozenPictureTests(unittest.TestCase):
         # Video reaches the decoder again from 9.25 s: FIRST_PICTURE_S later, nothing shown.
         self.assertEqual(self.stream.play(10.0, shown=0), [13.25])
 
+    def test_video_without_sound_played_is_no_frozen_picture(self):
+        # The preroll after a precise seek (on-demand HLS, review I1): both decoders decode
+        # and drop what comes before the target, so audio decodes but none plays; and VLC's
+        # buffering after a reset, where audio waits after its first frame.
+        self.stream.play(5.0)
+        self.assertEqual(self.stream.play(10.0, shown=0, played=0), [])
+
+    def test_a_stall_of_the_ticks_starts_the_count_afresh(self):
+        # The GUI thread stood still 3 s (review M2): what rose meanwhile is seen at once, as
+        # video reaching the decoder again, so the count starts afresh with a first picture's
+        # time.
+        self.stream.play(5.0)
+        self.assertEqual(self.stream.play(3.0, shown=0, tick=3.0), [])
+        self.assertEqual(self.stream.play(3.75, shown=0), [])
+        self.assertEqual(self.stream.play(0.5, shown=0), [12.0])
+
+    def test_a_restart_on_the_same_stream_waits_for_a_first_picture(self):
+        # A seek (the counters run on): the decoder gets a first picture's time again.
+        self.stream.play(5.0)
+        self.stream.watch.restart()
+        self.assertEqual(self.stream.play(3.75, shown=0), [])
+        self.assertEqual(self.stream.play(1.0, shown=0), [9.25])
+
     def test_a_restart_watches_the_next_stream(self):
         self.stream.play(5.0)
         self.assertEqual(self.stream.play(3.0, shown=0), [7.0])
@@ -143,9 +166,10 @@ class _StatsMedia(sessions._FakeMedia):
         self.released = 0
 
     def get_stats(self, stats):
-        shown, lost, video, audio = self.player.counts
+        shown, lost, video, audio, played = self.player.counts
         stats.displayed_pictures, stats.lost_pictures = shown, lost
         stats.decoded_video, stats.decoded_audio = video, audio
+        stats.played_abuffers = played
         return True
 
     def release(self):
@@ -153,17 +177,23 @@ class _StatsMedia(sessions._FakeMedia):
 
 
 class _StatsPlayer(sessions._FakePlayer):
-    """A player that plays at once and reports media counters (`counts`) and a position."""
+    """A player that plays at once and reports media counters (`counts`: shown, lost, video
+    decoded, audio decoded, audio played) and a position."""
 
     def __init__(self):
         super().__init__()
-        self.media, self.counts, self.ms, self.length = None, [0, 0, 0, 0], 0, 0
+        self.media, self.counts, self.ms, self.length = None, [0, 0, 0, 0, 0], 0, 0
         self.stats_read = 0
+        self.seekable = True
 
     def set_media(self, media):
         super().set_media(media)
         self.media = media
-        self.counts = [0, 0, 0, 0]  # a new media counts from 0
+        self.counts = [0, 0, 0, 0, 0]  # a new media counts from 0
+
+    def is_seekable(self):
+        self._call("is_seekable")
+        return self.seekable
 
     def get_media(self):
         self.stats_read += 1
@@ -229,13 +259,64 @@ class HardwareFallbackTests(unittest.TestCase):
     def options(self):
         return self.player.media.options
 
-    def tick(self, session, seconds, *, shown=25, video=25, audio=47):
+    def tick(self, session, seconds, *, shown=25, video=25, audio=47, played=None):
+        """Ticks for `seconds`; audio decoded at `audio` a second, played at `played` (as
+        decoded unless given)."""
+        played = audio if played is None else played
         for _ in range(round(seconds / TICK)):
             self.now += TICK
             counts = self.player.counts
-            for i, rate in ((0, shown), (2, video), (3, audio)):
+            for i, rate in ((0, shown), (2, video), (3, audio), (4, played)):
                 counts[i] += round(rate * TICK)
             session._tick()
+
+    def test_a_film_that_prerolls_after_a_seek_stays_as_it_is(self):
+        # Review I1: on-demand HLS seeks precisely (no fast seek): both decoders decode and
+        # drop what comes before the target, so video and audio decode, nothing is shown,
+        # nothing plays, and libVLC still says Playing. That is no frozen picture.
+        session = self.make()
+        self.player.length = 3_600_000
+        session.play("http://provider.test/film.m3u8", kind=PlayKind.VOD_STREAM)
+        self.tick(session, 3.0)
+        session.seek(1_800_000)
+        self.tick(session, 6.0, shown=0, played=0)
+        self.assertEqual((len(self.media()), self.froze), (1, []))
+
+    def test_a_seek_gives_the_decoder_a_first_pictures_time(self):
+        session = self.make()
+        self.player.length = 3_600_000
+        session.play("file:///film.mkv", kind=PlayKind.VOD_FILE)
+        self.tick(session, 3.0)
+        session.seek(1_800_000)
+        self.tick(session, 3.75, shown=0)
+        self.assertEqual(self.froze, [])
+        self.tick(session, 0.5, shown=0)
+        self.assertEqual(len(self.froze), 1)  # 4 s after the seek (FIRST_PICTURE_S)
+
+    def test_the_resume_seek_gives_the_decoder_a_first_pictures_time(self):
+        session = self.make()
+        self.player.length, self.player.seekable = 3_600_000, False
+        session.play("file:///film.mkv", kind=PlayKind.VOD_FILE, start_ms=1_800_000)
+        self.tick(session, 2.0)  # plays from the start until libVLC can seek
+        self.player.seekable = True
+        self.tick(session, TICK, shown=0)
+        self.assertIn(("set_time", 1_800_000), self.player.calls)
+        self.tick(session, 3.5, shown=0)
+        self.assertEqual(self.froze, [])
+        self.tick(session, 0.5, shown=0)
+        self.assertEqual(len(self.froze), 1)
+
+    def test_the_reopen_drops_what_waited_for_the_old_media(self):
+        # Review M4: a stall's audio track still to be restored is the old media's.
+        session = self.make()
+        session.play(sessions.A, kind=PlayKind.LIVE)
+        self.tick(session, 3.0)
+        session._pending_track = 2
+        session._restore_timer.start()
+        self.tick(session, 2.0, shown=0)
+        self.assertEqual(len(self.froze), 1)
+        self.assertFalse(session._restore_timer.isActive())
+        self.assertIsNone(session._pending_track)
 
     def test_a_live_stream_whose_picture_froze_opens_again_in_software(self):
         session = self.make()

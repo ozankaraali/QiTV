@@ -2927,6 +2927,23 @@ class SoftwareFallbackTests(LiveSessionCase):
         self.start(channel="A")  # its next tune
         self.assertEqual((self.playback.plays[-1], self.playback.software[-1]), (DIRECT, True))
 
+    def test_a_direct_reopen_refused_at_once_is_tried_again(self):
+        # Review M3: the reopen in software closes the stream first, and a provider allowing
+        # one stream may still count it: refused at once, it is tried again, as after a
+        # fallback, and only then reported.
+        self.live = self.make(retry_ms=(20, 30, 40))
+        self.engine.lose()
+        self.start(channel="A")
+        self.playback.set_state(PlaybackState.PLAYING)  # it played: errors reported at once
+        self.playback.pictureFroze.emit()  # PlaybackSession opened it again in software
+        plays = len(self.playback.plays)
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.failures, [])
+        self.assertEqual(self.notices[-1], RECONNECTING)
+        self.wait_until(lambda: len(self.playback.plays) == plays + 1)
+        self.assertEqual((self.playback.plays[-1], self.playback.software[-1]), (DIRECT, True))
+
     def test_what_the_channel_taught_before_is_kept(self):
         self.tuning.remember("A", Tuning(extra=1.5, rate_locked=True))
         feed = self.tune()

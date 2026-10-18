@@ -21,9 +21,10 @@ media statistics: once its picture stood still while its sound played (`FrozenPi
 has the lab), the stream decodes in software from then on (`software_options()`, media options
 that override the instance's decoder), `pictureFroze` follows, and a stream other than a
 time-shift one opens again where it plays (a film at its position, a live stream live). A
-time-shift stream's position is LiveSession's: it reopens it. The same URL opened again in
-this player (a reconnect, a retry) decodes in software too; `play(software=True)` asks for it
-(a channel that froze before).
+time-shift stream's position is LiveSession's: it reopens it. Each seek, the resume one
+included, gives the decoder a first picture's time again. The same URL opened again in this
+player (a reconnect, a retry) decodes in software too; `play(software=True)` asks for it (a
+channel that froze before).
 """
 
 from __future__ import annotations
@@ -442,6 +443,7 @@ class PlaybackSession(QObject):
     def seek(self, ms: int) -> None:
         if self.is_seekable():
             self._player.set_time(max(0, int(ms)))
+            self._frozen.restart()  # the decoder starts again where the seek lands
 
     def seek_relative(self, ms: int) -> None:
         self.seek(self.time_ms() + ms)
@@ -618,6 +620,7 @@ class PlaybackSession(QObject):
                 if length > 0:
                     target = max(0, min(target, length - _RESUME_END_MARGIN_MS))
                 self._player.set_time(target)
+                self._frozen.restart()
                 self._start_ms = None
             elif self._playing_clock.elapsed() > _RESUME_GIVE_UP_MS:
                 logger.debug("Dropping the resume position: the media is not seekable")
@@ -645,8 +648,9 @@ class PlaybackSession(QObject):
             "time-shift stream" if self._kind is PlayKind.LIVE_PIPELINE else "stream",
         )
         if self._kind is not PlayKind.LIVE_PIPELINE:  # LiveSession reopens its own
-            if self._seekable and self.length_ms() > 0:
-                self._start_ms = self.time_ms() or None  # a film where it plays
+            start = self.time_ms() if self._seekable and self.length_ms() > 0 else 0
+            self._cancel_pending()  # what waited for the old media (an audio track restore)
+            self._start_ms = start or None  # a film where it plays
             self._start_media()
         self.pictureFroze.emit()
         return True
@@ -665,7 +669,7 @@ class PlaybackSession(QObject):
                 int(stats.displayed_pictures),
                 int(stats.lost_pictures),
                 int(stats.decoded_video),
-                int(stats.decoded_audio),
+                int(stats.played_abuffers),  # decoded audio may be dropped (a seek's preroll)
             )
         finally:
             media.release()

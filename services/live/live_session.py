@@ -1302,7 +1302,12 @@ class LiveSession(QObject):
             return  # nothing of this tune plays yet
         self._software = True
         self._learn(software=True)
-        if self._phase is _Phase.PIPELINE and self._retry is None and self._deferred is None:
+        if self._phase is _Phase.DIRECT:
+            # It closed the stream before opening it again: a provider allowing one stream
+            # may still count it, so a refusal at once is tried again, as after a fallback.
+            self._direct_at = self._clock()
+            self._direct_retries = len(self._direct_waits)
+        elif self._retry is None and self._deferred is None:
             # (A reopen still to be made, or the RAM ring's next state, opens in software.)
             self._reopen_at_position()
 
