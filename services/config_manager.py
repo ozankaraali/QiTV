@@ -133,9 +133,11 @@ class ConfigManager:
     EPG_EXPIRATION_CHOICES = ("Hours", "Days", "Weeks", "Months")  # what Settings offers
     DEFAULT_OPTION_PREFER_HTTPS = False
     DEFAULT_OPTION_SSL_VERIFY = True
-    # Auto (2.0.2) learns each channel's latency; a latency saved before stays as it was.
+    # Auto learns each channel's latency; every saved latency is moved to it once.
     DEFAULT_OPTION_LIVE_LATENCY = "auto"
     LIVE_LATENCY_CHOICES = ("auto", "low", "normal", "stable")
+    # Bumped by each one-time change of the latency default (`update_patcher`).
+    LATENCY_DEFAULTS_VERSION = 1
     DEFAULT_OPTION_MOUSE_WHEEL = "channel"
     MOUSE_WHEEL_CHOICES = ("channel", "volume")
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
@@ -312,17 +314,30 @@ class ConfigManager:
         # Linux) every config saved `false`, so a choice and the old default look alike: it
         # is switched on once, and a choice made afterwards stays. 2.0.x keeps the key and
         # reads `hardware_decoding` as it is.
-        decoding_defaults = self.config.get("decoding_defaults_version", 0)
-        if not isinstance(decoding_defaults, int) or isinstance(decoding_defaults, bool):
-            decoding_defaults = 0
+        decoding_defaults = self._defaults_version("decoding_defaults_version")
         if decoding_defaults < 1:
             self.config["hardware_decoding"] = True
         if decoding_defaults < ConfigManager.DECODING_DEFAULTS_VERSION:
             self.config["decoding_defaults_version"] = ConfigManager.DECODING_DEFAULTS_VERSION
             need_update = True
 
+        # 2.1's Auto is new enough that everyone is moved to it once, whatever was saved
+        # (2.0.0 and 2.0.1 saved Normal for everyone, and a fixed distance skips where Auto
+        # plays further behind). A choice made afterwards stays. 2.x before this ignores the key.
+        latency_defaults = self._defaults_version("latency_defaults_version")
+        if latency_defaults < 1:
+            self.config["live_latency"] = "auto"
+        if latency_defaults < ConfigManager.LATENCY_DEFAULTS_VERSION:
+            self.config["latency_defaults_version"] = ConfigManager.LATENCY_DEFAULTS_VERSION
+            need_update = True
+
         if need_update:
             self._save_at_start()
+
+    def _defaults_version(self, key: str) -> int:
+        """Which one-time steps under `key` already ran: 0 when missing or not a number."""
+        version = self.config.get(key, 0)
+        return version if isinstance(version, int) and not isinstance(version, bool) else 0
 
     def _save_at_start(self) -> None:
         """Save while starting: a locked or read-only config.json must not stop QiTV.

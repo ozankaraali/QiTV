@@ -286,16 +286,42 @@ class TvConfigTests(unittest.TestCase):
             ConfigManager.TV_DEFAULTS_VERSION,
         )
 
-    def test_a_saved_live_latency_is_kept_and_auto_is_the_default_otherwise(self):
-        # 2.0.2: Auto is new and the default; a latency saved before (2.0.x saved "normal"
-        # for everyone) stays, also on disk. A config from before the setting gets Auto.
-        for saved in ("low", "normal", "stable", "auto"):
-            with self.subTest(saved=saved):
-                config, path = self._load({"live_latency": saved})
-                self.assertEqual(config.live_latency, saved)
+    def test_every_saved_live_latency_is_switched_to_auto_once(self):
+        # Auto is new enough that everyone is moved to it once, whatever was saved; the
+        # config records it (`latency_defaults_version`) and a choice made afterwards stays.
+        for value in ConfigManager.LIVE_LATENCY_CHOICES:
+            with self.subTest(value=value):
+                saved = {
+                    "live_latency": value,
+                    "tv_defaults_version": 2,
+                    "decoding_defaults_version": 1,
+                }
+                config, path = self._load(saved)
+                self.assertEqual(config.live_latency, "auto")
                 on_disk = json.loads(path.read_text(encoding="utf-8"))
-                self.assertEqual(on_disk["live_latency"], saved)
-        config, _ = self._load({"favorites": []})
+                self.assertEqual(on_disk["live_latency"], "auto")
+                self.assertEqual(on_disk["latency_defaults_version"], 1)
+                config.live_latency = value  # chosen again in Settings: it stays
+                config.save_config()
+                self.assertEqual(ConfigManager().live_latency, value)
+                on_disk = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(on_disk["live_latency"], value)
+
+    def test_a_latency_chosen_after_the_switch_is_kept(self):
+        for value in ConfigManager.LIVE_LATENCY_CHOICES:
+            with self.subTest(value=value):
+                config, path = self._load({"live_latency": value, "latency_defaults_version": 1})
+                self.assertEqual(config.live_latency, value)
+                on_disk = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(on_disk["live_latency"], value)
+
+    def test_auto_is_the_default_and_a_new_install_records_the_switch(self):
+        config, path = self._load(None)
+        self.assertEqual(config.live_latency, "auto")
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["live_latency"], "auto")
+        self.assertEqual(on_disk["latency_defaults_version"], 1)
+        config, _ = self._load({"favorites": []})  # a config from before the setting
         self.assertEqual(config.live_latency, "auto")
         self.assertEqual(ConfigManager.LIVE_LATENCY_CHOICES[0], "auto")
 
