@@ -187,6 +187,7 @@ class _StatsPlayer(sessions._FakePlayer):
         self.media, self.counts, self.ms, self.length = None, [0, 0, 0, 0, 0], 0, 0
         self.stats_read = 0
         self.seekable = True
+        self.vouts = 1  # libVLC's video outputs for the media playing (has_vout)
 
     def set_media(self, media):
         super().set_media(media)
@@ -196,6 +197,10 @@ class _StatsPlayer(sessions._FakePlayer):
     def is_seekable(self):
         self._call("is_seekable")
         return self.seekable
+
+    def has_vout(self):
+        self._call("has_vout")
+        return self.vouts
 
     def get_media(self):
         self.stats_read += 1
@@ -271,6 +276,31 @@ class HardwareFallbackTests(unittest.TestCase):
             for i, rate in ((0, shown), (2, video), (3, audio), (4, played)):
                 counts[i] += round(rate * TICK)
             session._tick()
+
+    def test_a_player_without_a_video_output_never_falls_back(self):
+        # The offscreen smoke (and a runner without a display): VLC can make no video output
+        # ("video output creation failed"), so no picture shows whatever the decoder does.
+        session = self.make()
+        self.player.vouts = 0
+        session.play(sessions.A, kind=PlayKind.LIVE)
+        self.tick(session, 10.0, shown=0)
+        session.play(sessions.B, kind=PlayKind.LIVE)
+        self.tick(session, 10.0, shown=0)
+        self.assertEqual((self.froze, len(self.media())), ([], 2))
+
+    def test_a_player_that_had_a_video_output_judges_a_stream_without_one(self):
+        # VideoToolbox showing no picture at a tune: VLC makes no video output for a decoder
+        # that sends none (the lab: none in 25 s). This player showed pictures before, so its
+        # outputs work: the stream froze.
+        session = self.make()
+        session.play(sessions.A, kind=PlayKind.LIVE)
+        self.tick(session, 3.0)
+        self.player.vouts = 0
+        session.play(sessions.B, kind=PlayKind.LIVE)
+        self.tick(session, 3.75, shown=0)
+        self.assertEqual(self.froze, [])
+        self.tick(session, 0.5, shown=0)
+        self.assertEqual(len(self.froze), 1)  # FIRST_PICTURE_S after it played
 
     def test_a_film_that_prerolls_after_a_seek_stays_as_it_is(self):
         # Review I1: on-demand HLS seeks precisely (no fast seek): both decoders decode and

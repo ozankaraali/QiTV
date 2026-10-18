@@ -176,10 +176,11 @@ WINDOW_CHANGES = (
 SCENARIO_CHECK = "the smoke scenario runs to the end"
 # The packaged app only: everything libVLC loaded (libvlc, libvlccore, plugins) is the app's own.
 BUNDLED_VLC_CHECK = "the packaged app plays with its own libVLC and plugins"
-# 2.1: hardware decoding is the default; a runner without a graphics chip decodes in software
-# (VLC falls back by itself). A picture that froze sends its stream to software once, never
-# again and again (services.picture_watch).
-DECODING_CHECK = "no player falls back to software decoding more than once"
+# 2.1: the smoke plays with hardware decoding, the default; a runner without a graphics chip
+# decodes in software (VLC falls back by itself). A picture that froze sends its stream to
+# software once, never again and again (services.picture_watch); where VLC can make no video
+# output (offscreen) no freeze is judged at all.
+DECODING_CHECK = "no stream falls back to software decoding more than once"
 
 MUTE_ENV = "QITV_SMOKE_MUTE"  # "1"/"0": dummy audio output or real sound; unset: dummy unless CI
 
@@ -1048,12 +1049,12 @@ class Driver:
         self.slot_timeline: list[tuple[float, str, dict[str, Any]]] = []  # (when, slot, state)
         self.helper_updates: list[tuple[float, str]] = []  # (when, session id)
         self.plays: dict[str, dict[str, int]] = {}  # slot -> {"play": n, "open": n}
-        # Hardware decoding's software fallbacks per player (a frozen picture: at most once).
+        # Hardware decoding's software fallbacks per stream ("<player> <url>": at most once).
         self.froze: dict[str, int] = {}
         for name, session in (("main", window.session), ("pip", window.pip_session)):
             froze = getattr(session, "pictureFroze", None)
             if froze is not None:
-                froze.connect(lambda name=name: self._froze(name))
+                froze.connect(lambda name=name, session=session: self._froze(name, session))
         self.finished = False
         self.problem = ""
         self._steps = self._scenario()
@@ -1063,8 +1064,9 @@ class Driver:
     def start(self) -> None:
         self._run()
 
-    def _froze(self, name: str) -> None:
-        self.froze[name] = self.froze.get(name, 0) + 1
+    def _froze(self, name: str, session: Any) -> None:
+        stream = f"{name} {session.url}"
+        self.froze[stream] = self.froze.get(stream, 0) + 1
         logger.info("The %s player's picture froze: it decodes in software now", name)
 
     def _run(self) -> None:

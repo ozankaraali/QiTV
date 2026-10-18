@@ -18,7 +18,8 @@ _AUDIO_POLL_MS for _AUDIO_WATCH_MS, then at each regular poll while playing. Wit
 
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
-has the lab), the stream decodes in software from then on (`software_options()`, media options
+has the lab) where pictures can show (`_can_show`: a video output now, or for an earlier media
+of this player), the stream decodes in software from then on (`software_options()`, media options
 that override the instance's decoder), `pictureFroze` follows, and a stream other than a
 time-shift one opens again where it plays (a film at its position, a live stream live). A
 time-shift stream's position is LiveSession's: it reopens it. Each seek, the resume one
@@ -199,6 +200,7 @@ class PlaybackSession(QObject):
         self._software = False  # this media decodes in software
         self._froze_url: Optional[str] = None  # the stream whose picture froze here
         self._frozen = FrozenPicture()
+        self._had_vout = False  # VLC made a video output for one of this player's media
         self._player = instance.media_player_new()
         self._player.video_set_mouse_input(False)
         self._player.video_set_key_input(False)
@@ -639,7 +641,7 @@ class PlaybackSession(QObject):
         if not self._hardware or self._software:
             return False
         counters = self._counters()
-        playing = state is PlaybackState.PLAYING
+        playing = state is PlaybackState.PLAYING and self._can_show()
         if counters is None or not self._frozen.update(self._clock(), playing, counters):
             return False
         self._software = True
@@ -656,6 +658,17 @@ class PlaybackSession(QObject):
             self._start_media()
         self.pictureFroze.emit()
         return True
+
+    def _can_show(self) -> bool:
+        """VLC has a video output for this media, or made one for an earlier media of this
+        player. Where it can make none ("video output creation failed": an offscreen run, a
+        runner without a display) no picture shows whatever the decoder does: no freeze is
+        judged there. A decoder that sends no picture gets no output either (VideoToolbox at
+        a tune into intra refresh): once this player showed pictures, its outputs work, so
+        that stream is judged too."""
+        if int(self._player.has_vout() or 0) > 0:
+            self._had_vout = True
+        return self._had_vout
 
     def _counters(self) -> Optional[Counters]:
         """This media's statistics from libVLC (the player's media and its input item: never
