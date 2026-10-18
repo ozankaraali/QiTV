@@ -32,6 +32,7 @@ from tests.test_tv_controller import (
     play_context,
     wait_until,
 )
+from ui.autoplay import FINISHED_TEXT
 from ui.keymap import Action
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
 from ui.page_stack import PageStack
@@ -876,6 +877,81 @@ class LibraryPlayTests(PipCase):
         self.assertTrue(self.sessions.pip_open())
         self.assertNotIn(("stop",), small.live.calls)
         self.assertEqual(self.requested()[-1], "Three")
+
+
+class TitleBesideChannelTests(PipCase):
+    """A film from the Library large and the channel kept small: what follows it, and its end
+    in the small picture (sweep B6: nothing said it ended there and nothing offered Next; Next
+    and autoplay closed the channel kept small)."""
+
+    FERRY = {"id": "m8", "name": "Night Ferry", "cmd": "http://vod/night-ferry.mkv"}
+
+    def setUp(self):
+        super().setUp()
+        self.start_large(0)  # One, Home's
+        self.controller.enter_library_playing()
+        self.films = [MOVIE, self.FERRY]
+        self.controller.play_vod(MOVIE, "movie", play_context(genre_items=self.films))
+        self.ready("http://vod/heat.mkv")
+        self.assertIs(self.sessions.large(), self.pip_slot)  # Heat large, One small
+
+    @staticmethod
+    def end(session):
+        """As PlaybackSession: the state is "ended" before ended() is emitted."""
+        session.stateChanged.emit("ended")
+        session.ended.emit()
+
+    def assert_one_plays_small_beside(self, url):
+        self.assertTrue(self.sessions.pip_open())
+        self.assertIs(self.sessions.small(), self.main_slot)
+        self.assertEqual(self.label.info[0], "One")
+        self.assertNotIn(("stop",), self.live.calls)
+        self.assertEqual(self.pip_session.plays[-1][0], url)
+
+    def test_next_after_the_film_keeps_the_channel_small(self):
+        self.end(self.pip_session)  # Heat ends large
+        self.assertEqual(self.next_card.named("show_next"), [("Night Ferry", "", "movie")])
+        self.next_card.activate()
+        self.ready("http://vod/night-ferry.mkv")
+        self.assert_one_plays_small_beside("http://vod/night-ferry.mkv")
+        self.transport.nextRequested.emit()  # the transport's Next: the same
+        self.assertEqual(self.requested()[-1], "Night Ferry")
+
+    def test_another_title_from_the_library_keeps_the_channel_small_too(self):
+        self.controller.enter_library_playing()
+        self.controller.play_vod(self.FERRY, "movie", play_context())
+        self.ready("http://vod/night-ferry.mkv")
+        self.assert_one_plays_small_beside("http://vod/night-ferry.mkv")
+
+    def test_a_title_of_the_channels_provider_without_a_second_stream_closes_it(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        self.controller.play_vod(self.FERRY, "movie", play_context())  # Home's, as One
+        self.assertEqual(
+            self.toast.messages()[-1],
+            ("Closed One to play Night Ferry: Home allows 1 stream", "info"),
+        )
+        self.assertFalse(self.sessions.pip_open())
+
+    def test_a_film_that_ends_small_says_so_and_offers_next_once_large_again(self):
+        self.controller.handle(Action.SWAP)  # One large, Heat small
+        self.assertEqual(self.label.info, ("Heat", ""))
+        self.end(self.pip_session)
+        self.assertEqual(self.label.info, ("Heat", FINISHED_TEXT))
+        self.assertEqual(self.next_card.named("show_next"), [])  # One plays large: no card
+        self.controller.handle(Action.SWAP)  # ⇄, S or a click: Heat large again
+        self.assertEqual(self.next_card.named("show_next"), [("Night Ferry", "", "movie")])
+        self.next_card.activate()
+        self.ready("http://vod/night-ferry.mkv")
+        self.assert_one_plays_small_beside("http://vod/night-ferry.mkv")
+
+    def test_a_swap_drops_the_next_card(self):
+        self.end(self.pip_session)  # Heat ends large: the card offers Night Ferry
+        links = len(self.catalog.links)
+        self.controller.handle(Action.SWAP)  # One large: the card was Heat's
+        self.assertFalse(self.next_card.visible)
+        self.next_card.activate()
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertTrue(self.sessions.pip_open())
 
 
 class PipLinkSettlingTests(PipCase):

@@ -6,18 +6,22 @@ channel. S (or a click on the small picture) swaps; one that has to wait for the
 picture's channel to open says "Switching…". Its link is asked for on LinkLanes' side lane,
 one at a time: a choice made while one is on its way waits, replacing an older one that
 waits, and a link that lands after the PiP was closed, or after the large picture took its
-channel, opens nothing. SessionManager
-opens it in the slot that is not large, with a main tune's start arguments; its refusals
-and failures are toasted here, except that an STB channel failing small gets a fresh link
-once (its portal signed in again when the page browses another provider), as the large
-picture's does, and opens small again.
+channel, opens nothing. SessionManager opens it in the slot that is not large, with a main
+tune's start arguments; its refusals and failures are toasted here, except that an STB
+channel failing small gets a fresh link once (its portal signed in again when the page
+browses another provider), as the large picture's does, and opens small again.
+
+A movie or an episode from the Library takes the large picture and keeps its channel small
+(`keep_large_small`); what takes the title's place there (Next, autoplay, another title)
+keeps the small picture beside it (`keep_beside`).
 
 The PiP frame and label follow the manager: the second surface shows at its corner while
 PiP is open, and the label names the small picture's channel and state ("Connecting…" until
 it plays; "−MM:SS" once time-shifted beyond its target, else "LIVE"); a movie or an episode
-swapped small shows its title alone. The label's × closes the small picture, its speaker
-mutes or unmutes it, and its ⇄, like a click on the small picture, swaps (the shell's
-`swap`).
+swapped small shows its title alone, and "Finished" once it ended there (swapped large
+again, the Next card offers what follows, as at its end). The label's × closes the small
+picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small picture,
+swaps (the shell's `swap`).
 
 What each slot shows (its target, the zap group it came from and, for a movie or an episode,
 its resume key) is kept here, so a swap can give the shell the new large picture's
@@ -27,6 +31,7 @@ its resume key) is kept here, so a swap can give the shell the new large picture
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import partial
 import logging
 from typing import Callable, Optional
 
@@ -39,6 +44,7 @@ from services.navigation import payloads
 from services.sessions import PURPOSE, SessionManager, Slot, limit_message
 from services.zapping import ZapContext
 from ui import item_provider
+from ui.autoplay import FINISHED_TEXT
 from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
 from ui.live_tuner import LiveStart, start_kwargs
@@ -131,6 +137,7 @@ class PipControls(QObject):
         self._link: Optional[Target] = None  # the one link request in flight
         self._timelines: dict[str, dict] = {}  # each slot's last timeline since it opened
         self._closed_view: Optional[SlotView] = None  # what the small picture showed last
+        self._ended: set[str] = set()  # the slots whose player's title ended
 
     def wire(self) -> None:
         sessions = self.sessions
@@ -140,6 +147,7 @@ class PipControls(QObject):
         sessions.slotTimeline.connect(self._on_timeline)
         for slot in (sessions.large(), sessions.other()):
             slot.live.modeChanged.connect(self._refresh_label)
+            slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
         self._lanes.sideFailed.connect(self._on_link_failed)
         self._transport.pipRequested.connect(self.toggle_previous)
         self._transport.set_pip_state(True, False)
@@ -344,6 +352,16 @@ class PipControls(QObject):
         self.close()
         return self.sessions.demote_large()
 
+    def keep_beside(self, item: dict, title: str) -> None:
+        """A movie or an episode takes the place of the one playing large (Next, autoplay,
+        another from the Library): the small picture plays on beside it, unless its channel is
+        of the title's provider, which allows fewer than two streams; then it closes for the
+        title (said)."""
+        small = self.sessions.small()
+        channel = small.channel if small is not None else None
+        if channel is None or self._no_second_stream(channel, item, title):
+            self.close()
+
     def _no_second_stream(self, channel: dict, item: dict, title: str) -> bool:
         """`channel` is of the title's provider, which allows fewer than two streams: the
         channel closes for the title (said here)."""
@@ -507,6 +525,19 @@ class PipControls(QObject):
         self._wanted = (again, view.context if view.context is not None else ZapContext())
         self._request(again)
 
+    def _on_player_state(self, name: str, state: str) -> None:
+        """A player's state: a title that ended small says "Finished" on the label."""
+        ended = state == "ended"
+        if ended == (name in self._ended):
+            return
+        if ended:
+            self._ended.add(name)
+        else:
+            self._ended.discard(name)
+        small = self.sessions.small()
+        if small is not None and small.name == name:
+            self._refresh_label()
+
     def _on_timeline(self, name: str, state: dict) -> None:
         self._timelines[name] = state
         small = self.sessions.small()
@@ -526,8 +557,8 @@ class PipControls(QObject):
         label.set_audible(not self.sessions.muted(small.name))
 
     def _state_text(self, slot: Slot, *, live: bool = True) -> str:
-        if not live:
-            return ""  # a movie or an episode swapped small plays on: its title alone
+        if not live:  # a movie or an episode swapped small plays on: its title alone
+            return FINISHED_TEXT if slot.name in self._ended else ""
         mode = slot.live.mode
         timeline = self._timelines.get(slot.name)
         if mode == "pipeline" and timeline is not None:

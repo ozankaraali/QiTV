@@ -34,8 +34,9 @@ shows swaps instead of opening it twice. A movie or an episode started from the 
 a channel plays takes the large picture and the channel goes small without reopening (a
 previous small picture closes first; when the title's provider has no second stream the
 channel closes instead, and a small picture plays on), and takes it back if the title's link
-fails; files and a title with no channel streaming close the small picture first: it is for
-live TV.
+fails; what follows the title (Next, autoplay, another title) keeps the channel small. A swap
+drops the Next card, and a title that ended small offers it once swapped large. Files and a
+title with no channel streaming close the small picture first: it is for live TV.
 
 Provider setups (the loading and welcome hints, the last channel, the drawer on an idle player)
 are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4) keeps what
@@ -855,6 +856,7 @@ class TVController(QObject):
         episode = kind == "episode"
         series = context["series"]
         title = item_title(item, episode=episode)
+        beside = self._title_beside_channel()  # what plays large is a title, a channel small
         target = Target(
             item,
             "series" if episode else "movies",
@@ -863,14 +865,28 @@ class TVController(QObject):
             context=context,
             start_over=bool(context["start_over"]),
         )
-        if from_library:
+        kept = False
+        if beside and self._pip is not None:
+            self._pip.keep_beside(item, title)  # Next, autoplay, another title: it plays on
+        elif from_library:
             kept = self._keep_channel_small(item, title)  # it closes the small picture, or not
         else:
-            kept = False
             self._close_pip()  # picture in picture is for live TV
         self._freed_for = target if kept else None
         self._lanes.supersede()  # a newer choice than an external play waiting for its link
         self._request(target)
+
+    def _title_beside_channel(self) -> bool:
+        """A movie or an episode is the large picture's (playing, ended or failed) while the
+        small picture shows a channel (the one kept small for a title from the Library)."""
+        current, sessions = self._current, self.sessions
+        return (
+            current is not None
+            and not current.live
+            and not current.local
+            and sessions is not None
+            and sessions.pip_open()
+        )
 
     def _keep_channel_small(self, item: dict, title: str) -> bool:
         """A title from the Library while a channel plays large (corner player): the channel
@@ -1232,6 +1248,7 @@ class TVController(QObject):
         self._state = self._states.get(new.name, "idle")
         self._audio_id = self._subtitle_id = None
         self._tuning.stop()
+        self._autoplay.drop()  # the Next card, and its wait, were the other picture's
         if self._digits:
             self.zap.cancel_digits()
         context = view.context
@@ -1254,6 +1271,8 @@ class TVController(QObject):
             self.overlays.banner.dismiss()
             transport.set_next_available(self._autoplay.has_next(current))
             transport.show_vod(current.title, current.subtitle)
+            if self._state == "ended":
+                self._autoplay.on_ended(current)  # it ended small: what follows, as at its end
         pip.after_swap()
         if self._tuner_of(old).idle():
             pip.close()  # the old large picture was between two channels: nothing to show
