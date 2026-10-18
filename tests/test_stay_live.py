@@ -961,6 +961,151 @@ class LandingTests(unittest.TestCase):
         self.assertLessEqual(sum(1 for rate in rates if rate < 1.0) * TICK, 20.0)
 
 
+def steer(stay, lag, seconds, *, clock, landing=None):
+    """Play `seconds` at stay-live's rates from `lag` (the source steady), where a jump to live
+    would land at `landing(now, lag)` (None: stay-live is not told). A jump lands there and is
+    reported to stay-live as the caller does (`user_go_live()`, then `landed()`). Returns the
+    lag, the rates and the times of the jumps."""
+    rates, jumps = [], []
+    if landing is not None:
+        stay.jump_lag = lambda: landing(clock.now, lag)
+    for _ in range(round(seconds / TICK)):
+        now = clock.tick()
+        decision = stay.update(lag, False, now=now)
+        rates.append(decision.rate)
+        if decision.reopen_live:
+            jumps.append(now)
+            if decision.jump:
+                lag = landing(now, lag)
+                stay.user_go_live()
+                stay.landed(lag - stay.target)
+            continue
+        lag -= (decision.rate - 1.0) * TICK
+    return lag, rates, jumps
+
+
+def keyframes(every, *, since=1000.0):
+    """Where a jump lands on a source with a keyframe every `every` seconds: the newest at
+    least a quarter second short of the target, as Go live picks (`since`: one was at the
+    target less a quarter second then)."""
+    return lambda now, lag: T - 0.25 + (now - since) % every
+
+
+class JumpTests(unittest.TestCase):
+    """2.1 stage 5 (safe jumps): far behind, one clean jump to live replaces a long 1.10x
+    catch-up (8 s at 1.10x takes 80 s): when the clean start Go live would pick lands within
+    the band or 5 s nearer, and nothing jumped (a tune, Go live, a reopen at live) within a
+    minute. Never two within a minute; the keyframes' grain is never a reason for 1.10x."""
+
+    def test_far_behind_with_a_clean_landing_at_the_target_jumps_once_and_never_speeds_up(self):
+        stay, clock = live(), Clock()
+        lag, rates, jumps = steer(stay, T + 10.0, 30.0, clock=clock, landing=lambda *_: T + 0.2)
+        self.assertEqual(len(jumps), 1)
+        self.assertLessEqual(jumps[0] - 1000.0, 3.25)  # as soon as 1.10x would have started
+        self.assertEqual(set(rates), {1.0})
+        self.assertAlmostEqual(lag, T + 0.2)
+
+    def test_a_jump_says_it_is_one_and_the_hard_bound_still_reopens(self):
+        stay, clock = live(), Clock()
+        stay.jump_lag = lambda: T
+        decisions = [stay.update(T + 10.0, False, now=clock.tick()) for _ in range(16)]
+        self.assertEqual([d.jump for d in decisions].count(True), 1)
+        self.assertEqual(sum(d.reopen_live for d in decisions), 1)
+        stay.user_go_live()
+        stay.landed(0.0)  # a jump a moment ago: the next within a minute is none ...
+        decision = stay.update(R + 1, False, now=clock.tick())
+        self.assertEqual(decision, Decision(1.0, True))  # ... but beyond 20 s, as ever
+
+    def test_again_within_a_minute_it_catches_up_at_1_10_then_jumps_once_the_minute_passed(self):
+        stay, clock = live(), Clock()
+        at = lambda *_: T + 0.2  # noqa: E731
+        lag, _, jumps = steer(stay, T + 10.0, 20.0, clock=clock, landing=at)
+        self.assertEqual(len(jumps), 1)
+        lag, rates, more = steer(stay, lag + 14.0, 30.0, clock=clock, landing=at)  # a backlog
+        self.assertEqual((max(rates), more), (1.10, []))  # never two jumps within a minute
+        lag, rates, more = steer(stay, lag, 40.0, clock=clock, landing=at)
+        self.assertEqual(len(more), 1)  # the catch-up's rest: one jump, a minute on
+        self.assertGreaterEqual(more[0] - jumps[0], 60.0)
+        self.assertEqual(rates[-1], 1.0)
+
+    def test_on_long_keyframe_intervals_it_waits_for_a_keyframe_that_helps(self):
+        # One keyframe every 10 s (the 1-stream raw-TS provider's 4K channel): the landing
+        # moves with the next keyframe; a jump waits for one that lands within the band or
+        # 5 s nearer, rather than 1.10x for a minute and a half.
+        for phase in (0.0, 2.5, 5.0, 7.5):
+            with self.subTest(phase=phase):
+                stay, clock = live(), Clock()
+                landing = keyframes(10.0, since=1000.0 - phase)
+                lag, rates, jumps = steer(stay, T + 9.0, 30.0, clock=clock, landing=landing)
+                self.assertLessEqual(max(rates), 1.03)  # a landing above the band: gently
+                self.assertEqual(set(rates[: round((jumps[0] - 1000.0) / TICK)]), {1.0})
+                self.assertEqual(len(jumps), 1)
+                self.assertLessEqual(jumps[0] - 1000.0, 3.0 + 10.25)
+                self.assertLessEqual(lag, T + 4.0)
+
+    def test_with_no_landing_that_helps_it_catches_up_at_1_10_after_waiting(self):
+        # Keyframes 30 s apart, say: the landing is 3 s nearer, neither within the band nor
+        # 5 s nearer. A keyframe interval's wait, then 1.10x as before.
+        stay, clock = live(), Clock()
+        lag, rates, jumps = steer(stay, T + 10.0, 120.0, clock=clock, landing=lambda *_: T + 7.0)
+        self.assertEqual(jumps, [])
+        first = next(i for i, rate in enumerate(rates) if rate != 1.0)
+        self.assertGreaterEqual(first * TICK, 3.0 + 12.0 - 0.25)
+        self.assertEqual(max(rates), 1.10)
+
+    def test_without_a_clean_start_to_jump_to_it_catches_up_at_once_as_before(self):
+        stay, clock = live(), Clock()
+        lag, rates, jumps = steer(stay, T + 10.0, 20.0, clock=clock, landing=lambda *_: None)
+        self.assertEqual(jumps, [])
+        first = next(i for i, rate in enumerate(rates) if rate != 1.0)
+        self.assertLessEqual(first * TICK, 3.25)
+        self.assertEqual(max(rates), 1.10)
+
+    def test_the_keyframes_grain_is_no_reason_for_1_10(self):
+        # Stage 3's open concern: a landing 9.7 s above the target (the newer keyframe just
+        # short of the floor) was nudged gently for its minute, then caught up at 1.10x.
+        # When no jump does better than the lag less a second, the gentle nudge goes on.
+        stay, clock = live(), Clock()
+        stay.landed(9.7)
+        lag, rates, jumps = steer(
+            stay, T + 9.7, 240.0, clock=clock, landing=lambda now, lag: lag - 0.5
+        )
+        self.assertEqual(jumps, [])
+        self.assertEqual(max(rates), 1.03)
+        self.assertLess(lag, T + 9.7 - 4.0)
+
+    def test_a_landing_far_above_the_target_jumps_after_its_minute_on_a_keyframe_that_helps(self):
+        stay, clock = live(), Clock()
+        stay.landed(9.7)
+        landing = keyframes(10.0, since=1003.0)
+        lag, rates, jumps = steer(stay, T + 9.7, 120.0, clock=clock, landing=landing)
+        self.assertEqual(max(rates), 1.03)  # gently while the landing's minute lasts
+        self.assertEqual(len(jumps), 1)
+        self.assertGreaterEqual(jumps[0] - 1000.0, 60.0)
+        self.assertLessEqual(jumps[0] - 1000.0, 60.0 + 3.0 + 10.25)
+        self.assertLessEqual(abs(lag - T), stay.band(1))
+
+    def test_no_jump_while_a_stream_just_opened(self):
+        stay, clock = live(), Clock()
+        stay.hold_reopen = True  # Go live (or a seek) opened a stream a moment ago
+        lag, rates, jumps = steer(stay, T + 10.0, 10.0, clock=clock, landing=lambda *_: T)
+        self.assertEqual((jumps, set(rates)), ([], {1.0}))
+        stay.hold_reopen = False
+        lag, rates, jumps = steer(stay, lag, 1.0, clock=clock, landing=lambda *_: T)
+        self.assertEqual(len(jumps), 1)
+
+    def test_a_tune_or_go_live_counts_as_a_jump(self):
+        for opened in ("tune", "go live"):
+            with self.subTest(opened=opened):
+                stay, clock = live(), Clock()
+                if opened == "go live":
+                    stay.user_go_live()
+                stay.landed(0.0)
+                lag, rates, jumps = steer(stay, T, 20.0, clock=clock, landing=lambda *_: T)
+                lag, rates, jumps = steer(stay, T + 10.0, 30.0, clock=clock, landing=lambda *_: T)
+                self.assertEqual((jumps, max(rates)), ([], 1.10))
+
+
 class BuildTests(unittest.TestCase):
     """A raised Auto target is reached without a jump back (2.0.2): by one nudge below 1x
     where the rate may change, else as VLC waits at the live edge."""

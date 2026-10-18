@@ -41,7 +41,9 @@ taken once the next reading agrees with it, unless it lands past the live edge o
 timestamp jump the helper reports having left out of its timeline (`breaks` in its state: an
 HLS discontinuity or a reconnect whose timestamps jumped 3 s or more; the position goes on
 at the rate); it never runs backwards. Seeking
-reopens the stream at a segment (about 2 s granularity) and keeps the pause intent: a
+reopens the stream at a segment (about 2 s granularity) where playback starts cleanly (2.1
+stage 5, `_seek_start`: a keyframe, else an intra picture, within 10 s of the point asked; a
+start without either only when none is that near) and keeps the pause intent: a
 reopened stream is paused again as soon as it plays (port map §8.19). A seek to within the
 target of the live edge goes live instead, still keeping the pause; only `go_live()` (the
 Go live button) unpauses. A pause, from any mode (a catch-up included), sets 1x and makes
@@ -78,10 +80,13 @@ StayLive changes the rate only for a lag outside its dead band for 15 s, by one 
 sooner and beyond that budget only far behind (1.10x), with under half a second of room when
 a burst lands (0.95x, 2.0.1's case) and once after trouble (a starvation or a stall that ran
 out the cushion: 0.95x back to the target, once VLC played a second short of it); not
-while paused, time-shifted or at a chosen speed. Its reopen at live waits until a stream
-opened (Go live, a seek, a reopen) has played and `_REOPEN_HOLD_S` passed, and a Go live
-right after stay-live's reopen (also one the tick made after it could not open at once)
-opens nothing more: never two opens in a row. The timeline's `shown` is the lag as the
+while paused, time-shifted or at a chosen speed. Far behind, a jump to live replaces
+the 1.10x catch-up (2.1 stage 5) when the clean start Go live would pick (`_jump_lag`) lands
+within stay-live's band or 5 s nearer and nothing jumped within a minute (a tune, Go live, a
+reopen: see `StayLive`). Its reopen at live (such a jump, or beyond the target plus 20 s)
+waits until a stream opened (Go live, a seek, a reopen) has played and `_REOPEN_HOLD_S`
+passed, and a Go live right after stay-live's reopen (also one the tick made after it could
+not open at once) opens nothing more: never two opens in a row. The timeline's `shown` is the lag as the
 indicator shows it (`SettledLag`: half seconds, changed after 3 s), `nudge` the rate a nudge
 ramps to. On some channels VLC cannot play at any rate but 1x: its position crawls. While
 stay-live's rate is not 1x, VLC's progress is checked against rate x wall time
@@ -123,7 +128,10 @@ plays it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 
 bursty source the mean; see `_live_start`): never below the target less a quarter second,
 since stay-live wins buffer back only that slowly, and only for a bursty source; the nearest
 the target within stay-live's band; else the nearest above it ("behind live" for a moment
-while stay-live catches up).
+while stay-live catches up). Every such open (a tune, Go live, stay-live's reopen) starts
+cleanly where it can (2.1 stage 5): a keyframe, else an intra picture, a start without either
+(its picture breaks until the next keyframe) only when nothing else is far enough back, which
+a debug log says on a stream with video; a keyframe over an intra picture within that band.
 
 Interruptions while playing from the pipeline:
 - VLC ended or failed: reopen at the position, or 5 s past the oldest buffered point with
@@ -241,6 +249,12 @@ _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) .
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
 _FROZEN_HOLDS = 2.0  # VLC's clock still for a window and this many holds has played nothing
 _ARRIVAL_S = 0.1  # the live edge moving less is no arrival (a closing segment's last frame)
+# Seeks (2.1 stage 5): a start without a keyframe gives way to a clean one this near the point
+# asked (a forced cut's length) ...
+_SEEK_REACH_S = 10.0
+# ... and an intra picture's to a keyframe's at most this much further (a common keyframe
+# interval).
+_KEY_REACH_S = 2.0
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -485,6 +499,7 @@ class LiveSession(QObject):
         if ram_bytes is not None:
             self._open_args["ram_bytes"] = ram_bytes
         self._stay = StayLive(self._latency)
+        self._stay.jump_lag = self._jump_lag  # where a jump to live would land (stage 5)
         if self._memory.rate_locked:
             self._stay.lock_rate()  # VLC could not play it at another rate before
         self._health = RateHealth()
@@ -568,7 +583,7 @@ class LiveSession(QObject):
         if self._deferred is not None:
             self._after_update = t  # the spans still describe the lost disk ring
             return
-        span = _locate(self._engine.spans(self._sid), t)
+        span = self._seek_start(t)
         if span is None:  # nothing buffered yet
             return
         self._stay.user_seeked_back()
@@ -856,7 +871,7 @@ class LiveSession(QObject):
             return
         hls = snapshot.get("hls") is True
         ahead = self._ahead(snapshot)
-        pick = self._live_start(cushion=True, ahead=ahead, tune=True)
+        pick = self._live_start(cushion=True, ahead=ahead)
         if not waited:
             held = self._clock() - self._ready_at
             if pick is None:
@@ -872,7 +887,7 @@ class LiveSession(QObject):
                 return
         aimed = pick is not None  # chosen for the target, not the most there is
         if pick is None:
-            pick = self._live_start(ahead=ahead, tune=True)  # the most buffer there is
+            pick = self._live_start(ahead=ahead)  # the most buffer there is
         if pick is not None:
             self._first_open(*pick, aimed=aimed)
 
@@ -915,9 +930,9 @@ class LiveSession(QObject):
                 self._open_first(oldest, None)
             return
         ahead = self._ahead(snapshot)
-        pick = self._live_start(cushion=True, ahead=ahead, tune=True)
+        pick = self._live_start(cushion=True, ahead=ahead)
         aimed = pick is not None
-        pick = pick or self._live_start(ahead=ahead, tune=True)
+        pick = pick or self._live_start(ahead=ahead)
         if pick is not None:
             self._open_first(*pick, aimed=aimed)
 
@@ -1167,6 +1182,12 @@ class LiveSession(QObject):
             decision = self._stay.update(lag, buffering, now=self._clock())
             self._set_rate(decision.rate)
             if decision.reopen_live:
+                _LOG.debug(
+                    "Stay-live reopens at live %.1f s behind (target %.1f s)%s.",
+                    lag,
+                    self._stay.target,
+                    ": a jump instead of a catch-up" if decision.jump else "",
+                )
                 self._go_live(unpause=False, reopen=True)
                 if self._phase is not _Phase.PIPELINE:
                     return
@@ -1541,16 +1562,18 @@ class LiveSession(QObject):
         return sorted((edge - start + shift, seq) for start, seq in starts)
 
     def _live_start(
-        self, *, cushion: bool = False, ahead: float = 0.0, tune: bool = False
+        self, *, cushion: bool = False, ahead: float = 0.0
     ) -> Optional[tuple[int, float]]:
-        """The start Go live picks and the lag it gives once VLC plays it, on a live edge
-        `ahead` seconds further (a tune's HLS backlog still to come); with `cushion`, None
-        while none is far enough behind. `tune`: a start without a keyframe or an intra
-        picture (5a's `start_quality` "none": its picture breaks until the next keyframe)
-        only when nothing else is far enough behind; and a keyframe start over an intra
-        picture's within stay-live's band (the target, a quarter second short to
-        `_LAND_ABOVE_S` beyond), where it costs no steering, never further back (one IDR in
-        a backlog of intra pictures started a tune 18 s above its target)."""
+        """The start Go live picks (a tune, Go live, stay-live's reopen at live) and the lag
+        it gives once VLC plays it, on a live edge `ahead` seconds further (a tune's HLS
+        backlog still to come); with `cushion`, None while none is far enough behind. A start
+        without a keyframe or an intra picture (5a's `start_quality` "none": its picture
+        breaks until the next keyframe) only when nothing else is far enough behind (or, in a
+        short buffer, there at all); and a keyframe start over an intra picture's within
+        stay-live's band (the target, a quarter second short to `_LAND_ABOVE_S` beyond),
+        where it costs no steering, never further back (one IDR in a backlog of intra
+        pictures started a tune 18 s above its target; an HEVC BLA, "open" too, starts as
+        cleanly as an IDR)."""
         assert self._sid is not None
         snapshot = self._snapshot()
         target = self._target(snapshot)
@@ -1564,19 +1587,22 @@ class LiveSession(QObject):
                 oldest,
                 edge - self._start_of(oldest) + self._burst_shift(snapshot) + self._open_s,
             )
+        ranks = self._qualities(snapshot)
         # Stay-live slows down only to build room, gently and briefly, so a landing below the
         # target would keep its smaller buffer for a long while: none below a quarter second
         # short of it. Then the nearest the target (ties: the newer start) within stay-live's
         # band, else the nearest above.
         safe = [mean for mean in means if mean[0] >= target - _BELOW_TARGET_S]
         if not safe:
-            return None if cushion else (means[-1][1], means[-1][0])  # a short buffer: all
-        ranks = self._qualities(snapshot) if tune else {}
-        if tune:
-            clean = [mean for mean in safe if ranks.get(mean[1], 0) < _QUALITY_RANK["none"]]
-            safe = clean or safe
+            if cushion:
+                return None
+            clean = [mean for mean in means if ranks.get(mean[1], 0) < _QUALITY_RANK["none"]]
+            lag, seq = (clean or means)[-1]  # a short buffer: all of it there is
+            return seq, lag
+        clean = [mean for mean in safe if ranks.get(mean[1], 0) < _QUALITY_RANK["none"]]
+        safe = clean or safe
         band = [mean for mean in safe if mean[0] <= target + _LAND_ABOVE_S]
-        if tune and band:
+        if band:
             keys = [mean for mean in band if ranks.get(mean[1], 0) == _QUALITY_RANK["key"]]
             band = keys or band
         if band:
@@ -1584,6 +1610,67 @@ class LiveSession(QObject):
         else:
             lag, seq = safe[0]
         return seq, lag
+
+    def _jump_lag(self) -> Optional[float]:
+        """Where a jump to live (stay-live's reopen, 2.1 stage 5) would land now: the mean lag
+        once VLC plays the start Go live would pick, when it starts cleanly (a keyframe or an
+        intra picture); None otherwise, and while none is far enough behind."""
+        if self._sid is None or self._phase is not _Phase.PIPELINE:
+            return None
+        pick = self._live_start(cushion=True)
+        if pick is None:
+            return None
+        seq, lag = pick
+        if self._qualities(self._snapshot()).get(seq, 0) >= _QUALITY_RANK["none"]:
+            return None  # only starts that break the picture are far enough behind
+        return lag
+
+    def _seek_start(self, t: float) -> Optional[Span]:
+        """Where a seek to `t` opens (2.1 stage 5): the segment holding `t` when it starts
+        cleanly (a keyframe; an intra picture unless a keyframe start is within
+        `_KEY_REACH_S` of `t`); else the clean start nearest `t` within `_SEEK_REACH_S`, a
+        keyframe's if one is at most `_KEY_REACH_S` further. The segment holding `t` without
+        either only when no clean start is that near. None while nothing is closed."""
+        assert self._sid is not None
+        spans = self._engine.spans(self._sid)
+        holding = _locate(spans, t)
+        if holding is None:
+            return None
+        ranks = self._qualities(self._snapshot())
+
+        def away(span: Span) -> float:
+            return 0.0 if span is holding else abs(span.start - t)
+
+        clean = [
+            span
+            for span in spans
+            if ranks.get(span.seq, 0) < _QUALITY_RANK["none"] and away(span) <= _SEEK_REACH_S
+        ]
+        if not clean:
+            return holding
+        nearest = min(away(span) for span in clean)
+        keys = [
+            span
+            for span in clean
+            if ranks.get(span.seq, 0) == _QUALITY_RANK["key"]
+            and away(span) <= nearest + _KEY_REACH_S
+        ]
+        return min(keys or clean, key=away)
+
+    def _say_unclean(self, seq: int) -> None:
+        """Opening at `seq`, a start without a keyframe or an intra picture: the pickers take
+        one only when nothing else is in reach. Said for debugging (an audio-only stream has
+        no other start, so nothing is said there)."""
+        snapshot = self._snapshot()
+        if snapshot.get("video") is False:
+            return
+        if self._qualities(snapshot).get(seq, 0) < _QUALITY_RANK["none"]:
+            return
+        _LOG.debug(
+            "Segment %d starts without a keyframe, and none is in reach: its picture may "
+            "break until the next one.",
+            seq,
+        )
 
     def _advance(self) -> float:
         """VLC's position (spec §6.3; 2.1 stage 2): the opened segment's start plus VLC's
@@ -1615,6 +1702,7 @@ class LiveSession(QObject):
         url = self._engine.stream_url(self._sid, seq)
         if not url:
             return False
+        self._say_unclean(seq)
         self._base, self._elapsed = self._start_of(seq), 0.0
         self._last_ms = 0
         self._opened_at = self._last_open = self._clock()
@@ -1650,7 +1738,7 @@ class LiveSession(QObject):
         start = self._buffer_start()
         expired = position < start - _EXPIRED_S
         at = start + _REWIND_MARGIN_S if expired else max(position, start)
-        span = _locate(self._engine.spans(self._sid), at)
+        span = self._seek_start(at)  # where playback starts cleanly, as a seek there
         seq = span.seq if span is not None else self._oldest_seq()
         if seq is None or not self._open_at(seq):
             self._retry = _Retry.RESUME

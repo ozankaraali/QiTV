@@ -123,13 +123,15 @@ class FakeEngine(QObject):
         backlog=None,
         finite=False,
         open_quality=None,
+        video=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
         (HLS: every listed segment arrived) defaults to `hls`; `end` (where the open segment
         starts) to the closed spans' end, or 0.0; `backlog`, the listed media an HLS source
         has still to deliver, is left out when None; `finite`: a finished (ENDLIST) playlist;
-        `open_quality`: how cleanly the open segment starts."""
+        `open_quality`: how cleanly the open segment starts; `video`: whether the stream has
+        a video PID (left out when None, as an older helper does)."""
         end = spans[-1].end if spans else (end or 0.0)
         oldest = spans[0].seq if spans else open_seq
         self._spans[sid] = list(spans)
@@ -151,6 +153,8 @@ class FakeEngine(QObject):
         }
         if backlog is not None:
             self._snapshots[sid]["backlog_s"] = backlog
+        if video is not None:
+            self._snapshots[sid]["video"] = video
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -2073,6 +2077,162 @@ class StayLiveTests(LiveSessionCase):
         self.step(0.25)
         self.assertEqual(self.playback.rates, [])
         self.assertEqual(self.timelines[-1]["target"], 6.0)
+
+
+def spans_at(*starts, end=20.0):
+    """Closed spans from (start, start quality) pairs, oldest first, the last up to `end`."""
+    ends = [start for start, _ in starts[1:]] + [end]
+    return [
+        Span(k, start, stop, False, quality)
+        for k, ((start, quality), stop) in enumerate(zip(starts, ends))
+    ]
+
+
+class SafeJumpTests(LiveSessionCase):
+    """2.1 stage 5 (safe jumps): Go live, stay-live's reopen at live and seeks open where
+    playback starts cleanly (a keyframe, else an intra picture; a start without either only
+    when nothing else is in reach, which a debug log says), and far behind one such jump
+    replaces a long 1.10x catch-up, never two within a minute."""
+
+    def go_live_over(self, *starts, video=None):
+        """Go live over closed spans starting at `starts` ((start, quality), oldest first) up
+        to a live edge at 20.0 (each lag once VLC plays it: 20.5 less its start); the URL
+        opened and what the session logged at debug level."""
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.engine.buffer(sid, spans_at(*starts), live_edge=20.0, video=video)
+        log = mock.Mock()
+        with mock.patch.object(live_session, "_LOG", log):
+            self.live.go_live()
+        debug = " ".join(str(call.args[0]) for call in log.debug.call_args_list)
+        return self.playback.plays[-1][0], self.engine.stream_url(sid, 0)[:-4], debug
+
+    def test_go_live_prefers_a_keyframe_then_an_intra_picture_never_a_start_without(self):
+        cases = (
+            # A keyframe within the band (3.0 s) over an intra picture at the target.
+            (((0.0, "none"), (17.5, "key"), (18.0, "open"), (18.4, "none")), 1),
+            # An intra picture at the target (3.0) over a keyframe beyond the band (4.1).
+            (((0.0, "none"), (16.4, "key"), (17.5, "open"), (17.9, "none")), 2),
+            # The keyframe 2 s further back (4.5) over a start without one at the target.
+            (((0.0, "none"), (16.0, "key"), (18.0, "none")), 1),
+        )
+        for starts, seq in cases:
+            with self.subTest(starts=starts):
+                self.live = self.make()
+                url, base, debug = self.go_live_over(*starts)
+                self.assertEqual(url, f"{base}{seq}.ts")
+                self.assertNotIn("keyframe", debug)
+
+    def test_with_only_starts_without_a_keyframe_go_live_takes_the_targets_and_says_so(self):
+        starts = ((0.0, "none"), (16.0, "none"), (18.0, "none"))
+        url, base, debug = self.go_live_over(*starts)
+        self.assertEqual(url, f"{base}2.ts")  # 2.5 s: the target's
+        self.assertIn("keyframe", debug)
+        # An audio-only stream has nothing else to start at: nothing to say.
+        self.live = self.make()
+        url, base, debug = self.go_live_over(*starts, video=False)
+        self.assertEqual(url, f"{base}2.ts")
+        self.assertNotIn("keyframe", debug)
+
+    def test_a_seek_opens_where_playback_starts_cleanly(self):
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        kinds = ("key", "none", "none", "open", "key", "none", "none", "none", "none", "none")
+        spans = [Span(k, 2.0 * k, 2.0 * k + 2.0, False, kind) for k, kind in enumerate(kinds)]
+        self.engine.buffer(sid, spans, live_edge=20.0)
+        for t, seq in (
+            (0.5, 0),  # a keyframe start holds it
+            (5.0, 4),  # no keyframe there: the keyframe 3 s on, 2 s beyond the intra picture's
+            (6.5, 4),  # an intra picture holds it, a keyframe start 1.5 s on
+            (13.0, 4),  # the clean start nearest, 5 s back
+        ):
+            with self.subTest(t=t):
+                self.live.seek_to(t)
+                self.assertEqual(self.playback.plays[-1], self.stream(sid, seq))
+
+    def test_a_seek_with_no_clean_start_near_opens_where_it_was_asked_and_says_so(self):
+        sid = self.ready(segments(0, 20), live_edge=40.0)
+        spans = [
+            Span(k, 2.0 * k, 2.0 * k + 2.0, False, "key" if k == 0 else "none") for k in range(20)
+        ]
+        self.engine.buffer(sid, spans, live_edge=40.0)
+        log = mock.Mock()
+        with mock.patch.object(live_session, "_LOG", log):
+            self.live.seek_to(25.0)  # the keyframe at 0 is 25 s away
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 12))
+        debug = " ".join(str(call.args[0]) for call in log.debug.call_args_list)
+        self.assertIn("keyframe", debug)
+
+    def far_behind(self, feed, step):
+        """`step` seconds more land at once (a backlog: drift, not the start's); then 0.25 s
+        at a time until a new open, at most 30 s. Returns when it opened (None: it did not)."""
+        plays = len(self.playback.plays)
+        feed.edge += step
+        feed.push()
+        for _ in range(120):
+            feed.run(0.25)
+            if len(self.playback.plays) > plays:
+                return self.clock.now
+        return None
+
+    def test_far_behind_one_jump_replaces_the_catch_up(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 2)])  # at the target
+        feed.run(65.0)  # past the tune's minute
+        at = self.far_behind(feed, 10.0)
+        self.assertIsNotNone(at)
+        feed.run(30.0)
+        self.assertEqual(len(self.playback.plays), 2)
+        self.assertEqual(self.playback.rates, [])  # no catch-up: never another rate
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["normal"], delta=0.5)
+
+    def test_again_within_a_minute_it_catches_up_then_jumps_once_the_minute_passed(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        feed.run(65.0)
+        first = self.far_behind(feed, 10.0)
+        feed.run(20.0)
+        self.assertIsNone(self.far_behind(feed, 14.0))  # within the minute: no open ...
+        self.assertEqual(max(self.playback.rates), 1.10)  # ... but a catch-up
+        for _ in range(4 * 15):
+            feed.run(0.25)
+            if len(self.playback.plays) == 3:
+                break
+        # The catch-up's rest: one jump, a minute after the first.
+        self.assertEqual(len(self.playback.plays), 3)
+        self.assertGreaterEqual(self.clock.now - first, 60.0)
+        self.assertEqual(self.playback.rates[-1], 1.0)
+        feed.run(30.0)
+        self.assertEqual(len(self.playback.plays), 3)
+
+    def test_a_landing_a_long_keyframe_interval_above_the_target_never_gets_1_10(self):
+        """Stage 3's open concern: one keyframe every 10 s (the 1-stream raw-TS provider's 4K
+        channel), the tune 9.7 s above the target (the newer keyframe just short of the
+        floor): nudged gently for its minute, then 1.10x. Now gently, then one jump on a
+        keyframe that helps."""
+        self.live._open_s = 0.0  # VLC opens at once here: the landing is the lag picked
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=22.2, gop=10.0).ready(backlog_after_start=False)
+        self.assertEqual(self.playback.plays, [self.stream(sid, 1)])  # 12.2 s behind
+        times = []
+        for _ in range(4 * 150):
+            feed.run(0.25)
+            if len(self.playback.plays) > len(times) + 1:
+                times.append(self.clock.now)
+        self.assertLessEqual(max(self.playback.rates), 1.03)
+        self.assertEqual(len(times), 1)
+        self.assertGreaterEqual(times[0] - 1000.0, 60.0)
+        self.assertLess(self.timelines[-1]["lag"], TARGETS["normal"] + 4.0)
+        self.assertEqual(feed.starved_s, 0.0)
+
+    def test_go_live_right_after_stay_lives_jump_opens_nothing_more(self):
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        feed.run(65.0)
+        self.assertIsNotNone(self.far_behind(feed, 10.0))
+        feed.run(1.0)
+        self.live.go_live()  # the viewer's, a second after it: merged
+        feed.run(30.0)
+        self.assertEqual(len(self.playback.plays), 2)
 
 
 class RateHealthTests(LiveSessionCase):

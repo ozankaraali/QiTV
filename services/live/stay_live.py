@@ -44,6 +44,18 @@ short then is accepted (no 2.0.1 slow-down, no nudge ahead) until the lag is bac
 band, or VLC runs dry
 (`trouble()`: the owed slow-down builds all of it then).
 
+Far behind, a jump to live is better than a long catch-up (2.1 stage 5: 8 s at 1.10x takes 80
+s). The caller says where one would land (`jump_lag`: the mean lag once VLC plays the clean
+start Go live would pick, a keyframe's or an intra picture's; None without one). Once far
+behind for `_URGENT_S`, and no jump (a tune, Go live, a reopen at live: whatever `landed()`
+hears) came within `_JUMP_GAP_S`, stay-live reopens at live instead of speeding up when that
+landing is within the band or `_JUMP_CLOSER_S` nearer than the lag; if it is not, for up to
+`_JUMP_WAIT_S` it waits at the rate it has for the next keyframes to bring one (one provider's
+4K channel has one every 10 s). A catch-up already under way (one started within the minute)
+ends in such a jump once the minute passed. When no jump can do better than the lag less
+`_GRAIN_S`, the lag is the keyframes' grain, not drift: the nudge stays gentle. Never while a
+stream just opened (`hold_reopen`); the reopen beyond the target plus 20 s stays as it was.
+
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in
 2.0.2: 4.5 s of media in 37 s). `RateHealth` notices that from VLC's progress, and the caller
 then calls `lock_rate()`: from there on stay-live keeps 1x and only reopens at live when the
@@ -60,6 +72,7 @@ Pure logic; the caller feeds the measured lag and applies the returned Decision.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -100,6 +113,11 @@ _BUDGET_S = 300.0  # one gentle nudge at most in this long
 _START_S = 60.0  # after a landing, a shortfall within this much playing is the start's ...
 _START_BUILD_S = 20.0  # ... built at _GENTLE_DOWN for at most this much playing, then accepted
 _WIDEN_S = 0.01  # beyond the budget the band takes in the lag outside it, and this much
+# Jumps (2.1 stage 5): far behind, a reopen at live instead of a long catch-up.
+_JUMP_GAP_S = 60.0  # never two jumps (a tune, Go live, a reopen at live) within this long
+_JUMP_CLOSER_S = 5.0  # a jump helps when it lands within the band, or at least this much nearer
+_JUMP_WAIT_S = 12.0  # far behind, waiting this long for one that helps (keyframes 10 s apart)
+_GRAIN_S = 1.0  # no jump does better than the lag less this: the keyframes' grain, no drift
 _TICK_S = 0.25  # the caller's update interval (what a first sample stands for)
 _MAX_DT = 1.0  # a longer gap between two updates counts as this long
 
@@ -137,6 +155,7 @@ class Mode(str, Enum):
 class Decision:
     rate: float
     reopen_live: bool = False
+    jump: bool = False  # the reopen is a jump instead of a catch-up (not the 20 s bound)
 
 
 class RateHealth:
@@ -435,6 +454,11 @@ class StayLive:
         # Set by the caller: a stream opened a moment ago (Go live, a seek, a reopen), so its
         # lag is not known yet: no reopen at live until it is (never two opens in a row).
         self.hold_reopen = False
+        # Set by the caller: where a jump to live would land now, as a mean lag (the clean
+        # start Go live would pick), or None without one; asked only far behind.
+        self.jump_lag: Optional[Callable[[], Optional[float]]] = None
+        self._jump_age = math.inf  # seconds since the last landing (a tune, Go live, a jump)
+        self._waited = 0.0  # far behind: seconds waited for a jump that helps
         self._rate = 1.0  # last rate decided in LIVE
         self._user_rate = 1.0
         self._reopened = False
@@ -490,6 +514,7 @@ class StayLive:
     def absorb(self) -> None:
         """The lag stepped (a reopen, say): count the time outside the band afresh."""
         self._outside, self._side, self._urgent = 0.0, 0, False
+        self._waited = 0.0
 
     def landed(self, excess: float) -> None:
         """A stream opened at the start Go live picks (after `user_go_live()` for a Go live):
@@ -504,6 +529,7 @@ class StayLive:
         self._floor = max(0.0, excess)
         self._start = self._landing = _START_S
         self._accepting = False
+        self._jump_age = self._waited = 0.0  # a jump: the next one a minute on at the earliest
 
     def landed_further(self, excess: float) -> None:
         """A backlog step right after a start took the lag `excess` above the target: within
@@ -576,6 +602,7 @@ class StayLive:
         """
         dt = 0.0 if self._last is None else min(max(now - self._last, 0.0), _MAX_DT)
         self._last = now
+        self._jump_age += dt
         if self.mode is Mode.SHIFTED:
             return Decision(self._user_rate)
         if self.mode is Mode.CATCHING_UP:
@@ -608,12 +635,14 @@ class StayLive:
             return Decision(self._rate)  # 1x: set by lock_rate(), never changed after
         if self._wide and self._budget_free(now):
             self._wide = 0.0
+        if self._reopened:
+            return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
         if self._owed:
             self._pay(lag_s, dt)
-        if self._nudge is not None:
-            self._steer(dt, lag_s, now)
-        else:
-            self._watch(dt, lag_s, now)
+        if self._steer(dt, lag_s, now) if self._nudge is not None else self._watch(dt, lag_s, now):
+            self._rate, self._nudge = 1.0, None  # a catch-up it replaces ends here
+            self._reopened = True
+            return Decision(1.0, reopen_live=True, jump=True)
         return Decision(self._rate)
 
     def _landed(self) -> float:
@@ -657,12 +686,40 @@ class StayLive:
         else:
             nudge.peak = _SLOW  # a gentle one under way: at once to the owed rate
 
+    def _far_move(self, lag: float, dt: float) -> str:
+        """Far behind: "jump" (a clean jump lands within the band or `_JUMP_CLOSER_S` nearer,
+        and nothing jumped within `_JUMP_GAP_S`), "wait" (one may, but none helps yet: the
+        next keyframes may bring one, for `_JUMP_WAIT_S`; a stream that just opened is waited
+        for too), "gentle" (no jump does better than the lag less `_GRAIN_S`: that lag is the
+        keyframes' grain) or "fast" (1.10x)."""
+        landing = self.jump_lag() if self.jump_lag is not None else None
+        if landing is not None and self._jump_age >= _JUMP_GAP_S - 1e-9:
+            if not self.hold_reopen and self._helps(landing, lag):
+                return "jump"
+            if self._waited < _JUMP_WAIT_S - 1e-9:
+                self._waited += dt
+                return "wait"
+        if landing is not None and landing >= lag - _GRAIN_S:
+            return "gentle"
+        return "fast"
+
+    def _helps(self, landing: float, lag: float) -> bool:
+        """A jump landing at the mean lag `landing` helps: within the band around the target
+        (as wide as the estimate's wander, not as the budget widened it), or at least
+        `_JUMP_CLOSER_S` nearer than `lag` without falling short of the band."""
+        band = max(_BAND_S, _BAND_SPREAD * self.spread)
+        over = landing - self._centre(1)
+        if over < -band:
+            return False  # short of room: VLC would run dry
+        return over <= band + _BAND_BURST * self.burst or landing <= lag - _JUMP_CLOSER_S
+
     def _short(self, lag: float) -> bool:
         """Under `_ROOM_S` left when a burst lands (a steady source: at all): VLC runs dry."""
         return lag - self.burst / 2 < _ROOM_S
 
-    def _watch(self, dt: float, lag: float, now: float) -> None:
-        """At 1x: count the time outside the band; start a nudge once it lasted."""
+    def _watch(self, dt: float, lag: float, now: float) -> bool:
+        """At 1x: count the time outside the band; start a nudge once it lasted. True: far
+        behind, a jump to live instead (`_far_move`)."""
         behind, ahead = lag - self._centre(1), lag - self._centre(-1)
         if self._accepting and ahead >= -self.band(-1):
             self._accepting = False  # back at the target: a later shortfall is a real one
@@ -671,9 +728,11 @@ class StayLive:
         under = short or (ahead < -self.band(-1) and not self._accepting)
         side = 1 if far or behind > self.band(1) else -1 if under else 0
         error = behind if side > 0 else ahead
+        if not far:
+            self._waited = 0.0
         if side == 0:
             self._outside = max(0.0, self._outside - 2 * dt)  # back inside: it fades
-            return
+            return False
         if side != self._side:
             self._outside, self._side = 0.0, side
         self._outside += dt
@@ -681,12 +740,21 @@ class StayLive:
         urgent = far or short or start
         self._urgent = urgent
         if self._outside < (_URGENT_S if urgent else _PERSIST_S) - 1e-9:
-            return
+            return False
+        if far:
+            move = self._far_move(lag, dt)
+            if move in ("jump", "wait"):
+                return move == "jump"
+            if move == "gentle":
+                # The keyframes' grain: a lasting lag like any other (behind: nothing short).
+                far = urgent = self._urgent = False
+                if self._outside < _PERSIST_S - 1e-9:
+                    return False
         if not urgent and not self._budget_free(now):
             # Spent: tolerate this much rather than a second nudge within the budget.
             self._wide = abs(error) + _WIDEN_S
             self.absorb()
-            return
+            return False
         if start:
             self._start = 0.0  # one build per landing
             nudge = _Nudge(_GENTLE_DOWN, abs(error), self._centre(side), limit=_START_BUILD_S)
@@ -696,9 +764,11 @@ class StayLive:
         self._nudge = nudge
         self.absorb()
         self._steer(0.0, lag, now)
+        return False
 
-    def _steer(self, dt: float, lag: float, now: float) -> None:
-        """Ramp the nudge in, hold it until its size is taken, ramp it out."""
+    def _steer(self, dt: float, lag: float, now: float) -> bool:
+        """Ramp the nudge in, hold it until its size is taken, ramp it out. True: far behind,
+        a jump to live instead (`_far_move`), which ends the nudge."""
         nudge = self._nudge
         assert nudge is not None
         rate = self._rate
@@ -711,7 +781,16 @@ class StayLive:
             nudge.left -= sign * (centre - nudge.target)
             nudge.target = centre
         error = lag - centre
-        if not nudge.ending and nudge.peak == _GENTLE_UP and error > _FAR_S + self._landed():
+        far = not nudge.ending and sign > 0 and error > _FAR_S + self._landed()
+        if not far:
+            self._waited = 0.0
+        # A catch-up under way asks only once a jump could follow (where it would land is
+        # worked out from the whole buffer).
+        asks = nudge.peak != _FAST or self._jump_age >= _JUMP_GAP_S - 1e-9
+        move = self._far_move(lag, dt) if far and asks else ""
+        if move == "jump":
+            return True  # a catch-up under way too, once nothing jumped for a minute
+        if move == "fast" and nudge.peak == _GENTLE_UP:
             nudge.peak = _FAST  # far behind after all (a step)
         elif (
             not nudge.ending
@@ -735,7 +814,7 @@ class StayLive:
         due = nudge.stepped is None or now - nudge.stepped >= _RAMP_EVERY_S - 1e-9
         goal = 1.0 if nudge.ending else nudge.peak
         if abs(goal - rate) < 1e-9 or not due:
-            return
+            return False
         # Steps on the nudge's grid, 1x to its peak; off the grid (a gentle nudge turned
         # urgent raised its peak) one step goes straight to the peak.
         k = abs(rate - 1.0) / nudge.step  # steps from 1x (rates are rounded: nearly whole)
@@ -756,6 +835,7 @@ class StayLive:
                     self._nudged_at = now  # the budget counts the gentle ones that ran
             self._nudge = None
             self.absorb()
+        return False
 
     @staticmethod
     def _ramp_out(rate: float, step: float) -> float:
