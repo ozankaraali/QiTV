@@ -176,6 +176,10 @@ WINDOW_CHANGES = (
 SCENARIO_CHECK = "the smoke scenario runs to the end"
 # The packaged app only: everything libVLC loaded (libvlc, libvlccore, plugins) is the app's own.
 BUNDLED_VLC_CHECK = "the packaged app plays with its own libVLC and plugins"
+# 2.1: hardware decoding is the default; a runner without a graphics chip decodes in software
+# (VLC falls back by itself). A picture that froze sends its stream to software once, never
+# again and again (services.picture_watch).
+DECODING_CHECK = "no player falls back to software decoding more than once"
 
 MUTE_ENV = "QITV_SMOKE_MUTE"  # "1"/"0": dummy audio output or real sound; unset: dummy unless CI
 
@@ -1044,6 +1048,12 @@ class Driver:
         self.slot_timeline: list[tuple[float, str, dict[str, Any]]] = []  # (when, slot, state)
         self.helper_updates: list[tuple[float, str]] = []  # (when, session id)
         self.plays: dict[str, dict[str, int]] = {}  # slot -> {"play": n, "open": n}
+        # Hardware decoding's software fallbacks per player (a frozen picture: at most once).
+        self.froze: dict[str, int] = {}
+        for name, session in (("main", window.session), ("pip", window.pip_session)):
+            froze = getattr(session, "pictureFroze", None)
+            if froze is not None:
+                froze.connect(lambda name=name: self._froze(name))
         self.finished = False
         self.problem = ""
         self._steps = self._scenario()
@@ -1052,6 +1062,10 @@ class Driver:
 
     def start(self) -> None:
         self._run()
+
+    def _froze(self, name: str) -> None:
+        self.froze[name] = self.froze.get(name, 0) + 1
+        logger.info("The %s player's picture froze: it decodes in software now", name)
 
     def _run(self) -> None:
         try:
@@ -2096,6 +2110,9 @@ class Driver:
         report.data["libvlc_loaded"] = facts
         if _frozen():
             report.check(BUNDLED_VLC_CHECK, "error" not in facts and _bundled(facts), facts)
+        hardware = self.window.config_manager.hardware_decoding
+        report.data["decoding"] = {"hardware": hardware, "software_fallbacks": dict(self.froze)}
+        report.check(DECODING_CHECK, all(n <= 1 for n in self.froze.values()), self.froze)
         report.data["close_requested_at"] = time.time()
         report.save()
         self.window.close()
