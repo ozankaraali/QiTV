@@ -13,7 +13,9 @@ from unittest import mock
 
 import ts_fixtures as fx
 
+from services.live.timeline import START_KEY, START_NONE, START_OPEN
 from services.live.ts import (
+    _LOOK_AHEAD,
     PACKET,
     Closed,
     Data,
@@ -263,6 +265,63 @@ def au_with_sei(video_type, key):
     return b"".join(b"\x00\x00\x00\x01" + bytes([t << 1, 1]) + b"\x55" * n for t, n in nals)
 
 
+I_SLICE = b"\x88" + b"\x55" * 300  # first_mb_in_slice 0, slice_type 7 (I)
+P_SLICE = b"\x9a" + b"\x55" * 300  # first_mb_in_slice 0, slice_type 5 (P)
+
+
+def h264_au(*nals):
+    """An H.264 access unit of (nal_unit_type, body) NAL units, AUD first."""
+    au = b"\x00\x00\x00\x01\x09\xf0"
+    return au + b"".join(b"\x00\x00\x00\x01" + bytes([0x60 | t]) + body for t, body in nals)
+
+
+def hevc_irap_au(nal_type, key, sei=0):
+    """HEVC: VPS, SPS, PPS, `sei` bytes of SEI and an IRAP picture of `nal_type` when `key`,
+    else a TRAIL_R picture."""
+    if key:
+        nals = [(32, 20), (33, 20), (34, 8)] + ([(39, sei)] if sei else []) + [(nal_type, 300)]
+    else:
+        nals = [(1, 350)]
+    return b"".join(b"\x00\x00\x00\x01" + bytes([t << 1, 1]) + b"\x55" * n for t, n in nals)
+
+
+def mpeg2_gop_au(key, closed):
+    """MPEG-2: a sequence header, a GOP header (closed_gop as given) and an I picture when
+    `key`, else a P picture."""
+    if not key:
+        return mpeg2_au(False)
+    gop = b"\x00\x00\x01\xb8" + bytes([0x00, 0x08, 0x00, 0x40 if closed else 0x00])
+    return b"\x00\x00\x01\xb3" + b"\x55" * 40 + gop + mpeg2_au(False, 1)
+
+
+def audio_only(seconds):
+    """Audio-only TS (no video PID in the PMT), tables before every 24th audio frame."""
+    out = []
+    cc = {"pat": 0, "pmt": 0, "a": 0}
+    for j in range(int(seconds * CLOCK) // fx.AUDIO_FRAME_TICKS):
+        if j % 24 == 0:
+            out.append(fx.pat(cc=cc["pat"]))
+            pkts, cc["pmt"] = psi_packets(
+                fx.PMT_PID, pmt_section([(0x0F, fx.AUDIO_PID)], pcr_pid=fx.AUDIO_PID), cc["pmt"]
+            )
+            out.extend(pkts)
+            cc["pat"] = (cc["pat"] + 1) & 0x0F
+        pkts, cc["a"] = fx.pes_packets(
+            fx.AUDIO_PID,
+            0xC0,
+            b"\xff\xf1" + b"\xaa" * 200,
+            900000 + j * fx.AUDIO_FRAME_TICKS,
+            cc_start=cc["a"],
+        )
+        out.extend(pkts)
+    return b"".join(out)
+
+
+def qualities(events):
+    """Each segment's start quality, as its Closed reports it."""
+    return [e.start_quality for e in closes(events)]
+
+
 def pes_starts(data, pids=(fx.VIDEO_PID, fx.AUDIO_PID)):
     """[(offset, pts or None)] of the PES starts on `pids`."""
     out = []
@@ -381,27 +440,7 @@ class SegmenterTests(unittest.TestCase):
 
     # 2
     def test_audio_only_cuts_about_every_two_seconds(self):
-        out = []
-        cc = {"pat": 0, "pmt": 0, "a": 0}
-        for j in range(10 * CLOCK // fx.AUDIO_FRAME_TICKS):
-            if j % 24 == 0:
-                out.append(fx.pat(cc=cc["pat"]))
-                pkts, cc["pmt"] = psi_packets(
-                    fx.PMT_PID,
-                    pmt_section([(0x0F, fx.AUDIO_PID)], pcr_pid=fx.AUDIO_PID),
-                    cc["pmt"],
-                )
-                out.extend(pkts)
-                cc["pat"] = (cc["pat"] + 1) & 0x0F
-            pkts, cc["a"] = fx.pes_packets(
-                fx.AUDIO_PID,
-                0xC0,
-                b"\xff\xf1" + b"\xaa" * 200,
-                900000 + j * fx.AUDIO_FRAME_TICKS,
-                cc_start=cc["a"],
-            )
-            out.extend(pkts)
-        seg, events = run(b"".join(out))
+        seg, events = run(audio_only(10))
         self.assertIsNone(seg.video_pid)
         self.assertEqual(opens(events)[0].first_pts, 900000)
         d = deltas(events)
@@ -1060,6 +1099,179 @@ class SegmenterTests(unittest.TestCase):
                 seg.finish()
             except Unsupported:
                 pass
+
+
+class StartQualityTests(unittest.TestCase):
+    """How cleanly each segment starts (`Closed.start_quality`, which the timeline's spans
+    carry): "key" at an IDR picture, which decodes on its own; "open" at an intra picture whose
+    leading pictures may reference the previous GOP (H.264 open GOP, HEVC CRA/BLA, an MPEG-2 I
+    picture outside a closed GOP); "none" without a keyframe (a forced cut, an audio-only cut).
+    """
+
+    def frames(self, au, *, count=250, every=25, rai=False):
+        """`count` frames at 25 fps, a keyframe `au(True)` every `every` frames; RAI on the
+        keyframes when `rai`, on every PES when "all"."""
+        return [
+            (900000 + i * FRAME, au(i % every == 0), rai == "all" or (rai and i % every == 0))
+            for i in range(count)
+        ]
+
+    def test_idr_starts_are_key(self):
+        _, events = run(fx.make_stream(10))
+        self.assertEqual(qualities(events), [START_KEY] * 5)
+        for nal_type in (19, 20):  # HEVC IDR_W_RADL, IDR_N_LP
+            for rai in (True, False):
+                with self.subTest(nal_type=nal_type, rai=rai):
+                    au = lambda key: hevc_irap_au(nal_type, key)  # noqa: E731
+                    _, events = run(video_only(self.frames(au, rai=rai), video_type=0x24))
+                    self.assertEqual(deltas(events), [TARGET] * 4)
+                    self.assertEqual(qualities(events), [START_KEY] * 5)
+
+    def test_h264_open_gop_intra_starts_are_open(self):
+        for rai in (True, False):
+            with self.subTest(rai=rai):
+                _, events = run(video_only(self.frames(h264_open_gop_au, rai=rai)))
+                self.assertEqual(deltas(events), [TARGET] * 4)
+                self.assertEqual(qualities(events), [START_OPEN] * 5)
+
+    def test_hevc_cra_and_bla_starts_are_open(self):
+        for nal_type in (21, 16, 17, 18):  # CRA, BLA_W_LP, BLA_W_RADL, BLA_N_LP
+            for rai in (True, False):
+                with self.subTest(nal_type=nal_type, rai=rai):
+                    au = lambda key: hevc_irap_au(nal_type, key)  # noqa: E731
+                    _, events = run(video_only(self.frames(au, rai=rai), video_type=0x24))
+                    self.assertEqual(deltas(events), [TARGET] * 4)
+                    self.assertEqual(qualities(events), [START_OPEN] * 5)
+
+    def test_mpeg_i_pictures_are_key_only_in_a_closed_gop(self):
+        for closed, expected in ((True, START_KEY), (False, START_OPEN)):
+            for video_type in (0x02, 0x01):
+                with self.subTest(closed=closed, video_type=hex(video_type)):
+                    au = lambda key: mpeg2_gop_au(key, closed)  # noqa: E731
+                    _, events = run(video_only(self.frames(au), video_type=video_type))
+                    self.assertEqual(deltas(events), [TARGET] * 4)
+                    self.assertEqual(qualities(events), [expected] * 5)
+
+    def test_a_forced_cut_without_a_keyframe_is_none(self):
+        # One IDR, then P pictures only: the forced cuts every 10 s land on P pictures. With a
+        # 15 s GOP the next IDR starts a key segment again.
+        for seconds, gop_s, starts, expected in (
+            (25, 30.0, [0, 10, 20], [START_KEY, START_NONE, START_NONE]),
+            (24, 15.0, [0, 10, 15], [START_KEY, START_NONE, START_KEY]),
+        ):
+            with self.subTest(gop_s=gop_s):
+                _, events = run(fx.make_stream(seconds, gop_s=gop_s))
+                self.assertEqual(
+                    [e.first_pts - 900000 for e in opens(events)], [t * CLOCK for t in starts]
+                )
+                self.assertEqual(qualities(events), expected)
+        # A pending discontinuity cut by the wall clock at a P picture.
+        data = shift_pts(fx.make_stream(20, gop_s=30.0), 112, 60 * CLOCK)
+        _, events = run_at(data, by_frame(data))
+        self.assertEqual([e.discontinuity for e in opens(events)], [False, True])
+        self.assertEqual(qualities(events), [START_KEY, START_NONE])
+
+    def test_audio_only_and_quiet_cuts_are_none(self):
+        _, events = run(audio_only(10))
+        self.assertEqual(qualities(events), [START_NONE] * 5)
+        # The video stops at 6 s: the cut at an audio PES 10 s later has no keyframe.
+        whole = fx.make_stream(20)
+        stop = pusi_offset(whole, fx.VIDEO_PID, 900000 + 150 * FRAME)
+        kept = [p for p in split_packets(whole[stop:]) if pid_of(p) != fx.VIDEO_PID]
+        data = whole[:stop] + b"".join(kept)
+        _, events = run_at(data, by_pts(data))
+        self.assertEqual(qualities(events), [START_KEY] * 3 + [START_NONE])
+
+    def test_a_picture_beyond_the_first_packet_is_read_from_the_next_packets(self):
+        # 400 bytes of SEI (or MPEG-2 user data) put the picture in the PES's third packet; the
+        # parameter sets before it make the cut.
+        sps, pps, sei = (7, b"\x55" * 15), (8, b"\x55" * 3), (6, b"\x55" * 400)
+        user_data = b"\x00\x00\x01\xb2" + b"\x55" * 400
+        gop = b"\x00\x00\x01\xb8\x00\x08\x00\x40"  # closed_gop
+
+        def h264(picture):
+            return lambda key: h264_au(sps, pps, sei, picture) if key else h264_au((1, P_SLICE))
+
+        def mpeg2(key):
+            seq = b"\x00\x00\x01\xb3" + b"\x55" * 40
+            return seq + user_data + gop + mpeg2_au(False, 1) if key else mpeg2_au(False)
+
+        cases = {
+            "H.264 IDR": (0x1B, h264((5, b"\x55" * 300)), START_KEY),
+            "H.264 open GOP": (0x1B, h264((1, I_SLICE)), START_OPEN),
+            "HEVC IDR": (0x24, lambda key: hevc_irap_au(19, key, sei=400), START_KEY),
+            "HEVC CRA": (0x24, lambda key: hevc_irap_au(21, key, sei=400), START_OPEN),
+            "MPEG-2 closed GOP": (0x02, mpeg2, START_KEY),
+        }
+        for name, (video_type, au, expected) in cases.items():
+            for rai in (True, False):
+                data = video_only(self.frames(au, count=125, rai=rai), video_type=video_type)
+                for chunk in (None, 187) if rai or name != "H.264 IDR" else (None, 187, 1):
+                    with self.subTest(name, rai=rai, chunk=chunk):
+                        _, events = run(data, chunk=chunk)
+                        self.assertEqual(deltas(events), [TARGET] * 2)
+                        self.assertEqual(qualities(events), [expected] * 3)
+
+    def test_a_picture_header_in_the_next_packet_is_read_there(self):
+        # The NAL header byte after a start code that ends the PES's first packet: RAI makes
+        # the cut, the next packet tells an IDR (key) from an intra slice (open) or a P slice.
+        def idr_after_packet_end(key):
+            if not key:
+                return h264_au((1, P_SLICE))
+            nal = b"\x00\x00\x00\x01"
+            return nal + b"\x09\xf0" + nal + b"\x06" + b"\x55" * 147 + nal + b"\x65" + I_SLICE
+
+        data = video_only(self.frames(idr_after_packet_end, count=125, rai=True))
+        first = split_packets(data)[pusi_offset(data, fx.VIDEO_PID, 900000) // PACKET]
+        self.assertEqual(first[184:], b"\x00\x00\x00\x01")
+        for chunk in (None, 187, 1):
+            with self.subTest("IDR", chunk=chunk):
+                _, events = run(data, chunk=chunk)
+                self.assertEqual(qualities(events), [START_KEY] * 3)
+        # RAI on every PES (trusted while the slice header is unreadable): the cuts at 2 s
+        # and 4 s land on P slices; the first on an intra slice.
+        frames = self.frames(h264_slice_at_packet_end, count=125, every=30, rai="all")
+        _, events = run(video_only(frames))
+        self.assertEqual([frame_of(e.first_pts) for e in opens(events)], [0, 50, 100])
+        self.assertEqual(qualities(events), [START_OPEN, START_NONE, START_NONE])
+
+    def test_a_picture_beyond_the_look_ahead_counts_by_its_first_packet(self):
+        # Unresolved within the look-ahead: parameter sets or a RAI flag count as an open
+        # start, never as key.
+        far = (6, b"\x55" * (_LOOK_AHEAD + 400))
+        near = (6, b"\x55" * (_LOOK_AHEAD - 400))
+        idr = (5, b"\x55" * 300)
+        cases = {
+            "parameter sets": (lambda sei: h264_au((7, b"\x55" * 15), sei, idr), False),
+            "RAI": (lambda sei: h264_au(sei, idr), True),
+        }
+        for name, (make, rai) in cases.items():
+            for sei, expected in ((far, START_OPEN), (near, START_KEY)):
+                with self.subTest(name, far=sei is far):
+                    au = lambda key: make(sei) if key else h264_au((1, P_SLICE))  # noqa: E731
+                    _, events = run(video_only(self.frames(au, count=125, rai=rai)))
+                    self.assertEqual(deltas(events), [TARGET] * 2)
+                    self.assertEqual(qualities(events), [expected] * 3)
+
+    def test_a_segment_that_closes_before_its_picture_is_read_keeps_the_fallback(self):
+        sei = (6, b"\x55" * 400)
+        au = lambda key: (  # noqa: E731
+            h264_au((7, b"\x55" * 15), sei, (5, b"\x55" * 300)) if key else h264_au((1, P_SLICE))
+        )
+        data = video_only(self.frames(au, count=125))
+        cut = pusi_offset(data, fx.VIDEO_PID, 900000 + 50 * FRAME) + PACKET
+        # The input ends right after the first packet of the keyframe at 2 s.
+        seg = Segmenter(clock=lambda: 0.0)
+        events = seg.feed(data[:cut]) + seg.finish()
+        self.assertEqual(qualities(events), [START_KEY, START_OPEN])
+        # The source restarts there (the rest of that PES never comes): packets that continue
+        # a PES in the new input are not read as the old picture.
+        orphan = fx._packet(fx.VIDEO_PID, b"\x00\x00\x01\x65" + b"\x55" * 180, 0)
+        seg = Segmenter(clock=lambda: 0.0)
+        events = seg.feed(data[:cut])
+        seg.discontinuity()
+        events += seg.feed(orphan * 3 + data) + seg.finish()
+        self.assertEqual(qualities(events)[:2], [START_KEY, START_OPEN])
 
 
 @unittest.skipUnless(os.environ.get("QITV_BENCH") == "1", "set QITV_BENCH=1 to benchmark")

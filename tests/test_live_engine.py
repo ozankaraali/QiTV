@@ -33,7 +33,7 @@ from ts_fixtures import make_stream
 
 from services.live import engine as engine_module
 from services.live.engine import LiveEngine
-from services.live.timeline import Span
+from services.live.timeline import START_KEY, START_NONE, START_OPEN, Span
 from services.thread_cleanup import has_pending_threads
 
 REPO = Path(__file__).resolve().parents[1]
@@ -311,6 +311,36 @@ class Signals:
         ]
 
 
+class SpanMessageTests(unittest.TestCase):
+    """In process, without a helper: the spans the state messages rebuild."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_spans_carry_the_start_quality_and_additions_without_one_start_on_a_key(self):
+        engine = LiveEngine(tempfile.gettempdir())  # never started: no helper, no buffer
+        self.addCleanup(engine.shutdown)
+        sid = engine.open_session(
+            URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB
+        )
+        additions = [
+            (0, 0.0, 2.0, False, START_OPEN),
+            (1, 2.0, 12.0, False, START_NONE),
+            (2, 12.0, 14.0, True),  # as an older helper sent it
+        ]
+        engine._on_message(("state", sid, {"oldest": 0}, 0, additions))
+        engine._on_message(("state", sid, {"oldest": 1}, 1, [(3, 14.0, 16.0, False, START_KEY)]))
+        self.assertEqual(
+            engine.spans(sid),
+            [
+                Span(1, 2.0, 12.0, False, START_NONE),
+                Span(2, 12.0, 14.0, True, START_KEY),
+                Span(3, 14.0, 16.0, False, START_KEY),
+            ],
+        )
+
+
 class LiveEngineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -378,6 +408,7 @@ class LiveEngineTests(unittest.TestCase):
         self.assertEqual(counts, sorted(counts), "spans shrank without eviction")
         spans = engine.spans(sid)
         self.assertTrue(all(isinstance(span, Span) for span in spans))
+        self.assertEqual({span.start_quality for span in spans}, {START_KEY})  # IDR starts
         self.assertEqual([span.seq for span in spans], list(range(len(spans))))
         for before, after in zip(spans, spans[1:]):
             self.assertAlmostEqual(before.end, after.start)

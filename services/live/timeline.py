@@ -6,13 +6,16 @@ times become contiguous seconds. A missing, backward, zero or oversized PTS delt
 timeline stays monotone and nothing is aborted. Oversized means beyond the forced cut plus
 a margin: a forced cut lands on the first frame at or past 10 s. The wall times are the
 segmenter's stall-free clock (`Segmenter.wall`), so a stalled source adds no time.
+
+Each span also says how cleanly playback can start at it (`Span.start_quality`, from the
+segmenter's `Closed.start_quality`), so a jump can prefer real keyframes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import List, Optional, Tuple
+from typing import Final, List, Literal, Optional, Tuple
 
 PTS_TICKS_PER_SECOND = 90_000
 _PTS_MODULUS = 1 << 33
@@ -22,6 +25,20 @@ _FORCED_MARGIN = 1.0
 _LIMIT = _FORCED_CUT + _FORCED_MARGIN  # the longest segment a PTS delta may size
 
 log = logging.getLogger(__name__)
+
+# How cleanly playback starts at a segment, best first:
+StartQuality = Literal["key", "open", "none"]
+# An IDR picture (H.264 NAL 5, HEVC 19/20, an MPEG-1/2 I picture in a closed GOP): every
+# picture from here decodes.
+START_KEY: Final = "key"
+# An intra picture that later pictures may reach behind (an H.264 non-IDR intra slice, HEVC
+# CRA/BLA, an MPEG-1/2 I picture in an open GOP), or a random access point whose picture
+# could not be read: the pictures shown before it (its leading pictures) may come out broken.
+START_OPEN: Final = "open"
+# No keyframe: a forced cut (10 s without one), a cut while the video was quiet, or an
+# audio-only stream's cut.
+START_NONE: Final = "none"
+START_QUALITIES: Final[Tuple[StartQuality, ...]] = (START_KEY, START_OPEN, START_NONE)
 
 
 def _pts_delta(a: int, b: int) -> int:
@@ -38,6 +55,9 @@ class Span:
     start: float
     end: float
     discontinuity: bool
+    # Spans made without one (an older helper's 4-field additions) count as keyframe starts,
+    # as every segment start did before.
+    start_quality: StartQuality = START_KEY
 
 
 @dataclass
@@ -62,18 +82,33 @@ class Timeline:
     ) -> None:
         if self._open is not None:
             log.warning("segment %r opened while %r was still open", seq, self._open.seq)
-            self._close(self._open, None, wall, force_discontinuity=True)
+            # Its start quality came with its Closed, which never came: no jump lands there.
+            self._close(self._open, None, wall, START_NONE, force_discontinuity=True)
         self._open = _Open(seq, first_pts, wall, discontinuity)
 
-    def on_closed(self, seq: int, next_first_pts: Optional[int], wall: float) -> Span:
-        """Close the open segment ``seq``; raises ValueError if it is not the open one."""
+    def on_closed(
+        self,
+        seq: int,
+        next_first_pts: Optional[int],
+        wall: float,
+        start_quality: StartQuality = START_KEY,
+    ) -> Span:
+        """Close the open segment ``seq``; raises ValueError if it is not the open one.
+
+        ``start_quality`` is how cleanly the segment starts (``Closed.start_quality``).
+        """
         opened = self._open
         if opened is None or opened.seq != seq:
             raise ValueError("segment %r is not open" % seq)
-        return self._close(opened, next_first_pts, wall)
+        return self._close(opened, next_first_pts, wall, start_quality)
 
     def _close(
-        self, opened: _Open, next_first_pts: Optional[int], wall: float, force_discontinuity=False
+        self,
+        opened: _Open,
+        next_first_pts: Optional[int],
+        wall: float,
+        start_quality: StartQuality,
+        force_discontinuity=False,
     ) -> Span:
         duration = self._pts_seconds(opened.first_pts, next_first_pts)
         discontinuity = opened.discontinuity or force_discontinuity
@@ -83,7 +118,7 @@ class Timeline:
         if duration is None or duration == 0:
             # Equal stamps are not a reset, but carry no duration: use wall time.
             duration = min(max(wall - opened.wall, _MIN_WALL_DURATION), _LIMIT)
-        span = Span(opened.seq, self._end, self._end + duration, discontinuity)
+        span = Span(opened.seq, self._end, self._end + duration, discontinuity, start_quality)
         self._spans.append(span)
         self._end = span.end
         self._next_seq = opened.seq + 1

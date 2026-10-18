@@ -423,6 +423,7 @@ class LiveWorkerTests(unittest.TestCase):
                     self.assertAlmostEqual(before[2], after[1])
                 self.assertAlmostEqual(buffered[-1][2] - buffered[0][1], seconds, delta=0.25)
                 self.assertAlmostEqual(snapshot["end"], buffered[-1][2])
+                self.assertEqual({item[4] for item in buffered}, {"key"})  # IDR starts
         self.assert_no_credentials(helper)
 
     def test_hls_segments_packaged_on_their_own_are_served_with_running_counters(self):
@@ -1084,6 +1085,30 @@ class InProcessHelper:
         self.loop.join(5)
         self.helper.shutdown()
         self.parent.close()
+
+
+class StartQualityTests(unittest.TestCase):
+    """In process: the spans message carries how cleanly each segment starts."""
+
+    def test_each_addition_ends_with_its_segments_start_quality(self):
+        # One IDR every 15 s: IDR starts at 0 and 15 s, a forced cut without one at 10 s.
+        upstream = LocalSource({SECRET_PATH: (200, {}, make_stream(24, gop_s=15.0))})
+        self.addCleanup(upstream.close)
+        helper = InProcessHelper(self)
+        helper.parent.send(("open", "q", upstream.url + SECRET_PATH, {}, True, RAM, 6.0))
+        helper.wait_for(lambda message: message == ("ended", "q"))
+        buffered = rebuild(m for m in helper.messages if m[:2] == ("state", "q"))
+        # (seq, start, end, discontinuity) as before, then the start quality.
+        self.assertEqual([item[0] for item in buffered], [0, 1, 2])
+        self.assertEqual([round(item[1], 3) for item in buffered], [0.0, 10.0, 15.0])
+        self.assertEqual(
+            [item[3:] for item in buffered],
+            [
+                (False, "key"),
+                (False, "none"),
+                (False, "key"),
+            ],
+        )
 
 
 class ClosedAfterReleaseTests(unittest.TestCase):

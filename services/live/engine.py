@@ -533,6 +533,8 @@ class LiveEngine(QObject):
         self._commands.put(("close", sid))
 
     def spans(self, sid: str) -> list[Span]:
+        """The session's closed segments, oldest first; each says how cleanly playback starts
+        at it (`Span.start_quality`)."""
         view = self._sessions.get(sid)
         return list(view.spans) if view is not None else []
 
@@ -594,7 +596,8 @@ class LiveEngine(QObject):
             return
         elif name == "state":
             _, _, snapshot, first, additions = message
-            # Ported from main: drop spans older than `first`, append the additions.
+            # Ported from main: drop spans older than `first`, append the additions. An
+            # addition without a start quality (four fields) starts on a keyframe, as before.
             spans = view.spans
             if first is None:
                 spans.clear()

@@ -2,7 +2,9 @@
 
 The segmenter cuts a raw 188-byte transport stream into keyframe-aligned segments. Packets pass
 through byte for byte. Each segment is announced with copies of the latest PAT and PMT packets,
-which the consumer prepends so that VLC can start playback at any segment.
+which the consumer prepends so that VLC can start playback at any segment. Its close says how
+cleanly playback starts there (`Closed.start_quality`): at an IDR picture, at an intra picture
+whose leading pictures may reach behind it (open GOP), or without a keyframe (a forced cut).
 
 Pure logic: no Qt and no I/O, and the wall clock is injected.
 
@@ -16,6 +18,8 @@ from dataclasses import dataclass
 import logging
 import time
 from typing import Callable
+
+from services.live.timeline import START_KEY, START_NONE, START_OPEN, StartQuality
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +52,16 @@ _VIDEO_TYPES = (0x1B, 0x24, 0x02, 0x01)  # H.264, HEVC, MPEG-2, MPEG-1
 _AUDIO_TYPES = (0x03, 0x04, 0x0F, 0x11, 0x81, 0x87)  # MPEG audio, AAC, LATM, AC-3, E-AC-3
 _H264 = 0x1B
 _HEVC = 0x24
-_KEY = 1  # results of `_classify`
+# Results of `_classify`; the positive ones are keyframes to the cut decision.
+_IDR = 3
+_OPEN = 2
+_PARAM = 1
 _UNDECIDED = 0
 _NOT_KEY = -1
+_QUALITY: dict[int, StartQuality] = {_IDR: START_KEY, _OPEN: START_OPEN, _NOT_KEY: START_NONE}
+# A segment start whose picture begins beyond the PES's first packet (behind large SEI, say)
+# is read on in the PES's next packets, up to this many ES bytes (16 packets).
+_LOOK_AHEAD = 16 * 184
 
 
 class Unsupported(Exception):
@@ -101,11 +112,16 @@ class Closed:
     the old content up to its last frame's end, then the new content up to the cut. It is None
     when that is unknown (no PTS), or beyond the forced cut plus a margin, so that the segment
     is sized by the stall-free wall clock instead.
+
+    `start_quality` is how cleanly playback starts at this segment (the timeline's START_*
+    values). It comes with the close because the first picture may begin in a later packet of
+    the segment's first PES.
     """
 
     seq: int
     next_first_pts: int | None
     wall: float
+    start_quality: StartQuality = START_KEY
 
 
 Event = Opened | Data | Closed
@@ -165,6 +181,9 @@ class Segmenter:
         # The open segment.
         self._seq = 0
         self._open = False
+        self._seg_start: StartQuality = START_NONE  # how cleanly the open segment starts
+        # ES bytes of the open segment's first PES while its picture is still unknown.
+        self._look: bytearray | None = None
         self._seg_pts: int | None = None
         self._seg_wall = 0.0
         self._pending = False
@@ -206,6 +225,7 @@ class Segmenter:
         """
         self._latch()
         self._media_ref = None  # measure the new content's age from its first PTS
+        self._look = None  # the rest of the open segment's first PES never comes
         self._pos += len(self._buf)
         self._buf = b""
         self._searching = True
@@ -232,7 +252,9 @@ class Segmenter:
         if not self._open:
             return []
         self._open = False
-        closed = Closed(self._seq, self._on_segment_axis(self._latest_pts), self._tick())
+        self._look = None
+        pts = self._on_segment_axis(self._latest_pts)
+        closed = Closed(self._seq, pts, self._tick(), self._seg_start)
         self._seq += 1
         return [closed]
 
@@ -272,6 +294,11 @@ class Segmenter:
         run = 0 if self._open else -1  # start of the packets not yet emitted as Data
         searching = self._searching
         scrambled = self._scrambled_run
+        if self._look is not None:  # the open segment's first picture is still unknown
+            if searching:
+                self._look = None
+            else:
+                self._read_ahead(data, 0)
         cut_pid = self._cut_pid
         pmt_pid = self._pmt_pid
         while off + PACKET <= n:
@@ -315,6 +342,8 @@ class Segmenter:
                                     events.append(Data(data[run:off]))
                                 events.extend(cut)
                                 run = off
+                                if self._look is not None:
+                                    self._read_ahead(data, end)
             else:
                 if (
                     (b1 & 0xC0) == 0x40  # a PES or section start without a transport error
@@ -376,6 +405,7 @@ class Segmenter:
         rai, pts, es = _pes_start(pkt)
         if es >= PACKET:
             logger.debug("PES header not readable from its first packet")
+        self._look = None  # the previous PES ended
         self._pusi_wall = wall
         self._quiet.clear()
         if pts is not None:
@@ -409,16 +439,16 @@ class Segmenter:
             self._rai_seen = True
         if not self._open:  # the first segment, or the first after finish(), which left a gap
             if self._is_key(rai, pts, pkt, es):
-                return self._cut(pts, wall, self._seq > 0)
+                return self._cut_pes(pkt, rai, es, pts, wall, self._seq > 0)
             return None
         first = self._seg_pts
         if not self._pending and pts is not None and first is not None:
             delta = pts_delta(first, pts)
             if delta >= -_REORDER_TICKS:
                 if delta >= self._target and self._is_key(rai, pts, pkt, es):
-                    return self._cut(pts, wall, False)
+                    return self._cut_pes(pkt, rai, es, pts, wall, False)
                 if delta >= self._forced:
-                    return self._cut(pts, wall, False)
+                    return self._cut_pes(pkt, rai, es, pts, wall, False)
                 return None
         # A pending discontinuity, no PTS, or PTS drifted backwards: time the segment by the
         # wall clock, and bound it by media time where PTS exist (feed stalls do not age it).
@@ -429,7 +459,7 @@ class Segmenter:
             pts is not None and ref is not None and pts_delta(ref, pts) >= self._forced
         )
         if (due and self._is_key(rai, pts, pkt, es)) or aged:
-            return self._cut(pts, wall, True)
+            return self._cut_pes(pkt, rai, es, pts, wall, True)
         return None
 
     def _latch(self) -> None:
@@ -464,7 +494,60 @@ class Segmenter:
         kind = _classify(pkt, es, self._video_type)
         if rai:  # trust the flag unless the picture is visibly not a keyframe
             return kind != _NOT_KEY
-        return not self._rai_seen and kind == _KEY
+        return not self._rai_seen and kind > _UNDECIDED
+
+    def _cut_pes(
+        self, pkt: bytes, rai: bool, es: int, pts: int | None, wall: float, discontinuity: bool
+    ) -> list[Event]:
+        """Cut at this cut-PID PES start; its picture tells how cleanly the segment starts."""
+        events = self._cut(pts, wall, discontinuity)
+        if self._video_pid is None:  # audio only: no keyframes (START_NONE)
+            return events
+        kind = _classify(pkt, es, self._video_type)
+        quality = _QUALITY.get(kind)
+        if quality is not None:
+            self._seg_start = quality
+            return events
+        # The picture starts beyond this packet: read on in the PES's next packets (the scan
+        # calls `_read_ahead`). Until it is found, a random access point (RAI) or parameter
+        # sets count as an open start.
+        self._seg_start = START_OPEN if rai or kind == _PARAM else START_NONE
+        if es < PACKET:
+            self._look = bytearray(pkt[es:])
+        return events
+
+    def _read_ahead(self, data: bytes, off: int) -> None:
+        """Read the open segment's first PES on in `data` from the packet at `off`, until its
+        picture is known, the PES ends or `_LOOK_AHEAD` ES bytes were read. The packets are
+        only peeked at (the scan forwards them as usual), and when the input ends first the
+        reading goes on with the next input: the scan's loop over every packet pays nothing."""
+        look = self._look
+        if look is None:
+            return
+        cut_pid = self._cut_pid
+        n = len(data)
+        while off + PACKET <= n:
+            if data[off] != SYNC:  # out of sync: the fallback stays
+                self._look = None
+                return
+            b1, b3 = data[off + 1], data[off + 3]
+            # Cut-PID packets without a transport error or scrambling bits, as the scan reads.
+            if ((b1 & 0x1F) << 8) | data[off + 2] == cut_pid and not (b1 & 0x80 or b3 & 0xC0):
+                if b1 & 0x40:  # the next PES starts: the fallback stays
+                    self._look = None
+                    return
+                start = off + (5 + data[off + 4] if b3 & 0x20 else 4)
+                if b3 & 0x10 and start < off + PACKET:  # a payload
+                    look += data[start : off + PACKET]
+                    quality = _QUALITY.get(_classify(look, 0, self._video_type))
+                    if quality is not None:
+                        self._seg_start = quality
+                        self._look = None
+                        return
+                    if len(look) >= _LOOK_AHEAD:  # the fallback stays
+                        self._look = None
+                        return
+            off += PACKET
 
     def _cut(self, pts: int | None, wall: float, discontinuity: bool) -> list[Event]:
         events: list[Event] = []
@@ -482,10 +565,12 @@ class Segmenter:
                     or not 0 < pts_delta(first, end) <= self._forced + _FORCED_MARGIN
                 ):
                     end = None
-            events.append(Closed(self._seq, end, wall))
+            events.append(Closed(self._seq, end, wall, self._seg_start))
             self._seq += 1
         events.append(Opened(self._seq, pts, self._pat + self._pmt, wall, discontinuity))
         self._open = True
+        self._seg_start = START_NONE  # a cut without a cut-PID PES (`_cut_pes` learns more)
+        self._look = None
         self._seg_pts = pts
         self._seg_wall = wall
         self._pusi_wall = wall
@@ -636,6 +721,7 @@ class Segmenter:
                 logger.debug("cut PID moved from %#x to %#x", self._cut_pid, cut_pid)
             self._cut_pid = cut_pid
             self._rai_seen = False
+            self._look = None
         return True
 
 
@@ -769,56 +855,63 @@ def _pes_start(pkt: bytes) -> tuple[bool, int | None, int]:
     return rai, pts, start + 9 + header_length
 
 
-def _classify(pkt: bytes, start: int, video_type: int | None) -> int:
-    """Whether the picture starting in this packet's ES bytes is a keyframe.
+def _classify(pkt: bytes | bytearray, start: int, video_type: int | None) -> int:
+    """What the picture starting in these ES bytes (from `start` to the end) is.
 
-    `_KEY`: an IRAP picture (H.264 IDR 5 or an intra slice 1, which open-GOP encoders use;
-    HEVC 16-21; an MPEG-1/2 I picture), or a parameter set (H.264 SPS 7, HEVC VPS 32, MPEG-1/2
-    sequence header) without a picture in this packet. `_NOT_KEY`: the first picture is not
-    IRAP (H.264 1-4 with P or B slices, HEVC 0-9, MPEG-1/2 P or B). `_UNDECIDED`: neither, or
-    the first slice header is cut off by the end of the packet.
+    `_IDR`: an IDR picture (H.264 5, HEVC 19-20) or an MPEG-1/2 I picture in a closed GOP.
+    `_OPEN`: another intra picture, whose leading pictures may reference the previous GOP (an
+    H.264 intra slice 1, which open-GOP encoders use; HEVC CRA 21 or BLA 16-18; an MPEG-1/2 I
+    picture otherwise). `_PARAM`: a parameter set (H.264 SPS 7, HEVC VPS 32, MPEG-1/2 sequence
+    header) without a picture in these bytes. `_NOT_KEY`: the first picture is not intra
+    (H.264 1-4 with P or B slices, HEVC 0-9, MPEG-1/2 P or B). `_UNDECIDED`: neither, or the
+    first slice header is cut off by the end of the bytes.
     """
-    parameter_set = False
+    size = len(pkt)
+    parameter_set = closed_gop = False
     i = pkt.find(_START_CODE, start)
-    while 0 <= i < PACKET - 3:
+    while 0 <= i < size - 3:
         code = pkt[i + 3]
         if video_type == _H264:
             nal_type = code & 0x1F
             if nal_type == 5:
-                return _KEY
+                return _IDR
             if nal_type == 1:  # the first slice decides
                 intra = _h264_intra(pkt, i + 4)
                 if intra is None:
                     return _UNDECIDED
-                return _KEY if intra else _NOT_KEY
+                return _OPEN if intra else _NOT_KEY
             if 2 <= nal_type <= 4:  # data partitions: never intra-only
                 return _NOT_KEY
             if nal_type == 7:
                 parameter_set = True
         elif video_type == _HEVC:
             nal_type = (code >> 1) & 0x3F
+            if 19 <= nal_type <= 20:
+                return _IDR
             if 16 <= nal_type <= 21:
-                return _KEY
+                return _OPEN
             if nal_type <= 9:
                 return _NOT_KEY
             if nal_type == 32:
                 parameter_set = True
         elif code == 0x00:  # MPEG-1/2 picture header: the first picture decides
-            if i + 6 > PACKET:
+            if i + 6 > size:
                 break
             coding_type = (pkt[i + 5] >> 3) & 7  # after the 10-bit temporal_reference
             if coding_type == 1:
-                return _KEY
+                return _IDR if closed_gop else _OPEN
             if coding_type in (2, 3):
                 return _NOT_KEY
             return _UNDECIDED
+        elif code == 0xB8:  # MPEG-1/2 GOP header: closed_gop follows the 25-bit time code
+            closed_gop = i + 8 <= size and bool(pkt[i + 7] & 0x40)
         elif code == 0xB3:  # MPEG-1/2 sequence header
             parameter_set = True
         i = pkt.find(_START_CODE, i + 3)
-    return _KEY if parameter_set else _UNDECIDED
+    return _PARAM if parameter_set else _UNDECIDED
 
 
-def _h264_intra(pkt: bytes, at: int) -> bool | None:
+def _h264_intra(pkt: bytes | bytearray, at: int) -> bool | None:
     """Whether the H.264 slice header at `at` is an I or SI slice; None when undecidable.
 
     Reads first_mb_in_slice and slice_type, two Exp-Golomb codes, from up to 6 bytes: enough

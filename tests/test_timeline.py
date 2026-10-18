@@ -2,7 +2,16 @@ import unittest
 
 import ts_fixtures as fx
 
-from services.live.timeline import PTS_TICKS_PER_SECOND as HZ, Timeline, _pts_delta
+from services.live.timeline import (
+    PTS_TICKS_PER_SECOND as HZ,
+    START_KEY,
+    START_NONE,
+    START_OPEN,
+    START_QUALITIES,
+    Span,
+    Timeline,
+    _pts_delta,
+)
 from services.live.ts import Closed, Opened, Segmenter
 
 WRAP = 1 << 33
@@ -101,6 +110,21 @@ class TimelineTests(unittest.TestCase):
         spans = tl.spans()
         self.assertEqual([(x.seq, x.end) for x in spans], [(0, 1.5)])
         self.assertTrue(spans[0].discontinuity)
+        self.assertEqual(spans[0].start_quality, START_NONE)  # its start was never reported
+
+    def test_spans_carry_their_segments_start_quality(self):
+        tl = Timeline()
+        for seq, quality in enumerate((START_OPEN, START_NONE, START_KEY)):
+            tl.on_opened(seq, seq * 2 * HZ, seq * 2.0, False)
+            tl.on_closed(seq, (seq + 1) * 2 * HZ, (seq + 1) * 2.0, quality)
+        tl.on_opened(3, 6 * HZ, 6.0, False)
+        tl.on_closed(3, 8 * HZ, 8.0)  # a caller that knows no quality: the old behaviour
+        self.assertEqual(
+            [s.start_quality for s in tl.spans()], [START_OPEN, START_NONE, START_KEY, START_KEY]
+        )
+        # Spans made without one (older readers, tests) start on a keyframe, as before.
+        self.assertEqual(Span(0, 0.0, 2.0, False), Span(0, 0.0, 2.0, False, START_KEY))
+        self.assertEqual(START_QUALITIES, ("key", "open", "none"))  # best first
 
     def test_close_of_unknown_seq_raises(self):
         tl = Timeline()
@@ -204,7 +228,7 @@ def segmented(parts, chunk=7 * 188):
             if isinstance(event, Opened):
                 tl.on_opened(event.seq, event.first_pts, event.wall, event.discontinuity)
             elif isinstance(event, Closed):
-                tl.on_closed(event.seq, event.next_first_pts, event.wall)
+                tl.on_closed(event.seq, event.next_first_pts, event.wall, event.start_quality)
 
     for data, seconds, real_time, gap, marker in parts:
         clock.now += gap
@@ -266,6 +290,11 @@ class SegmentedTimelineTests(unittest.TestCase):
                 spans = tl.spans()
                 self.assertAlmostEqual(spans[0].end - spans[0].start, 300 * 3003 / HZ)
                 self.assertFalse(any(span.discontinuity for span in spans))
+                # IDR starts at 0, 12 and 24 s; forced cuts without a keyframe at 10 and 22 s.
+                self.assertEqual(
+                    [span.start_quality for span in spans],
+                    [START_KEY, START_NONE, START_KEY, START_NONE, START_KEY],
+                )
 
 
 if __name__ == "__main__":

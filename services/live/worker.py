@@ -23,7 +23,9 @@ Commands (parent to helper):
 - `("shutdown",)`.
 
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
-additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet;
+additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
+each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality)`
+(`Span`'s fields: a reader that takes the first four still works);
 `("ready", sid)` once the first segment is open (its state comes first);
 `("error", sid, kind, message)`; `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
@@ -67,7 +69,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from services.live.timeline import Timeline
+from services.live.timeline import StartQuality, Timeline
 from services.live.ts import Data, Event, Opened, Segmenter, Unsupported
 
 if TYPE_CHECKING:
@@ -90,7 +92,8 @@ _NO_MEDIA = "The channel ended before any video could be buffered."
 _NO_DATA = "The channel sent no data."
 _DISK_FAILED = "The temporary playback buffer could not be created."
 
-_Addition = tuple[int, float, float, bool]  # seq, start, end, discontinuity
+# seq, start, end, discontinuity, start_quality
+_Addition = tuple[int, float, float, bool, StartQuality]
 
 # BurstMeter (see its docstring):
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
@@ -511,8 +514,12 @@ class _Session:
                 if not self._skipping:
                     closing = event.seq
                     self._write(lambda ring: ring.complete(closing))
-                span = timeline.on_closed(event.seq, event.next_first_pts, event.wall)
-                self._pending.append((span.seq, span.start, span.end, span.discontinuity))
+                span = timeline.on_closed(
+                    event.seq, event.next_first_pts, event.wall, event.start_quality
+                )
+                self._pending.append(
+                    (span.seq, span.start, span.end, span.discontinuity, span.start_quality)
+                )
                 self._notify(force=True)
 
     def _write(self, action: Callable[[Ring], None], *, new_segment: bool = False) -> None:
