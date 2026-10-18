@@ -91,6 +91,10 @@ instead of using others' distributions, which may have malware.**
 
 ## Good to know
 
+- **Hardware video decoding is safer to try.** It is still off by default and experimental
+  (Settings). With it on, when a channel's picture freezes while its sound goes on, QiTV
+  switches that channel back to software decoding by itself within a few seconds, and keeps it
+  there for a day.
 - **With one provider, nothing changes.** All providers appears once you have two or more
   providers. With one, the lists, channel numbers, stars, the guide and Recent work as in 2.0.
 - **Your stars come along.** A star from 2.0 stays on every provider that has a channel, film or
