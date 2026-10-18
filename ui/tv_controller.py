@@ -436,7 +436,8 @@ class TVController(QObject):
             self._request(replace(target, zapped=False, retried=False, start_over=False))
 
     def stop_for_library(self) -> None:
-        """The window opens the Library (spec §5.4, R5): stop what plays, waiting for nothing.
+        """Stop what plays, waiting for nothing: the corner player's ×, or the Library opened
+        with nothing playing (spec §5.4; what plays goes on in the corner otherwise).
 
         A link still on its way never opens, the guide, the Next card and the other player
         overlays close, and the stream's budget slot goes back once LiveTuner's release gate
