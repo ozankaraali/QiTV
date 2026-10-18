@@ -27,8 +27,9 @@ Position (spec §6.3; 2.1 stage 2): the start of the opened segment plus VLC's c
 `VlcClock` follows its `get_time()` readings: a clock at the rate set while VLC plays,
 corrected towards each new reading, with the readings' steps learned (a sparse-PCR channel's
 get_time steps by 2 s every 2 s; a steady one's every tick or so). A jump of VLC's clock is
-taken once the next reading agrees with it, unless it lands past the live edge (the stream's
-timestamps jumped: the position goes on at the rate); it never runs backwards. Seeking
+taken once the next reading agrees with it, unless it lands past the live edge or at a break
+the helper flagged on its spans (an HLS discontinuity, a reconnect: the stream's timestamps
+jumped, and the position goes on at the rate); it never runs backwards. Seeking
 reopens the stream at a segment (about 2 s granularity) and keeps the pause intent: a
 reopened stream is paused again as soon as it plays (port map §8.19). A seek to within the
 target of the live edge goes live instead, still keeping the pause; only `go_live()` (the
@@ -78,10 +79,11 @@ ahead at both ends of a tick, and from `_RATE_GRACE_S` after an opened stream pl
 VLC was at the live edge (within `_EDGE_S`, BUFFERING, or the source stalled): a starved
 VLC, and its restart once data comes again (it refills its caching while its clock stands
 still), are not taken for a slow one. The progress is VLC's own clock's, in its steps, never
-the position (whose clock runs at the rate by design): a stretch ends at a step of VLC's
-clock, or once it stood still past its hold. Under 70% of it over 3 s (at least two such
-stretches), the rate goes back to 1x at once and stay-live changes it no more on that
-channel (`StayLive.lock_rate`). On some HLS
+the position (whose clock runs at the rate by design): a stretch runs from VLC's first step
+once counting starts to a later step (a step only late or missing counts at its end), or
+holds nothing played once VLC's clock stood still a whole window and two of its holds. Under
+70% of it over 3 s (at least two such stretches), the rate goes back to 1x at once and
+stay-live changes it no more on that channel (`StayLive.lock_rate`). On some HLS
 channels VLC crawls through the pipeline even at 1x (measured, 2.0.2), while its own HLS
 plays them smoothly: counted the same way at 1x, under 70% progress in `_CRAWL_WINDOWS`
 windows of `_CRAWL_WINDOW_S` in a row makes the channel play directly ("Plays without rewind
@@ -209,6 +211,7 @@ _CALM_S = 1.0  # Auto: trouble again within this is the same starvation (VLC ref
 _REOPEN_HOLD_S = 5.0  # no reopen at live within this of an open (and before VLC played it)
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) ...
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
+_FROZEN_HOLDS = 2.0  # VLC's clock still for a window and this many holds has played nothing
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -229,12 +232,13 @@ _BEFORE_PLAY = (_Phase.STARTING, _Phase.WAITING, _Phase.RECOVERING)
 
 
 class _Progress(NamedTuple):
-    """A stretch of VLC's progress for rate health: from `start` (its counters), at 1x or
-    not, while VLC's clock had stepped `changes` times since the open."""
+    """A stretch of VLC's progress for rate health: from `start` (its counters; None until
+    VLC's clock steps), at 1x or not, while VLC's clock had stepped `changes` times since the
+    open."""
 
     at_1x: bool
     changes: int
-    start: ClockMark
+    start: Optional[ClockMark]
 
 
 class _Retry(Enum):
@@ -982,7 +986,8 @@ class LiveSession(QObject):
     ) -> None:
         """Trouble: a starvation or a stall that ran out the cushion. Auto latency raises the
         channel's target on it and lowers it while quiet; under any latency stay-live owes
-        a slow-down back to the target (`StayLive.trouble`: at once, beyond its budget).
+        a slow-down back to the target (`StayLive.trouble`: once VLC played a second short of
+        it, beyond its budget).
 
         Counted only while stay-live is LIVE (the caller skips paused and ended sessions),
         and trouble only once the lag had reached the target since the tune (`_cushion`).
@@ -1029,11 +1034,14 @@ class LiveSession(QObject):
         an opened stream plays or VLC was at the live edge (its restart after running dry is
         no crawl). VLC's progress over a counted stretch is what its clock stepped (2.1 stage
         2: a sparse-PCR channel's reading steps by 2 s every 2 s, so a tick says nothing),
-        against what the rates asked meanwhile; a stretch ends at a step of VLC's clock, or
-        once that clock stood still past its hold (no progress), and `RateHealth` judges
-        windows of at least two. At a rate other than 1x that stay-live set, a crawl locks
-        the rate at 1x at once for the channel. At 1x, an HLS channel that still crawls plays
-        directly (`CRAWLING`). The caller returns if it fell back.
+        against what the rates asked meanwhile. A stretch starts at VLC's first step once
+        counting starts (never a whole step against part of its time) and ends at a later
+        step; a step that is late or missing (twice as long) counts at its end, and only a
+        clock that stood still a whole window and two holds counts as nothing played.
+        `RateHealth` judges windows of at least two stretches, so they close at a step. At a
+        rate other than 1x that stay-live set, a crawl locks the rate at 1x at once for the
+        channel. At 1x, an HLS channel that still crawls plays directly (`CRAWLING`). The
+        caller returns if it fell back.
         """
         now = self._clock()
         ahead = self._live_edge(snapshot) - position
@@ -1053,14 +1061,26 @@ class LiveSession(QObject):
             and min(mark[1], ahead) >= _MEASURE_AHEAD_S
         )
         vlc, at_1x, stretch = self._vlc, self._rate == 1.0, self._progress
-        if not counted or stretch is None or stretch.at_1x != at_1x:
-            # A stretch starts here; it is judged once VLC's clock steps.
-            self._progress = _Progress(at_1x, vlc.changes, vlc.mark()) if counted else None
+        if not counted:
+            self._progress = None
             return
+        if stretch is None or stretch.at_1x != at_1x:
+            # Counting starts (again): a stretch starts at VLC's next step, so it never books
+            # a whole step against part of its time.
+            self._progress = _Progress(at_1x, vlc.changes, None)
+            return
+        health = self._crawl if at_1x else self._health
         if vlc.changes != stretch.changes:
             end = vlc.at_change  # up to VLC's last step
-        elif vlc.frozen() and vlc.played - stretch.start.played >= vlc.hold():
-            end = vlc.mark()  # its clock stood still: no progress
+            if stretch.start is None:
+                self._progress = _Progress(at_1x, vlc.changes, end)
+                return
+        elif stretch.start is not None and min(vlc.still, vlc.played - stretch.start.played) >= max(
+            health.window, _FROZEN_HOLDS * vlc.hold()
+        ):
+            # VLC's clock really stood still a whole window: that much was played of nothing.
+            # A step that is only late (or missing: twice as long) counts at its end.
+            end = vlc.mark()
         else:
             return
         self._progress = _Progress(at_1x, vlc.changes, end)
@@ -1290,9 +1310,22 @@ class LiveSession(QObject):
         playing = self._playback.state() is PlaybackState.PLAYING
         edge = self._live_edge(self._snapshot_cache)  # the most VLC can have played
         limit = edge - self._base if edge > self._base else math.inf
-        self._elapsed = self._vlc.update(self._clock(), ms, playing, self._rate, limit=limit)
+        self._elapsed = self._vlc.update(
+            self._clock(), ms, playing, self._rate, limit=limit, at_break=self._at_break
+        )
         self._last_ms = ms
         return self._base + self._elapsed
+
+    def _at_break(self, low: float, high: float) -> bool:
+        """The helper flagged a break (an HLS discontinuity or sequence gap, a reconnect, a
+        timestamp reset) at a segment boundary between these positions since the open."""
+        if self._sid is None:
+            return False
+        low, high = self._base + low, self._base + high
+        return any(
+            span.discontinuity and (low <= span.start <= high or low <= span.end <= high)
+            for span in self._engine.spans(self._sid)
+        )
 
     def _set_rate(self, rate: float) -> None:
         if rate != self._rate:
