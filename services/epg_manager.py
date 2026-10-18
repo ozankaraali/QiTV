@@ -600,6 +600,7 @@ class EpgManager:
 
     def _set_epg_from_file(self, xmltv_file):
         xmltv_filehash = _cache_key(xmltv_file)
+        self._take_shared_entry(xmltv_filehash)
         if xmltv_filehash in self.index:
             if self.index[xmltv_filehash] is None:
                 return
@@ -611,6 +612,7 @@ class EpgManager:
 
     def _set_epg_from_url(self, url):
         url_hash = _cache_key(url)
+        self._take_shared_entry(url_hash)
         if url_hash in self.index:
             if self.index[url_hash] is None:
                 return
@@ -729,10 +731,32 @@ class EpgManager:
         self.save_index()
 
     def _fetch_epg_from_url(self, url):
-        with _source_lock(_cache_key(url)):
+        url_hash = _cache_key(url)
+        before = self._read_index_file().get(url_hash)
+        with _source_lock(url_hash):
             if cancel_requested():
                 raise Cancelled()  # it waited for another manager's download: not a failure
+            stored = self._read_index_file().get(url_hash)
+            if isinstance(stored, dict) and stored != before:
+                # Another provider's manager stored this guide while this one waited.
+                self._take_shared_entry(url_hash)
+                if self._load_cached_epg(url_hash):
+                    return
             self._download_epg_from_url(url)
+
+    def _take_shared_entry(self, cache_key):
+        """A URL or local file guide is every provider's: another provider's manager may have
+        stored it since this one read the shared index. Its entry is taken when it is newer
+        than this manager's (an entry saying the source has no guide is not: each manager
+        finds that out)."""
+        shared = self._read_index_file().get(cache_key)
+        if not isinstance(shared, dict):
+            return
+        mine = self.index.get(cache_key)
+        if isinstance(mine, dict) and mine.get("last_access", "") >= shared.get("last_access", ""):
+            return
+        self.index[cache_key] = shared
+        self._index_base[cache_key] = copy.deepcopy(shared)
 
     def _download_epg_from_url(self, url):
         r = requests.get(

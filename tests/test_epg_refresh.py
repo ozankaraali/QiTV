@@ -467,8 +467,10 @@ class SharedIndexTests(_GuideCase):
 class SharedUrlGuideTests(_GuideCase):
     """The URL guide is global: each provider in use loads it with its own manager."""
 
-    def test_two_managers_never_download_the_same_url_at_once(self):
+    def test_two_managers_download_a_shared_url_guide_once(self):
         # Final review M4: both wrote the same <hash>.xml.download (a forced refresh).
+        # Sweep A9: the one that waited downloaded and parsed it again; it reads the guide
+        # the other just stored.
         self.config.epg_source = "URL"
         self.config.epg_url = "http://127.0.0.1:9/guide.xml"
         managers = [self.manager(), self.manager()]
@@ -504,10 +506,52 @@ class SharedUrlGuideTests(_GuideCase):
             for thread in threads:
                 thread.join()
         self.assertEqual(errors, [])
-        self.assertEqual(overlaps, [1, 1])  # one download at a time
+        self.assertEqual(overlaps, [1])  # one download, never two at once
         self.assertEqual([self.titles(m) for m in managers], [["New"], ["New"]])
         cache = os.path.dirname(managers[0]._index_file())
         self.assertEqual([f for f in os.listdir(cache) if f.endswith((".xml", ".download"))], [])
+
+    def test_a_manager_reads_the_url_guide_another_stored_since_it_read_the_index(self):
+        # Sweep A9: each provider's manager read the shared index when its catalog was made;
+        # the guide another provider downloaded later was downloaded and parsed again.
+        self.config.epg_source = "URL"
+        self.config.epg_url = "http://127.0.0.1:9/guide.xml"
+        first, second = self.manager(), self.manager()
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("New"))) as get:
+            first.set_current_epg()
+            second.set_current_epg()
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(self.titles(second), ["New"])
+
+    def test_a_local_file_guide_is_parsed_once_for_two_managers(self):
+        path = os.path.join(self.config.get_config_dir(), "guide.xml")
+        with open(path, "wb") as f:
+            f.write(xmltv("Local"))
+        self.config.epg_source = "Local File"
+        self.config.epg_file = path
+        first, second = self.manager(), self.manager()
+        parse, parsed = EpgManager._index_programs, []
+
+        def counting(manager, xmltv_file):
+            parsed.append(xmltv_file)
+            return parse(manager, xmltv_file)
+
+        with patch.object(EpgManager, "_index_programs", counting):
+            first.set_current_epg()
+            second.set_current_epg()
+        self.assertEqual(parsed, [path])
+        self.assertEqual(self.titles(second), ["Local"])
+
+    def test_a_shared_url_guide_that_failed_for_one_manager_is_tried_by_the_next(self):
+        self.config.epg_source = "URL"
+        self.config.epg_url = "http://127.0.0.1:9/guide.xml"
+        first, second = self.manager(), self.manager()
+        with patch("services.epg_manager.requests.get", side_effect=serving(b"<tv></tv>")):
+            first.set_current_epg()  # an answer without programmes: no guide
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("New"))) as get:
+            second.set_current_epg()
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(self.titles(second), ["New"])
 
 
 class UrlGuideDateTests(_GuideCase):

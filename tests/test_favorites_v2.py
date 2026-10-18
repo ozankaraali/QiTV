@@ -16,8 +16,8 @@ class StarsPerProviderTests(unittest.TestCase):
             item[PROVIDER_KEY] = provider
         return item
 
-    def starred_names(self, provider):
-        catalog = [self.item(n, provider) for n in ("News", "Film", "Other")]
+    def starred_names(self, provider, names=("News", "Film", "Other")):
+        catalog = [self.item(n, provider) for n in names]
         return [i["name"] for i in catalog if favorites.is_favorite(self.config, i)]
 
     def test_old_stars_stay_on_every_provider(self):
@@ -108,6 +108,44 @@ class StarsPerProviderTests(unittest.TestCase):
         self.assertTrue(favorites.migrate(self.config))
         self.assertTrue(all(isinstance(e, str) for e in self.config.favorites))
         self.assertEqual(self.config.favorites, ["Sports"])
+        self.assertEqual(self.config.provider_favorites, held)
+
+    def test_migrate_takes_the_stars_an_older_build_changed(self):
+        # Sweep A8: back on a build before 2.1, stars are edited in `favorites` only (names);
+        # upgraded again, `provider_favorites` ignored those edits.
+        self.config.favorites = ["News", "Film"]
+        favorites.migrate(self.config)
+        favorites.toggle(self.config, self.item("Sports", "Harbor IPTV"))  # at one provider
+        favorites.toggle(self.config, self.item("News", "Demo TV"))  # un-starred there only
+        self.config.favorites = ["News", "Sports", "Kids"]  # the old build: -Film, +Kids
+        self.assertTrue(favorites.migrate(self.config))
+        self.assertFalse(favorites.migrate(self.config))  # saved once
+        self.assertEqual(favorites.names(self.config), ["News", "Sports", "Kids"])
+        self.assertEqual(self.config.favorites, ["News", "Sports", "Kids"])
+        every = ("News", "Film", "Sports", "Kids")
+        self.assertEqual(self.starred_names("Demo TV", every), ["Kids"])  # Kids: everywhere
+        self.assertEqual(self.starred_names("Harbor IPTV", every), ["News", "Sports", "Kids"])
+
+    def test_a_name_an_older_build_starred_again_is_starred_everywhere(self):
+        self.config.favorites = ["News"]
+        favorites.migrate(self.config)
+        favorites.toggle(self.config, self.item("News", "Demo TV"))
+        favorites.toggle(self.config, self.item("News", "Harbor IPTV"))  # off everywhere
+        self.assertEqual(self.config.favorites, ["News"])  # still "*" with two exclusions
+        favorites.toggle(self.config, self.item("Film", "Demo TV"))
+        favorites.toggle(self.config, self.item("Film", "Demo TV"))  # starred, then not
+        self.config.favorites = ["News", "Film"]  # the old build stars Film
+        self.assertTrue(favorites.migrate(self.config))
+        self.assertEqual(self.starred_names("Harbor IPTV"), ["Film"])  # News: as 2.1 left it
+        self.assertEqual(self.starred_names("Demo TV"), ["Film"])
+
+    def test_migrate_leaves_stars_alone_when_favorites_only_moved(self):
+        self.config.favorites = ["News", "Film"]
+        favorites.migrate(self.config)
+        favorites.toggle(self.config, self.item("Sports", "Harbor IPTV"))
+        held = [dict(e) for e in self.config.provider_favorites]
+        self.config.favorites = ["Sports", "Film", "News"]  # the same names in another order
+        self.assertFalse(favorites.migrate(self.config))
         self.assertEqual(self.config.provider_favorites, held)
 
     def test_an_unstamped_toggle_stars_and_unstars_everywhere(self):
