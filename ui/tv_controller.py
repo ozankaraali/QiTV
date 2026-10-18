@@ -355,6 +355,7 @@ class TVController(QObject):
         self._connect_session(session, True)
         for name, player in self._players():
             player.stateChanged.connect(partial(self._states.__setitem__, name))
+            player.positionChanged.connect(partial(self._on_small_position, name))
         if self.sessions is not None:
             self.sessions.largeChanged.connect(self._on_large_changed)
             self.sessions.largeChanged.connect(lambda *_: self._update_guides())
@@ -1197,13 +1198,14 @@ class TVController(QObject):
             return
         new, old = sessions.large(), sessions.other()
         view = pip.take_large(
-            old.name, new.name, self._current, self.zap.context, self._current_url
+            old.name, new.name, self._current, self.zap.context, self._current_url, self._cid
         )
         shown = self._current if self._current is not None and self._current.live else None
         old.channel = shown.item if shown is not None else None  # what the small one shows
         old.group_key = shown.group_key if shown is not None else None
         self._use_slot(new)
-        self._current, self._cid, self._current_url = view.target, None, view.url
+        # A movie's resume key comes back with its slot: its position is saved again.
+        self._current, self._cid, self._current_url = view.target, view.cid, view.url
         self._restore_channel()
         self._state = self._states.get(new.name, "idle")
         self._audio_id = self._subtitle_id = None
@@ -1225,6 +1227,11 @@ class TVController(QObject):
                 # then announces the channel (they share the bottom of the video).
                 self._live_controls.show_live_transport(current)
             self._show_banner(channel)
+        elif self._current is not None:  # a movie or an episode: its own controls again
+            current = self._current
+            self.overlays.banner.dismiss()
+            transport.set_next_available(self._autoplay.has_next(current))
+            transport.show_vod(current.title, current.subtitle)
         pip.after_swap()
         if self._tuner_of(old).idle():
             pip.close()  # the old large picture was between two channels: nothing to show
@@ -1313,13 +1320,22 @@ class TVController(QObject):
         if self._pip is not None:
             self._pip.provider_settled(name, self._link_owner, ask_again=True)
 
-    def _on_links_provider_failed(self, name: str, _message: str) -> None:
+    def _on_links_provider_failed(self, name: str, message: str) -> None:
         """Provider `name` failed: the link requests it dropped never settle, so they are
-        forgotten; the queued choice of another provider goes on."""
+        forgotten; the queued choice of another provider goes on. When the newest choice, or
+        the channel waiting to open small, was `name`'s, the failure is said ("{name}:
+        {message}", unless the flow says it: the list shows `name`) and INFO, ★ and the guide
+        follow what plays."""
         if self._closed:
             return
         dropped = self._lanes.drop_provider(name, self._link_owner)
         queued = self._lanes.queued
+        newest = queued or dropped
+        lost = (
+            newest is not None
+            and not self._is_stay(newest)
+            and self._link_owner(newest.item) == name
+        )
         if queued is not None and self._link_owner(queued.item) == name:
             self._lanes.take_queued()
         elif queued is not None and dropped is not None:
@@ -1327,8 +1343,15 @@ class TVController(QObject):
                 self._lanes.take_queued()
             else:
                 self._request(queued)
-        if self._pip is not None:
-            self._pip.provider_settled(name, self._link_owner, ask_again=False)
+        if self._pip is not None and self._pip.provider_settled(
+            name, self._link_owner, ask_again=False
+        ):
+            lost = True
+        if not lost:
+            return
+        self._restore_channel()
+        if not self._flow.shows_failure(name):
+            self._error(f"{name}: {message}" if name else message)
 
     def _live_section_loaded(self) -> None:
         context = self.zap.context
@@ -1488,6 +1511,17 @@ class TVController(QObject):
             except Exception as e:
                 self._log_failure("save the playback position", e)
         self.overlays.transport.update_position(position_ms, length_ms)
+
+    def _on_small_position(self, name: str, position_ms: int, length_ms: int) -> None:
+        """A movie or an episode swapped small still plays: its position is saved under its
+        own resume key (and its end marks it finished), as while it was large."""
+        cid = self._pip.small_resume_key(name) if self._pip is not None else None
+        if self._closed or cid is None:
+            return
+        try:
+            self.watch.update_position(cid, position_ms, length_ms)
+        except Exception as e:
+            self._log_failure("save the playback position", e)
 
     def _on_error(self, message: str) -> None:
         if self._closed or self._tuner.running():
@@ -1845,7 +1879,12 @@ class TVController(QObject):
         return self._autoplay.card_open()
 
     def _toast(self, text: str, kind: str = "info", ms: int = INFO_MS) -> None:
-        self.overlays.toast.show_message(text, kind, ms)
+        """The player's toast; while the Library shows, the Library's (the player's page, in
+        its corner or hidden, shows no toast then): e.g. a playback error in the corner."""
+        toast = self.overlays.library_toast
+        if toast is None or not self._flow.in_library():
+            toast = self.overlays.toast
+        toast.show_message(text, kind, ms)
 
     def _notify(self, text: str, kind: str) -> None:
         """A toast for the shell's helpers: errors stay up longer."""
@@ -1860,11 +1899,7 @@ class TVController(QObject):
     def _menu_notify(self, text: str, kind: str) -> None:
         """A context menu's message: on the Library's toast while the Library shows (the
         player's page, with its toast, is hidden then), else on the player's."""
-        toast = self.overlays.library_toast
-        if toast is not None and self._flow.in_library():
-            toast.show_message(text, kind, ERROR_MS if kind == "error" else INFO_MS)
-        else:
-            self._notify(text, kind)
+        self._notify(text, kind)
 
     def _menu_error(self, text: str) -> None:
         """An external play or a context menu's link failed: _error's text, on _menu_notify's

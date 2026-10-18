@@ -3,6 +3,11 @@
 The sources column ends with three action rows, Settings, Add provider and Open file: rows to
 choose, not providers or layers to open (the drawer hands them to the shell, as it does the
 Library's sections).
+
+In "All providers" each provider's groups follow a heading row with its name; a provider with
+no groups there yet has a notice row under its heading instead ("Loading…" while it sets up or
+its list comes, or why its setup failed). One provider's setup ending there is new content, not
+a change of source: the path stays where it is.
 """
 
 from __future__ import annotations
@@ -42,6 +47,8 @@ _RECENT_LIMIT = 20
 _MEMO_LIMIT = 64  # memoized child lists kept (least recently used are dropped)
 FOLD_AHEAD_MS = 400  # a long list folds its titles this long after it is shown
 LAZY_ROWS = 2000  # a list of items this long gets its nodes made on demand (see NodeSeq)
+LOADING_NOTICE = "Loading…"  # under a provider's heading in "All providers" while it loads
+_UNREADABLE = ("header", "notice")  # rows that only label: never opened or played
 
 
 @dataclass(frozen=True)
@@ -355,6 +362,9 @@ class NavModel(QObject):
         self._provider_errors: dict[str, str] = {}  # providers whose last setup failed
         self._requested_sections: set[str] = set()  # asked for, neither ready nor failed yet
         self._ready_sections: set[str] = set()
+        # All providers: sections a provider refused while it set up (asked again when it is
+        # ready), the others' groups staying listed meanwhile.
+        self._refused_sections: set[str] = set()
         self._pending_group: Optional[tuple[str, str]] = None
         self._revealed: Optional[dict] = None  # the row the list opened on (see reveal)
         # children() results, keyed by parent and stamped with what they depend on.
@@ -430,15 +440,32 @@ class NavModel(QObject):
         if ("section", parent.key) in self._errors:
             return []
         pinned = self._pinned_groups() if parent.key == "live" else []
-        groups = [
-            (
-                NavNode("header", g.id, g.title, g)  # a provider's heading: never opened
-                if g.header
-                else NavNode("group", g.id, g.title, g, g.count)
-            )
-            for g in self.catalog.groups(parent.key)
-        ]
+        groups: list[NavNode] = []
+        listed = self.catalog.groups(parent.key)
+        for at, g in enumerate(listed):
+            if not g.header:
+                groups.append(NavNode("group", g.id, g.title, g, g.count))
+                continue
+            groups.append(NavNode("header", g.id, g.title, g))  # a provider's heading
+            if at + 1 == len(listed) or listed[at + 1].header:  # none of its groups yet
+                notice = self._provider_notice(g.provider, parent.key)
+                if notice:
+                    groups.append(NavNode("notice", f"{g.id}notice", notice, g))
         return pinned + groups
+
+    def _provider_notice(self, name: str, section: str) -> str:
+        """All providers: the row under the heading of a provider without groups: why its
+        setup (or its list) failed, "Loading…" while its list is not loaded, else none."""
+        error = self._provider_errors.get(name)
+        section_error = getattr(self.catalog, "section_error", None)
+        if not error and section_error is not None:
+            error = section_error(name, section)
+        if error:
+            return error
+        loaded = getattr(self.catalog, "provider_loaded", None)
+        if loaded is None or loaded(name, section):
+            return ""
+        return LOADING_NOTICE
 
     def _series_children(self, parent: NavNode) -> Optional[list[NavNode]]:
         if parent.layer == "item" and self.section_of(parent) == "series":
@@ -667,8 +694,8 @@ class NavModel(QObject):
         return node.layer == "item" and self.section_of(node) in ("live", "movies")
 
     def open(self, node: NavNode) -> None:
-        if node.layer == "header":
-            return  # a provider's heading in the mixed lists only labels its groups
+        if node.layer in _UNREADABLE:
+            return  # a provider's heading (or its notice) in the mixed lists only labels
         if node.layer == "source":
             # Another provider is only shown (its setup runs once, if it has not); the
             # current one is set up again when its last setup failed. A ready provider
@@ -786,6 +813,14 @@ class NavModel(QObject):
         self.changed.emit()
 
     def _on_section_failed(self, section: str, message: str) -> None:
+        if message == PROVIDER_LOADING_MESSAGE and self.all_mode():
+            # All providers: one provider still sets up (its part is asked again once it is
+            # ready); the others' groups stay listed.
+            self._refused_sections.add(section)
+            if any(not g.header for g in self.catalog.groups(section)):
+                return
+        elif self.all_mode():
+            self._events += 1  # a provider's notice row says why its list failed now
         # While a provider sets up, the catalog still holds the previous provider's groups:
         # that is not a failed refresh. It stays an error until providerReady clears it.
         loading = message == PROVIDER_LOADING_MESSAGE or (
@@ -832,6 +867,11 @@ class NavModel(QObject):
         self._fail(("episodes", series_id, season_id), message)
 
     def _on_provider_failed(self, name: str, message: str) -> None:
+        if self._one_of_all(name):
+            self._settle_provider(name, ready=False)
+            self._provider_errors[name] = message or "Couldn't connect"
+            self.changed.emit()
+            return
         # Requests made for the setup's provider will never settle: none is loading now,
         # and a request refused because the setup ran is not loading either.
         self._events += 1
@@ -843,6 +883,16 @@ class NavModel(QObject):
         self.changed.emit()
 
     def _on_provider_ready(self, name: str) -> None:
+        if self._one_of_all(name):
+            sections = self._settle_provider(name, ready=True)
+            self._provider_errors.pop(name, None)
+            # Its lists may be new, stale or not loaded yet: the sections this list has asked
+            # for are asked of it again (the others answered already; its heading says
+            # "Loading…" meanwhile when it has no groups).
+            for section in sorted(sections):
+                self.catalog.request_section(section, provider=name)
+            self.changed.emit()
+            return
         self._memo.clear()
         self._events += 1
         self._pending.clear()
@@ -854,3 +904,31 @@ class NavModel(QObject):
         if not self._path or self._path[0].key != name:
             self._path = [self._source()]
         self.changed.emit()
+
+    def _one_of_all(self, name: str) -> bool:
+        """Whether `name` is one provider of "All providers" (not the page's own source)."""
+        return name != ALL_PROVIDERS and self.all_mode()
+
+    def _settle_provider(self, name: str, *, ready: bool) -> set[str]:
+        """All providers: provider `name`'s setup ended (`ready`, or failed). Its requests made
+        before it never settle and those it refused meanwhile are not loading any more; the
+        other providers' state and the path (group, filter, the row revealed) stay. Returns the
+        sections this list has asked for, to ask of it again once it is ready (a section that
+        failed included: it may have that section now)."""
+        self._events += 1
+        sections = self._ready_sections | self._requested_sections | self._refused_sections
+        self._refused_sections.clear()
+        for key in [k for k in self._pending if self._owned_by(k, name)]:
+            self._pending.discard(key)
+        for key, message in list(self._errors.items()):
+            refused = message == PROVIDER_LOADING_MESSAGE
+            if refused or self._owned_by(key, name) or (ready and key[0] == "section"):
+                del self._errors[key]
+                if key[0] == "section":
+                    sections.add(key[1])
+        return sections
+
+    @staticmethod
+    def _owned_by(key: tuple, name: str) -> bool:
+        """Whether a request key is for one of provider `name`'s own groups."""
+        return key[0] == "group" and split_group_id(key[2])[0] == name

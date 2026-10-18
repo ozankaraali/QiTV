@@ -164,6 +164,17 @@ _UNREADABLE_GUIDE = (
 # read, merge and replace of one save finish before the next begins.
 _INDEX_SAVE_LOCK = threading.Lock()
 
+# The URL guide is global: each provider in use loads it with its own manager, on its own
+# loader thread. One download of a source at a time, so no two write (or remove) its
+# `<hash>.xml` and `.download` files at once (Windows fails to remove a file open elsewhere).
+_SOURCE_LOCKS: Dict[str, threading.Lock] = {}
+_SOURCE_LOCKS_GUARD = threading.Lock()
+
+
+def _source_lock(cache_key: str) -> threading.Lock:
+    with _SOURCE_LOCKS_GUARD:
+        return _SOURCE_LOCKS.setdefault(cache_key, threading.Lock())
+
 
 class EpgManager:
     def __init__(self, config_manager, provider_manager):
@@ -698,6 +709,12 @@ class EpgManager:
         self.save_index()
 
     def _fetch_epg_from_url(self, url):
+        with _source_lock(_cache_key(url)):
+            if cancel_requested():
+                raise Cancelled()  # it waited for another manager's download: not a failure
+            self._download_epg_from_url(url)
+
+    def _download_epg_from_url(self, url):
         r = requests.get(
             url,
             stream=True,

@@ -79,6 +79,9 @@ class Catalogs(QObject):
         self._specs: dict[str, dict] = {}  # the provider each catalog was built for
         self._started: set[str] = set()  # ensure() has begun this catalog's setup
         self._ready: set[str] = set()
+        # Edited in Settings while in use: set up again with the new settings (reload()); a
+        # forced setup asked meanwhile is that one.
+        self._renewing: set[str] = set()
         # Link requests waiting for a catalog's setup: (request id, item, section, is_episode)
         self._waiting: dict[str, list[tuple[int, dict, str, bool]]] = {}
         # The providers whose guides are in use (None: nobody said yet, every guide loads).
@@ -151,6 +154,8 @@ class Catalogs(QObject):
         """(Re)start this catalog's setup, as the screens ask when a provider is chosen."""
         if self._closed:
             return
+        if force_refresh and name in self._renewing:
+            return  # reload() is setting it up again with its new settings already
         catalog = self.catalog(name)
         self._started.add(name)
         catalog.select_provider(force_refresh=force_refresh)
@@ -193,6 +198,7 @@ class Catalogs(QObject):
 
     def _on_ready(self, name: str) -> None:
         self._ready.add(name)
+        self._renewing.discard(name)
         self._freeze_heap()
         self.providerReady.emit(name)
         self.contentChanged.emit(name)
@@ -205,16 +211,21 @@ class Catalogs(QObject):
     def _on_failed(self, name: str, message: str) -> None:
         self._ready.discard(name)
         self._started.discard(name)  # the next request tries again
+        self._renewing.discard(name)
         self.providerFailed.emit(name, message)
         for request_id, *_ in self._waiting.pop(name, []):
             self.linkFailed.emit(request_id, message)
 
     # --- links and guides ---------------------------------------------------------------
     def _route(self, item: dict) -> str:
-        """The provider an item belongs to; an unstamped item goes to the selected one."""
+        """The provider an item belongs to; an unstamped item goes to the selected one (the
+        first one when the selection names none, as a page falls back)."""
         name = provider_of(item)
         if not name:
+            names = self.names()
             name = str(self.config.selected_provider_name or "")
+            if name not in names and names:
+                name = names[0]
             logger.debug("An unstamped item goes to the selected provider")
         return name
 
@@ -268,7 +279,9 @@ class Catalogs(QObject):
     # --- Settings saved ---------------------------------------------------------------------
     def reload(self) -> None:
         """Drop the catalogs of removed providers and rebuild edited ones (on next use),
-        except those in use: they stay until a later reload() finds them out of use."""
+        except those in use: a removed one stays until a later reload() finds it out of use,
+        and an edited one is set up again at once with its new settings (its catalog stays,
+        so what it plays keeps playing; its lists come again from the new sign-in)."""
         current = {str(p.get("name", "")): p for p in self.registry.providers}
         busy = set(self._in_use())
         for name in list(self._by_name):
@@ -276,13 +289,25 @@ class Catalogs(QObject):
                 continue
             if name not in busy:
                 self._drop(name)
+            elif name in current:
+                self._renew(name, current[name])
         self.providersChanged.emit()
+
+    def _renew(self, name: str, spec: dict) -> None:
+        """Set provider `name` up again with its edited settings: its pinned manager reads
+        the new entry, and a link asked meanwhile waits for the new sign-in."""
+        self._specs[name] = dict(spec)
+        self._ready.discard(name)
+        self.select(name, force_refresh=True)
+        if name not in self._ready:  # a runner may finish the setup at once
+            self._renewing.add(name)
 
     def _drop(self, name: str) -> None:
         catalog = self._by_name.pop(name)
         self._specs.pop(name, None)
         self._started.discard(name)
         self._ready.discard(name)
+        self._renewing.discard(name)
         for request_id, *_ in self._waiting.pop(name, []):
             self.linkFailed.emit(request_id, UNKNOWN_PROVIDER_MESSAGE)
         self._stop(catalog)

@@ -8,6 +8,11 @@ drawer opens on an idle player. A failed setup opens the drawer on the sources w
 row. While the Library shows (spec §5.4), a provider change neither tunes nor opens the
 drawer; back to live TV (`resume_live`) tunes the last channel, or opens the drawer.
 
+In "All providers" the page's own setup is ALL_PROVIDERS'; each provider finishing or failing
+its setup there only changes the lists' content (a failure is said, and shown under its
+heading). A last channel whose provider has not listed its channels yet waits for it (as one
+of a provider other than the one browsed does), never opening the drawer meanwhile.
+
 TVController owns the links, the zapping and the player, and hands this unit callbacks.
 """
 
@@ -20,7 +25,7 @@ from PySide6.QtCore import QObject, QTimer
 
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavNode, payloads
-from services.provider_ids import ALL_PROVIDERS, with_provider
+from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, provider_of, with_provider
 from services.zapping import ZapContext
 
 logger = logging.getLogger(__name__)
@@ -115,6 +120,12 @@ class ProviderFlow(QObject):
         self._foreign = None
         self._foreign_timer.stop()
 
+    def shows_failure(self, name: str) -> bool:
+        """Whether a failed setup of provider `name` reaches this flow, which says so: the
+        list shows that provider, or every provider."""
+        source = getattr(self.catalog, "source", self.catalog.current_provider_name)()
+        return source in (name, ALL_PROVIDERS)
+
     def in_library(self) -> bool:
         """The window shows the Library (from enter_library until the player is back)."""
         return self._in_library
@@ -139,7 +150,7 @@ class ProviderFlow(QObject):
         if not self.catalog.provider_names():
             self.welcome()
             return
-        if self.catalog.is_loading():
+        if self.catalog.is_loading() and not self._mixed():
             self._live_on_ready = True  # _on_provider_ready decides
             return
         name = self.catalog.current_provider_name()
@@ -174,7 +185,10 @@ class ProviderFlow(QObject):
         self.overlays.welcome.show_card()
 
     def _setup_name(self, name: Optional[str]) -> str:
-        """The provider a setup for `name` loads, as ProviderManager picks it."""
+        """The provider a setup for `name` loads, as ProviderManager picks it (every provider
+        for ALL_PROVIDERS, or for None while the page shows them all)."""
+        if name == ALL_PROVIDERS or (name is None and self._mixed()):
+            return ALL_PROVIDERS_TITLE
         names = self.catalog.provider_names()
         wanted = name if name is not None else getattr(self.config, "selected_provider_name", None)
         if wanted in names:
@@ -200,8 +214,16 @@ class ProviderFlow(QObject):
 
     # ---- catalog events -----------------------------------------------------------------------
 
+    def _mixed(self) -> bool:
+        """The page shows every provider ("All providers")."""
+        return bool(self.catalog.current_provider_name() == ALL_PROVIDERS)
+
     def _on_provider_ready(self, name: str) -> None:
         if self._closed():
+            return
+        if name != ALL_PROVIDERS and self._mixed():
+            # One provider of All: new content in the lists (the path stays); a last channel
+            # waiting for this provider is tuned once its channels are listed (_try_foreign).
             return
         # Links the setup dropped are asked again by the controller, per provider.
         self.overlays.welcome.dismiss()
@@ -302,6 +324,8 @@ class ProviderFlow(QObject):
         if self._has_media() or self._links_busy() or self._in_library:
             return  # something else was chosen meanwhile
         channels = list(catalog.items("live", ALL_GROUP_ID) or [])
+        if self._mixed():  # ↑/↓ walk every provider's channels, as in All
+            channels = list(self.catalog.items("live", ALL_GROUP_ID) or channels)
         found = next((c for c in channels if ZapContext.same(c, item)), None)
         if found is None:
             logger.info("The last channel %r is no longer listed", item.get("name"))
@@ -337,6 +361,11 @@ class ProviderFlow(QObject):
             return
         self._end_loading()
         self._error(f"{name}: {message}" if name else message)
+        if name != ALL_PROVIDERS and self._mixed():
+            # One provider of All: its saved channels stay listed (its error under its heading
+            # when it has none), and the list stays on All providers. A last channel waiting
+            # for it gives up (_on_foreign_failed).
+            return
         # The sources, on the failed one, with a row to connect again: never a black screen.
         if self._in_library:
             return  # back to live TV opens the drawer on it (resume_live)
@@ -395,8 +424,20 @@ class ProviderFlow(QObject):
             if found is not None:
                 self._tune(found, key, channels)
                 return True
+        if self._start_foreign(self._waiting_owner(item)):
+            return True  # All providers: its provider has not listed its channels yet
         logger.info("The last channel %r is no longer listed", item.get("name"))
         return False
+
+    def _waiting_owner(self, item: dict) -> Optional[tuple[str, dict]]:
+        """All providers: (its provider, `item`) while that provider has not listed its
+        channels yet (it sets up, or they load); None otherwise."""
+        hub, owner = self._hub(), provider_of(item)
+        if hub is None or not self._mixed() or owner not in self.catalog.provider_names():
+            return None
+        if hub.is_ready(owner) and hub.catalog(owner).has_content("live"):
+            return None  # listed, and the channel is not among them
+        return owner, item
 
     def _group_channels(self, group_key: str) -> list[dict]:
         if group_key in _PINNED_GROUPS:

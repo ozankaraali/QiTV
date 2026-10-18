@@ -970,11 +970,14 @@ class OptionsDialog(QDialog):
             # In place: the providers' own managers share this list.
             self.provider_manager.providers[:] = deepcopy(self.providers)
             self.provider_manager.save_providers()
-            self.parent().providers_saved()  # catalogs of removed or edited providers go
         for name in changed_names:
             # The selected provider is invalidated after setup is serialized by the parent.
+            # The others' caches go before the catalogs reload: an edited provider in use is
+            # set up again at once and must not lose the lists its new sign-in brings.
             if name != self.selected_provider_name:
                 self._manager_of(name).invalidate_provider_cache(name)
+        if self.providers_modified:
+            self.parent().providers_saved()  # catalogs of removed or edited providers go
 
         if current_provider_changed or force_provider_refresh:
             self.parent().set_provider(force_update=force_provider_refresh)

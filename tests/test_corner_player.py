@@ -7,14 +7,31 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
 
 from tests.http_fixtures import LocalSource
 from tests.test_tv_window import INSTANCE, WindowCase
 from tests.ts_fixtures import make_stream
-from ui.overlays.corner_controls import BUTTONS, MIN_HIT_PX
+from ui.overlays.corner_controls import BUTTONS, MIN_HIT_PX, CornerControls
 from ui.page_stack import PageStack
+
+
+class CornerTooltipTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_the_sound_button_names_no_key(self):
+        # Final review M3: M types into the Library's search there.
+        host = QWidget()
+        host.resize(427, 240)
+        self.addCleanup(host.deleteLater)
+        controls = CornerControls(host)
+        sound = controls.button_rect("sound").center()
+        self.assertEqual(controls.tooltip_at(sound), "Mute")
+        controls.set_muted(True)
+        self.assertEqual(controls.tooltip_at(sound), "Unmute")
 
 
 class NothingPlayingTests(WindowCase):

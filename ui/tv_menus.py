@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLay
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
 from services.navigation import ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW, SETTINGS_ROW
+from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from ui.brand import logo_pixmap
 from ui.keymap import Action
 from ui.overlays.drawer import REFRESH_ACTION, SEARCH_ACTION
@@ -175,7 +176,8 @@ class TVMenus(QObject):
     # ---- providers ----------------------------------------------------------------------------
 
     def rebuild_providers(self) -> None:
-        """One checkable entry per provider, the current one (or the one loading) checked."""
+        """One checkable entry per provider, after "All providers" when there are two or more
+        (as in the channel list's sources), the source the TV page browses checked."""
         menu = self.providers_menu
         menu.clear()
         catalog = self._window.catalog
@@ -183,27 +185,29 @@ class TVMenus(QObject):
         if not names:
             menu.addAction(NO_PROVIDERS_TEXT).setEnabled(False)
             return
-        current = catalog.loading_provider() or catalog.current_provider_name()
+        current = catalog.source()
+        entries = [(name, name) for name in names]
+        if len(names) >= 2:
+            entries.insert(0, (ALL_PROVIDERS, ALL_PROVIDERS_TITLE))
         if self._provider_group is not None:
             self._provider_group.deleteLater()
         self._provider_group = group = QActionGroup(self)
         group.setExclusive(True)
-        for name in names:
-            action = QAction(name, menu)
+        for source, title in entries:
+            action = QAction(title, menu)
             action.setCheckable(True)
-            action.setChecked(name == current)
-            action.triggered.connect(lambda _checked=False, n=name: self._choose_provider(n))
+            action.setChecked(source == current)
+            action.triggered.connect(lambda _checked=False, s=source: self._choose_provider(s))
             group.addAction(action)
             menu.addAction(action)
 
-    def _choose_provider(self, name: str) -> None:
+    def _choose_provider(self, source: str) -> None:
         """The exclusive group moved the check; providerReady rebuilds the menu (never here:
-        that would delete the action whose signal runs)."""
+        that would delete the action whose signal runs). `source` is a provider's name or
+        ALL_PROVIDERS."""
         window = self._window
-        catalog = window.catalog
-        heading_to = catalog.loading_provider() or catalog.current_provider_name()
-        if not window.closing() and name != heading_to:
-            window.controller.select_provider(name)
+        if not window.closing() and source != window.catalog.source():
+            window.controller.select_provider(source)
 
     # ---- dialogs and links --------------------------------------------------------------------
 

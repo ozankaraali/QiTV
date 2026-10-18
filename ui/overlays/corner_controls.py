@@ -24,8 +24,9 @@ BUTTONS = ("sound", "back", "stop")  # left to right
 MIN_HIT_PX = 28  # each button is this square at least, at the default window and any other
 GAP_PX = 6
 INSET_PX = 6
-MUTE_TOOLTIP = "Mute (M)"
-UNMUTE_TOOLTIP = "Unmute (M)"
+# No key: M types into the Library's search, which has the keys while the player is here.
+MUTE_TOOLTIP = "Mute"
+UNMUTE_TOOLTIP = "Unmute"
 TOOLTIPS = {"back": "Back to the player", "stop": "Stop"}
 
 

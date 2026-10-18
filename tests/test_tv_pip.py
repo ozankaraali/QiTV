@@ -774,6 +774,31 @@ class LibraryPlayTests(PipCase):
         self.assertEqual(self.budget.holders("Home"), ["pip"])
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
 
+    def test_swapping_twice_keeps_the_movies_resume_point_and_controls(self):
+        # Final review I1: S, then S again, while a film from the Library plays large.
+        cid = "Home:movie:m7"
+        self.start_large(0)
+        self.play_from_library()
+        self.pip_session.positionChanged.emit(60_000, 600_000)
+        self.assertEqual(self.watch.positions[-1], (cid, 60_000, 600_000))
+        self.controller.handle(Action.SWAP)  # the channel large, the film small
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertEqual(self.shown_controls(), "show_timeshift")  # the channel's
+        self.pip_session.positionChanged.emit(61_000, 600_000)  # small, it still counts
+        self.assertEqual(self.watch.positions[-1], (cid, 61_000, 600_000))
+        self.assertNotIn(("update_position", 61_000, 600_000), self.transport.calls)
+        self.controller.handle(Action.SWAP)  # the film large again
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.assertEqual(self.shown_controls(), "show_vod")
+        self.assertEqual(self.transport.named("show_vod")[-1], ("Heat", ""))
+        self.pip_session.positionChanged.emit(590_000, 600_000)  # its end: finished
+        self.assertEqual(self.watch.positions[-1], (cid, 590_000, 600_000))
+        self.assertEqual(self.transport.calls[-1], ("update_position", 590_000, 600_000))
+
+    def shown_controls(self):
+        shows = ("show_vod", "show_live", "show_timeshift")
+        return [call[0] for call in self.transport.calls if call[0] in shows][-1]
+
     def test_without_the_library_a_movie_still_closes_the_small_picture(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])
@@ -813,6 +838,16 @@ class PipLinkSettlingTests(PipCase):
         QTest.qWait(20)
         self.assertFalse(self.sessions.pip_open())
         self.assertEqual(self.pip_live.named("start"), [])
+
+    def test_another_providers_failed_sign_in_says_why_the_small_picture_never_opens(self):
+        # Final review I3: the list shows Home; Harbor's channel was opened small.
+        self.controller.open_pip(HARBOR_TWO, group_key="10", channels=[HARBOR_TWO])
+        self.catalog.catalogs.providerFailed.emit("Harbor IPTV", "Portal down")
+        self.assertEqual(self.toast.messages()[-1], ("Harbor IPTV: Portal down", "error"))
+        self.assertEqual(self.controller._channel, CHANNELS[0])  # the large picture's
+        self.ready("http://stream/2")  # a late result is ignored
+        QTest.qWait(20)
+        self.assertFalse(self.sessions.pip_open())
 
     def test_its_own_providers_setup_asks_the_link_again(self):
         self.controller.open_pip(self.home_two, group_key="10", channels=[self.home_two])

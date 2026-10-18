@@ -23,6 +23,7 @@ from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QWidget
 
 from services.redact import safe_message
+from ui.macos_window import reclaim_first_responder
 from ui.overlays.painting import Units
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,10 @@ class PageStack(QWidget):
 
     def _mouse(self, event: QMouseEvent) -> None:
         kind, left = event.type(), Qt.MouseButton.LeftButton
+        if kind != QEvent.Type.MouseMove:
+            # macOS: libVLC's view in the clicked surface took the keys, and the window's own
+            # filter never sees the clicks this one takes (the Library's search would beep).
+            reclaim_first_responder(self.window())
         position = event.globalPosition().toPoint()
         if kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
             if event.button() == left:

@@ -965,8 +965,9 @@ class TVWindow(QMainWindow):
             self.set_provider()
 
     def _providers_in_use(self) -> set[str]:
-        """The providers a page shows: Settings may not drop their catalogs."""
-        return {name for name in (self.catalog.source(), self.library_catalog.source()) if name}
+        """The providers a page shows (in All providers, every one): Settings may not drop
+        their catalogs, and sets an edited one up again."""
+        return self.catalog.shown_providers() | self.library_catalog.shown_providers()
 
     def providers_saved(self) -> None:
         """Settings changed the provider list: catalogs of removed or edited providers go."""

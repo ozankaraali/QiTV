@@ -191,8 +191,8 @@ def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
 
 
 def _selectable(node: NavNode) -> bool:
-    """Whether a row can hold the highlight: a provider's heading cannot."""
-    return node.layer != "header"
+    """Whether a row can hold the highlight: a provider's heading (or its notice) cannot."""
+    return node.layer not in ("header", "notice")
 
 
 def _is_live_item(nav: NavModel, node: NavNode) -> bool:
@@ -321,6 +321,19 @@ class _SimpleRowDelegate(QStyledItemDelegate):
                 QRectF(left, rect.y(), width, rect.height()),
                 Qt.AlignLeft | Qt.AlignBottom,
                 elided(p, str(index.data(Qt.DisplayRole) or "").upper(), width),
+            )
+            p.restore()
+            return
+        if isinstance(node, NavNode) and node.layer == "notice":
+            # Under a provider's heading: it loads, or why it failed; never highlighted.
+            p.setFont(units.font(1.2))
+            p.setPen(qcolor(PALETTE.text, 0.5))
+            left = rect.x() + 1.2 * u
+            width = max(0.0, rect.right() - 1.2 * u - left)
+            p.drawText(
+                QRectF(left, rect.y(), width, rect.height()),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                elided(p, str(index.data(Qt.DisplayRole) or ""), width),
             )
             p.restore()
             return

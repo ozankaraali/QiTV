@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -153,6 +154,17 @@ class PageStackTests(StackCase):
         send(self.player, QEvent.Type.MouseButtonRelease, point, LEFT, NONE)
         self.assertEqual(clicks.count(), 1)
         self.assertEqual(stack.mode(), PageStack.CORNER)  # the window decides what a click does
+
+    def test_a_click_on_the_corner_player_gives_the_keys_back_to_the_window(self):
+        # Final review M1: macOS beeped at the next key typed in the Library after a click.
+        stack = self.make_stack()
+        stack.show_library(corner=True)
+        point = stack.mapToGlobal(stack.corner_rect().center())
+        with mock.patch("ui.page_stack.reclaim_first_responder") as reclaim:
+            send(self.player, QEvent.Type.MouseButtonPress, point)
+            send(self.player, QEvent.Type.MouseMove, point, NONE, LEFT)
+            send(self.player, QEvent.Type.MouseButtonRelease, point, LEFT, NONE)
+        self.assertEqual(reclaim.call_args_list, [mock.call(stack.window())] * 2)
 
     def test_the_mouse_on_the_player_is_the_stacks_only_in_the_corner(self):
         seen = []

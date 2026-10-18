@@ -7,9 +7,11 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
-from mixed_fixtures import DEMO, HARBOR, live_content, mixed_config
+from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
 from test_browsed_catalog import FakeEpg, ScriptedFactory
+from test_catalog_service import FakeWorker
 
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
@@ -43,16 +45,17 @@ class MixedNavigationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def build(self, providers, contents):
+    def build(self, providers, contents, runner=None):
         directory = tempfile.TemporaryDirectory(prefix="qitv-mixed-nav-")
         self.addCleanup(directory.cleanup)
         config, registry = mixed_config(directory.name, providers, contents)
         self.addCleanup(registry._cache_writer.shutdown, wait=True)
+        self.factory = ScriptedFactory()
         catalogs = Catalogs(
             config,
             registry,
-            runner=ImmediateRunner(),
-            factory=ScriptedFactory(),
+            runner=runner or ImmediateRunner(),
+            factory=self.factory,
             make_epg=lambda manager: FakeEpg(manager._pinned_provider),
         )
         self.addCleanup(catalogs.shutdown)
@@ -281,6 +284,87 @@ class MixedNavigationTests(unittest.TestCase):
         self.nav.reset_to("live", mixed_group_id("Harbor IPTV", "41"))
         drawer.open_drawer()
         self.assertEqual(model.index(0).data(ChannelRowsModel.ProviderRole), "")
+
+    # ---- one provider's setup while "All providers" shows (final review I2, M8) -------------
+
+    def test_another_providers_setup_keeps_the_path(self):
+        self.open_all()
+        self.nav.reset_to("live", ALL_GROUP_ID)
+        before = [n.key for n in self.nav.path]
+        self.assertEqual(before, [ALL_PROVIDERS, "live", ALL_GROUP_ID])
+        count = len(self.nav.children(self.nav.path[-1]))
+        # A retry, a setup the Library starts, an STB sign-in again: new content, same place.
+        self.view.catalogs.sign_in_again("Harbor IPTV")
+        QTest.qWait(10)
+        self.assertEqual([n.key for n in self.nav.path], before)
+        self.assertEqual(len(self.nav.children(self.nav.path[-1])), count)
+
+    def test_another_providers_failure_keeps_the_path_and_says_so_at_its_source(self):
+        self.open_all()
+        self.nav.reset_to("live", mixed_group_id("Demo TV", "News"))
+        before = [n.key for n in self.nav.path]
+        self.factory.fail_setup("Harbor IPTV", "Portal down")
+        self.view.catalogs.sign_in_again("Harbor IPTV")
+        QTest.qWait(10)
+        self.assertEqual([n.key for n in self.nav.path], before)
+        harbor = NavNode("source", "Harbor IPTV", "Harbor IPTV", "Harbor IPTV")
+        self.assertTrue(self.nav.provider_error(harbor))
+        self.assertEqual(len(self.nav.children(self.nav.path[-1])), 12)  # Demo's News stays
+
+    def test_a_provider_still_setting_up_does_not_blank_the_others_groups(self):
+        runner = HeldSetups("Harbor IPTV")
+        _config, _view, nav = self.build(
+            [DEMO, HARBOR], {"Demo TV": demo_content(), "Harbor IPTV": harbor_content()}, runner
+        )
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live", ALL_GROUP_ID)
+        QTest.qWait(10)  # Demo answers, Harbor refuses while it sets up
+        live = nav.path[1]
+        self.assertIn("News", [n.title for n in nav.children(live)])
+        self.assertEqual([n.key for n in nav.path], [ALL_PROVIDERS, "live", ALL_GROUP_ID])
+        runner.release("Harbor IPTV")
+        QTest.qWait(10)
+        self.assertEqual([n.key for n in nav.path], [ALL_PROVIDERS, "live", ALL_GROUP_ID])
+        self.assertIn("TR: Haber", [n.title for n in nav.children(live)])
+        self.assertEqual(len(nav.children(nav.path[-1])), 24 + 69)
+
+    def test_a_provider_without_a_cache_shows_a_loading_row_then_its_error(self):
+        runner = HeldSetups("Harbor IPTV")
+        _config, _view, nav = self.build([DEMO, HARBOR], {"Demo TV": demo_content()}, runner)
+        self.factory.fail_setup("Harbor IPTV", "Portal down")
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        QTest.qWait(10)
+        rows = self.rows_under(nav, "Harbor IPTV")
+        self.assertEqual([(n.layer, n.title) for n in rows], [("notice", "Loading…")])
+        runner.release("Harbor IPTV")
+        QTest.qWait(10)
+        rows = self.rows_under(nav, "Harbor IPTV")
+        self.assertEqual([n.layer for n in rows], ["notice"])
+        self.assertNotEqual(rows[0].title, "Loading…")  # its error
+        self.assertFalse(nav.is_playable(rows[0]))
+        path = nav.path
+        nav.open(rows[0])  # never opened
+        self.assertEqual(nav.path, path)
+
+    def test_a_provider_without_a_cache_whose_list_fails_shows_why(self):
+        # An Xtream panel signs in with its first list: its setup itself never fails.
+        _config, _view, nav = self.build([DEMO, HARBOR], {"Demo TV": demo_content()})
+        self.factory.xtream = lambda *args: FakeWorker(fail="Wrong password")
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        QTest.qWait(10)
+        rows = self.rows_under(nav, "Harbor IPTV")
+        self.assertEqual([n.layer for n in rows], ["notice"])
+        self.assertNotEqual(rows[0].title, "Loading…")
+        self.assertIn("Demo TV", [n.title for n in nav.children(nav.path[1])])
+
+    @staticmethod
+    def rows_under(nav, provider):
+        """The rows after `provider`'s heading in the open section."""
+        rows = nav.children(nav.path[1])
+        at = next(i for i, n in enumerate(rows) if n.layer == "header" and n.title == provider)
+        return rows[at + 1 :]
 
     def test_a_provider_group_in_all_mode_lists_that_providers_channels(self):
         groups = self.live_groups()

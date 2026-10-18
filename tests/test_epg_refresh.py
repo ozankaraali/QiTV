@@ -5,6 +5,7 @@ import os
 import pickle
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -425,6 +426,52 @@ class SharedIndexTests(_GuideCase):
             f for f in os.listdir(os.path.dirname(managers[0]._index_file())) if f.endswith(".tmp")
         ]
         self.assertEqual(leftovers, [])
+
+
+class SharedUrlGuideTests(_GuideCase):
+    """The URL guide is global: each provider in use loads it with its own manager."""
+
+    def test_two_managers_never_download_the_same_url_at_once(self):
+        # Final review M4: both wrote the same <hash>.xml.download (a forced refresh).
+        self.config.epg_source = "URL"
+        self.config.epg_url = "http://127.0.0.1:9/guide.xml"
+        managers = [self.manager(), self.manager()]
+        guard, active, overlaps, errors = threading.Lock(), [0], [], []
+        barrier = threading.Barrier(len(managers))
+
+        class Slow(_Response):
+            def __init__(self, body):
+                super().__init__(body)
+                self.headers = {"Last-Modified": "Sun, 18 Oct 2026 02:00:00 GMT"}
+
+            def iter_content(self, size):
+                with guard:
+                    active[0] += 1
+                    overlaps.append(active[0])
+                time.sleep(0.05)
+                yield self.content
+                with guard:
+                    active[0] -= 1
+
+        def refresh(manager):
+            barrier.wait()
+            try:
+                manager.force_refresh_current_epg()
+            except Exception as e:  # noqa: BLE001 - the test reports any failure
+                errors.append(e)
+
+        get = lambda url, **kwargs: Slow(xmltv("New"))  # noqa: E731
+        with patch("services.epg_manager.requests.get", side_effect=get):
+            threads = [threading.Thread(target=refresh, args=(m,)) for m in managers]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(overlaps, [1, 1])  # one download at a time
+        self.assertEqual([self.titles(m) for m in managers], [["New"], ["New"]])
+        cache = os.path.dirname(managers[0]._index_file())
+        self.assertEqual([f for f in os.listdir(cache) if f.endswith((".xml", ".download"))], [])
 
 
 if __name__ == "__main__":

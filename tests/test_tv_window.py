@@ -35,6 +35,7 @@ from services.config_manager import ConfigManager, get_app_version
 from services.epg_manager import EpgManager
 from services.image_manager import ImageManager
 from services.playback import NO_VLC_MESSAGE, PlaybackState, create_instance
+from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from services.provider_manager import ProviderManager
 from services.thread_cleanup import has_pending_threads
 from services.vlc_profile import PlayKind
@@ -1574,12 +1575,38 @@ class LibraryWindowTests(TwoProviderCase):
         def entries():
             return [(a.text(), a.isChecked()) for a in menu.actions()]
 
-        self.assertEqual(entries(), [(PROVIDER_NAME, True), (XTREAM, False)])
+        self.assertEqual(
+            entries(), [(ALL_PROVIDERS_TITLE, False), (PROVIDER_NAME, True), (XTREAM, False)]
+        )
         group = menu.actions()[0].actionGroup()
         self.assertTrue(group is not None and group.isExclusive())
-        menu.actions()[1].trigger()
+        menu.actions()[2].trigger()
         self.wait_ready(XTREAM)
-        self.assertTrue(wait_until(lambda: entries() == [(PROVIDER_NAME, False), (XTREAM, True)]))
+        self.assertTrue(
+            wait_until(
+                lambda: entries()
+                == [(ALL_PROVIDERS_TITLE, False), (PROVIDER_NAME, False), (XTREAM, True)]
+            )
+        )
+
+    def test_the_providers_menu_chooses_all_providers_and_a_provider_from_there(self):
+        # Final review M5: the browsed source is checked (never a provider that loads), and a
+        # provider can be chosen from All providers.
+        self.show()
+        self.wait_for_drawer()
+        menu = self.window.menus.providers_menu
+        catalog = self.window.catalog
+
+        def checked():
+            return [a.text() for a in menu.actions() if a.isChecked()]
+
+        menu.actions()[0].trigger()
+        self.assertTrue(wait_until(lambda: catalog.source() == ALL_PROVIDERS))
+        self.assertTrue(wait_until(lambda: checked() == [ALL_PROVIDERS_TITLE]))
+        menu.actions()[2].trigger()
+        self.assertTrue(wait_until(lambda: catalog.source() == XTREAM))
+        self.wait_ready(XTREAM)
+        self.assertTrue(wait_until(lambda: checked() == [XTREAM]))
 
     def test_esc_while_exporting_cancels_the_export_only(self):
         self.show()
@@ -1714,7 +1741,7 @@ class XtreamLibraryTests(TwoProviderCase):
         actions["Movies"].trigger()
         self.wait_for_titles()  # cached: the search reads every provider's saved catalog
         self.provider_manager._cache_writer.submit(lambda: None).result(timeout=5)
-        window.menus.providers_menu.actions()[0].trigger()
+        window.menus.providers_menu.actions()[1].trigger()  # after All providers
         self.wait_ready(PROVIDER_NAME)
         actions["Search"].trigger()
         self.assertEqual(window.library_controller.mode, "search")

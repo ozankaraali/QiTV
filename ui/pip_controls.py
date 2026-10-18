@@ -15,8 +15,9 @@ it plays; "−MM:SS" once time-shifted beyond its target, else "LIVE"). The labe
 the small picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small
 picture, swaps (the shell's `swap`).
 
-What each slot shows (its target and the zap group it came from) is kept here, so a swap
-can give the shell the new large picture's (`take_large`).
+What each slot shows (its target, the zap group it came from and, for a movie or an episode,
+its resume key) is kept here, so a swap can give the shell the new large picture's
+(`take_large`).
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ class SlotView:
     target: Optional[Target] = None
     context: Optional[ZapContext] = None
     url: str = ""  # its link: the watch history records it when it becomes large
+    cid: Optional[str] = None  # a movie's or an episode's resume key (it stays with the slot)
 
 
 class PipControls(QObject):
@@ -169,11 +171,26 @@ class PipControls(QObject):
         return self._views.setdefault(name, SlotView())
 
     def take_large(
-        self, old: str, new: str, target: Optional[Target], context, url: str
+        self,
+        old: str,
+        new: str,
+        target: Optional[Target],
+        context,
+        url: str,
+        cid: Optional[str] = None,
     ) -> SlotView:
-        """A swap: keep the old large slot's target, zap group and link; the new large one's."""
-        self._views[old] = SlotView(target, context, url)
+        """A swap: keep the old large slot's target, zap group, link and resume key; the new
+        large one's."""
+        self._views[old] = SlotView(target, context, url, cid)
         return self.view(new)
+
+    def small_resume_key(self, name: str) -> Optional[str]:
+        """The resume key of the movie or episode slot `name` plays small (None: it is large,
+        or plays a channel)."""
+        small = self.sessions.small()
+        if small is None or small.name != name:
+            return None
+        return self.view(name).cid
 
     # ---- keys, clicks and the menu ------------------------------------------------------------
 
@@ -278,26 +295,29 @@ class PipControls(QObject):
             return True
         return False
 
-    def provider_settled(self, name: str, owner: Callable[[dict], str], *, ask_again: bool) -> None:
+    def provider_settled(self, name: str, owner: Callable[[dict], str], *, ask_again: bool) -> bool:
         """Provider `name`'s setup dropped its link requests: none comes. The channel waiting
         to open asks anew when it is `name`'s and `ask_again` (a setup that finished), else it
-        is forgotten when it is `name`'s (a failure); another provider's request stays."""
+        is forgotten when it is `name`'s (a failure: True, the shell says why); another
+        provider's request stays."""
         link = self._link
         wanted = self._wanted
         if wanted is None:
             if link is not None and owner(link.item) == name:
                 self._link = None
-            return
+            return False
         if link is not None:
             if owner(link.item) != name:
-                return  # another provider's request is still coming
+                return False  # another provider's request is still coming
             self._link = None
         elif owner(wanted[0].item) != name:
-            return
+            return False
         if owner(wanted[0].item) == name and not ask_again:
             self._wanted = None
-        elif not self._closed():
+            return True
+        if not self._closed():
             self._request(wanted[0])
+        return False
 
     def keep_large_small(self, item: dict, title: str) -> bool:
         """A movie or an episode from the Library takes the large picture: the channel that

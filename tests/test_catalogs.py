@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
-from mixed_fixtures import DEMO, HARBOR, live_content, mixed_config
+from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
 from test_catalog_lifecycle import RealSetupFactory
 from test_catalog_service import FakeWorker
 
@@ -137,6 +137,39 @@ class CatalogsTests(unittest.TestCase):
         self.registry.providers[0]["url"] = "http://127.0.0.1:9/other.m3u"
         self.catalogs.reload()
         self.assertIsNot(self.catalogs.catalog("Demo TV"), old)
+
+    def test_an_edited_provider_in_use_is_set_up_again_once_with_its_new_settings(self):
+        # Final review I4: a renewed password must reach the pinned manager of a provider a
+        # page shows; Settings' own forced refresh of it is not a second sign-in.
+        runner = HeldSetups()
+        catalogs = Catalogs(
+            self.config,
+            self.registry,
+            runner=runner,
+            factory=self.factory,
+            make_epg=self.make_epg,
+            in_use=lambda: {"Harbor IPTV"},
+        )
+        self.addCleanup(catalogs.shutdown)
+        catalogs.ensure("Harbor IPTV")
+        old = catalogs.catalog("Harbor IPTV")
+        runner.held.add("Harbor IPTV")  # the next sign-in takes a while
+        self.registry.providers[1] = {**self.registry.providers[1], "password": "renewed"}
+        catalogs.reload()
+        self.assertEqual(self.factory.setups, ["Harbor IPTV", "Harbor IPTV"])  # signing in
+        catalogs.select("Harbor IPTV", force_refresh=True)
+        runner.release("Harbor IPTV")
+        self.assertIs(catalogs.catalog("Harbor IPTV"), old)  # what it plays keeps playing
+        self.assertEqual(self.factory.setups, ["Harbor IPTV", "Harbor IPTV"])
+        self.assertEqual(old.provider_manager.current_provider["password"], "renewed")
+        self.assertTrue(catalogs.is_ready("Harbor IPTV"))
+
+    def test_an_unstamped_item_goes_to_the_first_provider_without_a_selection(self):
+        # Final review M7: one provider, a stale selection (an old 2.0 Recent entry).
+        self.config.selected_provider_name = "Gone"
+        request = self.catalogs.request_link({"id": 9, "cmd": "http://d/9.ts"}, section="live")
+        self.assertEqual(self.ready_links(), [(request, "http://d/9.ts")])
+        self.assertEqual(self.factory.setups, ["Demo TV"])
 
     def test_an_unchanged_provider_keeps_its_catalog(self):
         old = self.catalogs.catalog("Demo TV")

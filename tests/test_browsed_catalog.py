@@ -17,6 +17,7 @@ from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
 from services.catalogs import Catalogs
 from services.jobs import ImmediateRunner
+from services.navigation import NavModel
 from services.provider_ids import (
     ALL_PROVIDERS,
     mixed_group_id,
@@ -422,6 +423,109 @@ class PinnedManagerTests(unittest.TestCase):
                 with self.assertRaises(LookupError):
                     manager.set_current_provider(Progress())
             self.assertEqual(manager.current_provider, {})
+
+
+class RenewingFactory(ScriptedFactory):
+    """Xtream lists answer Harbor's channels; the passwords they were asked with are kept."""
+
+    def __init__(self):
+        super().__init__()
+        self.passwords = []
+
+    def xtream(self, base_url, username, password, *args):
+        self.passwords.append(password)
+        return FakeWorker(harbor_content())
+
+
+class EditedProviderTests(unittest.TestCase):
+    """Settings edits a provider a page shows (final review I4)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="qitv-edited-")
+        self.addCleanup(directory.cleanup)
+        self.config, self.registry = mixed_config(
+            directory.name,
+            [DEMO, HARBOR],
+            {"Demo TV": demo_content(), "Harbor IPTV": harbor_content()},
+        )
+        self.addCleanup(self.registry._cache_writer.shutdown, wait=True)
+        self.factory = RenewingFactory()
+        self.views = []
+        self.catalogs = Catalogs(
+            self.config,
+            self.registry,
+            runner=ImmediateRunner(),
+            factory=self.factory,
+            make_epg=lambda manager: FakeEpg(manager._pinned_provider),
+            in_use=self.in_use,
+        )
+        self.addCleanup(self.catalogs.shutdown)
+        self.config.selected_provider_name = "Demo TV"
+
+    def in_use(self):
+        """As the window's: the providers its pages show."""
+        return set().union(*(view.shown_providers() for view in self.views))
+
+    def page(self, source_key="selected_provider_name", all_key="tv_all_providers"):
+        view = BrowsedCatalog(self.catalogs, self.config, source_key=source_key, all_key=all_key)
+        self.views.append(view)
+        return view
+
+    def edit_harbor(self, password):
+        """As Settings → Save: the list edited in place, Harbor's cache dropped, the catalogs
+        reloaded."""
+        edited = [dict(p) for p in self.registry.providers]
+        edited[1]["password"] = password
+        self.registry.providers[:] = edited
+        self.catalogs.catalog("Harbor IPTV").provider_manager.invalidate_provider_cache(
+            "Harbor IPTV"
+        )
+        self.catalogs.reload()
+
+    def test_editing_a_provider_all_providers_shows_brings_its_channels_back(self):
+        view = self.page()
+        view.select_provider(ALL_PROVIDERS)
+        nav = NavModel(view, self.config)
+        nav.reset_to("live", ALL_GROUP_ID)
+        QTest.qWait(10)
+        before = len(nav.children(nav.path[-1]))
+        self.assertEqual(before, 24 + 69)
+        self.edit_harbor("renewed")  # not the selected provider
+        QTest.qWait(10)
+        self.assertEqual(len(nav.children(nav.path[-1])), before)
+        manager = self.catalogs.catalog("Harbor IPTV").provider_manager
+        self.assertEqual(manager.current_provider["password"], "renewed")
+        self.assertEqual(self.factory.passwords, ["renewed"])
+
+    def test_editing_the_provider_only_the_library_shows_gives_it_the_new_record(self):
+        self.page().select_provider()  # the TV page: Demo TV
+        self.config.library_provider_name = "Harbor IPTV"
+        library = self.page("library_provider_name", "library_all_providers")
+        library.select_provider()
+        QTest.qWait(10)
+        ready = []
+        library.providerReady.connect(ready.append)
+        self.edit_harbor("renewed")
+        manager = self.catalogs.catalog("Harbor IPTV").provider_manager
+        self.assertEqual(manager.current_provider["password"], "renewed")
+        self.assertEqual(ready, ["Harbor IPTV"])  # the Library opens its lists again
+        library.request_section("live")
+        QTest.qWait(10)
+        self.assertEqual(self.factory.passwords, ["renewed"])
+        self.assertTrue(library.has_content("live"))
+
+    def test_a_provider_added_while_all_providers_shows_is_set_up(self):
+        view = self.page()
+        view.select_provider(ALL_PROVIDERS)
+        self.registry.providers.append(
+            {"type": "M3UPLAYLIST", "name": "Third", "url": "http://127.0.0.1:9/third.m3u"}
+        )
+        self.catalogs.reload()
+        self.assertIn("Third", self.factory.setups)
 
 
 if __name__ == "__main__":

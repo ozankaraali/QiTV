@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
-from services.catalog import ALL_GROUP_ID, CatalogService, Group
+from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, CatalogService, Group
 from services.catalogs import Catalogs
 from services.epg_view import Programme
 from services.provider_ids import (
@@ -89,9 +89,13 @@ class BrowsedCatalog(QObject):
         # ("groups"/"all", section) -> (versions, value). 200,000 channels are joined once.
         self._memo: dict[tuple[str, str], tuple[tuple, Any]] = {}
         self._seen_source = self.source()
+        # Why a provider's list of a section last failed to load, by (provider, section): the
+        # mixed lists say it under the provider's heading while it has no groups.
+        self._section_errors: dict[tuple[str, str], str] = {}
         catalogs.linkReady.connect(self.linkReady)
         catalogs.linkFailed.connect(self.linkFailed)
         catalogs.catalogCreated.connect(self._attach)
+        catalogs.providersChanged.connect(self._on_providers_changed)
         for name in catalogs.created():
             self._attach(name)
 
@@ -115,6 +119,21 @@ class BrowsedCatalog(QObject):
     def all_providers(self) -> bool:
         """Whether the page mixes every provider."""
         return bool(getattr(self.config, self._all_key, False))
+
+    def shown_providers(self) -> set[str]:
+        """The providers this page lists (Settings must not drop their catalogs): every one in
+        all mode, else its own."""
+        if self.all_providers():
+            return set(self._catalogs.names())
+        source = self._single_source()
+        return {source} if source else set()
+
+    def _on_providers_changed(self) -> None:
+        """Settings edited the provider list: in all mode the page lists every provider, so a
+        new one, or one rebuilt with its new settings, is set up (its lists join the others)."""
+        if self.all_providers():
+            for name in self._catalogs.names():
+                self._catalogs.ensure(name)
 
     def catalog_for(self, item: dict) -> CatalogService:
         """The catalog an item came from (an unstamped item belongs to the source); KeyError
@@ -163,6 +182,7 @@ class BrowsedCatalog(QObject):
 
     def _forwarder(self, name: str, signal_name: str) -> Callable[..., None]:
         def forward(*args: Any) -> None:
+            self._note_section_state(name, signal_name, args)
             if self.all_providers():
                 args = self._mixed_args(name, signal_name, args)
             elif self.source() != name and signal_name != "epgReady":
@@ -170,6 +190,20 @@ class BrowsedCatalog(QObject):
             getattr(self, signal_name).emit(*args)
 
         return forward
+
+    def _note_section_state(self, name: str, signal_name: str, args: tuple) -> None:
+        if signal_name == "sectionFailed" and args[1] != PROVIDER_LOADING_MESSAGE:
+            self._section_errors[(name, args[0])] = str(args[1])
+        elif signal_name == "sectionReady":
+            self._section_errors.pop((name, args[0]), None)
+        elif signal_name == "providerReady":
+            for key in [k for k in self._section_errors if k[0] == name]:
+                del self._section_errors[key]
+
+    def section_error(self, name: str, section: str) -> str:
+        """Why provider `name`'s list of `section` last failed to load ("": it did not, or
+        it was set up again since)."""
+        return self._section_errors.get((name, section), "")
 
     @staticmethod
     def _mixed_args(name: str, signal_name: str, args: tuple) -> tuple:
@@ -345,15 +379,23 @@ class BrowsedCatalog(QObject):
         catalog = self._cat()
         return catalog.has_content(section) if catalog is not None else False
 
-    def request_section(self, section: str, *, force: bool = False) -> None:
+    def request_section(self, section: str, *, force: bool = False, provider: str = "") -> None:
+        """Ask for a section (every provider's in all mode, or only `provider`'s there: its
+        setup just ended and the others answered already)."""
         if self.all_providers():
             for name in self._having(section):
+                if provider and name != provider:
+                    continue
                 self._catalogs.ensure(name)
                 self._catalogs.catalog(name).request_section(section, force=force)
             return
         catalog = self._cat(ensure=True)
         if catalog is not None:
             catalog.request_section(section, force=force)
+
+    def provider_loaded(self, name: str, section: str) -> bool:
+        """Whether provider `name` has its list of `section` (it may still set up or load)."""
+        return name in self._catalogs.names() and self._catalogs.catalog(name).has_content(section)
 
     def groups(self, section: str) -> list[Group]:
         if self.all_providers():
