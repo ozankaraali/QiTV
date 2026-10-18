@@ -11,7 +11,8 @@ drawer; back to live TV (`resume_live`) tunes the last channel, or opens the dra
 In "All providers" the page's own setup is ALL_PROVIDERS'; each provider finishing or failing
 its setup there only changes the lists' content (a failure is said, and shown under its
 heading). A last channel whose provider has not listed its channels yet waits for it (as one
-of a provider other than the one browsed does), never opening the drawer meanwhile.
+of a provider other than the one browsed does), never opening the drawer meanwhile; one whose
+provider's setup failed is not waited for (that would sign it in again).
 
 TVController owns the links, the zapping and the player, and hands this unit callbacks.
 """
@@ -431,12 +432,15 @@ class ProviderFlow(QObject):
 
     def _waiting_owner(self, item: dict) -> Optional[tuple[str, dict]]:
         """All providers: (its provider, `item`) while that provider has not listed its
-        channels yet (it sets up, or they load); None otherwise."""
+        channels yet (it sets up, or they load); None otherwise, and when its setup failed
+        (said once already: waiting would sign it in again, and fail again)."""
         hub, owner = self._hub(), provider_of(item)
         if hub is None or not self._mixed() or owner not in self.catalog.provider_names():
             return None
         if hub.is_ready(owner) and hub.catalog(owner).has_content("live"):
             return None  # listed, and the channel is not among them
+        if self.nav.provider_error(NavNode("source", owner, owner, owner)):
+            return None  # its setup failed, until it is set up again
         return owner, item
 
     def _group_channels(self, group_key: str) -> list[dict]:

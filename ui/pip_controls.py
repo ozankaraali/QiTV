@@ -11,9 +11,10 @@ and failures are toasted here.
 
 The PiP frame and label follow the manager: the second surface shows at its corner while
 PiP is open, and the label names the small picture's channel and state ("Connecting…" until
-it plays; "−MM:SS" once time-shifted beyond its target, else "LIVE"). The label's × closes
-the small picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small
-picture, swaps (the shell's `swap`).
+it plays; "−MM:SS" once time-shifted beyond its target, else "LIVE"); a movie or an episode
+swapped small shows its title alone. The label's × closes the small picture, its speaker
+mutes or unmutes it, and its ⇄, like a click on the small picture, swaps (the shell's
+`swap`).
 
 What each slot shows (its target, the zap group it came from and, for a movie or an episode,
 its resume key) is kept here, so a swap can give the shell the new large picture's
@@ -472,10 +473,12 @@ class PipControls(QObject):
             return
         target = self.view(small.name).target
         name = target.title if target is not None else str((small.channel or {}).get("name", ""))
-        label.set_info(name, self._state_text(small))
+        label.set_info(name, self._state_text(small, live=target is None or target.live))
         label.set_audible(not self.sessions.muted(small.name))
 
-    def _state_text(self, slot: Slot) -> str:
+    def _state_text(self, slot: Slot, *, live: bool = True) -> str:
+        if not live:
+            return ""  # a movie or an episode swapped small plays on: its title alone
         mode = slot.live.mode
         timeline = self._timelines.get(slot.name)
         if mode == "pipeline" and timeline is not None:

@@ -4247,11 +4247,12 @@ class AllProvidersLaunchTests(ControllerTestCase):
         )
         self.addCleanup(registry._cache_writer.shutdown, wait=True)
         self.runner = HeldSetups("Harbor IPTV")  # the last channel's provider loads second
+        self.factory = ScriptedFactory()
         self.hub = Catalogs(
             config,
             registry,
             runner=self.runner,
-            factory=ScriptedFactory(),
+            factory=self.factory,
             make_epg=lambda manager: FakeEpg(manager._pinned_provider),
         )
         self.addCleanup(self.hub.shutdown)
@@ -4304,6 +4305,29 @@ class AllProvidersLaunchTests(ControllerTestCase):
         self.assertEqual(self.toast.messages()[-1], ("Demo TV: Portal down", "error"))
         self.assertEqual(self.nav.path[0].key, ALL_PROVIDERS)
         self.assertNotIn((None, "left"), self.drawer.named("open_drawer"))
+
+    def test_a_last_channels_provider_failing_first_signs_in_once_and_is_said_once(self):
+        # Polish: Harbor (the last channel's) fails while Demo's playlist downloads. Waiting
+        # for it once Demo's channels came signed it in again, with a second identical toast.
+        registry = self.hub.registry
+        for name in ("Demo TV", "Harbor IPTV"):
+            os.remove(registry._provider_cache_name(name))  # nothing listed yet
+        self.factory.fail_setup("Harbor IPTV", "Portal down")
+        self.factory.results["m3u"] = {
+            "result": live_content(["Demo 1", "Demo 2"], {"News": [0, 1]}),
+            "on_run": lambda: self.runner.release("Harbor IPTV"),  # it fails meanwhile
+        }
+        self.runner.held.add("Demo TV")
+        self.controller.start()
+        QTest.qWait(20)
+        self.runner.release("Demo TV")  # Demo is set up and downloads its playlist
+        QTest.qWait(20)
+        self.assertEqual(self.factory.setups.count("Harbor IPTV"), 1)
+        said = [text for text, _kind in self.toast.messages() if text.startswith("Harbor IPTV:")]
+        self.assertEqual(len(said), 1)
+        self.assertEqual(self.asked, [])  # nothing to tune
+        self.assertEqual(len(self.drawer.named("open_drawer")), 1)  # the idle player's list
+        self.assertEqual(self.nav.path[0].key, ALL_PROVIDERS)
 
 
 if __name__ == "__main__":

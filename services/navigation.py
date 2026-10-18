@@ -914,10 +914,13 @@ class NavModel(QObject):
         before it never settle and those it refused meanwhile are not loading any more; the
         other providers' state and the path (group, filter, the row revealed) stay. Returns the
         sections this list has asked for, to ask of it again once it is ready (a section that
-        failed included: it may have that section now)."""
+        failed included: it may have that section now). Sections refused meanwhile are kept
+        while another provider still sets up: it is asked for them once it is ready (a list
+        without a cache, or without channels, would say "Loading…" for good)."""
         self._events += 1
         sections = self._ready_sections | self._requested_sections | self._refused_sections
-        self._refused_sections.clear()
+        if not self.catalog.is_loading():
+            self._refused_sections.clear()
         for key in [k for k in self._pending if self._owned_by(k, name)]:
             self._pending.discard(key)
         for key, message in list(self._errors.items()):

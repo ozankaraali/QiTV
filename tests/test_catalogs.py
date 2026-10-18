@@ -164,6 +164,24 @@ class CatalogsTests(unittest.TestCase):
         self.assertEqual(old.provider_manager.current_provider["password"], "renewed")
         self.assertTrue(catalogs.is_ready("Harbor IPTV"))
 
+    def test_an_edit_that_keeps_the_connection_signs_in_and_loads_nothing_again(self):
+        # Polish: only the stream limit changed on a provider a page shows. Its cache was
+        # wiped and downloaded again (and an open drawer jumped back to live).
+        self.in_use = {"Harbor IPTV"}
+        self.catalogs.ensure("Harbor IPTV")
+        catalog = self.catalogs.catalog("Harbor IPTV")
+        cache = self.registry._provider_cache_name("Harbor IPTV")
+        self.registry.providers[1] = {**self.registry.providers[1], "max_streams": 2}
+        self.catalogs.reload()
+        self.assertEqual(self.factory.setups, ["Harbor IPTV"])  # no second sign-in
+        self.assertTrue(os.path.exists(cache))  # its cache stays
+        self.assertTrue(catalog.has_content("live"))
+        self.assertTrue(self.catalogs.is_ready("Harbor IPTV"))
+        self.assertIs(self.catalogs.catalog("Harbor IPTV"), catalog)
+        self.assertEqual(catalog.current_provider()["max_streams"], 2)  # the budget's limit
+        self.catalogs.select("Harbor IPTV", force_refresh=True)  # Settings' own refresh runs
+        self.assertEqual(self.factory.setups, ["Harbor IPTV", "Harbor IPTV"])
+
     def test_an_unstamped_item_goes_to_the_first_provider_without_a_selection(self):
         # Final review M7: one provider, a stale selection (an old 2.0 Recent entry).
         self.config.selected_provider_name = "Gone"

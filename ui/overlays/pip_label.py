@@ -96,7 +96,8 @@ class PipLabel(Overlay):
     # ---- public API ---------------------------------------------------------------------
 
     def set_info(self, name: str, state: str) -> None:
-        """`state` is "LIVE", "−MM:SS" (behind live) or "Connecting…"."""
+        """`state` is "LIVE", "−MM:SS" (behind live), "Connecting…", or "" (a movie or an
+        episode: the name alone)."""
         if (name, state) != (self._name, self._state):
             self._name, self._state = name, state
             self._refresh()
@@ -204,10 +205,11 @@ class PipLabel(Overlay):
             state = states.elidedText(state, Qt.TextElideMode.ElideRight, max(0, int(state_room)))
         state_w = self._state_width(state_font, dot_gap, state)
         elide = Qt.TextElideMode.ElideRight
+        between = gap if state else 0.0  # the name alone ends at the pad
         # The name may shrink to "…" or, with no room for that, to nothing.
-        name_room = int(room - 2 * pad - gap - state_w)
+        name_room = int(room - 2 * pad - between - state_w)
         name = names.elidedText(self._name, elide, name_room) if name_room > 0 else ""
-        width = 2 * pad + state_w + (gap + names.horizontalAdvance(name) if name else 0)
+        width = 2 * pad + state_w + (between + names.horizontalAdvance(name) if name else 0)
         pill = QRectF(inset, inset, min(width, room), height)
         return _Layout(
             pill, hits, glyphs, name, state, name_font, state_font, pad, gap, dot, dot_gap

@@ -1,5 +1,6 @@
 import copy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 import gzip
 import hashlib
 import itertools
@@ -46,6 +47,19 @@ def _cache_key(source: str) -> str:
 
 def _xtream_cache_key(provider_url: str, username: str) -> str:
     return _cache_key(f"{provider_url}:{username}")
+
+
+def _source_date(last_modified: Optional[str]) -> datetime:
+    """A downloaded guide's date as the index keeps it (UTC, naive: the next refresh asks
+    If-Modified-Since with it): the server's Last-Modified, or the download time when the
+    server sends none or one that doesn't parse."""
+    try:
+        date = parsedate_to_datetime(last_modified or "")
+    except TypeError, ValueError:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+    if date.tzinfo is not None:
+        date = date.astimezone(timezone.utc).replace(tzinfo=None)
+    return date
 
 
 def _file_stamp(path: str) -> tuple[int, int, int]:
@@ -736,14 +750,8 @@ class EpgManager:
                 guide = self._index_programs(xmltv_file_path)
                 os.remove(xmltv_file_path)
                 if guide:
-                    last_modified = datetime.strptime(
-                        r.headers.get(
-                            "Last-Modified",
-                            datetime.now().strftime("%a, %d %b %Y %H:%M:%S %Z"),
-                        ),
-                        "%a, %d %b %Y %H:%M:%S %Z",
-                    )
-                    self._store_guide(url_hash, guide, last_modified)
+                    source_date = _source_date(r.headers.get("Last-Modified"))
+                    self._store_guide(url_hash, guide, source_date)
                 else:
                     self._source_failed(url_hash)
         self.save_index()

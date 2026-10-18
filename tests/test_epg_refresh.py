@@ -1,6 +1,7 @@
 """A guide refresh never blanks Now/Next, and a failed refresh keeps the guide it had."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 import pickle
 import tempfile
@@ -472,6 +473,73 @@ class SharedUrlGuideTests(_GuideCase):
         self.assertEqual([self.titles(m) for m in managers], [["New"], ["New"]])
         cache = os.path.dirname(managers[0]._index_file())
         self.assertEqual([f for f in os.listdir(cache) if f.endswith((".xml", ".download"))], [])
+
+
+class UrlGuideDateTests(_GuideCase):
+    """A URL guide is stored whatever its server says of its date (pre-existing: without a
+    Last-Modified header the store raised ValueError, and the guide was never kept)."""
+
+    def serve(self, last_modified):
+        """Serve one guide on 127.0.0.1 with `last_modified` (None: no such header) as the
+        URL guide; returns the requests it gets."""
+        body, seen = xmltv("Served"), []
+
+        class Guide(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/xml")
+                self.send_header("Content-Length", str(len(body)))
+                if last_modified is not None:
+                    self.send_header("Last-Modified", last_modified)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Guide)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.config.epg_source = "URL"
+        self.config.epg_url = f"http://127.0.0.1:{server.server_port}/guide.xml"
+        return seen
+
+    def stored_date(self, manager):
+        manager_key = _cache_key(self.config.epg_url)
+        self.assertTrue(os.path.exists(manager._guide_path(manager_key)))
+        return datetime.strptime(manager.index[manager_key]["date"], _INDEX_TIME_FORMAT)
+
+    def assert_download_time(self, date):
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        self.assertLess(abs(date - now), timedelta(minutes=1))
+
+    def test_a_guide_from_a_server_without_last_modified_is_stored(self):
+        seen = self.serve(None)
+        manager = self.manager()
+        manager.set_current_epg()
+        self.assertEqual(self.titles(manager), ["Served"])
+        self.assert_download_time(self.stored_date(manager))  # in UTC, as Last-Modified is
+        again = self.manager()  # the next start reads the saved guide
+        again.set_current_epg()
+        self.assertEqual(self.titles(again), ["Served"])
+        self.assertEqual(seen, ["/guide.xml"])
+
+    def test_an_unreadable_last_modified_is_taken_as_the_download_time(self):
+        self.serve("yesterday")
+        manager = self.manager()
+        manager.set_current_epg()
+        self.assertEqual(self.titles(manager), ["Served"])
+        self.assert_download_time(self.stored_date(manager))
+
+    def test_the_servers_last_modified_is_the_guides_date(self):
+        self.serve("Sun, 18 Oct 2026 02:00:00 GMT")
+        manager = self.manager()
+        manager.set_current_epg()
+        self.assertEqual(self.stored_date(manager), datetime(2026, 10, 18, 2, 0, 0))
 
 
 if __name__ == "__main__":

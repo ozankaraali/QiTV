@@ -2139,6 +2139,29 @@ class OptionsDialogTests(WindowCase):
         expected = sum(f.stat().st_size for f in cache.rglob("*") if f.is_file()) / (1024 * 1024)
         self.assertAlmostEqual(self.dialog().get_cache_size(), expected, places=3)
 
+    def test_an_edit_that_keeps_the_connection_reloads_nothing_and_the_list_stays(self):
+        # Polish: one provider, only its stream limit changed. Its cache was cleared, its
+        # channels downloaded again, and the open drawer jumped back to live.
+        self.show()
+        drawer = self.wait_for_drawer()
+        QTest.keyClick(self.window, Qt.Key.Key_Return)  # into the highlighted group (All)
+        nav = self.window.nav
+        self.assertTrue(wait_until(lambda: [n.layer for n in nav.path][-1:] == ["group"]))
+        path = nav.path
+        catalog = self.tv_catalog()
+        cache = catalog.provider_manager._provider_cache_name(PROVIDER_NAME)
+        dialog = self.dialog()
+        dialog.max_streams_input.setValue(2)
+        with mock.patch.object(catalog, "select_provider", wraps=catalog.select_provider) as setup:
+            dialog.save_settings()
+            QTest.qWait(200)  # a setup would have finished by now
+        setup.assert_not_called()
+        self.assertTrue(os.path.exists(cache))
+        self.assertEqual(nav.path, path)
+        self.assertTrue(drawer.isVisible())
+        self.assertEqual(self.provider_manager.providers[0]["max_streams"], 2)
+        self.assertEqual(catalog.current_provider()["max_streams"], 2)  # the budget reads it
+
     def test_an_epg_change_reloads_the_guide_in_the_background(self):
         dialog = self.dialog()
         dialog.epg_url_input.setText("http://epg.invalid/guide.xml")

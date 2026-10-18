@@ -795,6 +795,19 @@ class LibraryPlayTests(PipCase):
         self.assertEqual(self.watch.positions[-1], (cid, 590_000, 600_000))
         self.assertEqual(self.transport.calls[-1], ("update_position", 590_000, 600_000))
 
+    def test_a_movie_swapped_small_shows_its_title_without_live_wording(self):
+        # Polish: the label used live wording ("Connecting…") for the film playing small.
+        self.start_large(0)
+        self.play_from_library()
+        self.assertEqual(self.small_title(), "One")  # the channel kept small
+        self.controller.handle(Action.SWAP)  # the channel large, the film small
+        self.assertEqual(self.label.info, (MOVIE["name"], ""))
+        self.pip_session.positionChanged.emit(61_000, 600_000)
+        self.assertEqual(self.label.info, (MOVIE["name"], ""))
+        self.controller.handle(Action.SWAP)  # the film large again
+        self.assertEqual(self.small_title(), "One")
+        self.assertNotEqual(self.label.info[1], "")  # the channel's state again
+
     def shown_controls(self):
         shows = ("show_vod", "show_live", "show_timeshift")
         return [call[0] for call in self.transport.calls if call[0] in shows][-1]

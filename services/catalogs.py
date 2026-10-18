@@ -295,12 +295,28 @@ class Catalogs(QObject):
 
     def _renew(self, name: str, spec: dict) -> None:
         """Set provider `name` up again with its edited settings: its pinned manager reads
-        the new entry, and a link asked meanwhile waits for the new sign-in."""
+        the new entry, and a link asked meanwhile waits for the new sign-in. An edit that
+        keeps the connection (only the stream limit, say) loads nothing again: the lists
+        stay where they are and the manager holds the new entry."""
         self._specs[name] = dict(spec)
+        manager = self._by_name[name].provider_manager
+        if self._same_connection(manager, spec):
+            if manager.current_provider.get("name") == name:
+                manager.current_provider = spec  # the list's entry, as a setup takes it
+            return
         self._ready.discard(name)
         self.select(name, force_refresh=True)
         if name not in self._ready:  # a runner may finish the setup at once
             self._renewing.add(name)
+
+    @staticmethod
+    def _same_connection(manager: ProviderManager, spec: dict) -> bool:
+        """Whether the lists the provider's catalog holds came over the edited entry's
+        connection: the cache identity Settings compares to decide its own refresh."""
+        metadata = manager.current_provider_content.get("_cache")
+        if not isinstance(metadata, dict):
+            return False  # nothing loaded (or a cache from before identities): load again
+        return bool(metadata.get("identity") == manager.provider_cache_identity(spec))
 
     def _drop(self, name: str) -> None:
         catalog = self._by_name.pop(name)

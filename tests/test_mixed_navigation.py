@@ -17,11 +17,14 @@ from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
 from services.catalogs import Catalogs
 from services.jobs import ImmediateRunner
+from services.m3u import parse_m3u
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE, mixed_group_id, provider_of
 from services.zapping import ZapContext
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import Drawer
+
+EMPTY_LIST = {"type": "M3UPLAYLIST", "name": "Empty list", "url": "http://127.0.0.1:9/empty.m3u"}
 
 
 def demo_content() -> dict:
@@ -358,6 +361,45 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual([n.layer for n in rows], ["notice"])
         self.assertNotEqual(rows[0].title, "Loading…")
         self.assertIn("Demo TV", [n.title for n in nav.children(nav.path[1])])
+
+    def test_a_playlist_without_channels_set_up_after_another_failed_shows_no_loading_row(self):
+        # Polish: Harbor's failure (first) forgot that the playlist had refused the live
+        # list while it set up; it was never asked again and said "Loading…" for good.
+        runner = HeldSetups("Harbor IPTV", "Empty list")
+        _config, _view, nav = self.build([HARBOR, EMPTY_LIST], {}, runner)
+        self.factory.fail_setup("Harbor IPTV", "Portal down")
+        self.factory.m3u = lambda *args: FakeWorker(parse_m3u("#EXTM3U\n", categorize=True))
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        QTest.qWait(10)
+        runner.release("Harbor IPTV")
+        QTest.qWait(10)
+        self.assertEqual([n.title for n in self.rows_under(nav, "Empty list")], ["Loading…"])
+        runner.release("Empty list")  # set up: its playlist has no channels
+        QTest.qWait(10)
+        self.assertEqual(self.rows_under(nav, "Empty list"), [])
+        self.assertEqual([n.layer for n in self.rows_under(nav, "Harbor IPTV")][:1], ["notice"])
+
+    def test_a_provider_set_up_while_anothers_list_downloads_is_asked_for_its_own(self):
+        # Polish: the second setup ended while the first provider's list was on its way;
+        # nothing asked it for its list, and its heading said "Loading…" for good.
+        runner = HeldSetups("Demo TV", "Empty list")
+        _config, _view, nav = self.build([DEMO, EMPTY_LIST], {}, runner)
+
+        def playlist(url, *args):
+            if url == DEMO["url"]:
+                runner.release("Empty list")  # its setup ends meanwhile
+                return FakeWorker(demo_content())
+            return FakeWorker(parse_m3u("#EXTM3U\n", categorize=True))
+
+        self.factory.m3u = playlist
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        QTest.qWait(10)
+        runner.release("Demo TV")
+        QTest.qWait(10)
+        self.assertEqual(self.rows_under(nav, "Empty list"), [])
+        self.assertIn("News", [n.title for n in nav.children(nav.path[1])])
 
     @staticmethod
     def rows_under(nav, provider):
