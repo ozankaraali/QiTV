@@ -60,6 +60,7 @@ _SETTLE = 0.2  # a chosen speed catching up ends this close to the target
 _REOPEN = 20.0
 _HEALTH_WINDOW_S = 3.0  # rate health: VLC's progress is judged over this much counted time
 _HEALTH_SHARE = 0.7  # under this share of rate x wall time, VLC cannot play at that rate
+_HEALTH_PIECES = 2  # a window holds at least this many stretches (each up to a step of VLC's)
 _AUTO_UP = 1.5  # Auto: a starvation or a stall raises the channel's target this much
 _AUTO_DOWN = 0.5  # and each _AUTO_QUIET_S without one lowers it this much
 _AUTO_QUIET_S = 300.0
@@ -128,10 +129,12 @@ class RateHealth:
 
     The caller adds only time that says something about the rate: at a rate other than 1x,
     with VLC playing and media ahead of it (a VLC waiting at the live edge is starved, not
-    slow). Each window of `window_s` counted seconds (default `_HEALTH_WINDOW_S`) is judged on
-    its own; `share` is the last window's progress against what its rates asked. The verdict
-    needs `windows` bad windows in a row (a healthy one starts the count again; a new window
-    after an open keeps it).
+    slow), in stretches that end at a step of VLC's clock (2.1 stage 2). Each window of
+    `window_s` counted seconds (default `_HEALTH_WINDOW_S`) and at least `_HEALTH_PIECES`
+    stretches (so at least two of VLC's steps, on a channel whose clock steps every 2 s) is
+    judged on its own; `share` is the last window's progress against what its rates asked.
+    The verdict needs `windows` bad windows in a row (a healthy one starts the count again; a
+    new window after an open keeps it).
     """
 
     def __init__(self, window_s: float = _HEALTH_WINDOW_S, *, windows: int = 1) -> None:
@@ -144,6 +147,7 @@ class RateHealth:
     def reset(self) -> None:
         """Start a new window (the stream was opened again, say)."""
         self._wall = self._asked = self._played = 0.0
+        self._pieces = 0
 
     def add(self, wall: float, played: float, rate: float) -> bool:
         """`wall` seconds at `rate` in which VLC played `played` seconds of media.
@@ -154,7 +158,8 @@ class RateHealth:
         self._wall += wall
         self._asked += wall * rate
         self._played += played
-        if self._wall < self._window - 1e-9:
+        self._pieces += 1
+        if self._wall < self._window - 1e-9 or self._pieces < _HEALTH_PIECES:
             return False
         self.share = self._played / self._asked if self._asked > 0 else 1.0
         self.reset()

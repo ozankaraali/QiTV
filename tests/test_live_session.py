@@ -239,8 +239,11 @@ class Feed:
     clock stands still while it says Playing; the 2.0.2 review's model). While
     `stalled` the source sends nothing: the edge stands still and no state arrives. With
     `sizes` (an iterator) each arrival brings the next size instead of `burst` seconds, at
-    the same rhythm (a public HLS channel: 6 s every 7 s, every sixth time 12 s).
-    LiveSession ticks every 0.25 s.
+    the same rhythm (a public HLS channel: 6 s every 7 s, every sixth time 12 s). With `pcr`
+    VLC's get_time() moves only at the stream's timestamps, one each `pcr` seconds of media
+    (2.1 stage 2, measured on sparse-PCR HLS channels: 2000 ms steps every 2 s); with
+    `speed` VLC plays at that share of the rate set when it is not 1x, with `speed_1x` at 1x
+    (a real crawl, on that clock). LiveSession ticks every 0.25 s.
     """
 
     DT = 0.05
@@ -263,12 +266,16 @@ class Feed:
         crawl_1x=False,
         hls=False,
         recover=0.0,
+        pcr=0.0,
+        speed=1.0,
+        speed_1x=1.0,
     ):
         self.case, self.sid, self.burst, self.gop = case, sid, burst, gop
         self.crawl, self.crawled = crawl, 0.0  # wall seconds at another rate since a step
         self.crawl_1x = crawl_1x
         self.hls = hls
         self.recover, self.frozen_until, self.dry, self.recoveries = recover, -1.0, False, 0
+        self.pcr, self.speed, self.speed_1x = pcr, speed, speed_1x
         self.meter = worker.BurstMeter() if metered else None
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
         self.jitter, self.rng = jitter, random.Random(seed)
@@ -327,7 +334,7 @@ class Feed:
                 PlaybackState.BUFFERING,
             ):
                 rate = (playback.rates or [1.0])[-1]
-                wanted = rate * self.DT
+                wanted = rate * self.DT * (self.speed_1x if rate == 1.0 else self.speed)
                 if (self.crawl and rate != 1.0) or self.crawl_1x:
                     every, media = self.CRAWL
                     self.crawled += self.DT
@@ -350,7 +357,10 @@ class Feed:
                     playback.set_state(state)
                 self.position += advance
                 self.media += advance
-                playback.ms = round(self.media * 1000)
+                stamp = self.media
+                if self.pcr > 0:
+                    stamp = math.floor(self.media / self.pcr + 1e-9) * self.pcr
+                playback.ms = round(stamp * 1000)
             if now >= self.next_tick - 1e-9:
                 self.next_tick += 0.25
                 case.live._tick()
@@ -1568,7 +1578,9 @@ class RateHealthTests(LiveSessionCase):
             rates = list(self.playback.rates)
             self.assertEqual((rates[0], rates[-1], changes(rates)), (0.9833, 1.0, 2))
             slowed = [state for state in self.timelines if state["rate"] != 1.0]
-            self.assertLessEqual(len(slowed) * 0.25, 3.0 + 0.25)  # its first 3 s window
+            # Its first 3 s window (2.1 stage 2: ending with a step of VLC's clock, or once
+            # it stood still past its hold).
+            self.assertLessEqual(len(slowed) * 0.25, 3.0 + 0.5)
             feed.run(120.0)
         self.assertEqual(self.playback.rates, rates)  # never changed again
         self.assertEqual(len(self.playback.plays), 1)  # and no jump to live
@@ -1694,7 +1706,7 @@ class CrawlFallbackTests(LiveSessionCase):
     def test_an_hls_channel_that_crawls_at_1x_plays_directly_once(self):
         feed = self.tune(crawl_1x=True)
         sid = self.engine.last_sid
-        feed.run(30.0)
+        feed.run(36.0)  # (2.1 stage 2: windows end at a step of VLC's clock, 2 s apart here)
         # Its nudge crawled first: 1x for good (rate health), and it still crawled at 1x.
         self.assertEqual(self.playback.rates[-1], 1.0)
         self.assertIn(sid, self.engine.closed)  # the pipeline's upstream closes first
@@ -2144,7 +2156,11 @@ class PositionTests(LiveSessionCase):
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(0.25)
         self.step(0.25, media=0.3)
-        self.assertAlmostEqual(self.live.position(), 10.55)
+        # 2.1 stage 2: a clock at the rate, moved half way to each new reading of VLC's.
+        self.assertAlmostEqual(self.live.position(), 10.525)
+        for _ in range(8):
+            self.step(0.25)
+        self.assertAlmostEqual(self.live.position(), 10.55 + 2.0, delta=0.001)
 
     def test_a_vlc_time_jump_falls_back_to_wall_clock(self):
         # Stable's 6 s target: stay-live leaves the rate alone at this lag.
@@ -2174,6 +2190,118 @@ class PositionTests(LiveSessionCase):
         self.playback.set_state(PlaybackState.PAUSED)
         self.step(30.0, media=0)
         self.assertEqual(self.live.position(), 0.0)
+
+
+class SparseClockTests(LiveSessionCase):
+    """2.1 stage 2, measured on two public sparse-PCR HLS channels: VLC's get_time() stands
+    still and steps by 2000 ms every 2 s. The old position rule took each step for a jump and
+    counted a tick's wall time instead (0.09-0.16 of what VLC played): the lag read far too
+    high (false catch-ups, a reopen at live every ~22 s), rate health saw a crawl and locked
+    1x within seconds, the crawl check played the channel directly, and VLC's clock counted as
+    frozen (starved) between its steps."""
+
+    def setUp(self):
+        super().setUp()
+        self.live = self.make(tuning=LiveTuning(None))
+
+    def tune(self, *, edge=12.0, burst=6.0, **kwargs):
+        sid = self.start(latency=AUTO, channel="A")
+        return Feed(self, sid, burst=burst, edge=edge, hls=True, pcr=2.0, **kwargs).ready()
+
+    def errors(self, feed, seconds):
+        """The position less VLC's real one at every tick for `seconds`."""
+        out = []
+        for _ in range(round(seconds / 0.25)):
+            feed.run(0.25)
+            out.append(self.live.position() - feed.position)
+        return out
+
+    def test_the_position_follows_vlc_between_its_steps(self):
+        feed = self.tune(edge=8.0)  # within its band of a 6 s target: nothing to steer
+        feed.run(10.0)
+        errors = self.errors(feed, 120.0)
+        self.assertLess(max(abs(e) for e in errors), 0.5)
+        self.assertLess(abs(sum(errors) / len(errors)), 0.25)
+        self.assertEqual(self.playback.rates, [])  # no false catch-up
+        self.assertEqual(len(self.playback.plays), 1)  # and no reopen at live
+
+    def test_a_channel_at_its_target_is_left_alone_for_minutes(self):
+        feed = self.tune(edge=8.0)
+        feed.run(300.0)
+        self.assertLessEqual(changes(self.playback.rates), 2)
+        self.assertEqual(len(self.playback.plays), 1)
+        self.assertFalse(self.live._stay.rate_locked)
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertEqual(self.notices, [])
+        self.assertEqual(self.live._tuning.get("A"), Tuning())
+
+    def test_a_seek_back_and_go_live_start_the_clock_at_their_segment(self):
+        feed = self.tune(edge=30.0, burst=2.0)
+        feed.run(20.0)
+        for action in ("back", "live"):
+            with self.subTest(action=action):
+                plays = len(self.playback.plays)
+                if action == "back":
+                    self.live.seek_relative(-20.0)
+                else:
+                    self.live.go_live()
+                feed.sync()
+                self.assertEqual(len(self.playback.plays), plays + 1)
+                errors = self.errors(feed, 20.0)
+                self.assertLess(max(abs(e) for e in errors), 0.5)
+                self.assertEqual(len(self.playback.plays), plays + 1)  # nothing more opened
+
+    def test_vlcs_clock_is_frozen_only_well_past_its_steps(self):
+        feed = self.tune(edge=8.0)
+        feed.run(10.0)
+        frozen = []
+        for _ in range(80):
+            feed.run(0.25)
+            frozen.append(self.live._clock_frozen())
+        self.assertFalse(any(frozen))  # never between its 2 s steps
+        while self.playback.ms == round(feed.media * 1000):  # until just after a step
+            feed.run(0.25)
+        for _ in range(8):
+            if self.playback.ms != round(feed.media * 1000):
+                break
+            feed.run(0.25)
+        feed.speed_1x = 0.0  # VLC stands still while it says Playing
+        waited = 0.0
+        while not self.live._clock_frozen() and waited < 10.0:
+            feed.run(0.25)
+            waited += 0.25
+        self.assertGreater(waited, 2.0)  # not at its own interval ...
+        self.assertLessEqual(waited, 1.5 * 2.0 + 0.25 + 0.5)  # ... but soon after it
+
+    def test_a_catch_up_on_a_two_second_clock_is_not_taken_for_a_crawl(self):
+        feed = self.tune(edge=20.0, burst=2.0)  # 18 s behind a 2.5 s target: 1.10x
+        feed.run(200.0)
+        self.assertEqual(max(self.playback.rates), 1.10)
+        self.assertFalse(self.live._stay.rate_locked)
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertLess(self.timelines[-1]["lag"], TARGETS["normal"] + 1.5)
+
+    def test_a_real_crawl_on_a_two_second_clock_still_locks_1x(self):
+        feed = self.tune(edge=20.0, burst=2.0, speed=0.6)
+        feed.run(20.0)
+        self.assertTrue(self.live._stay.rate_locked)
+        self.assertEqual(self.playback.rates[-1], 1.0)
+        self.assertEqual(self.modes, ["pipeline"])  # at 1x it plays as it should
+
+    def test_the_crawl_check_leaves_a_healthy_two_second_clock_alone(self):
+        feed = self.tune()
+        feed.run(120.0)
+        self.assertEqual(self.modes, ["pipeline"])
+        self.assertNotIn(CrawlFallbackTests.CRAWLING, self.notices)
+        self.assertFalse(self.live._tuning.get("A").direct)
+
+    def test_a_real_crawl_at_1x_on_a_two_second_clock_still_plays_directly(self):
+        feed = self.tune(edge=8.0, speed=0.6, speed_1x=0.6)
+        feed.run(60.0)
+        self.engine.answer()
+        self.assertEqual(self.modes[-1], "direct")
+        self.assertEqual(self.notices, [CrawlFallbackTests.CRAWLING])
+        self.assertTrue(self.live._tuning.get("A").direct)
 
 
 class InterruptionTests(LiveSessionCase):
