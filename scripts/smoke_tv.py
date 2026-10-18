@@ -20,7 +20,8 @@ Channel 3 of the playlist, and the app has time-shift consent (its buffer on dis
 to it: it must play from the loopback stream; a 4 s pause leaves it at least 3 s behind live;
 L (Go live) is live within 6 s, at most target + 0.75 s (stay-live's band) + the newest
 segment's length (the starts it can land on are a segment apart) + 0.5 s (VLC's open) behind,
-and at the end of the 6 s stay-live is closing in (rate above 1x) or inside the band; ← moves
+and at the end of the 6 s it holds there or closes in (2.1's stay-live keeps 1x inside its dead
+band and nudges only after 15 s outside it: not drifting away is enough); ← moves
 the position back 8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live;
 then Down zaps to Channel 4 (a second such source) and Up back to Channel 3 as soon as
 Channel 4's upstream delivers: each source, and both together, never had more than one
@@ -197,6 +198,7 @@ FRESH_TIMELINE_MS = 2_000  # LiveSession emits its timeline every 250 ms
 GO_LIVE_MS = 6_000
 GO_LIVE_BAND_S = 0.75  # the top of stay-live's band above the target
 GO_LIVE_OPEN_S = 0.5  # VLC opening the reopened stream
+GO_LIVE_HOLD_S = 0.5  # how far the lag may rise after landing (VLC's position jitters)
 HISTORY_S = 14.0  # buffered behind the position before the seek: 10 s back stays inside it
 HISTORY_TIMEOUT_MS = 20_000
 SEEK_BACK = (8.0, 12.0)  # seconds the position may move back for ← (10 s, segment-aligned)
@@ -211,7 +213,7 @@ TUNED_CHECK = f"{PIPELINE_PREFIX}{LIVE_CHANNEL} plays from the loopback time-shi
 ON_DISK_CHECK = f"{PIPELINE_PREFIX}its buffer is on disk in the timeshift directory"
 PAUSE_CHECK = f"{PIPELINE_PREFIX}a 4 s pause leaves it at least 3 s behind live"
 GO_LIVE_CHECK = (
-    f"{PIPELINE_PREFIX}Go live is live within 6 s, at most a segment past the band, and closing in"
+    f"{PIPELINE_PREFIX}Go live is live within 6 s, at most a segment past the band, and holding"
 )
 SEEK_CHECK = f"{PIPELINE_PREFIX}seeking back 10 s moves the position back 8-12 s"
 SPEED_CHECK = f"{PIPELINE_PREFIX}1.5x is applied while time-shifted"
@@ -1427,7 +1429,7 @@ class Driver:
         self._capture(PIPELINE_SCREENSHOTS[0])  # Space shows the transport: the time-shift bar
 
         # 4. Go live (L): live within 6 s, at most a segment past stay-live's band (plus VLC's
-        # open), and closing in by the end of the 6 s. VLC's position jitters by about half a
+        # open), and still there or closer by the end of the 6 s. VLC's position jitters by about half a
         # second, so the lag is judged against bounds, not step by step.
         report.step("pipeline 4. Go live")
         pressed = time.monotonic()
@@ -1534,7 +1536,17 @@ class Driver:
             ((t, s) for t, s in window if s["mode"] == "live" and s["lag"] <= bound), None
         )
         last_t, last = window[-1]
-        closing = last["rate"] > 1.0 or last["lag"] <= target + GO_LIVE_BAND_S
+        # Closing in, inside the band, or holding where it landed (2.1: 1x inside the dead band,
+        # a nudge only after 15 s outside it): never drifting away from live.
+        closing = (
+            last["rate"] > 1.0
+            or last["lag"] <= target + GO_LIVE_BAND_S
+            or (
+                landed is not None
+                and last["lag"] <= bound
+                and last["lag"] <= landed[1]["lag"] + GO_LIVE_HOLD_S
+            )
+        )
         lags = [round(float(s["lag"]), 3) for _, s in window]
         lowest = min(lags)
         facts["go_live"] = {
@@ -1562,7 +1574,7 @@ class Driver:
         detail = (
             f"{arrived} ({bounds}); min lag {lowest:.3f}; after {last_t:.2f} s lag "
             f"{last['lag']:.3f}, rate {last['rate']}, mode {last['mode']}"
-            f"{'' if closing else ' (not closing in)'}; lags: {lags}"
+            f"{'' if closing else ' (drifting away)'}; lags: {lags}"
         )
         return landed is not None and closing, detail
 
