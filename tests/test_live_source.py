@@ -1275,6 +1275,62 @@ high.m3u8
                 timer.join()
                 self.assertEqual(requested_segments(server), names[first:])
 
+    def test_hls_says_whether_its_playlist_is_finished_and_which_segments_came_whole(self):
+        # Review I1: a finished (ENDLIST) playlist plays from its beginning; I3: a segment
+        # that failed leaves the backlog, and the media/EXTINF ratio counts whole ones only.
+        names = ["a.ts", "b.ts", "c.ts"]
+        routes = {"/a.ts": (200, {}, self.video), "/c.ts": (200, {}, self.video)}
+        routes["/b.ts"] = (404, {}, b"Not found")
+        for ended in (True, False):
+            with self.subTest(ended=ended):
+                routes["/live.m3u8"] = (200, {}, hls(0, names, target=2, ended=ended))
+                server = self.server(dict(routes))
+                stop = threading.Event()
+                timer = threading.Timer(0.5, stop.set)  # before the first reload
+                timer.start()
+                source = open_source(
+                    server.url + "/live.m3u8",
+                    headers={},
+                    verify_ssl=True,
+                    stop=stop,
+                    live_delay=100.0,
+                )
+                seen = []
+                try:
+                    for item in source.chunks():
+                        if isinstance(item, bytes):
+                            seen.append((source.segment_serial, source.last_whole))
+                finally:
+                    source.close()
+                    timer.join()
+                self.assertIs(source.finite, ended)
+                self.assertEqual(seen[0], (1, None))  # a.ts is under way
+                self.assertEqual(seen[-1], (3, (1, 2.0)))  # c.ts: a.ts came whole, b.ts not
+                self.assertEqual(source.segment_s, 0.0)
+
+    def test_a_failed_segment_leaves_the_backlog(self):
+        names = ["a.ts", "b.ts"]
+        routes = {"/a.ts": (200, {}, self.video), "/b.ts": (404, {}, b"Not found")}
+        routes["/live.m3u8"] = (200, {}, hls(0, names, target=2, ended=True))
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        failed = []
+        real_skip = source._skip
+
+        def skip(*args, **kwargs):
+            real_skip(*args, **kwargs)
+            failed.append((source.segment_serial, source.segment_s))
+
+        source._skip = skip
+        try:
+            for _ in source.chunks():
+                pass
+        finally:
+            source.close()
+        self.assertEqual(failed, [(2, 0.0)])
+
     def test_live_hls_says_how_much_listed_media_is_still_to_come(self):
         # 2.1 stage 3: the helper predicts the live edge once the backlog fetched at the
         # start has arrived, so the start need not wait for all of it.

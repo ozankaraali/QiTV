@@ -34,8 +34,9 @@ shown: in half seconds, changed only after it differed for `_SHOWN_HOLD_S`.
 A stream opened at the start Go live picks (2.1 stage 3: a tune, Go live, a reopen at live;
 the caller says so with `landed()`) lands where the source's keyframes allow. Above the
 target by up to a keyframe interval (one provider's 4K channel has one every 10 s) is no
-drift: far behind and the reopen at live count from that landing (`_floor`, which follows the
-lag down as a nudge takes it off), so it gets a gentle nudge, not 1.10x. Short of the target
+drift: for `_START_S` of playing, far behind and the reopen at live count from that landing
+(`_floor`, which follows the lag down as a nudge takes it off), so it gets a gentle nudge,
+not 1.10x; after that, as ever (a reconnect's backlog later is drift). Short of the target
 (nothing further back was buffered, or a raw TS source's bursts were measured after the start
 and raised the target) within `_START_S` of playing, the room is built once, at `_GENTLE_DOWN`
 for at most `_START_BUILD_S` of playing, outside the budget; what is still short then is accepted (no
@@ -448,6 +449,7 @@ class StayLive:
         self._short_for = 0.0  # seconds the lag was short of the target since then
         self._uncharged: Optional[float] = None  # a cut catch-up's end, while it may count
         self._floor = 0.0  # how far above the target the last landing was (see landed())
+        self._landing = 0.0  # seconds of playing left in which that floor holds
         self._start = 0.0  # seconds of playing in which a shortfall is the start's
         self._accepting = False  # the start's build ran: what is still short is accepted
 
@@ -492,14 +494,22 @@ class StayLive:
         """A stream opened at the start Go live picks (after `user_go_live()` for a Go live):
         its mean lag lands `excess` seconds above the target (below it when negative).
 
-        Above it, far behind (1.10x) and the reopen at live count from there, and follow the
-        lag down: the landing a keyframe interval allowed is taken off by a gentle nudge.
-        Short of it, or should the target rise within `_START_S` of playing, the room is built
-        once at `_GENTLE_DOWN` for at most `_START_BUILD_S`, then the rest is accepted.
+        Above it, for `_START_S` of playing, far behind (1.10x) and the reopen at live count
+        from there, following the lag down: the landing a keyframe interval allowed is taken
+        off by a gentle nudge. Short of it, or should the target rise within `_START_S` of
+        playing, the room is built once at `_GENTLE_DOWN` for at most `_START_BUILD_S`, then
+        the rest is accepted.
         """
         self._floor = max(0.0, excess)
-        self._start = _START_S
+        self._start = self._landing = _START_S
         self._accepting = False
+
+    def landed_further(self, excess: float) -> None:
+        """A backlog step right after a start took the lag `excess` above the target: within
+        the landing's window it is part of the landing (raw TS whose backlog came after the
+        start was held), not drift. Nothing else of the start changes."""
+        if self._landing > 0:
+            self._floor = max(self._floor, excess)
 
     def trouble(self) -> None:
         """VLC ran out of room: a starvation, or a stall, that ran out the cushion (Auto may have
@@ -520,7 +530,10 @@ class StayLive:
     def user_seeked_back(self) -> None:
         self._leave_live()
 
-    def user_go_live(self) -> None:
+    def user_go_live(self, *, keep_landing: bool = False) -> None:
+        """Back to LIVE at 1x. A Go live that opens a stream says where it landed next
+        (`landed()`); `keep_landing`: it opened nothing (merged into stay-live's reopen a
+        moment before), so that stream's landing stays."""
         self.mode = Mode.LIVE
         self._rate = 1.0
         self._user_rate = 1.0
@@ -528,8 +541,9 @@ class StayLive:
         self._nudge = None
         self._owed = False  # the stream opens afresh at the target: nothing is owed
         self._uncharged = None
-        self._floor = self._start = 0.0  # its own landing follows (landed())
-        self._accepting = False
+        if not keep_landing:
+            self._floor = self._start = self._landing = 0.0  # its own landing follows
+            self._accepting = False
         self.absorb()
 
     def user_speed(self, rate: float) -> None:
@@ -568,11 +582,12 @@ class StayLive:
             return Decision(self._rate)
         self._floor = min(self._floor, max(0.0, lag_s - self._centre(1)))
         self._start = max(0.0, self._start - dt)
+        self._landing = max(0.0, self._landing - dt)
         if self._owed:  # VLC ran dry: the owed slow-down builds a start's shortfall, all of it
             self._start, self._accepting = 0.0, False
             if self._nudge is not None:
                 self._nudge.limit = None
-        if lag_s > self.target + _REOPEN + self._floor:
+        if lag_s > self.target + _REOPEN + self._landed():
             if self.hold_reopen:
                 return Decision(self._rate)  # the stream just opened: its lag comes first
             self._rate, self._nudge = 1.0, None
@@ -591,6 +606,11 @@ class StayLive:
         else:
             self._watch(dt, lag_s, now)
         return Decision(self._rate)
+
+    def _landed(self) -> float:
+        """What far behind and the reopen at live count from: the landing above the target,
+        while its window lasts (review R32: a backlog later is drift)."""
+        return self._floor if self._landing > 0 else 0.0
 
     def _budget_free(self, now: float) -> bool:
         return self._nudged_at is None or now - self._nudged_at >= _BUDGET_S - 1e-9
@@ -637,7 +657,7 @@ class StayLive:
         behind, ahead = lag - self._centre(1), lag - self._centre(-1)
         if self._accepting and ahead >= -self.band(-1):
             self._accepting = False  # back at the target: a later shortfall is a real one
-        far = behind > _FAR_S + self._floor  # a landing above the target is no drift
+        far = behind > _FAR_S + self._landed()  # a landing above the target is no drift
         short = ahead < -_BAND_S and self._short(lag) and not self._accepting
         under = short or (ahead < -self.band(-1) and not self._accepting)
         side = 1 if far or behind > self.band(1) else -1 if under else 0
@@ -682,7 +702,7 @@ class StayLive:
             nudge.left -= sign * (centre - nudge.target)
             nudge.target = centre
         error = lag - centre
-        if not nudge.ending and nudge.peak == _GENTLE_UP and error > _FAR_S + self._floor:
+        if not nudge.ending and nudge.peak == _GENTLE_UP and error > _FAR_S + self._landed():
             nudge.peak = _FAST  # far behind after all (a step)
         elif (
             not nudge.ending

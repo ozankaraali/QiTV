@@ -120,12 +120,15 @@ class FakeEngine(QObject):
         caught_up=None,
         end=None,
         backlog=None,
+        finite=False,
+        open_quality=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
         (HLS: every listed segment arrived) defaults to `hls`; `end` (where the open segment
         starts) to the closed spans' end, or 0.0; `backlog`, the listed media an HLS source
-        has still to deliver, is left out when None."""
+        has still to deliver, is left out when None; `finite`: a finished (ENDLIST) playlist;
+        `open_quality`: how cleanly the open segment starts."""
         end = spans[-1].end if spans else (end or 0.0)
         oldest = spans[0].seq if spans else open_seq
         self._spans[sid] = list(spans)
@@ -142,6 +145,8 @@ class FakeEngine(QObject):
             "hls": hls,
             "breaks": list(breaks),
             "caught_up": hls if caught_up is None else caught_up,
+            "finite": finite,
+            "open_quality": open_quality,
         }
         if backlog is not None:
             self._snapshots[sid]["backlog_s"] = backlog
@@ -335,12 +340,16 @@ class Feed:
             breaks=self.reported,
         )
 
-    def ready(self, late=True):
-        """`late`: the session starts at the oldest segment and the rest of `edge` lands right
-        after (see `LiveSessionCase.ready`); else all of it is there at ready."""
+    def ready(self, backlog_after_start=True):
+        """`backlog_after_start`: the session starts at the oldest segment and the rest of
+        `edge` lands after it, as drift (see `LiveSessionCase.ready`); else all of it is there
+        at ready."""
         burst = self.burst if self.meter is None else self.meter.burst_s
-        if late and self.case.ready_at_oldest(self.sid, 0, 0.0, self.edge, burst, self.hls):
-            self.push()  # the rest lands right after the start
+        case = self.case
+        if backlog_after_start and case.ready_at_oldest(
+            self.sid, 0, 0.0, self.edge, burst, self.hls
+        ):
+            self.push()  # the rest lands after the start
         else:
             self.case.engine.sessionReady.emit(self.sid)
         self.sync()
@@ -477,19 +486,27 @@ class LiveSessionCase(unittest.TestCase):
         return self.engine.last_sid if self.engine.opened else None
 
     def ready(
-        self, spans, *, live_edge=None, open_seq=None, burst=0.0, latency="normal", late=True
+        self,
+        spans,
+        *,
+        live_edge=None,
+        open_seq=None,
+        burst=0.0,
+        latency="normal",
+        backlog_after_start=True,
     ):
         """Start, and get ready with `spans` buffered (and an open segment after them).
 
-        `late` (the start most tests assume): the session starts at the oldest segment and
-        the rest lands right after it, a backlog its start was not held for. Ready then comes
-        with only that segment buffered, as far back as the target (2.1 stage 3 starts at the
-        target), and the rest follows. Without `late`, or when the oldest segment cannot be
-        that far back, all of it is buffered at ready and the start policy picks."""
+        `backlog_after_start` (the start most tests assume: they test stay-live from a lag,
+        not the start): the session starts at the oldest segment, and the rest lands after
+        it as drift (a reconnect's backlog, say), not as part of the start's landing. Ready
+        comes with only that segment buffered, as far back as the target (2.1 stage 3 starts
+        at the target), and the rest follows. Without it, or when the oldest segment cannot
+        be that far back, all of it is buffered at ready and the start policy picks."""
         sid = self.start(latency=latency)
         first = (spans[0].seq, spans[0].start) if spans else (open_seq, 0.0)
         limit = live_edge if live_edge is not None else (spans[-1].end if spans else 0.0)
-        early = late and first[0] is not None
+        early = backlog_after_start and first[0] is not None
         if early and self.ready_at_oldest(sid, *first, limit, burst):
             self.engine.buffer(sid, spans, live_edge=live_edge, open_seq=open_seq, burst=burst)
             return sid
@@ -508,6 +525,9 @@ class LiveSessionCase(unittest.TestCase):
             return False
         self.engine.buffer(sid, [], open_seq=seq, live_edge=edge, end=start, burst=burst, hls=hls)
         self.engine.sessionReady.emit(sid)
+        # What lands next is drift: the start's re-landing window (a backlog step within
+        # 10 s of it is part of the landing) is over.
+        live._reland_until = -math.inf
         return True
 
     def stream(self, sid, seq):
@@ -609,7 +629,9 @@ class StartTests(LiveSessionCase):
             with self.subTest(latency=latency):
                 self.live = self.make()
                 spans = segments(0, 1)
-                sid = self.ready(spans, live_edge=2.5, open_seq=1, latency=latency, late=False)
+                sid = self.ready(
+                    spans, live_edge=2.5, open_seq=1, latency=latency, backlog_after_start=False
+                )
                 url = self.engine.stream_url(sid, seq)  # 1 s and 3 s behind once playing
                 self.assertEqual(self.playback.plays, [(url, PlayKind.LIVE_PIPELINE, latency)])
 
@@ -630,7 +652,9 @@ class StartTests(LiveSessionCase):
         self.assertEqual(self.engine.closed, [])
 
     def test_stable_starts_at_its_target_when_the_buffer_holds_more(self):
-        sid = self.ready(segments(0, 6), live_edge=12.0, burst=6.0, latency="stable", late=False)
+        sid = self.ready(
+            segments(0, 6), live_edge=12.0, burst=6.0, latency="stable", backlog_after_start=False
+        )
         # A burst just landed: from 2.0 the mean lag is 7.5 s once playing, from 4.0 5.5 s.
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 1))
 
@@ -816,13 +840,15 @@ class StartPolicyTests(LiveSessionCase):
         # Once VLC opened them (0.5 s): 19, 12, 5 and 2.4 s behind, the last one 0.1 s
         # short of the 2.5 s target, which counts as at it.
         spans = [Span(0, 1.5, 8.5, False), Span(1, 8.5, 15.5, False), Span(2, 15.5, 18.1, False)]
-        sid = self.ready(spans, live_edge=20.0, open_seq=3, late=False)
+        sid = self.ready(spans, live_edge=20.0, open_seq=3, backlog_after_start=False)
         self.assertEqual(self.playback.plays, [self.stream(sid, 3)])
         self.assertEqual(self.live.position(), 18.1)
         self.assertAlmostEqual(self.landed.call_args.args[1], -0.1)
 
     def test_never_the_oldest_backlog_when_a_start_nearer_the_target_exists(self):
-        sid = self.ready([Span(0, 1.5, 11.5, False)], live_edge=20.0, open_seq=1, late=False)
+        sid = self.ready(
+            [Span(0, 1.5, 11.5, False)], live_edge=20.0, open_seq=1, backlog_after_start=False
+        )
         self.assertEqual(self.playback.plays, [self.stream(sid, 1)])
         self.assertAlmostEqual(self.landed.call_args.args[1], 9.0 - 2.5)
 
@@ -898,8 +924,119 @@ class StartPolicyTests(LiveSessionCase):
         for _ in range(12):  # 3 s: the open segment (8.0) is 13.5 s behind 24.0, the newest
             self.step(0.25)
         self.assertEqual(self.playback.plays, [])
+        self.assertEqual(self.notices, [LOADING])  # after a second
+        # 14.0 would be 7 s behind 24.0, but a segment or less is still to come: a wrong
+        # EXTINF or a missing segment could move it (review I3), so it waits for it.
         self.engine.buffer(sid, segments(0, 9), live_edge=18.0, open_seq=9, backlog=6.0, **hls)
+        self.assertEqual(self.playback.plays, [])
+        hls["caught_up"] = True
+        self.engine.buffer(sid, segments(0, 11), live_edge=24.0, open_seq=11, **hls)
         self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 7))  # 14.0: 7 s
+        self.assertEqual(self.notices, [LOADING])
+
+    def test_hls_takes_a_start_inside_stay_lives_band_at_once(self):
+        # Review M9: a start already within the band is not held for a nearer one.
+        sid = self.start(latency=AUTO)
+        hls = {"burst": 7.0, "hls": True, "caught_up": False}
+        self.engine.buffer(sid, [], open_seq=0, backlog=24.0, **hls)
+        self.engine.sessionReady.emit(sid)
+        # From 14.0 (the open segment, the newest): 7 s behind 24.0, the target.
+        self.engine.buffer(sid, segments(0, 7), live_edge=16.0, open_seq=7, backlog=8.0, **hls)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 7))
+        self.assertAlmostEqual(self.landed.call_args.args[1], 0.0)
+
+    def test_a_finished_playlist_fetched_at_once_plays_from_its_beginning(self):
+        # Review I1: a 60 s clip (ENDLIST) played its last 4 s.
+        sid = self.start(latency=AUTO)
+        clip = {"burst": 2.0, "hls": True, "finite": True}
+        self.engine.buffer(sid, segments(0, 30), live_edge=60.0, **clip)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 0))
+        self.assertFalse(self.landed.called)  # nothing live to land near
+
+    def test_a_finished_playlist_still_downloading_plays_from_its_beginning_at_once(self):
+        # Review I1: a long one waited the whole ready timeout, then started at the newest
+        # segment fetched, with a landing an hour above the target.
+        sid = self.start(latency=AUTO)
+        clip = {"burst": 2.0, "hls": True, "finite": True, "caught_up": False, "backlog": 0.0}
+        self.engine.buffer(sid, segments(0, 3), live_edge=6.5, open_seq=3, **clip)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 0))
+        self.assertFalse(self.landed.called)
+        self.assertEqual(self.notices, [])
+
+    def test_an_ended_input_plays_from_the_oldest_segment(self):
+        sid = self.start()
+        self.engine.sessionEnded.emit(sid)
+        self.engine.buffer(sid, segments(0, 10), live_edge=20.0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 0))
+
+    def test_the_tune_prefers_a_keyframe_start(self):
+        # Review M6 (5a's start qualities): a cut without a keyframe (a forced one) starts
+        # broken; a keyframe 2 s further back first, an intra picture after it.
+        cases = (
+            (("none", "key"), 8),  # 16.0 (4.5 s behind) over 18.0 (2.5 s), a forced cut
+            (("none", "open"), 8),  # an intra picture before no keyframe at all
+            (("open", "key"), 8),  # a keyframe before an intra picture
+            (("none", "none"), 9),  # nothing better far enough back: the target's
+        )
+        for (newest, older), seq in cases:
+            with self.subTest(newest=newest, older=older):
+                self.live = self.make()
+                spans = [Span(k, 2.0 * k, 2.0 * k + 2.0, False, "none") for k in range(8)]
+                spans += [Span(8, 16.0, 18.0, False, older), Span(9, 18.0, 20.0, False, newest)]
+                sid = self.ready(spans, live_edge=20.0, backlog_after_start=False)
+                self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, seq))
+        # The open segment's quality as the helper knows it.
+        self.live = self.make()
+        sid = self.start()
+        spans = [Span(k, 2.0 * k, 2.0 * k + 2.0, False, "none") for k in range(8)]
+        spans.append(Span(8, 16.0, 18.0, False, "key"))
+        self.engine.buffer(sid, spans, live_edge=20.0, open_seq=9, open_quality="none")
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 8))
+
+    def test_a_go_live_merged_into_stay_lives_reopen_keeps_its_landing(self):
+        # Review M4: the merged Go live opened nothing but wiped the reopen's landing (9 s
+        # above the target on 10 s keyframe intervals): 1.10x came back.
+        spans = segments(0, 3, length=10.0)
+        sid = self.ready(spans, live_edge=31.0, backlog_after_start=False)
+        self.live._go_live(unpause=False, reopen=True)  # stay-live's own, far behind
+        self.live.go_live()  # the user's, a moment later: merged
+        self.assertEqual(len(self.playback.plays), 2)
+        self.playback.set_state(PlaybackState.PLAYING)
+        edge = 31.0
+        for _ in range(40):  # 10 s, the lag held 9 s above the target
+            edge += 0.25
+            self.engine.buffer(sid, spans, live_edge=edge)
+            self.step(0.25)
+        self.assertEqual(self.playback.rates, [])
+
+    def test_a_first_open_without_a_helper_picks_its_start_again_once_one_serves(self):
+        # Review M5: it reopened at the position (the oldest segment), with no landing.
+        sid = self.start()
+        self.engine.up = False  # the helper is not serving yet: no stream URL
+        self.engine.buffer(sid, segments(0, 10), live_edge=20.0)
+        self.engine.sessionReady.emit(sid)
+        self.assertEqual(self.playback.plays, [])
+        self.engine.up = True
+        self.engine.buffer(sid, segments(0, 10), live_edge=20.5)
+        self.step(0.25)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 9))
+        self.assertTrue(self.landed.called)
+
+    def test_a_backlog_step_right_after_the_start_is_part_of_the_landing(self):
+        # Review M8: raw TS whose backlog came after the 1.5 s hold ran 1.10x for ~100 s.
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=13.5, gop=10.0).ready(backlog_after_start=False)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 1))  # 4 s
+        feed.run(3.0)
+        feed.edge += 9.0  # the rest of the backlog
+        feed.push()
+        feed.run(45.0)  # within the landing's window (after it a backlog is drift: R32)
+        self.assertLessEqual(max(self.playback.rates or [1.0]), 1.03)
+        self.assertEqual(len(self.playback.plays), 1)
 
     def test_hls_that_does_not_say_what_is_to_come_waits_until_every_segment_arrived(self):
         # A sparse-PCR channel's 10 s segments (2 s keyframe intervals), 36 s fetched.
@@ -946,7 +1083,7 @@ class StartPolicyTests(LiveSessionCase):
         from the newest keyframe at or above the target, 9 s above it (8 s is far behind),
         nudged gently."""
         sid = self.start(latency=AUTO)
-        feed = Feed(self, sid, burst=0.0, edge=21.0, gop=10.0).ready(late=False)
+        feed = Feed(self, sid, burst=0.0, edge=21.0, gop=10.0).ready(backlog_after_start=False)
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 1))  # not 21 s
         self.assertAlmostEqual(self.landed.call_args.args[1], 11.5 - 2.5)
         feed.run(60.0)
@@ -1929,16 +2066,19 @@ class HlsRateTests(LiveSessionCase):
 
     def test_short_of_its_room_it_waits_until_a_start_is_far_enough_back(self):
         # The measured channel's shape: 10 s segments and 8 s buffered at the start. 2.0.1
-        # started there and slowed to 0.95x. 2.1 stage 3 waits until its mean lag over the
-        # batch reaches the 10 s target: 6.25 s after it landed, 8.5 s of room to the next.
+        # started there and slowed to 0.95x. 2.1 stage 3 waits for a start as far back as
+        # the 10 s target (its mean over a batch); the ready timeout comes first: from the
+        # oldest then, 9.5 s behind once playing, 8.5 s of room to the next batch.
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=10.0, edge=8.0, hls=True).ready()
-        feed.run(6.0)
+        feed.run(5.75)
         self.assertEqual(self.playback.plays, [])
-        feed.run(0.5)
+        self.assertEqual(self.notices, [LOADING])
+        self.live._on_ready_timeout()  # 6 s after the start (a QTimer in the app)
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 0))
         feed.run(60.0)
-        self.assertEqual((self.playback.rates, feed.starved_s), ([], 0.0))
+        self.assertEqual(feed.starved_s, 0.0)
+        self.assertTrue(all(rate >= 0.97 for rate in self.playback.rates))
 
     def test_a_crawl_at_another_rate_still_locks_1x(self):
         sid = self.start()

@@ -52,6 +52,8 @@ STATE_KEYS = {
     "breaks",
     "caught_up",
     "backlog_s",
+    "finite",
+    "open_quality",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -492,14 +494,20 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertGreater(state[2]["live_edge"], 7.9)  # all 8 s, not the last cut's 6 s
         self.assertIs(helper.of(sid, "state")[0][2]["caught_up"], False)
 
-    def test_an_hls_backlog_reports_the_media_still_to_come(self):
-        # 2.1 stage 3: live edge + backlog_s is where the edge will be once every listed
-        # segment arrived (EXTINF seconds), so a tune can start before all of them did.
-        names = ["a.ts", "b.ts", "c.ts"]
-        routes = {"/user/secret/live.m3u8": (200, {}, leaf(*names, ended=False))}
-        for number, name in enumerate(names):
-            body = make_stream(4, pts_start=900000 + number * 4 * 90000)
-            routes[f"/user/secret/{name}"] = (200, {}, body)
+    def backlog_states(self, names, *, extinf, seconds, missing=()):
+        """The states of an HLS session whose live playlist lists `names` (each `extinf` long
+        by its EXTINF, `seconds` of media; those in `missing` answer 404) until caught up."""
+        text = f"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{extinf}\n"
+        text += "#EXT-X-MEDIA-SEQUENCE:0\n"
+        text += "".join(f"#EXTINF:{extinf},\n{name}\n" for name in names)
+        routes = {"/user/secret/live.m3u8": (200, {}, text.encode())}
+        start = 900000
+        for name in names:
+            if name in missing:
+                routes[f"/user/secret/{name}"] = (404, {}, b"Not found")
+                continue
+            routes[f"/user/secret/{name}"] = (200, {}, make_stream(seconds, pts_start=start))
+            start += round(seconds * 90000)
         source = self.source(routes)
         helper = self.helper()
         sid = helper.open(source.url + "/user/secret/live.m3u8", live_delay=100.0)
@@ -507,12 +515,65 @@ class LiveWorkerTests(unittest.TestCase):
             lambda message: message[:2] == ("state", sid) and message[2]["caught_up"], timeout=5
         )
         states = [message[2] for message in helper.of(sid, "state")]
-        playable = [state for state in states if state["oldest"] is not None]
+        return [state for state in states if state["oldest"] is not None]
+
+    def test_an_hls_backlog_reports_the_media_still_to_come(self):
+        # 2.1 stage 3: live edge + backlog_s is where the edge will be once every listed
+        # segment arrived, so a tune can start before all of them did; measured once a
+        # segment came whole (before: None).
+        playable = self.backlog_states(["a.ts", "b.ts", "c.ts"], extinf=4, seconds=4)
         self.assertGreater(len(playable), 2)
-        for state in playable:
+        self.assertIsNone(playable[0]["backlog_s"])
+        measured = [state for state in playable if state["backlog_s"] is not None]
+        self.assertGreater(len(measured), 1)
+        for state in measured:
+            # Each segment measures a frame short (the edge stands at its last frame's
+            # start): the prediction errs low, on the side that keeps room.
             predicted = state["live_edge"] + state["backlog_s"]
-            self.assertAlmostEqual(predicted, 12.0, delta=0.1, msg=state)
+            self.assertAlmostEqual(predicted, 12.0, delta=0.2, msg=state)
         self.assertEqual(playable[-1]["backlog_s"], 0.0)
+        self.assertEqual(playable[-1]["open_quality"], "key")  # the open segment's start
+        self.assertIs(playable[-1]["finite"], False)
+
+    def test_an_hls_backlog_follows_the_media_not_a_wrong_extinf(self):
+        # Review I3: EXTINF 10 on segments of 8 s moved the start 2 s a segment.
+        playable = self.backlog_states(["a.ts", "b.ts", "c.ts", "d.ts"], extinf=10, seconds=8)
+        measured = [state for state in playable if state["backlog_s"] is not None]
+        self.assertGreater(len(measured), 1)
+        for state in measured:
+            predicted = state["live_edge"] + state["backlog_s"]
+            self.assertAlmostEqual(predicted, 32.0, delta=0.5, msg=state)
+
+    def test_a_missing_segment_leaves_the_backlog(self):
+        # Review I3: a 404 segment was counted in, and never came: the start landed short.
+        playable = self.backlog_states(
+            ["a.ts", "b.ts", "c.ts", "d.ts"], extinf=4, seconds=4, missing=("c.ts",)
+        )
+        final = playable[-1]["live_edge"]
+        self.assertAlmostEqual(final, 12.0, delta=0.1)
+        for state in playable:
+            if state["backlog_s"] is not None:
+                predicted = state["live_edge"] + state["backlog_s"]
+                self.assertLessEqual(predicted, final + 4.1, msg=state)  # c.ts while it fails
+        late = [state for state in playable if state["live_edge"] > 8.0]
+        self.assertTrue(late)
+        for state in late:  # once c.ts failed: what d.ts brings
+            self.assertAlmostEqual(state["live_edge"] + state["backlog_s"], final, delta=0.1)
+
+    def test_a_finished_playlist_says_so_and_has_no_backlog(self):
+        # Review I1: a finished (ENDLIST) playlist plays from its beginning.
+        names = ["a.ts", "b.ts", "c.ts"]
+        routes = {"/user/secret/clip.m3u8": (200, {}, leaf(*names))}
+        for number, name in enumerate(names):
+            body = make_stream(4, pts_start=900000 + number * 4 * 90000)
+            routes[f"/user/secret/{name}"] = (200, {}, body)
+        source = self.source(routes)
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/clip.m3u8", live_delay=100.0)
+        helper.wait_for(lambda message: message == ("ended", sid))
+        states = [message[2] for message in helper.of(sid, "state")]
+        self.assertTrue(all(state["finite"] for state in states))
+        self.assertTrue(all(state["backlog_s"] == 0.0 for state in states))
 
     def test_the_sessions_target_sets_how_far_back_hls_starts(self):
         names = [f"s{number}.ts" for number in range(6)]

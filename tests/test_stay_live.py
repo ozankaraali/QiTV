@@ -857,9 +857,38 @@ class LandingTests(unittest.TestCase):
     def test_the_landing_allowance_follows_the_lag_down(self):
         stay, clock = live(), Clock()
         stay.landed(9.0)
-        lag, rates = drive(stay, T + 9.0, 200.0, clock=clock)  # the nudge took 6 s off
-        self.assertLess(lag, T + 3.5)
+        lag, rates = drive(stay, T + 9.0, 45.0, clock=clock)  # the nudge took some off
+        self.assertLess(lag, T + 8.5)
         _, rates = drive(stay, lag + 8.6, 10.0, clock=clock)  # 8.6 s more: far from there
+        self.assertEqual(max(rates), 1.10)
+
+    def test_after_the_first_minute_a_backlog_is_caught_up_as_ever(self):
+        # Review R32: the landing's allowance lasts the start window only. A reconnect's
+        # backlog 2 minutes on is drift: 1.10x after 3 s, and the reopen at 20 s beyond.
+        stay, clock = live(), Clock()
+        stay.landed(9.0)
+        lag, _ = drive(stay, T + 9.0, 120.0, clock=clock)
+        lag, rates = drive(stay, lag + 8.0, 10.0, clock=clock)
+        self.assertEqual(max(rates), 1.10)
+        stay, clock = live(), Clock()
+        stay.landed(9.0)
+        drive(stay, T + 9.0, 120.0, clock=clock)
+        decision = stay.update(T + 20.5, False, now=clock.tick())
+        self.assertTrue(decision.reopen_live)
+
+    def test_a_backlog_step_right_after_the_start_is_part_of_the_landing(self):
+        # Review M8: raw TS whose backlog came after the 1.5 s hold: 1.10x for ~100 s.
+        stay, clock = live(), Clock()
+        stay.landed(1.5)
+        drive(stay, T + 1.5, 3.0, clock=clock)
+        stay.landed_further(10.5)  # 9 s more landed
+        _, rates = drive(stay, T + 10.5, 30.0, clock=clock)
+        self.assertEqual(max(rates), 1.03)
+        stay, clock = live(), Clock()  # after the window it is drift
+        stay.landed(1.5)
+        drive(stay, T + 1.5, 70.0, clock=clock)
+        stay.landed_further(10.5)
+        _, rates = drive(stay, T + 10.5, 10.0, clock=clock)
         self.assertEqual(max(rates), 1.10)
 
     def test_go_live_forgets_the_landing(self):
@@ -868,6 +897,15 @@ class LandingTests(unittest.TestCase):
         stay.user_go_live()  # a Go live opens afresh (and says where it landed)
         _, rates = drive(stay, T + 12.0, 10.0, clock=clock)
         self.assertEqual(max(rates), 1.10)
+
+    def test_a_go_live_that_opens_nothing_keeps_the_landing(self):
+        # Review M4: a Go live merged into stay-live's reopen a moment before opens nothing:
+        # the stream that opened then keeps its landing (no 1.10x for its keyframe interval).
+        stay, clock = live(), Clock()
+        stay.landed(9.0)
+        stay.user_go_live(keep_landing=True)
+        _, rates = drive(stay, T + 9.0, 10.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
 
     def test_a_short_landing_builds_at_0_97_for_20_seconds_at_most_then_accepts(self):
         # A public HLS channel started short (7 s target, 3.5 s behind): 2.0.1's rule built

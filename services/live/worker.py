@@ -113,6 +113,9 @@ _BURST_SPREAD = 1.5  # two bursts in a row are alike when neither is larger by m
 _BURST_RUN = 3  # the estimate is the largest of this many latest bursts
 _STEADY_BURSTS = 3.0  # this many estimates' worth of seconds without a gap: steady again
 _STEADY_UNCONFIRMED = 1.0  # the same for an estimate from one burst no other has confirmed
+# An HLS backlog's EXTINF is scaled by the media/EXTINF ratio measured, kept within these:
+_RATIO_MIN = 0.5
+_RATIO_MAX = 2.0
 
 
 class BurstMeter:
@@ -359,6 +362,7 @@ class _Session:
         self._received = 0  # bytes from the source, those before the first keyframe too
         self._caught_up = False  # HLS: every segment its playlist listed was delivered once
         self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
+        self._measured = (0.0, 0.0)  # HLS: media and EXTINF seconds of the whole segments
         self._pending: list[_Addition] = []
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
@@ -594,19 +598,36 @@ class _Session:
         self._send(("error", self.sid, kind, message))
 
     def _follow(self, source: Source) -> None:
-        """HLS: note the live edge where each segment's first bytes begin (`_backlog`)."""
+        """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and
+        measure the one before if it arrived whole: its media against its EXTINF."""
         serial = getattr(source, "segment_serial", 0)
-        if serial != self._segment[0]:
-            self._segment = (serial, self._live_edge())
+        if serial == self._segment[0]:
+            return
+        edge = self._live_edge()
+        previous, began = self._segment
+        whole = getattr(source, "last_whole", None)
+        if isinstance(whole, tuple) and whole[0] == previous and whole[1] > 0 and edge > began:
+            media, extinf = self._measured
+            self._measured = (media + edge - began, extinf + whole[1])
+        self._segment = (serial, edge)
 
-    def _backlog(self, source: Source | None) -> float:
-        """HLS: the media its playlist listed still to come (EXTINF seconds): what the segment
-        being fetched holds beyond the live edge, and the listed ones after it."""
-        fetching = getattr(source, "segment_s", 0.0)
-        rest = getattr(source, "rest_s", 0.0)
+    def _backlog(self, source: Source | None) -> float | None:
+        """HLS: the media its playlist listed still to come: what the segment being fetched
+        holds beyond the live edge and the listed ones after it, by their EXTINF scaled by
+        the media/EXTINF ratio of the whole segments so far (2.1 stage 3: EXTINF 10 on 8 s
+        segments moved the start). None until one was measured; 0.0 for a finished playlist
+        (it plays from its beginning) and for raw TS."""
+        fetching = getattr(source, "segment_s", None)
+        rest = getattr(source, "rest_s", None)
         if not isinstance(fetching, float) or not isinstance(rest, float):
             return 0.0
-        return max(0.0, self._segment[1] + fetching - self._live_edge()) + rest
+        if getattr(source, "finite", False) is True:
+            return 0.0
+        media, extinf = self._measured
+        if extinf <= 0:
+            return None if fetching + rest > 0 else 0.0
+        ratio = min(max(media / extinf, _RATIO_MIN), _RATIO_MAX)
+        return max(0.0, self._segment[1] + fetching * ratio - self._live_edge()) + rest * ratio
 
     def _live_edge(self) -> float:
         # On the segment's own PTS axis and the stall-free clock: no stall or jump inflates it.
@@ -664,6 +685,11 @@ class _Session:
             # HLS: the live edge once every listed segment arrived is this much further (2.1
             # stage 3: a tune need not wait for all of its backlog); 0.0 for raw TS.
             "backlog_s": self._backlog(source),
+            # HLS: the playlist is finished (ENDLIST): a clip, played from its beginning.
+            "finite": bool(source is not None and getattr(source, "finite", False) is True),
+            # How cleanly playback starts at the open segment ("key", "open", "none"; None:
+            # none is open), as `start_quality` tells it for the closed ones.
+            "open_quality": self._segmenter.open_quality,
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the

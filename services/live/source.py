@@ -1161,6 +1161,8 @@ class HlsSource:
         self._serial = 0  # segments started so far
         self._fetching = 0.0  # the EXTINF of the segment being fetched (0.0: none)
         self._rest = 0.0  # the EXTINF of the listed segments after it
+        self._last_whole: tuple[int, float] | None = None  # (serial, EXTINF) of the last whole
+        self._finite = bool(playlist.is_endlist)  # the playlist is finished (ENDLIST)
 
     @property
     def burst_s(self) -> float:
@@ -1176,6 +1178,18 @@ class HlsSource:
     def segment_s(self) -> float:
         """The EXTINF seconds of the segment being fetched; 0.0 once every listed one came."""
         return self._fetching
+
+    @property
+    def last_whole(self) -> tuple[int, float] | None:
+        """(`segment_serial`, EXTINF) of the last segment that arrived whole: the helper
+        measures the media/EXTINF ratio of those (2.1 stage 3: a wrong EXTINF moved the
+        start). A segment that failed (404, skipped) is never one."""
+        return self._last_whole
+
+    @property
+    def finite(self) -> bool:
+        """The playlist is finished (ENDLIST): a clip, played from its beginning."""
+        return self._finite
 
     @property
     def rest_s(self) -> float:
@@ -1212,10 +1226,12 @@ class HlsSource:
     def _depth(self, playlist: Any) -> float:
         """How far back from a live playlist's end the start goes (2.1 stage 3).
 
-        Without the session's target, ``live_delay``. With it, far enough back for a start
-        at the target (the source's segment duration, when that is larger, under any latency)
-        plus one segment, and at least ``live_delay`` and the playlist's HOLD-BACK, or three
-        target durations without one (the HLS spec's advice); plus the session's extra. A
+        Without the session's target, ``live_delay``. With it, the target (the source's
+        segment duration, when that is larger, under any latency) and one and a half segments
+        more (a start at the target is half a segment further back than it, the target being
+        the mean lag over a batch, and one segment more is the room to choose), and at least
+        ``live_delay`` and the playlist's HOLD-BACK, or three target durations without one
+        (the HLS spec's advice); plus the session's extra. A
         sparse-PCR channel's 10 s segments fetched from 6 s before the end gave one segment,
         and VLC ran dry before the next landed.
         """
@@ -1225,7 +1241,7 @@ class HlsSource:
         control = playlist.server_control
         hold_back = float(control.hold_back or 0) if control is not None else 0.0
         advised = hold_back if hold_back > 0 else 3 * duration
-        room = max(self._target, duration) + 1.5 * duration  # a start at the target, a segment
+        room = max(self._target, duration) + 1.5 * duration
         return max(self._live_delay, advised, room) + max(0.0, self._extra)
 
     def _restarted(self, playlist: Any, base: str, stalled: float) -> bool:
@@ -1305,6 +1321,7 @@ class HlsSource:
             content, final = http.fetch(lambda: _load_playlist(http, url))
             playlist, url = _media_playlist(http, content, final)
             self._burst = float(playlist.target_duration or 0)
+            self._finite = bool(playlist.is_endlist)
 
     def _segment(self, segment: Any, sequence: int, base: str) -> Iterator[bytes | Discontinuity]:
         uri = _resolve(base, segment.uri)
@@ -1344,6 +1361,7 @@ class HlsSource:
         if failure is None:
             self._failures = 0
             self._delivered = True
+            self._last_whole = (self._serial, float(segment.duration or 0))
         else:
             self._skip(failure, content)
 
@@ -1351,6 +1369,7 @@ class HlsSource:
         """Skip a segment with a marker, or end the session: on bad content before any
         segment arrived whole (it is unsupported), and on a third failure in a row."""
         self._failures += 1
+        self._fetching = 0.0  # it leaves the backlog: what it holds never comes
         if (content and not self._delivered) or self._failures >= _SEGMENT_FAILURES:
             raise failure
         log.info("Skipped an HLS segment (%s %s).", failure.kind, failure.status or "")
@@ -1435,9 +1454,8 @@ def open_source(
 
     A live HLS session starts at the first segment from which the playlist's remaining
     EXTINF durations add up to at least ``live_delay`` seconds (at least one segment); given
-    the session's ``target`` (and the ``extra`` it adds, Auto's), far enough back for a start
-    at that target plus one segment, and at least HOLD-BACK or three target durations
-    (`HlsSource._depth`). After each batch of listed segments it yields `CaughtUp`.
+    the session's ``target`` (and the ``extra`` it adds, Auto's), that target and one and a
+    half segments more, and at least HOLD-BACK or three target durations (`HlsSource._depth`). After each batch of listed segments it yields `CaughtUp`.
     Local paths and ``file://`` URLs are refused unless ``allow_local`` (tests only).
 
     Blocks while connecting. Setting ``stop`` (polled every 0.1 s) or calling ``close()`` on

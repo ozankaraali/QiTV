@@ -219,6 +219,12 @@ class Segmenter:
         return self._latest_pts
 
     @property
+    def open_quality(self) -> StartQuality | None:
+        """How cleanly playback starts at the open segment, as known so far (None: none is
+        open); its `Closed.start_quality` once it closes (2.1 stage 3: a tune prefers a key)."""
+        return self._seg_quality if self._open else None
+
+    @property
     def progress_pts(self) -> int | None:
         """The latest cut-PID PTS on the open segment's own axis, for its live progress: across
         a PTS jump, the segment's first PTS plus the media since. None when unknown."""

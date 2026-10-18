@@ -222,12 +222,19 @@ _MEASURE_AHEAD_S = 3.0  # rate health counts only ticks with this much ahead at 
 _RATE_GRACE_S = 2.0  # and only from this long after an open plays or VLC was at the edge
 _CALM_S = 1.0  # Auto: trouble again within this is the same starvation (VLC refills, starves)
 _REOPEN_HOLD_S = 5.0  # no reopen at live within this of an open (and before VLC played it)
-# The tune's start (2.1 stage 3): held until the backlog a source sends at connect landed ...
-_SETTLE_S = 1.0  # ... (its live edge grew at most _SETTLE_GROWTH_S over this long; HLS: ...
-_SETTLE_GROWTH_S = 2.0  # ... every listed segment arrived), at most _SETTLE_MAX_S from ready;
-_SETTLE_MAX_S = 1.5  # with nothing far enough back, a steady source starts at the oldest ...
-_STEADY_WAIT_S = 1.0  # ... after this, a bursty or HLS one (or Stable) waits, "Still loading…"
-_LOADING_AFTER_S = 1.0  # after this, bounded by the ready timeout
+# The tune's start (2.1 stage 3, `_play_first`). A source other than HLS is held until the
+# backlog it sends at connect landed: its live edge grew by at most _SETTLE_GROWTH_S over the
+# last _SETTLE_S, or _SETTLE_MAX_S passed since ready.
+_SETTLE_S = 1.0
+_SETTLE_GROWTH_S = 2.0
+_SETTLE_MAX_S = 1.5
+# With nothing far enough back, a steady source starts at the oldest after this long.
+_STEADY_WAIT_S = 1.0
+# A start held longer than this says "Still loading…" (a bursty or HLS source, Stable).
+_LOADING_AFTER_S = 1.0
+# Within this long after a tune's start, a backlog step that raises the lag is part of the
+# landing (raw TS whose backlog came after the hold).
+_RELAND_S = 10.0
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) ...
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
 _FROZEN_HOLDS = 2.0  # VLC's clock still for a window and this many holds has played nothing
@@ -265,10 +272,16 @@ class _Retry(Enum):
     LIVE = "live"
     REOPEN = "reopen"  # stay-live's own reopen at live (a Go live right after it is merged)
     RESUME = "resume"
+    FIRST = "first"  # the tune's first open: its start is picked again
 
 
 def _number(value: Any) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+# How cleanly playback starts at a segment (`Span.start_quality`), best first; a start whose
+# quality is not known counts as a key.
+_QUALITY_RANK = {"key": 0, "open": 1, "none": 2}
 
 
 def _locate(spans: Sequence[Span], t: float) -> Optional[Span]:
@@ -368,6 +381,8 @@ class LiveSession(QObject):
         self._ready_at = 0.0  # when it was
         self._edges: list[tuple[float, float]] = []  # (when, live edge) while the start waits
         self._held_said = False  # "Still loading…" was said while the start waited
+        self._reland_until = -math.inf  # a backlog step before this is part of the landing
+        self._reland_edge = 0.0  # the live edge at the last tick, meanwhile
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
         # The mean lag over the source's arrival rhythm, and the lag as shown (2.1).
         self._filter = LagFilter()
@@ -571,6 +586,7 @@ class LiveSession(QObject):
         live already: one open, not two). A recovery or the RAM ring's reopen always opens.
         Stay-live hears where an open landed (`StayLive.landed`)."""
         landing: Optional[float] = None
+        merged = False
         try:
             if unpause and self._phase in _BEFORE_PLAY:
                 self._paused = False  # remembered: the stream that opens next plays, live
@@ -592,6 +608,7 @@ class LiveSession(QObject):
                     and self._retry is None
                     and self._clock() - self._reopened_at < _REOPEN_HOLD_S
                 ):
+                    merged = True
                     return  # stay-live reopened at live a moment ago
                 pick = self._live_start()
                 if pick is None or not self._open_at(pick[0]):
@@ -606,7 +623,7 @@ class LiveSession(QObject):
             if self._paused:
                 self._stay.user_paused()
             else:
-                self._stay.user_go_live()
+                self._stay.user_go_live(keep_landing=merged)  # nothing opened: it stays
                 if landing is not None:
                     self._stay.landed(landing)
 
@@ -811,50 +828,96 @@ class LiveSession(QObject):
 
     def _play_first(self, *, waited: bool = False) -> None:
         """The tune's first play (2.1 stage 3), at the start Go live would pick: the nearest
-        the target from above, never the oldest backlog when a start nearer it exists.
+        the target from above (a keyframe start before any other, `_live_start`), never the
+        oldest backlog when a start nearer it exists.
 
-        An HLS source says how much listed media is still to come (`backlog_s`): the starts
-        are judged against the live edge it will reach, and one is taken once it is final (a
-        newer start is already too near), else once every listed segment came, bounded by
-        the ready timeout. Any other source is held, on each state and tick, until the
-        backlog it sent at connect landed (`_landed`), at most `_SETTLE_MAX_S` after ready.
-        With nothing far enough back, a steady source starts at the oldest after
-        `_STEADY_WAIT_S`; a bursty or HLS source (or Stable, the cushion for jittery
-        providers) waits for one, saying "Still loading…" after `_LOADING_AFTER_S`.
-        `waited`: the ready timeout ran out: the best start there is now. Stay-live hears
-        where it landed (`StayLive.landed`).
+        A finished playlist (ENDLIST), or a session whose input already ended, plays from its
+        oldest segment at once: a clip from its beginning. An HLS source says how much listed
+        media is still to come (`backlog_s`, its EXTINF scaled by the media measured): the
+        starts are judged against the live edge it will reach (`_hls_ready`). Any other
+        source is held, on each state and tick, until the backlog it sent at connect landed
+        (`_landed`), at most `_SETTLE_MAX_S` after ready. With nothing far enough back, a
+        steady source starts at the oldest after `_STEADY_WAIT_S`; a bursty or HLS source (or
+        Stable, the cushion for jittery providers) waits for one. A start held longer than
+        `_LOADING_AFTER_S` (but a raw TS backlog's) says "Still loading…". `waited`: the ready
+        timeout ran out: the best start there is now. Stay-live hears where it landed
+        (`StayLive.landed`).
         """
         snapshot = self._snapshot()
+        if self._ended or snapshot.get("ended") is True or snapshot.get("finite") is True:
+            oldest = self._oldest_seq()
+            if oldest is not None:
+                self._first_open(oldest, None)  # nothing live to land near
+            return
         hls = snapshot.get("hls") is True
-        ahead = 0.0 if snapshot.get("caught_up") is True else _number(snapshot.get("backlog_s"))
-        pick = self._live_start(cushion=True, ahead=ahead)
+        ahead = self._ahead(snapshot)
+        pick = self._live_start(cushion=True, ahead=ahead, tune=True)
         if not waited:
             held = self._clock() - self._ready_at
             if pick is None:
                 if self._waits_for_cushion(snapshot):
-                    if held >= _LOADING_AFTER_S - 1e-9 and not self._held_said:
-                        self._held_said = True
-                        self.notice.emit(LOADING)
+                    self._say_loading(held)
                     return  # the ready timeout bounds it
                 if held < _STEADY_WAIT_S - 1e-9:
                     return
-            elif not self._landed(snapshot, ahead) and (hls or held < _SETTLE_MAX_S - 1e-9):
-                return  # HLS: bounded by the ready timeout
+            elif hls and not self._hls_ready(snapshot, pick[1], ahead):
+                self._say_loading(held)
+                return  # bounded by the ready timeout
+            elif not hls and not self._landed(snapshot) and held < _SETTLE_MAX_S - 1e-9:
+                return
         if pick is None:
-            pick = self._live_start(ahead=ahead)  # the most buffer there is
-        if pick is None:
-            return  # not playable yet: the ready timeout still runs
-        seq, lag = pick
+            pick = self._live_start(ahead=ahead, tune=True)  # the most buffer there is
+        if pick is not None:
+            self._first_open(*pick)
+
+    def _first_open(self, seq: int, lag: Optional[float]) -> None:
+        """Play the tune from `seq`, its lag once playing `lag` (None: a finished playlist's
+        beginning, no landing); a failed open picks again on the tick (`_Retry.FIRST`)."""
         self._ready_timer.stop()
         self._phase = _Phase.PIPELINE
         self._mode = "pipeline"
         self._edges = []
         self._tick_timer.start()
-        if self._open_at(seq):
-            self._stay.landed(lag - self._target(self._snapshot()))
-        else:
-            self._retry = _Retry.RESUME
+        self._open_first(seq, lag)
         self.modeChanged.emit(self._mode)
+
+    def _open_first(self, seq: int, lag: Optional[float]) -> None:
+        if not self._open_at(seq):
+            self._retry = _Retry.FIRST
+            return
+        if lag is None:
+            return
+        snapshot = self._snapshot()
+        self._stay.landed(lag - self._target(snapshot))
+        self._reland_until = self._clock() + _RELAND_S
+        self._reland_edge = self._live_edge(snapshot)
+
+    def _open_first_again(self) -> None:
+        """The tune's first open failed (no helper served it): pick its start again."""
+        snapshot = self._snapshot()
+        if self._ended or snapshot.get("ended") is True or snapshot.get("finite") is True:
+            oldest = self._oldest_seq()
+            if oldest is not None:
+                self._open_first(oldest, None)
+            return
+        ahead = self._ahead(snapshot)
+        pick = self._live_start(cushion=True, ahead=ahead, tune=True)
+        pick = pick or self._live_start(ahead=ahead, tune=True)
+        if pick is not None:
+            self._open_first(*pick)
+
+    def _ahead(self, snapshot: Mapping[str, Any]) -> float:
+        """The media an HLS tune's backlog still brings (0.0 once every listed segment came,
+        and while that is not known)."""
+        backlog = snapshot.get("backlog_s")
+        if snapshot.get("caught_up") is True or not isinstance(backlog, (int, float)):
+            return 0.0
+        return max(0.0, float(backlog))
+
+    def _say_loading(self, held: float) -> None:
+        if held >= _LOADING_AFTER_S - 1e-9 and not self._held_said:
+            self._held_said = True
+            self.notice.emit(LOADING)
 
     def _waits_for_cushion(self, snapshot: Mapping[str, Any]) -> bool:
         """A tune with nothing far enough back waits for it: a bursty or HLS source (each
@@ -862,19 +925,29 @@ class LiveSession(QObject):
         bursty = snapshot.get("hls") is True or _number(snapshot.get("burst_s")) > 0
         return bursty or self._latency == "stable"
 
-    def _landed(self, snapshot: Mapping[str, Any], ahead: float = 0.0) -> bool:
-        """The start can be chosen now: an HLS source delivered every segment its playlist
-        listed (`caught_up`), or its newest start is already short of the target on the edge
-        its backlog will reach (`ahead`), so what is still to come cannot bring a nearer one;
-        any other's live edge grew by at most `_SETTLE_GROWTH_S` over the last `_SETTLE_S`
-        (about real time; one provider's 20 s came as two keyframe intervals a second apart)."""
-        if snapshot.get("hls") is True:
-            if snapshot.get("caught_up") is True:
-                return True
-            if "backlog_s" not in snapshot:
-                return False  # what is still to come is not known: all of it, then
-            means = self._start_lags(snapshot, ahead)
-            return bool(means) and means[0][0] < self._target(snapshot) - _BELOW_TARGET_S
+    def _hls_ready(self, snapshot: Mapping[str, Any], lag: float, ahead: float) -> bool:
+        """An HLS tune's start (its lag `lag` on the edge `ahead` seconds further) can be
+        taken: every listed segment came (`caught_up`); or, the media still to come known
+        (`backlog_s`) and more than a segment of it, the start is already within stay-live's
+        band, or the newest start is short of the target there, so nothing still to come can
+        bring a nearer one. With a segment or less to come it waits for it: a wrong EXTINF or
+        a missing segment cannot move the start then."""
+        if snapshot.get("caught_up") is True:
+            return True
+        if not isinstance(snapshot.get("backlog_s"), (int, float)):
+            return False  # not measured yet: all of it, then
+        if ahead <= _number(snapshot.get("burst_s")) + 1e-9:
+            return False
+        target = self._target(snapshot)
+        if target - _BELOW_TARGET_S <= lag <= target + _LAND_ABOVE_S:
+            return True
+        means = self._start_lags(snapshot, ahead)
+        return bool(means) and means[0][0] < target - _BELOW_TARGET_S
+
+    def _landed(self, snapshot: Mapping[str, Any]) -> bool:
+        """A source other than HLS: the backlog it sent at connect has landed, its live edge
+        grew by at most `_SETTLE_GROWTH_S` over the last `_SETTLE_S` (about real time; one
+        provider's 20 s came as two keyframe intervals a second apart)."""
         edge, since = self._live_edge(snapshot), self._clock() - _SETTLE_S
         past = self._edges[0][1] if self._edges else edge
         for at, seen in self._edges:
@@ -1027,6 +1100,9 @@ class LiveSession(QObject):
         if self._retry is not None:
             if self._retry is _Retry.RESUME:
                 self._resume()
+            elif self._retry is _Retry.FIRST:
+                if not self._gave_up():
+                    self._open_first_again()
             elif not self._gave_up():
                 self._go_live(unpause=False, reopen=self._retry is _Retry.REOPEN)
             if self._phase is not _Phase.PIPELINE:
@@ -1067,6 +1143,7 @@ class LiveSession(QObject):
             self._stay.hold_reopen = self._just_opened()
             self._stay.burst = self._filter.burst
             self._stay.spread = self._filter.spread()
+            self._reland(snapshot, lag)
             buffering = (
                 stalled or self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
             )
@@ -1079,6 +1156,17 @@ class LiveSession(QObject):
         else:
             self._auto_mark = None  # paused (or ended): no quiet time for Auto
         self._emit_timeline()
+
+    def _reland(self, snapshot: Mapping[str, Any], lag: float) -> None:
+        """Within `_RELAND_S` of a tune's start, a backlog step (the live edge grew by more
+        than `_SETTLE_GROWTH_S` in a tick) that took the lag further above the target is part
+        of the landing (`StayLive.landed_further`): raw TS whose backlog came after the hold."""
+        if self._clock() >= self._reland_until:
+            return
+        edge = self._live_edge(snapshot)
+        stepped, self._reland_edge = edge - self._reland_edge > _SETTLE_GROWTH_S, edge
+        if stepped:
+            self._stay.landed_further(lag - self._stay.target)
 
     def _back_off(
         self, snapshot: Mapping[str, Any], position: float, stalled: bool, lag: float
@@ -1382,6 +1470,19 @@ class LiveSession(QObject):
         # The open segment starts where the closed ones end (0.0 for the very first).
         return _number(self._snapshot().get("end"))
 
+    def _qualities(self, snapshot: Mapping[str, Any]) -> dict[int, int]:
+        """Each start's `_QUALITY_RANK`: the closed spans' `start_quality`, the open segment's
+        as the helper knows it so far (`open_quality`)."""
+        assert self._sid is not None
+        ranks = {
+            span.seq: _QUALITY_RANK.get(str(getattr(span, "start_quality", "key")), 0)
+            for span in self._engine.spans(self._sid)
+        }
+        open_seq = snapshot.get("open")
+        if isinstance(open_seq, int):
+            ranks[open_seq] = _QUALITY_RANK.get(str(snapshot.get("open_quality") or "key"), 0)
+        return ranks
+
     def _start_lags(
         self, snapshot: Mapping[str, Any], ahead: float = 0.0
     ) -> list[tuple[float, int]]:
@@ -1402,11 +1503,13 @@ class LiveSession(QObject):
         return sorted((edge - start + shift, seq) for start, seq in starts)
 
     def _live_start(
-        self, *, cushion: bool = False, ahead: float = 0.0
+        self, *, cushion: bool = False, ahead: float = 0.0, tune: bool = False
     ) -> Optional[tuple[int, float]]:
         """The start Go live picks and the lag it gives once VLC plays it, on a live edge
         `ahead` seconds further (a tune's HLS backlog still to come); with `cushion`, None
-        while none is far enough behind."""
+        while none is far enough behind. `tune`: among the starts far enough behind, those
+        at a keyframe first, then at an intra picture, one without either only when nothing
+        else is (5a's `start_quality`)."""
         assert self._sid is not None
         snapshot = self._snapshot()
         target = self._target(snapshot)
@@ -1427,6 +1530,10 @@ class LiveSession(QObject):
         safe = [mean for mean in means if mean[0] >= target - _BELOW_TARGET_S]
         if not safe:
             return None if cushion else (means[-1][1], means[-1][0])  # a short buffer: all
+        if tune:
+            ranks = self._qualities(snapshot)
+            best = min(ranks.get(seq, 0) for _, seq in safe)
+            safe = [mean for mean in safe if ranks.get(mean[1], 0) == best]
         band = [mean for mean in safe if mean[0] <= target + _LAND_ABOVE_S]
         lag, seq = min(band, key=lambda mean: (abs(mean[0] - target), mean[0])) if band else safe[0]
         return seq, lag
