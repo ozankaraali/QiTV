@@ -115,26 +115,41 @@ a day: see `services.live.tuning`). A raw TS channel never does.
 2.0.2 `extra` read as its prior, on Normal's floor): what its arrivals need (the live edge,
 every tick) plus the margin its starvation prior believes in. It hears (`_feed_learned`, the
 integration contract of stage 4a's review) each stall once as it begins (the bound passed:
-silence beyond the helper's burst plus `STALL_S`, with that burst), VLC running dry at the
-live edge (BUFFERING, or its clock standing still while Playing, within `_EDGE_S`) once per
-dry run (a refill's flicker within `_CALM_S` is the same one), a near-miss (VLC's headroom
-before a batch, less its caching), a stall VLC got through (its least headroom), and the
-time played at the live edge; trouble only while stay-live is LIVE and once it ran out a
-cushion (`_ran_out`: the lag had reached the target, less `_BELOW_TARGET_S`, since the tune;
-the tune started at a pick chosen for the target, ruling R33; or stay-live accepted the
-start's shortfall), judged before the target rises with it. What it learned moves the target
-stay-live steers by (`SteeredTarget`): a rise in a step of half a second or more once it held
-10 s, at once with trouble (and its owed slow-down); a fall at most Auto's quiet pace (half a
-second per 5 minutes). The timeline's target, Go live's and the start's are that same target;
-the steering one reads the source's burst as the lag filter has it (never the helper's own,
-whose one-off backlog "burst" would lift it). A move of half a second or more is said at INFO
-(arrivals, trouble or quiet moved it) and saved. What a channel taught (the learned target,
+silence beyond the helper's burst plus `STALL_S`, with that burst; noted, trouble only if VLC
+then runs dry), VLC running dry at the live edge (BUFFERING, or its clock standing still while
+Playing, within `_EDGE_S`) once per dry run (a refill's flicker within `_CALM_S` is the same
+one; inside a stall told while it counted too), a near-miss (VLC's headroom before a batch,
+less its caching; not the batch that ends a dry run), a stall VLC got through (its least
+headroom), and the time played at the live edge; trouble only while stay-live is LIVE and
+once it ran out a cushion (`_ran_out`: the lag had reached the target, less stay-live's band,
+since the tune; the tune started at a pick chosen for the target, ruling R33; or stay-live
+accepted the start's shortfall), judged before the target rises with it. What it learned
+moves the target stay-live steers by (`SteeredTarget`): a rise in a step of half a second or
+more once it held 10 s, at once with trouble (and its owed slow-down); a fall of what trouble
+raised at most Auto's quiet pace (half a second per 5 minutes), of what the arrivals alone
+raised half a second a minute; what the source's burst (as the lag filter has it, with its
+hysteresis) moves in it, at once either way, and so does the burst's stand-in for the need
+going once the need is measured. The steering target reads the lag filter's burst (never the
+helper's own, whose one-off backlog "burst" would lift it); the timeline's, Go live's, the
+start's and the cushion's add what the helper's burst changes in the learned target, at once,
+as under any latency, so stay-live never speeds up towards a target the burst is about to
+raise (stage 1's `slack`). The start fetches for the learned target itself (no extra: it
+holds the segments). A move of half a second or more is said at INFO (trouble, the source's
+burst, arrivals or quiet moved it) and saved. What a channel taught (the learned target,
 a locked rate) is kept per channel (`start(channel=...)`, in the `LiveTuning` given; the
 learned target on trouble, on a move worth saying and when the tune ends, without a 2.0.2
 `extra` then, and leaving the lock and direct play as the store has them): its next tune
 starts there, a locked rate under any latency (for a day: then the store reads it as none,
 so a tune tries other rates again). The burst floor (`SEGMENT_FLOOR`, ruling R37) is on
-unless QITV_SEGMENT_FLOOR=0 is set for the run. Go live
+unless QITV_SEGMENT_FLOOR=0 is set for the run (`segment_floor_from`).
+
+Under any latency, a backlog step within `_REPICK_S` of the tune's first open that leaves the
+mean lag more than a burst (at least `_REPICK_GAIN_S`) beyond the target picks the start
+again once the edge settled, as Go live would, once a tune, when the clean start it picks
+gains at least that much: the 1-stream raw-TS provider sent 2 s, then 18-22 s a moment after
+the open, and a public HLS channel's next reload brought 12 s two seconds after its start, so
+the viewer sat 16-23 s behind for a minute (the jumps' cooldown counts from the tune). A
+later one within `_RELAND_S` is still part of the landing. Go live
 picks among every segment start, the open one included, by the lag it would give once VLC
 plays it (VLC's open time, play() to Playing, is a moving average seeded at 0.5 s; for a
 bursty source the mean; while playing, from the lag filter's mean edge, as stay-live then
@@ -260,6 +275,14 @@ _LOADING_AFTER_S = 1.0
 # Within this long after a tune's start, a backlog step that raises the lag is part of the
 # landing (raw TS whose backlog came after the hold).
 _RELAND_S = 10.0
+# Within this long after a tune's first open, a backlog step that leaves the lag far above the
+# target (more than the band and the burst) re-picks the start once, as Go live would, once
+# the edge has settled (`_SETTLE_S` without a step, at most `_REPICK_SETTLE_MAX_S` after the
+# first): the 1-stream raw-TS provider sent 2 s, then 18-22 s a moment after the open, and
+# the viewer sat 23 s behind for a minute (the jumps' cooldown counts from the tune).
+_REPICK_S = 5.0
+_REPICK_SETTLE_MAX_S = 3.0
+_REPICK_GAIN_S = 1.0  # (stay-live's band) the least the new start must gain, and exceed by
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) ...
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
 _FROZEN_HOLDS = 2.0  # VLC's clock still for a window and this many holds has played nothing
@@ -282,16 +305,19 @@ _LAND_OFFSET_MAX_S = 1.5  # ... up to this much either way
 _CACHING_S = 0.3
 _PLAYED_MAX_S = 1.0  # a longer gap between two ticks counts as this much playing
 _LOG_STEP_S = 0.5  # a learned target that moved this much since it was last said is said
+
+
+def segment_floor_from(value: str) -> bool:
+    """The burst floor switch from the environment's QITV_SEGMENT_FLOOR: off for 0, off,
+    false or no (any case, spaces ignored), else on."""
+    return value.strip().lower() not in ("0", "off", "false", "no")
+
+
 # The burst floor (`learned_target.SEGMENT_FLOOR`, ruling R37, provisional): a segmented
 # source never goes under its burst. QITV_SEGMENT_FLOOR=0 (or off, false, no) in the
 # environment turns it off for the whole run (read once, here: stage 4b's A/B; keep each
 # channel in one arm, as a target learned without it reads high with it for hours).
-SEGMENT_FLOOR = os.environ.get("QITV_SEGMENT_FLOOR", "1").strip().lower() not in (
-    "0",
-    "off",
-    "false",
-    "no",
-)
+SEGMENT_FLOOR = segment_floor_from(os.environ.get("QITV_SEGMENT_FLOOR", ""))
 _PLAYING = PlaybackState.PLAYING.value
 _PAUSED = PlaybackState.PAUSED.value
 
@@ -441,6 +467,9 @@ class LiveSession(QObject):
         self._held_said = False  # "Still loading…" was said while the start waited
         self._reland_until = -math.inf  # a backlog step before this is part of the landing
         self._reland_edge = 0.0  # the live edge at the last tick, meanwhile
+        self._repick_until = -math.inf  # a backlog step before this re-picks the tune's start
+        self._repick_step: Optional[float] = None  # when the step to re-pick for began ...
+        self._repick_last = 0.0  # ... and when the edge last stepped since
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
         # The mean lag over the source's arrival rhythm, and the lag as shown (2.1).
         self._filter = LagFilter()
@@ -456,6 +485,7 @@ class LiveSession(QObject):
         # (`SteeredTarget`), and what is fed to it (see `_feed_learned`).
         self._learned: Optional[LearnedTarget] = None
         self._steered = SteeredTarget()
+        self._steer_burst: Optional[float] = None  # the burst it was last steered for
         self._stall_on = False  # the stall bound passed: a stall is in progress ...
         self._stall_counted = False  # ... told to the learned target (`stalled()`) ...
         self._stall_low = math.inf  # ... the least headroom VLC had since it began ...
@@ -463,7 +493,8 @@ class LiveSession(QObject):
         self._dry_at: Optional[float] = None  # when VLC was last seen dry at the live edge
         self._headroom: Optional[float] = None  # VLC's headroom on the last tick
         self._fed_at: Optional[float] = None  # the last tick fed to the learned target
-        self._said: Optional[tuple[float, float]] = None  # (target, need) last said at INFO
+        # (target, need, burst) last said at INFO
+        self._said: Optional[tuple[float, float, float]] = None
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
         self._wire_engine(engine, connect=True)
@@ -542,11 +573,12 @@ class LiveSession(QObject):
         self._memory = memory or Tuning()
         self._latency = latency if latency in LATENCIES else "normal"
         self._learned = self._new_learned() if self._latency == AUTO else None
-        self._steered = SteeredTarget()
+        self._steered, self._steer_burst = SteeredTarget(), None
         self._troubled_at = None
         self._forget_feed()
         self._said = None
         self._cushion = 0.0
+        self._repick_until, self._repick_step = -math.inf, None
         self._land_offset, self._land_check = 0.0, None  # each tune's own (ruling R38)
         self._open_args = {
             "headers": dict(headers),
@@ -753,7 +785,7 @@ class LiveSession(QObject):
             self._learned = None
         elif self._learned is None:
             self._learned = self._new_learned()  # where the channel left it
-            self._steered = SteeredTarget()
+            self._steered, self._steer_burst = SteeredTarget(), None
             self._forget_feed()
 
     def buffered_range(self) -> tuple[float, float]:
@@ -775,15 +807,16 @@ class LiveSession(QObject):
         if self._dead or self._memory.direct:
             self._fall_back(UNAVAILABLE)
             return
-        learned, target = self._learned, start_target(self._latency)
+        learned = self._learned
         self._sid = self._engine.open_session(
             self._url,
             **self._open_args,
             live_delay=LIVE_DELAY[self._latency],
             # An HLS source starts far enough back for a start at the target (2.1 stage 3),
-            # under Auto the learned one (the source adds its own segments to it).
-            target=target,
-            extra=max(0.0, learned.target(0.0) - target) if learned is not None else 0.0,
+            # under Auto the learned one: it holds the source's segments already (the helper
+            # adds its own segment and a half of room to whichever is larger).
+            target=start_target(self._latency) if learned is None else learned.target(0.0),
+            extra=0.0,
         )
         self._phase = _Phase.WAITING
         self._ready_seen = self._loading = self._held_said = False
@@ -1042,6 +1075,7 @@ class LiveSession(QObject):
             self._cushion = max(self._cushion, target)
         self._reland_until = self._clock() + _RELAND_S
         self._reland_edge = self._live_edge(snapshot)
+        self._repick_until, self._repick_step = self._clock() + _REPICK_S, None
 
     def _open_first_again(self) -> None:
         """The tune's first open failed (no helper served it): pick its start again."""
@@ -1318,7 +1352,9 @@ class LiveSession(QObject):
             self._stay.hold_reopen = self._just_opened()
             self._stay.burst = self._filter.burst
             self._stay.spread = self._filter.spread()
-            self._reland(snapshot, lag)
+            if self._reland(snapshot, lag, position):
+                self._emit_timeline()
+                return  # the start was picked again
             buffering = (
                 stalled or self._playback.state() is PlaybackState.BUFFERING or self._clock_frozen()
             )
@@ -1403,16 +1439,49 @@ class LiveSession(QObject):
             stay.stop()
             self._set_rate(1.0)
 
-    def _reland(self, snapshot: Mapping[str, Any], lag: float) -> None:
+    def _reland(self, snapshot: Mapping[str, Any], lag: float, position: float) -> bool:
         """Within `_RELAND_S` of a tune's start, a backlog step (the live edge grew by more
         than `_SETTLE_GROWTH_S` in a tick) that took the lag further above the target is part
-        of the landing (`StayLive.landed_further`): raw TS whose backlog came after the hold."""
-        if self._clock() >= self._reland_until:
-            return
+        of the landing (`StayLive.landed_further`): raw TS whose backlog came after the hold.
+        One that began within `_REPICK_S` of the tune's open and, once the edge settled,
+        leaves the lag far above the target re-picks the start once, as Go live would (no
+        jump's cooldown, nothing merged): True then."""
+        now = self._clock()
+        if now >= self._reland_until and self._repick_step is None:
+            return False
         edge = self._live_edge(snapshot)
         stepped, self._reland_edge = edge - self._reland_edge > _SETTLE_GROWTH_S, edge
         if stepped:
             self._stay.landed_further(lag - self._stay.target)
+            if now < self._repick_until:
+                if self._repick_step is None:
+                    self._repick_step = now
+                self._repick_last = now
+        step = self._repick_step
+        if step is None or stepped and now - step < _REPICK_SETTLE_MAX_S - 1e-9:
+            return False
+        if now - self._repick_last < _SETTLE_S - 1e-9 and now - step < _REPICK_SETTLE_MAX_S:
+            return False
+        self._repick_step = None  # settled: a later step within the window is its own
+        if self._stay.mode is not Mode.LIVE or self._paused:
+            return False
+        # The mean lag the step leaves (the edge less the position, less half a burst: the
+        # mean over one) beyond the target by more than a burst (an uneven batch the rhythm
+        # brings is no backlog), and a clean start Go live would pick that gains on it.
+        burst = _number(snapshot.get("burst_s"))
+        now_lag = edge - position - burst / 2
+        if now_lag - self._stay.target <= max(burst, _REPICK_GAIN_S):
+            return False
+        landing = self._jump_lag()
+        if landing is None or now_lag - landing < max(_REPICK_GAIN_S, burst / 2):
+            return False
+        _LOG.debug("A backlog %.1f s behind right after the start: picked again.", now_lag)
+        self._repick_until = -math.inf  # once a tune
+        # The step is taken in at once: the pick reads the edge now, not the lag filter's
+        # mean from before it (which arrived over several ticks, none a step on its own).
+        self._filter.reset()
+        self._go_live(unpause=False, build=False)
+        return True
 
     def _back_off(
         self, snapshot: Mapping[str, Any], position: float, stalled: bool, cushioned: bool
@@ -1437,13 +1506,15 @@ class LiveSession(QObject):
 
     def _ran_out(self, snapshot: Mapping[str, Any]) -> bool:
         """VLC running dry (or a stall) now runs out a cushion: the lag had reached the target
-        since the tune (less `_BELOW_TARGET_S`), or the tune started at a pick chosen for it
-        (R33), or stay-live accepted the start's shortfall (nothing further back was
-        buffered: it never had the cushion, so running dry is trouble all the same)."""
-        return (
-            self._cushion >= self._target(snapshot) - _BELOW_TARGET_S
-            or self._stay.shortfall_accepted
-        )
+        since the tune (less `_BELOW_TARGET_S`; under Auto, less stay-live's band: a learned
+        rise within it is drift, built by nothing, so the lag in the band is at the target),
+        or the tune started at a pick chosen for it (R33), or stay-live accepted the start's
+        shortfall (nothing further back was buffered: it never had the cushion, so running
+        dry is trouble all the same)."""
+        below = _BELOW_TARGET_S
+        if self._learned is not None:
+            below = max(below, self._stay.band(-1))
+        return self._cushion >= self._target(snapshot) - below or self._stay.shortfall_accepted
 
     def _learn(self, *, direct: bool = False, learned_only: bool = False) -> None:
         """Keep what the channel taught (Auto's learned target, a locked rate, playing
@@ -1501,22 +1572,38 @@ class LiveSession(QObject):
         now = self._clock()
         dt = 0.0 if self._fed_at is None else min(max(0.0, now - self._fed_at), _PLAYED_MAX_S)
         burst = self._filter.burst_for(_number(snapshot.get("burst_s")))
-        before = learned.target(burst)
+        last, self._steer_burst = self._steer_burst, burst
+        moved = last is not None and abs(burst - last) > 1e-9
+        if moved:  # what the source's burst moves (the filter's hysteresis held it) at once
+            assert last is not None
+            self._steered.shift(learned.target(burst) - learned.target(last))
+        warm, before = learned.arrivals.warm, learned.target(burst)
         trouble = self._feed_learned(snapshot, position, stalled, cushioned, dt)
         self._fed_at = now
         raw = learned.target(burst)
+        if learned.arrivals.warm and not warm and learned.arrivals.remembered is None:
+            # Measured now: the burst no longer stands in for the need, what it held goes
+            # at once, as the burst's own moves do (a one-off first "burst", learned only).
+            self._steered.shift(min(0.0, raw - before))
         # A rise trouble made comes at once, with its owed slow-down (`StayLive.trouble`).
         target = self._steered.update(raw, dt, trouble=trouble and raw > before + 1e-9)
         need = learned.need(burst)
         said = self._said
         if said is None:
-            self._said = (target, need)
+            self._said = (target, need, burst)
         elif abs(target - said[0]) >= _LOG_STEP_S - 1e-9:
-            why = "trouble" if trouble else "arrivals" if abs(need - said[1]) > 1e-9 else "quiet"
+            if trouble:
+                why = "trouble"
+            elif abs(burst - said[2]) > 1e-9:
+                why = "the source's burst"
+            elif abs(need - said[1]) > 1e-9:
+                why = "arrivals"
+            else:
+                why = "quiet"
             _LOG.info(
                 "The learned live target is now %.1f s (was %.1f s): %s.", target, said[0], why
             )
-            self._said = (target, need)
+            self._said = (target, need, burst)
             self._learn(learned_only=True)
 
     def _feed_learned(
@@ -1529,16 +1616,20 @@ class LiveSession(QObject):
     ) -> bool:
         """Tell the learned target this tick (the integration contract of 2.1 stage 4a):
 
-        - the live edge, every tick (`arrivals.add`; a VLC reopen restarts nothing there,
-          only another stream from the helper does: `_recover`);
+        - the live edge, every tick the pipeline plays on (`arrivals.add`; not while the
+          session waits for the helper, retries an open or defers one: no edge then); a VLC
+          reopen restarts nothing there, only another stream from the helper does
+          (`_recover`);
         - a stall once when it begins (the bound passed: silence beyond the helper's burst
           plus `STALL_S`), with that burst (0 for a stall the 2 s bound found), only while
-          stay-live is live and after the cushion (`_ran_out`): `stalled()`; and, should it
+          stay-live is live and after the cushion (`_ran_out`): `stalled()`, which notes it
+          (trouble only once VLC runs dry: a stall the target covered is none); and, should it
           end without VLC running dry, the least headroom VLC had meanwhile: `absorbed()`;
-        - VLC running dry, once per dry run (a refill's flicker within `_CALM_S` is the same
-          one), even inside a counted stall, under the same conditions: `starved()`;
-        - when a batch begins, VLC's headroom on the tick before less its caching, if VLC
-          is not dry, under the same conditions: `near_miss()`;
+        - VLC running dry while live, once per dry run (a refill's flicker within `_CALM_S` is
+          the same one), under the same conditions or inside a counted stall: `starved()`;
+        - when a batch begins, VLC's headroom on the tick before less its caching, if VLC is
+          not dry and was not within `_CALM_S` (the batch that ends a dry run is none), under
+          the same conditions: `near_miss()`;
         - `dt` of playing at the live edge (not paused, not time-shifted, not dry): `played()`.
 
         True when trouble was told (the steered target follows at once). What it learned is
@@ -1560,14 +1651,14 @@ class LiveSession(QObject):
         counts = live and cushioned
         trouble = False
         before, self._headroom = self._headroom, headroom
-        if began and counts and not dry and before is not None:
+        was_dry = self._dry_at is not None and now - self._dry_at <= _CALM_S
+        if began and counts and not dry and not was_dry and before is not None:
             learned.near_miss(before - _CACHING_S, burst)
         if stalled and not self._stall_on:
             self._stall_on, self._stall_counted = True, counts
             self._stall_low, self._stall_dry = headroom, dry
             if counts:
                 learned.stalled(_number(snapshot.get("burst_s")))  # the bound's own burst
-                trouble = True
         elif stalled:
             self._stall_low = min(self._stall_low, headroom)
             self._stall_dry = self._stall_dry or dry
@@ -1575,13 +1666,15 @@ class LiveSession(QObject):
             if self._stall_counted and not self._stall_dry:
                 learned.absorbed(self._stall_low, burst)
             self._stall_on = self._stall_counted = False
-        if dry:
+        if dry and live:
             fresh = self._dry_at is None or now - self._dry_at > _CALM_S
             self._dry_at = now
-            if fresh and counts:
+            # Inside a stall told while it counted: the target it raised (none now, but a
+            # cushion judged against it) does not hide VLC running dry.
+            if fresh and (cushioned or (self._stall_on and self._stall_counted)):
                 learned.starved(burst)
                 trouble = True
-        elif live and dt > 0:
+        elif live and not dry and dt > 0:
             learned.played(dt)
         if trouble:
             self._learn(learned_only=True)
@@ -1642,10 +1735,11 @@ class LiveSession(QObject):
                 self._progress = _Progress(at_1x, vlc.changes, end)
                 return
         elif stretch.start is not None and min(vlc.still, vlc.played - stretch.start.played) >= max(
-            health.window, _FROZEN_HOLDS * vlc.hold()
+            health.window, _FROZEN_HOLDS * vlc.hold(), vlc.changed_hold(self._rate)
         ):
             # VLC's clock really stood still a whole window: that much was played of nothing.
-            # A step that is only late (or missing: twice as long) counts at its end.
+            # A step that is only late (or missing: twice as long) counts at its end, and so
+            # does the first of a cadence that just turned coarse (`VlcClock.changed_hold`).
             end = vlc.mark()
         else:
             return
@@ -1799,15 +1893,19 @@ class LiveSession(QObject):
         return max(TARGETS[self._latency], burst)
 
     def _auto_target(self, reported: float) -> float:
-        """Auto's target: the steered learned target (`_steer_learned`); before the first
-        tick fed it (the tune's start), the learned target for the burst the source reports,
-        as the lag filter takes its first report."""
+        """Auto's target for a source reporting the burst `reported`: the steered learned
+        target (`_steer_learned`, for the burst as the lag filter has it), moved by what
+        `reported` changes in the learned target, so the helper's burst counts at once, as
+        under any latency (for the lag filter's own burst: no change, the steering target);
+        before the first tick fed it (the tune's start), the learned target for the burst
+        the source reports, as the lag filter takes its first report."""
         learned = self._learned
         assert learned is not None
+        steering = self._filter.burst_for(reported)
         value = self._steered.value
-        if value is not None:
-            return value
-        return learned.target(self._filter.burst_for(reported))
+        if value is None:
+            return learned.target(steering)
+        return value + learned.target(reported) - learned.target(steering)
 
     def _just_opened(self) -> bool:
         """A pipeline stream opened a moment ago: VLC has not played it yet (a fresh clock),

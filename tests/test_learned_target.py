@@ -346,7 +346,9 @@ class ArrivalModelTests(unittest.TestCase):
         self.assertAlmostEqual(len(source.began), 600, delta=60)
         self.assertLessEqual(model.need(), lt.FLOOR_S)
 
-    def test_six_s_every_seven_with_every_sixth_twelve_needs_seven_and_a_half_to_nine(self):
+    def test_six_s_every_seven_with_every_sixth_twelve_needs_what_its_deepest_dip_does(self):
+        # The edge falls 6 s below its mean before each 12 s batch: about 7 s of mean lag, run
+        # dry at no batch, at most 9 s (the gap term, 7 s less half a 6 s batch, is under it).
         for seed in SEEDS:
             for name, pieces in (
                 ("one tick", six_and_twelve(600)),
@@ -356,9 +358,10 @@ class ArrivalModelTests(unittest.TestCase):
             ):
                 with self.subTest(seed=seed, batches=name):
                     target = LearnedTarget()
-                    Source(target.arrivals).run(pieces, 600)
+                    source = Source(target.arrivals).run(pieces, 600)
                     # Announced as 6 s segments: the learned need lifts it above its burst.
-                    self.assertGreaterEqual(target.target(6.0), 7.5)
+                    self.assertEqual(dry_runs(source.levels, target.target(6.0)), 0)
+                    self.assertGreater(target.target(6.0), 6.0)
                     self.assertLessEqual(target.target(6.0), 9.0)
                     self.assertTrue(target.adjusted(6.0))
                     # Announced as 12 s: never under its burst (as 2.0.2), nothing to add.
@@ -367,31 +370,33 @@ class ArrivalModelTests(unittest.TestCase):
                     # Learned only: the need, whatever the playlist announces.
                     target.segment_floor = False
                     for burst in (6.0, 12.0):
-                        self.assertGreaterEqual(target.target(burst), 7.5)
+                        self.assertEqual(target.target(burst), target.need())
                         self.assertLessEqual(target.target(burst), 9.0)
                         self.assertTrue(target.adjusted(burst))
 
-    def test_ten_s_every_twelve_needs_more_than_the_batch_interval_before_any_starvation(self):
-        # TARGETDURATION 10 whose batches land every 12 s: Auto's 2.0.2 target was 10 (the
-        # burst) and VLC starved before each batch. Literally 10 s every 12 s, and 12 s batches
-        # announced as 10; whole, over 1-12 ticks or downloading for 0.05-0.2 s.
+    def test_a_sparse_pcr_rhythm_needs_what_keeps_vlc_from_running_dry_and_no_more(self):
+        # Two sparse-PCR channels, measured (2.1 stage 4b): 10 s batches 12, 12 and 6 s apart,
+        # their playlists' target duration 12 s. A 12 s target kept 4.9 s of headroom before
+        # every batch; read as gaps plus lateness the need was 16 s. Whole, over 1-12 ticks or
+        # downloading for 0.05-0.2 s: never dry at the need, and no more than 12 s.
         for seed in SEEDS:
-            for media in (10.0, 12.0):
-                batches = regular(12.0, media, 600)
-                for name, pieces in (
-                    ("one tick", batches),
-                    ("1-12 ticks", spread_over_ticks(batches, seed)),
-                    ("0.05-0.2 s downloads", downloaded(batches, seed)),
-                ):
-                    with self.subTest(seed=seed, media=media, batches=name):
-                        target = LearnedTarget()
-                        source = Source(target.arrivals)
-                        source.run([p for p in pieces if p[0] <= 60], 60)
-                        self.assertEqual(target.prior.margin(), 0.0)  # no starvation told
-                        self.assertGreaterEqual(target.target(10.0), 12.5)
-                        source.run([p for p in pieces if p[0] > 60], 600)
-                        self.assertGreaterEqual(target.target(10.0), 12.5)
-                        self.assertLessEqual(target.target(10.0), 14.5)
+            times = [k * 30.0 + d for k in range(21) for d in (12.0, 24.0, 30.0)]
+            batches = [(t, 10.0) for t in times if t <= 600]
+            for name, pieces in (
+                ("one tick", batches),
+                ("1-12 ticks", spread_over_ticks(batches, seed)),
+                ("0.05-0.2 s downloads", downloaded(batches, seed)),
+            ):
+                with self.subTest(seed=seed, batches=name):
+                    target = LearnedTarget()
+                    source = Source(target.arrivals).run(pieces, 600)
+                    need = target.need(12.0)
+                    self.assertEqual(dry_runs(source.levels, need), 0)
+                    self.assertGreater(need, truth(source.levels))
+                    self.assertLessEqual(need, 12.0)
+                    self.assertEqual(target.target(12.0), 12.0)  # at its burst
+                    target.segment_floor = False
+                    self.assertEqual(target.target(12.0), need)
 
     def test_a_batch_is_one_arrival_however_many_ticks_it_takes(self):
         model = ArrivalModel()
@@ -405,7 +410,7 @@ class ArrivalModelTests(unittest.TestCase):
         regular_need = need_after(regular(7.0, 7.0, 600), 600)
         jittery_need = need_after(jittery(7.0, 600, 2.0), 600)
         wilder_need = need_after(jittery(7.0, 600, 3.0), 600)
-        self.assertAlmostEqual(regular_need, 7.0 + lt.MARGIN_S, delta=0.3)
+        self.assertAlmostEqual(regular_need, 7.0 * (1 - lt.MEDIA_SHARE) + lt.MARGIN_S, delta=0.3)
         self.assertGreater(jittery_need, regular_need + 1.0)
         self.assertGreater(wilder_need, jittery_need)
 
@@ -437,7 +442,9 @@ class ArrivalModelTests(unittest.TestCase):
                         stalled=lambda t, s=start: told and s + 7 + STALL_S < t < s + 47,
                     )
                     start = back + 105.0
-                self.assertAlmostEqual(model.need(), 7.0 + lt.MARGIN_S, delta=0.05)
+                self.assertAlmostEqual(
+                    model.need(), 7.0 * (1 - lt.MEDIA_SHARE) + lt.MARGIN_S, delta=0.2
+                )
 
     def test_late_batches_the_session_calls_stalls_still_count(self):
         # A 12-s rhythm announced as 10 (the session's stall bound: 12 s), about one batch in
@@ -496,10 +503,10 @@ class ArrivalModelTests(unittest.TestCase):
         # HLS segments downloading at under 1.5x come in ~1 s pieces. The idle time between
         # two segments is the source's rhythm, not a stall (trouble is judged against the
         # gaps between batches after a still edge), and the troughs before them set the dips.
-        # The gap term holds the idle time and a piece (6 s and 7 s), above the dips' 3.2 s
-        # and 4.0 s. With the burst floor the target stays at the burst (a lost segment is
-        # held out as in 2.0.2); learned only, it is the need, which holds the rhythm alone.
-        for seg, took, need in ((15.0, (10.2, 10.8), 6.0), (20.0, (13.5, 14.5), 7.0)):
+        # The gap term holds the idle time and a piece, less half a piece (5.5 s and 6.3 s),
+        # above the dips' 3.2 s and 4.0 s. With the burst floor the target stays at the burst
+        # (2.0.2's footing); learned only, it is the need, which holds the rhythm alone.
+        for seg, took, need in ((15.0, (10.2, 10.8), 5.5), (20.0, (13.5, 14.5), 6.3)):
             for seed in range(4):
                 with self.subTest(seg=seg, seed=seed):
                     target = LearnedTarget()
@@ -513,13 +520,16 @@ class ArrivalModelTests(unittest.TestCase):
                     self.assertEqual(target.target(seg), target.need(seg))
                     self.assertTrue(target.adjusted(seg))  # above the floor
 
-    def test_a_download_twice_as_fast_still_needs_its_whole_cycle(self):
+    def test_a_download_twice_as_fast_is_one_batch_a_cycle(self):
+        # Not cut into pieces: each segment one batch, its gap the cycle, less half of it.
         for seed in range(4):
             target = LearnedTarget()
             pieces = downloaded(regular(15.0, 15.0, 600), seed, (7.3, 7.7))
             source = Source(target.arrivals).run(pieces, 600)
-            self.assertAlmostEqual(target.target(15.0), 16.0, delta=TICK + 1e-6)
-            self.assertEqual(dry_runs(source.levels, target.target(15.0)), 0)
+            need = target.need(15.0)
+            self.assertAlmostEqual(need, 15.0 * (1 - lt.MEDIA_SHARE) + lt.MARGIN_S, delta=0.5)
+            self.assertEqual(dry_runs(source.levels, need), 0)
+            self.assertEqual(target.target(15.0), 15.0)
 
     def test_a_backlog_never_switches_the_dips_off(self):
         # The dips of a lumpy source need 10.4 s; a backlog delivered at once (the first
@@ -630,10 +640,10 @@ class ArrivalModelTests(unittest.TestCase):
         source = Source(model).run(downloaded(regular(15.0, 15.0, 600.0), 0, (10.2, 10.8)), 40)
         self.assertGreaterEqual(model.seen, lt.WARM_GAPS)
         self.assertFalse(model.warm)
-        self.assertEqual(model.need(15.0), 15.0 + lt.MARGIN_S)
+        self.assertEqual(model.need(15.0), 15.0)
         source.run(downloaded(regular(15.0, 15.0, 600.0), 0, (10.2, 10.8)), 600)
         self.assertTrue(model.warm)
-        self.assertAlmostEqual(model.need(15.0), 6.0, delta=0.5)
+        self.assertAlmostEqual(model.need(15.0), 5.5, delta=0.5)
         flow = ArrivalModel()  # a flow never stands still: twenty batches in a row will do
         Source(flow).run(flowing(30.0), 30.0)
         self.assertTrue(flow.warm)
@@ -693,18 +703,18 @@ class ArrivalModelTests(unittest.TestCase):
     def test_until_measured_the_burst_stands_in_and_warm_up_never_lowers_it(self):
         model = ArrivalModel()
         self.assertEqual(model.need(), 0.0)  # steady and unknown: the floor decides
-        self.assertEqual(model.need(6.0), 6.0 + lt.MARGIN_S)
+        self.assertEqual(model.need(6.0), 6.0)  # a segment of mean lag: 2.0.2's footing
         # An HLS start: the live window's segments are fetched one after another, a second
         # apart, then the rhythm. The quick gaps alone would say 2 s.
         backlog = [(float(n), 6.0) for n in range(1, 6)]
         source = Source(model).run(backlog, 5.5)
         self.assertIsNotNone(model.fresh())
         self.assertLess(model.fresh(), 3.0)
-        self.assertGreaterEqual(model.need(6.0), 6.0 + lt.MARGIN_S)
+        self.assertGreaterEqual(model.need(6.0), 6.0)
         source.run(regular(6.0, 6.0, 31, start=5.0), 31)
-        self.assertGreaterEqual(model.need(6.0), 6.0 + lt.MARGIN_S)
+        self.assertGreaterEqual(model.need(6.0), 6.0)
         source.run(regular(6.0, 6.0, 600, start=29.0), 600)
-        self.assertAlmostEqual(model.need(6.0), 6.0 + lt.MARGIN_S, delta=0.3)
+        self.assertAlmostEqual(model.need(6.0), 6.0 * (1 - lt.MEDIA_SHARE) + lt.MARGIN_S, delta=0.3)
         self.assertAlmostEqual(model.need(0.0), model.need(10.0))  # measured: the burst is moot
 
     def test_it_estimates_at_most_once_a_second(self):
@@ -978,9 +988,10 @@ class LearnedTargetTests(unittest.TestCase):
         Source(target.arrivals).run(regular(12.0, 12.0, 600), 600)
         for _ in range(20):
             target.starved()
-        self.assertEqual(target.target(), target.need() + 2.0)
-        self.assertAlmostEqual(target.margin(), 2.0)
-        self.assertAlmostEqual(target.room(), 2.0)
+        cap = max(lt.CAP_MIN_S, target.need() + lt.CAP_ABOVE_S)
+        self.assertEqual(target.target(), cap)
+        self.assertAlmostEqual(target.margin(), cap - target.need())
+        self.assertAlmostEqual(target.room(), cap - target.need())
 
     def test_nothing_that_would_change_the_next_tune_is_nothing_to_remember(self):
         self.assertIsNone(LearnedTarget().learned())
@@ -1012,7 +1023,7 @@ class LearnedTargetTests(unittest.TestCase):
         source = Source(again.arrivals).run(regular(7.0, 7.0, 35), 35)  # five quick ones
         self.assertEqual(again.target(), 13.0)
         source.run(regular(7.0, 7.0, 600, start=35), 600)
-        self.assertAlmostEqual(again.target(), 7.0 + lt.MARGIN_S, delta=0.3)
+        self.assertAlmostEqual(again.target(), 7.0 * (1 - lt.MEDIA_SHARE) + lt.MARGIN_S, delta=0.3)
         self.assertAlmostEqual(again.learned().need, again.need(), places=2)
 
     def test_a_short_tune_keeps_the_need_it_was_given(self):
@@ -1056,12 +1067,11 @@ class LearnedTargetTests(unittest.TestCase):
         self.assertAlmostEqual(target.room(15.0), 16.0 - target.need(15.0))
         target.starved(15.0)
         self.assertAlmostEqual(target.target(15.0), 16.0)
-        fast = LearnedTarget(segment_floor=False)  # the need already holds a segment
+        fast = LearnedTarget(segment_floor=False)  # whole segments: half of one, a second
         Source(fast.arrivals).run(downloaded(regular(15.0, 15.0, 600.0), 0, (0.5, 2.0)), 600)
-        need = fast.need(15.0)
-        self.assertGreaterEqual(need, 16.0)
+        self.assertAlmostEqual(fast.need(15.0), 8.5, delta=0.5)
         fast.starved(15.0)
-        self.assertAlmostEqual(fast.target(15.0), need + math.log2(3), delta=0.05)
+        self.assertAlmostEqual(fast.target(15.0), 16.0)  # a segment covered at once
         low = LearnedTarget(Learned(need=2.0), segment_floor=False)
         self.assertFalse(low.adjusted(15.0))  # at the floor: nothing learned raised it
         self.assertEqual(low.target(15.0), lt.FLOOR_S)
@@ -1079,32 +1089,36 @@ class LearnedTargetTests(unittest.TestCase):
         floored = LearnedTarget(learned)  # the A/B switched back: the cap bounds it
         self.assertAlmostEqual(floored.target(30.0), 32.0)
 
-    def test_a_segmented_source_stalling_is_trouble_at_once(self):
-        # As 2.0.2 counted it: a segment late or lost raises the margin before VLC runs dry.
-        segmented = LearnedTarget(Learned(need=6.0))
-        segmented.stalled(15.0)
-        self.assertAlmostEqual(segmented.target(15.0), 15.0 + math.log2(3))
-        segmented.stalled(15.0)
-        self.assertAlmostEqual(segmented.target(15.0), 17.0)  # 2.0.2's cap: burst + 2 s
-        steady = LearnedTarget(Learned(need=6.0))
-        steady.stalled()  # a steady source's stall is only noted
-        self.assertEqual(steady.target(), 6.0)
-        self.assertTrue(steady.arrivals._stalled)
-        only = LearnedTarget(Learned(need=6.0), segment_floor=False)
-        only.stalled(15.0)  # learned only: noted, counted when VLC runs dry
-        self.assertEqual(only.target(15.0), 6.0)
-        self.assertTrue(only.arrivals._stalled)
+    def test_a_stall_is_noted_and_counts_only_once_vlc_runs_dry(self):
+        # Ruling R37 counted a segmented source's stall at once, as 2.0.2 did: an ordinary
+        # HLS stall the target held through held it up 1.6-2 s for an hour (stage 4b review).
+        # Any source's stall is noted; a dry run is trouble (`starved`), one the target held
+        # out is `absorbed`.
+        for target, burst in (
+            (LearnedTarget(Learned(need=6.0)), 15.0),
+            (LearnedTarget(Learned(need=6.0)), 0.0),
+            (LearnedTarget(Learned(need=6.0), segment_floor=False), 15.0),
+        ):
+            with self.subTest(burst=burst, segment_floor=target.segment_floor):
+                before = target.target(burst)
+                target.stalled(burst)
+                self.assertEqual(target.target(burst), before)
+                self.assertTrue(target.arrivals._stalled)
+                target.starved(burst)
+                self.assertGreater(target.target(burst), before)
 
     def test_lost_segments_cost_no_more_than_in_two_zero_two(self):
         # HLS 15 s segments downloading at 1.45x, one lost every 3-5 minutes, VLC holding the
-        # target: at its burst (2.0.2's footing) every loss is held out, as then. Learned only,
-        # the first loss runs VLC dry once (its starvation covers a segment at once) and the
-        # later ones are held out.
+        # target: the first loss runs VLC dry once (with the burst floor its starvation's
+        # margin, learned only a segment covered at once), the later ones are held out. (This
+        # loop takes a raised target in at once, so R37's stall counted at its bound held
+        # even the first out here, and 2.0.2's does; in the session a raise in the middle of a
+        # stall brings no media.)
         for seed in range(2):
             pieces = lossy_hls(seed, 3600.0, 15.0, (10.2, 10.8))
             old, _ = closed_loop(pieces, 3600.0, 15.0, learned=False)
             self.assertEqual(old, [])
-            for segment_floor, most in ((True, 0), (False, 1)):
+            for segment_floor, most in ((True, 1), (False, 1)):
                 with self.subTest(seed=seed, segment_floor=segment_floor):
                     dry, targets = closed_loop(pieces, 3600.0, 15.0, segment_floor=segment_floor)
                     self.assertLessEqual(len(dry), most)

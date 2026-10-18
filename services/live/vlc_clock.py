@@ -69,6 +69,7 @@ _AGREE = 1.25
 _CHANGED = 0.5  # ... and differ from it by more than this share: the cadence changed
 _HOLD_INTERVALS = 1.5  # VLC's clock is starved after standing still this many intervals ...
 _HOLD_PAD_S = 0.25  # ... and this long
+_COARSE_STEP_S = 2.0  # the coarsest cadence met: a sparse-PCR channel's 2 s stamps
 _AHEAD_STEPS = 1.5  # the clock runs at most this many steps past VLC's last reading ...
 _AHEAD_FIRST_S = 1.0  # ... and a second at the rate before any step is known
 _JUMP_STEPS = 1.5  # a reading further than this many quanta from the clock is a jump ...
@@ -157,6 +158,15 @@ class VlcClock:
         if interval is None:
             return FROZEN_S
         return max(FROZEN_S, _HOLD_INTERVALS * interval + _HOLD_PAD_S)
+
+    def changed_hold(self, rate: float = 1.0) -> float:
+        """How long VLC's clock may stand still at `rate` because its cadence just turned
+        coarse, before the steps it learns say so: two of the coarsest steps met
+        (`_COARSE_STEP_S`: one stamp missing) and two holds' pad. Rate health waits that long
+        before a still clock counts as nothing played (stage 2 review: fine quanta, then 2 s
+        stamps with one of the first three missing, at 1.10x or 0.95x, locked a healthy
+        channel at 1x for a day)."""
+        return 2 * _COARSE_STEP_S / max(rate, 1e-6) + 2 * _HOLD_PAD_S
 
     def frozen(self) -> bool:
         """VLC's clock stood still past `hold()` while it played (starved)."""

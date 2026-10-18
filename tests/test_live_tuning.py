@@ -305,7 +305,7 @@ class LiveTuningTests(unittest.TestCase):
         store.flush()
         restored = self.store().get("a")
         again = LearnedTarget(restored.learned, restored.extra)
-        self.assertGreaterEqual(again.target(10.0), 12.5)
+        self.assertGreater(again.target(10.0), 10.0)  # its burst and the near-miss's margin
         self.assertAlmostEqual(again.target(10.0), target.target(10.0), delta=0.01)
 
     def test_a_learned_only_segment_cover_round_trips_through_the_file(self):

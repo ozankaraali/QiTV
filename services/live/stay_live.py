@@ -146,7 +146,9 @@ _BURST_STEP_S = 0.5  # burst changes smaller than this leave it as it was
 # SteeredTarget: the learned target (Auto, 2.1 stage 4b) as stay-live steers by it.
 _STEER_STEP_S = 0.5  # a rise moves it in a step this big at least ...
 _STEER_HOLD_S = 10.0  # ... once it held this long (at once with trouble) ...
-_STEER_FALL = _AUTO_DOWN / _AUTO_QUIET_S  # ... and a fall at most this fast (Auto's decay)
+_STEER_FALL = _AUTO_DOWN / _AUTO_QUIET_S  # ... a fall of what trouble raised at most this
+# fast (Auto's quiet decay) ...
+_STEER_FALL_ARRIVALS = 0.5 / 60.0  # ... of what the arrivals alone raised, this fast
 
 # SettledLag: the lag as shown.
 _SHOWN_STEP_S = 0.5
@@ -223,20 +225,40 @@ class SteeredTarget:
     once a second, the margin as it fades); steered by as it is, each move would be a new
     target to build or catch up to. So a rise counts in a step of at least `_STEER_STEP_S`
     once it held `_STEER_HOLD_S` (as a larger burst counts), at once when trouble raised it
-    (its owed slow-down comes with it: `StayLive.trouble`); a fall comes at most at
-    `_STEER_FALL` (Auto's quiet decay, half a second per 5 minutes), never as a step.
+    (its owed slow-down comes with it: `StayLive.trouble`); a fall is never a step: what
+    trouble raised comes down at most at `_STEER_FALL` (Auto's quiet decay, half a second per
+    5 minutes), what the arrivals alone raised at `_STEER_FALL_ARRIVALS` (half a second a
+    minute: a stall's aftermath lifts the need for a minute or so). What the source's burst
+    moves in it (the lag filter's burst, which has its own hysteresis) moves it at once,
+    either way (`shift`): a burst the helper measured late counts as soon as the filter
+    takes it, and a one-off first "burst" (a backlog) goes as the filter drops it.
     """
 
     def __init__(self) -> None:
         self.value: Optional[float] = None
+        self._troubled: Optional[float] = None  # the level trouble raised it to, falling
         self._rising = 0.0  # seconds the learned target held a step above it
+
+    def shift(self, delta: float) -> None:
+        """The source's burst moved the learned target by `delta` seconds: so much at once."""
+        if self.value is not None:
+            self.value += delta
+        if self._troubled is not None:
+            self._troubled += delta
 
     def update(self, learned: float, dt: float, *, trouble: bool = False) -> float:
         """The target to steer by, `dt` seconds after the last update, the learned target now
         `learned`; `trouble`: trouble raised it this moment."""
-        value = self.value
-        if value is None or (trouble and learned > value):
+        value, dt = self.value, max(0.0, dt)
+        if self._troubled is not None:
+            self._troubled -= _STEER_FALL * dt
+            if self._troubled <= learned + 1e-9:
+                self._troubled = None  # what trouble raised is all learned now
+        if value is None:
             self.value, self._rising = learned, 0.0
+        elif trouble and learned > value:
+            self.value = self._troubled = learned
+            self._rising = 0.0
         elif learned >= value + _STEER_STEP_S - 1e-9:
             self._rising += dt
             if self._rising >= _STEER_HOLD_S - 1e-9:
@@ -244,7 +266,8 @@ class SteeredTarget:
         else:
             self._rising = 0.0
             if learned < value:
-                self.value = max(learned, value - _STEER_FALL * max(0.0, dt))
+                held = -math.inf if self._troubled is None else self._troubled
+                self.value = max(learned, value - _STEER_FALL_ARRIVALS * dt, min(value, held))
         assert self.value is not None
         return self.value
 

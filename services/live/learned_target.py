@@ -11,11 +11,16 @@ none lasts beyond `BATCH_MAX_S`. Whether the channel's flow is cut is decided on
 batches, by the median rate of its runs (from a batch after a still edge to the next), with
 hysteresis, so a download at the border is not cut one time and whole the next; once its runs
 are forgotten (it flows now, say) it is judged afresh. Between two
-batches' starts VLC plays at 1x what it holds, so that gap is the media it must have in hand.
-The need is the larger of two: the 95th percentile of the gaps (the usual longest wait) plus
-half their interquartile range (lateness: nothing for a source that keeps its rhythm, more the
-more its gaps wander, as the window may not have shown the longest yet) plus a fixed margin;
-and the 95th percentile of the dips, how far the edge fell below its own mean before each
+batches' starts VLC plays at 1x what it holds, so that gap is the media it must have in hand
+when a batch lands; the need is a mean lag (the target stay-live steers the mean to), and
+right after a batch the edge stands above its own mean, about half a batch on a regular
+rhythm, so a gap asks that much less of the mean lag (`MEDIA_SHARE`; the 2.1 stage 4b review:
+two sparse-PCR channels' 10 s batches 12, 12 and 6 s apart read 16 s, a 12 s target kept 4.9
+s of headroom before every batch). The need is the larger of two: the 95th percentile of the
+gaps (the usual longest wait) plus half their interquartile range (lateness: nothing for a
+source that keeps its rhythm, more the more its gaps wander, as the window may not have shown
+the longest yet), less half the usual batch, plus a fixed margin; and the 95th percentile of
+the dips, how far the edge fell below its own mean before each
 batch (its lowest since the batch before), the deepest of each `DIP_SLICE_S` of time (deep
 where a big batch follows several small ones, or a flowing source sags; many small batches
 would otherwise hide the deep ones) plus the same margin. A source that runs off real time
@@ -32,7 +37,8 @@ idle time look like stalls), while such cycles are at least half of the batches 
 edge; else the gap between any two batches (a flowing source's pauses and stalls are no
 rhythm). Until the tune has seen enough batches (and, for a source that stands still, enough
 of its still edges) the need is never lower than what the channel taught before (or than the
-burst the source reports, plus the margin, if it taught nothing yet).
+burst the source reports, if it taught nothing yet: a whole segment of mean lag leaves VLC
+about half of one before each batch on a regular rhythm, 2.0.2's footing and Normal's).
 
 `StarvationPrior` is the belief about how often VLC runs dry: Gamma-like (starvations counted
 over hours of playing, but weighed by the margin in force and tempered as below: not a strict
@@ -67,7 +73,8 @@ sync, latency). Off, a segmented source has max(floor, need) + margin like a ste
 most max(Stable's 6 s + 4 s, need + 2 s, burst + `CAP_BURST_S`): room for the margin to cover
 a whole lost segment where the need is well under one (a slow download), which its
 starvation then covers at once (the target to the burst + `CAP_BURST_S`, within the cap), and
-its stall is only noted, as a steady source's. Either way a steady source's target is the
+its stall is only noted. Any source's stall is only noted since the 2.1 stage 4b review (its
+trouble counts once VLC runs dry). Either way a steady source's target is the
 same.
 `LearnedTarget` holds one channel's model and prior; `Learned` is what it remembers
 (`services.live.tuning`) when it says something about the next tune, and a 2.0.2 `extra`
@@ -86,7 +93,9 @@ after one); `BATCH_MAX_S` (10 s: a 12-s segment downloading at under 2x); `CYCLE
 `BATCH_MAX_S` / `BATCH_SPLIT_S` = 20: the most batches a cycle may hold, a download of up to
 20 s cut into pieces). Cycles and run rates count for `GAP_WINDOW_S`. `QUANTILE` (95%) of
 the gaps of the last `GAP_WINDOW_S` (10 minutes, at most `MAX_GAPS`) are the usual waits;
-`LATE_SHARE` (half) of their interquartile range is the lateness. `MIN_GAPS` (3) batches give
+`LATE_SHARE` (half) of their interquartile range is the lateness, and `MEDIA_SHARE` (half) of
+the median of what the last `TYPICAL_GAPS` batches brought is how far above its mean the edge
+stands when a batch lands. `MIN_GAPS` (3) batches give
 a first estimate; until `WARM_GAPS` (20), with `MIN_GAPS` after a still edge or `WARM_GAPS`
 in a row without one, the earlier need holds as a floor; it is estimated at most once per
 `ESTIMATE_EVERY_S` (1 s). A gap (from the last batch after a still edge) longer than
@@ -149,6 +158,7 @@ BATCH_MAX_S = 10.0
 CYCLE_PIECES = int(2 * BATCH_MAX_S / BATCH_SPLIT_S)
 QUANTILE = 0.95
 LATE_SHARE = 0.5
+MEDIA_SHARE = 0.5
 GAP_WINDOW_S = 600.0
 MAX_GAPS = 1200
 MIN_GAPS = 3
@@ -384,7 +394,7 @@ class ArrivalModel:
         if self.remembered is not None:
             fallback = self.remembered
         else:
-            fallback = burst + MARGIN_S if burst > 0 else 0.0
+            fallback = burst
         if fresh is None:
             need = fallback
         elif not self.warm:
@@ -632,7 +642,8 @@ class ArrivalModel:
             return None
         gaps.sort()
         late = _quantile(gaps, 0.75) - _quantile(gaps, 0.25)
-        need = _quantile(gaps, QUANTILE) + LATE_SHARE * late + MARGIN_S
+        lead = MEDIA_SHARE * (self._usual_media or 0.0)  # the edge over its mean at a batch
+        need = max(0.0, _quantile(gaps, QUANTILE) + LATE_SHARE * late - lead) + MARGIN_S
         dips = sorted(deepest.values())
         if len(dips) >= MIN_GAPS and abs(self._pace() - 1.0) <= DRIFT_SHARE:
             need = max(need, _quantile(dips, QUANTILE) + MARGIN_S)
@@ -859,15 +870,14 @@ class LearnedTarget:
             self.prior.at_least(min(self.room(burst), cover))
 
     def stalled(self, burst: float = 0.0) -> None:
-        """The source stalled (the session's stall bound passed) while VLC had its cushion.
-        With the burst floor, a segmented source's stall is a segment late or lost: as 2.0.2
-        did, it is trouble at once, one step of margin before VLC can run dry (within the cap:
-        at most its burst + `CAP_ABOVE_S`, 2.0.2's). A steady source's (and, learned only,
-        any source's) is only noted (`ArrivalModel.stall`): its trouble counts when VLC runs
-        dry."""
+        """The source stalled (the session's stall bound passed) while VLC had its cushion:
+        noted (`ArrivalModel.stall`), any source. Its trouble counts when VLC runs dry
+        (`starved`); one the target covered is `absorbed` (a near-miss at most, when its batch
+        lands). (Ruling R37 had a segmented source's stall raise the margin at once, as 2.0.2
+        did; the 2.1 stage 4b review: an ordinary HLS stall the target held through then held
+        the target up 1.6-2 s.) `burst`: the one the session's bound used."""
+        del burst
         self.arrivals.stall()
-        if self.segment_floor and _burst(burst) > 0:
-            self.prior.starved(self.margin(burst), self.room(burst))
 
     def _base(self, burst: float) -> float:
         return _base(self.need(burst), self.floor, burst, self.segment_floor)

@@ -1316,8 +1316,9 @@ class JumpTests(unittest.TestCase):
 class SteeredTargetTests(unittest.TestCase):
     """2.1 stage 4b: the learned target as stay-live steers by it. A rise moves it in a step
     of at least half a second once it held 10 s (at once with trouble: its owed slow-down
-    comes with it); a fall is slow, Auto's quiet decay (half a second per 5 minutes), never a
-    step."""
+    comes with it); a fall is never a step: what trouble raised falls at Auto's quiet decay
+    (half a second per 5 minutes), what the arrivals alone raised half a second a minute; what
+    the source's burst moves (`shift`) moves it at once, either way."""
 
     def run_for(self, steer, raw, seconds, *, trouble=False):
         values = []
@@ -1352,14 +1353,51 @@ class SteeredTargetTests(unittest.TestCase):
         steer.update(2.5, TICK)
         self.assertEqual(steer.update(4.1, TICK, trouble=True), 4.1)
 
-    def test_a_fall_is_slow(self):
+    def test_what_trouble_raised_falls_slowly(self):
         steer = SteeredTarget()
-        steer.update(8.0, TICK)
+        steer.update(5.0, TICK)
+        steer.update(8.0, TICK, trouble=True)
         values = self.run_for(steer, 5.0, 300.0)
         self.assertAlmostEqual(values[-1], 7.5, delta=0.01)  # half a second in 5 minutes
         self.assertTrue(all(a >= b for a, b in zip(values, values[1:])))
         self.run_for(steer, 5.0, 3600.0)
         self.assertEqual(steer.value, 5.0)  # down to the learned target, not under
+
+    def test_what_the_arrivals_raised_falls_half_a_second_a_minute(self):
+        # A stall's aftermath lifts the arrival need for a minute (a public HLS channel):
+        # held at Auto's quiet pace, its 3.5 s stayed half an hour.
+        steer = SteeredTarget()
+        steer.update(9.8, TICK)
+        self.run_for(steer, 13.3, 10.25)
+        self.assertEqual(steer.value, 13.3)
+        values = self.run_for(steer, 9.8, 60.0)
+        self.assertAlmostEqual(values[-1], 12.8, delta=0.01)
+        self.assertTrue(all(a >= b for a, b in zip(values, values[1:])))
+        self.run_for(steer, 9.8, 420.0)
+        self.assertEqual(steer.value, 9.8)
+
+    def test_trouble_above_the_arrivals_falls_slowly_then_the_rest_faster(self):
+        steer = SteeredTarget()
+        steer.update(8.0, TICK)
+        steer.update(10.0, TICK, trouble=True)
+        self.run_for(steer, 9.0, 60.0)
+        self.assertAlmostEqual(steer.value, 9.9, delta=0.01)  # trouble's: slowly
+
+    def test_the_burst_moves_it_at_once_either_way(self):
+        # A raw TS meter's burst, once the lag filter takes it in (its own hysteresis), and a
+        # one-off first "burst" (a backlog) dropped again: no hold, no slow fall.
+        steer = SteeredTarget()
+        steer.update(2.5, TICK)
+        steer.shift(8.5)
+        self.assertEqual(steer.update(11.0, TICK), 11.0)
+        steer.shift(-8.5)
+        self.assertEqual(steer.update(2.5, TICK), 2.5)
+        steer = SteeredTarget()
+        steer.update(5.0, TICK)
+        steer.update(8.0, TICK, trouble=True)
+        steer.shift(2.0)  # trouble's level moves with it
+        self.run_for(steer, 7.0, 60.0)
+        self.assertAlmostEqual(steer.value, 9.9, delta=0.01)
 
 
 class BurstForTests(unittest.TestCase):
