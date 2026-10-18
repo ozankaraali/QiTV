@@ -1158,11 +1158,31 @@ class HlsSource:
         self._delivered = False  # a segment arrived whole
         self._pending = False  # a Discontinuity is due before the next bytes
         self._joiner = ContinuityJoiner()  # the segments' counters run on across joins
+        self._serial = 0  # segments started so far
+        self._fetching = 0.0  # the EXTINF of the segment being fetched (0.0: none)
+        self._rest = 0.0  # the EXTINF of the listed segments after it
 
     @property
     def burst_s(self) -> float:
         """The media playlist's target duration, updated on every reload."""
         return self._burst
+
+    @property
+    def segment_serial(self) -> int:
+        """Counts the segments started: it changes as the next segment's first bytes come."""
+        return self._serial
+
+    @property
+    def segment_s(self) -> float:
+        """The EXTINF seconds of the segment being fetched; 0.0 once every listed one came."""
+        return self._fetching
+
+    @property
+    def rest_s(self) -> float:
+        """The EXTINF seconds of the listed segments after the one being fetched: with what
+        that one still holds, the media to come before the source has caught up (2.1 stage 3:
+        the helper predicts the live edge then, so a tune need not wait for all of it)."""
+        return self._rest
 
     def chunks(self) -> Iterator[Chunk]:
         return _guarded(self._http, self._run())
@@ -1249,6 +1269,11 @@ class HlsSource:
             if not stale:
                 self._discontinuity_sequence = playlist.discontinuity_sequence
             fresh = newest >= next_sequence
+            self._rest = sum(
+                float(segment.duration or 0)
+                for index, segment in enumerate(playlist.segments)
+                if first + index >= next_sequence and not segment.gap_tag
+            )
             # Frozen time runs between reloads only, never while segments download.
             if not fresh and loaded - progress >= _FROZEN_TIMEOUT:
                 raise SourceError("timeout", _FROZEN)
@@ -1263,7 +1288,11 @@ class HlsSource:
                     log.info("Skipped an HLS segment tagged as a gap.")
                     self._mark()
                     continue
+                self._fetching = float(segment.duration or 0)
+                self._rest = max(0.0, self._rest - self._fetching)
+                self._serial += 1
                 yield from self._segment(segment, sequence, url)
+            self._fetching = 0.0
             if fresh:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it

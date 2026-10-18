@@ -1275,6 +1275,27 @@ high.m3u8
                 timer.join()
                 self.assertEqual(requested_segments(server), names[first:])
 
+    def test_live_hls_says_how_much_listed_media_is_still_to_come(self):
+        # 2.1 stage 3: the helper predicts the live edge once the backlog fetched at the
+        # start has arrived, so the start need not wait for all of it.
+        names = ["a.ts", "b.ts", "c.ts"]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        routes["/live.m3u8"] = (200, {}, hls(0, names, target=2, ended=True))
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/live.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        seen = []
+        try:
+            for item in source.chunks():
+                listed = (source.segment_serial, source.segment_s, source.rest_s)
+                if not seen or seen[-1] != listed:
+                    seen.append(listed)
+        finally:
+            source.close()
+        # (the segment fetched, its EXTINF, the EXTINF of the listed ones after it)
+        self.assertEqual(seen, [(1, 2.0, 4.0), (2, 2.0, 2.0), (3, 2.0, 0.0), (3, 0.0, 0.0)])
+
     def test_live_hls_says_when_it_delivered_every_listed_segment(self):
         # The helper reports its live edge on it: the end of a batch is otherwise reported
         # only with the next one (its state messages are throttled to four a second).

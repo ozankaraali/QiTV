@@ -54,6 +54,7 @@ STATE_KEYS = {
     "hls",
     "breaks",
     "caught_up",
+    "backlog_s",
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024

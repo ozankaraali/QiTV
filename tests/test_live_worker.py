@@ -51,6 +51,7 @@ STATE_KEYS = {
     "hls",
     "breaks",
     "caught_up",
+    "backlog_s",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -490,6 +491,28 @@ class LiveWorkerTests(unittest.TestCase):
         )
         self.assertGreater(state[2]["live_edge"], 7.9)  # all 8 s, not the last cut's 6 s
         self.assertIs(helper.of(sid, "state")[0][2]["caught_up"], False)
+
+    def test_an_hls_backlog_reports_the_media_still_to_come(self):
+        # 2.1 stage 3: live edge + backlog_s is where the edge will be once every listed
+        # segment arrived (EXTINF seconds), so a tune can start before all of them did.
+        names = ["a.ts", "b.ts", "c.ts"]
+        routes = {"/user/secret/live.m3u8": (200, {}, leaf(*names, ended=False))}
+        for number, name in enumerate(names):
+            body = make_stream(4, pts_start=900000 + number * 4 * 90000)
+            routes[f"/user/secret/{name}"] = (200, {}, body)
+        source = self.source(routes)
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/live.m3u8", live_delay=100.0)
+        helper.wait_for(
+            lambda message: message[:2] == ("state", sid) and message[2]["caught_up"], timeout=5
+        )
+        states = [message[2] for message in helper.of(sid, "state")]
+        playable = [state for state in states if state["oldest"] is not None]
+        self.assertGreater(len(playable), 2)
+        for state in playable:
+            predicted = state["live_edge"] + state["backlog_s"]
+            self.assertAlmostEqual(predicted, 12.0, delta=0.1, msg=state)
+        self.assertEqual(playable[-1]["backlog_s"], 0.0)
 
     def test_the_sessions_target_sets_how_far_back_hls_starts(self):
         names = [f"s{number}.ts" for number in range(6)]

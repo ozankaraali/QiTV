@@ -358,6 +358,7 @@ class _Session:
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
         self._received = 0  # bytes from the source, those before the first keyframe too
         self._caught_up = False  # HLS: every segment its playlist listed was delivered once
+        self._segment = (0, 0.0)  # HLS: the segment being fetched (serial), the edge it began at
         self._pending: list[_Addition] = []
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
@@ -432,6 +433,7 @@ class _Session:
                     self._caught_up = True
                     self._notify(force=True)
                 else:
+                    self._follow(source)  # before its bytes: where an HLS segment begins
                     self._received += len(item)
                     self._apply(segmenter.feed(item))
                     self._measure()
@@ -591,6 +593,21 @@ class _Session:
             self._notify(force=True)
         self._send(("error", self.sid, kind, message))
 
+    def _follow(self, source: Source) -> None:
+        """HLS: note the live edge where each segment's first bytes begin (`_backlog`)."""
+        serial = getattr(source, "segment_serial", 0)
+        if serial != self._segment[0]:
+            self._segment = (serial, self._live_edge())
+
+    def _backlog(self, source: Source | None) -> float:
+        """HLS: the media its playlist listed still to come (EXTINF seconds): what the segment
+        being fetched holds beyond the live edge, and the listed ones after it."""
+        fetching = getattr(source, "segment_s", 0.0)
+        rest = getattr(source, "rest_s", 0.0)
+        if not isinstance(fetching, float) or not isinstance(rest, float):
+            return 0.0
+        return max(0.0, self._segment[1] + fetching - self._live_edge()) + rest
+
     def _live_edge(self) -> float:
         # On the segment's own PTS axis and the stall-free clock: no stall or jump inflates it.
         return self._timeline.live_edge(self._segmenter.progress_pts, self._segmenter.wall)
@@ -644,6 +661,9 @@ class _Session:
             # HLS: every segment its playlist listed has arrived, once at least (the backlog
             # fetched at the start has landed). Never for raw TS, whose end is not known.
             "caught_up": self._caught_up,
+            # HLS: the live edge once every listed segment arrived is this much further (2.1
+            # stage 3: a tune need not wait for all of its backlog); 0.0 for raw TS.
+            "backlog_s": self._backlog(source),
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the

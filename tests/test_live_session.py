@@ -119,11 +119,13 @@ class FakeEngine(QObject):
         breaks=(),
         caught_up=None,
         end=None,
+        backlog=None,
     ):
         """Closed `spans` plus an optional open segment, as the helper's state reports them;
         `breaks`: (timeline position, seconds) of timestamp jumps it left out. `caught_up`
         (HLS: every listed segment arrived) defaults to `hls`; `end` (where the open segment
-        starts) to the closed spans' end, or 0.0."""
+        starts) to the closed spans' end, or 0.0; `backlog`, the listed media an HLS source
+        has still to deliver, is left out when None."""
         end = spans[-1].end if spans else (end or 0.0)
         oldest = spans[0].seq if spans else open_seq
         self._spans[sid] = list(spans)
@@ -141,6 +143,8 @@ class FakeEngine(QObject):
             "breaks": list(breaks),
             "caught_up": hls if caught_up is None else caught_up,
         }
+        if backlog is not None:
+            self._snapshots[sid]["backlog_s"] = backlog
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
     def receive(self, sid, count):
@@ -865,7 +869,39 @@ class StartPolicyTests(LiveSessionCase):
         self.assertLess(self.landed.call_args.args[1], 0)  # short of the target
         self.assertEqual(self.notices, [])
 
-    def test_hls_waits_until_every_listed_segment_arrived(self):
+    def test_hls_starts_on_the_edge_its_backlog_will_reach_once_that_start_is_final(self):
+        # A sparse-PCR channel's 10 s segments (2 s keyframe intervals), 36 s fetched: the
+        # start need not wait for all of it (a slow segment of a public HLS channel held
+        # the picture back 4 s): the helper says what is still to come.
+        sid = self.start(latency=AUTO)
+        hls = {"burst": 10.0, "hls": True, "caught_up": False}
+        self.engine.buffer(sid, [], open_seq=0, backlog=36.0, **hls)
+        self.engine.sessionReady.emit(sid)
+        self.engine.buffer(sid, segments(0, 10), live_edge=20.0, open_seq=10, backlog=16.0, **hls)
+        self.step(0.25)
+        # From 20.0 (the open segment): 11.5 s behind 36.0 once playing; but a newer start
+        # may yet be nearer the 10 s target.
+        self.assertEqual(self.playback.plays, [])
+        self.engine.buffer(sid, segments(0, 12), live_edge=24.0, open_seq=12, backlog=12.0, **hls)
+        # From 22.0: 9.5 s, under the floor: 20.0 is final, the rest of the backlog on its way.
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 10))
+        self.assertAlmostEqual(self.landed.call_args.args[1], 1.5)
+
+    def test_hls_is_held_past_a_second_and_a_half_until_its_start_is_final(self):
+        # Seen on a public HLS channel: held at most 1.5 s like raw TS, it started with 18 s
+        # of 24 buffered, the rest landed after it, and stay-live ran 1.10x for 2 minutes.
+        sid = self.start(latency=AUTO)
+        hls = {"burst": 7.0, "hls": True, "caught_up": False}
+        self.engine.buffer(sid, [], open_seq=0, backlog=24.0, **hls)
+        self.engine.sessionReady.emit(sid)
+        self.engine.buffer(sid, segments(0, 4), live_edge=8.0, open_seq=4, backlog=16.0, **hls)
+        for _ in range(12):  # 3 s: the open segment (8.0) is 13.5 s behind 24.0, the newest
+            self.step(0.25)
+        self.assertEqual(self.playback.plays, [])
+        self.engine.buffer(sid, segments(0, 9), live_edge=18.0, open_seq=9, backlog=6.0, **hls)
+        self.assertEqual(self.playback.plays[-1][0], self.engine.stream_url(sid, 7))  # 14.0: 7 s
+
+    def test_hls_that_does_not_say_what_is_to_come_waits_until_every_segment_arrived(self):
         # A sparse-PCR channel's 10 s segments (2 s keyframe intervals), 36 s fetched.
         sid = self.start(latency=AUTO)
         self.engine.buffer(sid, [], open_seq=0, burst=10.0, hls=True, caught_up=False)
