@@ -98,6 +98,8 @@ def decoder_args(hardware: bool) -> list[str]:
 
 # Qt platforms without a window system: VLC can make no video output there.
 _HEADLESS_PLATFORMS = ("offscreen", "minimal")
+# Set to "1" for the smoke test (main.SMOKE_ENV; CI's packaged smoke and scripts/smoke_tv.py).
+SMOKE_ENV = "QITV_SMOKE"
 
 
 def display_exists() -> bool:
@@ -682,7 +684,14 @@ class PlaybackSession(QObject):
         existed does a stream there count as frozen."""
         if int(self._player.has_vout() or 0) > 0:
             self._had_vout = True
-        return self._had_vout or display_exists()
+        if self._had_vout:
+            return True
+        # The smoke test judges a stream without an output only once one existed: CI's
+        # macOS smoke runs the packaged app on the real cocoa platform, but libVLC never
+        # opens a video display in that VM, so a window system there still shows nothing
+        # (CI run 39173463876 sent a time-shift stream to software, and its reopen broke
+        # the Go live check). A viewer's app judges a first tune without a picture.
+        return display_exists() and os.environ.get(SMOKE_ENV) != "1"
 
     def _counters(self) -> Optional[Counters]:
         """This media's statistics from libVLC (the player's media and its input item: never

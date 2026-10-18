@@ -521,7 +521,9 @@ def run_smoke(out: Path, seconds: float, fixtures: Path, pipeline: bool, pip: bo
         with tempfile.TemporaryDirectory(
             prefix="qitv-smoke-", ignore_cleanup_errors=True
         ) as config:
-            env = dict(os.environ, QITV_CONFIG_DIR=config)
+            # QITV_SMOKE: the app is the smoke test (CI's packaged run sets it already), so
+            # hardware decoding's watchdog judges only players that had a video output.
+            env = dict(os.environ, QITV_CONFIG_DIR=config, QITV_SMOKE="1")
             env[VLC_LOG_ENV] = str(out / VLC_LOG)
             process = subprocess.Popen(
                 _child_command(args), cwd=None if _frozen() else ROOT, env=env

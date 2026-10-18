@@ -295,12 +295,40 @@ class HardwareFallbackTests(unittest.TestCase):
         # doing: the first tune of a fresh player is judged too.
         session = self.make()
         self.player.vouts = 0
-        with mock.patch("services.playback.display_exists", return_value=True):
+        with (
+            mock.patch("services.playback.display_exists", return_value=True),
+            mock.patch.dict(os.environ),
+        ):
+            os.environ.pop(playback.SMOKE_ENV, None)  # a viewer's app, not the smoke test
             session.play(sessions.A, kind=PlayKind.LIVE)
             self.tick(session, 3.75, shown=0)
             self.assertEqual(self.froze, [])
             self.tick(session, 0.5, shown=0)
         self.assertEqual(len(self.froze), 1)  # FIRST_PICTURE_S after it played
+
+    def test_the_smoke_judges_a_stream_without_an_output_only_once_one_existed(self):
+        # CI's macOS smoke runs the packaged app on the real cocoa platform, but libVLC never
+        # opens a video display in that VM: a window system, and still no output (CI run
+        # 39173463876 sent a time-shift stream to software, and its reopen broke Go live).
+        import main
+
+        self.assertEqual(playback.SMOKE_ENV, main.SMOKE_ENV)
+        session = self.make()
+        self.player.vouts = 0
+        with (
+            mock.patch("services.playback.display_exists", return_value=True),
+            mock.patch.dict(os.environ, {playback.SMOKE_ENV: "1"}),
+        ):
+            session.play(sessions.A, kind=PlayKind.LIVE)
+            self.tick(session, 10.0, shown=0)
+            self.assertEqual(self.froze, [])
+            self.player.vouts = 1  # an output once: outputs work in this run ...
+            session.play(sessions.B, kind=PlayKind.LIVE)
+            self.tick(session, 3.0)
+            self.player.vouts = 0
+            session.play(sessions.C, kind=PlayKind.LIVE)  # ... so this one is judged
+            self.tick(session, 4.25, shown=0)
+        self.assertEqual(len(self.froze), 1)
 
     def test_display_exists_only_on_a_window_system(self):
         self.assertFalse(playback.display_exists())  # QT_QPA_PLATFORM=offscreen
