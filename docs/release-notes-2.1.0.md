@@ -77,10 +77,29 @@ instead of using others' distributions, which may have malware.**
   (a keyframe), so a jump no longer shows broken blocks or loses the sound for a moment. When a
   channel has fallen far behind, QiTV jumps closer once instead of playing faster for a minute or
   more, at most once a minute; a few seconds off, it still eases the speed gently as above.
-<!-- 4b: learned target bullet goes here if stage 4b ships -->
+- **Auto learns each channel.** Under Auto, QiTV now learns from how a channel's pieces arrive
+  how far behind live it can play without the picture running dry, and starts there the next
+  time: about 2.5-3.5 seconds for a steady stream, more for one that arrives in uneven pieces or
+  in bursts, never less than one burst. A pause the buffer covered no longer pushes a channel
+  further back; only running dry does, and quiet minutes bring it closer again. "adjusted" beside
+  the distance means trouble is holding the channel further back for now.
+- **A late backlog doesn't leave you far behind.** Some providers send 20 seconds of backlog a
+  moment after a channel starts. QiTV used to stay that far behind for a minute; now, once the
+  stream flows on normally, it picks the start again within seconds.
+- **More channels with time-shift.** A channel whose server answers at once but sends its first
+  picture seconds later now gets up to 15 seconds ("Still loading…") instead of playing without
+  rewind after 6, and a first request a server turns away in passing is tried again (never one
+  that says the account's connections are used up). An HLS channel that lists its sound
+  separately but also carries it with the picture now time-shifts, and a playlist entry that
+  names the page its stream expects to be opened from sends it, to the player and the time-shift
+  buffer.
 
 ## Fixes
 
+- **No more speed lock for a day.** A channel whose clock changed rhythm while QiTV was adjusting
+  the speed could be held at normal speed for a day. It isn't any more.
+- **Picture-in-picture renews an expired portal link.** An STB channel in the small picture whose
+  link expired now gets a fresh one once, as the big picture does, instead of an error.
 - **Guides from a web address are kept.** A guide whose server sends no date, or a date QiTV
   couldn't read, wasn't saved. It is now.
 - **Live TV comes back after a lost buffer.** When the time-shift buffer was lost and QiTV
@@ -91,6 +110,9 @@ instead of using others' distributions, which may have malware.**
 
 ## Good to know
 
+- **Some channels still play without rewind.** A few HLS channels send their sound as a separate
+  stream, or use the newer fragmented MP4 format. QiTV plays them directly, as before, so they
+  have no time-shift yet.
 - **Hardware video decoding is safer to try.** It is still off by default and experimental
   (Settings). With it on, when a channel's picture freezes while its sound goes on, QiTV
   switches that channel back to software decoding by itself within a few seconds, and keeps it
