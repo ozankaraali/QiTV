@@ -325,27 +325,38 @@ class PipControls(QObject):
         was large moves to the small one without reopening, and a previous small picture
         closes first (its stream is released before the title opens, as any open waits).
 
-        False when nothing is kept and the caller plays as before: no channel plays large, the
-        channels play in an external player, or the title's provider has no second stream, in
-        which case the channel is closed for it (toasted).
+        False when the channel is not kept and the caller plays as before: no channel plays
+        large or the channels play in an external player (the small picture closes: it is for
+        live TV), or the title's provider has no second stream, in which case the channel
+        closes for it (toasted) and a small picture, another provider's, plays on.
         """
         channel = self._large_channel()
         if channel is None or self._external():
+            self.close()
+            return False
+        if self._no_second_stream(channel, item, title):
             return False
         self.close()
+        return self.sessions.demote_large()
+
+    def _no_second_stream(self, channel: dict, item: dict, title: str) -> bool:
+        """`channel` is of the title's provider, which allows fewer than two streams: the
+        channel closes for the title (said here)."""
         provider = item_provider.provider_dict(self.catalog, item)
         name = str(provider.get("name", ""))
         limit = self._budget.limit_for(provider, item_provider.max_connections(self.catalog, item))
-        # The channel is the only stream left once the small picture closed.
-        same = item_provider.provider_name(self.catalog, channel) == name
-        if limit is not None and limit < 2 and same:
-            plural = "s" if limit != 1 else ""
-            self._toast(
-                f"Closed {channel.get('name') or ''} to play {title}: "
-                f"{name} allows {limit} stream{plural}"
-            )
+        if (
+            limit is None
+            or limit >= 2
+            or item_provider.provider_name(self.catalog, channel) != name
+        ):
             return False
-        return self.sessions.demote_large()
+        plural = "s" if limit != 1 else ""
+        self._toast(
+            f"Closed {channel.get('name') or ''} to play {title}: "
+            f"{name} allows {limit} stream{plural}"
+        )
+        return True
 
     def _limit_reached(self, channel: dict) -> bool:
         """The limit of the channel's own provider leaves no stream for a small picture: say

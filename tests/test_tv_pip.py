@@ -767,6 +767,54 @@ class LibraryPlayTests(PipCase):
         self.assertEqual([url for url, _ in self.session.plays][-1], "http://vod/heat.mkv")
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
 
+    def test_the_movies_limit_keeps_another_providers_small_picture(self):
+        # Sweep B5: the small picture closed before the limit was looked at, for nothing.
+        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: self.live.named("start")))
+        self.live.play_pipeline()
+        small = self.open_small(CHANNELS[1])  # Home's Two
+        self.play_from_library({**MOVIE, "_provider": "Harbor IPTV"})  # one Harbor stream
+        self.assertEqual(
+            self.toast.messages()[-1],
+            ("Closed One to play Heat: Harbor IPTV allows 1 stream", "info"),
+        )
+        self.assertTrue(self.sessions.pip_open())
+        self.assertNotIn(("stop",), small.live.calls)  # Two plays on, small
+        self.assertEqual(self.label.info[0], "Two")
+        self.assertEqual(self.live.calls[-1], ("stop",))  # One gives the film its stream
+        self.live.released.emit()
+        self.assertEqual([url for url, _ in self.session.plays][-1], "http://vod/heat.mkv")
+        self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
+        self.assertEqual(self.budget.holders("Home"), ["pip"])
+
+    def test_a_failed_link_gives_the_channel_the_big_picture_back(self):
+        # Sweep B5: the channel stayed small beside an empty big picture.
+        self.start_large(0)
+        self.controller.enter_library_playing()
+        self.controller.play_vod(MOVIE, "movie", play_context())
+        self.assertIs(self.sessions.large(), self.pip_slot)  # One went small for it
+        self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Not found")
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertFalse(self.sessions.pip_open())
+        self.assertIs(self.controller.session, self.session)
+        self.assertFalse(self.session.muted)  # heard again
+        self.assertNotIn(("stop",), self.live.calls)  # One never stopped
+        self.assertEqual(self.controller._channel, CHANNELS[0])  # INFO, ★, the guide
+        self.assertEqual(self.toast.messages()[-1], ("Heat: Not found", "error"))
+        self.controller.handle(Action.CH_NEXT)  # zapping goes on from One
+        self.assertEqual(self.requested()[-1], "Two")
+
+    def test_a_failed_sign_in_of_the_movies_provider_gives_the_channel_back_too(self):
+        self.start_large(0)
+        self.controller.enter_library_playing()
+        self.controller.play_vod({**MOVIE, "_provider": "Harbor IPTV"}, "movie", play_context())
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.catalog.catalogs.providerFailed.emit("Harbor IPTV", "Portal down")
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(self.toast.messages()[-1], ("Harbor IPTV: Portal down", "error"))
+
     def test_a_movie_of_another_provider_keeps_the_channel_small_whatever_its_limit(self):
         self.start_large(0)  # Home, two streams
         self.play_from_library({**MOVIE, "_provider": "Harbor IPTV"})

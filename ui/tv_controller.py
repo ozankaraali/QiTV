@@ -32,9 +32,10 @@ on it. A swap re-points them (`_use_slot`) and trades what each picture showed (
 and zap group); nothing is stopped or restarted. A zap onto the channel the small picture
 shows swaps instead of opening it twice. A movie or an episode started from the Library while
 a channel plays takes the large picture and the channel goes small without reopening (a
-previous small picture closes first, and so does the channel when the title's provider has no
-second stream); files and a title with no channel streaming close the small picture first: it
-is for live TV.
+previous small picture closes first; when the title's provider has no second stream the
+channel closes instead, and a small picture plays on), and takes it back if the title's link
+fails; files and a title with no channel streaming close the small picture first: it is for
+live TV.
 
 Provider setups (the loading and welcome hints, the last channel, the drawer on an idle player)
 are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4) keeps what
@@ -237,6 +238,9 @@ class TVController(QObject):
         )
         self._current: Optional[Target] = None  # handed to the player
         self._current_url = ""  # its link (a swap records the picture made large)
+        # The title the channel playing large went small for, until its link comes: its failure
+        # gives the channel the large picture back.
+        self._freed_for: Optional[Target] = None
         self._cid: Optional[str] = None  # resume key of the VOD being played
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
         self._digits = ""  # number entry under way
@@ -851,31 +855,38 @@ class TVController(QObject):
         episode = kind == "episode"
         series = context["series"]
         title = item_title(item, episode=episode)
-        if not (from_library and self._keep_channel_small(item, title)):
-            self._close_pip()  # picture in picture is for live TV
-        self._lanes.supersede()  # a newer choice than an external play waiting for its link
-        self._request(
-            Target(
-                item,
-                "series" if episode else "movies",
-                title,
-                subtitle=item_title(series) if episode and isinstance(series, dict) else "",
-                context=context,
-                start_over=bool(context["start_over"]),
-            )
+        target = Target(
+            item,
+            "series" if episode else "movies",
+            title,
+            subtitle=item_title(series) if episode and isinstance(series, dict) else "",
+            context=context,
+            start_over=bool(context["start_over"]),
         )
+        if from_library:
+            kept = self._keep_channel_small(item, title)  # it closes the small picture, or not
+        else:
+            kept = False
+            self._close_pip()  # picture in picture is for live TV
+        self._freed_for = target if kept else None
+        self._lanes.supersede()  # a newer choice than an external play waiting for its link
+        self._request(target)
 
     def _keep_channel_small(self, item: dict, title: str) -> bool:
         """A title from the Library while a channel plays large (corner player): the channel
         goes small without reopening and the title opens in the freed large slot.
 
-        False: nothing was kept (no channel streaming large, or its provider has no stream for
-        the title and the channel closed); the caller closes the PiP and plays as before.
+        False: the channel was not kept and the caller plays as before. With no channel
+        streaming large the small picture closed (it is for live TV); when the channel's
+        provider has no stream for the title, the channel closes for it and a small picture of
+        another provider plays on (PipControls.keep_large_small).
         """
         pip = self._pip
         if pip is None or self.sessions is None or self._playing_live() is None:
+            self._close_pip()
             return False
         if self._tuner.settling() or not self._tuner.running():
+            self._close_pip()
             return False  # a channel still opening has nothing to keep
         self._cancel_external()
         self._lanes.drop_tune()  # a choice on its way for the large picture is superseded
@@ -944,6 +955,7 @@ class TVController(QObject):
             return
         if self._follow_queue(target):
             return  # the failed target was superseded: no error for it
+        self._give_large_back(target)
         self._restore_channel()
         self._error(f"{target.title}: {message}")
 
@@ -990,6 +1002,13 @@ class TVController(QObject):
         if banner.isVisible() and channel is not None:  # never one that was dismissed
             banner.show_info(self.banner_info(channel))
 
+    def _give_large_back(self, target: Optional[Target]) -> None:
+        """`target` never came (its link or its provider failed): when the channel playing
+        large went small for it, the pictures swap back and the empty one closes."""
+        freed, self._freed_for = self._freed_for, None
+        if target is not None and target is freed:
+            self.swap()
+
     def _restore_channel(self) -> None:
         """After a failed tune, INFO and the drawer follow the channel still playing."""
         current = self._current
@@ -997,6 +1016,7 @@ class TVController(QObject):
 
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item
+        self._freed_for = None  # it came: the large picture is the title's
         launcher = self._external_launcher()
         # Direct plays book the slot under the item's own provider, as pipeline tunes do.
         provider_name = item_provider.provider_name(self.catalog, item)
@@ -1343,6 +1363,7 @@ class TVController(QObject):
         if not lost and not side_lost:
             return
         if lost:
+            self._give_large_back(newest)
             self._restore_channel()
         if not self._flow.shows_failure(name):
             self._error(f"{name}: {message}" if name else message)
