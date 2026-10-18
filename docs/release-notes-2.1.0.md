@@ -95,7 +95,8 @@ instead of using others' distributions, which may have malware.**
   buffer.
 - **Hardware decoding is back.** QiTV again decodes video with your computer's graphics chip,
   which uses less CPU. If a channel's picture freezes while its sound goes on, QiTV switches
-  that channel to software decoding by itself. You can turn it off in Settings.
+  that channel to software decoding by itself. You can turn it off in Settings; if you had
+  turned it off before, 2.1 turns it on once, so turn it off again if you prefer software.
 
 ## Fixes
 
