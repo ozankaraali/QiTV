@@ -11,14 +11,15 @@ player page holds the native views libVLC draws into, and a native view is never
 In the corner a press on the player drags it and the release snaps it to the nearest corner,
 as PipFrame does for the small picture (saved as `corner_player_corner`); a press released
 without a drag is a click, `cornerClicked`. The stack takes every mouse event on the player
-page and its views in that mode: nothing reaches the shell's video handling (pause, the
-drawer, zaps) and the PiP frame's own mouse handling is switched off by the window.
+page and its views in that mode (also views added later): nothing reaches the shell's video
+handling (pause, the drawer, zaps) and the PiP frame's own mouse handling is switched off by
+the window. The mouse's Back and Forward go nowhere either, as over the Library's page.
 """
 
 import logging
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QChildEvent, QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QWidget
 
@@ -70,8 +71,7 @@ class PageStack(QWidget):
         for page in (player, library):
             page.setParent(self)
         # The player page and its native views: their mouse events are the stack's in the corner.
-        for watched in (player, *player.findChildren(QWidget)):
-            watched.installEventFilter(self)
+        self._watch(player)
         library.hide()
         self._layout()
 
@@ -154,7 +154,16 @@ class PageStack(QWidget):
 
     # ---- mouse: dragging the corner player ----------------------------------------------
 
+    def _watch(self, widget: QWidget) -> None:
+        for watched in (widget, *widget.findChildren(QWidget)):
+            watched.installEventFilter(self)  # once: Qt drops an earlier install of it
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if isinstance(event, QChildEvent) and event.type() == QEvent.Type.ChildAdded:
+            child = event.child()
+            if isinstance(child, QWidget):
+                self._watch(child)  # a view added to the player page later
+            return False
         if self._mode != self.CORNER or event.type() not in _MOUSE_EVENTS:
             return False
         if isinstance(event, QMouseEvent):

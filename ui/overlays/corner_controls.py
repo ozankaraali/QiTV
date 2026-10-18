@@ -9,15 +9,27 @@ player back as ⤢ does.
 
 The host's width is the corner player's, so u would make these tiny: each button is
 MIN_HIT_PX wide whatever the window size.
+
+What reaches the buttons stays there: a wheel, the mouse's Back and Forward and moves would go
+on to the host, whose wheel zaps and whose Back opens the channel list of the hidden player
+(the corner player is a thumbnail, as the PageStack keeps it over the video). A double-click
+acts once.
 """
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QHelpEvent, QMouseEvent, QPainter, QPaintEvent, QPen, QRegion
+from PySide6.QtGui import (
+    QHelpEvent,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QRegion,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QToolTip, QWidget
 
 from ui.overlays.base import Overlay
 from ui.overlays.painting import draw_icon, fill_round
-from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
 BUTTONS = ("sound", "back", "stop")  # left to right
@@ -38,6 +50,7 @@ class CornerControls(Overlay):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)  # never the host's
         self._muted = False
         if parent is not None:
             parent.installEventFilter(self)
@@ -162,12 +175,9 @@ class CornerControls(Overlay):
     # ---- input: the buttons act on a press ----------------------------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() in NAV_BUTTONS:
-            event.ignore()  # Back/Forward go on to the host
-            return
         event.accept()
         if event.button() != Qt.MouseButton.LeftButton:
-            return
+            return  # Back and Forward too: the Library's page does nothing with them either
         part = self._part_at(event.position())
         if part == "sound":
             self.soundRequested.emit()
@@ -176,8 +186,14 @@ class CornerControls(Overlay):
         elif part == "stop":
             self.stopRequested.emit()
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        event.accept()  # its first click acted: a mute would be undone at once
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        event.ignore()  # the host's pointer handling
+        event.accept()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        event.accept()
 
     def event(self, event: QEvent) -> bool:
         if event.type() == QEvent.Type.ToolTip and isinstance(event, QHelpEvent):

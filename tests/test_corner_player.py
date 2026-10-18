@@ -5,7 +5,8 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
@@ -13,8 +14,12 @@ from timer_fixtures import elapse, wait_until
 from tests.http_fixtures import LocalSource
 from tests.test_tv_window import INSTANCE, WindowCase
 from tests.ts_fixtures import make_stream
+from ui.keymap import Action
 from ui.overlays.corner_controls import BUTTONS, MIN_HIT_PX, CornerControls
 from ui.page_stack import PageStack
+
+LEFT = Qt.MouseButton.LeftButton
+NO_MODS = Qt.KeyboardModifier.NoModifier
 
 
 class CornerTooltipTests(unittest.TestCase):
@@ -32,6 +37,80 @@ class CornerTooltipTests(unittest.TestCase):
         self.assertEqual(controls.tooltip_at(sound), "Mute")
         controls.set_muted(True)
         self.assertEqual(controls.tooltip_at(sound), "Unmute")
+
+
+class Host(QWidget):
+    """The overlay host as far as the corner's buttons reach it: what it was passed."""
+
+    def __init__(self):
+        super().__init__()
+        self.setMouseTracking(True)  # as the host: it reads every move
+        self.got = []
+
+    def mousePressEvent(self, event):
+        self.got.append(("press", event.button()))
+
+    def mouseDoubleClickEvent(self, event):
+        self.got.append(("double", event.button()))
+
+    def mouseMoveEvent(self, event):
+        self.got.append(("move",))
+
+    def wheelEvent(self, event):
+        self.got.append(("wheel",))
+
+
+class CornerInputTests(unittest.TestCase):
+    """The corner's buttons keep what they are given (sweep B2): the host's wheel zapped the
+    channel playing in the corner, its Back and Forward opened the hidden channel list."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.host = Host()
+        self.host.resize(427, 240)
+        self.addCleanup(self.host.deleteLater)
+        self.controls = CornerControls(self.host)
+        self.controls.show()
+        self.sounds = []
+        self.controls.soundRequested.connect(lambda: self.sounds.append(True))
+
+    def send(self, kind, button=LEFT, buttons=LEFT):
+        point = self.controls.button_rect("sound").center()
+        global_point = QPointF(self.controls.mapToGlobal(point.toPoint()))
+        event = QMouseEvent(kind, point, global_point, button, buttons, NO_MODS)
+        QApplication.sendEvent(self.controls, event)
+
+    def test_the_wheel_and_the_mouses_back_and_forward_stay_on_the_buttons(self):
+        point = self.controls.button_rect("sound").center()
+        wheel = QWheelEvent(
+            point,
+            QPointF(self.controls.mapToGlobal(point.toPoint())),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.MouseButton.NoButton,
+            NO_MODS,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        QApplication.sendEvent(self.controls, wheel)
+        self.assertTrue(wheel.isAccepted())  # a wheel from the platform goes no further then
+        for button in (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton):
+            self.send(QEvent.Type.MouseButtonPress, button, button)
+            self.send(QEvent.Type.MouseButtonDblClick, button, button)
+        self.send(QEvent.Type.MouseMove, Qt.MouseButton.NoButton, Qt.MouseButton.NoButton)
+        self.assertEqual(self.host.got, [])
+        self.assertEqual(self.sounds, [])
+
+    def test_a_double_click_on_a_button_acts_once(self):
+        self.send(QEvent.Type.MouseButtonPress)
+        self.send(QEvent.Type.MouseButtonRelease, buttons=Qt.MouseButton.NoButton)
+        self.send(QEvent.Type.MouseButtonDblClick)
+        self.send(QEvent.Type.MouseButtonRelease, buttons=Qt.MouseButton.NoButton)
+        self.assertEqual(self.sounds, [True])  # muted, not muted and unmuted at once
+        self.assertEqual(self.host.got, [])
 
 
 class NothingPlayingTests(WindowCase):
@@ -157,6 +236,12 @@ class CornerPlayerTests(WindowCase):
         self.stops.clear()
         window.screens.open_library("movies")
         self.assertFalse(window.overlays.drawer.isVisible())
+        self.assertFalse(window.controller.overlay_open())
+        window.screens.back_to_player()
+        window.controller.handle(Action.GUIDE)  # sweep B2: the guide was never checked
+        self.assertTrue(window.overlays.guide.isVisible())
+        window.screens.open_library("movies")
+        self.assertFalse(window.overlays.guide.isVisible())
         self.assertFalse(window.controller.overlay_open())
         self.assertEqual(self.stops, [])
 

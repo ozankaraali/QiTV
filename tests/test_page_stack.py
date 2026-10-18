@@ -189,6 +189,26 @@ class PageStackTests(StackCase):
         send(view, QEvent.Type.MouseButtonPress, view.mapToGlobal(view.rect().center()))
         self.assertEqual(len(seen), 1)  # in the corner: the stack took it
 
+    def test_views_added_to_the_player_later_are_the_stacks_in_the_corner_too(self):
+        # Sweep B2: only the views there when the stack was made were the stack's.
+        seen = []
+
+        class View(QWidget):
+            def mousePressEvent(self, event):
+                seen.append(self)
+
+        stack = self.make_stack()
+        view = View(self.player)  # after the stack
+        inner = View(view)  # and inside that one
+        stack.show_library(corner=True)
+        for widget in (view, inner):
+            widget.setGeometry(self.player.rect())
+            send(widget, QEvent.Type.MouseButtonPress, widget.mapToGlobal(QPoint(5, 5)))
+        self.assertEqual(seen, [])
+        stack.show_player()
+        send(inner, QEvent.Type.MouseButtonPress, inner.mapToGlobal(QPoint(5, 5)))
+        self.assertEqual(seen, [inner])  # on the player page: its own
+
     def test_the_corners_are_the_four_names(self):
         stack = self.make_stack()
         for name in CORNERS:
