@@ -853,6 +853,66 @@ class ContinuityJoiner:
             self._flag_pcr = False
 
 
+def program_has_audio(data: bytes) -> bool | None:
+    """Whether the first program's PMT in `data` (packet-aligned, as an HLS segment starts)
+    lists an audio stream: one of the audio stream types, or a private PES (0x06) with a DVB
+    AC-3, E-AC-3 or AAC descriptor. None until its PAT and PMT came (single-packet sections,
+    as segment packagers write them) or once the packet sync is lost.
+
+    2.1: an HLS master may name a separate default audio playlist while the variant muxes that
+    audio too; only the variant's own program tables tell.
+    """
+    pmt_pid: int | None = None
+    for at in range(0, len(data) - PACKET + 1, PACKET):
+        if data[at] != SYNC:
+            return None
+        b1 = data[at + 1]
+        pid = ((b1 & 0x1F) << 8) | data[at + 2]
+        if not b1 & 0x40 or b1 & 0x80 or (pid != 0 and pid != pmt_pid):
+            continue  # not a section start, damaged, or another PID
+        afc = (data[at + 3] >> 4) & 3
+        start = at + (5 + data[at + 4] if afc & 2 else 4)
+        if not afc & 1 or start >= at + PACKET:
+            continue
+        begin = start + 1 + data[start]  # past the pointer field
+        if begin + 3 > at + PACKET:
+            continue
+        end = begin + 3 + (((data[begin + 1] & 0x0F) << 8) | data[begin + 2])
+        if end > at + PACKET or end - begin < 16:  # spans packets, or too short
+            continue
+        section = data[begin:end]
+        if pid == 0 and section[0] == 0x00:
+            for i in range(8, len(section) - 4 - 3, 4):
+                if (section[i] << 8) | section[i + 1]:  # program 0 is the network table
+                    pmt_pid = ((section[i + 2] & 0x1F) << 8) | section[i + 3]
+                    break
+        elif pid == pmt_pid and section[0] == 0x02:
+            return _lists_audio(section)
+    return None
+
+
+_DVB_AUDIO = (0x6A, 0x7A, 0x7C)  # AC-3, enhanced AC-3, AAC descriptors
+
+
+def _lists_audio(section: bytes) -> bool:
+    """Whether a PMT section lists an audio stream (see `program_has_audio`)."""
+    end = len(section) - 4
+    i = 12 + (((section[10] & 0x0F) << 8) | section[11])
+    while i + 5 <= end:
+        stream_type = section[i]
+        info_end = i + 5 + (((section[i + 3] & 0x0F) << 8) | section[i + 4])
+        if stream_type in _AUDIO_TYPES:
+            return True
+        if stream_type == 0x06:
+            j = i + 5
+            while j + 2 <= min(info_end, end):
+                if section[j] in _DVB_AUDIO:
+                    return True
+                j += 2 + section[j + 1]
+        i = info_end
+    return False
+
+
 def _find_sync(data: bytes, start: int) -> int:
     """First i >= start with sync bytes at i, i+188 and i+376; -1 if none is decidable yet."""
     stop = len(data) - 2 * PACKET  # candidates must have i + 376 inside data

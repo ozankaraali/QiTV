@@ -55,7 +55,7 @@ from urllib3.exceptions import ReadTimeoutError
 from urllib3.util.ssl_ import create_urllib3_context, resolve_cert_reqs, resolve_ssl_version
 
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
-from services.live.ts import ContinuityJoiner
+from services.live.ts import ContinuityJoiner, program_has_audio
 from services.vlc_profile import DEFAULT_USER_AGENT
 
 log = logging.getLogger(__name__)
@@ -67,6 +67,9 @@ _STALL_TIMEOUT = 10.0
 _MANIFEST_LIMIT = 2 * 1024 * 1024
 _READ_SIZE = 64 * 1024
 _SNIFF_SIZE = 10
+# A variant whose master names a separate default audio playlist: how much of its first
+# segment may pass before its program tables must have shown audio of its own.
+_AUDIO_LOOK = 64 * 1024
 _PACKET = 188
 _BLOCK = 16
 _RECONNECT_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
@@ -988,17 +991,19 @@ def _check_media(playlist: Any, base: str) -> None:
             raise SourceError("unsupported", _ENCRYPTION)
 
 
-def _check_audio(playlist: Any) -> None:
-    """Only the default AUDIO rendition matters: it must be muxed into the video."""
+def _check_audio(playlist: Any) -> bool:
+    """Only the default AUDIO rendition matters: whether it is a separate playlist (True), which
+    a TS-only fetcher cannot mux. The variant may carry that audio too (some multi-track restream
+    servers name each track's playlist and mux the first into the video's): its first segment
+    decides (`HlsSource._own_audio`)."""
     audio = [item for item in playlist.media if item.type == "AUDIO"]
     if not audio:
-        return
+        return False
     default = next((item for item in audio if item.default == "YES"), audio[0])
-    if default.uri:  # a TS-only fetcher cannot mux a separate audio playlist
-        raise SourceError("unsupported", _SEPARATE_AUDIO)
     dropped = [item.name or item.language or "unnamed" for item in audio if item.uri]
     if dropped:
         log.info("Alternate audio renditions are not time-shifted: %s.", ", ".join(dropped))
+    return bool(default.uri)
 
 
 def _sniff(http: _Http, response: Any) -> tuple[bytes, bytes | None]:
@@ -1024,14 +1029,16 @@ def _load_playlist(http: _Http, url: str) -> tuple[bytes, str]:
     return content, final
 
 
-def _media_playlist(http: _Http, content: bytes, url: str) -> tuple[Any, str]:
-    """Follow the best variant down to a checked media playlist and its final URL."""
+def _media_playlist(http: _Http, content: bytes, url: str) -> tuple[Any, str, bool]:
+    """Follow the best variant down to a checked media playlist and its final URL; and
+    whether a master on the way named a separate default audio playlist (`_check_audio`)."""
+    separate = False
     for _hop in range(_PLAYLIST_HOPS):
         playlist = _select_manifest(content, url)
         if not playlist.is_variant:
             _check_media(playlist, url)
-            return playlist, url
-        _check_audio(playlist)
+            return playlist, url, separate
+        separate = _check_audio(playlist) or separate
         content, url = _load_playlist(http, _resolve(url, playlist.playlists[0].uri))
     raise SourceError("unsupported", _INVALID_PLAYLIST)
 
@@ -1126,6 +1133,10 @@ class HlsSource:
       window, resumes at the live start;
     - reloads that bring no new segment for 60 s (download time excluded) time out.
 
+    A master that names a separate default audio playlist is followed to its variant; the
+    variant's first segment then passes only when its program tables list audio of its own
+    (`_own_audio`), else the channel is unsupported (nothing here muxes the separate audio).
+
     Segments are joined with each PID's continuity counter running on (`ContinuityJoiner`):
     some CDNs package every segment on its own, its counters restarting at 0, and VLC took
     each join for a break on every PID, losing its clock (2.0.2). At a discontinuity marker
@@ -1143,10 +1154,15 @@ class HlsSource:
         live_delay: float,
         target: float | None = None,
         extra: float = 0.0,
+        *,
+        separate_audio: bool = False,
     ) -> None:
         self.user_agent = http.user_agent
         self._http = http
         self._playlist = playlist
+        # The master named a separate default audio playlist: the first segment must show the
+        # variant's own audio (`_own_audio`) before any of it passes.
+        self._audio_unknown = separate_audio
         self._url = url
         self._live_delay = live_delay
         self._target = target  # the session's target (None: start at live_delay only)
@@ -1322,7 +1338,7 @@ class HlsSource:
                 raise _Closed()
             loaded = time.monotonic()
             content, final = http.fetch(lambda: _load_playlist(http, url))
-            playlist, url = _media_playlist(http, content, final)
+            playlist, url, _separate = _media_playlist(http, content, final)
             self._burst = float(playlist.target_duration or 0)
             self._finite = bool(playlist.is_endlist)
 
@@ -1345,7 +1361,10 @@ class HlsSource:
         joiner = self._joiner
         joiner.segment()
         try:
-            for block in _checked_ts(self._blocks(response, decryptor)):
+            blocks = _checked_ts(self._blocks(response, decryptor))
+            if self._audio_unknown:
+                blocks = self._own_audio(blocks)
+            for block in blocks:
                 if self._pending:  # only ever right before bytes that really arrive
                     self._pending = False
                     joiner.discontinuity()
@@ -1367,6 +1386,27 @@ class HlsSource:
             self._last_whole = (self._serial, float(segment.duration or 0))
         else:
             self._skip(failure, content)
+
+    def _own_audio(self, blocks: Iterator[bytes]) -> Iterator[bytes]:
+        """A segment's blocks, held until its program tables show whether the variant carries
+        audio of its own (2.1: public channels VLC played were refused for their master alone,
+        which named a separate default audio playlist the variant also muxed). Without such
+        audio by `_AUDIO_LOOK` bytes (or the segment's end), the channel is unsupported: a
+        TS-only fetcher cannot mux the separate playlist. Asked of the first whole segment
+        only (a missing one is skipped as any other, and the next one asked)."""
+        head = b""
+        audio: bool | None = None
+        for block in blocks:
+            head += block
+            audio = program_has_audio(head)
+            if audio is not None or len(head) >= _AUDIO_LOOK:
+                break
+        if not audio:
+            raise _BadSegment(_SEPARATE_AUDIO)
+        self._audio_unknown = False
+        log.info("The HLS variant carries audio of its own; its separate playlist is left out.")
+        yield head
+        yield from blocks
 
     def _skip(self, failure: SourceError, content: bool = False) -> None:
         """Skip a segment with a marker, or end the session: on bad content before any
@@ -1477,9 +1517,9 @@ def _open_http(
         final = str(response.url)
     finally:
         http.release(response)
-    playlist, base = _media_playlist(http, content, final)
+    playlist, base, separate = _media_playlist(http, content, final)
     http.add_entry(base)  # reloads and same-origin segments keep the provider's Referer
-    return HlsSource(http, playlist, base, live_delay, target, extra)
+    return HlsSource(http, playlist, base, live_delay, target, extra, separate_audio=separate)
 
 
 def open_source(

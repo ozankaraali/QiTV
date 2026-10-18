@@ -24,6 +24,7 @@ from services.live.ts import (
     Unsupported,
     _crc32,
     _h264_slice_type,
+    program_has_audio,
     pts_delta,
 )
 
@@ -1497,6 +1498,45 @@ class ReadAheadGuardTests(unittest.TestCase):
         before = b"".join(packets[: first + 1] + audio)
         after = continuation((cc + 1) & 0x0F, IDR_SLICE_START)
         self.assertEqual(self.qualities_of(before, after), [START_KEY, START_NONE, START_NONE])
+
+
+class ProgramAudioTests(unittest.TestCase):
+    """2.1: whether an HLS variant carries audio of its own, from its first segment's PAT and
+    PMT (its master names a separate default audio playlist, which nothing here can mux)."""
+
+    @staticmethod
+    def pmt_with(streams):
+        """A PMT packet for program 1 listing `streams`: (stream_type, pid, descriptors)."""
+        body = (0xE000 | fx.VIDEO_PID).to_bytes(2, "big") + b"\xf0\x00"
+        for stream_type, pid, descriptors in streams:
+            body += bytes([stream_type]) + (0xE000 | pid).to_bytes(2, "big")
+            body += (0xF000 | len(descriptors)).to_bytes(2, "big") + descriptors
+        head = bytes([0x02]) + (0xB000 | (5 + len(body) + 4)).to_bytes(2, "big")
+        section = head + (1).to_bytes(2, "big") + bytes([0xC1, 0, 0]) + body
+        return fx._psi_packet(fx.PMT_PID, section, 0)
+
+    def test_audio_of_its_own_is_found_in_the_program_tables(self):
+        self.assertIs(program_has_audio(fx.make_stream(1)), True)
+        self.assertIs(program_has_audio(fx.make_stream(1, audio=False)), False)
+
+    def test_tables_not_yet_seen_decide_nothing(self):
+        stream = fx.make_stream(1)
+        self.assertIsNone(program_has_audio(b""))
+        self.assertIsNone(program_has_audio(stream[:PACKET]))  # the PAT alone
+        video = fx.pes_packets(fx.VIDEO_PID, 0xE0, fx.h264_access_unit(True), 900000)[0]
+        self.assertIsNone(program_has_audio(b"".join(video)))  # no tables at all
+
+    def test_dvb_audio_in_private_pes_counts_by_its_descriptor(self):
+        video = (0x1B, fx.VIDEO_PID, b"")
+        for name, descriptor, audio in (
+            ("AC-3", b"\x6a\x01\x00", True),
+            ("E-AC-3", b"\x7a\x01\x00", True),
+            ("AAC", b"\x7c\x01\x00", True),
+            ("teletext", b"\x56\x05eng\x09\x00", False),
+        ):
+            with self.subTest(name):
+                tables = fx.pat() + self.pmt_with([video, (0x06, fx.AUDIO_PID, descriptor)])
+                self.assertIs(program_has_audio(tables), audio)
 
 
 @unittest.skipUnless(os.environ.get("QITV_BENCH") == "1", "set QITV_BENCH=1 to benchmark")

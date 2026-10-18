@@ -498,7 +498,11 @@ unsupported.m3u8
         self.assertEqual(server.counts["/media/low.m3u8"], 0)
         self.assertEqual(server.counts["/media/unsupported.m3u8"], 0)
 
-    def test_an_external_audio_group_is_unsupported(self):
+    def test_an_external_audio_group_is_unsupported_unless_the_variant_carries_audio(self):
+        # A TS-only fetcher cannot mux a separate audio playlist. Some multi-track restream
+        # servers name each track's playlist and still mux the first audio into the video's,
+        # though: whether the variant carries audio of its own, its first segment's program
+        # tables tell (2.1: public channels VLC played were refused for their master alone).
         master = b'''#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="languages",NAME="English",LANGUAGE="eng",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="languages",NAME="French",LANGUAGE="fra",DEFAULT=NO,AUTOSELECT=YES,URI="audio/fr.m3u8"
@@ -507,22 +511,39 @@ low.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=200000,CODECS="mp2v,mp4a.40.2",AUDIO="languages"
 high.m3u8
 '''
-        server = self.server(
-            {
-                "/master.m3u8": (200, {}, master),
-                "/high.m3u8": (200, {}, leaf("video.ts")),
-                "/audio/en.m3u8": (200, {}, leaf("en.ts")),
-                "/video.ts": (200, {}, self.video),
-            }
-        )
-        with self.assertRaises(SourceError) as raised:
-            open_source(
-                server.url + "/master.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
-            )
-        self.assertEqual(raised.exception.kind, "unsupported")
-        self.assertEqual(server.counts["/master.m3u8"], 1)
-        self.assertEqual(server.counts["/high.m3u8"], 0)
-        self.assertEqual(server.counts["/audio/en.m3u8"], 0)
+        video_only = ts_fixtures.make_stream(4, audio=False)
+        for name, segment, plays in (
+            ("its own audio", self.video, True),
+            ("video only", video_only, False),
+        ):
+            with self.subTest(name):
+                server = self.server(
+                    {
+                        "/master.m3u8": (200, {}, master),
+                        "/high.m3u8": (200, {}, leaf("video.ts", "next.ts")),
+                        "/audio/en.m3u8": (200, {}, leaf("en.ts")),
+                        "/video.ts": (200, {}, segment),
+                        "/next.ts": (200, {}, segment),
+                    }
+                )
+                source = open_source(
+                    server.url + "/master.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+                )
+                if plays:
+                    self.assertEqual(drain(source), joined(segment, segment))
+                    self.assertEqual(server.counts["/next.ts"], 1)
+                else:
+                    parts = []
+                    with self.assertRaises(SourceError) as raised:
+                        parts.extend(source.chunks())
+                    self.assertEqual(raised.exception.kind, "unsupported")
+                    self.assertIn("separate", str(raised.exception))
+                    self.assertEqual(parts, [])  # not one byte of it
+                    self.assertEqual(server.counts["/next.ts"], 0)
+                self.assertEqual(server.counts["/master.m3u8"], 1)
+                self.assertEqual(server.counts["/high.m3u8"], 1)
+                self.assertEqual(server.counts["/audio/en.m3u8"], 0)  # never fetched
+                self.assertEqual(server.counts["/video.ts"], 1)
 
     def test_live_leaf_reloads_real_redirect_url_and_tolerates_segment_gap(self):
         def playlist(_request, count):
@@ -1815,23 +1836,25 @@ high.m3u8
 
         muxed = 'NAME="English",LANGUAGE="eng"'
         french = 'NAME="French",LANGUAGE="fra",URI="audio/fr.m3u8"'
+        video_only = ts_fixtures.make_stream(4, audio=False)
         cases = (
-            ("muxed default", [muxed + ",DEFAULT=YES", french], True),
-            ("muxed first", [muxed, french], True),
-            ("external first", [french, muxed], False),
+            ("muxed default", [muxed + ",DEFAULT=YES", french], self.video, True),
+            ("muxed first", [muxed, french], self.video, True),
+            ("external first", [french, muxed], video_only, False),
+            ("external first, the variant's own", [french, muxed], self.video, True),
         )
-        for name, renditions, accepted in cases:
+        for name, renditions, segment, accepted in cases:
             with self.subTest(name):
                 server = self.server(
                     {
                         "/master.m3u8": (200, {}, master(renditions)),
                         "/video.m3u8": (200, {}, leaf("video.ts")),
-                        "/video.ts": (200, {}, self.video),
+                        "/video.ts": (200, {}, segment),
                     }
                 )
                 with source_logs() as logs:
                     if accepted:
-                        self.assertEqual(media(server.url + "/master.m3u8"), [self.video])
+                        self.assertEqual(media(server.url + "/master.m3u8"), [segment])
                     else:
                         with self.assertRaises(SourceError) as raised:
                             media(server.url + "/master.m3u8")

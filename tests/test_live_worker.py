@@ -765,8 +765,15 @@ class LiveWorkerTests(unittest.TestCase):
             "scrambled": make_stream(4, scrambled=True),
             "too-short": b"<html>nope</html>",
             "fragmented-hls": fragmented,
+            # Its audio only in a separate playlist: the video's segments carry none.
+            "separate-audio-hls": (
+                b'#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="a",DEFAULT=YES,'
+                b'URI="a.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="a"\nv.m3u8\n'
+            ),
         }
         routes = {f"/user/secret/{name}": (200, {}, body) for name, body in bodies.items()}
+        routes["/user/secret/v.m3u8"] = (200, {}, leaf("v.ts"))
+        routes["/user/secret/v.ts"] = (200, {}, make_stream(4, audio=False))
         # A live input that turns out scrambled: its upstream is released at the error.
         hung_up = threading.Event()
         live = make_stream(30, scrambled=True)
