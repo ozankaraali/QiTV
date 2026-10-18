@@ -1231,9 +1231,9 @@ class HlsSource:
         more (a start at the target is half a segment further back than it, the target being
         the mean lag over a batch, and one segment more is the room to choose), and at least
         ``live_delay`` and the playlist's HOLD-BACK, or three target durations without one
-        (the HLS spec's advice); plus the session's extra. A
-        sparse-PCR channel's 10 s segments fetched from 6 s before the end gave one segment,
-        and VLC ran dry before the next landed.
+        (the HLS spec's advice); plus the session's extra. A sparse-PCR channel's 10 s
+        segments fetched from 6 s before the end gave one segment, and VLC ran dry before
+        the next landed.
         """
         if self._target is None:
             return self._live_delay
@@ -1455,7 +1455,8 @@ def open_source(
     A live HLS session starts at the first segment from which the playlist's remaining
     EXTINF durations add up to at least ``live_delay`` seconds (at least one segment); given
     the session's ``target`` (and the ``extra`` it adds, Auto's), that target and one and a
-    half segments more, and at least HOLD-BACK or three target durations (`HlsSource._depth`). After each batch of listed segments it yields `CaughtUp`.
+    half segments more, and at least HOLD-BACK or three target durations
+    (`HlsSource._depth`). After each batch of listed segments it yields `CaughtUp`.
     Local paths and ``file://`` URLs are refused unless ``allow_local`` (tests only).
 
     Blocks while connecting. Setting ``stop`` (polled every 0.1 s) or calling ``close()`` on

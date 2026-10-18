@@ -965,6 +965,43 @@ class StartPolicyTests(LiveSessionCase):
         self.assertFalse(self.landed.called)
         self.assertEqual(self.notices, [])
 
+    def test_a_clip_still_downloading_is_not_steered_as_live(self):
+        # Re-review I1: a finished playlist downloading at ~8x started at 0, then ramped to
+        # 1.067x and reopened at its newest segment after the 5 s hold.
+        sid = self.start(latency=AUTO)
+        clip = {"burst": 2.0, "hls": True, "finite": True, "caught_up": False, "backlog": 0.0}
+        self.engine.buffer(sid, segments(0, 3), live_edge=6.5, open_seq=3, **clip)
+        self.engine.sessionReady.emit(sid)
+        self.playback.set_state(PlaybackState.PLAYING)
+        edge = 6.5
+        for _ in range(80):  # 20 s, 2 s of the clip every 0.25 s
+            edge += 2.0
+            count = int(edge // 2)
+            self.engine.buffer(sid, segments(0, count), live_edge=edge, open_seq=count, **clip)
+            self.step(0.25)
+        self.assertEqual(self.playback.rates, [])
+        self.assertEqual(len(self.playback.plays), 1)
+
+    def test_an_input_that_ends_mid_catch_up_plays_on_at_normal_speed(self):
+        # Re-review I1: a download that ended mid-ramp kept 1.033x for the rest of the clip.
+        for how in ("ended", "finished"):
+            with self.subTest(how=how):
+                self.live = self.make()
+                sid = self.ready(segments(0, 7), live_edge=14.0)
+                self.playback.set_state(PlaybackState.PLAYING)
+                for k in range(1, 16):  # the source sends on, 11.5 s more than the target
+                    self.engine.buffer(sid, segments(0, 7), live_edge=14.0 + 0.25 * k)
+                    self.step(0.25)
+                self.assertGreater(self.playback.rates[-1], 1.0)  # far behind: catching up
+                if how == "ended":
+                    self.engine.sessionEnded.emit(sid)
+                else:  # the playlist turned finished (ENDLIST)
+                    self.engine.buffer(sid, segments(0, 7), live_edge=18.0, finite=True)
+                self.step(0.25)
+                self.assertEqual(self.playback.rates[-1], 1.0)
+                self.step(5.0)
+                self.assertEqual(self.playback.rates[-1], 1.0)
+
     def test_an_ended_input_plays_from_the_oldest_segment(self):
         sid = self.start()
         self.engine.sessionEnded.emit(sid)
@@ -978,7 +1015,7 @@ class StartPolicyTests(LiveSessionCase):
         cases = (
             (("none", "key"), 8),  # 16.0 (4.5 s behind) over 18.0 (2.5 s), a forced cut
             (("none", "open"), 8),  # an intra picture before no keyframe at all
-            (("open", "key"), 8),  # a keyframe before an intra picture
+            (("open", "key"), 9),  # a keyframe 2 s further back is beyond stay-live's band
             (("none", "none"), 9),  # nothing better far enough back: the target's
         )
         for (newest, older), seq in cases:
@@ -996,6 +1033,23 @@ class StartPolicyTests(LiveSessionCase):
         self.engine.buffer(sid, spans, live_edge=20.0, open_seq=9, open_quality="none")
         self.engine.sessionReady.emit(sid)
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 8))
+
+    def test_a_keyframe_is_preferred_only_within_stay_lives_band(self):
+        # Re-review I2: one IDR at the oldest segment, intra-picture starts every 2 s
+        # (HEVC CRA, an open GOP): the tune started there, 18 s above its 2.5 s target.
+        spans = [Span(0, 0.0, 2.0, False, "key")]
+        spans += [Span(k, 2.0 * k, 2.0 * k + 2.0, False, "open") for k in range(1, 10)]
+        sid = self.ready(spans, live_edge=20.0, backlog_after_start=False)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 9))  # 2.5 s
+        self.assertAlmostEqual(self.landed.call_args.args[1], 0.0)
+        # A keyframe within the band (3 s behind, the band reaching 3.25 s) is taken over the
+        # intra picture nearer the target: it costs no steering.
+        self.live = self.make()
+        spans = [Span(k, 2.0 * k, 2.0 * k + 2.0, False, "none") for k in range(8)]
+        spans += [Span(8, 16.0, 17.5, False, "none"), Span(9, 17.5, 18.0, False, "key")]
+        spans.append(Span(10, 18.0, 20.0, False, "open"))
+        sid = self.ready(spans, live_edge=20.0, backlog_after_start=False)
+        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 9))
 
     def test_a_go_live_merged_into_stay_lives_reopen_keeps_its_landing(self):
         # Review M4: the merged Go live opened nothing but wiped the reopen's landing (9 s
@@ -3409,6 +3463,24 @@ class HelperDeathTests(LiveSessionCase):
         self.start()
         self.assertEqual(len(self.engine.opened), 1)
         self.assertEqual(self.notices, [LOST, UNAVAILABLE])
+
+    def test_a_backlog_step_right_after_a_recovery_is_part_of_its_landing(self):
+        # Re-review nit 4: the restarted helper's session went live at the target, then its
+        # raw-TS backlog landed and was caught up at 1.10x as drift.
+        sid = self.ready(segments(0, 3), live_edge=6.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.engine.sessionFailed.emit(sid, "internal", "The live buffer stopped unexpectedly.")
+        self.engine.available.emit(True)
+        self.engine.buffer(sid, segments(0, 2), live_edge=4.0)
+        self.engine.sessionReady.emit(sid)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        edge = 14.0  # 10 s more at once: the backlog
+        for _ in range(80):
+            self.engine.buffer(sid, segments(0, 7), live_edge=edge)
+            self.step(0.25)
+            edge += 0.25
+        self.assertLessEqual(max(self.playback.rates or [1.0]), 1.03)
 
     def test_internal_always_waits_for_the_reopen(self):
         sid = self.ready(segments(0, 3), live_edge=6.0)

@@ -38,9 +38,10 @@ drift: for `_START_S` of playing, far behind and the reopen at live count from t
 (`_floor`, which follows the lag down as a nudge takes it off), so it gets a gentle nudge,
 not 1.10x; after that, as ever (a reconnect's backlog later is drift). Short of the target
 (nothing further back was buffered, or a raw TS source's bursts were measured after the start
-and raised the target) within `_START_S` of playing, the room is built once, at `_GENTLE_DOWN`
-for at most `_START_BUILD_S` of playing, outside the budget; what is still short then is accepted (no
-2.0.1 slow-down, no nudge ahead) until the lag is back within the band, or VLC runs dry
+and raised the target) within `_START_S` of playing, the room is built once, at
+`_GENTLE_DOWN` for at most `_START_BUILD_S` of playing, outside the budget; what is still
+short then is accepted (no 2.0.1 slow-down, no nudge ahead) until the lag is back within the
+band, or VLC runs dry
 (`trouble()`: the owed slow-down builds all of it then).
 
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in

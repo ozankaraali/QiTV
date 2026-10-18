@@ -599,14 +599,17 @@ class _Session:
 
     def _follow(self, source: Source) -> None:
         """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and
-        measure the one before if it arrived whole: its media against its EXTINF."""
+        measure the one before if it arrived whole: its media against its EXTINF. Not the
+        first that brought media (it began at edge 0.0): the timeline starts at its first
+        keyframe, so whatever came before that would read as missing media."""
         serial = getattr(source, "segment_serial", 0)
         if serial == self._segment[0]:
             return
         edge = self._live_edge()
         previous, began = self._segment
         whole = getattr(source, "last_whole", None)
-        if isinstance(whole, tuple) and whole[0] == previous and whole[1] > 0 and edge > began:
+        measurable = began > 0.0 and edge > began
+        if isinstance(whole, tuple) and whole[0] == previous and whole[1] > 0 and measurable:
             media, extinf = self._measured
             self._measured = (media + edge - began, extinf + whole[1])
         self._segment = (serial, edge)

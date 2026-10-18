@@ -792,6 +792,9 @@ class LiveSession(QObject):
             self._phase = _Phase.PIPELINE
             self._tick_timer.start()
             self._go_live(unpause=False)
+            if not self._paused:  # the new session's backlog may land after it: the landing
+                self._reland_until = self._clock() + _RELAND_S
+                self._reland_edge = self._live_edge(self._snapshot())
 
     def _on_updated(self, sid: str, snapshot: dict) -> None:
         if sid != self._sid:
@@ -1143,12 +1146,14 @@ class LiveSession(QObject):
         self._observe(snapshot, stalled)
         lag = max(0.0, self._mean_lag(snapshot, position))
         self._settled.update(self._clock(), lag)
-        # An ended source has no live edge left to stay near, and a paused player stays
-        # where the pause leaves it (StayLive is SHIFTED then, or CATCHING_UP at a speed
-        # the user chose while paused, which applies on resume). A stalled source and a
-        # starved VLC (libVLC 3 still says Playing then) count as buffering: no rate
-        # change and no reopen while nothing arrives.
-        if not self._ended and not self._paused:
+        # An ended source, and a finished playlist (a clip, while it still downloads), have
+        # no live edge to stay near: no catch-up, no reopen, and 1x if stay-live had set
+        # another rate. A paused player stays where the pause leaves it (StayLive is SHIFTED
+        # then, or CATCHING_UP at a speed the user chose while paused, which applies on
+        # resume). A stalled source and a starved VLC (libVLC 3 still says Playing then)
+        # count as buffering: no rate change and no reopen while nothing arrives.
+        live = not self._ended and snapshot.get("finite") is not True
+        if live and not self._paused:
             self._back_off(snapshot, position, stalled, lag)
             self._stay.target = self._control_target()
             self._stay.slack = self._target(snapshot) - self._stay.target
@@ -1167,6 +1172,8 @@ class LiveSession(QObject):
                     return
         else:
             self._auto_mark = None  # paused (or ended): no quiet time for Auto
+            if not live and self._stay.mode is Mode.LIVE and self._rate != 1.0:
+                self._set_rate(1.0)  # it ended (or turned out a clip) mid catch-up
         self._emit_timeline()
 
     def _reland(self, snapshot: Mapping[str, Any], lag: float) -> None:
@@ -1519,9 +1526,12 @@ class LiveSession(QObject):
     ) -> Optional[tuple[int, float]]:
         """The start Go live picks and the lag it gives once VLC plays it, on a live edge
         `ahead` seconds further (a tune's HLS backlog still to come); with `cushion`, None
-        while none is far enough behind. `tune`: among the starts far enough behind, those
-        at a keyframe first, then at an intra picture, one without either only when nothing
-        else is (5a's `start_quality`)."""
+        while none is far enough behind. `tune`: a start without a keyframe or an intra
+        picture (5a's `start_quality` "none": its picture breaks until the next keyframe)
+        only when nothing else is far enough behind; and a keyframe start over an intra
+        picture's within stay-live's band (the target, a quarter second short to
+        `_LAND_ABOVE_S` beyond), where it costs no steering, never further back (one IDR in
+        a backlog of intra pictures started a tune 18 s above its target)."""
         assert self._sid is not None
         snapshot = self._snapshot()
         target = self._target(snapshot)
@@ -1542,12 +1552,18 @@ class LiveSession(QObject):
         safe = [mean for mean in means if mean[0] >= target - _BELOW_TARGET_S]
         if not safe:
             return None if cushion else (means[-1][1], means[-1][0])  # a short buffer: all
+        ranks = self._qualities(snapshot) if tune else {}
         if tune:
-            ranks = self._qualities(snapshot)
-            best = min(ranks.get(seq, 0) for _, seq in safe)
-            safe = [mean for mean in safe if ranks.get(mean[1], 0) == best]
+            clean = [mean for mean in safe if ranks.get(mean[1], 0) < _QUALITY_RANK["none"]]
+            safe = clean or safe
         band = [mean for mean in safe if mean[0] <= target + _LAND_ABOVE_S]
-        lag, seq = min(band, key=lambda mean: (abs(mean[0] - target), mean[0])) if band else safe[0]
+        if tune and band:
+            keys = [mean for mean in band if ranks.get(mean[1], 0) == _QUALITY_RANK["key"]]
+            band = keys or band
+        if band:
+            lag, seq = min(band, key=lambda mean: (abs(mean[0] - target), mean[0]))
+        else:
+            lag, seq = safe[0]
         return seq, lag
 
     def _advance(self) -> float:

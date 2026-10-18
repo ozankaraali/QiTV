@@ -105,6 +105,18 @@ time.sleep(60)
 """
 
 
+def second_pat(data):
+    """The offset of the second PAT packet: where a stream cut half a second in begins (its
+    program tables come every half second)."""
+    seen = 0
+    for at in range(0, len(data), 188):
+        if data[at + 1] & 0x1F == 0 and data[at + 2] == 0:
+            seen += 1
+            if seen == 2:
+                return at
+    raise AssertionError("no second PAT")
+
+
 def helper_with_a_lingering_thread(conn, root):
     """The real helper in a process that also runs a non-daemon thread, as any imported
     module could start, or a parent's unguarded __main__ module that spawn runs again."""
@@ -494,9 +506,11 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertGreater(state[2]["live_edge"], 7.9)  # all 8 s, not the last cut's 6 s
         self.assertIs(helper.of(sid, "state")[0][2]["caught_up"], False)
 
-    def backlog_states(self, names, *, extinf, seconds, missing=()):
+    def backlog_states(self, names, *, extinf, seconds, missing=(), cut_first=False):
         """The states of an HLS session whose live playlist lists `names` (each `extinf` long
-        by its EXTINF, `seconds` of media; those in `missing` answer 404) until caught up."""
+        by its EXTINF, `seconds` of media; those in `missing` answer 404) until caught up.
+        `cut_first`: the first segment begins half a second in, before its first keyframe
+        (keyframes every 2 s)."""
         text = f"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{extinf}\n"
         text += "#EXT-X-MEDIA-SEQUENCE:0\n"
         text += "".join(f"#EXTINF:{extinf},\n{name}\n" for name in names)
@@ -506,7 +520,10 @@ class LiveWorkerTests(unittest.TestCase):
             if name in missing:
                 routes[f"/user/secret/{name}"] = (404, {}, b"Not found")
                 continue
-            routes[f"/user/secret/{name}"] = (200, {}, make_stream(seconds, pts_start=start))
+            body = make_stream(seconds, pts_start=start, gop_s=2.0 if cut_first else 1.0)
+            if cut_first and name == names[0]:
+                body = body[second_pat(body) :]
+            routes[f"/user/secret/{name}"] = (200, {}, body)
             start += round(seconds * 90000)
         source = self.source(routes)
         helper = self.helper()
@@ -520,8 +537,8 @@ class LiveWorkerTests(unittest.TestCase):
     def test_an_hls_backlog_reports_the_media_still_to_come(self):
         # 2.1 stage 3: live edge + backlog_s is where the edge will be once every listed
         # segment arrived, so a tune can start before all of them did; measured once a
-        # segment came whole (before: None).
-        playable = self.backlog_states(["a.ts", "b.ts", "c.ts"], extinf=4, seconds=4)
+        # segment came whole, not the first (before: None).
+        playable = self.backlog_states(["a.ts", "b.ts", "c.ts", "d.ts"], extinf=4, seconds=4)
         self.assertGreater(len(playable), 2)
         self.assertIsNone(playable[0]["backlog_s"])
         measured = [state for state in playable if state["backlog_s"] is not None]
@@ -530,7 +547,7 @@ class LiveWorkerTests(unittest.TestCase):
             # Each segment measures a frame short (the edge stands at its last frame's
             # start): the prediction errs low, on the side that keeps room.
             predicted = state["live_edge"] + state["backlog_s"]
-            self.assertAlmostEqual(predicted, 12.0, delta=0.2, msg=state)
+            self.assertAlmostEqual(predicted, 16.0, delta=0.2, msg=state)
         self.assertEqual(playable[-1]["backlog_s"], 0.0)
         self.assertEqual(playable[-1]["open_quality"], "key")  # the open segment's start
         self.assertIs(playable[-1]["finite"], False)
@@ -543,6 +560,20 @@ class LiveWorkerTests(unittest.TestCase):
         for state in measured:
             predicted = state["live_edge"] + state["backlog_s"]
             self.assertAlmostEqual(predicted, 32.0, delta=0.5, msg=state)
+
+    def test_a_first_segment_without_a_keyframe_at_its_start_is_not_measured(self):
+        # Re-review minor 3: its media counts from its first keyframe (1.5 s in here), so it
+        # read short against its EXTINF and pulled the prediction low.
+        playable = self.backlog_states(
+            ["a.ts", "b.ts", "c.ts", "d.ts"], extinf=8, seconds=8, cut_first=True
+        )
+        final = playable[-1]["live_edge"]
+        self.assertAlmostEqual(final, 30.0, delta=0.1)  # the first 2 s are before a keyframe
+        measured = [state for state in playable if state["backlog_s"] is not None]
+        self.assertTrue(measured)
+        for state in measured:
+            predicted = state["live_edge"] + state["backlog_s"]
+            self.assertAlmostEqual(predicted, final, delta=0.5, msg=state)
 
     def test_a_missing_segment_leaves_the_backlog(self):
         # Review I3: a 404 segment was counted in, and never came: the start landed short.
