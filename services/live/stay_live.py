@@ -118,6 +118,7 @@ _BUDGET_S = 300.0  # one gentle nudge at most in this long
 _START_S = 60.0  # after a landing, a shortfall within this much playing is the start's ...
 _START_BUILD_S = 20.0  # ... built at _GENTLE_DOWN for at most this much playing, then accepted
 _WIDEN_S = 0.01  # beyond the budget the band takes in the lag outside it, and this much
+_BACK_IN_S = 3.0  # a landing's shortfall back in the band this long is no more its own
 # Jumps (2.1 stage 5): far behind, a reopen at live instead of a long catch-up.
 _JUMP_GAP_S = 60.0  # never two jumps (a tune, Go live, a reopen at live) within this long
 _JUMP_CLOSER_S = 5.0  # a jump helps when it lands within the band, or at least this much nearer
@@ -307,6 +308,7 @@ class LagFilter:
         self._burst_seen = False
         self._pending: Optional[tuple[float, float]] = None  # (since, reported) unlike `burst`
         self.restarts = 0  # how often its window started afresh (a step, a burst, reset())
+        self.steps = 0  # arrivals that moved the level more than `_STEP_S` (restarting or not)
 
     def reset(self) -> None:
         """Forget the edges (the burst stays: it is the source's)."""
@@ -337,7 +339,10 @@ class LagFilter:
         burst = self.burst
         shift = min(max(0.0, since), burst + STALL_S) - burst / 2 if burst > 0 else 0.0
         level = edge + shift - now
-        if self._level is not None and abs(level - self._level) > max(_STEP_S, burst):
+        moved = 0.0 if self._level is None else abs(level - self._level)
+        if moved > _STEP_S:
+            self.steps += 1  # (under a burst the rhythm may still hold it: no restart)
+        if moved > max(_STEP_S, burst):
             self.reset()  # a step, not the rhythm: taken in at once
         dt = _TICK_S if self._last is None else min(max(now - self._last, 0.0), _MAX_DT)
         self._last, self._level = now, level
@@ -506,6 +511,7 @@ class StayLive:
         # (taken at the first update after it, when the caller has set the target in force),
         # nor once the lag was back in the band after the stream played (`_own_shortfall`).
         self._landed_at: Optional[float] = None
+        self._in_band = 0.0  # seconds the lag was back in the band since (`_BACK_IN_S`)
 
     @property
     def nudge(self) -> float:
@@ -572,6 +578,7 @@ class StayLive:
         self._start = _START_S if build else 0.0
         self._accepting, self._tolerant = False, not build
         self._landed_at = None  # the target in force at the next update
+        self._in_band = 0.0
         self._jump_age = self._waited = 0.0  # a jump: the next one a minute on at the earliest
 
     def source_stepped(self) -> None:
@@ -660,8 +667,6 @@ class StayLive:
                 self.user_go_live()
                 return Decision(1.0)
             return Decision(self._user_rate)
-        if self._landed_at is None:
-            self._landed_at = self.target  # the target a landing just now aimed at
         if buffering:
             # What the wait adds is a step, not a drift; but a VLC that runs dry again and
             # again is the urgent case itself: its count only pauses.
@@ -683,7 +688,11 @@ class StayLive:
                 return Decision(1.0)
             self._reopened = True
             return Decision(1.0, reopen_live=True)
-        self._own_shortfall(lag_s)
+        if self._landed_at is None:
+            # The target a landing just now aimed at, once the source sent (a stalled first
+            # tick has no burst classified yet: Normal's 2.5 s made an HLS 7 s target a rise).
+            self._landed_at = self.target
+        self._own_shortfall(lag_s, dt)
         if self._reopened:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
         if self.rate_locked:
@@ -700,20 +709,30 @@ class StayLive:
             return self._jump(now)
         return Decision(self._rate)
 
-    def _own_shortfall(self, lag: float) -> None:
+    def _own_shortfall(self, lag: float, dt: float) -> None:
         """Only a landing's own shortfall is built at the start or tolerated (re-review N1,
         then for the tune's build too): once the target rose above the one it landed at (a
         higher latency, a larger burst, Auto, a learned target) the start's build window, what
         its build accepted and a jump's tolerance end, so the rise is built once as without
         the landing; once the lag is in the band after the stream played (right after an
         open it reads where the pick aimed) what was accepted or tolerated ends, so a later
-        shortfall is drift."""
+        shortfall is drift. A rise is one beyond the band (a smaller one, the learned target
+        creeping, is drift inside it: stage 4b); back in the band takes `_BACK_IN_S` there (a
+        quarter second of the estimate's wander gave a second full build)."""
         landed_at = self._landed_at
-        if landed_at is not None and self.target > landed_at + 1e-9:
+        if landed_at is not None and self.target - landed_at > self._dead_band() + 1e-9:
             self._start = 0.0
             self._accepting = self._tolerant = False
         elif not self.hold_reopen and lag - self._centre(-1) >= -self.band(-1):
-            self._accepting = self._tolerant = False
+            self._in_band += dt
+            if self._in_band >= _BACK_IN_S - 1e-9:
+                self._accepting = self._tolerant = False
+        else:
+            self._in_band = 0.0
+
+    def _dead_band(self) -> float:
+        """The band as wide as the estimate's wander, not as the budget widened it."""
+        return max(_BAND_S, _BAND_SPREAD * self.spread)
 
     def _jump(self, now: float) -> Decision:
         """Reopen at live instead (`_far_move`): a catch-up it replaces ends here, and a
@@ -799,7 +818,7 @@ class StayLive:
         """A jump landing at the mean lag `landing` helps: within the band around the target
         (as wide as the estimate's wander, not as the budget widened it), or at least
         `_JUMP_CLOSER_S` nearer than `lag` without falling short of the band."""
-        band = max(_BAND_S, _BAND_SPREAD * self.spread)
+        band = self._dead_band()
         over = landing - self._centre(1)
         if over < -band:
             return False  # short of room: VLC would run dry

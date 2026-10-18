@@ -2427,6 +2427,43 @@ class SafeJumpTests(LiveSessionCase):
         self.assertEqual((min(self.playback.rates), changes(self.playback.rates)), (0.97, 2))
         self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["stable"], delta=0.5)
 
+    def test_a_backlog_inside_the_check_on_a_bursty_source_teaches_nothing(self):
+        # Stage 5b's last review: on a bursty source a backlog under its burst moves the lag
+        # filter's level without starting it afresh (a step there is beyond the burst); 5 s
+        # 5.5 s into the check taught +1.78. The check is dropped on such a step, and what the
+        # filter's mean edge moved meanwhile is no miss of the pick's either.
+        cases = (
+            (7.0, True, 5.0, 5.5, False),
+            (7.0, True, 6.5, 5.5, False),
+            (10.0, False, 6.0, 5.5, False),
+            (7.0, True, 5.0, 1.0, True),  # on a filter that settled a moment ago
+            (6.0, True, 6.0, 3.0, True),
+        )
+        for burst, hls, step, at, fresh in cases:
+            with self.subTest(burst=burst, step=step, at=at, fresh=fresh):
+                self.live = self.make()
+                sid = self.start()
+                feed = Feed(self, sid, burst=burst, edge=40.0, hls=hls)
+                feed.ready(backlog_after_start=False)
+                self.live._open_s = 0.0
+                feed.run(40.0)
+                if fresh:  # the filter starts afresh after a stall, and has just settled
+                    feed.stalled = True
+                    feed.run(burst + 3.0)
+                    feed.stalled = False
+                    feed.run(20.0)
+                else:
+                    feed.run(20.0)
+                self.live.go_live()
+                feed.sync()
+                feed.run(at)
+                feed.edge += step
+                feed.push()
+                feed.run(15.0)
+                self.assertLess(abs(self.live._land_offset), 0.05)
+                self.live.stop()
+                self.engine.answer()
+
     def test_go_live_then_a_higher_latency_is_built_as_without_it(self):
         # Re-review N1: after a Go live the shortfall a higher target left was tolerated for
         # good (2.0 s behind a 6 s target for 5 minutes).

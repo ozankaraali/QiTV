@@ -1001,6 +1001,43 @@ class LandingTests(unittest.TestCase):
         self.assertEqual(changes(rates), 2)
         self.assertLess(lag, 7.0 - 2.5)
 
+    def test_a_moment_in_the_band_does_not_end_what_was_accepted(self):
+        # Stage 5b's last review: a quarter second in the band (the estimate's wander) ended
+        # the acceptance, and a second full build followed. It takes `_BACK_IN_S` there.
+        for blip, builds in ((0.25, 1), (2.0, 1), (4.0, 2)):
+            with self.subTest(blip=blip):
+                stay, clock = live(7.0, burst=7.0), Clock()
+                stay.landed(-3.5)
+                lag, rates = drive(stay, 3.5, 120.0, clock=clock)  # built, then accepted
+                drive(stay, 6.5, blip, clock=clock)  # in the band for a moment
+                _, more = drive(stay, lag, 300.0, clock=clock)
+                self.assertEqual(changes(rates + more), 2 * builds)
+
+    def test_the_target_a_start_aimed_at_is_taken_once_the_source_sent(self):
+        # Stage 5b's last review: a stalled first tick (no burst classified yet) made
+        # Normal's 2.5 s the reference, and the HLS 7 s target "a rise": 0.95x for 73 s
+        # instead of the start's 0.97x build for at most 20 s.
+        stay, clock = live(T), Clock()
+        stay.landed(-3.5)
+        stay.update(3.5, True, now=clock.tick())  # buffering: the source stalled
+        stay.target, stay.burst = 7.0, 7.0  # the burst classified on the next tick
+        _, rates = drive(stay, 3.5, 300.0, clock=clock)
+        self.assertEqual(min(rates), 0.97)
+        self.assertLessEqual(sum(1 for rate in rates if rate < 1.0) * TICK, 20.0)
+
+    def test_a_learned_rise_within_the_band_is_drift(self):
+        # Stage 4b: a rise counts as one after the landing only beyond the band; a smaller one
+        # (the learned target creeping) builds nothing by itself.
+        for rise, rates_seen in ((0.8, {1.0}), (1.2, {1.0, 0.99, 0.98, 0.97})):
+            with self.subTest(rise=rise):
+                stay, clock = live(), Clock()
+                stay.user_go_live()
+                stay.landed(0.0, build=False)  # Go live, which landed 1.3 s short
+                lag, _ = drive(stay, T - 1.3, 30.0, clock=clock)
+                stay.target = T + rise
+                _, rates = drive(stay, lag, 300.0, clock=clock)
+                self.assertEqual(set(rates), rates_seen)
+
 
 def steer(stay, lag, seconds, *, clock, landing=None, actual=None):
     """Play `seconds` at stay-live's rates from `lag` (the source steady), where a jump to live

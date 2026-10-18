@@ -407,8 +407,8 @@ class LiveSession(QObject):
         self._reopened_at = -math.inf  # when stay-live last reopened at live
         self._open_s = _OPEN_SEED_S  # VLC's open time, averaged over this object's opens
         self._land_offset = 0.0  # what this tune's picks missed by (see _learn_landing)
-        # (opened, lag predicted, the lag filter's restarts then) of a landing being measured
-        self._land_check: Optional[tuple[float, float, int]] = None
+        # (opened, lag predicted, the lag filter's level and marks then) of a landing measured
+        self._land_check: Optional[tuple[float, float, float, tuple[int, int]]] = None
         self._opened_at: Optional[float] = None  # a pipeline play() not yet Playing
         self._ready_seen = False  # the session is ready: the start may still be held
         self._ready_at = 0.0  # when it was
@@ -683,7 +683,9 @@ class LiveSession(QObject):
                     if reopen:
                         self._reopened_at = self._clock()
                     if filtered:
-                        self._land_check = (self._clock(), pick[1], self._filter.restarts)
+                        marks = self._filter_marks()
+                        level = self._filter.level()
+                        self._land_check = (self._clock(), pick[1], level, marks)
         finally:
             # Always, so StayLive's edge-triggered reopen re-arms; but a pause that was kept
             # stays time-shifted: only the Go live button (it unpaused) returns to LIVE.
@@ -1291,34 +1293,45 @@ class LiveSession(QObject):
     def _learn_landing(self, lag: float, *, disturbed: bool) -> None:
         """A Go live or a jump picked from a settled lag filter's mean (`_start_lags`,
         `LagFilter.settled`), once VLC played it `_LAND_CHECK_S` at 1x in LIVE without a
-        wait, a stall or the filter starting afresh (a step, a burst reclassified):
+        wait, a stall, the filter starting afresh (a step, a burst reclassified) or an
+        arrival moving its level more than a step (a backlog under a bursty source's burst):
         `_LAND_WEIGHT` of what its landing missed by (the mean lag now less the one
-        predicted) is added to this tune's offset, up to `_LAND_OFFSET_MAX_S` either way, so
+        predicted, less what the filter's mean edge moved meanwhile: the source's doing, not
+        the pick's) is added to this tune's offset, up to `_LAND_OFFSET_MAX_S` either way, so
         the next pick lands where it aims (review I3: VLC's clock started a little ahead on a
         sparse-PCR channel). Anything else meanwhile measures nothing (re-review N2: a 5 s
         backlog inside the check taught the cap). Kept for the tune only (ruling R38)."""
         check = self._land_check
         if check is None:
             return
-        opened, predicted, restarts = check
+        opened, predicted, level, marks = check
         if (
             disturbed
             or self._rate != 1.0
             or self._stay.mode is not Mode.LIVE
-            or self._filter.restarts != restarts
+            or self._filter_marks() != marks
         ):
             self._land_check = None
             return
         if self._clock() - opened < _LAND_CHECK_S - 1e-9:
             return
         self._land_check = None
-        offset = self._land_offset + _LAND_WEIGHT * (lag - predicted)
+        # What the pick missed by: the lag now less the one predicted, less what the filter's
+        # mean edge moved meanwhile (the source's doing: a backlog, its rhythm's wander).
+        missed = lag - predicted - (self._filter.level() - level)
+        offset = self._land_offset + _LAND_WEIGHT * missed
         self._land_offset = max(-_LAND_OFFSET_MAX_S, min(_LAND_OFFSET_MAX_S, offset))
         _LOG.debug(
             "A landing missed its pick by %+.2f s; this tune's picks now add %+.2f s.",
-            lag - predicted,
+            missed,
             self._land_offset,
         )
+
+    def _filter_marks(self) -> tuple[int, int]:
+        """How often the lag filter started afresh, and how many arrivals moved its level more
+        than a step (`LagFilter.restarts`, `.steps`): a landing measured across either is not
+        the pick's error."""
+        return self._filter.restarts, self._filter.steps
 
     def _no_live_edge(self, snapshot: Mapping[str, Any], position: float) -> None:
         """The input ended, or the stream is a finished playlist (a clip): stay-live is not
