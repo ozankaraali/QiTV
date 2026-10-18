@@ -9,14 +9,16 @@ from the start, it plays from the oldest segment then.
 
 Falling back (spec §9) never overlaps two upstream connections: the session is closed and
 the provider URL plays directly (`PlayKind.LIVE`) once the engine confirms the close, or
-after `_CLOSE_CAP_MS`. A direct play after a session was open that fails at once is tried
-again up to three times, `retry_ms` apart (3, 5 and 10 s; a provider allowing one stream may
-still count the buffer's connection a while), with "Reconnecting…" each time, and only then
-reported; once it played, an error is reported at once. Only `available(False)` plays
-directly at once: no helper, so no upstream and no buffer, is left (also for a session whose
-input had ended). Unsupported sources, failures before ready and a ready that does not come
-within `ready_timeout_ms` fall back with "Time-shift isn't available for this channel";
-after `available(False)` every start plays directly for the rest of the run. A source that
+after `_CLOSE_CAP_MS`. A direct play after a session was open that fails at once (within
+`_DIRECT_QUICK_S` of its play call) is tried again up to three times, `retry_ms` apart (3, 5
+and 10 s; a provider allowing one stream may still count the buffer's connection a while),
+with "Reconnecting…" each time, and only then reported; a later failure (VLC timed out
+opening it: the provider does not answer) and, once it played, any error are reported at
+once. Only `available(False)` plays directly at once: no helper, so no upstream and no
+buffer, is left (also for a session whose input had ended). Unsupported sources, failures
+before ready and a ready that does not come within `ready_timeout_ms` fall back with
+"Time-shift isn't available for this channel"; after `available(False)` every start plays
+directly for the rest of the run. A source that
 sent bytes by then without anything playable (no keyframe yet: an on-demand restream
 starting up, say) gets until `ready_max_ms` from the start, with "Still loading…" at
 `ready_timeout_ms`; one that sent nothing falls back at `ready_timeout_ms`.
@@ -59,12 +61,13 @@ StayLive changes the rate only for a lag outside its dead band for 15 s, by one 
 (1.03x or 0.97x, ramped in three steps, sized to end at the target; one per 5 minutes),
 sooner and beyond that budget only far behind (1.10x), with under half a second of room when
 a burst lands (0.95x, 2.0.1's case) and once after trouble (a starvation or a stall that ran
-out the cushion: 0.95x back to the target, as soon as VLC plays); not while paused,
-time-shifted or at a chosen speed. Its reopen at live waits until a stream opened (Go live,
-a seek, a reopen) has played and `_REOPEN_HOLD_S` passed, and a Go live right after
-stay-live's reopen opens nothing more: never two opens in a row. The timeline's `shown` is
-the lag as the indicator shows it (`SettledLag`: half seconds, changed after 3 s), `nudge`
-the rate a nudge ramps to. On some channels VLC cannot play at any rate but 1x: its position
+out the cushion: 0.95x back to the target, once VLC played a second short of it); not
+while paused, time-shifted or at a chosen speed. Its reopen at live waits until a stream
+opened (Go live, a seek, a reopen) has played and `_REOPEN_HOLD_S` passed, and a Go live
+right after stay-live's reopen (also one the tick made after it could not open at once)
+opens nothing more: never two opens in a row. The timeline's `shown` is the lag as the
+indicator shows it (`SettledLag`: half seconds, changed after 3 s), `nudge` the rate a nudge
+ramps to. On some channels VLC cannot play at any rate but 1x: its position
 crawls. While stay-live's rate is not 1x, VLC's progress is checked against rate x wall time
 (`RateHealth`), counted only while VLC plays and at least `_MEASURE_AHEAD_S` of media is
 ahead at both ends of a tick, and from `_RATE_GRACE_S` after an opened stream plays or after
@@ -179,7 +182,8 @@ DISK = "Disk time-shift isn't available; using memory"
 REWOUND = "Rewound past the buffer"
 CRAWLING = "Plays without rewind for smoother playback"
 RECONNECTING = "Reconnecting…"
-_DIRECT_RETRIES_MS = (3000, 5000, 10000)  # a fallback's direct play, failing at once
+_DIRECT_RETRIES_MS = (3000, 5000, 10000)  # a fallback's direct play, failing at once ...
+_DIRECT_QUICK_S = 5.0  # ... within this of its play call (a timeout is reported at once)
 LOADING = "Still loading…"
 _CLOSE_CAP_MS = 2000  # a close not confirmed by then counts as done
 _RECOVERY_MS = 10_000  # a helper restart must bring the session back by then
@@ -220,6 +224,7 @@ _BEFORE_PLAY = (_Phase.STARTING, _Phase.WAITING, _Phase.RECOVERING)
 
 class _Retry(Enum):
     LIVE = "live"
+    REOPEN = "reopen"  # stay-live's own reopen at live (a Go live right after it is merged)
     RESUME = "resume"
 
 
@@ -285,6 +290,7 @@ class LiveSession(QObject):
         self._direct_timer = QTimer(self, singleShot=True)
         self._direct_timer.timeout.connect(self._retry_direct)
         self._direct_retries = 0  # tries a fallback's direct play has left (0: report errors)
+        self._direct_at = -math.inf  # when the direct play() was last made
         self._limited: Optional[str] = None  # the provider's refusal (one of REFUSALS)
         self._phase = _Phase.IDLE
         self._mode = ""
@@ -544,7 +550,7 @@ class LiveSession(QObject):
                     return  # stay-live reopened at live a moment ago
                 seq = self._live_seq()
                 if seq is None or not self._open_at(seq):
-                    self._retry = _Retry.LIVE
+                    self._retry = _Retry.REOPEN if reopen else _Retry.LIVE  # the tick tries
                 elif reopen:
                     self._reopened_at = self._clock()
         finally:
@@ -656,6 +662,7 @@ class LiveSession(QObject):
     def _play_direct(self) -> None:
         self._phase = _Phase.DIRECT
         self._mode = "direct"
+        self._direct_at = self._clock()
         self._playback.play(
             self._url, kind=PlayKind.LIVE, latency=self._latency, user_agent=self._user_agent
         )
@@ -851,21 +858,25 @@ class LiveSession(QObject):
 
     def _on_error(self, message: str) -> None:
         if self._phase is _Phase.DIRECT:
-            if self._direct_retries > 0:
+            quick = self._clock() - self._direct_at <= _DIRECT_QUICK_S
+            if self._direct_retries > 0 and quick:
                 # Right after a fallback the provider may still count the connection the
-                # buffer closed (one allowed stream): tried again after a while.
+                # buffer closed (one allowed stream): tried again after a while. A provider
+                # that does not answer at all times out, and is reported at once.
                 wait = self._direct_waits[len(self._direct_waits) - self._direct_retries]
                 self._direct_retries -= 1
                 _LOG.info("The channel did not open directly; trying again in %d ms.", wait)
                 self.notice.emit(RECONNECTING)
                 self._direct_timer.start(wait)
                 return
+            self._direct_retries = 0
             self.failed.emit(message)
         else:
             self._on_interrupted()
 
     def _retry_direct(self) -> None:
         if self._phase is _Phase.DIRECT:
+            self._direct_at = self._clock()
             self._playback.play(
                 self._url, kind=PlayKind.LIVE, latency=self._latency, user_agent=self._user_agent
             )
@@ -898,7 +909,7 @@ class LiveSession(QObject):
             if self._retry is _Retry.RESUME:
                 self._resume()
             elif not self._gave_up():
-                self._go_live(unpause=False)
+                self._go_live(unpause=False, reopen=self._retry is _Retry.REOPEN)
             if self._phase is not _Phase.PIPELINE:
                 return  # it fell back
             if self._retry is not None:

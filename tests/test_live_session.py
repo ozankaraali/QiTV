@@ -1451,6 +1451,30 @@ class StayLiveTests(LiveSessionCase):
             self.step(0.25)
         self.assertEqual(len(self.playback.plays), 2)
 
+    def test_a_reopen_the_tick_retried_is_merged_with_a_go_live(self):
+        """Stage 1's last review: stay-live's reopen at live could not open (no stream from
+        the helper for a moment) and the tick made it later, but not as a reopen: a Go live
+        right after it opened a second time."""
+        sid = self.ready(segments(0, 20), live_edge=40.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        for k in range(1, 20):  # 40 s behind; not within 5 s of the open
+            self.engine.buffer(sid, segments(0, 20), live_edge=40.0 + 0.25 * k)
+            self.step(0.25)
+        self.assertEqual(len(self.playback.plays), 1)
+        self.engine.up = False  # the helper serves no stream for a moment
+        self.engine.buffer(sid, segments(0, 20), live_edge=45.0)
+        self.step(0.25)  # stay-live reopens at live: it cannot yet
+        self.assertEqual(len(self.playback.plays), 1)
+        self.engine.up = True
+        self.step(0.25)  # the tick makes it
+        self.assertEqual(self.playback.plays[-1], self.stream(sid, 19))
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.live.go_live()  # the viewer's Go live a moment after it: merged, one open
+        for _ in range(8):
+            self.step(0.25)
+        self.assertEqual(len(self.playback.plays), 2)
+
     def test_a_recovery_or_the_ram_ring_opens_even_just_after_a_reopen(self):
         # The merge (one open, not two) is for the Go live button and a seek to the edge:
         # a helper's restart and the RAM ring after a disk failure always open (review 2).
@@ -2474,6 +2498,33 @@ class InterruptionTests(LiveSessionCase):
                 QTest.qWait(80)
                 self.assertEqual(len(self.playback.plays), plays + 4)  # four tries, no more
                 self.assertEqual(self.notices.count(RECONNECTING), 3)
+
+    def test_a_direct_play_that_timed_out_is_reported_at_once(self):
+        """Stage 1's last review: a provider that does not answer times out after VLC's open
+        timeout (20 s), and retrying that showed "Reconnecting…" for a minute and a half.
+        Only a failure within a few seconds of its play call is tried again."""
+        plays = self.fall_back_on_one_stream()
+        self.clock.now += 20.0  # VLC gave up opening it
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("Timed out opening the stream")
+        self.assertEqual(self.failures, ["Timed out opening the stream"])
+        self.assertNotIn(RECONNECTING, self.notices)
+        QTest.qWait(80)
+        self.assertEqual(len(self.playback.plays), plays + 1)
+
+    def test_a_retry_that_times_out_is_reported_at_once(self):
+        plays = self.fall_back_on_one_stream()
+        self.clock.now += 4.0  # refused within a few seconds: tried again
+        self.playback.set_state(PlaybackState.ERROR)
+        self.playback.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.failures, [])
+        self.wait_until(lambda: len(self.playback.plays) == plays + 2)
+        self.clock.now += 20.0  # the retry timed out
+        self.playback.errorOccurred.emit("Timed out opening the stream")
+        self.assertEqual(self.failures, ["Timed out opening the stream"])
+        QTest.qWait(80)
+        self.assertEqual(len(self.playback.plays), plays + 2)
+        self.assertEqual(self.notices.count(RECONNECTING), 1)
 
     def test_a_fallback_that_played_reports_a_later_error_at_once(self):
         plays = self.fall_back_on_one_stream()

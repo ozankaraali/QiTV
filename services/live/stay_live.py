@@ -22,11 +22,13 @@ VLC's waits pause but do not restart) and beyond the budget: further than `_FAR_
 (1.10x), and less room than `_ROOM_S` when a burst lands (a steady source: at all; 0.95x: VLC
 would run dry, before each burst as 2.0.1 measured, or at any hiccup). And VLC running out of
 room (`trouble()`: a starvation or a stall that ran out the cushion, when Auto raises the
-target) is owed one slow-down to the target at 0.95x as soon as VLC plays again, beyond the
-budget, as 2.0.2 built a raised target at once; only if the lag is then short of the target
-does it end a catch-up (a stall far behind it changes nothing). A nudge stops early when the
-lag gets to the target by itself (a step), and is resized when the target moves; only one that
-ran to its end counts against the budget. `SettledLag` gives the lag as
+target) is owed one slow-down to the target at 0.95x once VLC played `_OWED_HOLD_S` short of
+it, beyond the budget, as 2.0.2 built a raised target at once; only a lag short of the target
+for that long ends a catch-up (a stall far behind it changes nothing, and so does the first
+tick after a stall, which the lag filter starts afresh from: a source that sent what it
+missed is back near the target on the next). A nudge stops early when the lag gets to the
+target by itself (a step), and is resized when the target moves; a catch-up that trouble cut
+counts against the budget only if no slow-down followed it. `SettledLag` gives the lag as
 shown: in half seconds, changed only after it differed for `_SHOWN_HOLD_S`.
 
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in
@@ -77,7 +79,9 @@ _FAST = 1.10
 _SLOW = 0.95
 _RAMP_STEPS = 3  # a nudge ramps in (and out) in this many equal steps ...
 _RAMP_EVERY_S = 1.0  # ... this far apart
-_OWED_MIN_S = 0.5  # a slow-down owed after trouble is made for a deficit beyond this
+_OWED_MIN_S = 0.5  # a slow-down owed after trouble is made for a deficit beyond this ...
+_OWED_HOLD_S = 1.0  # ... once it lasted this long while VLC plays (right after a stall the
+# lag filter holds one sample: a source that sent what it missed is back on the next tick)
 _BUDGET_S = 300.0  # one gentle nudge at most in this long
 _WIDEN_S = 0.01  # beyond the budget the band takes in the lag outside it, and this much
 _TICK_S = 0.25  # the caller's update interval (what a first sample stands for)
@@ -387,6 +391,7 @@ class _Nudge:
     target: float  # the target it was sized for
     ending: bool = False  # ramping out: back to 1x, whatever the lag does meanwhile
     cut: bool = False  # ended before its end (trouble): it does not count against the budget
+    spent: bool = False  # it took its whole size (ramping out: it counts, whatever follows)
     stepped: Optional[float] = None  # when the rate last stepped
 
     @property
@@ -421,6 +426,7 @@ class StayLive:
         self._wide = 0.0  # the band widened while the budget is spent
         self._urgent = False  # the time outside counts towards an urgent nudge
         self._owed = False  # VLC ran out of room: a slow-down to the target is owed
+        self._short_for = 0.0  # seconds the lag was short of the target since then
 
     @property
     def nudge(self) -> float:
@@ -455,10 +461,11 @@ class StayLive:
 
     def trouble(self) -> None:
         """VLC ran out of room: a starvation, or a stall, that ran out the cushion (Auto may have
-        raised the target for it). One slow-down to the target is owed, at `_SLOW`, as soon as
-        VLC plays again and beyond the budget, if the lag is short of the target then (`_pay`):
-        a stall far behind it changes nothing, a catch-up included."""
+        raised the target for it). One slow-down to the target is owed, at `_SLOW`, once VLC
+        played `_OWED_HOLD_S` short of the target, beyond the budget (`_pay`): a stall far
+        behind it changes nothing, a catch-up included."""
         self._owed = True
+        self._short_for = 0.0
 
     def user_paused(self) -> None:
         """A pause leaves LIVE, and a catch-up too: it resumes time-shifted at 1x."""
@@ -526,7 +533,7 @@ class StayLive:
         if self._wide and self._budget_free(now):
             self._wide = 0.0
         if self._owed:
-            self._pay(lag_s, now)
+            self._pay(lag_s, dt)
         if self._nudge is not None:
             self._steer(dt, lag_s, now)
         else:
@@ -536,16 +543,25 @@ class StayLive:
     def _budget_free(self, now: float) -> bool:
         return self._nudged_at is None or now - self._nudged_at >= _BUDGET_S - 1e-9
 
-    def _pay(self, lag: float, now: float) -> None:
-        """The slow-down owed after trouble, if the lag is short of the target: a catch-up
-        ends first (and does not count against the budget), any nudge ramps out first."""
+    def _pay(self, lag: float, dt: float) -> None:
+        """The slow-down owed after trouble, once the lag was short of the target for
+        `_OWED_HOLD_S`: a catch-up ends first (and does not count against the budget if the
+        slow-down follows), any nudge ramps out first. A lag back near the target drops it,
+        and a catch-up it cut then counts again: it ran, and nothing followed."""
         nudge = self._nudge
         deficit = self.target - lag
         if deficit <= _OWED_MIN_S:
             self._owed = False  # room enough: far behind, or the source caught up, say
+            if nudge is not None and nudge.cut:
+                nudge.cut = False  # still ramping out, and no slow-down follows
             return
+        self._short_for += dt
+        if self._short_for < _OWED_HOLD_S - 1e-9:
+            return  # one unsettled tick is no deficit
         if nudge is not None and nudge.peak > 1.0:
-            nudge.ending = nudge.cut = True  # catching up with too little room: stop
+            # Catching up with too little room: stop. One that ran its size already counts.
+            nudge.cut = nudge.cut or not nudge.spent
+            nudge.ending = True
             return  # the slow-down follows its ramp out
         if nudge is not None and nudge.ending:
             return
@@ -610,6 +626,7 @@ class StayLive:
         # stopping it short would only start the next one.
         urgent = nudge.peak in (_FAST, _SLOW)
         spent = not urgent and nudge.left <= self._ramp_out(rate, nudge.step)
+        nudge.spent = nudge.spent or (spent and not nudge.ending)
         nudge.ending = nudge.ending or spent or reached
         due = nudge.stepped is None or now - nudge.stepped >= _RAMP_EVERY_S - 1e-9
         goal = 1.0 if nudge.ending else nudge.peak

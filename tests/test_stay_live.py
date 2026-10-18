@@ -342,7 +342,9 @@ class SteeringTests(unittest.TestCase):
         _, waiting = drive(stay, 1.5, 8.0, clock=clock, buffering=True)  # VLC waits
         self.assertEqual(set(waiting), {1.0})
         lag, rates = drive(stay, 1.5, 120.0, clock=clock)
-        self.assertEqual(rates[0], 0.9833)  # as soon as VLC plays
+        # Once VLC played a second short of the target (stage 2: the first tick after a
+        # stall holds one sample of the lag filter, and is no measure on its own).
+        self.assertEqual(rates[:4], [1.0, 1.0, 1.0, 0.9833])
         self.assertEqual(calls(rates), [0.9833, 0.9667, 0.95, 0.9667, 0.9833, 1.0])
         self.assertAlmostEqual(lag, T + 1.5, delta=0.15)
 
@@ -380,6 +382,32 @@ class SteeringTests(unittest.TestCase):
                 self.assertEqual(changes(rates + more), 2)  # one catch-up, in and out once
                 self.assertEqual(min(rates + more), 1.0)  # never slowed down
                 self.assertAlmostEqual(lag, target, delta=0.15)
+
+    def test_backfilled_stalls_never_restart_a_catch_up_free_of_the_budget(self):
+        # Stage 1's last review: a source whose 3 s stalls are backfilled, so the lag is back
+        # at once; the first tick after each (the lag filter holds one sample) reads a second
+        # short of the target. It cut a gentle catch-up near the target, which then started
+        # again free of the budget, about twice a minute without end.
+        stay, clock = live(), Clock()
+        _, rates = drive(stay, T + 1.5, 20.0, clock=clock)
+        self.assertEqual(rates[-1], 1.03)  # a catch-up is under way
+        for _ in range(14):  # 300 s in all
+            stay.trouble()  # the stall ran out the cushion
+            rates += drive(stay, T + 1.3, 3.0, clock=clock, buffering=True)[1]
+            rates += drive(stay, T - 1.0, TICK, clock=clock)[1]  # one unsettled tick
+            rates += drive(stay, T + 1.3, 20.0 - 3.0 - TICK, clock=clock)[1]
+        self.assertLessEqual(changes(rates), 2)
+
+    def test_a_cut_catch_up_counts_against_the_budget_unless_the_slow_down_follows(self):
+        stay, clock = live(), Clock()
+        _, rates = drive(stay, T + 3.0, 20.0, clock=clock)
+        self.assertEqual(rates[-1], 1.03)
+        stay.trouble()
+        rates += drive(stay, T - 1.0, 1.25, clock=clock)[1]  # short long enough: it is cut
+        self.assertLess(rates[-1], 1.03)
+        rates += drive(stay, T + 2.0, 60.0, clock=clock)[1]  # the lag was back: no 0.95x
+        self.assertEqual(min(rates), 1.0)
+        self.assertEqual(changes(rates), 2)  # and no second nudge within the budget
 
     def test_trouble_then_go_live_owes_nothing(self):
         # Review round 2: an owed slow-down outlived a Go live and slowed the stream that
