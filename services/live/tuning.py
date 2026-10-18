@@ -15,13 +15,15 @@ day later the next tune tries the pipeline again. A later lesson (Auto's extra m
 keeps their times; a time in the future (the clock was set back) counts as expired.
 
 `LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
-most `MAX_ENTRIES` (the least recently learned go first). The file is read once; each change
-writes it on one background thread, the newest state only, through a temporary file swapped
-in. A missing, unreadable or corrupt file, or one of another version, counts as empty, and
-a bad entry (a learned target that makes no sense included) is left out. It is written as
-version 2 (the learned target's); 2.0.2's version 1 is still read, its entries as they were:
-their `extra` is what `LearnedTarget` reads as a prior. A write that fails is logged
-(without its path or any address).
+most `MAX_ENTRIES` (beyond it the least recently learned go first, a locked rate or direct
+play last). The file is read once; each change writes it on one background thread, the
+newest state only, through a temporary file swapped in. A missing, unreadable or corrupt file,
+or one of another version, counts as empty, and a bad entry is left out. The learned target
+is an optional field of version 1, so 2.0.x reads 2.1's file (it ignores the field): one
+that makes no sense, or would not change the next tune (`Learned.informative`), is left out
+on its own, and an entry left with nothing is none. A 2.0.2 `extra` stays as it was:
+`LearnedTarget` reads it as a prior. A write that fails is logged (without its path or any
+address).
 """
 
 from __future__ import annotations
@@ -48,8 +50,7 @@ FILE_NAME = "live_tuning.json"
 MAX_ENTRIES = 500
 RATE_LOCK_S = 24 * 60 * 60  # a lock older than this is tried again
 DIRECT_S = 24 * 60 * 60  # so is a channel played directly
-_VERSION = 2  # 2.1: entries may hold a learned target
-_READS = (1, 2)  # 1: 2.0.2's, read as it was
+_VERSION = 1  # 2.1's learned target is an optional field: 2.0.x still reads the file
 _MIN_HOURS = 1e-6  # a learned target's hours of playing are more than nothing
 
 
@@ -86,37 +87,34 @@ def _finite(value: Any, low: float, high: float) -> bool:
 
 
 def _learned(value: Any) -> Optional[dict[str, Any]]:
-    """A learned target as written by `remember()`; None when it is not one."""
+    """A learned target as `remember()` writes it, when it makes sense and would change the
+    next tune (`Learned.informative`); else None."""
     if not isinstance(value, dict):
         return None
     need, events, hours = value.get("need"), value.get("events"), value.get("hours")
     if need is not None and not _finite(need, 0.0, NEED_MAX_S):
         return None
+    if events is None or hours is None:
+        return None
     if not _finite(events, 0.0, EVENTS_MAX) or not _finite(hours, _MIN_HOURS, HOURS_MAX):
+        return None
+    if not Learned(need, float(events), float(hours)).informative():
         return None
     return {"need": need, "events": events, "hours": hours}
 
 
-def _learned_part(value: Any) -> tuple[bool, Optional[dict[str, Any]]]:
-    """An entry's learned target: (whether it makes sense, it or None when there is none)."""
-    if value is None:
-        return True, None
-    learned = _learned(value)
-    return learned is not None, learned
-
-
 def _entry(value: Any) -> Optional[dict[str, Any]]:
-    """A stored entry as written by `remember()`; None when it is not one."""
+    """A stored entry as written by `remember()`; None when it is not one. A learned target
+    that makes no sense is left out on its own."""
     if not isinstance(value, dict):
         return None
     extra, locked, used = value.get("extra"), value.get("rate_locked", False), value.get("used")
-    direct = value.get("direct", False)
-    sane, learned = _learned_part(value.get("learned"))
+    direct, learned = value.get("direct", False), _learned(value.get("learned"))
     if extra is not None and not (_number(extra) and math.isfinite(extra)):
         return None
     if not isinstance(locked, bool) or not isinstance(direct, bool) or not _number(used):
         return None
-    if not sane or (extra is None and not locked and not direct and learned is None):
+    if extra is None and not locked and not direct and learned is None:
         return None
     entry = {"extra": extra, "rate_locked": locked, "direct": direct, "used": used}
     if learned is not None:
@@ -162,10 +160,15 @@ class LiveTuning:
         return Tuning(entry["extra"], locked, direct, Learned(**learned) if learned else None)
 
     def remember(self, key: str, tuning: Tuning) -> None:
-        """Keep `tuning` for the channel `key` (nothing learned: forget it); write it soon."""
+        """Keep `tuning` for the channel `key` (nothing learned: forget it); write it soon.
+        A learned target that makes no sense or would change nothing counts as none."""
         if not key:
             return
-        if tuning == Tuning():
+        learned = None
+        if tuning.learned is not None:
+            what = tuning.learned
+            learned = _learned({"need": what.need, "events": what.events, "hours": what.hours})
+        if tuning.extra is None and not tuning.rate_locked and not tuning.direct and not learned:
             if self._entries.pop(key, None) is None:
                 return
         else:
@@ -176,11 +179,8 @@ class LiveTuning:
                 "direct": tuning.direct,
                 "used": now,
             }
-            if tuning.learned is not None:
-                learned = tuning.learned
-                fields = {"need": learned.need, "events": learned.events, "hours": learned.hours}
-                if _learned(fields) is not None:  # one that makes no sense is not kept
-                    entry["learned"] = fields
+            if learned is not None:
+                entry["learned"] = learned
             # A lock (or direct play) still in force keeps its time; else it counts from now.
             for flag, at, lasts in (
                 ("rate_locked", "locked_at", RATE_LOCK_S),
@@ -216,8 +216,7 @@ class LiveTuning:
         if not isinstance(channels, dict):
             _LOG.info("Ignoring the saved live tuning: it is not QiTV's")
             return {}
-        version = data.get("version")
-        if type(version) is not int or version not in _READS:
+        if data.get("version") != _VERSION:
             _LOG.info("Ignoring the saved live tuning: it is of another version")
             return {}
         entries = {}
@@ -228,11 +227,16 @@ class LiveTuning:
         return entries
 
     def _trim(self) -> None:
-        """Drop the least recently learned entries beyond the cap."""
+        """Drop the entries beyond the cap: the least recently learned first, those with a
+        locked rate or direct play last."""
         excess = len(self._entries) - self._max
         if excess > 0:
-            oldest = sorted(self._entries, key=lambda key: self._entries[key]["used"])
-            for key in oldest[:excess]:
+
+            def worth(key: str) -> tuple[bool, float]:
+                entry = self._entries[key]
+                return bool(entry["rate_locked"] or entry["direct"]), entry["used"]
+
+            for key in sorted(self._entries, key=worth)[:excess]:
                 del self._entries[key]
 
     def _save(self) -> None:

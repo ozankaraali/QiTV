@@ -3,8 +3,10 @@ learned target (2.1)."""
 
 import json
 from pathlib import Path
+import sys
 import tempfile
 import threading
+import types
 import unittest
 from unittest import mock
 
@@ -240,18 +242,16 @@ class LiveTuningTests(unittest.TestCase):
         self.assertIn("ValueError", "\n".join(logs.output))
 
     def test_a_file_of_another_version_is_ignored(self):
-        # 2.0.2's version 1 and the learned target's version 2 are read; nothing else.
         channels = {"a": {"extra": 1.5, "used": self.clock.now}}
-        for version in (3, 0, None, "1", "2"):
+        for version in (2, None, "1"):
             with self.subTest(version=version):
                 data = {"channels": channels}
                 if version is not None:
                     data["version"] = version
                 self.path.write_text(json.dumps(data))
                 self.assertEqual(self.store().get("a"), Tuning())
-        for version in (1, 2):
-            self.path.write_text(json.dumps({"version": version, "channels": channels}))
-            self.assertEqual(self.store().get("a"), Tuning(extra=1.5))
+        self.path.write_text(json.dumps({"version": 1, "channels": channels}))
+        self.assertEqual(self.store().get("a"), Tuning(extra=1.5))
 
     def test_the_learned_target_round_trips_through_the_file(self):
         store = self.store()
@@ -261,7 +261,7 @@ class LiveTuningTests(unittest.TestCase):
         self.assertEqual(store.get("a"), Tuning(learned=learned))  # at once, from memory
         store.flush()
         data = json.loads(self.path.read_text())
-        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["version"], 1)  # an optional field: 2.0.x reads the file
         self.assertEqual(
             data["channels"]["a"]["learned"], {"need": 8.25, "events": 1.5, "hours": 1.2}
         )
@@ -270,6 +270,26 @@ class LiveTuningTests(unittest.TestCase):
         self.assertEqual(
             again.get("b"), Tuning(extra=3.0, rate_locked=True, learned=Learned(events=4.0))
         )
+
+    def test_two_zero_eight_reads_what_two_one_writes(self):
+        store = self.store()
+        store.remember("locked", Tuning(rate_locked=True, learned=Learned(need=8.0)))
+        store.remember("extra", Tuning(extra=3.0, learned=Learned(events=4.0)))
+        store.remember("direct", Tuning(direct=True))
+        store.remember("learned", Tuning(learned=Learned(need=13.0)))
+        store.flush()
+        old = load_two_zero_eight()
+        reader = old.LiveTuning(str(self.path), now=self.clock)
+        self.addCleanup(reader.flush)
+        self.assertEqual(reader.get("locked"), old.Tuning(rate_locked=True))
+        self.assertEqual(reader.get("extra"), old.Tuning(extra=3.0))
+        self.assertEqual(reader.get("direct"), old.Tuning(direct=True))
+        self.assertEqual(reader.get("learned"), old.Tuning())  # what it can't hold: nothing
+        reader.remember("other", old.Tuning(extra=1.5))  # 2.0.8 writes back what it knows
+        reader.flush()
+        again = self.store()
+        self.assertEqual(again.get("locked"), Tuning(rate_locked=True))
+        self.assertEqual(again.get("other"), Tuning(extra=1.5))
 
     def test_the_next_tune_starts_at_the_learned_target(self):
         target = LearnedTarget()
@@ -302,7 +322,7 @@ class LiveTuningTests(unittest.TestCase):
         self.assertIsNone(again.extra)
         self.assertAlmostEqual(LearnedTarget(again.learned).target(), lt.FLOOR_S + 3.0)
 
-    def test_learned_states_that_make_no_sense_are_left_out(self):
+    def test_a_learned_target_that_makes_no_sense_is_left_out_on_its_own(self):
         good = {"need": 8.0, "events": 1.5, "hours": 1.2}
         channels = {
             "ok": {"learned": good, "used": self.clock.now},
@@ -316,14 +336,46 @@ class LiveTuningTests(unittest.TestCase):
             "fewer": {"learned": dict(good, events=-0.5), "used": 1.0},
             "hours": {"learned": dict(good, hours=0.0), "used": 1.0},
             "missing": {"learned": {"need": 8.0}, "used": 1.0},
+            "nothing": {"learned": {"need": 2.0, "events": 0.5, "hours": 1.0}, "used": 1.0},
             "locked": {"learned": "x", "rate_locked": True, "used": self.clock.now},
+            "extra": {"learned": dict(good, hours=-1), "extra": 3.0, "used": self.clock.now},
         }
-        self.path.write_text(json.dumps({"version": 2, "channels": channels}))
+        self.path.write_text(json.dumps({"version": 1, "channels": channels}))
         store = self.store()
         self.assertEqual(store.get("ok"), Tuning(learned=Learned(8.0, 1.5, 1.2)))
         self.assertEqual(store.get("unknown"), Tuning(learned=Learned(None, 1.5, 1.2)))
-        for key in set(channels) - {"ok", "unknown"}:
+        self.assertEqual(store.get("locked"), Tuning(rate_locked=True))  # the lock stays
+        self.assertEqual(store.get("extra"), Tuning(extra=3.0))
+        for key in set(channels) - {"ok", "unknown", "locked", "extra"}:
             self.assertEqual(store.get(key), Tuning(), key)
+
+    def test_a_learned_target_that_changes_nothing_is_not_kept(self):
+        store = self.store()
+        zapped = Learned(None, 0.5, 1.0001)  # a quarter second played through
+        store.remember("zap", Tuning(learned=zapped))
+        store.remember("steady", Tuning(learned=Learned(need=2.25)))  # under the floor
+        store.remember("nonsense", Tuning(learned=Learned(need=-3.0)))
+        store.remember("locked", Tuning(rate_locked=True, learned=zapped))
+        store.flush()
+        self.assertEqual(set(json.loads(self.path.read_text())["channels"]), {"locked"})
+        self.assertEqual(store.get("locked"), Tuning(rate_locked=True))
+        store.remember("learned", Tuning(learned=Learned(need=8.0)))
+        store.remember("learned", Tuning(learned=zapped))  # it changes nothing now: forgotten
+        self.assertEqual(store.get("learned"), Tuning())
+
+    def test_learned_entries_do_not_push_out_a_locked_rate_or_direct_play(self):
+        store = self.store(max_entries=3)
+        store.remember("locked", Tuning(rate_locked=True))
+        store.remember("direct", Tuning(direct=True))
+        for key in ("a", "b", "c"):  # three zaps that learned something
+            store.remember(key, Tuning(learned=Learned(need=8.0)))
+        self.assertEqual(store.get("locked"), Tuning(rate_locked=True))
+        self.assertEqual(store.get("direct"), Tuning(direct=True))
+        self.assertEqual(store.get("a"), Tuning())  # the oldest of the rest went
+        store.flush()
+        self.assertEqual(
+            set(json.loads(self.path.read_text())["channels"]), {"locked", "direct", "c"}
+        )
 
     def test_the_cap_holds_with_learned_entries(self):
         store = self.store(max_entries=3)
@@ -338,6 +390,251 @@ class LiveTuningTests(unittest.TestCase):
         store.remember("a", Tuning(rate_locked=True))
         store.flush()
         self.assertEqual(store.get("a"), Tuning(rate_locked=True))
+
+
+def load_two_zero_eight():
+    """2.0.8's tuning module, loaded from its source (`TUNING_2_0_8`) beside this one."""
+    module = types.ModuleType("tuning_2_0_8")
+    sys.modules[module.__name__] = module  # its dataclass looks its module up
+    try:
+        exec(compile(TUNING_2_0_8, "tuning_2_0_8.py", "exec"), module.__dict__)
+    finally:
+        del sys.modules[module.__name__]
+    return module
+
+
+# services/live/tuning.py as 2.0.8 released it (git show 67154a0:services/live/tuning.py),
+# verbatim: the reader that a downgrade meets.
+TUNING_2_0_8 = r'''"""What QiTV learned about each live channel (2.0.2), for that channel's next tune.
+
+Per (provider, channel): what Auto latency adds to its target (`AutoTarget`), whether VLC can play the
+channel at a rate other than 1x (`RateHealth`), and whether it plays directly because VLC
+crawled through the pipeline even at 1x (an HLS channel). `channel_key()` tells channels apart as the
+zap list does (the stream address, else the id, else the name) and hashes that with the
+provider's name: a stream address may carry credentials, and none reach the file.
+
+A lock is kept with when it was set: from `RATE_LOCK_S` (a day) later it reads as unlocked,
+so the channel's next tune tries other rates again, and rate health locks it again if VLC
+still crawls (a new day from then). Playing directly is kept the same way (`DIRECT_S`): a
+day later the next tune tries the pipeline again. A later lesson (Auto's extra moving)
+keeps their times; a time in the future (the clock was set back) counts as expired.
+
+`LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
+most `MAX_ENTRIES` (the least recently learned go first). The file is read once; each change
+writes it on one background thread, the newest state only, through a temporary file swapped
+in. A missing, unreadable or corrupt file, or one of another version, counts as empty, and
+a bad entry is left out. A write that fails is logged (without its path or any address).
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+import hashlib
+import logging
+import math
+import os
+import tempfile
+import threading
+import time
+from typing import Any, Callable, Mapping, Optional
+
+import orjson as json
+
+from services.redact import safe_message
+
+_LOG = logging.getLogger(__name__)
+
+FILE_NAME = "live_tuning.json"
+MAX_ENTRIES = 500
+RATE_LOCK_S = 24 * 60 * 60  # a lock older than this is tried again
+DIRECT_S = 24 * 60 * 60  # so is a channel played directly
+_VERSION = 1
+
+
+@dataclass(frozen=True)
+class Tuning:
+    """What one channel taught: nothing, by default."""
+
+    extra: Optional[float] = None  # what Auto latency adds to the target in force (if any)
+    rate_locked: bool = False  # VLC cannot play the channel at a rate other than 1x
+    direct: bool = False  # it crawled through the pipeline even at 1x: play it directly
+
+
+def channel_key(provider: str, item: Mapping[str, Any]) -> str:
+    """The channel's key under `provider`; "" when the item has no address, id or name."""
+    cmd = str(item.get("cmd") or "").strip()
+    if cmd:
+        identity = f"cmd:{cmd}"
+    elif item.get("id") is not None:
+        identity = f"id:{item['id']}"
+    elif item.get("name"):
+        identity = f"name:{item['name']}"
+    else:
+        return ""
+    return hashlib.sha256(f"{provider}\0{identity}".encode("utf-8")).hexdigest()[:32]
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _entry(value: Any) -> Optional[dict[str, Any]]:
+    """A stored entry as written by `remember()`; None when it is not one."""
+    if not isinstance(value, dict):
+        return None
+    extra, locked, used = value.get("extra"), value.get("rate_locked", False), value.get("used")
+    direct = value.get("direct", False)
+    if extra is not None and not (_number(extra) and math.isfinite(extra)):
+        return None
+    if not isinstance(locked, bool) or not isinstance(direct, bool) or not _number(used):
+        return None
+    if extra is None and not locked and not direct:
+        return None
+    entry = {"extra": extra, "rate_locked": locked, "direct": direct, "used": used}
+    for flag, at in (("rate_locked", "locked_at"), ("direct", "direct_at")):
+        if entry[flag]:
+            when = value.get(at, used)  # without its time: when it was learned
+            if not _number(when):
+                return None
+            entry[at] = when
+    return entry
+
+
+class LiveTuning:
+    def __init__(
+        self,
+        path: Optional[str],
+        *,
+        max_entries: int = MAX_ENTRIES,
+        now: Callable[[], float] = time.time,
+    ) -> None:
+        """`path` None keeps what is learned for this run only."""
+        self._path = path
+        self._max = max_entries
+        self._now = now
+        self._lock = threading.Lock()  # the newest state's number, read by the writer
+        self._generation = 0
+        self._writer: Optional[ThreadPoolExecutor] = None
+        self._written: Optional[Future] = None
+        self._entries: dict[str, dict[str, Any]] = self._load()
+        self._trim()
+
+    def get(self, key: str) -> Tuning:
+        """What the channel taught; a lock from `RATE_LOCK_S` ago or longer reads as none,
+        and so does playing directly from `DIRECT_S` ago."""
+        entry = self._entries.get(key) if key else None
+        if entry is None:
+            return Tuning()
+        now = self._now()
+        locked = entry["rate_locked"] and 0 <= now - entry["locked_at"] < RATE_LOCK_S
+        direct = entry.get("direct", False) and 0 <= now - entry["direct_at"] < DIRECT_S
+        return Tuning(entry["extra"], locked, direct)
+
+    def remember(self, key: str, tuning: Tuning) -> None:
+        """Keep `tuning` for the channel `key` (nothing learned: forget it); write it soon."""
+        if not key:
+            return
+        if tuning == Tuning():
+            if self._entries.pop(key, None) is None:
+                return
+        else:
+            now, old = self._now(), self._entries.get(key)
+            entry = {
+                "extra": tuning.extra,
+                "rate_locked": tuning.rate_locked,
+                "direct": tuning.direct,
+                "used": now,
+            }
+            # A lock (or direct play) still in force keeps its time; else it counts from now.
+            for flag, at, lasts in (
+                ("rate_locked", "locked_at", RATE_LOCK_S),
+                ("direct", "direct_at", DIRECT_S),
+            ):
+                if entry[flag]:
+                    entry[at] = now
+                    if old is not None and old.get(flag) and 0 <= now - old[at] < lasts:
+                        entry[at] = old[at]
+            self._entries[key] = entry
+            self._trim()
+        self._save()
+
+    def flush(self, timeout: float = 5.0) -> None:
+        """Wait for the writes asked for so far (tests; at exit the pool waits by itself)."""
+        written = self._written
+        if written is not None:
+            written.result(timeout=timeout)
+
+    # ---- the file ------------------------------------------------------------------------
+    def _load(self) -> dict[str, dict[str, Any]]:
+        if self._path is None:
+            return {}
+        try:
+            with open(self._path, "rb") as f:
+                data = json.loads(f.read())
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError) as e:
+            _LOG.info("Ignoring the saved live tuning: %s", safe_message(e))
+            return {}
+        channels = data.get("channels") if isinstance(data, dict) else None
+        if not isinstance(channels, dict):
+            _LOG.info("Ignoring the saved live tuning: it is not QiTV's")
+            return {}
+        if data.get("version") != _VERSION:
+            _LOG.info("Ignoring the saved live tuning: it is of another version")
+            return {}
+        entries = {}
+        for key, value in channels.items():
+            entry = _entry(value)
+            if isinstance(key, str) and key and entry is not None:
+                entries[key] = entry
+        return entries
+
+    def _trim(self) -> None:
+        """Drop the least recently learned entries beyond the cap."""
+        excess = len(self._entries) - self._max
+        if excess > 0:
+            oldest = sorted(self._entries, key=lambda key: self._entries[key]["used"])
+            for key in oldest[:excess]:
+                del self._entries[key]
+
+    def _save(self) -> None:
+        if self._path is None:
+            return
+        snapshot = {"version": _VERSION, "channels": dict(self._entries)}
+        with self._lock:
+            self._generation += 1
+            generation = self._generation
+        if self._writer is None:
+            self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-tuning")
+        self._written = self._writer.submit(self._write, generation, snapshot)
+
+    def _write(self, generation: int, snapshot: dict[str, Any]) -> None:
+        """On the writer thread: write `snapshot` unless a newer one is queued."""
+        with self._lock:
+            if generation != self._generation:
+                return
+        path = self._path
+        assert path is not None
+        temporary = None
+        try:
+            fd, temporary = tempfile.mkstemp(
+                dir=os.path.dirname(path) or ".", prefix=".live_tuning-", suffix=".tmp"
+            )
+            with os.fdopen(fd, "wb") as f:
+                f.write(json.dumps(snapshot))
+            os.replace(temporary, path)
+            temporary = None
+        except Exception as e:  # anything else would stay in the Future, unseen
+            _LOG.warning("Couldn't save the live tuning: %s", safe_message(e))
+        finally:
+            if temporary is not None:
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+'''
 
 
 if __name__ == "__main__":
