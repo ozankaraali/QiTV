@@ -196,6 +196,25 @@ def _source_lock(cache_key: str) -> threading.Lock:
         return _SOURCE_LOCKS.setdefault(cache_key, threading.Lock())
 
 
+# The last guide each source got from any manager of this process, by (cache folder, cache
+# key): (how many were stored, its index entry). A manager whose index predates it takes it
+# instead of fetching the source again; one that waited for another's download knows by
+# the count whether that one stored anything (the index file is never read for it outside
+# _INDEX_SAVE_LOCK: on Windows a save's replace fails while it is open).
+_STORED: Dict[tuple[str, str], tuple[int, Dict[str, Any]]] = {}
+
+
+def _stored(where: tuple[str, str]) -> tuple[int, Optional[Dict[str, Any]]]:
+    with _SOURCE_LOCKS_GUARD:
+        count, entry = _STORED.get(where, (0, None))
+        return count, (dict(entry) if entry is not None else None)
+
+
+def _note_stored(where: tuple[str, str], entry: Dict[str, Any]) -> None:
+    with _SOURCE_LOCKS_GUARD:
+        _STORED[where] = (_STORED.get(where, (0, None))[0] + 1, dict(entry))
+
+
 class EpgManager:
     def __init__(self, config_manager, provider_manager):
         self.config_manager = config_manager
@@ -306,6 +325,10 @@ class EpgManager:
             "date": (source_date or now).strftime(_INDEX_TIME_FORMAT),
             "last_access": now.strftime(_INDEX_TIME_FORMAT),
         }
+        _note_stored(self._where(cache_key), self.index[cache_key])
+
+    def _where(self, cache_key: str) -> tuple[str, str]:
+        return (self._cache_dir(), cache_key)
 
     def _source_failed(self, cache_key):
         """Loading this source failed or found no guide.
@@ -520,7 +543,7 @@ class EpgManager:
                 return True
         return False
 
-    def _refresh_epg_url(self, url):
+    def _refresh_epg_url(self, url, seen=None):
         url_hash = _cache_key(url)
         epg_info = self.index.get(url_hash)
         if epg_info:
@@ -542,7 +565,7 @@ class EpgManager:
                     epg_info["last_access"] = current_time.strftime(_INDEX_TIME_FORMAT)
                     return False
                 # EPG is not fresh, fetch it
-                self._fetch_epg_from_url(url)
+                self._fetch_epg_from_url(url, seen)
                 return True
         return False
 
@@ -612,15 +635,16 @@ class EpgManager:
 
     def _set_epg_from_url(self, url):
         url_hash = _cache_key(url)
+        seen = _stored(self._where(url_hash))[0]  # before the entry is taken: none is missed
         self._take_shared_entry(url_hash)
         if url_hash in self.index:
             if self.index[url_hash] is None:
                 return
-            if self._refresh_epg_url(url):
+            if self._refresh_epg_url(url, seen):
                 return
             if self._load_cached_epg(url_hash):
                 return
-        self._fetch_epg_from_url(url)
+        self._fetch_epg_from_url(url, seen)
 
     def _fetch_epg_from_file(self, xmltv_filehash, xmltv_file):
         guide = self._index_programs(xmltv_file)
@@ -730,33 +754,35 @@ class EpgManager:
 
         self.save_index()
 
-    def _fetch_epg_from_url(self, url):
+    def _fetch_epg_from_url(self, url, seen=None):
+        """Download the URL guide, one manager at a time. `seen`: how many guides of it this
+        process had stored when the load began (default: now); one stored since by another
+        provider's manager, while this one waited, is read instead."""
         url_hash = _cache_key(url)
-        before = self._read_index_file().get(url_hash)
+        where = self._where(url_hash)
+        before = _stored(where)[0] if seen is None else seen
         with _source_lock(url_hash):
             if cancel_requested():
                 raise Cancelled()  # it waited for another manager's download: not a failure
-            stored = self._read_index_file().get(url_hash)
-            if isinstance(stored, dict) and stored != before:
-                # Another provider's manager stored this guide while this one waited.
-                self._take_shared_entry(url_hash)
+            if _stored(where)[0] != before:
+                self._take_shared_entry(url_hash, newest=True)
                 if self._load_cached_epg(url_hash):
                     return
             self._download_epg_from_url(url)
 
-    def _take_shared_entry(self, cache_key):
+    def _take_shared_entry(self, cache_key, *, newest=False):
         """A URL or local file guide is every provider's: another provider's manager may have
         stored it since this one read the shared index. Its entry is taken when it is newer
-        than this manager's (an entry saying the source has no guide is not: each manager
-        finds that out)."""
-        shared = self._read_index_file().get(cache_key)
-        if not isinstance(shared, dict):
+        than this manager's, or as the `newest` (an entry saying the source has no guide is
+        never stored: each manager finds that out)."""
+        _count, shared = _stored(self._where(cache_key))
+        if shared is None:
             return
         mine = self.index.get(cache_key)
-        if isinstance(mine, dict) and mine.get("last_access", "") >= shared.get("last_access", ""):
-            return
+        if not newest and isinstance(mine, dict):
+            if mine.get("last_access", "") >= shared.get("last_access", ""):
+                return
         self.index[cache_key] = shared
-        self._index_base[cache_key] = copy.deepcopy(shared)
 
     def _download_epg_from_url(self, url):
         r = requests.get(

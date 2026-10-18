@@ -1274,6 +1274,23 @@ class StartupTests(ControllerTestCase):
         self.assertEqual(self.toast.messages(), [("Harbor IPTV: Network down", "error")])
         self.assertEqual(self.catalog.links, [])
 
+    def test_a_rebuilt_providers_live_failure_ends_a_later_wait(self):
+        # Sweep A review M7: the flow heard the live list failures of the catalog it first
+        # waited on (by name); a provider rebuilt since (an edit in Settings) failed unheard,
+        # and the wait ran until its timeout.
+        hub = self.start_with_last_of_harbor()
+        hub.ready.add("Harbor IPTV")
+        hub.contentChanged.emit("Harbor IPTV")
+        hub.own["Harbor IPTV"].sectionFailed.emit("live", "Network down")  # gives up
+        self.drawer.visible = False
+        hub.own["Harbor IPTV"] = FakeOwnCatalog([HARBOR_ONE])  # rebuilt after an edit
+        self.controller._flow._start_foreign(("Harbor IPTV", HARBOR_ONE))  # waits again
+        self.assertEqual(hub.own["Harbor IPTV"].requests, ["live"])
+        hub.own["Harbor IPTV"].sectionFailed.emit("live", "Portal down")
+        self.assertEqual(self.toast.messages()[-1], ("Harbor IPTV: Portal down", "error"))
+        self.assertEqual(len(self.drawer.named("open_drawer")), 2)
+        self.assertIsNone(self.controller._flow._foreign)
+
     def test_a_last_channel_that_never_arrives_gives_up_and_opens_the_drawer(self):
         self.start_with_last_of_harbor()
         self.controller._flow._foreign_timer.setInterval(30)

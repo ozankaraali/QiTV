@@ -140,7 +140,9 @@ class LibraryController(QObject):
         )
         self._pending = PendingAction()
         self._ran_for = ""  # the shown provider whose ready just ran the pending action
-        self._watched_sections: set[str] = set()  # providers whose section signals we follow
+        # The catalog whose section signals are followed, by provider: a catalog the hub
+        # rebuilds (an edit in Settings) is a new object, followed when it is next asked.
+        self._watched_sections: dict[str, object] = {}
         self._wire()
 
     # ---- wiring -------------------------------------------------------------------------------
@@ -631,8 +633,8 @@ class LibraryController(QObject):
     def _load_section(self, provider: str, section: str) -> None:
         """Ask `provider` for `section`; the pending action runs when it arrives."""
         catalog = self._catalog.catalogs.catalog(provider)
-        if provider not in self._watched_sections:
-            self._watched_sections.add(provider)
+        if self._watched_sections.get(provider) is not catalog:
+            self._watched_sections[provider] = catalog
             catalog.sectionReady.connect(lambda s, p=provider: self._on_section_ready(p, s))
             catalog.sectionFailed.connect(
                 lambda s, message, p=provider: self._on_section_failed(p, s, message)
@@ -748,7 +750,13 @@ class LibraryController(QObject):
             self._search.rerun()
 
     def _on_providers_changed(self) -> None:
-        """The provider list changed: a title waiting for a provider that is gone is dropped."""
+        """The provider list changed: a title waiting for a provider that is gone is dropped,
+        and the catalogs the hub dropped are let go (a rebuilt one is followed when asked)."""
+        created = getattr(self._catalog.catalogs, "created", None)
+        if created is not None:
+            alive = set(created())
+            for provider in [p for p in self._watched_sections if p not in alive]:
+                del self._watched_sections[provider]
         action = self._pending.action
         if not self._closed and action and action.provider not in self._catalog.catalogs.names():
             self._pending.cancel()

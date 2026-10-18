@@ -191,6 +191,16 @@ class Catalogs(QObject):
         that drops the requests a setup dropped keeps this one."""
         return any(held[0] == request_id for waiting in self._waiting.values() for held in waiting)
 
+    def forget(self, request_id: int) -> None:
+        """Drop link request `request_id` held for its provider's setup (a newer choice was
+        asked instead): it is never asked of the portal, and never answered."""
+        for name, waiting in list(self._waiting.items()):
+            kept = [held for held in waiting if held[0] != request_id]
+            if kept:
+                self._waiting[name] = kept
+            else:
+                del self._waiting[name]
+
     def loaded_contents(self) -> dict[str, dict]:
         """The content the catalogs of the ready providers hold in memory, by provider name:
         what Search reads instead of parsing every cache file again (read only)."""

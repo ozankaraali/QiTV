@@ -459,6 +459,29 @@ class LinksDuringSetupTests(unittest.TestCase):
         )
         self.assertEqual(len(asked), 3)
 
+    def test_a_newer_choice_goes_at_once_past_a_tune_held_for_another_providers_setup(self):
+        # Sweep A review M1: a tune held for Harbor's refresh kept a newer choice of a ready
+        # provider queued until that refresh ended. The newest choice goes now; the held one
+        # is never answered, nor asked of its portal.
+        seven = with_provider({"id": 7, "cmd": "http://127.0.0.1:9/live/7.ts"}, "Harbor IPTV")
+        self.hub.ensure("Demo TV")
+        self.hub.ensure("Harbor IPTV")
+        self.runner.held.add("Harbor IPTV")
+        self.hub.select("Harbor IPTV", force_refresh=True)  # its refresh runs a while
+        harbor, asked = self.hub.catalog("Harbor IPTV"), []
+        ask = harbor.request_link
+        harbor.request_link = lambda item, **kwargs: asked.append(item) or ask(item, **kwargs)
+        lanes = self.lanes()
+        lanes.request(Target(seven, "live", "Seven"))
+        lanes.request(Target(self.ONE, "live", "One"))  # chosen since, of Demo (ready)
+        QTest.qWait(30)
+        self.assertEqual(self.tunes, ["http://127.0.0.1:9/live/1.ts"])
+        self.runner.release("Harbor IPTV")
+        QTest.qWait(30)
+        self.assertEqual(self.tunes, ["http://127.0.0.1:9/live/1.ts"])
+        self.assertEqual(asked, [])
+        self.assertEqual(self.hub_failures, [])
+
     def test_links_held_for_a_failed_setup_are_dropped_with_it(self):
         self.runner.held.add("Demo TV")
         setups = []

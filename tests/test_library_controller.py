@@ -926,6 +926,22 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.handle(Action.ESCAPE)
         self.assertEqual(ctl.mode, "search")
 
+    def test_a_series_hit_of_a_provider_rebuilt_since_still_opens(self):
+        # Sweep A review I1: the Library heard the section of the catalog it first asked (by
+        # name); once Settings rebuilt that provider's catalog (an edit while no page showed
+        # it), the new one's section came to no one: nothing opened and nothing was said.
+        self.test_a_series_hit_from_another_provider_waits_for_its_section()
+        ctl, hub = self.ctl, self.catalog.catalogs
+        del hub._by_name["R"]  # the hub dropped it; the next use builds a new one
+        hub.ready.discard("R")
+        hub.providersChanged.emit()
+        ctl.handle(Action.NAV_ACTIVATE)  # R's series hit again
+        self.make_ready("R")
+        rebuilt = hub.catalog("R")
+        rebuilt.sectionReady.emit("series")
+        self.assertEqual(self.catalog.requests.count(("seasons", "77")), 2)
+        self.assertEqual(ctl.mode, "series")
+
     def test_a_pending_series_whose_section_fails_is_dropped(self):
         self.pm.caches.append(("R", {"series": [dict(SERIES)]}))
         self.catalog.names.append("R")

@@ -97,17 +97,30 @@ class LinkLanes(QObject):
     # ---- the tune lane ------------------------------------------------------------------------
 
     def request(self, target: Target) -> None:
-        """Ask for `target`'s link; while one is in flight it becomes the queued target."""
+        """Ask for `target`'s link; while one is in flight it becomes the queued target. One
+        the catalog holds for its provider's setup asks nothing of a portal yet: it is
+        dropped (`forget`) and the newer choice is asked at once."""
         if self._closed:
             return
-        if self._inflight is not None:
-            self.queued = target  # replaces any older queued target
-            return
+        inflight = self._inflight
+        if inflight is not None:
+            if not self._held(inflight[0]):
+                self.queued = target  # replaces any older queued target
+                return
+            forget = getattr(self.catalog, "forget", None)
+            if forget is not None:
+                forget(inflight[0])
+            self._inflight = None
         self.queued = None  # the target sent now is the newest choice
         request_id = self.catalog.request_link(
             target.item, section=target.section, is_episode=target.section == "series"
         )
         self._inflight = (request_id, target, self._generation)
+
+    def _held(self, request_id: int) -> bool:
+        """Whether the catalog holds the request for its provider's setup (see `holds`)."""
+        holds = getattr(self.catalog, "holds", None)
+        return holds is not None and bool(holds(request_id))
 
     def in_flight(self) -> Optional[Target]:
         return self._inflight[1] if self._inflight is not None else None
@@ -188,10 +201,9 @@ class LinkLanes(QObject):
         asked again before those waiting behind it, which all stay, in order. Requests the
         catalog held for the setup (`holds`) are answered now and stay; other providers'
         requests are not touched."""
-        holds = getattr(self.catalog, "holds", None)
 
         def dropped_by_setup(request_id: int, item: dict) -> bool:
-            return owner(item) == name and not (holds is not None and holds(request_id))
+            return owner(item) == name and not self._held(request_id)
 
         dropped = None
         inflight = self._inflight

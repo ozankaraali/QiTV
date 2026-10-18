@@ -250,7 +250,7 @@ class MixedNavigationTests(unittest.TestCase):
             [("Harbor IPTV", "Harbor 5"), ("Demo TV", "Demo 5")],
         )
 
-    def test_recent_with_one_provider_is_as_before(self):
+    def test_recent_with_one_provider_is_stamped_and_shows_no_provider_tag(self):
         config, _view, nav = self.build([DEMO], {"Demo TV": demo_content()})
         config.watch_history = [
             {

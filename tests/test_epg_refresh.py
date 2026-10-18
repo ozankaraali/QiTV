@@ -523,6 +523,28 @@ class SharedUrlGuideTests(_GuideCase):
         self.assertEqual(get.call_count, 1)
         self.assertEqual(self.titles(second), ["New"])
 
+    def test_a_waiter_downloads_when_nothing_was_stored_while_it_waited(self):
+        # Sweep A review M3: the waiter took any change of the shared index entry while it
+        # waited (here a third manager saving when it last read the guide, while the download
+        # it waited for failed) for a guide just stored, and downloaded nothing.
+        self.config.epg_source = "URL"
+        self.config.epg_url = "http://127.0.0.1:9/guide.xml"
+        with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("Old"))):
+            self.manager().set_current_epg()
+        waiter, third = self.manager(), self.manager()
+        key, lock = _cache_key(self.config.epg_url), epg_manager_module._source_lock
+
+        def meanwhile(cache_key):
+            third.index[key]["last_access"] = "2099-01-01 00:00:00"
+            third.save_index()
+            return lock(cache_key)
+
+        get = patch("services.epg_manager.requests.get", side_effect=serving(xmltv("New")))
+        with patch.object(epg_manager_module, "_source_lock", side_effect=meanwhile), get as got:
+            waiter.force_refresh_current_epg()
+        self.assertEqual(got.call_count, 1)
+        self.assertEqual(self.titles(waiter), ["New"])
+
     def test_a_local_file_guide_is_parsed_once_for_two_managers(self):
         path = os.path.join(self.config.get_config_dir(), "guide.xml")
         with open(path, "wb") as f:

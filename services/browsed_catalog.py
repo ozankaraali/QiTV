@@ -563,6 +563,10 @@ class BrowsedCatalog(QObject):
         """Whether a link request waits for its provider's setup (see Catalogs.holds)."""
         return self._catalogs.holds(request_id)
 
+    def forget(self, request_id: int) -> None:
+        """Drop a link request held for its provider's setup (see Catalogs.forget)."""
+        self._catalogs.forget(request_id)
+
     def programmes(self, channel: dict, now: datetime, limit: int = 8) -> list[Programme]:
         return self._catalogs.programmes(channel, now, limit)
 

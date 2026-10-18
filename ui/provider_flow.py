@@ -79,7 +79,9 @@ class ProviderFlow(QObject):
         # tuned once that provider's own catalog has its channels.
         self._foreign: Optional[tuple[str, dict]] = None
         self._foreign_asked = False
-        self._foreign_listening: set[str] = set()  # owners whose live failure is heard
+        # The catalog whose live failure is heard, by owner: one the hub rebuilds (an edit in
+        # Settings) is a new object, heard when it is next waited on.
+        self._foreign_listening: dict[str, object] = {}
         self._foreign_timer = QTimer(self, singleShot=True, interval=FOREIGN_WAIT_MS)
         self._foreign_timer.timeout.connect(self._on_foreign_timeout)
 
@@ -94,6 +96,17 @@ class ProviderFlow(QObject):
         if hub is not None:
             hub.contentChanged.connect(self._try_foreign)
             hub.providerFailed.connect(self._on_foreign_failed)
+            changed = getattr(hub, "providersChanged", None)
+            if changed is not None:
+                changed.connect(self._forget_dropped_catalogs)
+
+    def _forget_dropped_catalogs(self) -> None:
+        """The provider list changed: catalogs the hub dropped are let go."""
+        created = getattr(self._hub(), "created", None)
+        if created is not None:
+            alive = set(created())
+            for owner in [o for o in self._foreign_listening if o not in alive]:
+                del self._foreign_listening[owner]
 
     # ---- the shell's calls --------------------------------------------------------------------
 
@@ -311,8 +324,8 @@ class ProviderFlow(QObject):
         if not catalog.has_content("live"):
             if not self._foreign_asked:
                 self._foreign_asked = True
-                if owner not in self._foreign_listening:
-                    self._foreign_listening.add(owner)
+                if self._foreign_listening.get(owner) is not catalog:
+                    self._foreign_listening[owner] = catalog
                     catalog.sectionFailed.connect(
                         lambda section, message, owner=owner: self._on_foreign_section_failed(
                             owner, section, message

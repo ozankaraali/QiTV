@@ -313,6 +313,18 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertNotIn("TR: Haber", [g.title for g in view.groups("live")])
         self.assertEqual(len(view.items("live", ALL_GROUP_ID)), 24)
 
+    def test_a_page_lets_go_of_a_catalog_the_hub_dropped(self):
+        # Sweep A review M2: the page held a removed provider's catalog (its guide and its
+        # lists) until QiTV quit.
+        view = self.view("Demo TV")
+        view.select_provider()
+        self.catalogs.ensure("Harbor IPTV")
+        self.assertIn("Harbor IPTV", view._attached)
+        self.registry.providers[:] = [p for p in self.registry.providers if p["name"] == "Demo TV"]
+        self.catalogs.reload()  # removed, and no page shows it
+        self.assertNotIn("Harbor IPTV", view._attached)
+        self.assertIn("Demo TV", view._attached)
+
     def test_all_providers_mode_is_the_pages_setting(self):
         view = self.view(ALL_PROVIDERS)
         self.assertTrue(self.config.tv_all_providers)
