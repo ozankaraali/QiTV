@@ -409,6 +409,37 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(min(rates), 1.0)
         self.assertEqual(changes(rates), 2)  # and no second nudge within the budget
 
+    def test_a_cut_catch_up_counts_when_the_lag_is_back_just_after_its_ramp_out(self):
+        # Stage 2 review: the catch-up ramped out to 1x one tick before the lag came back,
+        # and so escaped the budget.
+        stay, clock = live(), Clock()
+        _, rates = drive(stay, T + 3.0, 20.0, clock=clock)
+        self.assertEqual(rates[-1], 1.03)
+        stay.trouble()
+        for _ in range(100):  # short of the target until the cut catch-up is back at 1x
+            more = drive(stay, T - 1.0, TICK, clock=clock)[1]
+            rates += more
+            if more[-1] == 1.0:
+                break
+        rates += drive(stay, T + 2.0, 60.0, clock=clock)[1]  # then back at once, and behind
+        self.assertEqual(min(rates), 1.0)  # no 0.95x followed ...
+        self.assertEqual(changes(rates), 2)  # ... so the catch-up counted: no second one
+
+    def test_a_nudge_that_ran_its_whole_size_counts_against_the_budget(self):
+        stay, clock = live(), Clock()
+        lag, rates = drive(stay, T + 1.5, 16.0, clock=clock)
+        for _ in range(400):  # until it took its size and ramps out
+            lag, more = drive(stay, lag, TICK, clock=clock)
+            rates += more
+            if stay._nudge is not None and stay._nudge.ending:
+                break
+        self.assertTrue(stay._nudge.spent)
+        stay.trouble()
+        lag, more = drive(stay, T - 1.5, 40.0, clock=clock)  # short: 0.95x after its ramp out
+        self.assertEqual(min(more), 0.95)
+        _, more = drive(stay, T + 1.5, 60.0, clock=clock)  # behind again within 5 minutes
+        self.assertEqual(max(more), 1.0)  # it counted: the band widens instead
+
     def test_trouble_then_go_live_owes_nothing(self):
         # Review round 2: an owed slow-down outlived a Go live and slowed the stream that
         # opened at the target (a little short of it while VLC opens).
@@ -679,6 +710,16 @@ class RateHealthTests(unittest.TestCase):
         health = RateHealth()
         self.assertFalse(any(self.feed(health, 1.0)))  # a healthy window
         self.assertEqual(self.feed(health, 0.2)[-1], True)  # not averaged with the one before
+
+
+class StretchTests(unittest.TestCase):
+    def test_a_window_holds_two_stretches_at_least(self):
+        # Stretches end at VLC's steps (2.1 stage 2): a step that came late, then one early,
+        # are judged together, not the late one alone (52% of 1.10x).
+        health = RateHealth()
+        self.assertFalse(health.add(3.5, 2.0, 1.10))
+        self.assertFalse(health.add(0.5, 2.0, 1.10))
+        self.assertGreater(health.share, 0.7)
 
 
 class ConsecutiveWindowTests(unittest.TestCase):

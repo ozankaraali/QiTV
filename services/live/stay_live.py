@@ -139,7 +139,7 @@ class RateHealth:
 
     def __init__(self, window_s: float = _HEALTH_WINDOW_S, *, windows: int = 1) -> None:
         self.share = 1.0
-        self._window = window_s
+        self.window = window_s
         self._needed = windows
         self._bad = 0  # bad windows in a row
         self.reset()
@@ -159,7 +159,7 @@ class RateHealth:
         self._asked += wall * rate
         self._played += played
         self._pieces += 1
-        if self._wall < self._window - 1e-9 or self._pieces < _HEALTH_PIECES:
+        if self._wall < self.window - 1e-9 or self._pieces < _HEALTH_PIECES:
             return False
         self.share = self._played / self._asked if self._asked > 0 else 1.0
         self.reset()
@@ -432,6 +432,7 @@ class StayLive:
         self._urgent = False  # the time outside counts towards an urgent nudge
         self._owed = False  # VLC ran out of room: a slow-down to the target is owed
         self._short_for = 0.0  # seconds the lag was short of the target since then
+        self._uncharged: Optional[float] = None  # a cut catch-up's end, while it may count
 
     @property
     def nudge(self) -> float:
@@ -478,6 +479,7 @@ class StayLive:
         self._user_rate = 1.0
         self._nudge = None
         self._owed = False
+        self._uncharged = None
 
     def user_seeked_back(self) -> None:
         self._leave_live()
@@ -489,6 +491,7 @@ class StayLive:
         self._reopened = False
         self._nudge = None
         self._owed = False  # the stream opens afresh at the target: nothing is owed
+        self._uncharged = None
         self.absorb()
 
     def user_speed(self, rate: float) -> None:
@@ -559,6 +562,9 @@ class StayLive:
             self._owed = False  # room enough: far behind, or the source caught up, say
             if nudge is not None and nudge.cut:
                 nudge.cut = False  # still ramping out, and no slow-down follows
+            if self._uncharged is not None:  # it ramped out already: it counts from its end
+                self._nudged_at = max(self._nudged_at or self._uncharged, self._uncharged)
+                self._uncharged = None
             return
         self._short_for += dt
         if self._short_for < _OWED_HOLD_S - 1e-9:
@@ -571,6 +577,7 @@ class StayLive:
         if nudge is not None and nudge.ending:
             return
         self._owed = False
+        self._uncharged = None  # the slow-down follows: a catch-up it cut spent nothing
         if nudge is None:
             self._nudge = _Nudge(_SLOW, deficit, self.target)
             self.absorb()
@@ -648,8 +655,11 @@ class StayLive:
         self._rate = round(1.0 + sign * k * nudge.step, 4)
         nudge.stepped = now
         if nudge.ending and self._rate == 1.0:
-            if nudge.peak in (_GENTLE_UP, _GENTLE_DOWN) and not nudge.cut:
-                self._nudged_at = now  # the budget counts the gentle ones that ran to their end
+            if nudge.peak in (_GENTLE_UP, _GENTLE_DOWN):
+                if nudge.cut:
+                    self._uncharged = now  # counts unless the owed slow-down follows
+                else:
+                    self._nudged_at = now  # the budget counts the gentle ones that ran
             self._nudge = None
             self.absorb()
 
@@ -668,3 +678,4 @@ class StayLive:
             self._user_rate = 1.0
             self._nudge = None
             self._owed = False
+            self._uncharged = None
