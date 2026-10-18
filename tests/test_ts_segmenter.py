@@ -23,7 +23,7 @@ from services.live.ts import (
     Segmenter,
     Unsupported,
     _crc32,
-    _h264_intra,
+    _h264_slice_type,
     pts_delta,
 )
 
@@ -322,6 +322,54 @@ def qualities(events):
     return [e.start_quality for e in closes(events)]
 
 
+SPS = (7, b"\x55" * 15)
+SEI = (6, b"\x55" * 400)  # puts the picture after it in its PES's third packet
+P_PICTURE = h264_au((1, P_SLICE))
+
+
+def broken_start_frames(count=275):
+    """One IDR (frame 0), then P pictures: the forced cut at 10 s lands on frame 250, a P
+    picture behind SEI, so its first packet cannot tell. Frame 251 is an IDR of two slices,
+    the second starting in a later packet of its PES."""
+
+    def au(i):
+        if i == 0:
+            return h264_au(SPS, (5, b"\x55" * 300))
+        if i == 250:
+            return h264_au(SEI, (1, P_SLICE))
+        if i == 251:
+            return h264_au((5, b"\x55" * 400), (5, b"\x55" * 300))
+        return P_PICTURE
+
+    return [(900000 + i * FRAME, au(i), False) for i in range(count)]
+
+
+def pes_indexes(packets, pts):
+    """Indexes of the video PES with `pts` in `packets`: its first packet, then the rest."""
+    first = next(
+        i
+        for i, p in enumerate(packets)
+        if pid_of(p) == fx.VIDEO_PID and p[1] & 0x40 and pusi_pts(p) == pts & MASK
+    )
+    rest = []
+    for i in range(first + 1, len(packets)):
+        if pid_of(packets[i]) == fx.VIDEO_PID:
+            if packets[i][1] & 0x40:
+                break
+            rest.append(i)
+    return [first] + rest
+
+
+def continuation(cc, payload, *, pid=fx.VIDEO_PID, b1_flags=0, b3_flags=0):
+    """A payload-only packet continuing a PES on `pid` (184 payload bytes), with extra header
+    flags (0x80 in byte 1: transport error; 0x80 or 0xC0 in byte 3: scrambled)."""
+    body = payload + b"\x55" * (184 - len(payload))
+    return bytes([fx.SYNC, (pid >> 8) | b1_flags, pid & 0xFF, 0x10 | b3_flags | (cc & 0x0F)]) + body
+
+
+IDR_SLICE_START = b"\x00\x00\x01\x65"  # what a later slice of an IDR picture starts with
+
+
 def pes_starts(data, pids=(fx.VIDEO_PID, fx.AUDIO_PID)):
     """[(offset, pts or None)] of the PES starts on `pids`."""
     out = []
@@ -559,16 +607,16 @@ class SegmenterTests(unittest.TestCase):
                 bits = exp_golomb(first_mb) + exp_golomb(slice_type) + "1" + "0" * 40
                 bits += "0" * (-len(bits) % 8)
                 header = escaped(int(bits, 2).to_bytes(len(bits) // 8, "big"))
-                got = _h264_intra(header, 0)
-                self.assertEqual(got, slice_type % 5 in (2, 4), (first_mb, slice_type))
+                got = _h264_slice_type(header, 0)
+                self.assertEqual(got, slice_type, first_mb)
                 # Cut off before the codes end: undecided, never a guess.
                 need = (len(exp_golomb(first_mb)) + len(exp_golomb(slice_type)) + 7) // 8
-                self.assertIsNone(_h264_intra(header[: need - 1], 0), (first_mb, slice_type))
-        self.assertIsNone(_h264_intra(b"", 0))
+                self.assertIsNone(_h264_slice_type(header[: need - 1], 0), (first_mb, slice_type))
+        self.assertIsNone(_h264_slice_type(b"", 0))
         for slice_type in (10, 11, 12, 30):  # not a slice type: undecided
             bits = "1" + exp_golomb(slice_type) + "1"
             bits += "0" * (-len(bits) % 8)
-            self.assertIsNone(_h264_intra(int(bits, 2).to_bytes(len(bits) // 8, "big"), 0))
+            self.assertIsNone(_h264_slice_type(int(bits, 2).to_bytes(len(bits) // 8, "big"), 0))
 
     def test_content_without_rai_after_a_discontinuity_is_cut_at_its_idr_frames(self):
         # A RAI stream, then content without RAI (an ad from another packager): after a PTS
@@ -1265,13 +1313,166 @@ class StartQualityTests(unittest.TestCase):
         events = seg.feed(data[:cut]) + seg.finish()
         self.assertEqual(qualities(events), [START_KEY, START_OPEN])
         # The source restarts there (the rest of that PES never comes): packets that continue
-        # a PES in the new input are not read as the old picture.
-        orphan = fx._packet(fx.VIDEO_PID, b"\x00\x00\x01\x65" + b"\x55" * 180, 0)
+        # a PES in the new input, its counter in sequence, are not read as the old picture.
+        cc = data[cut - PACKET + 3] & 0x0F
+        orphan = continuation((cc + 1) & 0x0F, IDR_SLICE_START)
         seg = Segmenter(clock=lambda: 0.0)
         events = seg.feed(data[:cut])
         seg.discontinuity()
         events += seg.feed(orphan * 3 + data) + seg.finish()
         self.assertEqual(qualities(events)[:2], [START_KEY, START_OPEN])
+
+    def test_an_h264_picture_known_intra_by_its_first_slice_only_is_open_with_rai(self):
+        # slice_type 7 or 9: every slice of the picture is I or SI (open). 2 or 4: only the
+        # first slice is known I or SI, the others may be P: open with RAI, else none. The
+        # cuts stay where they were.
+        headers = {7: b"\x88", 9: b"\x8a", 2: b"\xb8", 4: b"\x96"}
+        for slice_type, header in headers.items():
+            self.assertEqual(_h264_slice_type(header, 0), slice_type)
+            picture = (1, header + b"\x55" * 300)
+            for behind_sei in (False, True):  # read from the first packet, or the next ones
+                for rai in (True, False):
+                    expected = START_OPEN if slice_type >= 5 or rai else START_NONE
+                    with self.subTest(slice_type=slice_type, behind_sei=behind_sei, rai=rai):
+                        key_au = h264_au(SPS, SEI, picture) if behind_sei else h264_au(picture)
+                        au = lambda key: key_au if key else P_PICTURE  # noqa: E731
+                        _, events = run(video_only(self.frames(au, rai=rai)))
+                        self.assertEqual(deltas(events), [TARGET] * 4)
+                        self.assertEqual(qualities(events), [expected] * 5)
+
+
+class ReadAheadGuardTests(unittest.TestCase):
+    """Reading a segment's first PES beyond its first packet never takes in another picture's
+    bytes: the reading ends, and the first packet's fallback stays (never key), at the next PES
+    start, at damage (a transport error, scrambling bits, a lost packet), at a lost packet
+    sync, at a restart, at a new cut PID and at a cut while the video is quiet."""
+
+    BROKEN = 900000 + 250 * FRAME  # the PTS of frame 250, the broken P start
+
+    def packets(self, frames=None):
+        return split_packets(video_only(frames or broken_start_frames()))
+
+    def qualities_of(self, *inputs):
+        seg = Segmenter(clock=lambda: 0.0)
+        events = []
+        for data in inputs:
+            events += seg.feed(data)
+        return qualities(events + seg.finish())
+
+    def test_the_broken_start_reads_as_none_and_the_idr_after_it_has_two_slices(self):
+        packets = self.packets()
+        self.assertEqual(self.qualities_of(b"".join(packets)), [START_KEY, START_NONE])
+        later = pes_indexes(packets, self.BROKEN + FRAME)[1:]
+        self.assertTrue(any(IDR_SLICE_START in packets[i] for i in later))
+
+    def test_a_lost_or_damaged_next_pes_start_ends_the_reading(self):
+        # The rest of frame 250's PES is lost, and frame 251's first packet is lost, flagged
+        # with a transport error or scrambled: its later packets, with its second IDR slice,
+        # must not make the broken P start read as key.
+        packets = self.packets()
+        rest = set(pes_indexes(packets, self.BROKEN)[1:])
+        start = pes_indexes(packets, self.BROKEN + FRAME)[0]
+        cases = {
+            "lost": None,
+            "transport error": lambda p: p[:1] + bytes([p[1] | 0x80]) + p[2:],
+            "scrambled": lambda p: p[:3] + bytes([p[3] | 0x80]) + p[4:],
+        }
+        for name, damage in cases.items():
+            with self.subTest(name):
+                kept = []
+                for i, p in enumerate(packets):
+                    if i in rest or (i == start and damage is None):
+                        continue
+                    kept.append(damage(p) if i == start and damage else p)
+                self.assertEqual(self.qualities_of(b"".join(kept)), [START_KEY, START_NONE])
+
+    def test_a_damaged_or_scrambled_packet_in_sequence_ends_the_reading(self):
+        packets = self.packets()
+        second = pes_indexes(packets, self.BROKEN)[1]
+        cc = packets[second][3] & 0x0F
+        flags = {"transport error": (0x80, 0), "scrambled": (0, 0x80), "odd key": (0, 0xC0)}
+        for name, (b1, b3) in flags.items():
+            with self.subTest(name):
+                damaged = list(packets)
+                damaged[second] = continuation(cc, IDR_SLICE_START, b1_flags=b1, b3_flags=b3)
+                self.assertEqual(self.qualities_of(b"".join(damaged)), [START_KEY, START_NONE])
+
+    def test_a_true_duplicate_is_skipped_and_a_false_one_ends_the_reading(self):
+        # Keyframes behind SEI: key once the picture is read, else open (SPS).
+        frames = [
+            (
+                900000 + i * FRAME,
+                h264_au(SPS, SEI, (5, b"\x55" * 300)) if i % 25 == 0 else P_PICTURE,
+                False,
+            )
+            for i in range(75)
+        ]
+        packets = self.packets(frames)
+        first, second = pes_indexes(packets, 900000)[:2]
+        changed = packets[second][:-1] + b"\x00"
+        cases = {
+            "a true duplicate": (second, packets[second], START_KEY),
+            "the first packet's true duplicate": (first, packets[first], START_KEY),
+            "a false duplicate": (second, changed, START_OPEN),
+        }
+        for name, (at, copy, expected) in cases.items():
+            with self.subTest(name):
+                doubled = packets[: at + 1] + [copy] + packets[at + 1 :]
+                for chunk in (None, 187):
+                    _, events = run(b"".join(doubled), chunk=chunk)
+                    self.assertEqual(qualities(events), [expected, START_KEY])
+
+    def test_a_pes_without_a_picture_stays_open_when_an_idr_pes_follows(self):
+        def au(i):
+            if i % 25 == 0:
+                return h264_au(SPS, SEI)  # AUD, SPS and SEI only: the parameter sets cut
+            return h264_au((5, b"\x55" * 300)) if i % 25 == 1 else P_PICTURE
+
+        data = video_only([(900000 + i * FRAME, au(i), False) for i in range(125)])
+        for chunk in (None, 187):
+            with self.subTest(chunk=chunk):
+                _, events = run(data, chunk=chunk)
+                self.assertEqual(deltas(events), [TARGET] * 2)
+                self.assertEqual(qualities(events), [START_OPEN] * 3)
+
+    def test_a_lost_packet_sync_ends_the_reading(self):
+        # 100 bytes are lost after frame 250's first packet (the scan finds the sync again in
+        # null packets); the next input goes on with a packet in sequence holding an IDR slice.
+        packets = self.packets()
+        broken = pes_indexes(packets, self.BROKEN)
+        cc = packets[broken[0]][3] & 0x0F
+        null = bytes([fx.SYNC, 0x1F, 0xFF, 0x10]) + b"\xff" * 184
+        before = b"".join(packets[: broken[0] + 1]) + b"\x00" * 100 + null * 3
+        after = continuation((cc + 1) & 0x0F, IDR_SLICE_START)
+        after += b"".join(packets[broken[-1] + 1 :])
+        self.assertEqual(self.qualities_of(before, after), [START_KEY, START_NONE])
+
+    def test_a_new_cut_pid_ends_the_reading(self):
+        # The PMT moves the video to PID 0x200 right after frame 250's first packet; the next
+        # input holds a packet on the new PID whose counter happens to follow.
+        packets = self.packets()
+        first = pes_indexes(packets, self.BROKEN)[0]
+        cc = packets[first][3] & 0x0F
+        before = b"".join(packets[: first + 1]) + fx.pmt(video_pid=0x200, audio_pids=())
+        after = continuation((cc + 1) & 0x0F, IDR_SLICE_START, pid=0x200)
+        self.assertEqual(self.qualities_of(before, after), [START_KEY, START_NONE])
+
+    def test_a_cut_while_the_video_is_quiet_ends_the_reading(self):
+        # The video stops after frame 250's first packet; 10 s of audio later the quiet video
+        # is cut. A late packet continuing frame 250's PES then must not label that segment.
+        packets = self.packets()
+        first = pes_indexes(packets, self.BROKEN)[0]
+        cc = packets[first][3] & 0x0F
+        audio, acc = [], 0
+        for j in range(11 * CLOCK // fx.AUDIO_FRAME_TICKS):
+            pts = self.BROKEN + j * fx.AUDIO_FRAME_TICKS
+            pkts, acc = fx.pes_packets(
+                fx.AUDIO_PID, 0xC0, b"\xff\xf1" + b"\xaa" * 200, pts, cc_start=acc
+            )
+            audio += pkts
+        before = b"".join(packets[: first + 1] + audio)
+        after = continuation((cc + 1) & 0x0F, IDR_SLICE_START)
+        self.assertEqual(self.qualities_of(before, after), [START_KEY, START_NONE, START_NONE])
 
 
 @unittest.skipUnless(os.environ.get("QITV_BENCH") == "1", "set QITV_BENCH=1 to benchmark")

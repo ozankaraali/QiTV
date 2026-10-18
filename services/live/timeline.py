@@ -31,12 +31,18 @@ StartQuality = Literal["key", "open", "none"]
 # An IDR picture (H.264 NAL 5, HEVC 19/20, an MPEG-1/2 I picture in a closed GOP): every
 # picture from here decodes.
 START_KEY: Final = "key"
-# An intra picture that later pictures may reach behind (an H.264 non-IDR intra slice, HEVC
-# CRA/BLA, an MPEG-1/2 I picture in an open GOP), or a random access point whose picture
-# could not be read: the pictures shown before it (its leading pictures) may come out broken.
+# An intra picture that later pictures may reach behind: an H.264 non-IDR picture of I or SI
+# slices only (slice_type 7/9), or one whose first slice is I or SI (2/4) in a PES flagged
+# with RAI; HEVC CRA/BLA; an MPEG-1/2 I picture in an open GOP. Also a start whose picture
+# could not be read (beyond the look-ahead, or the reading met damage) but whose PES carried
+# RAI or parameter sets (SPS, VPS, a sequence header). The pictures shown before it (its
+# leading pictures) may come out broken. For part B: HEVC BLA_W_RADL (17) and BLA_N_LP (18)
+# have no such pictures (no RASL) and start as cleanly as an IDR; they stay "open" all the
+# same.
 START_OPEN: Final = "open"
-# No keyframe: a forced cut (10 s without one), a cut while the video was quiet, or an
-# audio-only stream's cut.
+# No keyframe: a forced cut (10 s without one) or any start whose picture is not intra, a
+# cut while the video was quiet, an audio-only stream's cut, or an H.264 picture whose first
+# slice is I or SI without RAI (its other slices may be P).
 START_NONE: Final = "none"
 START_QUALITIES: Final[Tuple[StartQuality, ...]] = (START_KEY, START_OPEN, START_NONE)
 

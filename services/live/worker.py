@@ -25,7 +25,8 @@ Commands (parent to helper):
 Messages (helper to parent): `("hello", base_url)`; `("state", sid, snapshot, first,
 additions)`, also before ready while bytes arrive (`received`) and nothing is playable yet,
 each addition a newly closed segment's `(seq, start, end, discontinuity, start_quality)`
-(`Span`'s fields: a reader that takes the first four still works);
+(`Span`'s fields; an engine from before 2.1 would not take the fifth, but the helper and the
+engine always ship in one build, and the engine still takes four);
 `("ready", sid)` once the first segment is open (its state comes first);
 `("error", sid, kind, message)`; `("ended", sid)`; `("closed", sid)`. Error messages are
 fixed strings. `kind`, one meaning each:
