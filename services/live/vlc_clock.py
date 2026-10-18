@@ -14,10 +14,11 @@ update's time at most, so one further ahead of the clock than that is taken at o
 (VLC played more than the clock counted: it skipped what came too late, say).
 
 It learns the readings' cadence online: their typical step and the time between two (the
-median of the last `_LEARN_N`, or of the last `_RECENT_N` when that is larger, so a cadence
-that grows, fine quanta and then 2 s stamps, shows within a few readings; it stays the same
-channel's across opens), so a 2 s-step and a quarter-second-step channel both work without a
-setting:
+median of the last `_LEARN_N`; the median of the last `_RECENT_N` instead when those agree and
+differ from it by half or more, so a cadence that changes, fine quanta and then 2 s stamps,
+shows within a few readings, while a stamp or two missing now and then does not; it stays the
+same channel's across opens), so a 2 s-step and a quarter-second-step channel both work
+without a setting:
 
 - The software clock runs at most `_AHEAD_STEPS` steps past where it was at VLC's last
   reading (VLC cannot be further on without its clock stepping; before any step is known, a
@@ -27,14 +28,16 @@ setting:
   rate and more: only past `hold()` (1.5 of them plus a quarter second, at least `FROZEN_S`)
   is it starved (`frozen()`).
 - A reading further from the clock than `_JUMP_STEPS` quanta (the larger of its step and the
-  rate times its interval, at least `_JUMP_MIN_S`: ahead,
-  or behind with the reading gone backwards) is held until the next one. If that one agrees
-  with it, the two teach the cadence a step, and either VLC really skipped ahead (the clock
-  takes it at once) or the clock goes on from where it is, reading VLC's clock from there:
-  VLC's clock restarted, or the stream's timestamps jumped (past `limit`, the media VLC can
-  have played, or at a break the helper flagged: `at_break`, an HLS discontinuity or a
-  reconnect, whose new timestamps say nothing of what VLC played). If not, it was an outlier
-  and is dropped. A smaller jump ahead at such a break is the stream's clock too.
+  rate times its interval, at least `_JUMP_MIN_S`: ahead, or behind with the reading gone
+  backwards) is held until the next one. If that one agrees with it, the two teach the
+  cadence a step, and either VLC really skipped ahead (the clock takes it at once) or the
+  clock goes on from where it is, reading VLC's clock from there: VLC's clock restarted, or
+  the stream's timestamps jumped. Those are a jump past `limit` (the media VLC can have
+  played), and one the helper reported (`breaks`): the segmenter leaves a forward timestamp
+  jump of `JUMP_S` or more out of the timeline (an HLS discontinuity, a reconnect after an
+  outage) and reports where and how much; a VLC jump as large, where it was, is that one. A
+  smaller step stays media on the timeline, and VLC's clock with it: it is followed. If the
+  next reading does not agree, the held one was an outlier and is dropped.
 - `position` never runs backwards: when VLC is behind the clock, the clock waits for it.
 
 It also keeps VLC's own progress for rate health (counters since the open: `played` wall
@@ -51,15 +54,19 @@ Pure logic: the caller feeds the time, the reading, the state and the rate.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 import math
 from statistics import median
 from typing import NamedTuple, Optional
 
+from services.live.ts import JUMP_S
+
 FROZEN_S = 0.5  # VLC's clock standing still this long while Playing is starved, at least
 _GAIN = 0.5  # of the clock's error that each new reading corrects
 _LEARN_N = 16  # the cadence is the median of this many readings ...
-_RECENT_N = 3  # ... or of this many last ones, when larger (a cadence that grew)
+_RECENT_N = 3  # ... or of this many last ones, when they agree (within this) ...
+_AGREE = 1.25
+_CHANGED = 0.5  # ... and differ from it by more than this share: the cadence changed
 _HOLD_INTERVALS = 1.5  # VLC's clock is starved after standing still this many intervals ...
 _HOLD_PAD_S = 0.25  # ... and this long
 _AHEAD_STEPS = 1.5  # the clock runs at most this many steps past VLC's last reading ...
@@ -67,11 +74,11 @@ _AHEAD_FIRST_S = 1.0  # ... and a second at the rate before any step is known
 _JUMP_STEPS = 1.5  # a reading further than this many quanta from the clock is a jump ...
 _JUMP_MIN_S = 1.0  # ... and further than this
 _LIMIT_SLACK_S = 1.0  # a reading this far past the buffered media is the stream's clock
-_BREAK_PAD_S = 1.0  # a break this near (and a quantum) is where the stream's clock jumped
-_BREAK_MIN_S = 0.5  # a smaller jump ahead is not looked up among the breaks
+_BREAK_PAD_S = 1.0  # a reported break this near (and a quantum) is where the jump was ...
+_BREAK_AMOUNT_S = 0.5  # ... and it left out as much, within this (or a quantum)
 
-# `at_break(low, high)`: whether the helper flagged a break between these positions.
-AtBreak = Callable[[float, float], bool]
+# The helper's breaks: (position since the open, seconds the timeline left out there).
+Breaks = Sequence[tuple[float, float]]
 
 
 class ClockMark(NamedTuple):
@@ -83,9 +90,20 @@ class ClockMark(NamedTuple):
 
 
 def _typical(values: Sequence[float]) -> Optional[float]:
+    """The median of the values; the median of the last few instead when those agree with
+    each other (within `_AGREE`) and differ from it by more than `_CHANGED`: the cadence
+    changed (a stamp or two missing now and then is no change)."""
     if not values:
         return None
-    return max(median(values), median(list(values)[-_RECENT_N:]))
+    typical = median(values)
+    recent = list(values)[-_RECENT_N:]
+    if len(recent) < _RECENT_N or min(recent) <= 0:
+        return typical
+    agree = max(recent) <= _AGREE * min(recent)
+    latest = median(recent)
+    if agree and abs(latest - typical) > _CHANGED * typical:
+        return latest
+    return typical
 
 
 class VlcClock:
@@ -156,11 +174,12 @@ class VlcClock:
         rate: float = 1.0,
         *,
         limit: float = math.inf,
-        at_break: Optional[AtBreak] = None,
+        breaks: Breaks = (),
     ) -> float:
         """VLC's reading `ms` at `now`, whether it plays, at `rate`; `limit`: the most media
-        it can have played since the open (the live edge); `at_break`: the helper's breaks
-        (positions since the open). Returns the position."""
+        it can have played since the open (the live edge); `breaks`: the timestamp jumps the
+        helper left out of its timeline (position since the open, seconds). Returns the
+        position."""
         dt = max(0.0, now - self._wall)
         self._wall, self._rate = now, rate
         if playing:
@@ -170,7 +189,7 @@ class VlcClock:
             cap = min(self._cap(rate), limit)  # nor past the media there is
             self._estimate = max(self._estimate, min(self._estimate + rate * dt, cap))
             if ms != self._ms:
-                self._read(ms, rate, rate * dt, limit, at_break)
+                self._read(ms, rate, rate * dt, limit, breaks)
         self.position = max(self.position, self._estimate)
         return self.position
 
@@ -179,9 +198,7 @@ class VlcClock:
         step = self.step()
         return self._anchor + (_AHEAD_FIRST_S * rate if step is None else _AHEAD_STEPS * step)
 
-    def _read(
-        self, ms: int, rate: float, stale: float, limit: float, at_break: Optional[AtBreak]
-    ) -> None:
+    def _read(self, ms: int, rate: float, stale: float, limit: float, breaks: Breaks) -> None:
         """A new reading: follow it, hold it, or take a jump; learn the cadence from it.
         `stale`: how far behind VLC a reading that changed since the last update can be."""
         if self.changes or self._held is not None:  # not the first: the open is no step
@@ -189,12 +206,10 @@ class VlcClock:
                 self._intervals.append(self.still)
         self.still = 0.0
         self._ms = ms
-        self._follow(ms, rate, stale, limit, at_break)
+        self._follow(ms, rate, stale, limit, breaks)
         self._anchor = self._estimate
 
-    def _follow(
-        self, ms: int, rate: float, stale: float, limit: float, at_break: Optional[AtBreak]
-    ) -> None:
+    def _follow(self, ms: int, rate: float, stale: float, limit: float, breaks: Breaks) -> None:
         reading = ms / 1000.0 + self._offset
         error = reading - self._estimate
         quantum = self.quantum(rate) or 0.0
@@ -208,7 +223,7 @@ class VlcClock:
             if ms > held[1]:
                 self._learn_held(held[1], ms)  # two alike: steps of the cadence
             skipped = error > 0 and reading <= limit + _LIMIT_SLACK_S
-            if skipped and not self._near_break(at_break, held[2], quantum):
+            if skipped and not self._matches(breaks, held[2], held[0], quantum):
                 self._estimate = reading  # VLC really skipped ahead
             else:
                 self._offset -= error  # VLC's clock restarted, or the stream's jumped
@@ -223,7 +238,7 @@ class VlcClock:
         # played more than the clock counted (it skipped what came too late, say): at once.
         # At a break the helper flagged, the stream's timestamps jumped instead.
         beyond = max(0.0, error - stale)
-        if beyond > _BREAK_MIN_S and self._near_break(at_break, self._estimate, quantum):
+        if self._matches(breaks, self._estimate, beyond, quantum):
             self._offset -= beyond
             self._estimate += _GAIN * (error - beyond)
             self._settle(ms, step=False)
@@ -239,12 +254,18 @@ class VlcClock:
         self._steps.append((ms - held_ms) / 1000.0)
 
     @staticmethod
-    def _near_break(at_break: Optional[AtBreak], position: float, quantum: float) -> bool:
-        """The helper flagged a break within a quantum (and a margin) of `position`."""
-        if at_break is None:
+    def _matches(breaks: Breaks, position: float, jump: float, quantum: float) -> bool:
+        """A jump ahead of VLC's clock by `jump` at `position` is one the helper reported: as
+        large as the segmenter leaves out (`JUMP_S`), where a break was reported (within a
+        quantum and `_BREAK_PAD_S`) and as large (within a quantum or `_BREAK_AMOUNT_S`).
+        A smaller jump the timeline kept as media, and so does VLC: it is followed."""
+        if jump < JUMP_S - max(_BREAK_AMOUNT_S, quantum):
             return False
-        pad = quantum + _BREAK_PAD_S
-        return at_break(position - pad, position + pad)
+        near, alike = quantum + _BREAK_PAD_S, max(_BREAK_AMOUNT_S, quantum)
+        return any(
+            abs(where - position) <= near and abs(seconds - jump) <= alike
+            for where, seconds in breaks
+        )
 
     def _settle(self, ms: int, *, step: bool) -> None:
         """A reading taken: VLC's progress moves by its step from the last one taken (`step`),

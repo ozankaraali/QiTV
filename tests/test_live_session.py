@@ -107,8 +107,9 @@ class FakeEngine(QObject):
     def stream_url(self, sid, seq):
         return f"http://127.0.0.1:9/token/{sid}/stream/{seq}.ts" if self.up else ""
 
-    def buffer(self, sid, spans, *, live_edge=None, open_seq=None, burst=0.0, hls=False):
-        """Closed `spans` plus an optional open segment, as the helper's state reports them."""
+    def buffer(self, sid, spans, *, live_edge=None, open_seq=None, burst=0.0, hls=False, breaks=()):
+        """Closed `spans` plus an optional open segment, as the helper's state reports them;
+        `breaks`: (timeline position, seconds) of timestamp jumps it left out."""
         end = spans[-1].end if spans else 0.0
         oldest = spans[0].seq if spans else open_seq
         self._spans[sid] = list(spans)
@@ -123,6 +124,7 @@ class FakeEngine(QObject):
             "ended": False,
             "burst_s": burst,
             "hls": hls,
+            "breaks": list(breaks),
         }
         self.sessionUpdated.emit(sid, dict(self._snapshots[sid]))
 
@@ -244,10 +246,11 @@ class Feed:
     (2.1 stage 2, measured on sparse-PCR HLS channels: 2000 ms steps every 2 s); with
     `speed` VLC plays at that share of the rate set when it is not 1x, with `speed_1x` at 1x
     (a real crawl, on that clock). On that clock `missing(k)` drops the k-th stamp (a step
-    twice as long now and then). The segments in `breaks` (seqs) carry the helper's
-    discontinuity flag, and once VLC plays past `jump_at` its stamps jump by `jump_by` (an
-    HLS discontinuity whose PCR jumps: VLC's clock moves, what it plays does not). LiveSession
-    ticks every 0.25 s.
+    twice as long now and then). Once VLC plays past `jump_at` its stamps jump by `jump_by`:
+    an HLS discontinuity or a reconnect whose timestamps jump, so VLC's clock moves while what
+    it plays does not; with `media_step` the timeline kept the step as media (under 3 s), so
+    VLC's place on it moves too. `reported` is the helper's list of the jumps it left out of
+    its timeline: (position, seconds). LiveSession ticks every 0.25 s.
     """
 
     DT = 0.05
@@ -280,8 +283,8 @@ class Feed:
         self.hls = hls
         self.recover, self.frozen_until, self.dry, self.recoveries = recover, -1.0, False, 0
         self.pcr, self.speed, self.speed_1x = pcr, speed, speed_1x
-        self.missing, self.breaks = None, set()
-        self.jump_at, self.jump_by = math.inf, 0.0
+        self.missing, self.reported = None, []
+        self.jump_at, self.jump_by, self.media_step = math.inf, 0.0, False
         self.stamp = self.stamp_offset = 0.0
         self.meter = worker.BurstMeter() if metered else None
         self.edge, self.chunk = edge, (burst if burst > 0 else 0.25)
@@ -298,16 +301,19 @@ class Feed:
 
     def push(self):
         closed = math.ceil(self.edge / self.gop - 1e-9) - 1  # the newest segment is open
-        spans = [
-            Span(span.seq, span.start, span.end, span.seq in self.breaks)
-            for span in segments(0, closed, length=self.gop)
-        ]
+        spans = segments(0, closed, length=self.gop)
         burst = self.burst
         if self.meter is not None:
             self.meter.add(self.case.clock.now, self.edge)
             burst = self.meter.burst_s
         self.case.engine.buffer(
-            self.sid, spans, live_edge=self.edge, open_seq=closed, burst=burst, hls=self.hls
+            self.sid,
+            spans,
+            live_edge=self.edge,
+            open_seq=closed,
+            burst=burst,
+            hls=self.hls,
+            breaks=self.reported,
         )
 
     def ready(self):
@@ -368,6 +374,8 @@ class Feed:
                     playback.set_state(state)
                 if self.position < self.jump_at <= self.position + advance:
                     self.stamp_offset += self.jump_by  # its stamps jump here
+                    if self.media_step:  # and its place on the timeline, which kept it
+                        self.position += self.jump_by
                 self.position += advance
                 self.media += advance
                 stamp = self.media
@@ -2293,22 +2301,62 @@ class SparseClockTests(LiveSessionCase):
             feed.run(15.0)
         self.assertTrue(self.live._stay.rate_locked)
 
-    def test_a_stamp_jump_at_a_discontinuity_leaves_the_lag_alone(self):
+    def stamps_jump(self, feed, by, *, ahead=4.0, reported=None, late=0.0, media=False):
+        """A few seconds ahead of VLC its stamps jump by `by`; the helper reports `reported`
+        seconds left out there, `late` seconds further on (or nothing). With `media` the
+        timeline kept the step (under 3 s; or VLC really skipped): the media after it, already
+        buffered, is that much later on the timeline. The position's errors from then on."""
+        at = feed.position + ahead
+        feed.jump_at, feed.jump_by, feed.media_step = at, by, media
+        if media:
+            feed.edge += by
+        if reported is not None:
+            feed.reported = [(at + late, reported)]
+        feed.push()
+        errors = self.errors(feed, 30.0)
+        self.assertGreater(self.playback.ms, round((feed.media + by - 1.0) * 1000))  # it did
+        return errors
+
+    def test_a_dropped_ten_second_jump_the_helper_reports_leaves_the_lag(self):
         # Stage 2 review: an HLS discontinuity whose PCR jumps forward 10 s moves VLC's
         # get_time with it, but neither the helper's timeline nor what VLC plays: taken for a
         # skip, the lag would read 10 s short (a false 0.95x until the next open).
         feed = self.tune(edge=8.0)
         feed.run(30.0)
         lag = self.timelines[-1]["lag"]
-        seq = math.ceil(feed.position / 2.0) + 2  # a segment ahead of VLC
-        feed.breaks.add(seq)
-        feed.jump_at, feed.jump_by = seq * 2.0, 10.0
-        feed.push()
-        errors = self.errors(feed, 30.0)
-        self.assertGreater(self.playback.ms, round((feed.media + 9.0) * 1000))  # it jumped
+        errors = self.stamps_jump(feed, 10.0, reported=10.0)
         self.assertLess(max(abs(e) for e in errors), 0.5)
         self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=1.0)
         self.assertTrue(all(rate >= 1.0 for rate in self.playback.rates))
+
+    def test_a_two_second_step_the_timeline_kept_is_followed(self):
+        # Stage 2 re-review: the segmenter keeps a step under 3 s as media (a quick
+        # reconnect, an HLS sequence gap on 2 s segments): VLC's clock and the timeline agree,
+        # so the position moves with it and the lag stays the timeline's.
+        feed = self.tune(edge=8.0)
+        feed.run(30.0)
+        lag = self.timelines[-1]["lag"]
+        errors = self.stamps_jump(feed, 2.0, media=True)
+        self.assertLess(max(abs(e) for e in errors), 0.5)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=1.0)
+
+    def test_a_reconnect_reported_a_gop_late_still_matches(self):
+        # A steady raw-TS channel reconnects after an outage: its timestamps jump 10 s and the
+        # segmenter's report may sit up to a GOP (here 1 s) from where VLC's clock jumps.
+        sid = self.start(latency=AUTO, channel="A")
+        feed = Feed(self, sid, burst=0.0, edge=3.0).ready()  # within its band: no steering
+        feed.run(30.0)
+        lag = self.timelines[-1]["lag"]
+        errors = self.stamps_jump(feed, 10.0, reported=10.0, late=1.0)
+        self.assertLess(max(abs(e) for e in errors), 0.5)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=1.0)
+
+    def test_a_real_skip_unlike_a_reported_break_is_taken(self):
+        feed = self.tune(edge=8.0)
+        feed.run(30.0)
+        feed.reported = [(feed.position + 4.0, 10.0)]  # a 10 s break ahead ...
+        errors = self.stamps_jump(feed, 5.0, media=True)  # ... and VLC skips 5 s there
+        self.assertLess(max(abs(e) for e in errors[24:]), 0.5)
 
     def test_vlcs_clock_is_frozen_only_well_past_its_steps(self):
         feed = self.tune(edge=8.0)

@@ -27,9 +27,10 @@ Position (spec §6.3; 2.1 stage 2): the start of the opened segment plus VLC's c
 `VlcClock` follows its `get_time()` readings: a clock at the rate set while VLC plays,
 corrected towards each new reading, with the readings' steps learned (a sparse-PCR channel's
 get_time steps by 2 s every 2 s; a steady one's every tick or so). A jump of VLC's clock is
-taken once the next reading agrees with it, unless it lands past the live edge or at a break
-the helper flagged on its spans (an HLS discontinuity, a reconnect: the stream's timestamps
-jumped, and the position goes on at the rate); it never runs backwards. Seeking
+taken once the next reading agrees with it, unless it lands past the live edge or matches a
+timestamp jump the helper reports having left out of its timeline (`breaks` in its state: an
+HLS discontinuity or a reconnect whose timestamps jumped 3 s or more; the position goes on
+at the rate); it never runs backwards. Seeking
 reopens the stream at a segment (about 2 s granularity) and keeps the pause intent: a
 reopened stream is paused again as soon as it plays (port map §8.19). A seek to within the
 target of the live edge goes live instead, still keeping the pause; only `go_live()` (the
@@ -1310,22 +1311,16 @@ class LiveSession(QObject):
         playing = self._playback.state() is PlaybackState.PLAYING
         edge = self._live_edge(self._snapshot_cache)  # the most VLC can have played
         limit = edge - self._base if edge > self._base else math.inf
+        # The timestamp jumps the helper left out of its timeline, since the open.
+        breaks = [
+            (_number(where) - self._base, _number(seconds))
+            for where, seconds in self._snapshot_cache.get("breaks") or ()
+        ]
         self._elapsed = self._vlc.update(
-            self._clock(), ms, playing, self._rate, limit=limit, at_break=self._at_break
+            self._clock(), ms, playing, self._rate, limit=limit, breaks=breaks
         )
         self._last_ms = ms
         return self._base + self._elapsed
-
-    def _at_break(self, low: float, high: float) -> bool:
-        """The helper flagged a break (an HLS discontinuity or sequence gap, a reconnect, a
-        timestamp reset) at a segment boundary between these positions since the open."""
-        if self._sid is None:
-            return False
-        low, high = self._base + low, self._base + high
-        return any(
-            span.discontinuity and (low <= span.start <= high or low <= span.end <= high)
-            for span in self._engine.spans(self._sid)
-        )
 
     def _set_rate(self, rate: float) -> None:
         if rate != self._rate:

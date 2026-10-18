@@ -65,7 +65,7 @@ class Harness:
 
     def __init__(self, vlc, *, limit=math.inf):
         self.vlc, self.limit = vlc, limit
-        self.breaks = []  # positions of the stream's discontinuities (as the helper flags them)
+        self.breaks = []  # (position, seconds) of jumps the helper left out of its timeline
         self.now = 1000.0
         self.clock = VlcClock()
         self.clock.restart(self.now)
@@ -80,16 +80,13 @@ class Harness:
             self.now += TICK
             ms = self.vlc.ms
             position = self.clock.update(
-                self.now, ms, playing, self.vlc.rate, limit=self.limit, at_break=self.at_break
+                self.now, ms, playing, self.vlc.rate, limit=self.limit, breaks=self.breaks
             )
             if ms != self.last_ms and playing:
                 self.at_changes.append(position - self.vlc.reading)
             self.last_ms = ms
             self.errors.append(position - self.vlc.truth)
         return self
-
-    def at_break(self, low, high):
-        return any(low <= b <= high for b in self.breaks)
 
     def until_step(self, limit=40):
         """Tick until VLC's reading changes (at most `limit` ticks)."""
@@ -216,7 +213,8 @@ class CadenceTests(unittest.TestCase):
     def test_a_coarser_cadence_is_learned_within_a_few_readings(self):
         run = Harness(Vlc(quanta=(0.2, 0.4), seed=3)).run(30.0)
         self.to_two_second_stamps(run.vlc)
-        run.until_step().until_step().until_step()
+        for _ in range(4):  # three 2 s steps alike: the cadence changed
+            run.until_step()
         run.errors.clear()
         run.run(60.0)
         self.assertLess(max(abs(e) for e in run.errors), 0.5)
@@ -225,7 +223,8 @@ class CadenceTests(unittest.TestCase):
     def test_a_few_fine_readings_at_the_start_do_not_hold_the_clock_back(self):
         run = Harness(Vlc(every=0.1, phase=0.0)).run(1.0)
         run.vlc.every, run.vlc.phase = 2.0, run.vlc.truth + 0.3
-        run.until_step().until_step().until_step()
+        for _ in range(4):
+            run.until_step()
         run.errors.clear()
         run.run(60.0)
         self.assertLess(max(abs(e) for e in run.errors), 0.5)
@@ -240,6 +239,24 @@ class CadenceTests(unittest.TestCase):
         end = run.clock.at_change
         self.assertLess((end.progress - start.progress) / (end.asked - start.asked), 0.7)
 
+    def test_a_stamp_or_two_missing_now_and_then_keeps_the_step(self):
+        # Stage 2 re-review: two missing 2 s stamps within three readings made the step 4 s.
+        for gone in ({20}, {20, 23}, {20, 22}, {20, 21}):
+            with self.subTest(missing=sorted(gone)):
+                run = Harness(Vlc())
+                run.vlc.missing = gone.__contains__
+                steps = []
+                for _ in range(240):
+                    run.run(TICK)
+                    steps.append(run.clock.step())
+                self.assertEqual({round(step, 2) for step in steps[40:]}, {2.0})
+
+    def test_three_alike_steps_in_a_row_are_a_new_cadence(self):
+        run = Harness(Vlc()).run(40.0)
+        run.vlc.missing = lambda k: k % 2 == 1  # every other stamp from here on: 4 s steps
+        run.run(16.0)
+        self.assertAlmostEqual(run.clock.step(), 4.0, delta=0.05)
+
     def test_before_its_cadence_is_known_the_clock_stays_near_vlcs_reading(self):
         # A fresh tune whose VLC stands still at once: run on to the live edge, the clock
         # would read as starved there (and raise Auto's target).
@@ -250,34 +267,57 @@ class CadenceTests(unittest.TestCase):
 
 
 class BreakTests(unittest.TestCase):
-    """Stage 2 review: a forward jump of the stream's timestamps (an HLS discontinuity, a
-    raw-TS reconnect) moved the position as if VLC had skipped. The helper flags those
-    breaks on its spans; a jump at one is the stream's clock: the position keeps counting."""
+    """The stream's timestamps can jump ahead (an HLS discontinuity, a raw-TS reconnect after an
+    outage). The segmenter leaves a jump of 3 s or more out of its timeline and reports where
+    and how much (`breaks`): VLC's clock jumps by it there while what it plays does not, so the
+    position keeps counting. A smaller step stays media on the timeline (2.1 stage 2 review:
+    the old span flags took a 2 s one for the stream's clock): VLC's clock and the timeline
+    move together, and the clock follows."""
 
-    def jump(self, by):
-        run = Harness(Vlc(), limit=1000.0).run(20.0)
-        run.vlc.jump_at = run.vlc.truth + 1.0
-        run.vlc.jump_by = by
-        run.breaks = [run.vlc.jump_at]
+    def stamps_jump(self, by, *, vlc=None, reported=None, late=0.0):
+        """Once VLC plays a second on, its stamps jump by `by` while what it plays does not;
+        the helper reports `reported` seconds left out there, `late` seconds further on."""
+        run = Harness(vlc or Vlc(), limit=1000.0).run(20.0)
+        at = run.vlc.truth + 1.0
+        run.vlc.jump_at, run.vlc.jump_by = at, by
+        if reported is not None:
+            run.breaks = [(at + late, reported)]
         run.errors.clear()
         run.run(20.0)
         return run
 
-    def test_a_ten_second_stamp_jump_at_a_discontinuity_leaves_the_position(self):
-        run = self.jump(10.0)
+    def test_a_reported_ten_second_jump_leaves_the_position(self):
+        run = self.stamps_jump(10.0, reported=10.0)
         self.assertLess(max(abs(e) for e in run.errors), 0.5)
 
-    def test_a_short_stamp_jump_at_a_discontinuity_leaves_it_too(self):
-        run = self.jump(2.5)  # under the 3 s a 2 s-step channel holds as a jump
+    def test_a_break_reported_a_gop_from_vlcs_jump_still_matches(self):
+        # A raw-TS reconnect on a steady channel: the report may sit up to a GOP away.
+        run = self.stamps_jump(10.0, vlc=Vlc(quanta=(0.2, 0.4)), reported=10.0, late=1.0)
         self.assertLess(max(abs(e) for e in run.errors), 0.5)
 
-    def test_away_from_a_discontinuity_a_jump_is_vlc_skipping(self):
+    def test_an_unreported_stamp_jump_is_taken_as_vlc_skipping(self):
+        run = self.stamps_jump(10.0)  # within the buffer, and no break was reported
+        self.assertGreater(run.errors[-1], 9.0)
+
+    def test_a_two_second_step_the_timeline_kept_is_followed(self):
+        # The segmenter keeps a step under 3 s as media: on the timeline, VLC moves 2 s on.
         run = Harness(Vlc(), limit=1000.0).run(20.0)
-        run.vlc.truth += 5.0
+        run.vlc.truth += 2.0
+        run.vlc.reading += 2.0
+        run.errors.clear()
+        run.until_step().until_step()
+        run.run(10.0)
+        self.assertLess(max(abs(e) for e in run.errors[-40:]), 0.5)
+
+    def test_a_real_skip_unlike_a_reported_break_is_taken(self):
+        run = Harness(Vlc(), limit=1000.0).run(20.0)
+        run.breaks = [(run.vlc.truth + 1.0, 10.0)]  # a 10 s break just ahead ...
+        run.vlc.truth += 5.0  # ... and VLC skips 5 s there
         run.vlc.reading += 5.0
-        run.breaks = [run.vlc.truth + 100.0]
         run.until_step().until_step()
         self.assertLess(abs(run.at_changes[-1]), 0.5)
+        run.run(10.0)
+        self.assertLess(max(abs(e) for e in run.errors[-20:]), 0.5)
 
 
 class StandingStillTests(unittest.TestCase):
