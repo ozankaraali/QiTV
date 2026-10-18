@@ -1,4 +1,5 @@
-"""What QiTV learned per live channel (2.0.2): Auto's extra and "can't change speed"."""
+"""What QiTV learned per live channel: Auto's extra and "can't change speed" (2.0.2), the
+learned target (2.1)."""
 
 import json
 from pathlib import Path
@@ -7,7 +8,8 @@ import threading
 import unittest
 from unittest import mock
 
-from services.live import tuning
+from services.live import learned_target as lt, tuning
+from services.live.learned_target import Learned, LearnedTarget
 from services.live.tuning import LiveTuning, Tuning, channel_key
 
 CHANNEL = {"id": 7, "name": "One", "cmd": "http://provider.example/live/user/secret/7.ts"}
@@ -238,16 +240,98 @@ class LiveTuningTests(unittest.TestCase):
         self.assertIn("ValueError", "\n".join(logs.output))
 
     def test_a_file_of_another_version_is_ignored(self):
+        # 2.0.2's version 1 and the learned target's version 2 are read; nothing else.
         channels = {"a": {"extra": 1.5, "used": self.clock.now}}
-        for version in (2, None, "1"):
+        for version in (3, 0, None, "1", "2"):
             with self.subTest(version=version):
                 data = {"channels": channels}
                 if version is not None:
                     data["version"] = version
                 self.path.write_text(json.dumps(data))
                 self.assertEqual(self.store().get("a"), Tuning())
+        for version in (1, 2):
+            self.path.write_text(json.dumps({"version": version, "channels": channels}))
+            self.assertEqual(self.store().get("a"), Tuning(extra=1.5))
+
+    def test_the_learned_target_round_trips_through_the_file(self):
+        store = self.store()
+        learned = Learned(need=8.25, events=1.5, hours=1.2)
+        store.remember("a", Tuning(learned=learned))
+        store.remember("b", Tuning(extra=3.0, rate_locked=True, learned=Learned(events=4.0)))
+        self.assertEqual(store.get("a"), Tuning(learned=learned))  # at once, from memory
+        store.flush()
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(
+            data["channels"]["a"]["learned"], {"need": 8.25, "events": 1.5, "hours": 1.2}
+        )
+        again = self.store()
+        self.assertEqual(again.get("a"), Tuning(learned=learned))
+        self.assertEqual(
+            again.get("b"), Tuning(extra=3.0, rate_locked=True, learned=Learned(events=4.0))
+        )
+
+    def test_the_next_tune_starts_at_the_learned_target(self):
+        target = LearnedTarget()
+        now = 1000.0
+        for n in range(1, 120):  # 10 s batches every 12 s, a tick every 0.25 s
+            for tick in range(48):
+                now += 0.25
+                target.arrivals.add(now, 10.0 * n if tick == 47 else 10.0 * (n - 1))
+        target.near_miss(0.2)
+        target.played(600.0)
+        store = self.store()
+        store.remember("a", Tuning(learned=target.learned()))
+        store.flush()
+        restored = self.store().get("a")
+        again = LearnedTarget(restored.learned, restored.extra)
+        self.assertGreaterEqual(again.target(10.0), 12.5)
+        self.assertAlmostEqual(again.target(10.0), target.target(10.0), delta=0.01)
+
+    def test_a_two_zero_two_extra_reads_as_a_prior(self):
+        channels = {"a": {"extra": 3.0, "used": self.clock.now}}
         self.path.write_text(json.dumps({"version": 1, "channels": channels}))
-        self.assertEqual(self.store().get("a"), Tuning(extra=1.5))
+        store = self.store()
+        tuned = store.get("a")
+        self.assertEqual(tuned, Tuning(extra=3.0))  # as 2.0.2 wrote it
+        target = LearnedTarget(tuned.learned, tuned.extra)
+        self.assertAlmostEqual(target.target(), lt.FLOOR_S + 3.0)  # it needed that much
+        store.remember("a", Tuning(learned=target.learned()))  # kept the new way from now
+        store.flush()
+        again = self.store().get("a")
+        self.assertIsNone(again.extra)
+        self.assertAlmostEqual(LearnedTarget(again.learned).target(), lt.FLOOR_S + 3.0)
+
+    def test_learned_states_that_make_no_sense_are_left_out(self):
+        good = {"need": 8.0, "events": 1.5, "hours": 1.2}
+        channels = {
+            "ok": {"learned": good, "used": self.clock.now},
+            "unknown": {"learned": dict(good, need=None), "used": self.clock.now},
+            "text": {"learned": "8", "used": 1.0},
+            "list": {"learned": [8.0, 1.5, 1.2], "used": 1.0},
+            "need": {"learned": dict(good, need="8"), "used": 1.0},
+            "negative": {"learned": dict(good, need=-1.0), "used": 1.0},
+            "huge": {"learned": dict(good, need=1e9), "used": 1.0},
+            "events": {"learned": dict(good, events=True), "used": 1.0},
+            "fewer": {"learned": dict(good, events=-0.5), "used": 1.0},
+            "hours": {"learned": dict(good, hours=0.0), "used": 1.0},
+            "missing": {"learned": {"need": 8.0}, "used": 1.0},
+            "locked": {"learned": "x", "rate_locked": True, "used": self.clock.now},
+        }
+        self.path.write_text(json.dumps({"version": 2, "channels": channels}))
+        store = self.store()
+        self.assertEqual(store.get("ok"), Tuning(learned=Learned(8.0, 1.5, 1.2)))
+        self.assertEqual(store.get("unknown"), Tuning(learned=Learned(None, 1.5, 1.2)))
+        for key in set(channels) - {"ok", "unknown"}:
+            self.assertEqual(store.get(key), Tuning(), key)
+
+    def test_the_cap_holds_with_learned_entries(self):
+        store = self.store(max_entries=3)
+        for key in ("a", "b", "c", "d"):
+            store.remember(key, Tuning(learned=Learned(need=8.0)))
+        self.assertEqual(store.get("a"), Tuning())
+        store.flush()
+        self.assertEqual(set(json.loads(self.path.read_text())["channels"]), {"b", "c", "d"})
 
     def test_without_a_file_it_remembers_for_the_run(self):
         store = LiveTuning(None)

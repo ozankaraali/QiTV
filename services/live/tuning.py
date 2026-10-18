@@ -2,7 +2,9 @@
 
 Per (provider, channel): what Auto latency adds to its target (`AutoTarget`), whether VLC can play the
 channel at a rate other than 1x (`RateHealth`), and whether it plays directly because VLC
-crawled through the pipeline even at 1x (an HLS channel). `channel_key()` tells channels apart as the
+crawled through the pipeline even at 1x (an HLS channel). Since 2.1 also its learned target
+(`Learned`: the arrival need and the starvation prior, three small numbers; see
+`services.live.learned_target`). `channel_key()` tells channels apart as the
 zap list does (the stream address, else the id, else the name) and hashes that with the
 provider's name: a stream address may carry credentials, and none reach the file.
 
@@ -16,7 +18,10 @@ keeps their times; a time in the future (the clock was set back) counts as expir
 most `MAX_ENTRIES` (the least recently learned go first). The file is read once; each change
 writes it on one background thread, the newest state only, through a temporary file swapped
 in. A missing, unreadable or corrupt file, or one of another version, counts as empty, and
-a bad entry is left out. A write that fails is logged (without its path or any address).
+a bad entry (a learned target that makes no sense included) is left out. It is written as
+version 2 (the learned target's); 2.0.2's version 1 is still read, its entries as they were:
+their `extra` is what `LearnedTarget` reads as a prior. A write that fails is logged
+(without its path or any address).
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from typing import Any, Callable, Mapping, Optional
 
 import orjson as json
 
+from services.live.learned_target import EVENTS_MAX, HOURS_MAX, NEED_MAX_S, Learned
 from services.redact import safe_message
 
 _LOG = logging.getLogger(__name__)
@@ -42,7 +48,9 @@ FILE_NAME = "live_tuning.json"
 MAX_ENTRIES = 500
 RATE_LOCK_S = 24 * 60 * 60  # a lock older than this is tried again
 DIRECT_S = 24 * 60 * 60  # so is a channel played directly
-_VERSION = 1
+_VERSION = 2  # 2.1: entries may hold a learned target
+_READS = (1, 2)  # 1: 2.0.2's, read as it was
+_MIN_HOURS = 1e-6  # a learned target's hours of playing are more than nothing
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,7 @@ class Tuning:
     extra: Optional[float] = None  # what Auto latency adds to the target in force (if any)
     rate_locked: bool = False  # VLC cannot play the channel at a rate other than 1x
     direct: bool = False  # it crawled through the pipeline even at 1x: play it directly
+    learned: Optional[Learned] = None  # its learned target (2.1), if any
 
 
 def channel_key(provider: str, item: Mapping[str, Any]) -> str:
@@ -72,19 +81,46 @@ def _number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _finite(value: Any, low: float, high: float) -> bool:
+    return _number(value) and math.isfinite(value) and low <= value <= high
+
+
+def _learned(value: Any) -> Optional[dict[str, Any]]:
+    """A learned target as written by `remember()`; None when it is not one."""
+    if not isinstance(value, dict):
+        return None
+    need, events, hours = value.get("need"), value.get("events"), value.get("hours")
+    if need is not None and not _finite(need, 0.0, NEED_MAX_S):
+        return None
+    if not _finite(events, 0.0, EVENTS_MAX) or not _finite(hours, _MIN_HOURS, HOURS_MAX):
+        return None
+    return {"need": need, "events": events, "hours": hours}
+
+
+def _learned_part(value: Any) -> tuple[bool, Optional[dict[str, Any]]]:
+    """An entry's learned target: (whether it makes sense, it or None when there is none)."""
+    if value is None:
+        return True, None
+    learned = _learned(value)
+    return learned is not None, learned
+
+
 def _entry(value: Any) -> Optional[dict[str, Any]]:
     """A stored entry as written by `remember()`; None when it is not one."""
     if not isinstance(value, dict):
         return None
     extra, locked, used = value.get("extra"), value.get("rate_locked", False), value.get("used")
     direct = value.get("direct", False)
+    sane, learned = _learned_part(value.get("learned"))
     if extra is not None and not (_number(extra) and math.isfinite(extra)):
         return None
     if not isinstance(locked, bool) or not isinstance(direct, bool) or not _number(used):
         return None
-    if extra is None and not locked and not direct:
+    if not sane or (extra is None and not locked and not direct and learned is None):
         return None
     entry = {"extra": extra, "rate_locked": locked, "direct": direct, "used": used}
+    if learned is not None:
+        entry["learned"] = learned
     for flag, at in (("rate_locked", "locked_at"), ("direct", "direct_at")):
         if entry[flag]:
             when = value.get(at, used)  # without its time: when it was learned
@@ -122,7 +158,8 @@ class LiveTuning:
         now = self._now()
         locked = entry["rate_locked"] and 0 <= now - entry["locked_at"] < RATE_LOCK_S
         direct = entry.get("direct", False) and 0 <= now - entry["direct_at"] < DIRECT_S
-        return Tuning(entry["extra"], locked, direct)
+        learned = entry.get("learned")
+        return Tuning(entry["extra"], locked, direct, Learned(**learned) if learned else None)
 
     def remember(self, key: str, tuning: Tuning) -> None:
         """Keep `tuning` for the channel `key` (nothing learned: forget it); write it soon."""
@@ -133,12 +170,17 @@ class LiveTuning:
                 return
         else:
             now, old = self._now(), self._entries.get(key)
-            entry = {
+            entry: dict[str, Any] = {
                 "extra": tuning.extra,
                 "rate_locked": tuning.rate_locked,
                 "direct": tuning.direct,
                 "used": now,
             }
+            if tuning.learned is not None:
+                learned = tuning.learned
+                fields = {"need": learned.need, "events": learned.events, "hours": learned.hours}
+                if _learned(fields) is not None:  # one that makes no sense is not kept
+                    entry["learned"] = fields
             # A lock (or direct play) still in force keeps its time; else it counts from now.
             for flag, at, lasts in (
                 ("rate_locked", "locked_at", RATE_LOCK_S),
@@ -174,7 +216,8 @@ class LiveTuning:
         if not isinstance(channels, dict):
             _LOG.info("Ignoring the saved live tuning: it is not QiTV's")
             return {}
-        if data.get("version") != _VERSION:
+        version = data.get("version")
+        if type(version) is not int or version not in _READS:
             _LOG.info("Ignoring the saved live tuning: it is of another version")
             return {}
         entries = {}
