@@ -2256,10 +2256,11 @@ class SafeJumpTests(LiveSessionCase):
                 self.live.stop()
                 self.engine.answer()
 
-    def test_what_landings_miss_by_is_learned_for_the_channel(self):
+    def test_what_landings_miss_by_is_learned_for_the_tune(self):
         # Review I3's measurement after the pick read the filter's mean: 8 landings on a
         # sparse-PCR channel, every one 0.1-0.7 s short (mean 0.3). Learned from each clean
-        # landing (picked while playing, then 8 s at 1x), half of it at a time, bounded.
+        # landing (picked while playing, then 8 s at 1x), half of it at a time, bounded; and
+        # afresh at each tune (ruling R38: not kept with the channel).
         real = StayLive.landed
         landed = self.enterContext(
             mock.patch.object(StayLive, "landed", autospec=True, side_effect=real)
@@ -2282,10 +2283,51 @@ class SafeJumpTests(LiveSessionCase):
                 self.assertLess(errors[0], -lead + 0.15)  # the first misses by all of it
                 self.assertLess(abs(errors[-1]), settled)  # later ones by less (bounded)
                 self.assertLessEqual(abs(self.live._land_offset), live_session._LAND_OFFSET_MAX_S)
+                self.assertLess(self.live._land_offset, -0.1)  # learned
+                self.start(latency=latency)  # a re-tune of the same channel, the same session
+                self.assertEqual(self.live._land_offset, 0.0)
                 self.live.stop()
                 self.engine.answer()
-        self.live = self.make()  # each channel learns afresh
-        self.assertEqual(self.live._land_offset, 0.0)
+
+    def test_only_the_picks_own_error_is_learned(self):
+        # Re-review N2: a 5 s backlog 5.5 s after a Go live (no stall) was learned as a miss
+        # (+1.5 s, the cap), and picks right after the lag filter started afresh (a stall's
+        # end, a step, a burst reclassified: when jumps happen) taught it its own wander.
+        for case in ("a step inside the check", "a pick right after a restart"):
+            with self.subTest(case=case):
+                self.live = self.make()
+                sid = self.start()
+                feed = Feed(self, sid, burst=0.0, edge=12.0).ready(backlog_after_start=False)
+                feed.run(30.0)
+                if case == "a pick right after a restart":
+                    feed.stalled = True  # the filter starts afresh once it sends again
+                    feed.run(3.0)
+                    feed.stalled = False
+                    feed.run(3.0)
+                self.live.go_live()
+                feed.sync()
+                if case == "a step inside the check":
+                    feed.run(5.5)
+                    feed.edge += 5.0  # a reconnect's backlog, at once
+                    feed.push()
+                feed.run(15.0)
+                self.assertEqual(self.live._land_offset, 0.0)
+                self.live.stop()
+                self.engine.answer()
+
+    def test_go_live_then_a_higher_latency_is_built_as_without_it(self):
+        # Re-review N1: after a Go live the shortfall a higher target left was tolerated for
+        # good (2.0 s behind a 6 s target for 5 minutes).
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=12.0).ready(backlog_after_start=False)
+        feed.run(30.0)
+        self.live.go_live()
+        feed.sync()
+        feed.run(20.0)
+        self.live.set_latency("stable")
+        feed.run(300.0)
+        self.assertEqual(min(self.playback.rates), 0.97)
+        self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["stable"], delta=1.0)
 
     def test_stay_live_hears_when_a_stall_ends(self):
         # Seen on a public sparse-PCR channel: Go live during a stall that went on after it
