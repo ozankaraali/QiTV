@@ -394,6 +394,20 @@ class RoleTests(_Fixture):
         self.pump()
         self.assertTrue(self.manager.swap())
 
+    def test_the_small_streams_start_is_said_on_open_and_after_a_change(self):
+        # Review M3: the shell's swap back waits for a change on its way to start.
+        started = []
+        self.manager.pipStarted.connect(lambda: started.append(self.manager.changing()))
+        self.swapped()
+        self.assertEqual(started, [False])  # it opened
+        self.main.live.auto_release = False
+        self.open(C)
+        self.assertTrue(self.manager.changing())
+        self.main.live.released.emit()
+        self.pump()
+        self.assertEqual(started, [False, False])  # the change started
+        self.assertFalse(self.manager.changing())
+
     def test_a_player_still_letting_go_of_a_direct_play_delays_the_new_channel(self):
         self.swapped()
         self.main_tuner.holding = True  # e.g. a channel the main player played directly

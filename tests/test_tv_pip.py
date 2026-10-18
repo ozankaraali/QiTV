@@ -808,6 +808,52 @@ class LibraryPlayTests(PipCase):
         self.controller.handle(Action.CH_NEXT)  # zapping goes on from One
         self.assertEqual(self.requested()[-1], "Two")
 
+    def change_small_while_the_film_comes(self):
+        """One large; Heat from the Library sends it small; while Heat's link is on its way,
+        Three is opened small instead: that change waits for One's stream to let go."""
+        self.start_large(0)
+        self.controller.enter_library_playing()
+        self.controller.play_vod(MOVIE, "movie", play_context())
+        film = self.catalog.links[-1][0]
+        self.controller.open_pip(CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.ready("http://stream/3")
+        self.assertEqual(self.live.calls[-1], ("stop",))  # One gives way to Three
+        return film
+
+    def test_a_failed_link_while_the_small_picture_changes_waits_for_it(self):
+        # Review M3: the swap is refused while the change is on its way, and the big picture
+        # stayed empty.
+        film = self.change_small_while_the_film_comes()
+        self.catalog.linkFailed.emit(film, "Not found")
+        self.assertEqual(self.toast.messages()[-1], ("Heat: Not found", "error"))
+        self.assertIs(self.sessions.large(), self.pip_slot)  # still empty, for now
+        self.three_opens()
+        self.assertIs(self.sessions.large(), self.main_slot)  # ...and takes the big picture
+        self.assertFalse(self.sessions.pip_open())  # the empty one closed
+        self.assertEqual(self.controller._channel, CHANNELS[2])
+
+    def test_back_to_the_library_while_the_small_picture_changes_drops_the_film(self):
+        film = self.change_small_while_the_film_comes()
+        self.controller.enter_library_playing()
+        self.catalog.linkReady.emit(film, "http://vod/heat.mkv")  # late: it opens nothing
+        self.assertEqual(self.pip_session.plays, [])
+        self.three_opens()
+        self.assertIs(self.sessions.large(), self.main_slot)  # Three, large in the corner
+        self.assertFalse(self.sessions.pip_open())
+
+    def three_opens(self):
+        self.live.released.emit()  # One let go: Three opens small
+        self.assertTrue(wait_until(lambda: self.live.named("start")[-1][0] == "http://stream/3"))
+
+    def test_a_choice_made_meanwhile_is_not_swapped_small_once_the_change_settles(self):
+        film = self.change_small_while_the_film_comes()
+        self.catalog.linkFailed.emit(film, "Not found")
+        self.tune(3)  # Four, chosen since for the big picture
+        self.three_opens()
+        self.assertIs(self.sessions.large(), self.pip_slot)  # Four's link is on its way there
+        self.assertTrue(self.sessions.pip_open())
+        self.assertEqual(self.requested()[-1], "Four")
+
     def test_a_film_whose_open_fails_gives_the_channel_the_big_picture_back(self):
         # Review M2: the open raising (no player, say) left the big picture black.
         self.start_large(0)

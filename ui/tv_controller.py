@@ -243,6 +243,9 @@ class TVController(QObject):
         # The title the channel playing large went small for, until its link comes: its failure
         # gives the channel the large picture back.
         self._freed_for: Optional[Target] = None
+        # That title never came while the small picture changed channel (no swap then): the
+        # new small channel gives the large picture back once it starts.
+        self._give_back_later = False
         self._cid: Optional[str] = None  # resume key of the VOD being played
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
         self._digits = ""  # number entry under way
@@ -366,6 +369,8 @@ class TVController(QObject):
         if self.sessions is not None:
             self.sessions.largeChanged.connect(self._on_large_changed)
             self.sessions.largeChanged.connect(lambda *_: self._update_guides())
+            self.sessions.pipStarted.connect(self._on_pip_started)
+            self.sessions.pipStateChanged.connect(self._on_pip_state)
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
@@ -499,6 +504,7 @@ class TVController(QObject):
         if self._title_on_its_way():
             # The title the channel went small for is dropped, as a link on its way is when the
             # Library opens: the channel takes the large picture back and plays on.
+            self._lanes.drop_tune()
             self._give_large_back(self._freed_for)
         self._guide.close()
         if self._digits:
@@ -923,6 +929,7 @@ class TVController(QObject):
         return list(self.catalog.items("live", ALL_GROUP_ID) or [])
 
     def _request(self, target: Target) -> None:
+        self._give_back_later = False  # the large picture has a newer choice
         self._cancel_external()
         self._flow.drop_autotune()  # a choice made before the live section loaded comes first
         self._autoplay.drop()  # a newer choice than what the Next card offers
@@ -1034,7 +1041,22 @@ class TVController(QObject):
         large went small for it, the pictures swap back and the empty one closes."""
         if target is not None and target is self._freed_for:
             self._freed_for = None
-            self.swap()
+            sessions = self.sessions
+            if not self.swap() and sessions is not None and sessions.changing():
+                self._give_back_later = True  # once the small picture's channel starts
+
+    def _on_pip_started(self) -> None:
+        """The small picture's stream started: a swap back that waited for its channel change
+        gives it the large picture now, while that is still empty."""
+        if not self._give_back_later or self._closed:
+            return
+        self._give_back_later = False
+        if self._current is None and not self._lanes.busy() and self._tuner.idle():
+            self.swap()  # the empty picture, small now, closes
+
+    def _on_pip_state(self, open_: bool) -> None:
+        if not open_:
+            self._give_back_later = False
 
     def _restore_channel(self) -> None:
         """After a failed tune, INFO and the drawer follow the channel still playing."""

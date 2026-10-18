@@ -135,6 +135,7 @@ class _Open:
 class SessionManager(QObject):
     largeChanged = Signal(str)  # name of the slot that is now large
     pipStateChanged = Signal(bool)  # PiP open/closed
+    pipStarted = Signal()  # the small slot's stream started: PiP opened, or its channel changed
     denied = Signal(int)  # limit (budget refused PiP)
     # A fixed message: the PiP's live session did not start or failed for good (the limit
     # message for a provider refusal), or the budget refused a channel change of a PiP it had
@@ -197,6 +198,11 @@ class SessionManager(QObject):
 
     def pip_open(self) -> bool:
         return self._open
+
+    def changing(self) -> bool:
+        """The open PiP's channel change waits for its slot or the old stream's release (a
+        swap is refused meanwhile)."""
+        return self._pending is not None and self._open
 
     def pip_opening(self) -> bool:
         """A PiP was asked for and has not opened (nor been refused) yet."""
@@ -349,6 +355,7 @@ class SessionManager(QObject):
         if opening:
             self._open = True
             self.pipStateChanged.emit(True)
+        self.pipStarted.emit()
 
     def _on_main_failed(self, message: str) -> None:
         self._on_failed(self._main, message)
