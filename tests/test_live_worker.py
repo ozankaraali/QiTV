@@ -49,6 +49,7 @@ STATE_KEYS = {
     "burst_s",
     "received",
     "hls",
+    "breaks",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -386,6 +387,24 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertEqual(source.counts[SECRET_PATH], 1)
         self.assertEqual(source.requests[0][1].get("User-Agent"), "QiTV-test")
         self.assert_no_credentials(helper)
+
+    def test_a_timestamp_jump_left_out_of_the_timeline_is_reported(self):
+        # 2.1 stage 2: the player's clock jumps by what the timeline leaves out (a reconnect
+        # after an outage, an HLS discontinuity): where on the timeline, and how much. A step
+        # under 3 s stays media and is not reported.
+        helper = self.helper()
+        for path, jump, reported in (("/jump.ts", 5.0, [(4.0, 5.0)]), ("/step.ts", 2.0, [])):
+            with self.subTest(jump=jump):
+                first = make_stream(4)
+                second = make_stream(4, pts_start=900000 + round((4 + jump) * 90000))
+                source = self.source({path: (200, {}, first + second)})
+                sid = helper.open(source.url + path)
+                helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
+                breaks = helper.of(sid, "state")[-1][2]["breaks"]
+                self.assertEqual(len(breaks), len(reported))
+                for (where, seconds), (at, left_out) in zip(breaks, reported):
+                    self.assertAlmostEqual(where, at, delta=0.05)
+                    self.assertAlmostEqual(seconds, left_out, delta=0.05)
 
     def test_a_finite_source_ends_after_its_last_segment(self):
         first, second = make_stream(4), make_stream(4, pts_start=900000 + 4 * 90000)

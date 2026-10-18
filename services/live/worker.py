@@ -95,6 +95,7 @@ _DISK_FAILED = "The temporary playback buffer could not be created."
 
 # seq, start, end, discontinuity, start_quality
 _Addition = tuple[int, float, float, bool, StartQuality]
+_BREAKS_KEPT = 8  # the latest PTS jumps the timeline left out, in the state (2.1 stage 2)
 
 # BurstMeter (see its docstring):
 _BURST_GAP_S = 1.0  # this long without a byte ends a burst
@@ -351,6 +352,8 @@ class _Session:
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
         self._received = 0  # bytes from the source, those before the first keyframe too
         self._pending: list[_Addition] = []
+        # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
+        self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
 
@@ -522,6 +525,21 @@ class _Session:
                     (span.seq, span.start, span.end, span.discontinuity, span.start_quality)
                 )
                 self._notify(force=True)
+        self._take_breaks()
+
+    def _take_breaks(self) -> None:
+        """Where the segmenter left a PTS jump out of the timeline, and how much (the player's
+        clock jumps by it there, while the media does not), reported at once."""
+        dropped = self._segmenter.dropped
+        if not dropped:
+            return
+        timeline = self._timeline
+        starts = {span.seq: span.start for span in timeline.spans()}
+        for seq, offset, seconds in dropped:
+            # A closed segment's start, else the open one's (where the closed ones end).
+            self._breaks.append((starts.get(seq, timeline.end) + (offset or 0.0), seconds))
+        dropped.clear()
+        self._notify(force=True)
 
     def _write(self, action: Callable[[Ring], None], *, new_segment: bool = False) -> None:
         from services.live.ring import RamRing, RingError
@@ -603,6 +621,8 @@ class _Session:
             # An HLS source: the parent keeps its player at 1x (VLC crawls once its rate
             # was changed on such a stream; 2.0.2).
             "hls": bool(source is not None and source.hls),
+            # PTS jumps the timeline left out: (timeline position, seconds), the latest last.
+            "breaks": list(self._breaks),
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the

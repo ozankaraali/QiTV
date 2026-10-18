@@ -687,6 +687,30 @@ class SegmenterTests(unittest.TestCase):
                 self.assertEqual(closes(events)[2].next_first_pts, 900000 + 125 * FRAME)
                 self.assert_closed_pts(events)
 
+    def test_a_jump_left_out_of_the_timeline_is_reported_where_and_how_much(self):
+        # 2.1 stage 2: the player's clock jumps by what the timeline leaves out. The +5 s
+        # step at frame 120 (4.8 s) is in segment 2, 0.8 s after its start at 4.0 s.
+        seg, _ = run(shift_pts(fx.make_stream(12), 120, 5 * CLOCK))
+        self.assertEqual(len(seg.dropped), 1)
+        seq, offset, seconds = seg.dropped[0]
+        self.assertEqual(seq, 2)
+        self.assertAlmostEqual(offset, 0.8, places=3)
+        self.assertAlmostEqual(seconds, 5.0, places=3)
+
+    def test_a_reconnects_jump_is_reported_and_a_shorter_step_or_a_reset_is_not(self):
+        for jump, reported in ((5.0, 5.0), (2.0, None), (-30.0, None)):
+            with self.subTest(jump=jump):
+                seg = Segmenter(clock=lambda: 0.0)
+                seg.feed(fx.make_stream(3))
+                seg.discontinuity()  # a reconnect
+                seg.feed(fx.make_stream(3, pts_start=900000 + round((3 + jump) * CLOCK)))
+                seg.finish()
+                if reported is None:
+                    self.assertEqual(seg.dropped, [])
+                else:
+                    self.assertEqual(len(seg.dropped), 1)
+                    self.assertAlmostEqual(seg.dropped[0][2], reported, places=3)
+
     def test_a_slideshow_with_frames_seconds_apart_is_not_a_discontinuity(self):
         # A radio channel's still picture every 5 s with continuous audio: steps of the
         # stream's own frame cadence are no PTS jump, but a +60 s step still is.

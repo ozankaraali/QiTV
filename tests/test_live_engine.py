@@ -52,6 +52,7 @@ STATE_KEYS = {
     "burst_s",
     "received",
     "hls",
+    "breaks",
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024

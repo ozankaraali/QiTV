@@ -40,7 +40,9 @@ _CRC_REPEATS = 3  # identical bad-CRC sections accepted while no valid one has b
 _REORDER_TICKS = _CLOCK
 # A longer forward step between two PES is a timestamp jump, unless the stream's own cadence
 # (its previous forward step) is at least half as long: a slideshow's stills seconds apart.
-_JUMP_TICKS = 3 * _CLOCK
+# A jump is left out of the timeline (`Segmenter.dropped`); a shorter step stays media.
+JUMP_S = 3.0
+_JUMP_TICKS = round(JUMP_S * _CLOCK)
 _SCRAMBLED_PACKETS = 8  # scrambled cut-PID packets that prove scrambling ...
 _SCRAMBLED_WINDOW_S = 2.0  # ... in total within this first wall time, later in a row
 _STALL_S = 5.0  # a longer pause between feeds is a stalled source: removed from the clock
@@ -204,6 +206,9 @@ class Segmenter:
         # starts at `_part_pts`, after `_carried` ticks of earlier media (None when unknown).
         self._part_pts: int | None = None
         self._carried: int | None = 0
+        # Forward PTS jumps left out of the timeline, for the caller to take: (the open
+        # segment's seq, seconds of its media before the jump or None, seconds left out).
+        self.dropped: list[tuple[int, float | None, float]] = []
 
     @property
     def video_pid(self) -> int | None:
@@ -426,6 +431,8 @@ class Segmenter:
                     logger.debug("PTS jumped by %.2f s", step / _CLOCK)
                     self._latch()
                     self._carry()
+                    if step > 0 and self._open:
+                        self._report_jump(last, pts)
                     self._jumped = True
                     self._part_pts = pts
                     # The segment ages by all of its media, not only the new content's.
@@ -484,6 +491,15 @@ class Segmenter:
             return
         part = pts_delta(part_pts, top + frame)
         self._carried = self._carried + part if part >= 0 else None
+
+    def _report_jump(self, last: int, pts: int) -> None:
+        """A forward jump the timeline leaves out: from the old content's end (its furthest PTS
+        plus a frame; else the last PTS) to `pts`, after the open segment's media so far."""
+        top, frame = self._top, self._frame
+        end = (top + frame) % _PTS_MODULO if top is not None and frame is not None else last
+        carried = self._carried
+        offset = carried / _CLOCK if carried is not None else None
+        self.dropped.append((self._seq, offset, max(pts_delta(end, pts), 0) / _CLOCK))
 
     def _on_segment_axis(self, pts: int | None) -> int | None:
         """`pts` of the current content as a PTS on the open segment's own axis: unchanged
