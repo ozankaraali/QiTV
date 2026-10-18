@@ -2951,6 +2951,28 @@ class SoftwareFallbackTests(LiveSessionCase):
         self.playback.pictureFroze.emit()
         self.assertEqual(self.tuning.get("A"), Tuning(1.5, True, software=True))
 
+    def test_auto_s_learned_target_and_software_decoding_are_both_kept(self):
+        # Stage 4b saves the learned target on its own (trouble, a move, the tune's end):
+        # the flag the store holds goes with it, as the lock and direct play do.
+        self.start(latency=AUTO, channel="A")
+        feed = Feed(self, self.engine.last_sid, burst=0.0, edge=20.0).ready()
+        feed.run(10.0)
+        self.playback.pictureFroze.emit()
+        feed.run(5.0)
+        self.live.stop()  # the tune's end saves the learned target (Auto's own save)
+        self.engine.answer()
+        self.assertTrue(self.tuning.get("A").software)
+
+    def test_a_later_lesson_keeps_software_decoding(self):
+        # A channel in software whose VLC then crawls at another rate: the lock's save keeps
+        # the software flag (MemoryTests' crawl).
+        self.tuning.remember("A", Tuning(software=True))
+        self.start(latency=AUTO, channel="A")
+        self.engine.answer()
+        Feed(self, self.engine.last_sid, burst=0.0, edge=12.0, crawl=True).ready().run(10.0)
+        kept = self.tuning.get("A")
+        self.assertEqual((kept.rate_locked, kept.software), (True, True))
+
     def test_a_freeze_heard_before_the_stream_plays_changes_nothing(self):
         self.start(channel="A")
         plays = len(self.playback.plays)
@@ -4585,6 +4607,29 @@ class RepickTests(LiveSessionCase):
                     lag = self.timelines[-1]["lag"]
                     self.assertEqual(self.outcome(feed), (2, 0.0))
                     self.assertLess(lag, 22.0)
+
+    def test_a_reopen_in_software_and_the_re_pick_are_never_two_opens_in_a_row(self):
+        # Hardware decoding froze the picture right after the dump: the stream opened again
+        # in software where it played; the re-pick still comes, but not within the reopen
+        # hold of that open (never two opens in a row).
+        feed = self.tune("normal", burst=0.0, edge=2.0)
+        feed.ready(backlog_after_start=False)
+        self.opened(feed)
+        opens = [self.clock.now]
+        feed.run(0.7)
+        feed.edge += 20.0
+        feed.push()
+        feed.run(2.3)
+        self.playback.pictureFroze.emit()
+        self.assertEqual(len(self.playback.plays), 2)
+        opens.append(self.clock.now)
+        for _ in range(80):
+            feed.run(0.25)
+            if len(self.playback.plays) > len(opens):
+                opens.append(self.clock.now)
+        self.assertEqual(len(opens), 3)  # the re-pick came
+        self.assertTrue(all(self.playback.software[1:]))
+        self.assertGreaterEqual(opens[2] - opens[1], live_session._REOPEN_HOLD_S)
 
     def test_an_hls_start_is_never_picked_again(self):
         # Round 3 of re-review 2: a public HLS channel (6 s segments 7 s apart, every sixth

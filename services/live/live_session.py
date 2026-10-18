@@ -1524,7 +1524,9 @@ class LiveSession(QObject):
             self._repick_step = None
             return False
         flowed = now - step
-        if flowed < _REPICK_FLOW_S - 1e-9 or not played:
+        if flowed < _REPICK_FLOW_S - 1e-9 or not played or self._just_opened():
+            # (Within the reopen hold of another open, a reopen in software say: never two
+            # opens in a row. The step stays to be judged once the hold is over.)
             return False
         self._repick_step = None
         low, high = _REPICK_RATE
