@@ -198,6 +198,13 @@ class PipControls(QObject):
         self._views[old] = SlotView(target, context, url, cid)
         return self.view(new)
 
+    def small_title(self, name: str) -> Optional[Target]:
+        """The movie or the episode slot `name` plays small (None: it is large, or plays a
+        channel)."""
+        small = self.sessions.small()
+        target = self.view(name).target if small is not None and small.name == name else None
+        return target if target is not None and not target.live else None
+
     def small_resume_key(self, name: str) -> Optional[str]:
         """The resume key of the movie or episode slot `name` plays small (None: it is large,
         or plays a channel)."""

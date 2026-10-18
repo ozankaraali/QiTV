@@ -361,6 +361,7 @@ class TVController(QObject):
         for name, player in self._players():
             player.stateChanged.connect(partial(self._states.__setitem__, name))
             player.positionChanged.connect(partial(self._on_small_position, name))
+            player.errorOccurred.connect(partial(self._on_small_error, name))
         if self.sessions is not None:
             self.sessions.largeChanged.connect(self._on_large_changed)
             self.sessions.largeChanged.connect(lambda *_: self._update_guides())
@@ -1574,6 +1575,13 @@ class TVController(QObject):
             self.watch.update_position(cid, position_ms, length_ms)
         except Exception as e:
             self._log_failure("save the playback position", e)
+
+    def _on_small_error(self, name: str, message: str) -> None:
+        """A movie or an episode swapped small failed to play: said as the large picture says
+        it (a channel's player errors are its live session's to recover or report)."""
+        target = self._pip.small_title(name) if self._pip is not None else None
+        if not self._closed and target is not None:
+            self._error(f"{target.title}: {message}")
 
     def _on_error(self, message: str) -> None:
         if self._closed or self._tuner.running():

@@ -998,6 +998,19 @@ class TitleBesideChannelTests(PipCase):
         self.ready("http://vod/night-ferry.mkv")
         self.assert_one_plays_small_beside("http://vod/night-ferry.mkv")
 
+    def test_a_film_that_fails_small_says_why_once(self):
+        # Sweep B follow-up: the small player's errors had no listener.
+        self.session.errorOccurred.emit("Broken")  # One's, small: its live session's to recover
+        self.assertEqual(self.toast.messages(), [])
+        self.controller.handle(Action.SWAP)  # One large, Heat small
+        self.pip_session.errorOccurred.emit("The stream could not be opened")
+        self.assertEqual(self.toast.messages(), [("Heat: The stream could not be opened", "error")])
+        self.assertTrue(self.sessions.pip_open())  # its title stays: × closes it, ⇄ swaps
+        self.controller.handle(Action.SWAP)  # Heat large: it says it as the big picture
+        self.pip_session.errorOccurred.emit("Broken")
+        self.assertEqual(self.toast.messages()[-1], ("Heat: Broken", "error"))
+        self.assertEqual(len(self.toast.messages()), 2)
+
     def test_a_swap_drops_the_next_card(self):
         self.end(self.pip_session)  # Heat ends large: the card offers Night Ferry
         links = len(self.catalog.links)
