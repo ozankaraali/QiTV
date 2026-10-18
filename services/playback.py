@@ -76,13 +76,15 @@ class PlaybackState(str, Enum):
 
 
 def decoder_args(hardware: bool) -> list[str]:
-    """VLC's video decoder: software unless `hardware` (Settings, experimental).
+    """VLC's video decoder: VLC's own choice with `hardware` (Settings; the default again
+    since 2.1, when VLC takes software where the graphics chip can't), else software.
 
-    The Mac's hardware decoder (VideoToolbox) showed about half the pictures of an interlaced
-    TV channel and froze it at times; VLC's software decoder showed them all, as mpv does.
-    `--no-videotoolbox` exists only where VLC has that module (an unknown option fails).
-    With hardware decoding, a stream whose picture freezes while its sound plays goes back
-    to software (2.1: `services.picture_watch`, `software_options()`).
+    2.0.5 made software the default: the Mac's hardware decoder (VideoToolbox) had shown
+    about half the pictures of an interlaced TV channel and frozen it at times. Since 2.1 a
+    stream whose picture freezes while its sound plays goes back to software by itself
+    (`services.picture_watch`, `software_options()`), and a lab in a real window showed full
+    frame rates with less CPU. `--no-videotoolbox` exists only where VLC has that module (an
+    unknown option fails).
     """
     if hardware:
         return []

@@ -140,7 +140,11 @@ class ConfigManager:
     MOUSE_WHEEL_CHOICES = ("channel", "volume")
     DEFAULT_OPTION_START_WITH_LAST_CHANNEL = True
     DEFAULT_OPTION_TIMESHIFT_ENABLED = False
-    DEFAULT_OPTION_HARDWARE_DECODING = False  # experimental: software decodes every picture
+    # 2.1: hardware again (a frozen picture falls back to software: services.picture_watch);
+    # VLC itself takes software where the graphics chip can't decode a stream.
+    DEFAULT_OPTION_HARDWARE_DECODING = True
+    # Bumped by each one-time change of the decoding default (`update_patcher`).
+    DECODING_DEFAULTS_VERSION = 1
     DEFAULT_OPTION_TIMESHIFT_MAX_MIB = 2048
     DEFAULT_OPTION_TIMESHIFT_RAM_MIB = 256  # memory per stream not on the disk ring
     TIMESHIFT_RAM_CHOICES = (128, 256, 512)
@@ -302,6 +306,19 @@ class ConfigManager:
             self.config["play_in_mpv"] = False
         if tv_defaults < ConfigManager.TV_DEFAULTS_VERSION:
             self.config["tv_defaults_version"] = ConfigManager.TV_DEFAULTS_VERSION
+            need_update = True
+
+        # 2.1: hardware decoding is the default again. Since 2.0.5 (2.0.6 on Windows and
+        # Linux) every config saved `false`, so a choice and the old default look alike: it
+        # is switched on once, and a choice made afterwards stays. 2.0.x keeps the key and
+        # reads `hardware_decoding` as it is.
+        decoding_defaults = self.config.get("decoding_defaults_version", 0)
+        if not isinstance(decoding_defaults, int) or isinstance(decoding_defaults, bool):
+            decoding_defaults = 0
+        if decoding_defaults < 1:
+            self.config["hardware_decoding"] = True
+        if decoding_defaults < ConfigManager.DECODING_DEFAULTS_VERSION:
+            self.config["decoding_defaults_version"] = ConfigManager.DECODING_DEFAULTS_VERSION
             need_update = True
 
         if need_update:

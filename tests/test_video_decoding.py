@@ -1,14 +1,16 @@
-"""Video decoding: software by default, the hardware decoder only when Settings asks for it.
+"""Video decoding: hardware by default (2.1), software when Settings asks for it.
 
-The Mac's hardware decoder (VideoToolbox) showed about half the pictures of an interlaced TV
-channel and froze it at times (13.8 of 25 pictures a second); VLC's software decoder showed
-all 25, as mpv does.
+2.0.5 made software the default: the Mac's hardware decoder (VideoToolbox) had shown about
+half the pictures of an interlaced TV channel and frozen it at times (13.8 of 25 pictures a
+second). 2.1 brings hardware back as the default, on every platform, with a one-time switch
+for configs that saved the old default (`decoding_defaults_version`).
 
 2.1: with hardware decoding, a stream whose picture stands still while its sound plays opens
 again in software (`services.picture_watch`; the lab that reproduced the freeze is in its
 docstring), and a live channel stays in software for a day (tests/test_live_session.py).
 """
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -471,28 +473,74 @@ class DecoderArgsTests(unittest.TestCase):
 
 
 class DecodingConfigTests(unittest.TestCase):
+    """2.1: hardware decoding is the default again, on every platform (the software fallback;
+    a lab in a real window on a Mac: full frame rates, no frozen picture, 1.5-5.5x less CPU;
+    VLC itself decodes in hardware by default and takes software where the graphics chip
+    can't)."""
+
     _load = test_config_tv.TvConfigTests._load
 
-    def test_off_by_default_and_only_true_turns_it_on(self):
+    @staticmethod
+    def saved(path):
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_on_by_default(self):
+        config, path = self._load(None)
+        self.assertIs(config.hardware_decoding, True)
+        self.assertIs(self.saved(path)["hardware_decoding"], True)
+
+    def test_only_true_turns_it_on(self):
         config, _ = self._load(None)
-        self.assertFalse(config.hardware_decoding)
-        for value in (None, "true", 1):
+        for value in (None, "true", 1, False):
             config.config["hardware_decoding"] = value
             self.assertFalse(config.hardware_decoding)
         config.hardware_decoding = True
         self.assertTrue(config.hardware_decoding)
 
+    def test_a_config_from_before_2_1_is_switched_on_once(self):
+        # Since 2.0.5 (2.0.6 on Windows and Linux) every config saved `false`: untouched and
+        # turned off look alike, so the first 2.1 start switches it on once and says so in
+        # the config (`decoding_defaults_version`).
+        saved = {"hardware_decoding": False, "tv_defaults_version": 2}
+        config, path = self._load(saved)
+        self.assertTrue(config.hardware_decoding)
+        written = self.saved(path)
+        self.assertIs(written["hardware_decoding"], True)
+        self.assertEqual(written["decoding_defaults_version"], 1)
+        config.hardware_decoding = False  # the user's choice afterwards stays
+        config.save_config()
+        self.assertFalse(ConfigManager().hardware_decoding)
+        self.assertIs(self.saved(path)["hardware_decoding"], False)
+
+    def test_a_new_install_records_the_switch(self):
+        _, path = self._load(None)
+        self.assertEqual(self.saved(path)["decoding_defaults_version"], 1)
+
+    def test_a_choice_made_after_the_switch_stays(self):
+        for value in (False, True):
+            with self.subTest(value=value):
+                saved = {"hardware_decoding": value, "decoding_defaults_version": 1}
+                config, path = self._load(saved)
+                self.assertIs(config.hardware_decoding, value)
+                self.assertIs(self.saved(path)["hardware_decoding"], value)
+
 
 class DecodingWindowTests(base.WindowCase):
-    def test_settings_offers_hardware_decoding_as_experimental_and_saves_it(self):
+    def test_settings_offers_hardware_decoding_with_its_fallback(self):
+        self.config.hardware_decoding = True
         dialog = OptionsDialog(self.window)
         self.addCleanup(dialog.deleteLater)
         box = dialog.hardware_decoding_checkbox
-        self.assertFalse(box.isChecked())
-        self.assertIn("experimental", box.text().lower())
-        self.assertIn("restart", box.toolTip().lower())
-        self.assertIn("goes back to software", box.toolTip().lower())  # the 2.1 fallback
-        box.setChecked(True)
+        self.assertTrue(box.isChecked())
+        self.assertNotIn("experimental", box.text().lower())
+        tip = box.toolTip().lower()
+        self.assertIn("freezes while its sound plays", tip)
+        self.assertIn("switches to software decoding by itself, for a day", tip)
+        self.assertIn("restart", tip)
+        box.setChecked(False)  # Settings turns it off ...
+        dialog.save_settings()
+        self.assertFalse(ConfigManager().hardware_decoding)
+        box.setChecked(True)  # ... and on again
         dialog.save_settings()
         self.assertTrue(ConfigManager().hardware_decoding)
 
@@ -516,6 +564,9 @@ class DecodingWindowTests(base.WindowCase):
 @unittest.skipIf(base.INSTANCE is None, "libVLC is not available")
 class SoftwareWindowTests(base.WindowCase):
     vlc_instance = base.INSTANCE
+
+    def prepare_config(self):
+        self.config.hardware_decoding = False  # (the default is hardware)
 
     def test_neither_player_watches_for_frozen_pictures(self):
         self.assertFalse(self.window.session.hardware)

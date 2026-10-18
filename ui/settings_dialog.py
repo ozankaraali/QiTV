@@ -326,14 +326,11 @@ class OptionsDialog(QDialog):
         )
         self.settings_layout.addRow("Live latency", self.live_latency_combo)
 
-        self.hardware_decoding_checkbox = QCheckBox(
-            "Hardware video decoding (experimental)", self.settings_tab
-        )
+        self.hardware_decoding_checkbox = QCheckBox("Hardware video decoding", self.settings_tab)
         self.hardware_decoding_checkbox.setToolTip(
-            "Decode video with your graphics chip instead of the processor. It uses less CPU,"
-            " but some TV channels stutter or freeze with it: a channel whose picture freezes"
-            " while its sound plays goes back to software decoding by itself, for a day."
-            " Applies after QiTV restarts."
+            "Decode video with your graphics chip instead of the processor: it uses less CPU."
+            " A channel whose picture freezes while its sound plays switches to software"
+            " decoding by itself, for a day. Applies after QiTV restarts."
         )
         self.hardware_decoding_checkbox.setChecked(self.config_manager.hardware_decoding)
         self.settings_layout.addRow(self.hardware_decoding_checkbox)
