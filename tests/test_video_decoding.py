@@ -347,7 +347,9 @@ class SoftwareOverrideTests(unittest.TestCase):
         self.assertTrue(
             sessions.wait_for(lambda: session.state() is playback.PlaybackState.PLAYING)
         )
-        self.assertTrue(sessions.wait_for(lambda: "video decoder module" in log.read_text()))
+        # "using …", not the "looking for …" line before it (a loaded runner falls between).
+        chosen = "using video decoder module"
+        self.assertTrue(sessions.wait_for(lambda: chosen in log.read_text()))
         session.stop()
         decoders = [
             line for line in log.read_text().splitlines() if "using video decoder module" in line
