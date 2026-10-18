@@ -1116,6 +1116,7 @@ class PipRetryTests(PipCase):
 
     def setUp(self):
         super().setUp()
+        self.catalog.catalogs.ready.add("Portal B")  # set up: its links were made
         self.start_large(0)
 
     def fail_small(self, small, message="The stream could not be opened"):
@@ -1140,6 +1141,22 @@ class PipRetryTests(PipCase):
         self.assertEqual(self.toast.messages(), [(PIP_FAILED, "error")])
         self.assertEqual(len(self.catalog.links), links + 1)
         self.assertFalse(self.sessions.pip_open())
+
+    def test_both_pictures_failing_on_one_portal_sign_it_in_once(self):
+        # Review M5: each retry signed the portal in again: two handshakes, one of them wasted.
+        self.catalog.specs["Portal B"]["max_streams"] = 2
+        three = {**CHANNELS[2], "_provider": "Portal B"}
+        self.controller.tune(three, group_key="10", channels=[three])
+        self.ready("http://stream/3")
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: len(self.live.named("start")) == 2))
+        self.live.play_pipeline()
+        small = self.open_small(self.PORTAL_TWO)
+        links = len(self.catalog.links)
+        self.live.failed.emit("The stream could not be opened")  # the large picture's
+        self.fail_small(small)
+        self.assertEqual(self.catalog.setups, ["Portal B"])  # one sign-in serves both links
+        self.assertEqual(len(self.catalog.links), links + 2)
 
     def test_the_browsed_portal_makes_the_link_again_without_signing_in(self):
         small = self.open_small(CHANNELS[1])

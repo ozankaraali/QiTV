@@ -199,6 +199,7 @@ class FakeCatalog(NavCatalog):
 
     def sign_in_again(self, name):
         self.setups.append(name)
+        self.catalogs.ready.discard(name)  # until its setup is done again
 
     def hub_ready(self, name):
         """A provider's setup is done: the hub says so (link lanes), then the page's view."""
@@ -1132,6 +1133,7 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.requested(), ["One", "One", "Two", "Two"])
 
     def test_a_failed_stb_link_is_made_again_by_its_own_provider(self):
+        self.catalog.catalogs.ready.add("Portal B")  # set up: its link was made
         self.controller.tune(PORTAL_ONE, group_key="10", channels=[PORTAL_ONE])
         self.ready("http://stream/1")
         self.session.errorOccurred.emit("The stream could not be opened")

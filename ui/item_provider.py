@@ -62,7 +62,13 @@ def max_connections(catalog, item: dict) -> Optional[int]:
 
 def sign_in_again(catalog, item: dict) -> None:
     """An STB retry: the item's own portal signs in again before its next link. The browsed
-    provider does not (as before 2.1: the next link it makes has a fresh play token)."""
+    provider does not (as before 2.1: the next link it makes has a fresh play token), nor one
+    that is not set up now: its sign-in is under way (the other picture's retry, say), and the
+    next link waits for it, or the link asks for one."""
     name = provider_of(item)
-    if name and name != catalog.current_provider_name():
-        catalog.sign_in_again(name)
+    if not name or name == catalog.current_provider_name():
+        return
+    hub = getattr(catalog, "catalogs", None)
+    if hub is not None and not hub.is_ready(name):
+        return
+    catalog.sign_in_again(name)
