@@ -474,8 +474,13 @@ class TVController(QObject):
         self._current, self._cid = None, None
 
     def playing(self) -> bool:
-        """Something plays, or its stream is opening."""
-        return not self._closed and self._has_media()
+        """Something plays, or its stream is opening; or the channel plays small while the
+        title it went small for is on its way."""
+        return not self._closed and (self._has_media() or self._title_on_its_way())
+
+    def _title_on_its_way(self) -> bool:
+        sessions = self.sessions
+        return self._freed_for is not None and sessions is not None and sessions.pip_open()
 
     def enter_library_playing(self) -> None:
         """The window opens the Library with the player in a corner (2.1): what plays keeps
@@ -489,6 +494,10 @@ class TVController(QObject):
         if self._closed:
             return
         self._flow.enter_library()
+        if self._title_on_its_way():
+            # The title the channel went small for is dropped, as a link on its way is when the
+            # Library opens: the channel takes the large picture back and plays on.
+            self._give_large_back(self._freed_for)
         self._guide.close()
         if self._digits:
             self.zap.cancel_digits()
@@ -1249,6 +1258,7 @@ class TVController(QObject):
         self._audio_id = self._subtitle_id = None
         self._tuning.stop()
         self._autoplay.drop()  # the Next card, and its wait, were the other picture's
+        self._freed_for = None  # a title on its way for the large picture was dropped
         if self._digits:
             self.zap.cancel_digits()
         context = view.context

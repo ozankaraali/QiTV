@@ -818,6 +818,60 @@ class LibraryPlayTests(PipCase):
         self.assertFalse(self.sessions.pip_open())
         self.assertEqual(self.toast.messages()[-1], ("Harbor IPTV: Portal down", "error"))
 
+    def pages(self):
+        """TVPages over a window whose stack shows the Library with the player in its corner."""
+        library_page, player_page = object(), object()
+        stack = mock.Mock()
+        stack.mode.return_value = PageStack.CORNER
+        stack.currentWidget.return_value = library_page
+
+        def show(mode, page):
+            stack.mode.return_value = mode
+            stack.currentWidget.return_value = page
+
+        stack.show_player.side_effect = lambda: show(PageStack.PLAYER, player_page)
+        stack.show_library.side_effect = lambda corner: show(
+            PageStack.CORNER if corner else PageStack.LIBRARY, library_page
+        )
+        window = mock.Mock(
+            pages=stack,
+            library_page=library_page,
+            player_page=player_page,
+            controller=self.controller,
+        )
+        window.closing.return_value = False
+        return PagesForTest(window), stack
+
+    def test_back_to_the_library_before_the_films_link_came_keeps_the_channel_playing(self):
+        # Sweep B follow-up: ‹ Library (or Esc) then found nothing playing and stopped both.
+        self.start_large(0)
+        self.controller.enter_library_playing()
+        pages, stack = self.pages()
+        pages.play(MOVIE, "movie", play_context())  # One goes small; Heat's link is on its way
+        self.assertTrue(self.sessions.pip_open())
+        pages.back_to_library()
+        stack.show_library.assert_called_with(corner=True)  # One plays on, in the corner
+        self.assertIs(self.sessions.large(), self.main_slot)  # large again: the film is dropped
+        self.assertFalse(self.sessions.pip_open())
+        self.assertNotIn(("stop",), self.live.calls)
+        self.assertFalse(self.session.muted)
+        self.ready("http://vod/heat.mkv")  # late: it opens nothing
+        self.assertEqual(self.pip_session.plays, [])
+
+    def test_a_swap_while_the_films_link_comes_leaves_nothing_to_give_back_later(self):
+        self.start_large(1)
+        self.start_large(0)  # One, after Two
+        self.controller.enter_library_playing()
+        self.controller.play_vod(MOVIE, "movie", play_context())  # One small, Heat on its way
+        self.controller.handle(Action.SWAP)  # One large again, the empty picture closes
+        self.assertFalse(self.sessions.pip_open())
+        self.controller.handle(Action.PIP)  # Two, small
+        self.ready("http://stream/2")
+        self.assertTrue(wait_until(self.sessions.pip_open))
+        self.controller.enter_library_playing()
+        self.assertIs(self.sessions.large(), self.main_slot)  # nothing swapped
+        self.assertTrue(self.sessions.pip_open())
+
     def test_a_movie_of_another_provider_keeps_the_channel_small_whatever_its_limit(self):
         self.start_large(0)  # Home, two streams
         self.play_from_library({**MOVIE, "_provider": "Harbor IPTV"})
