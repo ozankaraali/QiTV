@@ -1,3 +1,6 @@
+import contextlib
+import gc
+import io
 import os
 import unittest
 from unittest import mock
@@ -208,6 +211,23 @@ class PageStackTests(StackCase):
         stack.show_player()
         send(inner, QEvent.Type.MouseButtonPress, inner.mapToGlobal(QPoint(5, 5)))
         self.assertEqual(seen, [inner])  # on the player page: its own
+
+    def test_a_stack_collected_with_its_views_reports_no_error(self):
+        # Review M4: in a reference cycle (as a test case or a window makes), the collector
+        # clears the stack's attributes before Qt deletes it and its views, whose last events
+        # still reach its filter: "AttributeError: no attribute '_mode'" on stderr.
+        player, library = QWidget(), QWidget()
+        QWidget(player)
+        stack = PageStack(player, library, FakeConfig())
+        stack.resize(400, 300)
+        stack.show()
+        stack.close()
+        stack.cycle = stack
+        del stack, player, library
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            gc.collect()
+            QApplication.processEvents()
+        self.assertEqual(err.getvalue(), "")
 
     def test_the_corners_are_the_four_names(self):
         stack = self.make_stack()

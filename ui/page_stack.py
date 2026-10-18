@@ -159,12 +159,17 @@ class PageStack(QWidget):
             watched.installEventFilter(self)  # once: Qt drops an earlier install of it
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        mode = getattr(self, "_mode", None)
+        if mode is None:
+            # Collected in a reference cycle: the collector cleared the attributes before Qt
+            # deletes the stack and its views, whose last events still come here.
+            return False
         if isinstance(event, QChildEvent) and event.type() == QEvent.Type.ChildAdded:
             child = event.child()
             if isinstance(child, QWidget):
                 self._watch(child)  # a view added to the player page later
             return False
-        if self._mode != self.CORNER or event.type() not in _MOUSE_EVENTS:
+        if mode != self.CORNER or event.type() not in _MOUSE_EVENTS:
             return False
         if isinstance(event, QMouseEvent):
             self._mouse(event)
