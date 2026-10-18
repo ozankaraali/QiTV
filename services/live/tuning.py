@@ -16,8 +16,9 @@ keeps their times; a time in the future (the clock was set back) counts as expir
 
 `LiveTuning` keeps the entries in memory and in `live_tuning.json` beside the config, at
 most `MAX_ENTRIES` (beyond it the least recently learned go first, a locked rate or direct
-play last). The file is read once; each change writes it on one background thread, the
-newest state only, through a temporary file swapped in. A missing, unreadable or corrupt file,
+play still in force last). The file is read once; each change writes it on one background
+thread, the newest state only, through a temporary file swapped in. A missing, unreadable or
+corrupt file,
 or one of another version, counts as empty, and a bad entry is left out. The learned target
 is an optional field of version 1, so 2.0.x reads 2.1's file (it ignores the field): one
 that makes no sense, or would not change the next tune (`Learned.informative`), is left out
@@ -41,7 +42,7 @@ from typing import Any, Callable, Mapping, Optional
 
 import orjson as json
 
-from services.live.learned_target import EVENTS_MAX, HOURS_MAX, NEED_MAX_S, Learned
+from services.live.learned_target import EVENTS_MAX, FLOOR_S, HOURS_MAX, NEED_MAX_S, Learned
 from services.redact import safe_message
 
 _LOG = logging.getLogger(__name__)
@@ -88,19 +89,23 @@ def _finite(value: Any, low: float, high: float) -> bool:
 
 def _learned(value: Any) -> Optional[dict[str, Any]]:
     """A learned target as `remember()` writes it, when it makes sense and would change the
-    next tune (`Learned.informative`); else None."""
+    next tune (`Learned.informative`, under the floor it was learned with); else None."""
     if not isinstance(value, dict):
         return None
     need, events, hours = value.get("need"), value.get("events"), value.get("hours")
+    floor = value.get("floor", FLOOR_S)  # written only when not Normal's
     if need is not None and not _finite(need, 0.0, NEED_MAX_S):
         return None
-    if events is None or hours is None:
+    if events is None or hours is None or not _finite(floor, 0.0, NEED_MAX_S):
         return None
     if not _finite(events, 0.0, EVENTS_MAX) or not _finite(hours, _MIN_HOURS, HOURS_MAX):
         return None
-    if not Learned(need, float(events), float(hours)).informative():
+    if not Learned(need, float(events), float(hours), float(floor)).informative():
         return None
-    return {"need": need, "events": events, "hours": hours}
+    fields = {"need": need, "events": events, "hours": hours}
+    if floor != FLOOR_S:
+        fields["floor"] = floor
+    return fields
 
 
 def _entry(value: Any) -> Optional[dict[str, Any]]:
@@ -167,7 +172,9 @@ class LiveTuning:
         learned = None
         if tuning.learned is not None:
             what = tuning.learned
-            learned = _learned({"need": what.need, "events": what.events, "hours": what.hours})
+            learned = _learned(
+                {"need": what.need, "events": what.events, "hours": what.hours, "floor": what.floor}
+            )
         if tuning.extra is None and not tuning.rate_locked and not tuning.direct and not learned:
             if self._entries.pop(key, None) is None:
                 return
@@ -191,7 +198,7 @@ class LiveTuning:
                     if old is not None and old.get(flag) and 0 <= now - old[at] < lasts:
                         entry[at] = old[at]
             self._entries[key] = entry
-            self._trim()
+            self._trim(now)
         self._save()
 
     def flush(self, timeout: float = 5.0) -> None:
@@ -226,15 +233,18 @@ class LiveTuning:
                 entries[key] = entry
         return entries
 
-    def _trim(self) -> None:
+    def _trim(self, now: Optional[float] = None) -> None:
         """Drop the entries beyond the cap: the least recently learned first, those with a
-        locked rate or direct play last."""
+        locked rate or direct play still in force last."""
         excess = len(self._entries) - self._max
         if excess > 0:
+            when = self._now() if now is None else now
 
             def worth(key: str) -> tuple[bool, float]:
                 entry = self._entries[key]
-                return bool(entry["rate_locked"] or entry["direct"]), entry["used"]
+                locked = entry["rate_locked"] and 0 <= when - entry["locked_at"] < RATE_LOCK_S
+                direct = entry["direct"] and 0 <= when - entry["direct_at"] < DIRECT_S
+                return bool(locked or direct), entry["used"]
 
             for key in sorted(self._entries, key=worth)[:excess]:
                 del self._entries[key]

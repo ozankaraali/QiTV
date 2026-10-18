@@ -377,6 +377,58 @@ class LiveTuningTests(unittest.TestCase):
             set(json.loads(self.path.read_text())["channels"]), {"locked", "direct", "c"}
         )
 
+    def test_a_lock_that_expired_does_not_outweigh_a_fresh_learned_target(self):
+        store = self.store(max_entries=2)
+        store.remember("expired", Tuning(rate_locked=True))
+        store.remember("direct", Tuning(direct=True))
+        self.clock.now += tuning.RATE_LOCK_S + 10  # both read as nothing now
+        store.remember("a", Tuning(learned=Learned(need=8.0)))
+        self.assertEqual(store.get("a"), Tuning(learned=Learned(need=8.0)))
+        store.remember("b", Tuning(learned=Learned(need=9.0)))
+        self.assertEqual(store.get("a"), Tuning(learned=Learned(need=8.0)))
+        self.assertEqual(store.get("b"), Tuning(learned=Learned(need=9.0)))
+        store.flush()
+        self.assertEqual(set(json.loads(self.path.read_text())["channels"]), {"a", "b"})
+
+    def test_a_learned_target_is_judged_under_its_own_floor(self):
+        target = LearnedTarget(floor=1.0)
+        now = 1000.0
+        for n in range(1, 400):  # batches of 1 s every second: a need of 2 s, over 1.0 + 0.25
+            for tick in range(4):
+                now += 0.25
+                target.arrivals.add(now, n - 1 + (1.0 if tick == 3 else 0.0))
+        learned = target.learned()
+        self.assertIsNotNone(learned)
+        self.assertEqual(learned.floor, 1.0)
+        store = self.store()
+        store.remember("a", Tuning(learned=learned))
+        store.remember("normal", Tuning(learned=Learned(need=2.0)))  # under Normal's floor
+        store.flush()
+        channels = json.loads(self.path.read_text())["channels"]
+        self.assertEqual(set(channels), {"a"})
+        self.assertEqual(channels["a"]["learned"]["floor"], 1.0)
+        self.assertEqual(self.store().get("a").learned, learned)
+
+    def test_an_old_extra_does_not_come_back_once_its_lesson_faded(self):
+        # Part B's way: the next tune reads 2.0.2's extra as a prior; once that faded,
+        # `learned()` is None and the channel is remembered with extra None, so the old extra
+        # is gone, not read again.
+        channels = {"a": {"extra": 3.0, "rate_locked": True, "used": self.clock.now}}
+        self.path.write_text(json.dumps({"version": 1, "channels": channels}))
+        store = self.store()
+        tuned = store.get("a")
+        target = LearnedTarget(tuned.learned, tuned.extra)
+        self.assertAlmostEqual(target.target(), lt.FLOOR_S + 3.0)
+        target.played(3 * 3600.0)
+        self.assertIsNone(target.learned())
+        store.remember("a", Tuning(None, tuned.rate_locked, tuned.direct, target.learned()))
+        again = store.get("a")
+        self.assertEqual(again, Tuning(rate_locked=True))
+        self.assertEqual(LearnedTarget(again.learned, again.extra).target(), lt.FLOOR_S)
+        store.remember("a", Tuning(None, False, False, None))  # nothing left: forgotten
+        store.flush()
+        self.assertEqual(json.loads(self.path.read_text())["channels"], {})
+
     def test_the_cap_holds_with_learned_entries(self):
         store = self.store(max_entries=3)
         for key in ("a", "b", "c", "d"):

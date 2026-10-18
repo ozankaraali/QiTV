@@ -1,5 +1,6 @@
 """The learned live target (2.1 stay-live stage 4): arrivals, the starvation prior, the target."""
 
+from collections import deque
 import math
 import random
 import unittest
@@ -29,6 +30,7 @@ class Source:
         self.edge = edge
         self.now = now
         self.began = []  # ticks on which `add()` said a batch began
+        self.levels = []  # (seconds after START, edge - wall) each tick
 
     def run(self, pieces, until, *, stalled=lambda t: False):
         """Tick until `until` (seconds after START); `pieces`: (seconds after START, media).
@@ -42,7 +44,27 @@ class Source:
                 self.model.stall()
             if self.model.add(self.now, self.edge):
                 self.began.append(self.now)
+            self.levels.append((self.now - START, self.edge - (self.now - START)))
         return self
+
+
+def dry_runs(levels, target, skip=120.0, window=60.0, caching=0.3):
+    """Times VLC would run dry holding a mean lag of `target` (the mean over the last
+    `window`, as stay-live steers it): the lag under VLC's own caching, once per dip."""
+    recent, total, count, inside = deque(), 0.0, 0, False
+    for t, level in levels:
+        recent.append((t, level))
+        total += level
+        while recent[0][0] < t - window:
+            total -= recent.popleft()[1]
+        if t < skip:
+            continue
+        lag = target - (total / len(recent) - level)
+        if lag < caching and not inside:
+            count, inside = count + 1, True
+        elif lag >= caching + TICK:
+            inside = False
+    return count
 
 
 def regular(gap, media, until, *, start=0.0):
@@ -95,6 +117,44 @@ def downloaded(batches, seed, took=(0.05, 0.2)):
         count = max(1, int(seconds / 0.02))
         pieces += [(t0 + seconds * (k + 1) / count, media / count) for k in range(count)]
     return pieces
+
+
+def truth(levels, skip=120.0):
+    """The mean lag that never runs dry: the mean level less its deepest dip, plus a second."""
+    later = [level for t, level in levels if t > skip]
+    return sum(later) / len(later) - min(later) + 1.0
+
+
+def lumpy(n):
+    """Four small batches and a big one, every 7 s (35 s of media per 35 s)."""
+    return 19.0 if n % 5 == 4 else 4.0
+
+
+def starvations_learned(needed, told, hours=6):
+    """Trouble every 10 min that a margin under `needed` can't hold out: starvations per hour
+    after the first two (`told`: the trouble a margin held out is told as `absorbed()`)."""
+    target, late = LearnedTarget(), 0
+    for minute in range(hours * 60):
+        if minute % 10 == 0:
+            if target.margin() < needed - 1e-9:
+                target.starved()
+                late += minute >= 120
+            elif told:
+                target.absorbed()
+        target.played(60.0)
+    return late / (hours - 2)
+
+
+def starvations_two_zero_two(needed, hours=6):
+    """The same with 2.0.2's AutoTarget."""
+    auto, late = AutoTarget(), 0
+    for minute in range(hours * 60):
+        if minute % 10 == 0 and auto.target(0.0) - lt.FLOOR_S < needed - 1e-9:
+            auto.trouble(0.0)
+            late += minute >= 120
+        for _ in range(4):
+            auto.quiet(15.0)
+    return late / (hours - 2)
 
 
 def need_after(pieces, until, burst=0.0, **kwargs):
@@ -281,6 +341,50 @@ class ArrivalModelTests(unittest.TestCase):
                 rhythm = [(t + ticks * TICK, media) for t, media in steady(600, seed=3)]
                 self.assertLessEqual(need_after(flush + rhythm, 600), lt.FLOOR_S)
 
+    def test_a_slow_download_cut_into_pieces_keeps_its_cycle(self):
+        # HLS segments downloading at under 1.5x come in ~1 s pieces. The idle time between
+        # two segments is the source's rhythm, not a stall (trouble is judged against the
+        # gaps between batches after a still edge), and the troughs before them set the dips.
+        # The gap term holds the idle time and a piece (6 s and 7 s), above the dips' 3.2 s
+        # and 4.0 s.
+        for seg, took, need in ((15.0, (10.2, 10.8), 6.0), (20.0, (13.5, 14.5), 7.0)):
+            for seed in range(4):
+                with self.subTest(seg=seg, seed=seed):
+                    target = LearnedTarget()
+                    pieces = downloaded(regular(seg, seg, 600), seed, took)
+                    source = Source(target.arrivals).run(pieces, 600)
+                    self.assertAlmostEqual(target.target(seg), need, delta=0.5)
+                    self.assertGreater(target.target(seg), truth(source.levels))
+                    self.assertEqual(dry_runs(source.levels, target.target(seg)), 0)
+
+    def test_a_download_twice_as_fast_still_needs_its_whole_cycle(self):
+        for seed in range(4):
+            target = LearnedTarget()
+            pieces = downloaded(regular(15.0, 15.0, 600), seed, (7.3, 7.7))
+            source = Source(target.arrivals).run(pieces, 600)
+            self.assertAlmostEqual(target.target(15.0), 16.0, delta=TICK + 1e-6)
+            self.assertEqual(dry_runs(source.levels, target.target(15.0)), 0)
+
+    def test_a_backlog_never_switches_the_dips_off(self):
+        # The dips of a lumpy source need 10.4 s; a backlog delivered at once (the first
+        # fetch's, or one after a stall) is no drift of the source's.
+        rhythm = regular(7.0, lumpy, 1500)
+        lost = [(t, media) for t, media in rhythm if not 600 <= t < 630]
+        cases = {
+            "first fetch": ([(0.75, 30.0)] + rhythm, 200),
+            "stall, then the backlog": (lost + [(630.0, 30.0)], 650),
+            "stall, nothing back": (lost, 650),
+        }
+        for name, (pieces, first) in cases.items():
+            with self.subTest(case=name):
+                model, source, needs = ArrivalModel(), None, []
+                source = Source(model)
+                for until in range(first, 1501, 50):
+                    source.run([p for p in pieces if source.now - START < p[0] <= until], until)
+                    needs.append(model.need())
+                self.assertGreaterEqual(min(needs), 10.0, needs)
+                self.assertLessEqual(max(needs), 10.8, needs)
+
     def test_a_reset_forgets_the_edge_but_keeps_what_was_learned(self):
         model = ArrivalModel()
         source = Source(model).run(six_and_twelve(600), 600)
@@ -387,7 +491,7 @@ class StarvationPriorTests(unittest.TestCase):
         prior.starved()
         self.assertAlmostEqual(prior.margin(), 2 * math.log2(3), places=6)
         spaced = StarvationPrior()
-        for _ in range(6):  # one every ten minutes of playing
+        for _ in range(4):  # one every ten minutes of playing (under the cap)
             before = spaced.margin()
             spaced.starved()
             self.assertGreater(spaced.margin() - before, 1.0)
@@ -405,7 +509,7 @@ class StarvationPriorTests(unittest.TestCase):
         for _ in range(20):
             tight.starved(room=2.0)
         self.assertAlmostEqual(tight.margin(), 2.0)
-        tight.played(1800.0)
+        tight.played(lt.HOLD_S + 1800.0)
         self.assertLess(tight.margin(), 1.01)  # it did not pile up beyond the room
 
     def test_a_dip_counts_once_at_its_closest(self):
@@ -425,17 +529,50 @@ class StarvationPriorTests(unittest.TestCase):
         flood.near_miss(0.1)  # a new dip
         self.assertGreater(flood.margin(), once.margin() + 0.2)
 
-    def test_quiet_playing_lowers_it_steadily_back_to_nothing(self):
+    def test_quiet_playing_holds_it_then_lowers_it_steadily_back_to_nothing(self):
         prior = StarvationPrior()
         prior.starved()
         start, margins = prior.margin(), []
         for _ in range(120):  # two hours, a minute at a time
             prior.played(60.0)
             margins.append(prior.margin())
+        held = int(lt.HOLD_S / 60)
         self.assertEqual(margins, sorted(margins, reverse=True))
-        self.assertLess(margins[30], start / 2)  # half an hour
-        self.assertEqual(margins[59], 0.0)  # an hour
+        self.assertEqual(margins[held - 1], start)  # 20 minutes: it holds
+        self.assertLess(margins[held + 30], start / 2)  # then half an hour halves it
+        self.assertEqual(margins[held + 50], 0.0)  # and it is gone within the hour
         self.assertEqual(margins[-1], 0.0)
+
+    def test_trouble_held_out_or_all_but_needed_holds_the_margin_again(self):
+        for name in ("absorbed", "near_miss"):
+            with self.subTest(told=name):
+                prior = StarvationPrior()
+                prior.starved()
+                start = prior.margin()
+                for _ in range(6):  # an hour and a half, trouble every quarter of an hour
+                    prior.played(900.0)
+                    prior.absorbed() if name == "absorbed" else prior.near_miss(0.45)
+                peak = prior.margin()
+                self.assertGreaterEqual(peak, start)
+                prior.played(lt.HOLD_S)
+                self.assertEqual(prior.margin(), peak)  # held to the end of the hold
+                prior.played(60.0)
+                self.assertLess(prior.margin(), peak)
+        told = StarvationPrior()
+        told.absorbed()  # no evidence of anything: no margin
+        self.assertEqual(told.margin(), 0.0)
+
+    def test_trouble_every_ten_minutes_starves_less_than_two_zero_two(self):
+        # Trouble every 10 min of playing that a margin under `needed` cannot hold out: the
+        # starvations per hour once two hours passed, against 2.0.2's AutoTarget in the same
+        # run (1.5 s more per trouble, 0.5 s less per 5 quiet minutes).
+        for needed in (4.5, 5.0, 6.0):
+            with self.subTest(needed=needed):
+                old = starvations_two_zero_two(needed)
+                self.assertEqual(old, 4.0)
+                self.assertLessEqual(starvations_learned(needed, told=False), 2.5)
+                self.assertLess(starvations_learned(needed, told=False), old)
+                self.assertEqual(starvations_learned(needed, told=True), 0.0)  # it stops
 
     def test_a_long_run_of_trouble_is_back_within_two_hours_of_quiet(self):
         for need in (0.0, 8.0, 13.0):
@@ -448,7 +585,7 @@ class StarvationPriorTests(unittest.TestCase):
                     peak = max(peak, target.prior.margin())  # the belief's own margin
                     target.played(60.0)
                 self.assertLessEqual(peak, target.room() + 1e-9)  # never beyond the room
-                for _ in range(120):
+                for _ in range(int(lt.HOLD_S / 60) + 120):  # the hold, then two hours
                     target.played(60.0)
                 self.assertEqual(target.target(), max(lt.FLOOR_S, target.need()))
 
@@ -518,12 +655,14 @@ class LearnedTargetTests(unittest.TestCase):
         self.assertGreater(targets[1].target(), targets[2].target())
         self.assertGreater(targets[2].target(), base)
 
-    def test_an_hour_of_quiet_brings_it_back_to_the_need(self):
+    def test_after_the_hold_an_hour_of_quiet_brings_it_back_to_the_need(self):
         target = LearnedTarget()
         Source(target.arrivals).run(six_and_twelve(600), 600)
         need = target.need()
         target.starved()
         raised = target.target()
+        target.played(lt.HOLD_S)
+        self.assertEqual(target.target(), raised)
         for _ in range(1800):
             target.played(1.0)
         self.assertLess(target.target() - need, (raised - need) / 2 + 1e-9)
