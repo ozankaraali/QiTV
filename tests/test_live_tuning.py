@@ -308,6 +308,20 @@ class LiveTuningTests(unittest.TestCase):
         self.assertGreaterEqual(again.target(10.0), 12.5)
         self.assertAlmostEqual(again.target(10.0), target.target(10.0), delta=0.01)
 
+    def test_a_learned_only_segment_cover_round_trips_through_the_file(self):
+        # The burst floor off (stage 4b's A/B), a lost 30 s segment covered over a 6 s need:
+        # a margin beyond today's 7.5 s, which the file keeps whole.
+        target = LearnedTarget(Learned(need=6.0), segment_floor=False)
+        target.starved(30.0)
+        self.assertAlmostEqual(target.target(30.0), 31.0)  # the segment and 1 s
+        store = self.store()
+        store.remember("a", Tuning(learned=target.learned()))
+        store.flush()
+        restored = self.store().get("a")
+        self.assertIsNotNone(restored.learned)
+        again = LearnedTarget(restored.learned, segment_floor=False)
+        self.assertAlmostEqual(again.target(30.0), target.target(30.0), delta=0.01)
+
     def test_a_two_zero_two_extra_reads_as_a_prior(self):
         channels = {"a": {"extra": 3.0, "used": self.clock.now}}
         self.path.write_text(json.dumps({"version": 1, "channels": channels}))

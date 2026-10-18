@@ -206,12 +206,13 @@ def lossy_hls(seed, until, seg, took, every=(180.0, 300.0)):
 
 class ClosedLoop:
     """VLC holding the target as its mean lag over the last `window`, wired as part B is told
-    (`LearnedTarget` docstring), or 2.0.2's `AutoTarget` (`learned` False). `dry`: when it ran
-    dry (from 30 s on); `targets`: the target every 30 s after ten minutes."""
+    (`LearnedTarget` docstring; `segment_floor` None: the module's setting), or 2.0.2's
+    `AutoTarget` (`learned` False). `dry`: when it ran dry (from 30 s on); `targets`: the
+    target every 30 s after ten minutes."""
 
-    def __init__(self, burst, learned=True, caching=0.3, window=60.0):
+    def __init__(self, burst, learned=True, caching=0.3, window=60.0, segment_floor=None):
         self.burst, self.caching, self.window = burst, caching, window
-        self.target = LearnedTarget() if learned else None
+        self.target = LearnedTarget(segment_floor=segment_floor) if learned else None
         self.auto = None if learned else AutoTarget()
         self.recent, self.total = deque(), 0.0
         self.dry, self.targets, self.inside, self.previous = [], [], False, None
@@ -266,9 +267,9 @@ class ClosedLoop:
             target.played(TICK) if target else self.auto.quiet(TICK)
 
 
-def closed_loop(pieces, until, burst, learned=True):
+def closed_loop(pieces, until, burst, learned=True, segment_floor=None):
     """`ClosedLoop` over `pieces` until `until`: (when VLC ran dry, the target every 30 s)."""
-    return ClosedLoop(burst, learned).run(pieces, until)
+    return ClosedLoop(burst, learned, segment_floor=segment_floor).run(pieces, until)
 
 
 def starvations_learned(needed, told, hours=6):
@@ -363,6 +364,12 @@ class ArrivalModelTests(unittest.TestCase):
                     # Announced as 12 s: never under its burst (as 2.0.2), nothing to add.
                     self.assertEqual(target.target(12.0), 12.0)
                     self.assertFalse(target.adjusted(12.0))
+                    # Learned only: the need, whatever the playlist announces.
+                    target.segment_floor = False
+                    for burst in (6.0, 12.0):
+                        self.assertGreaterEqual(target.target(burst), 7.5)
+                        self.assertLessEqual(target.target(burst), 9.0)
+                        self.assertTrue(target.adjusted(burst))
 
     def test_ten_s_every_twelve_needs_more_than_the_batch_interval_before_any_starvation(self):
         # TARGETDURATION 10 whose batches land every 12 s: Auto's 2.0.2 target was 10 (the
@@ -490,8 +497,8 @@ class ArrivalModelTests(unittest.TestCase):
         # two segments is the source's rhythm, not a stall (trouble is judged against the
         # gaps between batches after a still edge), and the troughs before them set the dips.
         # The gap term holds the idle time and a piece (6 s and 7 s), above the dips' 3.2 s
-        # and 4.0 s. The target stays at the burst (a segmented source never goes under it,
-        # so a lost segment is held out as in 2.0.2); the need would hold the rhythm alone.
+        # and 4.0 s. With the burst floor the target stays at the burst (a lost segment is
+        # held out as in 2.0.2); learned only, it is the need, which holds the rhythm alone.
         for seg, took, need in ((15.0, (10.2, 10.8), 6.0), (20.0, (13.5, 14.5), 7.0)):
             for seed in range(4):
                 with self.subTest(seg=seg, seed=seed):
@@ -502,6 +509,9 @@ class ArrivalModelTests(unittest.TestCase):
                     self.assertGreater(target.need(seg), truth(source.levels))
                     self.assertEqual(dry_runs(source.levels, target.need(seg)), 0)
                     self.assertEqual(target.target(seg), seg)
+                    target.segment_floor = False
+                    self.assertEqual(target.target(seg), target.need(seg))
+                    self.assertTrue(target.adjusted(seg))  # above the floor
 
     def test_a_download_twice_as_fast_still_needs_its_whole_cycle(self):
         for seed in range(4):
@@ -1032,6 +1042,43 @@ class LearnedTargetTests(unittest.TestCase):
         steady.starved()  # a steady source keeps its whole learned target
         self.assertAlmostEqual(steady.target(), 6.0 + math.log2(3))
 
+    def test_learned_only_a_segmented_source_has_its_need_and_a_segment_covered_when_dry(self):
+        # The burst floor off (stage 4b's A/B): the need alone, the cap leaving room for a lost
+        # segment (the burst + 1 s), and VLC running dry there covers a segment at once.
+        self.assertEqual(learned_target(6.0, 0.0, burst=15.0, segment_floor=False), 6.0)
+        self.assertEqual(learned_target(6.0, 20.0, segment_floor=False), 10.0)  # today's cap
+        self.assertEqual(learned_target(6.0, 20.0, burst=15.0, segment_floor=False), 16.0)
+        self.assertEqual(learned_target(16.0, 20.0, burst=15.0, segment_floor=False), 18.0)
+        target = LearnedTarget(segment_floor=False)  # 15 s segments downloading at 1.45x
+        Source(target.arrivals).run(downloaded(regular(15.0, 15.0, 600.0), 0, (10.2, 10.8)), 600)
+        self.assertAlmostEqual(target.need(15.0), 6.0, delta=0.5)
+        self.assertEqual(target.target(15.0), target.need(15.0))
+        self.assertAlmostEqual(target.room(15.0), 16.0 - target.need(15.0))
+        target.starved(15.0)
+        self.assertAlmostEqual(target.target(15.0), 16.0)
+        fast = LearnedTarget(segment_floor=False)  # the need already holds a segment
+        Source(fast.arrivals).run(downloaded(regular(15.0, 15.0, 600.0), 0, (0.5, 2.0)), 600)
+        need = fast.need(15.0)
+        self.assertGreaterEqual(need, 16.0)
+        fast.starved(15.0)
+        self.assertAlmostEqual(fast.target(15.0), need + math.log2(3), delta=0.05)
+        low = LearnedTarget(Learned(need=2.0), segment_floor=False)
+        self.assertFalse(low.adjusted(15.0))  # at the floor: nothing learned raised it
+        self.assertEqual(low.target(15.0), lt.FLOOR_S)
+
+    def test_a_learned_only_segment_cover_is_remembered(self):
+        # A learned-only margin may go beyond today's 7.5 s (a lost 30 s segment covered over a
+        # need of 6 s): it is remembered and read back whole, the burst floor on or off.
+        target = LearnedTarget(Learned(need=6.0), segment_floor=False)
+        target.starved(30.0)
+        self.assertAlmostEqual(target.target(30.0), 31.0)
+        learned = target.learned()
+        self.assertGreater(learned.events, 10_000.0)
+        again = LearnedTarget(learned, segment_floor=False)
+        self.assertAlmostEqual(again.target(30.0), 31.0, delta=0.01)
+        floored = LearnedTarget(learned)  # the A/B switched back: the cap bounds it
+        self.assertAlmostEqual(floored.target(30.0), 32.0)
+
     def test_a_segmented_source_stalling_is_trouble_at_once(self):
         # As 2.0.2 counted it: a segment late or lost raises the margin before VLC runs dry.
         segmented = LearnedTarget(Learned(need=6.0))
@@ -1043,19 +1090,42 @@ class LearnedTargetTests(unittest.TestCase):
         steady.stalled()  # a steady source's stall is only noted
         self.assertEqual(steady.target(), 6.0)
         self.assertTrue(steady.arrivals._stalled)
+        only = LearnedTarget(Learned(need=6.0), segment_floor=False)
+        only.stalled(15.0)  # learned only: noted, counted when VLC runs dry
+        self.assertEqual(only.target(15.0), 6.0)
+        self.assertTrue(only.arrivals._stalled)
 
     def test_lost_segments_cost_no_more_than_in_two_zero_two(self):
         # HLS 15 s segments downloading at 1.45x, one lost every 3-5 minutes, VLC holding the
-        # target: at its burst (2.0.2's footing) every loss is held out, as then.
+        # target: at its burst (2.0.2's footing) every loss is held out, as then. Learned only,
+        # the first loss runs VLC dry once (its starvation covers a segment at once) and the
+        # later ones are held out.
         for seed in range(2):
-            with self.subTest(seed=seed):
-                pieces = lossy_hls(seed, 3600.0, 15.0, (10.2, 10.8))
-                dry, targets = closed_loop(pieces, 3600.0, 15.0)
-                old, _ = closed_loop(pieces, 3600.0, 15.0, learned=False)
-                self.assertLessEqual(len(dry), len(old))
-                moves = sum(1 for a, b in zip(targets, targets[1:]) if abs(a - b) > 0.5)
-                self.assertLessEqual(moves, 3)
-                self.assertLess(sum(targets) / len(targets), 22.0)  # a segment, not more
+            pieces = lossy_hls(seed, 3600.0, 15.0, (10.2, 10.8))
+            old, _ = closed_loop(pieces, 3600.0, 15.0, learned=False)
+            self.assertEqual(old, [])
+            for segment_floor, most in ((True, 0), (False, 1)):
+                with self.subTest(seed=seed, segment_floor=segment_floor):
+                    dry, targets = closed_loop(pieces, 3600.0, 15.0, segment_floor=segment_floor)
+                    self.assertLessEqual(len(dry), most)
+                    moves = sum(1 for a, b in zip(targets, targets[1:]) if abs(a - b) > 0.5)
+                    self.assertLessEqual(moves, 3)
+                    self.assertLess(sum(targets) / len(targets), 22.0)  # a segment, not more
+
+    def test_the_burst_floor_is_a_switch_on_by_default(self):
+        self.assertTrue(lt.SEGMENT_FLOOR)
+        self.assertTrue(LearnedTarget().segment_floor)
+        self.assertEqual(learned_target(6.0, 0.0, burst=15.0), 15.0)
+        with mock.patch.object(lt, "SEGMENT_FLOOR", False):  # stage 4b's A/B flips it
+            self.assertFalse(LearnedTarget().segment_floor)
+            self.assertTrue(LearnedTarget(segment_floor=True).segment_floor)
+            self.assertEqual(learned_target(6.0, 0.0, burst=15.0), 6.0)
+            self.assertEqual(LearnedTarget(Learned(need=6.0)).target(15.0), 6.0)
+        steady = LearnedTarget(Learned(need=6.0))  # a steady source: the same either way
+        steady.starved()
+        only = LearnedTarget(Learned(need=6.0), segment_floor=False)
+        only.starved()
+        self.assertEqual(steady.target(), only.target())
 
     def test_a_zap_away_and_back_keeps_the_hold(self):
         target = LearnedTarget()
