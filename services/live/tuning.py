@@ -42,7 +42,14 @@ from typing import Any, Callable, Mapping, Optional
 
 import orjson as json
 
-from services.live.learned_target import EVENTS_MAX, FLOOR_S, HOURS_MAX, NEED_MAX_S, Learned
+from services.live.learned_target import (
+    EVENTS_MAX,
+    FLOOR_S,
+    HOLD_S,
+    HOURS_MAX,
+    NEED_MAX_S,
+    Learned,
+)
 from services.redact import safe_message
 
 _LOG = logging.getLogger(__name__)
@@ -93,18 +100,23 @@ def _learned(value: Any) -> Optional[dict[str, Any]]:
     if not isinstance(value, dict):
         return None
     need, events, hours = value.get("need"), value.get("events"), value.get("hours")
-    floor = value.get("floor", FLOOR_S)  # written only when not Normal's
+    floor = value.get("floor", FLOOR_S)  # written only when not Normal's ...
+    hold = value.get("hold", 0.0)  # ... and only when there is one
     if need is not None and not _finite(need, 0.0, NEED_MAX_S):
         return None
     if events is None or hours is None or not _finite(floor, 0.0, NEED_MAX_S):
         return None
     if not _finite(events, 0.0, EVENTS_MAX) or not _finite(hours, _MIN_HOURS, HOURS_MAX):
         return None
+    if not _finite(hold, 0.0, HOLD_S):
+        return None
     if not Learned(need, float(events), float(hours), float(floor)).informative():
         return None
     fields = {"need": need, "events": events, "hours": hours}
     if floor != FLOOR_S:
         fields["floor"] = floor
+    if hold > 0:
+        fields["hold"] = hold
     return fields
 
 
@@ -173,7 +185,13 @@ class LiveTuning:
         if tuning.learned is not None:
             what = tuning.learned
             learned = _learned(
-                {"need": what.need, "events": what.events, "hours": what.hours, "floor": what.floor}
+                {
+                    "need": what.need,
+                    "events": what.events,
+                    "hours": what.hours,
+                    "floor": what.floor,
+                    "hold": what.hold,
+                }
             )
         if tuning.extra is None and not tuning.rate_locked and not tuning.direct and not learned:
             if self._entries.pop(key, None) is None:

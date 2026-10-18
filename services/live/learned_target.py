@@ -5,25 +5,31 @@ play without VLC running dry, learned from how its data arrives and from the tro
 batch downloads (an HLS segment streams in, a raw TS burst comes over a second or more), so an
 arrival is a batch: the ticks on which the edge moved, in a row. A batch ends once the edge
 stood still for `BATCH_GAP_S`, or stood still a tick after bringing much of what a batch
-usually brings (the next one came early); one that comes no faster than it plays (a steady
-source) ends after `BATCH_SPLIT_S` and the next tick starts another, so a steady source
-arrives about once a second; none lasts beyond `BATCH_MAX_S`. Between two batches' starts VLC
-plays at 1x what it holds, so that gap is the media it must have in hand. The need is the
-larger of two: the 95th percentile of the gaps (the usual longest wait) plus half their
-interquartile range (lateness: nothing for a source that keeps its rhythm, more the more its
-gaps wander, as the window may not have shown the longest yet) plus a fixed margin; and the
-95th percentile of how far the edge fell below its own mean just before a batch that began
-after the edge stood still (a trough: deep where a big batch follows several small ones; a
-slow download's pieces begin while it rises) plus the same margin. A source that runs off
-real time (one only a synthetic test makes) would read its drift as dips, so then they are
-not used: its pace is the edge's advance over the dips' window, from the mean of its second
-half against its first. A gap far beyond the rhythm (a stall: trouble) is left out with the
-dip before it, and the window starts afresh after it, or when the edge jumps well above where
-the window has seen it (a backlog at once: a step). The rhythm a stall is judged against is
-the cycle, the gaps between batches that began after the edge stood still (a slow download's
-~1-s pieces would make its idle time look like stalls). Until the tune has seen enough
-batches the need is never lower than what the channel taught before (or than the burst the
-source reports, plus the margin, if it taught nothing yet).
+usually brings (the next one came early); a flow no faster than it plays (a steady source, a
+slow download) is cut every `BATCH_SPLIT_S`, so a steady source arrives about once a second;
+none lasts beyond `BATCH_MAX_S`. Whether the channel's flow is cut is decided once for all its
+batches, by the median rate of its runs (from a batch after a still edge to the next), with
+hysteresis, so a download at the border is not cut one time and whole the next. Between two
+batches' starts VLC plays at 1x what it holds, so that gap is the media it must have in hand.
+The need is the larger of two: the 95th percentile of the gaps (the usual longest wait) plus
+half their interquartile range (lateness: nothing for a source that keeps its rhythm, more the
+more its gaps wander, as the window may not have shown the longest yet) plus a fixed margin;
+and the 95th percentile of the dips, how far the edge fell below its own mean before each
+batch (its lowest since the batch before), the deepest of each `DIP_SLICE_S` of time (deep
+where a big batch follows several small ones, or a flowing source sags; many small batches
+would otherwise hide the deep ones) plus the same margin. A source that runs off real time
+(one only a synthetic test makes) would read its drift as dips, so then they are not used: its
+pace is the edge's advance over the last `DIP_MAX_S`, from the mean of the second half
+against the first. A gap far beyond the rhythm (a stall: trouble) is left out with the dip
+before it, and the windows start afresh after it, or when the edge jumps well above where
+the dips' window has seen it (a backlog at once: a step). The rhythm a stall is judged
+against is the cycle, the gap between batches that began after the edge stood still with
+about a download's worth of batches between (a slow download's ~1-s pieces would make its
+idle time look like stalls), while such cycles are at least half of the batches after a still
+edge; else the gap between any two batches (a flowing source's pauses and stalls are no
+rhythm). Until the tune has seen enough batches the need is never lower than what the channel
+taught before (or than the burst the source reports, plus the margin, if it taught nothing
+yet).
 
 `StarvationPrior` is the belief about how often VLC runs dry: Gamma-like (starvations counted
 over hours of playing, but weighed by the margin in force and tempered as below: not a strict
@@ -37,10 +43,11 @@ headroom under `NEAR_S` when a batch lands) counts a part of one, the more the c
 and near-misses within `NEAR_CALM_S` of playing are one dip, counted at its closest. Nothing
 counted takes the margin beyond the room the cap leaves. Playing counts hours (the more, the
 less one starvation says) and, once `HOLD_S` of it passed since the last starvation, near-miss
-or trouble the margin held out (`absorbed`), tempers the belief: the log of the believed rate
-over the accepted one shrinks with a half-life of playing time, so the margin itself halves
-every `HALF_LIFE_S` of quiet; under `MARGIN_MIN_S` it is none. More trouble only raises the
-margin, quiet only lowers it.
+or trouble the margin got VLC through (`absorbed`: its headroom fell within the margin),
+tempers the belief: the log of the believed rate over the accepted one shrinks with a
+half-life of playing time, so the margin itself halves every `HALF_LIFE_S` of quiet; under
+`MARGIN_MIN_S` it is none. The hold left is remembered with the rest. More trouble only
+raises the margin, quiet only lowers it.
 
 `learned_target()` adds the two: max(floor, need) + margin, at most today's cap (2.0.2's
 `AutoTarget`) with the need in the place of the burst: max(Stable's 6 s + 4 s, need + 2 s).
@@ -53,25 +60,31 @@ The constants: `MARGIN_S` (1 s) is what VLC needs beyond the media itself (its 0
 caching on the pipeline, about 0.5 s to open, the 0.25 s tick the edge is sampled at).
 `BATCH_GAP_S` (0.75 s: three ticks; the helper's own burst meter waits 1 s for bytes, which on
 the tick grid would merge a steady source's 1-s arrivals); `BATCH_SPLIT_S` (1 s) and
-`BATCH_FAST` (1.5: a batch bringing no more than 1.5 s of media per second is no download);
-`BATCH_PART` (half the median of what the last `TYPICAL_GAPS` batches brought: a download
-streams on without a still tick, a steady source's next arrival comes after one);
-`BATCH_MAX_S` (10 s: a 12-s segment downloading at under 2x). `QUANTILE` (95%) of the gaps of
-the last `GAP_WINDOW_S` (10 minutes, at most `MAX_GAPS`) are the usual waits; `LATE_SHARE`
+`BATCH_FAST` (1.5: a flow bringing no more than 1.5 s of media per second is no download; a
+channel turns fast above it plus `BATCH_BAND`, 0.1, and slow again under it less that, by
+the median of the last `TYPICAL_GAPS` runs that moved a second or more; each batch by its own
+until `MIN_GAPS` runs); `BATCH_PART` (half the median of what the last `TYPICAL_GAPS` batches
+brought: a download streams on without a still tick, a steady source's next arrival comes
+after one); `BATCH_MAX_S` (10 s: a 12-s segment downloading at under 2x); `CYCLE_PIECES` (2 x
+`BATCH_MAX_S` / `BATCH_SPLIT_S` = 20: the most batches a cycle may hold, a download of up to
+20 s cut into pieces). Cycles and run rates count for `GAP_WINDOW_S`. `QUANTILE` (95%) of
+the gaps of the last `GAP_WINDOW_S` (10 minutes, at most `MAX_GAPS`) are the usual waits;
+`LATE_SHARE`
 (half) of their interquartile range is the lateness. `MIN_GAPS` (3) batches give a first
 estimate; until `WARM_GAPS` (20) the earlier need holds as a floor; it is estimated at most
 once per `ESTIMATE_EVERY_S` (1 s). A gap (from the last batch after a still edge) longer than
 `OUTLIER_FACTOR` (3) usual cycles and than one plus `STALL_S` (2 s, stay-live's stall bound)
 is trouble, whether or not the caller saw a stall; the usual cycle is the median of the last
-`TYPICAL_GAPS` cycles (of all gaps for a source whose edge never stands still). The dips are
-measured from the mean over `DIP_WINDOW_GAPS` (24) usual cycles, `DIP_MIN_S` to `DIP_MAX_S`
-(20-180 s: longer than `LagFilter`'s, so a pattern of several batches is held whole a few
-times; a window holding part of one more measures from a mean that part pulls off), once it
-held half of that and `MIN_GAPS` batches; an edge more than `STEP_S` (3 s, as `LagFilter`)
-above the highest that window saw is a step. They are not used while the edge advances more
-than `DRIFT_SHARE` (5%) faster or slower than real time over a window that held its whole
-length. `NEED_MAX_S` (60 s, 2.0.2's bound on a remembered extra) bounds the need, and a need
-within `INFO_NEED_S` (0.25 s) of the floor is not worth remembering. The prior believes
+`TYPICAL_GAPS` cycles (of all gaps when cycles are not the rule). The dips are measured from
+the mean over `DIP_WINDOW_GAPS` (24) usual cycles, `DIP_MIN_S` to `DIP_MAX_S` (20-180 s:
+longer than `LagFilter`'s, so a pattern of several batches is held whole a few times; a
+window holding part of one more measures from a mean that part pulls off), once it held half
+of that and `MIN_GAPS` batches, and the deepest of each `DIP_SLICE_S` (30 s) counts; an edge
+more than `STEP_S` (3 s, as `LagFilter`) above the highest that window saw is a step. They are
+not used while the edge advanced more than `DRIFT_SHARE` (5%) faster or slower than real time
+over the last `DIP_MAX_S` (a second's pieces would read a sag as drift over less).
+`NEED_MAX_S` (60 s, 2.0.2's bound on a remembered extra) bounds the need, and a need within
+`INFO_NEED_S` (0.25 s) of the floor is not worth remembering. The prior believes
 `ACCEPTED_PER_H` (one dry run in two hours of playing) with the weight of `PRIOR_H` (an
 hour), so a first starvation adds log2(3) = 1.6 s (2.0.2 added 1.5 s), about 1.1 s once long
 playing counts; `HOLD_S` (20 minutes of playing) it then holds, as 2.0.2 waited for quiet
@@ -110,8 +123,10 @@ MARGIN_S = 1.0
 BATCH_GAP_S = 0.75
 BATCH_SPLIT_S = 1.0
 BATCH_FAST = 1.5
+BATCH_BAND = 0.1
 BATCH_PART = 0.5
 BATCH_MAX_S = 10.0
+CYCLE_PIECES = int(2 * BATCH_MAX_S / BATCH_SPLIT_S)
 QUANTILE = 0.95
 LATE_SHARE = 0.5
 GAP_WINDOW_S = 600.0
@@ -124,6 +139,7 @@ OUTLIER_FACTOR = 3.0
 DIP_WINDOW_GAPS = 24.0
 DIP_MIN_S = 20.0
 DIP_MAX_S = 180.0
+DIP_SLICE_S = 30.0
 DRIFT_SHARE = 0.05
 INFO_NEED_S = 0.25
 _EDGE_EPS = 1e-3  # an edge that moved less than this did not move
@@ -160,6 +176,14 @@ def _quantile(ordered: Sequence[float], share: float) -> float:
     return ordered[low] + (rank - low) * (ordered[high] - ordered[low])
 
 
+def _cycles_rule(counted: int, stills: int) -> bool:
+    """The usual gap is the cycle (between batches after a still edge, with about a
+    download's worth of batches between) when `MIN_GAPS` or more were counted and they are at
+    least half of the batches after a still edge; else the gap between any two batches (a
+    flowing source's occasional pauses are no rhythm)."""
+    return counted >= MIN_GAPS and 2 * counted >= stills
+
+
 def _trouble(gap: float, usual: float) -> bool:
     """A gap that is no rhythm: over `OUTLIER_FACTOR` usual gaps and the usual plus `STALL_S`."""
     return gap > usual + STALL_S and gap > OUTLIER_FACTOR * usual
@@ -184,6 +208,7 @@ class Learned:
     events: float = PRIOR_EVENTS  # the prior's starvations counted (with its pseudo ones) ...
     hours: float = PRIOR_H  # ... over these hours of playing
     floor: float = FLOOR_S  # the floor of the target it was learned under
+    hold: float = 0.0  # seconds of playing its margin still holds
 
     def informative(self) -> bool:
         """It would change the next tune's target: a need above the floor, or a margin."""
@@ -216,8 +241,15 @@ class ArrivalModel:
         self._gaps: deque[_Gap] = deque(maxlen=MAX_GAPS)
         self._recent: deque[float] = deque(maxlen=TYPICAL_GAPS)
         self._usual: Optional[float] = None  # the median of `_recent`
-        self._recent_cycles: deque[float] = deque(maxlen=TYPICAL_GAPS)
+        # Each batch after a still edge: (when, its cycle; None when it was not counted).
+        self._recent_cycles: deque[tuple[float, Optional[float]]] = deque(maxlen=TYPICAL_GAPS)
         self._cycle_from: Optional[float] = None  # when the last batch after stillness began
+        self._since_still = 0  # batches begun since (that one included)
+        self._rates: deque[tuple[float, float]] = deque(maxlen=TYPICAL_GAPS)  # (when, x)
+        self._fast: Optional[bool] = None  # the channel downloads faster than it plays
+        self._run_before: Optional[float] = None  # the edge before the run in progress
+        self._pace_samples: deque[tuple[float, float, float]] = deque()  # (wall, level, weight)
+        self._pace_from: Optional[float] = None
         self._samples: deque[tuple[float, float, float]] = deque()  # (wall, level, weight)
         self._peaks: deque[tuple[float, float]] = deque()  # (wall, level), falling: the max
         self._sum = self._weight = 0.0
@@ -227,6 +259,7 @@ class ArrivalModel:
         self._edge: Optional[float] = None
         self._now: Optional[float] = None  # the last sample's time
         self._moved: Optional[float] = None  # the last tick the edge moved on
+        self._low = math.inf  # the lowest level since the batch in progress began
         self._paused = False  # the edge stood still on the last tick
         self._batch: Optional[tuple[float, float, float]] = None  # (start, from, edge before)
         self._recent_media: deque[float] = deque(maxlen=TYPICAL_GAPS)
@@ -249,16 +282,24 @@ class ArrivalModel:
             return False
         self._expire(now)
         began = False
+        # The lowest the edge stood since the batch began: just before this tick's media.
+        self._low = min(self._low, previous - now)
         if edge > previous + _EDGE_EPS:
             still = self._moved is None or now - self._moved >= BATCH_GAP_S - 1e-9
             began = still or self._begins(now, last, previous)
             if began:
+                if still:
+                    self._run_ends(now, previous)
                 self._arrive(now, previous, still)
                 self._batch = (now, last, previous)
+                if still:
+                    self._run_before = previous
+                self._low = edge - now
             self._moved = now
             self._paused = False
         else:
             self._paused = True
+        self._low = min(self._low, edge - now)
         self._edge, self._now = edge, now
         self._sample(now, edge - now)
         return began
@@ -271,9 +312,11 @@ class ArrivalModel:
     def reset(self) -> None:
         """A new stream or a reopen: forget the edge (the next one is no batch); keep what was
         learned."""
-        self._edge = self._now = self._moved = self._cycle_from = None
+        self._edge = self._now = self._moved = self._cycle_from = self._run_before = None
         self._batch = None
         self._paused = self._stalled = False
+        self._since_still = 0
+        self._low = math.inf
         self._restart_window()
 
     # ---- what it learned ---------------------------------------------------------------------
@@ -328,23 +371,56 @@ class ArrivalModel:
         brought, usual = previous - before, self._usual_media
         if self._paused and usual is not None and brought >= BATCH_PART * usual:
             return True  # a pause after much of what a batch brings: the next one began
-        # A batch no faster than it plays is a steady source's flow: about a second each.
-        slow = brought <= BATCH_FAST * (last - since) + 1e-9
-        return now - start >= BATCH_SPLIT_S - 1e-9 and slow
+        if now - start < BATCH_SPLIT_S - 1e-9:
+            return False
+        # A flow no faster than it plays (a steady source, a slow download) is cut into
+        # pieces of about a second. Once the channel's runs gave their rates (`_run_ends`),
+        # their median decides for all its batches, so a download at the border is not cut
+        # one time and whole the next; until then, each batch's own rate so far.
+        if self._fast is not None:
+            return not self._fast
+        return brought <= BATCH_FAST * max(last - since, _TICK_S) + 1e-9
+
+    def _run_ends(self, now: float, previous: float) -> None:
+        """A run of moving edge (from one batch after a still edge to the next) ended: its rate
+        over the time the edge moved, if that was `BATCH_SPLIT_S` or more (shorter runs never
+        face the cut), classifies the channel."""
+        start, before, moved = self._cycle_from, self._run_before, self._moved
+        if start is None or before is None or moved is None:
+            return
+        moving = moved - start + _TICK_S
+        if moving >= BATCH_SPLIT_S - 1e-9:
+            self._rates.append((now, (previous - before) / moving))
+            self._classify()
+
+    def _classify(self) -> None:
+        if len(self._rates) < MIN_GAPS:
+            return
+        median = statistics.median(rate for _, rate in self._rates)
+        if self._fast is None:
+            self._fast = median > BATCH_FAST
+        elif self._fast:
+            self._fast = median >= BATCH_FAST - BATCH_BAND
+        else:
+            self._fast = median > BATCH_FAST + BATCH_BAND
 
     def _arrive(self, now: float, previous: float, still: bool) -> None:
         """A batch begins at `now` (after the edge stood still: `still`); the edge stood at
         `previous` just before it."""
         usual = self._judged_by()
         self._window_batches += 1
-        cycle = now - self._cycle_from if still and self._cycle_from is not None else None
+        # A cycle: since the last batch after a still edge, about one download's worth of
+        # batches (a source that flows for minutes between two of its stalls has no cycle).
+        cycle = None
+        if still and self._cycle_from is not None and self._since_still <= CYCLE_PIECES:
+            cycle = now - self._cycle_from
         if self._batch is not None:
             gap = now - self._batch[0]
             dip = None
             window_from = self._window_from
             held = window_from is not None and now - window_from >= self._window() / 2
             if held and self._window_batches > MIN_GAPS and self._weight > 0:
-                dip = max(0.0, self._mean() - (previous - now))
+                dip = max(0.0, self._mean() - self._low)
             media = previous - self._batch[2]
             self._gaps.append(_Gap(now, gap, dip, cycle, still, still or self._paused))
             self._recent.append(gap)
@@ -358,18 +434,20 @@ class ArrivalModel:
             span = gap if cycle is None else cycle
             if still and usual is not None and _trouble(span, usual):
                 self._restart_window()  # it may have come back anywhere: the mean afresh
-        if cycle is not None:
-            self._recent_cycles.append(cycle)
+        if still and self._cycle_from is not None:
+            self._recent_cycles.append((now, cycle))
         if still:
-            self._cycle_from = now
+            self._cycle_from, self._since_still = now, 0
+        self._since_still += 1
         self._stalled = False
 
     def _judged_by(self) -> Optional[float]:
-        """The usual gap trouble is judged against: between batches that began after the edge
-        stood still (a slow download's ~1-s pieces would make its idle time a stall), else
-        between any (a source whose edge never stands still)."""
-        if len(self._recent_cycles) >= MIN_GAPS:
-            return float(statistics.median(self._recent_cycles))
+        """The usual gap trouble is judged against (`_usual_gap`), from what the last
+        `GAP_WINDOW_S` saw."""
+        cycles = [cycle for _, cycle in self._recent_cycles]
+        counted = [cycle for cycle in cycles if cycle is not None]
+        if _cycles_rule(len(counted), len(cycles)):
+            return float(statistics.median(counted))
         return self._usual
 
     def _expire(self, now: float) -> None:
@@ -377,21 +455,24 @@ class ArrivalModel:
         while gaps and gaps[0].end < now - GAP_WINDOW_S:
             gaps.popleft()
             self._dirty = True
+        for times in (self._recent_cycles, self._rates):
+            while times and times[0][0] < now - GAP_WINDOW_S:
+                times.popleft()
 
     def _window(self) -> float:
         usual = self._judged_by() or 0.0
         return min(DIP_MAX_S, max(DIP_MIN_S, DIP_WINDOW_GAPS * usual))
 
     def _pace(self) -> float:
-        """Media per second of real time over the dip window: the edge's advance, from the
-        mean level of the window's second half against its first (so the source's own
-        sawtooth does not read as drift); 1.0 until the window held its whole length (it
-        starts afresh after trouble and steps, so a backlog is never counted)."""
-        samples, window_from = self._samples, self._window_from
-        if not samples or window_from is None or self._now is None:
+        """Media per second of real time over the last `DIP_MAX_S`: the edge's advance, from
+        the mean level of that span's second half against its first (so the source's own
+        sawtooth does not read as drift); 1.0 until it held the whole span (it starts afresh
+        with the dips' window, after trouble and steps, so a backlog is never counted)."""
+        samples, since = self._pace_samples, self._pace_from
+        if not samples or since is None or self._now is None:
             return 1.0
         first, last = samples[0][0], samples[-1][0]
-        if self._now - window_from < self._window() - _TICK_S or last - first <= 0:
+        if self._now - since < DIP_MAX_S - _TICK_S or last - first <= 0:
             return 1.0
         middle = (first + last) / 2
         sums = [0.0, 0.0]
@@ -408,6 +489,8 @@ class ArrivalModel:
     def _restart_window(self) -> None:
         self._samples.clear()
         self._peaks.clear()
+        self._pace_samples.clear()
+        self._pace_from = None
         self._sum = self._weight = 0.0
         self._anchor = None
         self._window_from = None
@@ -441,31 +524,44 @@ class ArrivalModel:
             self._weight -= weight
         while len(peaks) > 1 and peaks[0][0] < start:
             peaks.popleft()
+        paced = self._pace_samples
+        if self._pace_from is None:
+            self._pace_from = now
+        paced.append((now, level, dt))
+        while len(paced) > 1 and paced[0][0] < now - DIP_MAX_S:
+            paced.popleft()
 
     def _estimate(self) -> Optional[float]:
-        if len(self._gaps) < MIN_GAPS:
+        records = self._gaps
+        if len(records) < MIN_GAPS:
             return None
-        ordered = sorted(self._gaps, key=lambda g: g.gap)
-        cycles = sorted(g.cycle for g in ordered if g.cycle is not None)
-        if len(cycles) >= MIN_GAPS:
+        cycles = sorted(g.cycle for g in records if g.cycle is not None)
+        stills = sum(1 for g in records if g.after_still)
+        if _cycles_rule(len(cycles), stills):
             usual = _quantile(cycles, 0.5)  # the median, between batches after stillness
         else:
-            usual = _quantile([g.gap for g in ordered], 0.5)
-
-        def trouble(g: _Gap) -> bool:
-            return g.after_still and _trouble(g.gap if g.cycle is None else g.cycle, usual)
-
-        rhythm = [g for g in ordered if not trouble(g)]
-        if len(rhythm) < MIN_GAPS:
+            usual = _quantile(sorted(g.gap for g in records), 0.5)
+        beyond = max(usual + STALL_S, OUTLIER_FACTOR * usual)  # `_trouble`, in one bound
+        gaps: list[float] = []
+        # The deepest dip of each `DIP_SLICE_S` of time, so many small batches (a slow
+        # download's pieces, a flowing source's) don't hide the deep ones among shallow ones:
+        # the 95th percentile of those, troughs and all.
+        deepest: dict[int, float] = {}
+        for g in records:
+            if g.after_still and (g.gap if g.cycle is None else g.cycle) > beyond:
+                continue  # trouble, not rhythm
+            gaps.append(g.gap)
+            dip = g.dip
+            if dip is not None:
+                slot = int(g.end // DIP_SLICE_S)
+                if dip > deepest.get(slot, -1.0):
+                    deepest[slot] = dip
+        if len(gaps) < MIN_GAPS:
             return None
-        gaps = [g.gap for g in rhythm]  # still in order
+        gaps.sort()
         late = _quantile(gaps, 0.75) - _quantile(gaps, 0.25)
         need = _quantile(gaps, QUANTILE) + LATE_SHARE * late + MARGIN_S
-        # The dips before batches that began after the edge stood still are the troughs (a
-        # slow download's pieces begin while the edge rises); a source with none: all.
-        dips = sorted(g.dip for g in rhythm if g.dip is not None and g.trough)
-        if len(dips) < MIN_GAPS:
-            dips = sorted(g.dip for g in rhythm if g.dip is not None)
+        dips = sorted(deepest.values())
         if len(dips) >= MIN_GAPS and abs(self._pace() - 1.0) <= DRIFT_SHARE:
             need = max(need, _quantile(dips, QUANTILE) + MARGIN_S)
         return min(need, NEED_MAX_S)
@@ -479,11 +575,19 @@ class StarvationPrior:
     stands for: hours x `ACCEPTED_PER_H` x 2^risk.
     """
 
-    def __init__(self, events: Optional[float] = None, hours: Optional[float] = None) -> None:
-        """A restored belief (`Learned.events`, `Learned.hours`), or the prior's."""
+    def __init__(
+        self,
+        events: Optional[float] = None,
+        hours: Optional[float] = None,
+        hold: Optional[float] = None,
+    ) -> None:
+        """A restored belief (`Learned.events`, `Learned.hours`, `Learned.hold`), or the
+        prior's."""
         self.hours = PRIOR_H
         self.risk = 0.0
         self._hold = 0.0  # seconds of playing the margin still holds (after a starvation)
+        if hold is not None and _finite(hold):
+            self._hold = min(max(0.0, float(hold)), HOLD_S)
         self._calm = math.inf  # seconds played since the current dip's first near-miss
         self._dip = 0.0  # the share of a starvation that dip counted ...
         self._dip_weight = 1.0  # ... each share standing for this many with no margin
@@ -512,6 +616,11 @@ class StarvationPrior:
     def events(self) -> float:
         return self.hours * self.rate()
 
+    @property
+    def hold(self) -> float:
+        """Seconds of playing the margin still holds before it starts to fade."""
+        return self._hold
+
     def rate(self) -> float:
         """Believed starvations per hour of playing with no margin."""
         return float(ACCEPTED_PER_H * 2.0**self.risk)
@@ -529,10 +638,14 @@ class StarvationPrior:
         self._count(self._weight(margin, room), room)
         self._hold = HOLD_S
 
-    def absorbed(self) -> None:
-        """Trouble came (a stall, say) and VLC did not run dry: the margin held out, so it
-        holds `HOLD_S` again (no evidence either way about more)."""
-        self._hold = HOLD_S
+    def absorbed(self, headroom: float, margin: Optional[float] = None) -> None:
+        """Trouble came (a stall, say) and VLC did not run dry, its headroom never under
+        `headroom`: if that is within the `margin` in force (None: `margin()`), the margin is
+        what got it through, so it holds `HOLD_S` again (no evidence either way about more)."""
+        if margin is None or not _finite(margin):
+            margin = self.margin()
+        if _finite(headroom) and headroom < margin:
+            self._hold = HOLD_S
 
     def near_miss(
         self, headroom: float, margin: Optional[float] = None, room: float = MARGIN_MAX_S
@@ -591,10 +704,20 @@ class LearnedTarget:
     `near_miss()` and `played()`; `target(burst)` is the target in force. `learned()` is what
     to remember for the channel's next tune.
 
-    Two things the caller must keep to. A near-miss, like a starvation, counts only once VLC
-    had its cushion: while it still fills at a tune's start its headroom is small by nature,
-    and one such near-miss would make a margin (and a channel worth remembering). And when
-    `learned()` is None the caller still remembers the channel, with `extra` None
+    What the caller passes:
+
+    - `starved()`: VLC ran dry after it had its cushion (as 2.0.2's `_back_off` counts it).
+    - `near_miss(headroom)`: when a batch began (`arrivals.add` True), the headroom VLC had
+      on the tick before: the live edge less VLC's position, in seconds. The model ignores
+      it until the tune saw `MIN_GAPS` batches (VLC is still filling its cushion then); the
+      caller still counts one only after VLC had its cushion, as for a starvation.
+    - `absorbed(headroom)`: a stall ended (the session's stall bound passed, then a batch
+      came) and VLC never ran dry; `headroom` is the least VLC had from the stall's start to
+      the batch that ended it (the live edge less VLC's position, in seconds). The margin
+      holds again only if that fell within the margin in force: the margin got VLC through.
+    - `played(seconds)`: playing at the live edge (not paused, not time-shifted).
+
+    When `learned()` is None the caller still remembers the channel, with `extra` None
     (`Tuning(None, locked, direct, None)`): left as it was, a 2.0.2 `extra` would be read as
     a prior again on the next tune.
     """
@@ -611,7 +734,7 @@ class LearnedTarget:
         self.floor = floor
         if learned is not None:
             self.arrivals = ArrivalModel(learned.need)
-            self.prior = StarvationPrior(learned.events, learned.hours)
+            self.prior = StarvationPrior(learned.events, learned.hours, learned.hold)
         else:
             self.arrivals = ArrivalModel()
             self.prior = StarvationPrior.from_extra(extra)
@@ -642,12 +765,17 @@ class LearnedTarget:
         self.prior.starved(self.margin(burst), self.room(burst))
 
     def near_miss(self, headroom: float, burst: float = 0.0) -> None:
-        """VLC had only `headroom` seconds left when a batch landed."""
+        """VLC had only `headroom` seconds left when a batch landed. Not counted before the
+        tune saw `MIN_GAPS` batches: VLC is still filling its cushion then."""
+        if self.arrivals.seen < MIN_GAPS:
+            return
         self.prior.near_miss(headroom, self.margin(burst), self.room(burst))
 
-    def absorbed(self) -> None:
-        """Trouble came (a stall that ended, say) and VLC did not run dry: the margin holds."""
-        self.prior.absorbed()
+    def absorbed(self, headroom: float, burst: float = 0.0) -> None:
+        """Trouble came (a stall that ended, say) and VLC did not run dry; `headroom`: the
+        least VLC had left meanwhile (the live edge less its position, in seconds). The
+        margin holds again only if that headroom fell within it."""
+        self.prior.absorbed(headroom, self.margin(burst))
 
     def played(self, seconds: float) -> None:
         """`seconds` more of playing at the live edge."""
@@ -661,5 +789,6 @@ class LearnedTarget:
             round(self.prior.events, 4),
             round(self.prior.hours, 4),
             self.floor,
+            round(self.prior.hold, 1),
         )
         return learned if learned.informative() else None

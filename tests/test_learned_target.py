@@ -35,11 +35,11 @@ class Source:
     def run(self, pieces, until, *, stalled=lambda t: False):
         """Tick until `until` (seconds after START); `pieces`: (seconds after START, media).
         `stalled(t)`: the caller calls `stall()` on that tick."""
-        pending = sorted(pieces)
+        pending = deque(sorted(pieces))
         while self.now - START < until - 1e-9:
             self.now = round(self.now + TICK, 6)
             while pending and pending[0][0] <= self.now - START + 1e-9:
-                self.edge += pending.pop(0)[1]
+                self.edge += pending.popleft()[1]
             if stalled(self.now - START):
                 self.model.stall()
             if self.model.add(self.now, self.edge):
@@ -130,6 +130,64 @@ def lumpy(n):
     return 19.0 if n % 5 == 4 else 4.0
 
 
+def hiccuping(seg, took, seed, until):
+    """Segments every `seg` s, each downloading for a random time in `took` in 20-ms blocks,
+    the download pausing 0.25-0.5 s at a fifth of its quarter-second marks."""
+    rng = random.Random(seed)
+    pieces, start = [], seg
+    while start < until:
+        seconds = rng.uniform(*took)
+        count, t = int(seconds / 0.02), start
+        for k in range(count):
+            t += seconds / count
+            if k % 12 == 0 and rng.random() < 0.2:
+                t += rng.uniform(0.25, 0.5)
+            pieces.append((t, seg / count))
+        start += seg
+    return pieces
+
+
+def flowing(until, seed=0, sag=None, pauses=0.0, pause=(0.3, 0.6), stalls=()):
+    """A source whose edge moves on every tick (20-ms blocks at 1x). `sag`: (every, seconds,
+    rate): for `seconds` of each `every` the rate drops to `rate`, then makes it up as long.
+    `pauses`: the chance per second of a short pause, its media coming at once after it.
+    `stalls`: (at, seconds) the source sends nothing, and what it missed is lost."""
+    rng = random.Random(seed)
+    pieces, t, next_pause = [], 0.0, 0.0
+    stalls = sorted(stalls)
+    while t < until:
+        if stalls and t >= stalls[0][0]:
+            t += stalls.pop(0)[1]
+            continue
+        rate = 1.0
+        if sag is not None:
+            every, seconds, slow = sag
+            phase = t % every
+            if 10.0 <= phase < 10.0 + seconds:
+                rate = slow
+            elif 10.0 + seconds <= phase < 10.0 + 2 * seconds:
+                rate = 2.0 - slow
+        if pauses and t >= next_pause:
+            next_pause = t + 1.0
+            if rng.random() < pauses:
+                held = rng.uniform(*pause)
+                t += held
+                pieces.append((t, held))
+        t += 0.02
+        pieces.append((t, 0.02 * rate))
+    return pieces
+
+
+def flips(model, pieces, until, every=5.0, start=300.0):
+    """How often the need moved by more than half a second between looks `every` seconds."""
+    source, needs = Source(model), []
+    pieces = sorted(pieces)
+    for look in range(int(start), int(until) + 1, int(every)):
+        source.run([p for p in pieces if source.now - START < p[0] <= look], look)
+        needs.append(model.need())
+    return sum(1 for a, b in zip(needs, needs[1:]) if abs(a - b) > 0.5), needs
+
+
 def starvations_learned(needed, told, hours=6):
     """Trouble every 10 min that a margin under `needed` can't hold out: starvations per hour
     after the first two (`told`: the trouble a margin held out is told as `absorbed()`)."""
@@ -140,7 +198,7 @@ def starvations_learned(needed, told, hours=6):
                 target.starved()
                 late += minute >= 120
             elif told:
-                target.absorbed()
+                target.absorbed(target.margin() - needed)  # the trouble ate into the margin
         target.played(60.0)
     return late / (hours - 2)
 
@@ -385,6 +443,87 @@ class ArrivalModelTests(unittest.TestCase):
                 self.assertGreaterEqual(min(needs), 10.0, needs)
                 self.assertLessEqual(max(needs), 10.8, needs)
 
+    def test_a_flowing_source_that_sags_is_held_through_its_sags(self):
+        # Throughput dips on a source whose edge moves on every tick: the deepest of each half
+        # minute counts, however many shallow pieces come between, and with a pause now and
+        # then (troughs) too.
+        sags = ((45.0, 3.0, 0.2), (60.0, 6.0, 0.4), (60.0, 4.0, 0.3), (100.0, 5.0, 0.2))
+        for sag in sags:
+            for pauses in (0.0, 0.02):
+                for seed in range(3):
+                    with self.subTest(sag=sag, pauses=pauses, seed=seed):
+                        model = ArrivalModel()
+                        pieces = flowing(780.0, seed, sag=sag, pauses=pauses)
+                        source = Source(model).run(pieces, 780.0)
+                        target = max(lt.FLOOR_S, model.need())
+                        self.assertEqual(dry_runs(source.levels, target), 0)
+                        self.assertGreater(target, truth(source.levels) - 0.3)
+                        self.assertLess(target, truth(source.levels) + 0.6)
+
+    def test_a_slow_download_with_hiccups_needs_its_deepest_troughs(self):
+        for seed in range(3):
+            with self.subTest(seed=seed):
+                model = ArrivalModel()
+                source = Source(model).run(hiccuping(10.0, (6.0, 9.5), seed, 600.0), 600.0)
+                self.assertGreaterEqual(model.need(), truth(source.levels))
+                self.assertEqual(dry_runs(source.levels, model.need()), 0)
+
+    def test_a_flowing_source_that_only_stands_still_when_it_stalls_has_no_cycle(self):
+        # Its stalls (6-10 s every 2-5 min) are not its rhythm: each is trouble, whatever
+        # their spacing, and the need stays where the flow puts it.
+        for seed in range(2):
+            with self.subTest(seed=seed):
+                rng, stalls, t = random.Random(seed), [], 0.0
+                while t < 1500.0:
+                    t += rng.uniform(120.0, 300.0)
+                    stalls.append((t, rng.uniform(6.0, 10.0)))
+                model = ArrivalModel()
+                count, needs = flips(model, flowing(1500.0, seed, stalls=stalls), 1500.0)
+                self.assertEqual(count, 0)
+                self.assertLessEqual(max(needs), lt.FLOOR_S)
+
+    def test_a_flowing_source_with_short_pauses_takes_a_stall_as_trouble(self):
+        # Pauses of about a second now and then make a few close pairs look like cycles;
+        # they are not the rhythm while most of its pauses are minutes apart.
+        for seed in range(3):
+            for stall in (5.0, 10.0):
+                with self.subTest(seed=seed, stall=stall):
+                    pieces = flowing(
+                        1100.0, seed, pauses=0.02, pause=(0.8, 1.2), stalls=[(400.0, stall)]
+                    )
+                    model = ArrivalModel()
+                    count, needs = flips(model, pieces, 1100.0, every=50.0, start=350.0)
+                    self.assertEqual(count, 0)
+                    self.assertLessEqual(max(needs), lt.FLOOR_S)
+
+    def test_cycles_are_forgotten_after_ten_minutes_of_flow(self):
+        model = ArrivalModel()
+        source = Source(model).run(downloaded(regular(15.0, 15.0, 300), 1, (10.2, 10.8)), 300)
+        self.assertGreater(model._judged_by(), 10.0)  # the segments' cycle
+        flow = [(300.0 + t, media) for t, media in flowing(lt.GAP_WINDOW_S + 60.0)]
+        source.run(flow, 300.0 + lt.GAP_WINDOW_S + 60.0)
+        self.assertLess(model._judged_by(), 2.0)  # the pieces' gap again
+
+    def test_the_pace_takes_a_window_of_its_own_so_sags_do_not_flap_the_need(self):
+        for name, pieces in (
+            ("sag 0.5x 8 s every 90 s", flowing(900.0, sag=(90.0, 8.0, 0.5))),
+            ("sag 0.4x 6 s every 60 s", flowing(900.0, 1, sag=(60.0, 6.0, 0.4), pauses=0.02)),
+            ("raw TS bursts", spread_over_ticks(steady(900.0, 4), 4, (1, 2))),
+        ):
+            with self.subTest(source=name):
+                count, _ = flips(ArrivalModel(), pieces, 900.0)
+                self.assertLessEqual(count, 1)
+
+    def test_a_download_at_the_border_of_fast_keeps_one_need(self):
+        # 15 s segments downloading at 1.43-1.58x, 10 s ones at 1.32-1.72x: the channel's
+        # median rate decides whether its downloads are cut (with hysteresis), not each one.
+        for seg, took in ((15.0, (9.5, 10.5)), (10.0, (5.8, 7.6))):
+            for seed in range(2):
+                with self.subTest(seg=seg, seed=seed):
+                    pieces = downloaded(regular(seg, seg, 920.0), seed, took)
+                    count, _ = flips(ArrivalModel(), pieces, 920.0, start=200.0)
+                    self.assertLessEqual(count, 2)
+
     def test_a_reset_forgets_the_edge_but_keeps_what_was_learned(self):
         model = ArrivalModel()
         source = Source(model).run(six_and_twelve(600), 600)
@@ -551,7 +690,7 @@ class StarvationPriorTests(unittest.TestCase):
                 start = prior.margin()
                 for _ in range(6):  # an hour and a half, trouble every quarter of an hour
                     prior.played(900.0)
-                    prior.absorbed() if name == "absorbed" else prior.near_miss(0.45)
+                    prior.absorbed(0.3) if name == "absorbed" else prior.near_miss(0.45)
                 peak = prior.margin()
                 self.assertGreaterEqual(peak, start)
                 prior.played(lt.HOLD_S)
@@ -559,8 +698,23 @@ class StarvationPriorTests(unittest.TestCase):
                 prior.played(60.0)
                 self.assertLess(prior.margin(), peak)
         told = StarvationPrior()
-        told.absorbed()  # no evidence of anything: no margin
-        self.assertEqual(told.margin(), 0.0)
+        told.absorbed(0.3)  # no evidence of anything: no margin, nothing to hold
+        self.assertEqual((told.margin(), told.hold), (0.0, 0.0))
+
+    def test_only_trouble_the_margin_got_vlc_through_holds_it(self):
+        # A stall that left VLC with more than the margin in force says nothing about the
+        # margin (stay-live's stall bound trips on every late HLS reload): it fades as before.
+        for headroom, holds in ((8.0, False), (2.0, False), (0.4, True)):
+            with self.subTest(headroom=headroom):
+                prior = StarvationPrior()
+                prior.starved()
+                start = prior.margin()  # 1.6 s
+                for _ in range(180):  # six hours, a stall held out every two minutes
+                    prior.played(120.0)
+                    prior.absorbed(headroom)
+                self.assertEqual(prior.margin() == start, holds)
+                if not holds:
+                    self.assertEqual(prior.margin(), 0.0)
 
     def test_trouble_every_ten_minutes_starves_less_than_two_zero_two(self):
         # Trouble every 10 min of playing that a margin under `needed` cannot hold out: the
@@ -720,6 +874,30 @@ class LearnedTargetTests(unittest.TestCase):
         Source(fresh.arrivals).run(regular(7.0, 7.0, 35), 35)
         fresh.starved()
         self.assertIsNone(fresh.learned().need)  # too few batches to be worth keeping
+
+    def test_a_zap_away_and_back_keeps_the_hold(self):
+        target = LearnedTarget()
+        target.starved()
+        start = target.target()
+        target.played(300.0)  # five minutes, then a zap away
+        learned = target.learned()
+        self.assertAlmostEqual(learned.hold, lt.HOLD_S - 300.0)
+        again = LearnedTarget(learned)  # and back
+        again.played(lt.HOLD_S - 300.0 - 60.0)
+        self.assertAlmostEqual(again.target(), start, delta=0.001)  # still held (rounded)
+        again.played(120.0)
+        self.assertLess(again.target(), start)  # the hold ended where it would have
+
+    def test_near_misses_while_vlc_fills_at_the_start_do_not_count(self):
+        target = LearnedTarget()
+        source = Source(target.arrivals)
+        source.run(regular(1.0, 1.0, 2.5), 2.5)  # two batches: still filling
+        target.near_miss(0.1)
+        self.assertIsNone(target.learned())
+        source.run(regular(1.0, 1.0, 6.5, start=2.0), 6.5)
+        self.assertGreaterEqual(target.arrivals.seen, lt.MIN_GAPS)
+        target.near_miss(0.1)
+        self.assertGreater(target.prior.margin(), 0.0)
 
     def test_a_two_zero_two_extra_is_read_as_a_prior(self):
         target = LearnedTarget(None, extra=3.0)

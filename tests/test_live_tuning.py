@@ -429,6 +429,21 @@ class LiveTuningTests(unittest.TestCase):
         store.flush()
         self.assertEqual(json.loads(self.path.read_text())["channels"], {})
 
+    def test_the_hold_round_trips_and_a_wrong_one_is_left_out(self):
+        store = self.store()
+        held = Learned(need=8.0, events=1.5, hours=1.0, hold=900.0)
+        store.remember("a", Tuning(learned=held))
+        store.flush()
+        channels = json.loads(self.path.read_text())["channels"]
+        self.assertEqual(channels["a"]["learned"]["hold"], 900.0)
+        self.assertEqual(self.store().get("a").learned, held)
+        for hold in (-1.0, lt.HOLD_S + 1.0, "900"):
+            with self.subTest(hold=hold):
+                wrong = {"need": 8.0, "events": 1.5, "hours": 1.0, "hold": hold}
+                channels = {"a": {"learned": wrong, "rate_locked": True, "used": self.clock.now}}
+                self.path.write_text(json.dumps({"version": 1, "channels": channels}))
+                self.assertEqual(self.store().get("a"), Tuning(rate_locked=True))
+
     def test_the_cap_holds_with_learned_entries(self):
         store = self.store(max_entries=3)
         for key in ("a", "b", "c", "d"):
