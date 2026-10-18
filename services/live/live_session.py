@@ -6,9 +6,11 @@ learned extra included, so it fetches far enough back for a start there) and wai
 `sessionReady`; then VLC plays the loopback stream with the pipeline profile from the start
 Go live would pick (2.1 stage 3; before, the oldest segment: one provider sends a 20 s
 backlog at connect, and a sparse-PCR channel's one fetched segment ran VLC dry). The start
-is held until the backlog the source sends at connect has landed (`_play_first`): an HLS
-source has delivered every segment its playlist listed, any other's live edge grows at
-about real time, at most 1.5 s after ready. With nothing that far back, a steady source
+waits for the backlog the source sends at connect (`_play_first`): an HLS source says how
+much listed media is still to come, so the starts are judged on the edge it will reach and
+one is taken once nothing still to come can bring a nearer one (or every listed segment
+came); any other is held until its live edge grows at about real time, at most 1.5 s after
+ready. With nothing that far back, a steady source
 starts at the oldest segment within a second; a bursty or HLS one (and Stable, the cushion
 for jittery providers) waits for one, saying "Still loading…" after a second; if that takes
 longer than `ready_timeout_ms` from the start, it plays from the oldest segment then.
