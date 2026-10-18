@@ -4480,6 +4480,45 @@ class RepickTests(LiveSessionCase):
                     self.assertEqual(self.outcome(feed), (2, 0.0))
                     self.assertLess(lag, 22.0)
 
+    def test_an_hls_start_is_never_picked_again(self):
+        # Round 3 of re-review 2: a public HLS channel (6 s segments 7 s apart, every sixth
+        # batch 12 s) whose 12 s batch landed 2 s after the open and the next 3.24 s later
+        # read as a dump, then a flow: picked again 7 s behind, VLC ran dry twice. HLS never.
+        for latency in ("low", "normal", "stable", AUTO):
+            with self.subTest(latency=latency):
+
+                def play():
+                    feed = self.tune(latency, burst=7.0, edge=20.0, first=2.0, hls=True)
+                    sizes = [12.0, 6.0] + [12.0 if k % 6 == 5 else 6.0 for k in range(200)]
+                    feed.sizes = iter(sizes)
+                    feed.gaps = iter([3.24] + [7.0] * 201)
+                    feed.ready(backlog_after_start=False)
+                    return self.outcome(feed)
+
+                self.unchanged(play)
+
+    def test_a_flow_that_stands_still_three_seconds_is_no_flow(self):
+        # Raw TS: a dump, then batches 2.95 s apart (about real time over the window): the
+        # edge stands still about 3 s between them, which ticks a quarter second apart read
+        # as 3 s at some phases and 2.75 s at others: either way no flow (tick granularity
+        # works against qualifying).
+        for phase in (0.0, 0.05, 0.1, 0.15, 0.2):
+            with self.subTest(phase=phase):
+
+                def play(phase=phase):
+                    feed = self.tune("normal", burst=0.0, edge=2.0)
+                    feed.ready(backlog_after_start=False)
+                    self.opened(feed)
+                    feed.run(0.7)
+                    feed.edge += 20.0
+                    feed.push()
+                    feed.sizes = itertools.repeat(2.95)
+                    feed.gaps = itertools.repeat(2.95)
+                    feed.nominal = feed.next_arrival = self.clock.now + 2.95 + phase
+                    return self.outcome(feed, 30.0)
+
+                self.unchanged(play)
+
     def test_the_re_pick_can_be_switched_off(self):
         self.enterContext(mock.patch.object(live_session, "REPICK", False))
         feed = self.tune("normal", burst=0.0, edge=2.0)

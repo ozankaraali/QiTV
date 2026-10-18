@@ -481,7 +481,8 @@ class LiveSession(QObject):
         self._repick_until = -math.inf  # a backlog step before this re-picks the tune's start
         self._repick_step: Optional[float] = None  # when the step to re-pick for began ...
         self._repick_edge = 0.0  # ... the edge then ...
-        self._repick_moved = 0.0  # ... and when it last moved since
+        self._repick_moved = 0.0  # ... and when it last moved since ...
+        self._repick_seen = 0.0  # ... and the last tick it was looked at
         self._repick_opened = -math.inf  # the tune's first open
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
         # The mean lag over the source's arrival rhythm, and the lag as shown (2.1).
@@ -1470,6 +1471,12 @@ class LiveSession(QObject):
             self._stay.landed_further(lag - self._stay.target)
         if not REPICK or self._repick_until == -math.inf:
             return False
+        if snapshot.get("hls") is True:
+            # HLS never: its batches (a 12 s one, then the next 3 s later) read as a dump
+            # and a flow, and a start picked again ran VLC dry (re-review 2, round 3).
+            self._repick_until, self._repick_step = -math.inf, None
+            return False
+        tick, self._repick_seen = max(0.0, now - self._repick_seen), now
         played = self._opened_at is None and self._last_ms != 0
         since = now - self._repick_opened
         if since > _REPICK_DEADLINE_S or (not played and since > _REPICK_PLAY_S):
@@ -1484,8 +1491,10 @@ class LiveSession(QObject):
             return False
         if grown >= _ARRIVAL_S:
             self._repick_moved = now
-        elif now - self._repick_moved > _REPICK_GAP_S:
-            self._repick_step = None  # it stood still: a burst, the source's rhythm
+        elif now - self._repick_moved + tick >= _REPICK_GAP_S - 1e-9:
+            # It stood still (since the tick before it last moved, at the most: ticks work
+            # against qualifying): a burst, the source's rhythm.
+            self._repick_step = None
             return False
         flowed = now - step
         if flowed < _REPICK_FLOW_S - 1e-9 or not played:
