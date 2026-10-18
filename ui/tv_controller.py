@@ -1021,8 +1021,8 @@ class TVController(QObject):
     def _give_large_back(self, target: Optional[Target]) -> None:
         """`target` never came (its link or its provider failed): when the channel playing
         large went small for it, the pictures swap back and the empty one closes."""
-        freed, self._freed_for = self._freed_for, None
-        if target is not None and target is freed:
+        if target is not None and target is self._freed_for:
+            self._freed_for = None
             self.swap()
 
     def _restore_channel(self) -> None:
