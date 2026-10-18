@@ -213,6 +213,27 @@ class FoldedFilterTests(unittest.TestCase):
         self.assertTrue(shiboken6.isValid(notifier))
         self.assertIs(fold_notifier(), notifier)
 
+    def test_a_list_dropped_before_its_fold_ahead_is_not_folded(self):
+        # Sweep A12: the timer held the list and folded it a moment later though nothing
+        # showed it any more (a quarter of a second of CPU for 200,000 channels).
+        seq, kept = NodeSeq(channels(30)), NodeSeq(channels(30))
+        watch = weakref.ref(seq)
+        fold_all, folded = navigation.fold_all, []
+
+        def counting(titles):
+            folded.append(len(titles))
+            return fold_all(titles)
+
+        with mock.patch.object(navigation, "fold_all", counting):
+            seq.fold_ahead(10)
+            kept.fold_ahead(10)
+            del seq  # another group shows: the list is let go before its fold is due
+            self.assertIsNone(watch())
+            QTest.qWait(60)
+            kept._folding.join(5)
+        self.assertEqual(folded, [30])  # the list still shown folds ahead
+        self.assertIsNotNone(kept._folded)
+
     def test_a_fold_that_fails_is_tried_again_by_the_next_filter(self):
         seq = NodeSeq(channels(30))
         boom = mock.patch.object(navigation, "fold_all", side_effect=ValueError("boom"))

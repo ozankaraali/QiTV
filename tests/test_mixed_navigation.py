@@ -373,6 +373,44 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertNotEqual(rows[0].title, "Loading…")
         self.assertIn("Demo TV", [n.title for n in nav.children(nav.path[1])])
 
+    def test_only_a_failed_refresh_of_a_saved_list_says_the_saved_channels_show(self):
+        # Sweep A10: the toast came for a provider without a cache whose list failed too
+        # (nothing saved of it shows; its heading says why).
+        _config, view, nav = self.build([DEMO, HARBOR], {"Demo TV": demo_content()})
+        notices = []
+        nav.notice.connect(notices.append)
+        self.factory.xtream = lambda *args: FakeWorker(fail="Wrong password")
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        QTest.qWait(10)
+        self.assertEqual([n.layer for n in self.rows_under(nav, "Harbor IPTV")], ["notice"])
+        self.assertEqual(notices, [])
+        self.factory.m3u = lambda *args: FakeWorker(fail="Portal down")
+        view.catalogs.catalog("Demo TV").request_section("live", force=True)  # Demo's refresh
+        QTest.qWait(10)
+        self.assertEqual(notices, ["Couldn't refresh Live TV; showing saved channels"])
+        self.assertIn("News", [n.title for n in nav.children(nav.path[1])])
+
+    def test_moving_through_all_asks_nothing_of_providers_whose_setup_failed(self):
+        # Sweep A11: a failed provider was not signed in again, but its lists were still
+        # asked for (an STB portal: a request with the failed session at every move).
+        _config, view, nav = self.build([DEMO, HARBOR], {})
+        self.factory.fail_setup("Demo TV", "Portal down")
+        self.factory.fail_setup("Harbor IPTV", "Portal down")
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        QTest.qWait(10)
+        self.assertEqual([c[0] for c in self.factory.calls if c[0] in ("m3u", "xtream")], [])
+        self.assertFalse(nav.is_loading(nav.path[1]))  # nothing comes: the headings say why
+        rows = [(n.layer, n.title) for n in self.rows_under(nav, "Demo TV")]
+        self.assertEqual([layer for layer, _title in rows], ["notice", "header", "notice"])
+        self.assertNotIn("Loading…", [title for _layer, title in rows])
+        nav.reset_to("live")
+        QTest.qWait(10)
+        self.assertEqual(self.factory.setups.count("Harbor IPTV"), 1)
+        view.select_provider(ALL_PROVIDERS)  # chosen again: every provider is tried
+        self.assertEqual(self.factory.setups.count("Harbor IPTV"), 2)
+
     def test_a_playlist_without_channels_set_up_after_another_failed_shows_no_loading_row(self):
         # Polish: Harbor's failure (first) forgot that the playlist had refused the live
         # list while it set up; it was never asked again and said "Loading…" for good.
@@ -437,6 +475,28 @@ class MixedNavigationTests(unittest.TestCase):
         groups = self.live_groups()
         harbor_group = next(n for n in groups if n.key == mixed_group_id("Harbor IPTV", "41"))
         self.assertEqual(len(self.nav.children(harbor_group)), 41)
+
+    def test_a_channel_of_a_providers_own_group_is_revealed_in_all(self):
+        # Sweep A13: tuned from Harbor's own list (group "41"), then the page went to All
+        # providers, which lists that group under a mixed id: the list missed it.
+        self.open_all()
+        channel = self.view.catalogs.catalog("Harbor IPTV").items("live", "41")[3]
+        self.nav.reveal(ALL_PROVIDERS, "live", "41", channel)
+        group = mixed_group_id("Harbor IPTV", "41")
+        self.assertEqual([n.key for n in self.nav.path], [ALL_PROVIDERS, "live", group])
+        self.assertIs(self.nav.revealed(), channel)
+
+    def test_a_channel_outside_the_group_it_was_tuned_in_is_revealed_in_all(self):
+        # Sweep A13: a number typed outside the group tunes a channel of another group (TV
+        # numbers are global); the list opened on that group, without the channel.
+        _config, view, nav = self.build([DEMO], {"Demo TV": demo_content()})
+        nav.open(nav.children(None)[0])
+        sports = view.items("live", "Sports")[0]
+        nav.reveal("Demo TV", "live", "News", sports)
+        self.assertEqual([n.key for n in nav.path], ["Demo TV", "live", ALL_GROUP_ID])
+        news = view.items("live", "News")[2]
+        nav.reveal("Demo TV", "live", "News", news)  # in its group: opens there
+        self.assertEqual([n.key for n in nav.path], ["Demo TV", "live", "News"])
 
     def test_a_provider_whose_only_group_is_all_lists_it_under_its_heading(self):
         # Sweep A6: a playlist without group titles had an empty heading; its channels were

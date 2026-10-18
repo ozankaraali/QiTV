@@ -1,4 +1,7 @@
 import os
+from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -7,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
+import orjson
 from test_catalog_lifecycle import RealSetupFactory
 from test_catalog_service import FakeWorker
 
@@ -14,6 +18,7 @@ from services.catalogs import Catalogs
 from services.jobs import ImmediateRunner
 from services.provider_ids import provider_of, with_provider
 from ui.link_lanes import LinkLanes, Target
+from ui.tv_window import ABANDONED_EXIT_CODE
 
 
 class RecordingFactory(RealSetupFactory):
@@ -210,6 +215,17 @@ class CatalogsTests(unittest.TestCase):
         manager = catalogs.catalog("Harbor IPTV").provider_manager
         self.assertEqual(manager.current_provider.get("password"), original.get("password"))
 
+    def test_an_edited_provider_in_use_is_not_set_up_again_by_the_next_reload(self):
+        # Sweep A4: the record its catalog was built for follows the edit, so a later save
+        # without changes renews nothing.
+        self.in_use = {"Harbor IPTV"}
+        self.catalogs.ensure("Harbor IPTV")
+        self.registry.providers[1] = {**self.registry.providers[1], "password": "renewed"}
+        self.catalogs.reload()
+        self.assertEqual(self.factory.setups, ["Harbor IPTV", "Harbor IPTV"])
+        self.catalogs.reload()
+        self.assertEqual(self.factory.setups, ["Harbor IPTV", "Harbor IPTV"])
+
     def test_an_unstamped_item_goes_to_the_first_provider_without_a_selection(self):
         # Final review M7: one provider, a stale selection (an old 2.0 Recent entry).
         self.config.selected_provider_name = "Gone"
@@ -300,6 +316,45 @@ class CatalogsTests(unittest.TestCase):
         self.catalogs.reload()
         self.assertEqual(epg.released, 1)
         self.assertEqual(catalog.provider_manager.current_provider_content, {})
+
+
+CACHE_WRITE_AT_EXIT_SCRIPT = r"""
+import atexit, os, sys, time
+from services.config_manager import ConfigManager
+from services.provider_manager import ProviderManager
+import ui.tv_window as tw
+
+manager = ProviderManager(ConfigManager())
+manager.current_provider = {"type": "M3UPLAYLIST", "name": "Demo TV", "url": "http://127.0.0.1:9/x"}
+manager.current_provider_content = {"itv": {"categories": [], "contents": []}}
+write = manager._write_provider_cache
+manager._write_provider_cache = lambda *args: (time.sleep(0.5), write(*args))
+manager.save_provider()  # still writing when the window gives up waiting and leaves
+manager._cache_writer.shutdown(wait=False)  # Catalogs._stop
+atexit.register(tw._exit_now)  # TVWindow._abandon_threads
+print(manager._provider_cache_name("Demo TV"), flush=True)
+"""
+
+
+class CacheWriteAtExitTests(unittest.TestCase):
+    def test_a_cache_write_queued_at_quit_ends_before_the_hard_exit(self):
+        # Sweep A5: Catalogs._stop does not wait for the cache writer; the interpreter joins
+        # its thread before any atexit handler runs, _exit_now's os._exit included.
+        repo = Path(__file__).resolve().parent.parent
+        directory = tempfile.TemporaryDirectory(prefix="qitv-exit-cache-")
+        self.addCleanup(directory.cleanup)
+        env = {**os.environ, "QT_QPA_PLATFORM": "offscreen", "QITV_CONFIG_DIR": directory.name}
+        result = subprocess.run(
+            [sys.executable, "-c", CACHE_WRITE_AT_EXIT_SCRIPT],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, ABANDONED_EXIT_CODE, result.stderr[-2000:])
+        with open(result.stdout.strip(), "rb") as f:
+            self.assertEqual(orjson.loads(f.read())["itv"], {"categories": [], "contents": []})
 
 
 class HeldGuides(ImmediateRunner):

@@ -15,7 +15,7 @@ from datetime import datetime
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, CatalogService, Group
 from services.catalogs import Catalogs
@@ -93,8 +93,9 @@ class BrowsedCatalog(QObject):
         # mixed lists say it under the provider's heading while it has no groups.
         self._section_errors: dict[tuple[str, str], str] = {}
         # Providers whose setup failed: a list moving in all mode doesn't sign them in again
-        # (the user asks: picking it, a refresh, or choosing All again).
+        # nor asks for their lists (the user asks: picking it, a refresh, or choosing All again).
         self._failed: set[str] = set()
+        self._forwarding = ""  # the provider whose signal is being re-emitted (forwarding_from)
         catalogs.linkReady.connect(self.linkReady)
         catalogs.linkFailed.connect(self.linkFailed)
         catalogs.catalogCreated.connect(self._attach)
@@ -198,9 +199,18 @@ class BrowsedCatalog(QObject):
                 args = self._mixed_args(name, signal_name, args)
             elif self.source() != name and signal_name != "epgReady":
                 return  # (a guide in use is repainted whichever provider the list shows)
-            getattr(self, signal_name).emit(*args)
+            previous, self._forwarding = self._forwarding, name
+            try:
+                getattr(self, signal_name).emit(*args)
+            finally:
+                self._forwarding = previous
 
         return forward
+
+    def forwarding_from(self) -> str:
+        """The provider whose signal the page is re-emitting now ("" between them): in all
+        mode a slot can tell whose list it hears about."""
+        return self._forwarding
 
     def _note_section_state(self, name: str, signal_name: str, args: tuple) -> None:
         if signal_name == "sectionFailed" and args[1] != PROVIDER_LOADING_MESSAGE:
@@ -399,18 +409,29 @@ class BrowsedCatalog(QObject):
 
     def request_section(self, section: str, *, force: bool = False, provider: str = "") -> None:
         """Ask for a section (every provider's in all mode, or only `provider`'s there: its
-        setup just ended and the others answered already)."""
+        setup just ended and the others answered already). In all mode a provider whose setup
+        failed is not asked: its saved lists stay listed, its heading says why."""
         if self.all_providers():
+            asked = False
             for name in self._having(section):
                 if provider and name != provider:
                     continue
-                if name not in self._failed:
-                    self._catalogs.ensure(name)
+                if name in self._failed and not provider:
+                    continue
+                self._catalogs.ensure(name)
                 self._catalogs.catalog(name).request_section(section, force=force)
+                asked = True
+            if not asked and not provider:
+                # Every provider of the section failed to set up: nothing more will come.
+                QTimer.singleShot(0, self, lambda: self._settle_all(section))
             return
         catalog = self._cat(ensure=True)
         if catalog is not None:
             catalog.request_section(section, force=force)
+
+    def _settle_all(self, section: str) -> None:
+        if self.all_providers():
+            self.sectionReady.emit(section)  # the list is what the saved lists hold
 
     def provider_loaded(self, name: str, section: str) -> bool:
         """Whether provider `name` has its list of `section` (it may still set up or load)."""

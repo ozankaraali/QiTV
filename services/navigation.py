@@ -27,6 +27,7 @@ from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE
 from services.provider_ids import (
     ALL_PROVIDERS,
     ALL_PROVIDERS_TITLE,
+    mixed_group_id,
     provider_of,
     split_group_id,
     with_provider,
@@ -285,6 +286,8 @@ class NodeSeq(Sequence):
         for 200,000 channels. Asking again starts nothing."""
         if self._folded is None and not self._fold_under_way() and not self._fold_due:
             self._fold_due = True
+            # A bound method: the timer holds the list weakly, so one dropped meanwhile (the
+            # drawer moved on) is never folded. A lambda here would keep it until then.
             QTimer.singleShot(after_ms, self._fold_in_background)
 
     def _fold_in_background(self) -> None:
@@ -740,7 +743,11 @@ class NavModel(QObject):
     def reveal(self, source: str, section: str, group_key: str, item: dict) -> None:
         """Open the list where `item` was picked: its source, section and group (the channel
         list opening at the big picture's channel). A source other than the page's is only
-        shown (navigation: nothing that plays stops); `revealed()` is the row to highlight."""
+        shown (navigation: nothing that plays stops); `revealed()` is the row to highlight.
+
+        In "All providers" a provider's own group (picked before the page showed every
+        provider) is that provider's group there; a group that does not hold `item` (a
+        number typed outside it tunes any channel) gives way to All."""
         names = self.catalog.provider_names()
         if source and source != self.catalog.current_provider_name():
             if source == ALL_PROVIDERS and len(names) < 2:
@@ -748,8 +755,31 @@ class NavModel(QObject):
             elif source == ALL_PROVIDERS or source in names:
                 self._provider_errors.pop(source, None)
                 self.catalog.select_provider(source)
-        self.reset_to(section, group_key or ALL_GROUP_ID)
+        group_id = group_key or ALL_GROUP_ID
+        owner = provider_of(item)
+        own_group = group_id not in (ALL_GROUP_ID, FAVORITES_GROUP, RECENT_GROUP)
+        if own_group and owner and self.all_mode() and not split_group_id(group_id)[0]:
+            group_id = mixed_group_id(owner, group_id)
+        self.reset_to(section, group_id)
+        if group_id != ALL_GROUP_ID and len(self._path) == 3 and not self._lists(item):
+            self.reset_to(section, ALL_GROUP_ID)
         self._revealed = item
+
+    def _lists(self, item: dict) -> bool:
+        """Whether the group the path ends at lists `item` (True while its rows load): a row
+        with its key, of its provider (a row or an item without one may be any's)."""
+        nodes = self.children(self._path[-1])
+        if nodes is None:
+            return True
+        provider, key = provider_of(item), item_key(item)
+
+        def same_provider(payload: Any) -> bool:
+            theirs = provider_of(payload) if isinstance(payload, dict) else ""
+            return not provider or not theirs or theirs == provider
+
+        if isinstance(nodes, NodeSeq):
+            return any(item_key(i) == key and same_provider(i) for i in nodes.items)
+        return any(n.key == key and same_provider(n.payload) for n in nodes)
 
     def revealed(self) -> Optional[dict]:
         """The item the list was last opened on by reveal(); None after any other reset."""
@@ -833,12 +863,23 @@ class NavModel(QObject):
             # section, and say so instead of hiding it behind an error row.
             logger.info("Refreshing section %s failed; showing the saved catalog", section)
             self._on_section_ready(section)
-            title = SECTION_TITLES.get(section, section.title())
-            self.notice.emit(f"Couldn't refresh {title}; showing saved channels")
+            if self._shows_saved(section):
+                title = SECTION_TITLES.get(section, section.title())
+                self.notice.emit(f"Couldn't refresh {title}; showing saved channels")
             return
         if self._pending_group and self._pending_group[0] == section:
             self._pending_group = None
         self._fail(("section", section), message)
+
+    def _shows_saved(self, section: str) -> bool:
+        """Whether the list whose refresh just failed shows from its saved copy. In "All
+        providers" the others' groups keep the section listed: only the failing provider's
+        saved list counts (one without any has its heading's notice say why)."""
+        owner = getattr(self.catalog, "forwarding_from", None)
+        loaded = getattr(self.catalog, "provider_loaded", None)
+        if not self.all_mode() or owner is None or loaded is None or not owner():
+            return True
+        return bool(loaded(owner(), section))
 
     def _on_group_ready(self, section: str, group_id: str) -> None:
         self._settled(("group", section, group_id))
