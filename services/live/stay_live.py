@@ -789,7 +789,7 @@ class StayLive:
         creeping, is drift inside it: stage 4b); back in the band takes `_BACK_IN_S` there (a
         quarter second of the estimate's wander gave a second full build)."""
         landed_at = self._landed_at
-        if landed_at is not None and self.target - landed_at > self._dead_band() + 1e-9:
+        if landed_at is not None and self.target - landed_at > self.dead_band() + 1e-9:
             self._start = 0.0
             self._accepting = self._tolerant = False
         elif not self.hold_reopen and lag - self._centre(-1) >= -self.band(-1):
@@ -799,7 +799,7 @@ class StayLive:
         else:
             self._in_band = 0.0
 
-    def _dead_band(self) -> float:
+    def dead_band(self) -> float:
         """The band as wide as the estimate's wander, not as the budget widened it."""
         return max(_BAND_S, _BAND_SPREAD * self.spread)
 
@@ -887,7 +887,7 @@ class StayLive:
         """A jump landing at the mean lag `landing` helps: within the band around the target
         (as wide as the estimate's wander, not as the budget widened it), or at least
         `_JUMP_CLOSER_S` nearer than `lag` without falling short of the band."""
-        band = self._dead_band()
+        band = self.dead_band()
         over = landing - self._centre(1)
         if over < -band:
             return False  # short of room: VLC would run dry

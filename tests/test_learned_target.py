@@ -1026,6 +1026,13 @@ class LearnedTargetTests(unittest.TestCase):
         self.assertAlmostEqual(again.target(), 7.0 * (1 - lt.MEDIA_SHARE) + lt.MARGIN_S, delta=0.3)
         self.assertAlmostEqual(again.learned().need, again.need(), places=2)
 
+    def test_a_short_tune_of_a_segmented_source_keeps_its_burst_as_the_need(self):
+        target = LearnedTarget()
+        Source(target.arrivals).run(regular(10.0, 10.0, 60), 60)  # six bursts: not warm
+        target.target(10.0)  # the session asks for its burst's target
+        self.assertEqual(target.learned().need, 10.0)
+        self.assertEqual(LearnedTarget(target.learned()).target(), 10.0)
+
     def test_a_short_tune_keeps_the_need_it_was_given(self):
         again = LearnedTarget(Learned(need=13.0))
         Source(again.arrivals).run(regular(7.0, 7.0, 35), 35)

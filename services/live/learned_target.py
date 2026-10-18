@@ -327,6 +327,7 @@ class ArrivalModel:
         self._low = math.inf  # the lowest level since the batch in progress began
         self._paused = False  # the edge stood still on the last tick
         self._batch: Optional[tuple[float, float, float]] = None  # (start, from, edge before)
+        self._dumped: Optional[tuple[float, float]] = None  # (when, edge after) a dump in a batch
         self._recent_media: deque[float] = deque(maxlen=TYPICAL_GAPS)
         self._usual_media: Optional[float] = None  # the median of `_recent_media`
         self._stalled = False  # the caller said the source stalled since the last batch
@@ -357,9 +358,12 @@ class ArrivalModel:
                     self._run_ends(now, previous)
                 self._arrive(now, previous, still)
                 self._batch = (now, last, previous)
+                self._dumped = None
                 if still:
                     self._run_before = previous
                 self._low = edge - now
+            if edge - previous > STEP_S:
+                self._dumped = (now, edge)  # a backlog at once, within the batch or as it
             self._moved = now
             self._paused = False
         else:
@@ -440,6 +444,13 @@ class ArrivalModel:
         if batch is None:
             return True
         start, since, before = batch
+        # A dump (a backlog at once: more than `STEP_S` in a tick), then a flow no faster than
+        # `BATCH_FAST` for `BATCH_SPLIT_S`: the source's own flow after a backlog, cut as one
+        # (it had made a 10 s batch, and a 10 s gap the need took in for a minute).
+        dumped = self._dumped
+        if dumped is not None and now - dumped[0] >= BATCH_SPLIT_S - 1e-9:
+            if previous - dumped[1] <= BATCH_FAST * max(last - dumped[0], _TICK_S) + 1e-9:
+                return True
         if now - start >= BATCH_MAX_S - 1e-9:
             return True
         brought, usual = previous - before, self._usual_media
@@ -825,6 +836,7 @@ class LearnedTarget:
         under its burst (None: the module's `SEGMENT_FLOOR` now; False: learned only)."""
         self.floor = floor
         self.segment_floor = _floored(segment_floor)
+        self._burst = 0.0  # the last burst a target was asked for (a segmented source's)
         if learned is not None:
             self.arrivals = ArrivalModel(learned.need)
             self.prior = StarvationPrior(learned.events, learned.hours, learned.hold)
@@ -841,6 +853,8 @@ class LearnedTarget:
         (unless `segment_floor` is off); before the batches are measured the burst also stands
         in for the need."""
         need, margin = self.need(burst), self.prior.margin()
+        if _burst(burst) > 0:
+            self._burst = _burst(burst)
         return learned_target(need, margin, self.floor, burst, self.segment_floor)
 
     def margin(self, burst: float = 0.0) -> float:
@@ -900,8 +914,13 @@ class LearnedTarget:
         self.prior.played(seconds)
 
     def learned(self) -> Optional[Learned]:
-        """What to remember (rounded); None unless it would change the next tune's target."""
+        """What to remember (rounded); None unless it would change the next tune's target.
+        A tune too short to measure its need keeps the burst its source reported as one (the
+        2.1 stage 4b re-review: a bursty raw TS channel's next tune started at the floor and a
+        starvation's margin, and ran dry until the meter measured the burst again)."""
         need = self.arrivals.summary()
+        if need is None and self._burst > 0:
+            need = self._burst
         learned = Learned(
             None if need is None else round(need, 2),
             round(self.prior.events, 4),

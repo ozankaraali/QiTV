@@ -4712,9 +4712,10 @@ class LearnedTargetTests(LiveSessionCase):
         self.assertLess(self.timelines[-1]["target"], target + 1.0)
 
     def test_a_backlog_right_after_the_open_picks_the_start_again(self):
-        # The 1-stream raw-TS provider: the tune opened with 2 s buffered, then 20 s came at
-        # once 0.7 s later; stay-live nudged from 17 s and jumped only once the tune's 60 s
-        # had passed, a minute some 23 s behind. Now the start is picked again, once.
+        # The 1-stream raw-TS provider's random channel: the tune opened with 2 s buffered,
+        # then 20 s came at once 0.7 s later and the source flowed on at 1x; stay-live nudged
+        # from 17 s and jumped only once the tune's 60 s had passed, a minute some 23 s
+        # behind. Now the start is picked again, once, after 2.5 s of flow.
         for latency in (AUTO, "normal"):
             with self.subTest(latency=latency):
                 plays = len(self.playback.plays)
@@ -4730,7 +4731,84 @@ class LearnedTargetTests(LiveSessionCase):
                 rates = len(self.playback.rates)
                 feed.run(60.0)
                 self.assertEqual(len(self.playback.plays), plays + 2)
-                self.assertTrue(all(r <= 1.0 for r in self.playback.rates[rates:]))
+                # A gentle nudge at most (the pick's keyframe grain): no catch-up.
+                self.assertTrue(all(r <= 1.03 for r in self.playback.rates[rates:]))
+                self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_bursty_sources_first_burst_right_after_the_open_picks_nothing_again(self):
+        # Re-review C1: raw TS the meter has not measured yet (it can at the second burst),
+        # its first regular burst 1-4 s after the open, looked like a late backlog: the start
+        # was picked again 2.5 s behind and VLC ran dry 4-7 s until the next burst. Under any
+        # latency it plays on as before: no second open, no longer dry than before the re-pick.
+        for latency in ("normal", AUTO):
+            for burst, edge, first, most in (
+                (10.0, 12.0, 1.0, 0.0),
+                (10.0, 12.0, 2.0, 0.0),
+                (10.0, 12.0, 3.0, 0.95),
+                (10.0, 12.0, 4.0, 1.95),
+                (6.0, 8.0, 1.0, 0.0),
+            ):
+                with self.subTest(latency=latency, burst=burst, first=first):
+                    plays = len(self.playback.plays)
+                    self.start(latency=latency, channel="b%s%g" % (latency, first))
+                    self.engine.answer()
+                    feed = Feed(
+                        self,
+                        self.engine.last_sid,
+                        burst=burst,
+                        edge=edge,
+                        first=first,
+                        metered=True,
+                        starved=PlaybackState.PLAYING,
+                    ).ready(backlog_after_start=False)
+                    feed.run(60.0)
+                    self.assertEqual(len(self.playback.plays), plays + 1)
+                    self.assertLessEqual(feed.starved_s, most + 0.05)
+
+    def test_a_dump_then_a_bursty_source_is_left_as_it_landed(self):
+        # The re-pick's own shape, but bursty: 2 s at the open, 20 s 0.7 s later, then 10 s
+        # every 10 s. Nothing flows after the step: no re-pick (it ran VLC dry 6.2 s).
+        for latency in ("normal", AUTO):
+            with self.subTest(latency=latency):
+                plays = len(self.playback.plays)
+                self.start(latency=latency, channel="d" + latency)
+                self.engine.answer()
+                feed = Feed(
+                    self,
+                    self.engine.last_sid,
+                    burst=10.0,
+                    edge=2.0,
+                    metered=True,
+                    starved=PlaybackState.PLAYING,
+                ).ready(backlog_after_start=False)
+                self.played(feed, plays)
+                feed.run(0.7)
+                feed.edge += 20.0
+                feed.push()
+                feed.run(60.0)
+                self.assertEqual(len(self.playback.plays), plays + 1)
+                self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_bursty_channels_second_tune_does_not_run_dry_either(self):
+        # Auto, the same channel again after two minutes (re-review C1: 0.95-4.95 s dry; M-c:
+        # a first tune too short to measure the need kept nothing of the burst, and the next
+        # started at the floor and a starvation's margin, 1.95 s dry).
+        for first in (1.0, 2.0, 3.0, 6.0):
+            with self.subTest(first=first):
+                for tune in (1, 2):
+                    self.start(latency=AUTO, channel="t%g" % first)
+                    self.engine.answer()
+                    feed = Feed(
+                        self,
+                        self.engine.last_sid,
+                        burst=10.0,
+                        edge=12.0,
+                        first=first,
+                        metered=True,
+                        starved=PlaybackState.PLAYING,
+                    ).ready(backlog_after_start=False)
+                    feed.run(120.0 if tune == 1 else 60.0)
+                self.assertEqual(feed.starved_s, 0.0)
 
     def test_a_backlog_a_while_after_the_open_is_part_of_the_landing(self):
         # Later than the re-pick's few seconds: as stage 3 had it, steered gently.

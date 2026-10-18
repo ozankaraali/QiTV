@@ -276,12 +276,14 @@ _LOADING_AFTER_S = 1.0
 # landing (raw TS whose backlog came after the hold).
 _RELAND_S = 10.0
 # Within this long after a tune's first open, a backlog step that leaves the lag far above the
-# target (more than the band and the burst) re-picks the start once, as Go live would, once
-# the edge has settled (`_SETTLE_S` without a step, at most `_REPICK_SETTLE_MAX_S` after the
-# first): the 1-stream raw-TS provider sent 2 s, then 18-22 s a moment after the open, and
-# the viewer sat 23 s behind for a minute (the jumps' cooldown counts from the tune).
+# target (more than a burst) re-picks the start once, as Go live would, once the source then
+# flowed at about real time for `_REPICK_FLOW_S` (`_REPICK_FLOW_SHARE` of it: a dump, then a
+# steady source; a bursty source's edge stands still after its burst, which was no backlog):
+# the 1-stream raw-TS provider sent 2 s, then 18-22 s a moment after the open, and the viewer
+# sat 23 s behind for a minute (the jumps' cooldown counts from the tune).
 _REPICK_S = 5.0
-_REPICK_SETTLE_MAX_S = 3.0
+_REPICK_FLOW_S = 2.5
+_REPICK_FLOW_SHARE = 0.7
 _REPICK_GAIN_S = 1.0  # (stay-live's band) the least the new start must gain, and exceed by
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) ...
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
@@ -469,7 +471,8 @@ class LiveSession(QObject):
         self._reland_edge = 0.0  # the live edge at the last tick, meanwhile
         self._repick_until = -math.inf  # a backlog step before this re-picks the tune's start
         self._repick_step: Optional[float] = None  # when the step to re-pick for began ...
-        self._repick_last = 0.0  # ... and when the edge last stepped since
+        self._repick_last = 0.0  # ... and when the edge last stepped since ...
+        self._repick_edge = 0.0  # ... to where
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
         # The mean lag over the source's arrival rhythm, and the lag as shown (2.1).
         self._filter = LagFilter()
@@ -1443,9 +1446,10 @@ class LiveSession(QObject):
         """Within `_RELAND_S` of a tune's start, a backlog step (the live edge grew by more
         than `_SETTLE_GROWTH_S` in a tick) that took the lag further above the target is part
         of the landing (`StayLive.landed_further`): raw TS whose backlog came after the hold.
-        One that began within `_REPICK_S` of the tune's open and, once the edge settled,
-        leaves the lag far above the target re-picks the start once, as Go live would (no
-        jump's cooldown, nothing merged): True then."""
+        One that began within `_REPICK_S` of the tune's open, after which the source flowed
+        at about real time, and that leaves the lag far above the target re-picks the start
+        once, as Go live would (no jump's cooldown; a Go live right after it is merged): True
+        then."""
         now = self._clock()
         if now >= self._reland_until and self._repick_step is None:
             return False
@@ -1456,13 +1460,16 @@ class LiveSession(QObject):
             if now < self._repick_until:
                 if self._repick_step is None:
                     self._repick_step = now
-                self._repick_last = now
-        step = self._repick_step
-        if step is None or stepped and now - step < _REPICK_SETTLE_MAX_S - 1e-9:
+                self._repick_last, self._repick_edge = now, edge
             return False
-        if now - self._repick_last < _SETTLE_S - 1e-9 and now - step < _REPICK_SETTLE_MAX_S:
+        flowed = now - self._repick_last
+        if self._repick_step is None or flowed < _REPICK_FLOW_S - 1e-9:
             return False
-        self._repick_step = None  # settled: a later step within the window is its own
+        if self._opened_at is not None or self._last_ms == 0:
+            return False  # VLC has not played the open yet: no second open before its picture
+        self._repick_step = None  # a later step within the window is its own
+        if edge - self._repick_edge < _REPICK_FLOW_SHARE * flowed:
+            return False  # nothing flowed after it: a burst, the source's rhythm
         if self._stay.mode is not Mode.LIVE or self._paused:
             return False
         # The mean lag the step leaves (the edge less the position, less half a burst: the
@@ -1481,6 +1488,7 @@ class LiveSession(QObject):
         # mean from before it (which arrived over several ticks, none a step on its own).
         self._filter.reset()
         self._go_live(unpause=False, build=False)
+        self._reopened_at = self._clock()  # a Go live right after it opens nothing more
         return True
 
     def _back_off(
@@ -1506,14 +1514,15 @@ class LiveSession(QObject):
 
     def _ran_out(self, snapshot: Mapping[str, Any]) -> bool:
         """VLC running dry (or a stall) now runs out a cushion: the lag had reached the target
-        since the tune (less `_BELOW_TARGET_S`; under Auto, less stay-live's band: a learned
-        rise within it is drift, built by nothing, so the lag in the band is at the target),
+        since the tune (less `_BELOW_TARGET_S`; under Auto, less stay-live's band as wide as
+        the estimate's wander, not the budget's widening: a learned rise within it is drift,
+        built by nothing, so the lag in the band is at the target),
         or the tune started at a pick chosen for it (R33), or stay-live accepted the start's
         shortfall (nothing further back was buffered: it never had the cushion, so running
         dry is trouble all the same)."""
         below = _BELOW_TARGET_S
         if self._learned is not None:
-            below = max(below, self._stay.band(-1))
+            below = max(below, self._stay.dead_band())
         return self._cushion >= self._target(snapshot) - below or self._stay.shortfall_accepted
 
     def _learn(self, *, direct: bool = False, learned_only: bool = False) -> None:
