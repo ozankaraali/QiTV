@@ -13,7 +13,9 @@ browses another provider), as the large picture's does, and opens small again.
 
 A movie or an episode from the Library takes the large picture and keeps its channel small
 (`keep_large_small`); what takes the title's place there (Next, autoplay, another title)
-keeps the small picture beside it (`keep_beside`).
+keeps the small picture beside it (`keep_beside`). When the title's provider has no second
+stream for a channel, that channel closes for it only once the title's link comes
+(`make_room`: "Closed … to play …"); if the link fails, nothing closes.
 
 The PiP frame and label follow the manager: the second surface shows at its corner while
 PiP is open, and the label names the small picture's channel and state ("Connecting…" until
@@ -62,6 +64,14 @@ SWITCHING = "Switching…"  # a swap asked for while the large picture's channel
 SWITCHING_MS = 1500
 SHIFTED_MARGIN_S = 1.0  # the label says "−MM:SS" once the lag is this far beyond the target
 ERROR_MS = 6000
+
+
+@dataclass
+class _Room:
+    """What a title on its way closes once its link comes, and the toast that says so."""
+
+    note: str  # "Closed {channel} to play {title}: {provider} allows {limit} stream(s)"
+    close_small: bool  # the small picture closes then (else the large channel, as it opens)
 
 
 @dataclass
@@ -138,6 +148,7 @@ class PipControls(QObject):
         self._timelines: dict[str, dict] = {}  # each slot's last timeline since it opened
         self._closed_view: Optional[SlotView] = None  # what the small picture showed last
         self._ended: set[str] = set()  # the slots whose player's title ended
+        self._room: Optional[_Room] = None  # what a title on its way closes when it comes
 
     def wire(self) -> None:
         sessions = self.sessions
@@ -348,13 +359,17 @@ class PipControls(QObject):
         False when the channel is not kept and the caller plays as before: no channel plays
         large or the channels play in an external player (the small picture closes: it is for
         live TV), or the title's provider has no second stream, in which case the channel
-        closes for it (toasted) and a small picture, another provider's, plays on.
+        closes for it as the title opens (said then: `make_room`) and a small picture,
+        another provider's, plays on.
         """
+        self._room = None
         channel = self._large_channel()
         if channel is None or self._external():
             self.close()
             return False
-        if self._no_second_stream(channel, item, title):
+        note = self._no_second_stream(channel, item, title)
+        if note:
+            self._room = _Room(note, close_small=False)
             return False
         self.close()
         return self.sessions.demote_large()
@@ -363,15 +378,38 @@ class PipControls(QObject):
         """A movie or an episode takes the place of the one playing large (Next, autoplay,
         another from the Library): the small picture plays on beside it, unless its channel is
         of the title's provider, which allows fewer than two streams; then it closes for the
-        title (said)."""
+        title once the title's link comes (`make_room`)."""
+        self._room = None
         small = self.sessions.small()
         channel = small.channel if small is not None else None
-        if channel is None or self._no_second_stream(channel, item, title):
+        if channel is None:
             self.close()
+            return
+        note = self._no_second_stream(channel, item, title)
+        if note:
+            self._room = _Room(note, close_small=True)
 
-    def _no_second_stream(self, channel: dict, item: dict, title: str) -> bool:
-        """`channel` is of the title's provider, which allows fewer than two streams: the
-        channel closes for the title (said here)."""
+    def has_room(self) -> bool:
+        """The title chosen last closes a channel once its link comes."""
+        return self._room is not None
+
+    def make_room(self) -> None:
+        """The title's link came: the channel it has no stream for closes (the small picture
+        now; the large one as the title opens), and the toast says so."""
+        room, self._room = self._room, None
+        if room is None:
+            return
+        if room.close_small:
+            self.close()
+        self._toast(room.note)
+
+    def forget_room(self) -> None:
+        """The title never came (or another was chosen): nothing closes for it."""
+        self._room = None
+
+    def _no_second_stream(self, channel: dict, item: dict, title: str) -> str:
+        """When `channel` is of the title's provider, which allows fewer than two streams,
+        the toast that says it closes for the title; else ""."""
         provider = item_provider.provider_dict(self.catalog, item)
         name = str(provider.get("name", ""))
         limit = self._budget.limit_for(provider, item_provider.max_connections(self.catalog, item))
@@ -380,13 +418,12 @@ class PipControls(QObject):
             or limit >= 2
             or item_provider.provider_name(self.catalog, channel) != name
         ):
-            return False
+            return ""
         plural = "s" if limit != 1 else ""
-        self._toast(
+        return (
             f"Closed {channel.get('name') or ''} to play {title}: "
             f"{name} allows {limit} stream{plural}"
         )
-        return True
 
     def _limit_reached(self, channel: dict) -> bool:
         """The limit of the channel's own provider leaves no stream for a small picture: say
@@ -406,6 +443,8 @@ class PipControls(QObject):
 
     def close(self) -> None:
         """Close the small picture, or forget the one waiting to open."""
+        if self._room is not None and self._room.close_small:
+            self._room = None  # closed already: nothing to close, or say, for the title
         self._wanted = None
         self._link = None  # a late link for it is ignored (it is no longer `_link`)
         sessions = self.sessions

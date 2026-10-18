@@ -246,6 +246,9 @@ class TVController(QObject):
         # That title never came while the small picture changed channel (no swap then): the
         # new small channel gives the large picture back once it starts.
         self._give_back_later = False
+        # A title on its way that closes a channel (its provider has no stream for both) once
+        # its link comes; said then (PipControls.make_room), never if the link fails.
+        self._room_for: Optional[Target] = None
         self._cid: Optional[str] = None  # resume key of the VOD being played
         self._channel: Optional[dict] = None  # the channel tuned last, for INFO and the drawer
         self._digits = ""  # number entry under way
@@ -882,6 +885,8 @@ class TVController(QObject):
             context=context,
             start_over=bool(context["start_over"]),
         )
+        if self._pip is not None:
+            self._pip.forget_room()  # what an older title would have closed
         kept = False
         if beside and self._pip is not None:
             self._pip.keep_beside(item, title)  # Next, autoplay, another title: it plays on
@@ -890,6 +895,7 @@ class TVController(QObject):
         else:
             self._close_pip()  # picture in picture is for live TV
         self._freed_for = target if kept else None
+        self._room_for = target if self._pip is not None and self._pip.has_room() else None
         self._lanes.supersede()  # a newer choice than an external play waiting for its link
         self._request(target)
 
@@ -989,6 +995,7 @@ class TVController(QObject):
             return
         if self._follow_queue(target):
             return  # the failed target was superseded: no error for it
+        self._forget_room(target)
         self._give_large_back(target)
         self._restore_channel()
         self._error(f"{target.title}: {message}")
@@ -1045,6 +1052,12 @@ class TVController(QObject):
             if not self.swap() and sessions is not None and sessions.changing():
                 self._give_back_later = True  # once the small picture's channel starts
 
+    def _forget_room(self, target: Optional[Target]) -> None:
+        """`target` never came: the channel it would have closed plays on, unsaid."""
+        if target is not None and target is self._room_for and self._pip is not None:
+            self._room_for = None
+            self._pip.forget_room()
+
     def _on_pip_started(self) -> None:
         """The small picture's stream started: a swap back that waited for its channel change
         gives it the large picture now, while that is still empty."""
@@ -1066,6 +1079,9 @@ class TVController(QObject):
     def _deliver(self, target: Target, url: str) -> None:
         item = target.item
         self._freed_for = None  # it came: the large picture is the title's
+        if target is self._room_for and self._pip is not None:
+            self._room_for = None
+            self._pip.make_room()  # before it opens: a closing small picture is waited for
         launcher = self._external_launcher()
         # Direct plays book the slot under the item's own provider, as pipeline tunes do.
         provider_name = item_provider.provider_name(self.catalog, item)
@@ -1420,6 +1436,7 @@ class TVController(QObject):
         if not lost and not side_lost:
             return
         if lost:
+            self._forget_room(newest)
             self._give_large_back(newest)
             self._restore_channel()
         if not self._flow.shows_failure(name):

@@ -770,6 +770,19 @@ class LibraryPlayTests(PipCase):
         self.assertEqual([url for url, _ in self.session.plays][-1], "http://vod/heat.mkv")
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
 
+    def test_the_movies_limit_says_the_channel_closes_only_once_its_link_comes(self):
+        # Review M9: said before the link came; when that failed, One played on.
+        self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
+        self.ready("http://stream/1")
+        self.assertTrue(wait_until(lambda: self.live.named("start")))
+        self.live.play_pipeline()
+        self.controller.enter_library_playing()
+        self.controller.play_vod({**MOVIE, "_provider": "Harbor IPTV"}, "movie", play_context())
+        self.assertEqual(self.toast.messages(), [])
+        self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Not found")
+        self.assertEqual(self.toast.messages(), [("Heat: Not found", "error")])
+        self.assertNotIn(("stop",), self.live.calls)  # One plays on, large
+
     def test_the_movies_limit_keeps_another_providers_small_picture(self):
         # Sweep B5: the small picture closed before the limit was looked at, for nothing.
         self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
@@ -1039,11 +1052,23 @@ class TitleBesideChannelTests(PipCase):
     def test_a_title_of_the_channels_provider_without_a_second_stream_closes_it(self):
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
         self.controller.play_vod(self.FERRY, "movie", play_context())  # Home's, as One
+        self.assertTrue(self.sessions.pip_open())  # review M9: until its link comes
+        self.assertEqual(self.toast.messages(), [])
+        self.ready("http://vod/night-ferry.mkv")
         self.assertEqual(
             self.toast.messages()[-1],
             ("Closed One to play Night Ferry: Home allows 1 stream", "info"),
         )
         self.assertFalse(self.sessions.pip_open())
+
+    def test_a_title_whose_link_fails_closes_nothing_and_says_only_that(self):
+        # Review M9: "Closed One to play …" was said before the link came; One played on.
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
+        self.controller.play_vod(self.FERRY, "movie", play_context())
+        self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Not found")
+        self.assertEqual(self.toast.messages(), [("Night Ferry: Not found", "error")])
+        self.assertTrue(self.sessions.pip_open())  # One plays on, small
+        self.assertNotIn(("stop",), self.live.calls)
 
     def test_a_film_that_ends_small_says_so_and_offers_next_once_large_again(self):
         self.controller.handle(Action.SWAP)  # One large, Heat small
