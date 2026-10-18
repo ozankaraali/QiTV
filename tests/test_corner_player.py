@@ -289,6 +289,24 @@ class CornerPlayerTests(WindowCase):
         self.assertEqual(heard.events, [])
         self.assertFalse(window.isFullScreen())
 
+    def test_a_double_click_on_stop_acts_once(self):
+        # Review M1: its second click landed on the Library under the pointer, where a press
+        # on the current poster or a ▶ button plays that title.
+        self.play_channel()
+        window = self.window
+        window.screens.open_library("movies")
+        self.assertTrue(wait_until(window.corner_controls.isVisible))
+        controls, host = window.corner_controls, window.host
+        at = host.mapToGlobal(controls.mapTo(host, controls.button_rect("stop").center().toPoint()))
+        self.click("stop")
+        self.assertEqual(window.pages.mode(), PageStack.LIBRARY)
+        inside = window.mapFromGlobal(at)
+        under = window.childAt(inside)
+        self.assertIsNotNone(under)
+        heard = MouseHeard(under)
+        QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, pos=inside)
+        self.assertEqual(heard.events, [])
+
     def test_the_sound_button_mutes_what_plays(self):
         self.play_channel()
         window = self.window

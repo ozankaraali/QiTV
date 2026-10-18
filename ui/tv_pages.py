@@ -104,13 +104,15 @@ class TVPages(QObject):
 
     def stop_corner(self) -> None:
         """× on the corner player: what plays stops (today's stop for the Library) and the
-        Library stays, full size."""
+        Library stays, full size. A double-click's second click would land on the Library
+        under the pointer (a press on a poster or ▶ plays it): it reaches nothing."""
         window = self._window
         if window.closing() or window.pages.mode() != PageStack.CORNER:
             return
         self._set_return_to_library(False)
         window.controller.stop_for_library()
         self._show_page(window.library_page)
+        self._second_click.arm()
 
     def open_library(self, section: str) -> None:
         """Movies or Series: what plays goes on in a corner of the Library (nothing playing: the
