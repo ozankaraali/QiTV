@@ -93,6 +93,9 @@ instead of using others' distributions, which may have malware.**
   separately but also carries it with the picture now time-shifts, and a playlist entry that
   names the page its stream expects to be opened from sends it, to the player and the time-shift
   buffer.
+- **Hardware decoding is back.** QiTV again decodes video with your computer's graphics chip,
+  which uses less CPU. If a channel's picture freezes while its sound goes on, QiTV switches
+  that channel to software decoding by itself. You can turn it off in Settings.
 
 ## Fixes
 
@@ -113,10 +116,6 @@ instead of using others' distributions, which may have malware.**
 - **Some channels still play without rewind.** A few HLS channels send their sound as a separate
   stream, or use the newer fragmented MP4 format. QiTV plays them directly, as before, so they
   have no time-shift yet.
-- **Hardware video decoding is safer to try.** It is still off by default and experimental
-  (Settings). With it on, when a channel's picture freezes while its sound goes on, QiTV
-  switches that channel back to software decoding by itself within a few seconds, and keeps it
-  there for a day.
 - **With one provider, nothing changes.** All providers appears once you have two or more
   providers. With one, the lists, channel numbers, stars, the guide and Recent work as in 2.0.
 - **Your stars come along.** A star from 2.0 stays on every provider that has a channel, film or
