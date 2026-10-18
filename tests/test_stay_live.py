@@ -1136,6 +1136,18 @@ class JumpTests(unittest.TestCase):
         self.assertEqual(min(rates), 0.95)  # the owed slow-down
         self.assertAlmostEqual(lag, 7.0, delta=0.15)
 
+    def test_a_stall_after_a_landing_ends_its_tolerance(self):
+        # A Go live pressed while the source stalled (a public sparse-PCR channel): the stall
+        # went on after it and left the lag 7 s short. That is the source's, not the pick's.
+        stay, clock = live(13.5, burst=12.0), Clock()
+        stay.user_go_live()
+        stay.landed(0.4, build=False)
+        drive(stay, 13.9, 5.0, clock=clock)
+        stay.source_stepped()  # the stall ended: the filter starts afresh
+        lag, rates = drive(stay, 6.5, 120.0, clock=clock)
+        self.assertEqual(min(rates), 0.97)  # built back, gently
+        self.assertGreater(lag, 6.5 + 1.0)
+
     def test_the_keyframes_grain_never_widens_the_band(self):
         # Review: a "gentle" verdict while the budget is spent widened the band to the far
         # lag (8 s and more), on both sides. The band stays as it was.

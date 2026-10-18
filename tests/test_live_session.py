@@ -2287,6 +2287,22 @@ class SafeJumpTests(LiveSessionCase):
         self.live = self.make()  # each channel learns afresh
         self.assertEqual(self.live._land_offset, 0.0)
 
+    def test_stay_live_hears_when_a_stall_ends(self):
+        # Seen on a public sparse-PCR channel: Go live during a stall that went on after it
+        # left the lag 7 s short; that is the source's step, not the pick's (no tolerance).
+        stepped = self.enterContext(mock.patch.object(StayLive, "source_stepped", autospec=True))
+        sid = self.start()
+        feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
+        feed.run(10.0)
+        feed.stalled = True
+        self.live.go_live()
+        feed.sync()
+        feed.run(5.0)
+        self.assertFalse(stepped.called)
+        feed.stalled = False
+        feed.run(1.0)
+        self.assertEqual(stepped.call_count, 1)
+
     def test_a_jump_that_lands_short_changes_no_rate(self):
         # Review I3: each jump on a sparse-PCR channel read 1.2-1.4 s short once VLC played,
         # and 0.97x for 20 s followed (six rate changes).

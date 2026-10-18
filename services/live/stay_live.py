@@ -59,7 +59,7 @@ not count); the reopen beyond the target plus 20 s stays as it was. A locked rat
 (it changes no rate), and a gentle nudge a jump cut counts against the budget. A jump or Go
 live that lands short builds nothing (`landed(build=False)`): it was picked at the target in
 a full buffer, so its shortfall is the pick's error, tolerated but for too little room and
-trouble.
+trouble, until a stall's end (the source's step, steered as ever).
 
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in
 2.0.2: 4.5 s of media in 37 s). `RateHealth` notices that from VLC's progress, and the caller
@@ -541,14 +541,20 @@ class StayLive:
         playing, the room is built once at `_GENTLE_DOWN` for at most `_START_BUILD_S`, then
         the rest is accepted. Without `build` (a jump, Go live: picked at the target with the
         buffer full, 2.1 stage 5 review I3) a shortfall is the pick's, not missing room: it is
-        tolerated until the next landing, but for too little room (`_short`, 2.0.1) and VLC
-        running dry (`trouble()`).
+        tolerated until the next landing or a stall's end (`source_stepped()`), but for too
+        little room (`_short`, 2.0.1) and VLC running dry (`trouble()`).
         """
         self._floor = max(0.0, excess)
         self._landing = _START_S
         self._start = _START_S if build else 0.0
         self._accepting, self._tolerant = False, not build
         self._jump_age = self._waited = 0.0  # a jump: the next one a minute on at the earliest
+
+    def source_stepped(self) -> None:
+        """The source's edge stepped after a stall: what is short of the target now is the
+        source's, not a landing's pick (a Go live during a stall that went on after it left
+        the lag 7 s short on a public sparse-PCR channel). It is steered as ever."""
+        self._tolerant = False
 
     def landed_further(self, excess: float) -> None:
         """A backlog step right after a start took the lag `excess` above the target: within

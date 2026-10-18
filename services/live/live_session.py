@@ -1466,13 +1466,15 @@ class LiveSession(QObject):
     def _observe(self, snapshot: Mapping[str, Any], stalled: bool) -> None:
         """Give the lag filter this tick's live edge. A stalled source adds nothing (its
         standing edge is no rhythm), and the filter starts afresh once it sends again: it may
-        come back ahead or behind where it was, a step taken in at once, not as a drift."""
+        come back ahead or behind where it was, a step taken in at once, not as a drift
+        (and no landing's: stay-live steers what it left as ever, `source_stepped`)."""
         if stalled:
             self._was_stalled = True
             return
         if self._was_stalled:
             self._was_stalled = False
             self._filter.reset()
+            self._stay.source_stepped()
         self._filter.add(
             self._clock(),
             self._live_edge(snapshot),
