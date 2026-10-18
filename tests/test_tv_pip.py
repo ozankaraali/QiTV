@@ -998,6 +998,23 @@ class TitleBesideChannelTests(PipCase):
         self.ready("http://vod/night-ferry.mkv")
         self.assert_one_plays_small_beside("http://vod/night-ferry.mkv")
 
+    def test_the_channel_kept_small_that_fails_opens_again_beside_the_film(self):
+        # Review I1: the STB retry's fresh link was dropped because a movie plays, and
+        # nothing was said (before the retry: "Couldn't open this channel in PiP").
+        self.live.failed.emit("The stream could not be opened")  # One, Home's portal, small
+        self.assertFalse(self.sessions.pip_open())
+        self.live.released.emit()
+        self.ready("http://stream/1?play_token=new")
+        self.assertTrue(wait_until(lambda: len(self.live.named("start")) == 2))
+        self.assertEqual(self.live.named("start")[-1][0], "http://stream/1?play_token=new")
+        self.assertTrue(self.sessions.pip_open())
+        self.assertIs(self.sessions.small(), self.main_slot)
+        self.assertEqual(self.label.info[0], "One")
+        self.assertEqual(self.toast.messages(), [])
+        self.live.play_pipeline()
+        self.live.failed.emit("The stream could not be opened")  # once: said now
+        self.assertEqual(self.toast.messages(), [(PIP_FAILED, "error")])
+
     def test_a_film_that_fails_small_says_why_once(self):
         # Sweep B follow-up: the small player's errors had no listener.
         self.session.errorOccurred.emit("Broken")  # One's, small: its live session's to recover

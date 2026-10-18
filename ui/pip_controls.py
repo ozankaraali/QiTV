@@ -429,8 +429,12 @@ class PipControls(QObject):
             self._request(wanted[0])  # chosen since: only the newest is opened
             return
         self._wanted = None
-        if self._vod() or ZapContext.same(target.item, self._large_channel()):
-            return  # a movie started, or the large picture took the channel, meanwhile
+        # A movie started, or the large picture took the channel, meanwhile: nothing opens.
+        # A retried channel was small beside a movie (nothing else opens small then): again.
+        if (self._vod() and not target.retried) or ZapContext.same(
+            target.item, self._large_channel()
+        ):
+            return
         self._open(target, wanted[1], url)
 
     def _on_link_failed(self, target: Target, _message: str) -> None:
