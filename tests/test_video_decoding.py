@@ -277,9 +277,10 @@ class HardwareFallbackTests(unittest.TestCase):
                 counts[i] += round(rate * TICK)
             session._tick()
 
-    def test_a_player_without_a_video_output_never_falls_back(self):
-        # The offscreen smoke (and a runner without a display): VLC can make no video output
-        # ("video output creation failed"), so no picture shows whatever the decoder does.
+    def test_offscreen_a_player_without_a_video_output_never_falls_back(self):
+        # The offscreen smoke and CI: no window system, so VLC can make no video output
+        # ("video output creation failed") and no picture shows whatever the decoder does.
+        self.assertFalse(playback.display_exists())  # these tests run offscreen
         session = self.make()
         self.player.vouts = 0
         session.play(sessions.A, kind=PlayKind.LIVE)
@@ -287,6 +288,34 @@ class HardwareFallbackTests(unittest.TestCase):
         session.play(sessions.B, kind=PlayKind.LIVE)
         self.tick(session, 10.0, shown=0)
         self.assertEqual((self.froze, len(self.media())), ([], 2))
+
+    def test_with_a_display_the_first_tune_without_a_picture_falls_back(self):
+        # The lab's tune into intra refresh: VideoToolbox sends no picture, so VLC makes no
+        # video output, also in a real window. With a window system that is the decoder's
+        # doing: the first tune of a fresh player is judged too.
+        session = self.make()
+        self.player.vouts = 0
+        with mock.patch("services.playback.display_exists", return_value=True):
+            session.play(sessions.A, kind=PlayKind.LIVE)
+            self.tick(session, 3.75, shown=0)
+            self.assertEqual(self.froze, [])
+            self.tick(session, 0.5, shown=0)
+        self.assertEqual(len(self.froze), 1)  # FIRST_PICTURE_S after it played
+
+    def test_display_exists_only_on_a_window_system(self):
+        self.assertFalse(playback.display_exists())  # QT_QPA_PLATFORM=offscreen
+        for name, expected in (
+            ("cocoa", True),
+            ("xcb", True),
+            ("windows", True),
+            ("offscreen", False),
+            ("minimal", False),
+        ):
+            with (
+                self.subTest(platform=name),
+                mock.patch("services.playback.QGuiApplication.platformName", return_value=name),
+            ):
+                self.assertIs(playback.display_exists(), expected)
 
     def test_a_player_that_had_a_video_output_judges_a_stream_without_one(self):
         # VideoToolbox showing no picture at a tune: VLC makes no video output for a decoder

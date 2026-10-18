@@ -18,8 +18,8 @@ _AUDIO_POLL_MS for _AUDIO_WATCH_MS, then at each regular poll while playing. Wit
 
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
-has the lab) where pictures can show (`_can_show`: a video output now, or for an earlier media
-of this player), the stream decodes in software from then on (`software_options()`, media options
+has the lab) where pictures can show (`_can_show`: on a window system, or once VLC made a video
+output for one of this player's media), the stream decodes in software from then on (`software_options()`, media options
 that override the instance's decoder), `pictureFroze` follows, and a stream other than a
 time-shift one opens again where it plays (a film at its position, a live stream live). A
 time-shift stream's position is LiveSession's: it reopens it. Each seek, the resume one
@@ -38,6 +38,7 @@ import time
 from typing import Any, Callable, Optional, Protocol
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
+from PySide6.QtGui import QGuiApplication
 
 from services.jobs import JobRunner
 from services.picture_watch import Counters, FrozenPicture
@@ -93,6 +94,18 @@ def decoder_args(hardware: bool) -> list[str]:
     if platform.system() == "Darwin":
         args.append("--no-videotoolbox")
     return args
+
+
+# Qt platforms without a window system: VLC can make no video output there.
+_HEADLESS_PLATFORMS = ("offscreen", "minimal")
+
+
+def display_exists() -> bool:
+    """The app runs on a window system VLC can draw into: a GUI application on any Qt
+    platform but a headless one (the offscreen smoke, CI's unit tests)."""
+    if not isinstance(QGuiApplication.instance(), QGuiApplication):
+        return False
+    return QGuiApplication.platformName() not in _HEADLESS_PLATFORMS
 
 
 def software_options() -> list[str]:
@@ -660,15 +673,16 @@ class PlaybackSession(QObject):
         return True
 
     def _can_show(self) -> bool:
-        """VLC has a video output for this media, or made one for an earlier media of this
-        player. Where it can make none ("video output creation failed": an offscreen run, a
-        runner without a display) no picture shows whatever the decoder does: no freeze is
-        judged there. A decoder that sends no picture gets no output either (VideoToolbox at
-        a tune into intra refresh): once this player showed pictures, its outputs work, so
-        that stream is judged too."""
+        """Pictures could show: the app runs on a window system (`display_exists`), VLC has a
+        video output for this media, or it made one for an earlier media of this player.
+        A decoder that sends no picture gets no output (VideoToolbox at a tune into intra
+        refresh, also in a real window): with a window system that is the decoder's doing,
+        so it is judged from the first tune. Offscreen (the smoke, CI) VLC can make no output
+        at all ("video output creation failed"), whatever the decoder does: only once one
+        existed does a stream there count as frozen."""
         if int(self._player.has_vout() or 0) > 0:
             self._had_vout = True
-        return self._had_vout
+        return self._had_vout or display_exists()
 
     def _counters(self) -> Optional[Counters]:
         """This media's statistics from libVLC (the player's media and its input item: never
