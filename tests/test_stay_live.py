@@ -592,6 +592,20 @@ class LagFilterTests(unittest.TestCase):
         flt.reset()
         self.assertIsNone(flt.lag(1.0, 0.0))
 
+    def test_its_mean_settles_after_ten_seconds_and_two_bursts_since_a_restart(self):
+        # 2.1 stage 5 (re-review N2): only a settled mean's picks are learned from.
+        for burst, settles in ((0.0, 10.0), (10.0, 20.0)):
+            with self.subTest(burst=burst):
+                flt = LagFilter()
+                for k in range(81):  # 20 s
+                    now = 0.25 * k
+                    flt.add(now, 100.0 + now, burst, 0.0)
+                    self.assertEqual(flt.settled(now), now >= settles - 1e-9)
+                restarts = flt.restarts
+                flt.add(20.25, 100.0 + 20.25 + 30.0, burst, 0.0)  # a step: afresh
+                self.assertEqual(flt.restarts, restarts + 1)
+                self.assertFalse(flt.settled(20.25))
+
 
 class BurstClassTests(unittest.TestCase):
     """The filter's burst, with hysteresis (2.1): the helper's raw TS meter may report a
@@ -1135,6 +1149,50 @@ class JumpTests(unittest.TestCase):
         lag, rates = drive(stay, 5.7, 120.0, clock=clock)
         self.assertEqual(min(rates), 0.95)  # the owed slow-down
         self.assertAlmostEqual(lag, 7.0, delta=0.15)
+
+    def test_only_the_landings_own_shortfall_is_tolerated(self):
+        # Re-review N1: the tolerance outlived the landing: a target raised after a Go live
+        # (Normal to Stable, a larger burst, Auto) was never built, and a slow drift down was
+        # left until VLC had under half a second of room.
+        cases = {
+            "the target rises": dict(target=6.0),
+            "a larger burst": dict(target=5.0, burst=4.0),
+            "a slow drift down": dict(drift=-0.005),
+        }
+        for name, case in cases.items():
+            with self.subTest(case=name):
+                stay, clock = live(), Clock()
+                stay.user_go_live()
+                stay.landed(0.0, build=False)  # landed at the target
+                lag, _ = drive(stay, T, 30.0, clock=clock)
+                stay.target = case.get("target", stay.target)
+                stay.burst = case.get("burst", stay.burst)
+                lag, rates = drive(stay, lag, 500.0, clock=clock, drift=case.get("drift", 0.0))
+                self.assertEqual(min(rates), 0.97)  # built, gently, as without the Go live
+                if "drift" not in case:
+                    self.assertGreater(lag, stay.target - stay.band(-1) - 0.1)
+
+    def test_a_short_landing_back_in_the_band_is_tolerated_no_more(self):
+        stay, clock = live(), Clock()
+        stay.user_go_live()
+        stay.landed(0.0, build=False)
+        lag, rates = drive(stay, T - 1.4, 30.0, clock=clock)  # it landed short
+        self.assertEqual(set(rates), {1.0})
+        lag, rates = drive(stay, T - 0.5, 10.0, clock=clock)  # back in the band (a step)
+        lag, rates = drive(stay, T - 1.4, 60.0, clock=clock)  # short again: a real one
+        self.assertEqual(min(rates), 0.97)
+
+    def test_a_landing_is_judged_once_its_stream_played(self):
+        # Right after an open the lag reads where the pick aimed, then where VLC's clock puts
+        # it: that first reading in the band is no sign the landing was not short.
+        stay, clock = live(), Clock()
+        stay.user_go_live()
+        stay.landed(0.0, build=False)
+        stay.hold_reopen = True  # the stream opened a moment ago
+        drive(stay, T, 2.0, clock=clock)
+        stay.hold_reopen = False
+        _, rates = drive(stay, T - 1.3, 120.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
 
     def test_a_stall_after_a_landing_ends_its_tolerance(self):
         # A Go live pressed while the source stalled (a public sparse-PCR channel): the stall

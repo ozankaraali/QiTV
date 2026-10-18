@@ -306,6 +306,7 @@ class LagFilter:
         self.burst = 0.0
         self._burst_seen = False
         self._pending: Optional[tuple[float, float]] = None  # (since, reported) unlike `burst`
+        self.restarts = 0  # how often its window started afresh (a step, a burst, reset())
 
     def reset(self) -> None:
         """Forget the edges (the burst stays: it is the source's)."""
@@ -314,6 +315,15 @@ class LagFilter:
         self._sum = self._weight = 0.0
         self._last = self._first = self._level = None
         self._spread = 0.0
+        self.restarts += 1
+
+    def settled(self, now: float) -> bool:
+        """Its mean has held `_WARMUP_S` and two bursts since it started afresh (or its whole
+        window, if shorter): a pick read from it misses only by its own error (2.1 stage 5
+        re-review N2: right after a restart the mean still moves with the arrivals)."""
+        if self._first is None:
+            return False
+        return now - self._first >= min(self.window, max(_WARMUP_S, 2 * self.burst)) - 1e-9
 
     @property
     def window(self) -> float:
@@ -489,8 +499,11 @@ class StayLive:
         self._start = 0.0  # seconds of playing in which a shortfall is the start's
         self._accepting = False  # the start's build ran: what is still short is accepted
         # A jump or Go live landed (no build): what is short of the band is its pick's, not
-        # missing room; only too little room (`_short`) or trouble acts on it.
+        # missing room; only too little room (`_short`) or trouble acts on it. Only the
+        # landing's own shortfall: not once the target rose above the one it landed at, nor
+        # once the lag was back in the band after the stream played (`_tolerance`).
         self._tolerant = False
+        self._tolerant_at = 0.0  # the target it landed at
 
     @property
     def nudge(self) -> float:
@@ -540,14 +553,17 @@ class StayLive:
         off by a gentle nudge. Short of it, or should the target rise within `_START_S` of
         playing, the room is built once at `_GENTLE_DOWN` for at most `_START_BUILD_S`, then
         the rest is accepted. Without `build` (a jump, Go live: picked at the target with the
-        buffer full, 2.1 stage 5 review I3) a shortfall is the pick's, not missing room: it is
-        tolerated until the next landing or a stall's end (`source_stepped()`), but for too
-        little room (`_short`, 2.0.1) and VLC running dry (`trouble()`).
+        buffer full, 2.1 stage 5 review I3) the landing's own shortfall is the pick's, not
+        missing room: it is tolerated, but for too little room (`_short`, 2.0.1) and VLC
+        running dry (`trouble()`), until the next landing, a stall's end (`source_stepped()`),
+        a target above the one it landed at (re-review N1: built as without the landing), or
+        the lag in the band once the stream played (a later shortfall is drift).
         """
         self._floor = max(0.0, excess)
         self._landing = _START_S
         self._start = _START_S if build else 0.0
         self._accepting, self._tolerant = False, not build
+        self._tolerant_at = self.target
         self._jump_age = self._waited = 0.0  # a jump: the next one a minute on at the earliest
 
     def source_stepped(self) -> None:
@@ -657,6 +673,7 @@ class StayLive:
                 return Decision(1.0)
             self._reopened = True
             return Decision(1.0, reopen_live=True)
+        self._tolerance(lag_s)
         if self._reopened:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
         if self.rate_locked:
@@ -672,6 +689,19 @@ class StayLive:
         if self._steer(dt, lag_s, now) if self._nudge is not None else self._watch(dt, lag_s, now):
             return self._jump(now)
         return Decision(self._rate)
+
+    def _tolerance(self, lag: float) -> None:
+        """A jump's or Go live's shortfall stays tolerated only while it is the landing's own:
+        not once the target rose above the one it landed at (a higher latency, a larger
+        burst, Auto: built as without the landing), nor once the lag is in the band after the
+        stream played (right after an open it reads where the pick aimed; a shortfall after
+        it is drift). Re-review N1."""
+        if not self._tolerant:
+            return
+        if self.target > self._tolerant_at + 1e-9:
+            self._tolerant = False
+        elif not self.hold_reopen and lag - self._centre(-1) >= -self.band(-1):
+            self._tolerant = False
 
     def _jump(self, now: float) -> Decision:
         """Reopen at live instead (`_far_move`): a catch-up it replaces ends here, and a
