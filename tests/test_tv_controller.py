@@ -1044,6 +1044,44 @@ class LinkPipelineTests(ControllerTestCase):
         self.ready("http://stream/1")
         self.assertEqual(self.played_urls(), ["http://stream/1"])
 
+    def test_a_ready_provider_never_asks_while_another_providers_tune_is_in_flight(self):
+        # Sweep B8: Home's choice waits behind Backup's request, and one link at a time.
+        self.catalog.provider = "@all"
+        self.tune_stamped(BACKUP_TWO)  # in flight
+        self.tune_stamped(HOME_ONE)  # the newest choice, queued
+        self.catalog.hub_ready("Home")
+        self.assertEqual(self.requested(), ["Two"])
+        self.ready("http://stream/2")  # Two was superseded: One is asked now
+        self.assertEqual(self.requested(), ["Two", "One"])
+        self.assertEqual(self.played_urls(), [])
+        self.ready("http://stream/1")
+        self.assertEqual(self.played_urls(), ["http://stream/1"])
+
+    def test_a_loading_providers_failure_lets_another_providers_newer_choice_go(self):
+        # Sweep B8: Backup's choice, queued behind Home's request, waited for Home's setup
+        # (only Home's own choices are asked again when it is ready): the tune hung.
+        self.catalog.provider = "@all"
+        self.tune_stamped(HOME_ONE)
+        self.tune_stamped(BACKUP_TWO)  # queued behind One
+        self.catalog.linkFailed.emit(1, PROVIDER_LOADING_MESSAGE)  # Home is loading
+        self.assertEqual(self.requested(), ["One", "Two"])
+        self.ready("http://stream/2")
+        self.assertEqual(self.played_urls(), ["http://stream/2"])
+        self.catalog.hub_ready("Home")  # One was superseded: never asked again
+        self.assertEqual(self.requested(), ["One", "Two"])
+
+    def test_a_loading_providers_failure_drops_a_choice_to_stay_on_another_providers(self):
+        self.catalog.provider = "@all"
+        self.tune_stamped(BACKUP_TWO)
+        self.ready("http://stream/2")  # Two plays
+        self.tune_stamped(HOME_ONE)
+        self.tune_stamped(BACKUP_TWO)  # back to Two: stay on it
+        self.catalog.linkFailed.emit(2, PROVIDER_LOADING_MESSAGE)  # Home is loading
+        self.assertFalse(self.controller._lanes.busy())  # nothing waits for Home's setup
+        self.catalog.hub_ready("Home")
+        self.assertEqual(self.requested(), ["Two", "One"])
+        self.assertEqual(self.played_urls(), ["http://stream/2"])
+
     def test_provider_refresh_requests_the_pending_tune_again(self):
         self.catalog.hub_ready("Home")
         self.tune(0)

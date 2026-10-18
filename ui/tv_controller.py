@@ -933,9 +933,13 @@ class TVController(QObject):
             return
         if message == PROVIDER_LOADING_MESSAGE:
             # A provider setup is running; providerReady asks again for the newest choice:
-            # one queued meanwhile is newer than the target that just failed.
-            if self._lanes.queued is None:
+            # one queued meanwhile is newer than the target that just failed. Only that
+            # provider's ready asks it: another provider's newer choice goes on now.
+            queued = self._lanes.queued
+            if queued is None:
                 self._lanes.queued = target
+            elif self._link_owner(queued.item) != self._link_owner(target.item):
+                self._follow_queue(target)
             return
         if self._follow_queue(target):
             return  # the failed target was superseded: no error for it
@@ -1301,19 +1305,13 @@ class TVController(QObject):
             return
         dropped = self._lanes.provider_ready(name, self._link_owner)  # a menu's links go on
         if dropped is not None:
-            newest = self._lanes.queued or dropped
-            if self._is_stay(newest):
-                self._lanes.take_queued()  # the playing channel was the newest choice
-            else:
-                self._request(newest)
+            self._ask_again(self._lanes.queued or dropped)
         elif self._lanes.in_flight() is None:
-            # A tune that failed because this provider was loading waits queued for it.
+            # A tune that failed because this provider was loading waits queued for it (never
+            # asked while another provider's tune is in flight: it follows that one).
             queued = self._lanes.queued
             if queued is not None and self._link_owner(queued.item) == name:
-                if self._is_stay(queued):
-                    self._lanes.take_queued()
-                else:
-                    self._request(queued)
+                self._ask_again(queued)
         if self._pip is not None:
             self._pip.provider_settled(name, self._link_owner, ask_again=True)
 
@@ -1336,10 +1334,7 @@ class TVController(QObject):
         if queued is not None and self._link_owner(queued.item) == name:
             self._lanes.take_queued()
         elif queued is not None and dropped is not None:
-            if self._is_stay(queued):
-                self._lanes.take_queued()
-            else:
-                self._request(queued)
+            self._ask_again(queued)
         if self._pip is not None and self._pip.provider_settled(
             name, self._link_owner, ask_again=False
         ):
@@ -1350,6 +1345,14 @@ class TVController(QObject):
             self._restore_channel()
         if not self._flow.shows_failure(name):
             self._error(f"{name}: {message}" if name else message)
+
+    def _ask_again(self, newest: Target) -> None:
+        """A provider settled the newest choice's request: it asks for its link (again), or,
+        when it is the marker that keeps the playing channel (see _tune), it is dropped."""
+        if self._is_stay(newest):
+            self._lanes.take_queued()
+        else:
+            self._request(newest)
 
     def _live_section_loaded(self) -> None:
         context = self.zap.context
