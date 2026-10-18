@@ -823,6 +823,106 @@ class AutoTargetTests(unittest.TestCase):
         self.assertEqual(stay.target, TARGETS["normal"])
 
 
+class LandingTests(unittest.TestCase):
+    """2.1 stage 3: a stream opened at the start Go live picks (a tune, Go live, a reopen at
+    live) lands where the source's keyframes allow. Above the target by up to a keyframe
+    interval (the 1-stream raw-TS provider: one every 10 s) it is nudged gently, never
+    caught up at 1.10x nor reopened; short of it (nothing further back was buffered) it is
+    built at 0.97x for 20 s at most, then accepted until VLC runs dry."""
+
+    def test_a_landing_above_the_target_is_nudged_gently(self):
+        stay, clock = live(), Clock()
+        stay.landed(9.0)  # the newest keyframe at or above the target
+        lag, rates = drive(stay, T + 9.0, 60.0, clock=clock)
+        self.assertEqual(max(rates), 1.03)  # not 1.10x after 3 s
+        first = next(i for i, rate in enumerate(rates) if rate != 1.0)
+        self.assertGreaterEqual(first * TICK, 14.75)  # a lasting drift: after 15 s
+        lag, more = drive(stay, lag, 300.0, clock=clock)
+        self.assertEqual(changes(rates + more), 2)  # one nudge, in and out
+        self.assertAlmostEqual(lag, T, delta=0.2)
+
+    def test_a_landing_above_the_target_never_reopens_at_live(self):
+        stay, clock = live(), Clock()
+        stay.landed(12.0)
+        decisions = [stay.update(T + 21.0, False, now=clock.tick()) for _ in range(240)]
+        self.assertFalse(any(decision.reopen_live for decision in decisions))
+
+    def test_far_beyond_the_landing_is_still_caught_up(self):
+        stay, clock = live(), Clock()
+        stay.landed(9.0)
+        drive(stay, T + 9.0, 2.0, clock=clock)
+        lag, rates = drive(stay, T + 9.0 + 9.0, 10.0, clock=clock)  # a stall added 9 s
+        self.assertEqual(max(rates), 1.10)
+
+    def test_the_landing_allowance_follows_the_lag_down(self):
+        stay, clock = live(), Clock()
+        stay.landed(9.0)
+        lag, rates = drive(stay, T + 9.0, 200.0, clock=clock)  # the nudge took 6 s off
+        self.assertLess(lag, T + 3.5)
+        _, rates = drive(stay, lag + 8.6, 10.0, clock=clock)  # 8.6 s more: far from there
+        self.assertEqual(max(rates), 1.10)
+
+    def test_go_live_forgets_the_landing(self):
+        stay, clock = live(), Clock()
+        stay.landed(9.0)
+        stay.user_go_live()  # a Go live opens afresh (and says where it landed)
+        _, rates = drive(stay, T + 12.0, 10.0, clock=clock)
+        self.assertEqual(max(rates), 1.10)
+
+    def test_a_short_landing_builds_at_0_97_for_20_seconds_at_most_then_accepts(self):
+        # A public HLS channel started short (7 s target, 3.5 s behind): 2.0.1's rule built
+        # the room at 0.95x for 40-110 s, audibly.
+        stay, clock = live(7.0, burst=7.0), Clock()
+        stay.landed(-3.5)
+        lag, rates = drive(stay, 3.5, 180.0, clock=clock)
+        self.assertEqual(min(rates), 0.97)
+        slow = sum(1 for rate in rates if rate < 1.0) * TICK
+        self.assertLessEqual(slow, 20.0)
+        self.assertGreater(slow, 15.0)
+        self.assertEqual(changes(rates), 2)
+        self.assertEqual(rates[-1], 1.0)
+        self.assertLess(lag, 7.0 - 2.5)  # the rest of the shortfall is accepted
+
+    def test_a_shortfall_just_beyond_the_band_is_built_back_inside_it(self):
+        stay, clock = live(7.0, burst=7.0), Clock()
+        stay.landed(-1.3)
+        lag, rates = drive(stay, 5.7, 120.0, clock=clock)
+        self.assertEqual((min(rates), changes(rates)), (0.97, 2))
+        self.assertGreaterEqual(lag, 7.0 - stay.band(-1))  # 20 s at 0.97x: about 0.5 s
+        self.assertFalse(stay.shortfall_accepted)  # inside the band: nothing is accepted
+        lag, rates = drive(stay, 3.2, 120.0, clock=clock)  # later, less than 0.5 s of room
+        self.assertEqual(min(rates), 0.95)  # 2.0.1's protection
+
+    def test_an_accepted_shortfall_is_built_once_vlc_runs_dry(self):
+        stay, clock = live(7.0, burst=7.0), Clock()
+        stay.landed(-3.5)
+        lag, rates = drive(stay, 3.5, 60.0, clock=clock)  # built, then accepted
+        stay.trouble()  # VLC ran dry before a segment landed
+        lag, rates = drive(stay, lag, 120.0, clock=clock)
+        self.assertEqual(min(rates), 0.95)  # the slow-down owed after trouble
+        self.assertAlmostEqual(lag, 7.0, delta=0.15)
+
+    def test_after_the_start_a_real_shortfall_keeps_2_0_1s_protection(self):
+        stay, clock = live(10.0, burst=10.0), Clock()
+        stay.landed(0.5)
+        lag, rates = drive(stay, 10.5, 90.0, clock=clock)
+        self.assertEqual(set(rates), {1.0})
+        lag, rates = drive(stay, 5.2, 200.0, clock=clock)  # less than half a second of room
+        self.assertEqual(min(rates), 0.95)
+        self.assertAlmostEqual(lag, 10.0, delta=0.15)
+
+    def test_a_target_that_rises_in_the_first_minute_is_built_at_0_97(self):
+        # A raw TS source's bursts are measured only once a few have landed: the target
+        # rises from Normal's to the burst after the start.
+        stay, clock = live(), Clock()
+        stay.landed(0.0)
+        drive(stay, T, 20.0, clock=clock)
+        stay.target, stay.burst = 10.0, 10.0
+        _, rates = drive(stay, T, 120.0, clock=clock)
+        self.assertEqual(min(rates), 0.97)
+        self.assertLessEqual(sum(1 for rate in rates if rate < 1.0) * TICK, 20.0)
+
+
 class BuildTests(unittest.TestCase):
     """A raised Auto target is reached without a jump back (2.0.2): by one nudge below 1x
     where the rate may change, else as VLC waits at the live edge."""

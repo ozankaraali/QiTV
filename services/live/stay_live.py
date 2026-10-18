@@ -31,6 +31,17 @@ target by itself (a step), and is resized when the target moves; a catch-up that
 counts against the budget only if no slow-down followed it. `SettledLag` gives the lag as
 shown: in half seconds, changed only after it differed for `_SHOWN_HOLD_S`.
 
+A stream opened at the start Go live picks (2.1 stage 3: a tune, Go live, a reopen at live;
+the caller says so with `landed()`) lands where the source's keyframes allow. Above the
+target by up to a keyframe interval (one provider's 4K channel has one every 10 s) is no
+drift: far behind and the reopen at live count from that landing (`_floor`, which follows the
+lag down as a nudge takes it off), so it gets a gentle nudge, not 1.10x. Short of the target
+(nothing further back was buffered, or a raw TS source's bursts were measured after the start
+and raised the target) within `_START_S` of playing, the room is built once, at `_GENTLE_DOWN`
+for at most `_START_BUILD_S` of playing, outside the budget; what is still short then is accepted (no
+2.0.1 slow-down, no nudge ahead) until the lag is back within the band, or VLC runs dry
+(`trouble()`: the owed slow-down builds all of it then).
+
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in
 2.0.2: 4.5 s of media in 37 s). `RateHealth` notices that from VLC's progress, and the caller
 then calls `lock_rate()`: from there on stay-live keeps 1x and only reopens at live when the
@@ -84,6 +95,8 @@ _OWED_MIN_S = 0.5  # a slow-down owed after trouble is made for a deficit beyond
 _OWED_HOLD_S = 1.0  # ... once it lasted this long while VLC plays (right after a stall the
 # lag filter holds one sample: a source that sent what it missed is back on the next tick)
 _BUDGET_S = 300.0  # one gentle nudge at most in this long
+_START_S = 60.0  # after a landing, a shortfall within this much playing is the start's ...
+_START_BUILD_S = 20.0  # ... built at _GENTLE_DOWN for at most this much playing, then accepted
 _WIDEN_S = 0.01  # beyond the budget the band takes in the lag outside it, and this much
 _TICK_S = 0.25  # the caller's update interval (what a first sample stands for)
 _MAX_DT = 1.0  # a longer gap between two updates counts as this long
@@ -398,6 +411,7 @@ class _Nudge:
     cut: bool = False  # ended before its end (trouble): it does not count against the budget
     spent: bool = False  # it took its whole size (ramping out: it counts, whatever follows)
     stepped: Optional[float] = None  # when the rate last stepped
+    limit: Optional[float] = None  # a start's build: seconds below 1x it has left (budget-free)
 
     @property
     def step(self) -> float:
@@ -433,11 +447,20 @@ class StayLive:
         self._owed = False  # VLC ran out of room: a slow-down to the target is owed
         self._short_for = 0.0  # seconds the lag was short of the target since then
         self._uncharged: Optional[float] = None  # a cut catch-up's end, while it may count
+        self._floor = 0.0  # how far above the target the last landing was (see landed())
+        self._start = 0.0  # seconds of playing in which a shortfall is the start's
+        self._accepting = False  # the start's build ran: what is still short is accepted
 
     @property
     def nudge(self) -> float:
         """The rate the current nudge ramps to (1.0: none)."""
         return self._nudge.peak if self._nudge is not None else 1.0
+
+    @property
+    def shortfall_accepted(self) -> bool:
+        """The start's build ran and the lag is still short of the band: VLC running dry now
+        is trouble, even though the lag never reached the target."""
+        return self._accepting
 
     def band(self, side: int) -> float:
         """How far the lag may be from the target on `side` (+1 behind, -1 ahead)."""
@@ -464,6 +487,19 @@ class StayLive:
     def absorb(self) -> None:
         """The lag stepped (a reopen, say): count the time outside the band afresh."""
         self._outside, self._side, self._urgent = 0.0, 0, False
+
+    def landed(self, excess: float) -> None:
+        """A stream opened at the start Go live picks (after `user_go_live()` for a Go live):
+        its mean lag lands `excess` seconds above the target (below it when negative).
+
+        Above it, far behind (1.10x) and the reopen at live count from there, and follow the
+        lag down: the landing a keyframe interval allowed is taken off by a gentle nudge.
+        Short of it, or should the target rise within `_START_S` of playing, the room is built
+        once at `_GENTLE_DOWN` for at most `_START_BUILD_S`, then the rest is accepted.
+        """
+        self._floor = max(0.0, excess)
+        self._start = _START_S
+        self._accepting = False
 
     def trouble(self) -> None:
         """VLC ran out of room: a starvation, or a stall, that ran out the cushion (Auto may have
@@ -492,6 +528,8 @@ class StayLive:
         self._nudge = None
         self._owed = False  # the stream opens afresh at the target: nothing is owed
         self._uncharged = None
+        self._floor = self._start = 0.0  # its own landing follows (landed())
+        self._accepting = False
         self.absorb()
 
     def user_speed(self, rate: float) -> None:
@@ -528,7 +566,13 @@ class StayLive:
             if not self._urgent:
                 self.absorb()
             return Decision(self._rate)
-        if lag_s > self.target + _REOPEN:
+        self._floor = min(self._floor, max(0.0, lag_s - self._centre(1)))
+        self._start = max(0.0, self._start - dt)
+        if self._owed:  # VLC ran dry: the owed slow-down builds a start's shortfall, all of it
+            self._start, self._accepting = 0.0, False
+            if self._nudge is not None:
+                self._nudge.limit = None
+        if lag_s > self.target + _REOPEN + self._floor:
             if self.hold_reopen:
                 return Decision(self._rate)  # the stream just opened: its lag comes first
             self._rate, self._nudge = 1.0, None
@@ -591,9 +635,12 @@ class StayLive:
     def _watch(self, dt: float, lag: float, now: float) -> None:
         """At 1x: count the time outside the band; start a nudge once it lasted."""
         behind, ahead = lag - self._centre(1), lag - self._centre(-1)
-        far = behind > _FAR_S
-        short = ahead < -_BAND_S and self._short(lag)
-        side = 1 if far or behind > self.band(1) else -1 if short or ahead < -self.band(-1) else 0
+        if self._accepting and ahead >= -self.band(-1):
+            self._accepting = False  # back at the target: a later shortfall is a real one
+        far = behind > _FAR_S + self._floor  # a landing above the target is no drift
+        short = ahead < -_BAND_S and self._short(lag) and not self._accepting
+        under = short or (ahead < -self.band(-1) and not self._accepting)
+        side = 1 if far or behind > self.band(1) else -1 if under else 0
         error = behind if side > 0 else ahead
         if side == 0:
             self._outside = max(0.0, self._outside - 2 * dt)  # back inside: it fades
@@ -601,7 +648,8 @@ class StayLive:
         if side != self._side:
             self._outside, self._side = 0.0, side
         self._outside += dt
-        urgent = far or short
+        start = side < 0 and self._start > 0  # the start's shortfall: built once, gently
+        urgent = far or short or start
         self._urgent = urgent
         if self._outside < (_URGENT_S if urgent else _PERSIST_S) - 1e-9:
             return
@@ -610,8 +658,13 @@ class StayLive:
             self._wide = abs(error) + _WIDEN_S
             self.absorb()
             return
-        peak = _FAST if far else _SLOW if short else _GENTLE_UP if side > 0 else _GENTLE_DOWN
-        self._nudge = _Nudge(peak, abs(error), self._centre(side))
+        if start:
+            self._start = 0.0  # one build per landing
+            nudge = _Nudge(_GENTLE_DOWN, abs(error), self._centre(side), limit=_START_BUILD_S)
+        else:
+            peak = _FAST if far else _SLOW if short else _GENTLE_UP if side > 0 else _GENTLE_DOWN
+            nudge = _Nudge(peak, abs(error), self._centre(side))
+        self._nudge = nudge
         self.absorb()
         self._steer(0.0, lag, now)
 
@@ -622,24 +675,34 @@ class StayLive:
         rate = self._rate
         sign = 1.0 if nudge.peak > 1.0 else -1.0
         nudge.left -= sign * (rate - 1.0) * dt  # what the last update's rate took
+        if nudge.limit is not None and rate != 1.0:
+            nudge.limit -= dt
         centre = self._centre(sign)
         if centre != nudge.target:  # Auto moved it, or the burst: resized to match
             nudge.left -= sign * (centre - nudge.target)
             nudge.target = centre
         error = lag - centre
-        if not nudge.ending and nudge.peak == _GENTLE_UP and error > _FAR_S:
+        if not nudge.ending and nudge.peak == _GENTLE_UP and error > _FAR_S + self._floor:
             nudge.peak = _FAST  # far behind after all (a step)
-        elif not nudge.ending and nudge.peak == _GENTLE_DOWN and self._short(lag):
+        elif (
+            not nudge.ending
+            and nudge.peak == _GENTLE_DOWN
+            and nudge.limit is None  # a start's build stays gentle
+            and self._short(lag)
+        ):
             nudge.peak = _SLOW  # short of room after all (the burst grew)
         reached = sign * error <= 0.0  # at the target already (a step, say)
         # A gentle nudge ends once its size is taken: the estimate's own wander is no reason
         # to go on. An urgent one goes on to the target: it may have been sized on a lag that
         # was still settling, or the lag stepped (a backlog) or the target moved since, and
-        # stopping it short would only start the next one.
+        # stopping it short would only start the next one. A start's build ends in time to
+        # ramp out within its limit.
         urgent = nudge.peak in (_FAST, _SLOW)
         spent = not urgent and nudge.left <= self._ramp_out(rate, nudge.step)
+        k_now = round(abs(rate - 1.0) / nudge.step)
+        timed = nudge.limit is not None and nudge.limit <= k_now * _RAMP_EVERY_S + 1e-9
         nudge.spent = nudge.spent or (spent and not nudge.ending)
-        nudge.ending = nudge.ending or spent or reached
+        nudge.ending = nudge.ending or spent or reached or timed
         due = nudge.stepped is None or now - nudge.stepped >= _RAMP_EVERY_S - 1e-9
         goal = 1.0 if nudge.ending else nudge.peak
         if abs(goal - rate) < 1e-9 or not due:
@@ -655,7 +718,9 @@ class StayLive:
         self._rate = round(1.0 + sign * k * nudge.step, 4)
         nudge.stepped = now
         if nudge.ending and self._rate == 1.0:
-            if nudge.peak in (_GENTLE_UP, _GENTLE_DOWN):
+            if nudge.limit is not None:  # the start's build ran (outside the budget) ...
+                self._accepting = True  # ... and the rest is accepted
+            elif nudge.peak in (_GENTLE_UP, _GENTLE_DOWN):
                 if nudge.cut:
                     self._uncharged = now  # counts unless the owed slow-down follows
                 else:

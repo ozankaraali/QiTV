@@ -32,6 +32,7 @@ from services.live import source as source_module
 from services.live.source import (
     STREAM_LIMIT,
     STREAM_REFUSED,
+    CaughtUp,
     Discontinuity,
     SourceError,
     _scheme,
@@ -67,11 +68,14 @@ def hls(sequence, names, *, target=1, ended=False, extra=""):
     return (text + ("#EXT-X-ENDLIST\n" if ended else "")).encode()
 
 
-def drain(source):
-    """Every item from ``chunks()``, with adjacent byte blocks joined."""
+def drain(source, *, caught_up=False):
+    """Every item from ``chunks()``, with adjacent byte blocks joined; `CaughtUp` markers
+    (the helper's cue to report its live edge, no media) only with `caught_up`."""
     parts = []
     try:
         for item in source.chunks():
+            if isinstance(item, CaughtUp) and not caught_up:
+                continue
             if isinstance(item, bytes) and parts and isinstance(parts[-1], bytes):
                 parts[-1] += item
             else:
@@ -110,7 +114,7 @@ def plain(data):
     return bytes(out)
 
 
-def media(url, *, headers=None, verify_ssl=True, stop=None, **options):
+def media(url, *, headers=None, verify_ssl=True, stop=None, caught_up=False, **options):
     source = open_source(
         url,
         headers=headers or {},
@@ -118,7 +122,7 @@ def media(url, *, headers=None, verify_ssl=True, stop=None, **options):
         stop=stop or threading.Event(),
         **options,
     )
-    return drain(source)
+    return drain(source, caught_up=caught_up)
 
 
 @contextmanager
@@ -1233,6 +1237,61 @@ high.m3u8
                 fetched = [path[1:] for path, _headers in server.requests if path.endswith(".ts")]
                 self.assertEqual(fetched, names[first:])
 
+    def test_live_hls_starts_far_enough_back_for_the_sessions_target(self):
+        # 2.1 stage 3: a sparse-PCR channel's 10 s segments fetched from 6 s before the end
+        # gave one segment, and VLC ran dry before the next landed. Now: at least three
+        # target durations (or HOLD-BACK), and room for a start at the target (the segment
+        # duration under Auto, plus what Auto added) and one more segment.
+        names = [f"s{number}.ts" for number in range(8)]
+        routes = {f"/{name}": (200, {}, self.video) for name in names}
+        cases = (
+            # (target duration, HOLD-BACK, target, extra, first segment fetched)
+            (10, None, 2.5, 0.0, 5),  # 30 s: three segments
+            (10, None, 2.5, 4.0, 4),  # Auto learned 4 s more: 34 s
+            (6, None, 2.5, 0.0, 5),  # 18 s, which holds a start at 6 s plus a segment
+            (10, 45.0, 2.5, 0.0, 3),  # the playlist's HOLD-BACK
+            (10, 10.0, 2.5, 0.0, 5),  # a HOLD-BACK too short for the target: 25 s
+            (2, None, 6.0, 0.0, 2),  # Stable's 6 s target on 2 s segments: 6 + 3 < 12
+            (10, 500.0, 2.5, 0.0, 0),  # more than the playlist lists: all of it
+        )
+        for duration, hold_back, target, extra, first in cases:
+            with self.subTest(duration=duration, hold_back=hold_back, extra=extra):
+                control = (
+                    "" if hold_back is None else f"#EXT-X-SERVER-CONTROL:HOLD-BACK={hold_back}\n"
+                )
+                routes["/live.m3u8"] = (200, {}, hls(0, names, target=duration, extra=control))
+                server = self.server(routes)
+                stop = threading.Event()
+                timer = threading.Timer(0.5, stop.set)  # before the first reload
+                timer.start()
+                delay = 12.0 if target == 6.0 else 6.0
+                media(
+                    server.url + "/live.m3u8",
+                    stop=stop,
+                    live_delay=delay,
+                    target=target,
+                    extra=extra,
+                )
+                timer.join()
+                self.assertEqual(requested_segments(server), names[first:])
+
+    def test_live_hls_says_when_it_delivered_every_listed_segment(self):
+        # The helper reports its live edge on it: the end of a batch is otherwise reported
+        # only with the next one (its state messages are throttled to four a second).
+        copies = [hls(0, ["a.ts", "b.ts"]), hls(1, ["b.ts", "c.ts"], ended=True)]
+
+        def playlist(_request, count):
+            return 200, {}, copies[min(count, 2) - 1]
+
+        routes = {f"/{name}.ts": (200, {}, self.video) for name in "abc"}
+        routes["/live.m3u8"] = playlist
+        server = self.server(routes)
+        parts = media(server.url + "/live.m3u8", live_delay=100.0, caught_up=True)
+        markers = [type(part).__name__ for part in parts if not isinstance(part, bytes)]
+        self.assertEqual(markers, ["CaughtUp", "CaughtUp"])
+        self.assertIsInstance(parts[1], CaughtUp)  # right after a.ts and b.ts
+        self.assertIsInstance(parts[-1], CaughtUp)  # and after c.ts
+
     def test_a_media_sequence_restart_resumes_at_the_new_live_start(self):
         cases = {
             "new segment names": (
@@ -1443,6 +1502,7 @@ high.m3u8
                 for item in source.chunks():
                     items.append(item)
         self.assertEqual(raised.exception.kind, "timeout")
+        self.assertIsInstance(items.pop(), CaughtUp)  # a.ts was all the playlist listed
         self.assertEqual(b"".join(items), self.video)
         self.assertGreaterEqual(server.counts["/live.m3u8"], 2)
 

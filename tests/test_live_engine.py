@@ -53,6 +53,7 @@ STATE_KEYS = {
     "received",
     "hls",
     "breaks",
+    "caught_up",
 }
 HEADERS = {"User-Agent": "QiTV-test"}
 MIB = 1024 * 1024
@@ -175,6 +176,38 @@ class RamFallbackSizeTests(unittest.TestCase):
         self.assertEqual(
             supervisor._records["s1"].command[5], {"kind": "ram", "max_bytes": 512 * MIB}
         )
+
+
+class StartTargetTests(unittest.TestCase):
+    """2.1 stage 3: the session's target reaches the helper, so an HLS source starts far
+    enough back for a start at it; a reopen keeps it."""
+
+    def test_the_open_command_carries_the_target_and_extra(self):
+        import queue
+
+        from services.live import engine as engine_module
+
+        commands: queue.Queue = queue.Queue()
+        engine = engine_module.LiveEngine.__new__(engine_module.LiveEngine)
+        engine._shut, engine._sessions, engine._commands = False, {}, commands
+        engine.open_session(URL_FOR_RING, headers={}, verify_ssl=True, disk=False, max_bytes=MIB)
+        self.assertEqual(len(commands.get_nowait()), 7)  # 2.0's command: live_delay only
+        engine.open_session(
+            URL_FOR_RING,
+            headers={},
+            verify_ssl=True,
+            disk=True,
+            max_bytes=MIB,
+            target=2.5,
+            extra=3.0,
+        )
+        command = commands.get_nowait()
+        self.assertEqual(command[6:], (6.0, {"target": 2.5, "extra": 3.0}))
+        supervisor = engine_module._Supervisor(Path(tempfile.gettempdir()), queue.Queue())
+        supervisor._relay = lambda message: None
+        supervisor._records["s1"] = engine_module._Record(command=command, sent=True)
+        supervisor._receive(("error", "s1", "disk", "The disk buffer failed."))
+        self.assertEqual(supervisor._records["s1"].command[6:], command[6:])
 
 
 class StalledUpstream:

@@ -50,6 +50,7 @@ STATE_KEYS = {
     "received",
     "hls",
     "breaks",
+    "caught_up",
 }
 DISK_LIMIT = "The disk buffer limit cannot fit one keyframe interval or an active read."
 # The owner hands a copy of its pipe end to a holder process that outlives it, so the
@@ -122,9 +123,11 @@ class Helper:
         self.messages = []
         self.base_url = self.wait_for(lambda message: message[0] == "hello", timeout=60)[1]
 
-    def open(self, url, ring=RAM, live_delay=6.0):
+    def open(self, url, ring=RAM, live_delay=6.0, start=None):
+        """`start`: the session's target and extra (2.1 stage 3); None sends the 2.0 command."""
         sid = secrets.token_hex(8)
-        self.conn.send(("open", sid, url, {"User-Agent": "QiTV-test"}, True, ring, live_delay))
+        command = ("open", sid, url, {"User-Agent": "QiTV-test"}, True, ring, live_delay)
+        self.conn.send(command if start is None else (*command, start))
         return sid
 
     def close(self, sid):
@@ -455,6 +458,7 @@ class LiveWorkerTests(unittest.TestCase):
                 self.assertIsNone(snapshot["open"])
                 self.assertEqual(snapshot["burst_s"], burst)
                 self.assertIs(snapshot["hls"], hls)  # 2.0.2: stay-live keeps HLS at 1x
+                self.assertIs(snapshot["caught_up"], hls)  # HLS: every listed segment came
                 self.assertGreater(snapshot["bytes"], 0)
                 self.assertEqual(helper.of(sid, "error"), [])
                 buffered = spans(helper, sid)
@@ -468,6 +472,41 @@ class LiveWorkerTests(unittest.TestCase):
                 self.assertAlmostEqual(snapshot["end"], buffered[-1][2])
                 self.assertEqual({item[4] for item in buffered}, {"key"})  # IDR starts
         self.assert_no_credentials(helper)
+
+    def test_an_hls_batch_reports_its_live_edge_once_delivered(self):
+        # 2.1 stage 3: states are throttled to four a second, so the end of a batch that
+        # arrived within a quarter second waited for the next batch (a 2 s keyframe interval
+        # of a public HLS channel for 7 s): the start was chosen on a stale edge.
+        routes = {
+            "/user/secret/live.m3u8": (200, {}, leaf("a.ts", "b.ts", ended=False)),
+            "/user/secret/a.ts": (200, {}, make_stream(4)),
+            "/user/secret/b.ts": (200, {}, make_stream(4, pts_start=900000 + 4 * 90000)),
+        }
+        source = self.source(routes)
+        helper = self.helper()
+        sid = helper.open(source.url + "/user/secret/live.m3u8", live_delay=100.0)
+        state = helper.wait_for(
+            lambda message: message[:2] == ("state", sid) and message[2]["caught_up"], timeout=5
+        )
+        self.assertGreater(state[2]["live_edge"], 7.9)  # all 8 s, not the last cut's 6 s
+        self.assertIs(helper.of(sid, "state")[0][2]["caught_up"], False)
+
+    def test_the_sessions_target_sets_how_far_back_hls_starts(self):
+        names = [f"s{number}.ts" for number in range(6)]
+        routes = {"/user/secret/live.m3u8": (200, {}, leaf(*names, ended=False))}
+        routes.update({f"/user/secret/{name}": (200, {}, make_stream(4)) for name in names})
+        helper = self.helper()
+        for start, fetched in ((None, 2), ({"target": 2.5, "extra": 0.0}, 3)):
+            with self.subTest(start=start):
+                source = self.source(dict(routes))
+                sid = helper.open(source.url + "/user/secret/live.m3u8", start=start)
+                helper.wait_for(
+                    lambda message: message[:2] == ("state", sid) and message[2]["caught_up"]
+                )
+                segments = [path for path, _ in source.requests if path.endswith(".ts")]
+                # 2.0: 6 s back (two 4 s segments); 2.1: three target durations (12 s).
+                self.assertEqual(len(segments), fetched)
+                helper.close(sid)
 
     def test_hls_segments_packaged_on_their_own_are_served_with_running_counters(self):
         # 2.0.2: a CDN that packages each HLS segment on its own restarts every PID's

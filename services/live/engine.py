@@ -108,7 +108,7 @@ def _fallback_bytes(ring: dict[str, Any]) -> int:
 class _Record:
     """The supervisor's view of a session: what reopens it and what it reported."""
 
-    command: _Command  # ("open", sid, url, headers, verify_ssl, ring, live_delay)
+    command: _Command  # ("open", sid, url, headers, verify_ssl, ring, live_delay, start)
     sent: bool = False  # the current helper has the session
     failed: bool = False  # a final failure was reported for the current or last helper
     over: bool = False  # its input ended or its source failed for good: never reopened
@@ -510,8 +510,13 @@ class LiveEngine(QObject):
         max_bytes: int,
         live_delay: float = 6.0,
         ram_bytes: int | None = None,
+        target: float | None = None,
+        extra: float = 0.0,
     ) -> str:
-        """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None)."""
+        """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None).
+        `target` and `extra`: the target the session steers to and what it adds to it (Auto's
+        learned extra), so an HLS source starts far enough back for it (2.1 stage 3); without
+        `target`, `live_delay` seconds back."""
         sid = secrets.token_hex(8)
         if self._shut:
             return sid
@@ -521,7 +526,17 @@ class LiveEngine(QObject):
             if ram_bytes is not None:
                 ring["ram_bytes"] = int(ram_bytes)
         self._sessions[sid] = _View()
-        command = ("open", sid, url, dict(headers), bool(verify_ssl), ring, float(live_delay))
+        command: _Command = (
+            "open",
+            sid,
+            url,
+            dict(headers),
+            bool(verify_ssl),
+            ring,
+            float(live_delay),
+        )
+        if target is not None:
+            command = (*command, {"target": float(target), "extra": float(extra)})
         self._commands.put(command)
         return sid
 

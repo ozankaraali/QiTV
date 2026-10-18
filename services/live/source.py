@@ -153,6 +153,16 @@ class Discontinuity:
     """A break in the byte stream: an HLS discontinuity, a sequence gap or a reconnect."""
 
 
+class CaughtUp:
+    """HLS only: the source delivered every segment its playlist listed, so what follows comes
+    as the provider publishes it. Yielded after each such batch; the helper then reports its
+    live edge at once (its state messages are throttled, and the end of a batch would wait for
+    the next one) and that the backlog fetched at the start has landed."""
+
+
+Chunk = bytes | Discontinuity | CaughtUp
+
+
 class Source(Protocol):
     user_agent: str
     hls: bool  # an HLS source (stay-live keeps such a stream at 1x; 2.0.2)
@@ -162,7 +172,7 @@ class Source(Protocol):
         """How many seconds of media typically arrive at once: an HLS segment, or 0."""
         ...
 
-    def chunks(self) -> Iterator[bytes | Discontinuity]: ...
+    def chunks(self) -> Iterator[Chunk]: ...
 
     def close(self) -> None: ...
 
@@ -768,9 +778,7 @@ def _shorten_read_timeout(response: Any) -> None:
         log.debug("A read timeout could not be shortened (%s).", type(error).__name__)
 
 
-def _guarded(
-    http: _Http, inner: Iterator[bytes | Discontinuity]
-) -> Iterator[bytes | Discontinuity]:
+def _guarded(http: _Http, inner: Iterator[Chunk]) -> Iterator[Chunk]:
     """End quietly when closed; turn every other failure into a context-free SourceError."""
     failure: SourceError | None = None
     try:
@@ -807,7 +815,7 @@ class TsSource:
     def burst_s(self) -> float:
         return 0.0
 
-    def chunks(self) -> Iterator[bytes | Discontinuity]:
+    def chunks(self) -> Iterator[Chunk]:
         return _guarded(self._http, self._run())
 
     def close(self) -> None:
@@ -1124,12 +1132,22 @@ class HlsSource:
 
     hls = True
 
-    def __init__(self, http: _Http, playlist: Any, url: str, live_delay: float) -> None:
+    def __init__(
+        self,
+        http: _Http,
+        playlist: Any,
+        url: str,
+        live_delay: float,
+        target: float | None = None,
+        extra: float = 0.0,
+    ) -> None:
         self.user_agent = http.user_agent
         self._http = http
         self._playlist = playlist
         self._url = url
         self._live_delay = live_delay
+        self._target = target  # the session's target (None: start at live_delay only)
+        self._extra = extra  # what the session adds to its target (Auto's learned extra)
         self._loaded = time.monotonic()
         self._burst = float(playlist.target_duration or 0)
         self._keys: dict[str, bytes] = {}
@@ -1146,7 +1164,7 @@ class HlsSource:
         """The media playlist's target duration, updated on every reload."""
         return self._burst
 
-    def chunks(self) -> Iterator[bytes | Discontinuity]:
+    def chunks(self) -> Iterator[Chunk]:
         return _guarded(self._http, self._run())
 
     def close(self) -> None:
@@ -1160,15 +1178,35 @@ class HlsSource:
         self._pending = self._pending or self._started
 
     def _start(self, playlist: Any) -> int:
-        """The first segment to fetch: ``live_delay`` seconds from a live playlist's end."""
+        """The first segment to fetch: `_depth` seconds from a live playlist's end."""
         if playlist.is_endlist:
             return 0
+        depth = self._depth(playlist)
         total = 0.0
         for index in range(len(playlist.segments) - 1, -1, -1):
             total += float(playlist.segments[index].duration or 0)
-            if total >= self._live_delay:
+            if total >= depth:
                 return index
         return 0
+
+    def _depth(self, playlist: Any) -> float:
+        """How far back from a live playlist's end the start goes (2.1 stage 3).
+
+        Without the session's target, ``live_delay``. With it, far enough back for a start
+        at the target (the source's segment duration, when that is larger, under any latency)
+        plus one segment, and at least ``live_delay`` and the playlist's HOLD-BACK, or three
+        target durations without one (the HLS spec's advice); plus the session's extra. A
+        sparse-PCR channel's 10 s segments fetched from 6 s before the end gave one segment,
+        and VLC ran dry before the next landed.
+        """
+        if self._target is None:
+            return self._live_delay
+        duration = float(playlist.target_duration or 0)
+        control = playlist.server_control
+        hold_back = float(control.hold_back or 0) if control is not None else 0.0
+        advised = hold_back if hold_back > 0 else 3 * duration
+        room = max(self._target, duration) + 1.5 * duration  # a start at the target, a segment
+        return max(self._live_delay, advised, room) + max(0.0, self._extra)
 
     def _restarted(self, playlist: Any, base: str, stalled: float) -> bool:
         """For a playlist whose newest segment is older than the last one fetched: whether
@@ -1187,7 +1225,7 @@ class HlsSource:
             return True
         return stalled >= _STALE_TARGETS * float(playlist.target_duration or 1)
 
-    def _run(self) -> Iterator[bytes | Discontinuity]:
+    def _run(self) -> Iterator[Chunk]:
         http, playlist, url = self._http, self._playlist, self._url
         loaded = progress = self._loaded
         next_sequence: int | None = None
@@ -1228,6 +1266,7 @@ class HlsSource:
                 yield from self._segment(segment, sequence, url)
             if fresh:
                 progress = time.monotonic()
+                yield CaughtUp()  # what follows comes as the provider publishes it
             if playlist.is_endlist:
                 return
             interval = max(1.0, float(playlist.target_duration or 0) / 2)
@@ -1326,7 +1365,9 @@ def _open_local(url: str, scheme: str) -> Source:
     raise SourceError("unsupported")
 
 
-def _open_http(http: _Http, url: str, live_delay: float) -> Source:
+def _open_http(
+    http: _Http, url: str, live_delay: float, target: float | None, extra: float
+) -> Source:
     response = http.get(url)
     try:
         prefix, content = _sniff(http, response)
@@ -1339,7 +1380,7 @@ def _open_http(http: _Http, url: str, live_delay: float) -> Source:
     http.release(response)
     playlist, base = _media_playlist(http, content, final)
     http.add_entry(base)  # reloads and same-origin segments keep the provider's Referer
-    return HlsSource(http, playlist, base, live_delay)
+    return HlsSource(http, playlist, base, live_delay, target, extra)
 
 
 def open_source(
@@ -1349,6 +1390,8 @@ def open_source(
     verify_ssl: bool,
     stop: threading.Event,
     live_delay: float = 6.0,
+    target: float | None = None,
+    extra: float = 0.0,
     allow_local: bool = False,
 ) -> Source:
     """Open ``url`` (one request), sniff it, and return a TS or HLS source.
@@ -1362,7 +1405,10 @@ def open_source(
     Authorization, ...) is dropped.
 
     A live HLS session starts at the first segment from which the playlist's remaining
-    EXTINF durations add up to at least ``live_delay`` seconds (at least one segment).
+    EXTINF durations add up to at least ``live_delay`` seconds (at least one segment); given
+    the session's ``target`` (and the ``extra`` it adds, Auto's), far enough back for a start
+    at that target plus one segment, and at least HOLD-BACK or three target durations
+    (`HlsSource._depth`). After each batch of listed segments it yields `CaughtUp`.
     Local paths and ``file://`` URLs are refused unless ``allow_local`` (tests only).
 
     Blocks while connecting. Setting ``stop`` (polled every 0.1 s) or calling ``close()`` on
@@ -1382,7 +1428,7 @@ def open_source(
         raise SourceError("unsupported")
     http = _Http(url, headers, verify_ssl, stop)
     try:
-        return _open_http(http, url, live_delay)
+        return _open_http(http, url, live_delay, target, extra)
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:

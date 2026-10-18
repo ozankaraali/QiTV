@@ -15,9 +15,11 @@ by a parent's unguarded `__main__` module, which spawn runs again in the child) 
 interpreter's own teardown.
 
 Commands (parent to helper):
-- `("open", sid, url, headers, verify_ssl, ring, live_delay)`, where `ring` is
+- `("open", sid, url, headers, verify_ssl, ring, live_delay[, start])`, where `ring` is
   `{"kind": "ram", "max_bytes": n}` or `{"kind": "disk", "root": path, "dir": name,
-  "max_bytes": n}` (`root` defaults to the helper's own root);
+  "max_bytes": n}` (`root` defaults to the helper's own root) and `start` (2.1 stage 3) is
+  `{"target": seconds, "extra": seconds}`: the session's target and what it adds to it, so an
+  HLS source starts far enough back for a start at that target (`HlsSource._depth`);
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
   connection is closed but at most 0.5 s later;
 - `("shutdown",)`.
@@ -329,6 +331,7 @@ class _Session:
         verify_ssl: bool,
         ring: dict[str, Any],
         live_delay: float,
+        start: dict[str, float] | None = None,
     ) -> None:
         self.sid = sid
         self.stop = threading.Event()
@@ -343,6 +346,7 @@ class _Session:
         self._verify_ssl = verify_ssl
         self._ring_spec = ring
         self._live_delay = live_delay
+        self._start = start or {}
         self._source: Source | None = None
         self._ring: Ring | None = None
         self._disk = False
@@ -353,6 +357,7 @@ class _Session:
         self._timeline = Timeline()
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
         self._received = 0  # bytes from the source, those before the first keyframe too
+        self._caught_up = False  # HLS: every segment its playlist listed was delivered once
         self._pending: list[_Addition] = []
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
@@ -391,8 +396,9 @@ class _Session:
 
     def _ingest(self) -> None:
         from services.live.ring import RingError
-        from services.live.source import Discontinuity, SourceError, open_source
+        from services.live.source import CaughtUp, Discontinuity, SourceError, open_source
 
+        target = self._start.get("target")
         try:
             source = open_source(
                 self._url,
@@ -400,6 +406,8 @@ class _Session:
                 verify_ssl=self._verify_ssl,
                 stop=self.stop,
                 live_delay=self._live_delay,
+                target=float(target) if isinstance(target, (int, float)) else None,
+                extra=float(self._start.get("extra") or 0.0),
             )
         except SourceError as error:
             self._send(("error", self.sid, error.kind, str(error)))
@@ -418,6 +426,11 @@ class _Session:
                 self._check()
                 if isinstance(item, Discontinuity):
                     segmenter.discontinuity()
+                elif isinstance(item, CaughtUp):
+                    # The batch's end, which the throttle may have held back, and the start's
+                    # backlog has landed: the parent chooses where to start on this.
+                    self._caught_up = True
+                    self._notify(force=True)
                 else:
                     self._received += len(item)
                     self._apply(segmenter.feed(item))
@@ -628,6 +641,9 @@ class _Session:
             "hls": bool(source is not None and source.hls),
             # PTS jumps the timeline left out: (timeline position, seconds), the latest last.
             "breaks": list(self._breaks),
+            # HLS: every segment its playlist listed has arrived, once at least (the backlog
+            # fetched at the start has landed). Never for raw TS, whose end is not known.
+            "caught_up": self._caught_up,
         }
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
@@ -704,7 +720,8 @@ class _Helper:
         name = command[0] if isinstance(command, tuple) and command else None
         try:
             if name in ("open", "close"):
-                if len(command) != (7 if name == "open" else 2) or not isinstance(command[1], str):
+                sizes = (7, 8) if name == "open" else (2,)
+                if len(command) not in sizes or not isinstance(command[1], str):
                     # A plain reply: a malformed session id is never echoed back.
                     self.send(("error", None, "crashed", _INTERNAL))
                 elif name == "open":
@@ -727,11 +744,14 @@ class _Helper:
         verify_ssl: bool,
         ring: dict[str, Any],
         live_delay: float,
+        start: dict[str, float] | None = None,
     ) -> None:
         if not _SESSION_ID.fullmatch(sid) or sid in self._sessions:
             self.send(("error", sid, "crashed", _INTERNAL))
             return
-        session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay)
+        if start is not None and not isinstance(start, dict):
+            raise TypeError("start must be a mapping")
+        session = _Session(self, sid, url, headers, verify_ssl, ring, live_delay, start)
         self._sessions[sid] = session
         session.thread.start()
 
