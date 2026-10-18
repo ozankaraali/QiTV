@@ -93,9 +93,14 @@ class TVPages(QObject):
         window.menus.set_player_enabled(not library)
 
     def back_to_player(self) -> None:
-        """⤢, a click on the corner player: the player page again, what plays as it was."""
+        """⤢, a click on the corner player: the player page again, what plays as it was.
+
+        A double-click's second click would land on the player page under the pointer (a
+        double-click there toggles fullscreen): it reaches nothing (see back_to_library).
+        """
         if not self._window.closing() and self._window.pages.mode() == PageStack.CORNER:
             self._show_page(self._window.player_page)
+            self._second_click.arm()
 
     def stop_corner(self) -> None:
         """× on the corner player: what plays stops (today's stop for the Library) and the

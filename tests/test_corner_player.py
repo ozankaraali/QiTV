@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from timer_fixtures import elapse, wait_until
 
 from tests.http_fixtures import LocalSource
-from tests.test_tv_window import INSTANCE, WindowCase
+from tests.test_tv_window import INSTANCE, MouseHeard, WindowCase
 from tests.ts_fixtures import make_stream
 from ui.keymap import Action
 from ui.overlays.corner_controls import BUTTONS, MIN_HIT_PX, CornerControls
@@ -269,6 +269,25 @@ class CornerPlayerTests(WindowCase):
         self.assertFalse(window.player_page.isVisible())
         self.assertTrue(window.library_page.isVisible())
         self.assertFalse(window.corner_controls.isVisible())
+
+    def test_a_double_click_on_back_acts_once(self):
+        # 2.0.1: double-clicks act once on toggles. Its second click landed on the player page
+        # under the pointer (a double-click there toggles fullscreen).
+        self.play_channel()
+        window = self.window
+        window.screens.open_library("movies")
+        self.assertTrue(wait_until(window.corner_controls.isVisible))
+        controls, host = window.corner_controls, window.host
+        self.click("back")
+        self.assertEqual(window.pages.mode(), PageStack.PLAYER)
+        at = host.mapToGlobal(controls.mapTo(host, controls.button_rect("back").center().toPoint()))
+        inside = window.mapFromGlobal(at)
+        under = window.childAt(inside)
+        self.assertIsNotNone(under)
+        heard = MouseHeard(under)
+        QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, pos=inside)
+        self.assertEqual(heard.events, [])
+        self.assertFalse(window.isFullScreen())
 
     def test_the_sound_button_mutes_what_plays(self):
         self.play_channel()
