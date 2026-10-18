@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -94,6 +95,23 @@ class SecondClickGuardTests(unittest.TestCase):
             event = QMouseEvent(kind, point, point, left, held, Qt.KeyboardModifier.NoModifier)
             QApplication.sendEvent(window, event)
         self.assertEqual(self.page.events, [])
+
+    def test_a_swallowed_click_gives_the_keys_back_to_its_window(self):
+        # Review I2 (macOS): the second click of a double-click on ⤢ lands on the video, where
+        # AppKit makes libVLC's view the first responder; the window's own filter, which gives
+        # the keys back (2.0.1), never sees a click the guard swallowed: every key beeped.
+        surface = QWidget(self.page)
+        surface.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)  # as a video surface
+        surface.setGeometry(0, 0, 200, 200)
+        surface.show()
+        self.assertIsNotNone(surface.windowHandle())
+        self.guard.arm()
+        with mock.patch("ui.pointer.reclaim_first_responder") as reclaim:
+            QTest.mouseClick(surface.windowHandle(), Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+        self.assertEqual(reclaim.call_args_list, [mock.call(self.page.windowHandle())] * 2)
+        with mock.patch("ui.pointer.reclaim_first_responder") as reclaim:
+            QTest.mouseClick(surface.windowHandle(), Qt.MouseButton.LeftButton, pos=QPoint(50, 50))
+        reclaim.assert_not_called()  # a click that goes through is the window's to handle
 
     def test_a_click_after_disarming_reaches_the_page(self):
         # The page changed again (a key played a title): the guard was for the page before.

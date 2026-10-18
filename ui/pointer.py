@@ -8,7 +8,7 @@ from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QMouseEvent, QWindow
 from PySide6.QtWidgets import QApplication, QWidget
 
-from ui.macos_window import hide_pointer_until_moved
+from ui.macos_window import hide_pointer_until_moved, reclaim_first_responder
 
 NAV_BUTTONS = (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton)
 POINTER_IDLE_MS = 3000  # the player controls' own wait (Transport's idle_ms)
@@ -59,6 +59,10 @@ class SecondClickGuard(QObject):
     on an episode plays it. `arm()` right after such a click: for the double-click interval,
     the next left press (Qt may report it as a press or as a double-click) and its release
     reach no window. Only that one click, and only on that page: `disarm()` when it changes.
+
+    macOS: a click on the video made libVLC's view the first responder before Qt saw it, and
+    the window's own filter, which gives the keys back, never sees a click swallowed here:
+    the guard gives them back to that window itself.
     """
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -97,11 +101,20 @@ class SecondClickGuard(QObject):
         kind = event.type()
         if kind in _SECOND_PRESSES:
             self._held = True
+            reclaim_first_responder(_top_level(watched))
             return True
         if kind == QEvent.Type.MouseButtonRelease and self._held:
             self.disarm()
+            reclaim_first_responder(_top_level(watched))
             return True
         return False
+
+
+def _top_level(window: QWindow) -> QWindow:
+    """The top-level window of `window` (a video surface's own native window has a parent)."""
+    while window.parent() is not None:
+        window = window.parent()
+    return window
 
 
 class PointerHider(QObject):
