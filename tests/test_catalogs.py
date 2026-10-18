@@ -182,6 +182,33 @@ class CatalogsTests(unittest.TestCase):
         self.catalogs.select("Harbor IPTV", force_refresh=True)  # Settings' own refresh runs
         self.assertEqual(self.factory.setups, ["Harbor IPTV", "Harbor IPTV"])
 
+    def test_a_connection_changed_and_changed_back_before_the_setup_ends_signs_in_again(self):
+        # Polish 2: the first edit's setup was running (the manager still held the old
+        # entry), and changing it back looked like "nothing changed" and was skipped while the
+        # running setup used the in-between entry.
+        runner = HeldSetups()
+        catalogs = Catalogs(
+            self.config,
+            self.registry,
+            runner=runner,
+            factory=self.factory,
+            make_epg=self.make_epg,
+            in_use=lambda: {"Harbor IPTV"},
+        )
+        self.addCleanup(catalogs.shutdown)
+        catalogs.ensure("Harbor IPTV")
+        original = dict(self.registry.providers[1])
+        runner.held.add("Harbor IPTV")
+        self.registry.providers[1] = {**original, "password": "in between"}
+        catalogs.reload()
+        self.assertEqual(self.factory.setups, ["Harbor IPTV", "Harbor IPTV"])
+        self.registry.providers[1] = dict(original)  # back, before that setup ended
+        catalogs.reload()
+        runner.release("Harbor IPTV")  # the one running ends; the queued one takes the entry
+        self.assertEqual(self.factory.setups, ["Harbor IPTV", "Harbor IPTV", "Harbor IPTV"])
+        manager = catalogs.catalog("Harbor IPTV").provider_manager
+        self.assertEqual(manager.current_provider.get("password"), original.get("password"))
+
     def test_an_unstamped_item_goes_to_the_first_provider_without_a_selection(self):
         # Final review M7: one provider, a stale selection (an old 2.0 Recent entry).
         self.config.selected_provider_name = "Gone"

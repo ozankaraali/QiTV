@@ -1,6 +1,6 @@
 import copy
 from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 import gzip
 import hashlib
 import itertools
@@ -38,6 +38,12 @@ requests = lazy_module("requests")
 
 # Timestamp format of the "date"/"last_access" fields in the EPG cache index.
 _INDEX_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _http_date(moment: datetime) -> str:
+    """An index time (GMT, naive) as an HTTP date: "Sun, 06 Nov 1994 08:49:37 GMT", in English
+    whatever the locale (strftime follows it, and servers ignore a date in another language)."""
+    return format_datetime(moment.replace(tzinfo=timezone.utc), usegmt=True)
 
 
 def _cache_key(source: str) -> str:
@@ -526,7 +532,7 @@ class EpgManager:
                 # Request the URL with "If-Modified-Since" header
                 headers = {
                     **CLIENT_HEADERS,
-                    "If-Modified-Since": epg_date.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+                    "If-Modified-Since": _http_date(epg_date),
                 }
                 r = requests.get(
                     url, headers=headers, timeout=5, verify=self.config_manager.ssl_verify

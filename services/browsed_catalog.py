@@ -92,6 +92,9 @@ class BrowsedCatalog(QObject):
         # Why a provider's list of a section last failed to load, by (provider, section): the
         # mixed lists say it under the provider's heading while it has no groups.
         self._section_errors: dict[tuple[str, str], str] = {}
+        # Providers whose setup failed: a list moving in all mode doesn't sign them in again
+        # (the user asks: picking it, a refresh, or choosing All again).
+        self._failed: set[str] = set()
         catalogs.linkReady.connect(self.linkReady)
         catalogs.linkFailed.connect(self.linkFailed)
         catalogs.catalogCreated.connect(self._attach)
@@ -196,7 +199,10 @@ class BrowsedCatalog(QObject):
             self._section_errors[(name, args[0])] = str(args[1])
         elif signal_name == "sectionReady":
             self._section_errors.pop((name, args[0]), None)
+        elif signal_name == "providerFailed":
+            self._failed.add(name)
         elif signal_name == "providerReady":
+            self._failed.discard(name)
             for key in [k for k in self._section_errors if k[0] == name]:
                 del self._section_errors[key]
 
@@ -241,6 +247,7 @@ class BrowsedCatalog(QObject):
 
     def sign_in_again(self, name: str) -> None:
         """Sign provider `name` in again: a link asked next waits for it (an STB retry)."""
+        self._failed.discard(name)
         self._catalogs.sign_in_again(name)
 
     def provider_type(self) -> str:
@@ -281,6 +288,7 @@ class BrowsedCatalog(QObject):
             if name not in self._catalogs.names():
                 logger.warning("Not a provider in the list: nothing selected")
                 return
+            self._failed.discard(name)  # picked: it signs in again
             if self.all_providers():
                 setattr(self.config, self._all_key, False)
                 self._save_choice()
@@ -294,6 +302,7 @@ class BrowsedCatalog(QObject):
         if not target:
             return
         if force_refresh:
+            self._failed.discard(target)
             self._catalogs.select(target, force_refresh=True)
             return
         # Choosing a provider only moves what the page shows: its catalog is set up once
@@ -313,6 +322,7 @@ class BrowsedCatalog(QObject):
         if not self.all_providers():
             setattr(self.config, self._all_key, True)
             self._save_choice()
+        self._failed.clear()  # All chosen (or refreshed): every provider is tried
         for name in self._catalogs.names():
             if force_refresh:
                 self._catalogs.select(name, force_refresh=True)
@@ -386,7 +396,8 @@ class BrowsedCatalog(QObject):
             for name in self._having(section):
                 if provider and name != provider:
                     continue
-                self._catalogs.ensure(name)
+                if name not in self._failed:
+                    self._catalogs.ensure(name)
                 self._catalogs.catalog(name).request_section(section, force=force)
             return
         catalog = self._cat(ensure=True)
@@ -417,10 +428,12 @@ class BrowsedCatalog(QObject):
                 if not name:
                     self.request_section(section)
                 elif name in self._having(section):
+                    self._failed.discard(name)  # the user opened its heading
                     self._catalogs.ensure(name)
                     self._catalogs.catalog(name).request_section(section)
                 return
             if name in self._having(section):
+                self._failed.discard(name)  # the user opened its group
                 self._catalogs.ensure(name)
                 self._catalogs.catalog(name).request_group(section, own_id)
             return

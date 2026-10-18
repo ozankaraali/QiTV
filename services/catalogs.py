@@ -297,14 +297,17 @@ class Catalogs(QObject):
         """Set provider `name` up again with its edited settings: its pinned manager reads
         the new entry, and a link asked meanwhile waits for the new sign-in. An edit that
         keeps the connection (only the stream limit, say) loads nothing again: the lists
-        stay where they are and the manager holds the new entry."""
+        stay where they are and the manager holds the new entry. While a setup runs (or has not
+        finished) the manager still holds the one before it: nothing is skipped then."""
         self._specs[name] = dict(spec)
         manager = self._by_name[name].provider_manager
-        if self._same_connection(manager, spec):
+        settled = name in self._ready and name not in self._renewing
+        if settled and self._same_connection(manager, spec):
             if manager.current_provider.get("name") == name:
                 manager.current_provider = spec  # the list's entry, as a setup takes it
             return
         self._ready.discard(name)
+        self._renewing.discard(name)  # a setup running with the entry before: this one replaces it
         self.select(name, force_refresh=True)
         if name not in self._ready:  # a runner may finish the setup at once
             self._renewing.add(name)

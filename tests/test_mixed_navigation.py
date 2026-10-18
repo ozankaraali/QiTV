@@ -401,6 +401,20 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual(self.rows_under(nav, "Empty list"), [])
         self.assertIn("News", [n.title for n in nav.children(nav.path[1])])
 
+    def test_sections_refused_in_all_mode_do_not_outlive_it(self):
+        # Polish 2: leaving All while a provider still set up kept the sections it refused;
+        # back in All later, the next provider to finish was asked for an old section (an
+        # unrequested movies download).
+        runner = HeldSetups("Harbor IPTV")
+        _config, _view, nav = self.build([DEMO, HARBOR], {"Demo TV": demo_content()}, runner)
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live")
+        QTest.qWait(10)
+        self.assertEqual(nav._refused_sections, {"live"})  # Harbor refused: it sets up
+        nav.open(nav.children(None)[1])  # leaves All for one provider
+        QTest.qWait(10)
+        self.assertEqual(nav._refused_sections, set())
+
     @staticmethod
     def rows_under(nav, provider):
         """The rows after `provider`'s heading in the open section."""

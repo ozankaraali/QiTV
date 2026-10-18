@@ -329,6 +329,19 @@ class BrowsedCatalogTests(unittest.TestCase):
         items = self.view(ALL_PROVIDERS).items("live", mixed_group_id("Harbor IPTV", "41"))
         self.assertEqual(len(items), 41)
 
+    def test_moving_through_all_does_not_sign_a_failed_provider_in_again(self):
+        # Polish 2: a reset_to (no provider named) ensured every provider, so the one that
+        # just failed signed in again with every move.
+        self.factory.fail_setup("Harbor IPTV", "The provider refused the login")
+        view = self.view(ALL_PROVIDERS)
+        view.request_section("live")
+        self.assertEqual(self.factory.setups.count("Harbor IPTV"), 1)
+        view.request_section("live")
+        view.request_section("live")
+        self.assertEqual(self.factory.setups.count("Harbor IPTV"), 1)
+        view.sign_in_again("Harbor IPTV")  # the user asks (a refresh)
+        self.assertEqual(self.factory.setups.count("Harbor IPTV"), 2)
+
     def test_a_provider_never_loaded_shows_its_header_and_starts_loading(self):
         self.remove_cache("Harbor IPTV")
         view = self.view(ALL_PROVIDERS)

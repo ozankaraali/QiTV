@@ -877,6 +877,7 @@ class NavModel(QObject):
         self._events += 1
         self._pending.clear()
         self._requested_sections.clear()
+        self._refused_sections.clear()
         for key in [k for k, m in self._errors.items() if m == PROVIDER_LOADING_MESSAGE]:
             del self._errors[key]
         self._provider_errors[name] = message or "Couldn't connect"
@@ -897,6 +898,7 @@ class NavModel(QObject):
         self._events += 1
         self._pending.clear()
         self._requested_sections.clear()
+        self._refused_sections.clear()
         self._errors.clear()
         self._provider_errors.pop(name, None)
         self._ready_sections.clear()

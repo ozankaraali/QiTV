@@ -14,7 +14,13 @@ from unittest.mock import patch
 import requests
 
 from services import epg_manager as epg_manager_module, epg_store as epg_store_module
-from services.epg_manager import _INDEX_TIME_FORMAT, EpgManager, _cache_key, _xtream_cache_key
+from services.epg_manager import (
+    _INDEX_TIME_FORMAT,
+    EpgManager,
+    _cache_key,
+    _http_date,
+    _xtream_cache_key,
+)
 from services.multikeydict import MultiKeyDict
 
 CHANNEL = {"xmltv_id": "news.test", "name": "News"}
@@ -101,6 +107,35 @@ class _GuideCase(unittest.TestCase):
         old = (datetime.now() - timedelta(days=2)).strftime(_INDEX_TIME_FORMAT)
         manager.index[self.key]["date"] = old
         manager.save_index()
+
+
+class IfModifiedSinceTests(unittest.TestCase):
+    def test_the_date_is_an_english_http_date(self):
+        self.assertEqual(
+            _http_date(datetime(1994, 11, 6, 8, 49, 37)), "Sun, 06 Nov 1994 08:49:37 GMT"
+        )
+        self.assertEqual(
+            _http_date(datetime(2026, 3, 4, 23, 5, 9)), "Wed, 04 Mar 2026 23:05:09 GMT"
+        )
+
+    def test_the_date_does_not_follow_the_locale(self):
+        # Qt switches the process to the system locale on Unix: strftime then names the day
+        # and month in that language, which servers ignore.
+        import locale
+
+        previous = locale.setlocale(locale.LC_TIME)
+        self.addCleanup(locale.setlocale, locale.LC_TIME, previous)
+        for name in ("tr_TR.UTF-8", "de_DE.UTF-8", "fr_FR.UTF-8", "tr_TR", "de_DE"):
+            try:
+                locale.setlocale(locale.LC_TIME, name)
+                break
+            except locale.Error:
+                continue
+        else:
+            self.skipTest("no non-English locale installed")
+        self.assertEqual(
+            _http_date(datetime(2026, 3, 4, 23, 5, 9)), "Wed, 04 Mar 2026 23:05:09 GMT"
+        )
 
 
 class EpgRefreshTests(_GuideCase):
