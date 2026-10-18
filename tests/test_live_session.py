@@ -4519,6 +4519,31 @@ class RepickTests(LiveSessionCase):
 
                 self.unchanged(play)
 
+    def test_a_reopen_aims_at_least_at_the_measured_burst(self):
+        # Re-review 2's M-q: Auto, bursty raw TS (a dump, then 10 s bursts), VLC's clock
+        # still 25 s after the open: stay-live's reopen at live aimed 4.7 s behind though
+        # the helper had measured a 10 s burst, and VLC ran dry 3.7-4.7 s. The timeline's
+        # target (Go live's, a reopen's, a jump's) is never under the burst floor.
+        for first in (1.0, 2.0, 3.0):
+            with self.subTest(first=first):
+                feed = self.tune(AUTO, burst=10.0, edge=2.0, first=first + 0.7)
+                feed.ready(backlog_after_start=False)
+                self.opened(feed)
+                feed.frozen_until = self.clock.now + 25.0
+                feed.run(0.7)
+                feed.edge += 20.0
+                feed.push()
+                lowest = []
+                for _ in range(240):
+                    feed.run(0.25)
+                    snapshot = self.live._snapshot()
+                    if snapshot.get("burst_s", 0.0) > 0:
+                        lowest.append(self.live._target(snapshot) - snapshot["burst_s"])
+                self.assertGreaterEqual(min(lowest), 0.0)
+                self.assertEqual(feed.starved_s, 0.0)
+                self.live.stop()
+                self.engine.answer()
+
     def test_the_re_pick_can_be_switched_off(self):
         self.enterContext(mock.patch.object(live_session, "REPICK", False))
         feed = self.tune("normal", burst=0.0, edge=2.0)

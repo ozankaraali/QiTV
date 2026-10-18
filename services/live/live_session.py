@@ -210,7 +210,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.live.learned_target import LearnedTarget
+from services.live.learned_target import LearnedTarget, learned_target
 from services.live.refusals import REFUSALS, STREAM_LIMIT
 from services.live.stay_live import (
     AUTO,
@@ -1947,8 +1947,12 @@ class LiveSession(QObject):
         steering = self._filter.burst_for(reported)
         value = self._steered.value
         if value is None:
-            return learned.target(steering)
-        return value + learned.target(reported) - learned.target(steering)
+            value = learned.target(steering)
+        else:
+            value += learned.target(reported) - learned.target(steering)
+        # Never under the burst floor for the burst reported (re-review 2, M-q: the steered
+        # target lagging a learned rise left a reopen 4.7 s behind a measured 10 s burst).
+        return max(value, learned_target(0.0, 0.0, learned.floor, reported, learned.segment_floor))
 
     def _just_opened(self) -> bool:
         """A pipeline stream opened a moment ago: VLC has not played it yet (a fresh clock),
