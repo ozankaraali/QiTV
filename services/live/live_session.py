@@ -1172,9 +1172,28 @@ class LiveSession(QObject):
                     return
         else:
             self._auto_mark = None  # paused (or ended): no quiet time for Auto
-            if not live and self._stay.mode is Mode.LIVE and self._rate != 1.0:
-                self._set_rate(1.0)  # it ended (or turned out a clip) mid catch-up
+            if not live and not self._paused:
+                self._no_live_edge(snapshot, position)
         self._emit_timeline()
+
+    def _no_live_edge(self, snapshot: Mapping[str, Any], position: float) -> None:
+        """The input ended, or the stream is a finished playlist (a clip): stay-live is not
+        consulted. A catch-up it was making stops at 1x (`StayLive.stop`: no nudge left to
+        show). A clip still downloading that plays at a speed the user chose comes back to
+        1x within the target of its download edge, as a video player does near its
+        download, and is live again: it would run dry on a slow one."""
+        stay = self._stay
+        if stay.mode is Mode.LIVE:
+            if self._rate != 1.0 or stay.nudge != 1.0:
+                stay.stop()
+                self._set_rate(1.0)
+            return
+        downloading = snapshot.get("finite") is True and not self._ended
+        near = self._live_edge(snapshot) - position <= self._target(snapshot)
+        if downloading and self._rate > 1.0 and near:
+            stay.user_go_live()
+            stay.stop()
+            self._set_rate(1.0)
 
     def _reland(self, snapshot: Mapping[str, Any], lag: float) -> None:
         """Within `_RELAND_S` of a tune's start, a backlog step (the live edge grew by more

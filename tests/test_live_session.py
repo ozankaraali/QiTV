@@ -20,6 +20,7 @@ from services.live.timeline import Span
 from services.live.tuning import LiveTuning, Tuning
 from services.playback import PlaybackState
 from services.vlc_profile import PlayKind
+from ui.overlays.transport import Transport
 
 app = QApplication.instance() or QApplication([])
 
@@ -1001,6 +1002,42 @@ class StartPolicyTests(LiveSessionCase):
                 self.assertEqual(self.playback.rates[-1], 1.0)
                 self.step(5.0)
                 self.assertEqual(self.playback.rates[-1], 1.0)
+                # And it shows so: no nudge left, no "catching up" (re-review round 3).
+                self.assertEqual(self.timelines[-1]["nudge"], 1.0)
+                transport = Transport(None, idle_ms=3000)
+                self.addCleanup(transport.deleteLater)
+                transport.update_timeline(self.timelines[-1], [])
+                self.assertNotIn("catching up", transport.indicator_text())
+
+    def test_a_clip_at_a_chosen_speed_plays_on_at_1x_near_its_download_edge(self):
+        # Re-review round 3: a finished playlist still downloading, played faster after a
+        # seek back, never came back to 1x (stay-live no longer runs for it) and could run
+        # dry on a slow download. As a video player does near its download, it hands back
+        # at the target behind the download edge.
+        sid = self.start()
+        clip = {"burst": 2.0, "hls": True, "finite": True, "caught_up": False, "backlog": 0.0}
+        self.engine.buffer(sid, segments(0, 10), live_edge=20.0, open_seq=10, **clip)
+        self.engine.sessionReady.emit(sid)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.seek_to(2.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.set_speed(2.0)
+        self.assertEqual(self.playback.rates, [2.0])
+        edge = 20.0
+        lags = []
+        for _ in range(120):  # 30 s; the download brings 1.2 s a second
+            edge += 0.3
+            count = int(edge // 2)
+            self.engine.buffer(sid, segments(0, count), live_edge=edge, open_seq=count, **clip)
+            self.step(0.25, media=0.5 if self.playback.rates[-1] == 2.0 else 0.25)
+            lags.append(edge - self.live.position())
+        self.assertEqual(self.playback.rates, [2.0, 1.0])
+        handed = next(i for i, rate in enumerate(self.timelines) if rate["rate"] == 1.0)
+        at = next(i for i, lag in enumerate(lags) if lag <= TARGETS["normal"] + 0.5)
+        self.assertGreater(lags[at], TARGETS["normal"] - 0.5)  # handed back at the target
+        self.assertGreater(min(lags), 1.0)  # never run dry
+        self.assertEqual(self.timelines[-1]["mode"], "live")  # the transport: no chosen speed
+        self.assertEqual(self.timelines[handed]["nudge"], 1.0)
 
     def test_an_ended_input_plays_from_the_oldest_segment(self):
         sid = self.start()

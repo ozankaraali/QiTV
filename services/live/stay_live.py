@@ -512,6 +512,14 @@ class StayLive:
         if self._landing > 0:
             self._floor = max(self._floor, excess)
 
+    def stop(self) -> None:
+        """Stay-live is no longer consulted (the input ended, or the stream turned out a
+        clip): 1x, no nudge left and nothing owed, so nothing shows a catch-up."""
+        self._rate = 1.0
+        self._nudge = None
+        self._owed = False
+        self.absorb()
+
     def trouble(self) -> None:
         """VLC ran out of room: a starvation, or a stall, that ran out the cushion (Auto may have
         raised the target for it). One slow-down to the target is owed, at `_SLOW`, once VLC
