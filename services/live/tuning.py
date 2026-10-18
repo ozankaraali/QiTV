@@ -1,10 +1,11 @@
 """What QiTV learned about each live channel (2.0.2), for that channel's next tune.
 
-Per (provider, channel): what Auto latency adds to its target (`AutoTarget`), whether VLC can play the
+Per (provider, channel): what 2.0.2's Auto latency added to its target (`extra`, which 2.1
+reads as the learned target's prior and drops on its first save), whether VLC can play the
 channel at a rate other than 1x (`RateHealth`), and whether it plays directly because VLC
 crawled through the pipeline even at 1x (an HLS channel). Since 2.1 also its learned target
 (`Learned`: the arrival need and the starvation prior, three small numbers; see
-`services.live.learned_target`). `channel_key()` tells channels apart as the
+`services.live.learned_target`), which Auto latency steers by. `channel_key()` tells channels apart as the
 zap list does (the stream address, else the id, else the name) and hashes that with the
 provider's name: a stream address may carry credentials, and none reach the file.
 

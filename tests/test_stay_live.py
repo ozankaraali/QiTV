@@ -11,6 +11,7 @@ from services.live.stay_live import (
     RateHealth,
     SettledLag,
     StayLive,
+    SteeredTarget,
 )
 
 T = TARGETS["normal"]
@@ -1310,6 +1311,63 @@ class JumpTests(unittest.TestCase):
                 lag, rates, jumps = steer(stay, T, 20.0, clock=clock, landing=lambda *_: T)
                 lag, rates, jumps = steer(stay, T + 10.0, 30.0, clock=clock, landing=lambda *_: T)
                 self.assertEqual((jumps, max(rates)), ([], 1.10))
+
+
+class SteeredTargetTests(unittest.TestCase):
+    """2.1 stage 4b: the learned target as stay-live steers by it. A rise moves it in a step
+    of at least half a second once it held 10 s (at once with trouble: its owed slow-down
+    comes with it); a fall is slow, Auto's quiet decay (half a second per 5 minutes), never a
+    step."""
+
+    def run_for(self, steer, raw, seconds, *, trouble=False):
+        values = []
+        for _ in range(round(seconds / TICK)):
+            values.append(steer.update(raw, TICK, trouble=trouble))
+        return values
+
+    def test_it_starts_where_the_learned_target_is(self):
+        steer = SteeredTarget()
+        self.assertIsNone(steer.value)
+        self.assertEqual(steer.update(8.0, TICK), 8.0)
+
+    def test_a_rise_is_a_step_once_it_held_ten_seconds(self):
+        steer = SteeredTarget()
+        steer.update(7.0, TICK)
+        values = self.run_for(steer, 7.4, 30.0)  # under half a second: drift
+        self.assertEqual(set(values), {7.0})
+        values = self.run_for(steer, 7.8, 9.75)
+        self.assertEqual(set(values), {7.0})
+        self.assertEqual(steer.update(7.8, TICK), 7.8)  # 10 s on: one step
+
+    def test_a_rise_that_does_not_hold_moves_nothing(self):
+        steer = SteeredTarget()
+        steer.update(7.0, TICK)
+        for _ in range(10):
+            self.run_for(steer, 8.0, 8.0)
+            self.run_for(steer, 7.0, 1.0)
+        self.assertEqual(steer.value, 7.0)
+
+    def test_trouble_moves_it_at_once(self):
+        steer = SteeredTarget()
+        steer.update(2.5, TICK)
+        self.assertEqual(steer.update(4.1, TICK, trouble=True), 4.1)
+
+    def test_a_fall_is_slow(self):
+        steer = SteeredTarget()
+        steer.update(8.0, TICK)
+        values = self.run_for(steer, 5.0, 300.0)
+        self.assertAlmostEqual(values[-1], 7.5, delta=0.01)  # half a second in 5 minutes
+        self.assertTrue(all(a >= b for a, b in zip(values, values[1:])))
+        self.run_for(steer, 5.0, 3600.0)
+        self.assertEqual(steer.value, 5.0)  # down to the learned target, not under
+
+
+class BurstForTests(unittest.TestCase):
+    def test_the_burst_it_holds_or_the_first_one_reported(self):
+        flt = LagFilter()
+        self.assertEqual(flt.burst_for(7.0), 7.0)  # it would take the first one at once
+        flt.add(0.0, 10.0, 7.0, 0.0)
+        self.assertEqual(flt.burst_for(0.0), 7.0)  # held, with its hysteresis
 
 
 class BuildTests(unittest.TestCase):

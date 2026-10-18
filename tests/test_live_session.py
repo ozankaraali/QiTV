@@ -11,7 +11,8 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from services.live import worker
+from services.live import learned_target, worker
+from services.live.learned_target import ArrivalModel, Learned, LearnedTarget
 import services.live.live_session as live_session
 from services.live.live_session import LiveSession
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
@@ -1006,7 +1007,9 @@ class StartPolicyTests(LiveSessionCase):
         # A sparse-PCR channel's 10 s segments (2 s keyframe intervals), 36 s fetched: the
         # start need not wait for all of it (a slow segment of a public HLS channel held
         # the picture back 4 s): the helper says what is still to come.
-        sid = self.start(latency=AUTO)
+        # (Under Normal: the segments' target. Auto aims a second higher at first, its
+        # learned need: LearnedTargetTests.)
+        sid = self.start(latency="normal")
         hls = {"burst": 10.0, "hls": True, "caught_up": False}
         self.engine.buffer(sid, [], open_seq=0, backlog=36.0, **hls)
         self.engine.sessionReady.emit(sid)
@@ -1023,7 +1026,9 @@ class StartPolicyTests(LiveSessionCase):
     def test_hls_is_held_past_a_second_and_a_half_until_its_start_is_final(self):
         # Seen on a public HLS channel: held at most 1.5 s like raw TS, it started with 18 s
         # of 24 buffered, the rest landed after it, and stay-live ran 1.10x for 2 minutes.
-        sid = self.start(latency=AUTO)
+        # (Under Normal: the segments' target. Auto aims a second higher at first, its
+        # learned need: LearnedTargetTests.)
+        sid = self.start(latency="normal")
         hls = {"burst": 7.0, "hls": True, "caught_up": False}
         self.engine.buffer(sid, [], open_seq=0, backlog=24.0, **hls)
         self.engine.sessionReady.emit(sid)
@@ -1043,7 +1048,9 @@ class StartPolicyTests(LiveSessionCase):
 
     def test_hls_takes_a_start_inside_stay_lives_band_at_once(self):
         # Review M9: a start already within the band is not held for a nearer one.
-        sid = self.start(latency=AUTO)
+        # (Under Normal: the segments' target. Auto aims a second higher at first, its
+        # learned need: LearnedTargetTests.)
+        sid = self.start(latency="normal")
         hls = {"burst": 7.0, "hls": True, "caught_up": False}
         self.engine.buffer(sid, [], open_seq=0, backlog=24.0, **hls)
         self.engine.sessionReady.emit(sid)
@@ -1237,7 +1244,9 @@ class StartPolicyTests(LiveSessionCase):
 
     def test_hls_that_does_not_say_what_is_to_come_waits_until_every_segment_arrived(self):
         # A sparse-PCR channel's 10 s segments (2 s keyframe intervals), 36 s fetched.
-        sid = self.start(latency=AUTO)
+        # (Under Normal: the segments' target. Auto aims a second higher at first, its
+        # learned need: LearnedTargetTests.)
+        sid = self.start(latency="normal")
         self.engine.buffer(sid, [], open_seq=0, burst=10.0, hls=True, caught_up=False)
         self.engine.sessionReady.emit(sid)
         self.engine.buffer(
@@ -1683,7 +1692,9 @@ class StayLiveTests(LiveSessionCase):
         for edge, nudges in ((13.0, 0), (12.0, 1)):  # mean lags of 7.0 and 6.0 s (7 s target)
             with self.subTest(edge=edge):
                 self.live = self.make()
-                sid = self.start(latency=AUTO)
+                # Under Normal (the 7 s target 2.0.x had): Auto's learned target moves with
+                # what the channel needs (LearnedTargetTests: one gentle build at most).
+                sid = self.start(latency="normal")
                 feed = Feed(self, sid, burst=7.0, edge=edge, hls=True).ready()
                 feed.sizes = iter([12.0 if k % 6 == 5 else 6.0 for k in range(1000)])
                 feed.run(300.0)
@@ -2844,13 +2855,14 @@ class StartCushionTests(LiveSessionCase):
         # once its rhythm was learned (never the 6.75 s the cushion needed); VLC ran dry
         # before a 12 s batch, and Auto learned nothing.
         sid = self.start(latency=AUTO)
-        feed = Feed(self, sid, burst=7.0, edge=24.0, hls=True).ready(backlog_after_start=False)
-        self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 7))  # 7.0 s
+        feed = Feed(self, sid, burst=7.0, edge=25.0, hls=True).ready(backlog_after_start=False)
+        target = self.live._target(self.live._snapshot())  # (Auto: 7 s segments, a second more)
         feed.sizes = iter([4.0, 4.0, 4.0, 12.0] + [7.0] * 100)  # short batches, then 12 s
         feed.run(20.0)
-        self.assertLess(max(state["lag"] for state in self.timelines), 6.75)  # no cushion read
+        lags = [state["lag"] for state in self.timelines]
+        self.assertLess(max(lags), target - 0.25)  # no cushion read
         self.assertGreater(feed.starved_s, 0.5)  # VLC ran dry before the 12 s batch
-        self.assertEqual(self.timelines[-1]["target"], 8.5)  # Auto's step
+        self.assertGreater(self.timelines[-1]["target"], target + 1.0)  # the learned rise
         feed.run(30.0)
         self.assertEqual(min(self.playback.rates), 0.95)  # the owed slow-down
 
@@ -2860,18 +2872,21 @@ class StartCushionTests(LiveSessionCase):
         self.live = self.make(ready_timeout_ms=50)
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=7.0, edge=3.0, hls=True).ready()
+        target = self.live._target(self.live._snapshot())
         self.wait_until(lambda: self.playback.plays)
         feed.run(12.0)
         self.assertGreater(feed.starved_s, 0.5)
-        self.assertEqual(self.timelines[-1]["target"], 7.0)  # nothing ran out
+        self.assertEqual(self.timelines[-1]["target"], target)  # nothing ran out
 
 
 class BackOffTests(LiveSessionCase):
-    """2.0.2 "Auto" latency: the channel's target starts at Normal's, rises 1.5 s with each
-    starvation at the live edge or stall that ran out a cushion (the lag had reached the
-    target since the tune), up to Stable's plus 4 s (a bursty source: its burst plus 2 s),
-    and falls 0.5 s after each 5 quiet minutes. A rise never jumps back: the room grows at
-    0.95x where the rate may change, else as VLC waits at 1x."""
+    """Auto latency's trouble (2.0.2; since 2.1 stage 4b the learned target's,
+    `LearnedTarget`): VLC running dry once a cushion existed raises the channel's target at
+    once (its starvation prior's margin, about 1.6 s for the first), up to today's cap
+    (Stable's plus 4 s; a segmented source: its burst plus 2 s); a steady source's stall is
+    noted, a segmented one's is trouble at once (R37); quiet takes it down slowly, after it
+    held for a while. A rise never jumps back: the room grows at 0.95x where the rate may
+    change, else as VLC waits at 1x."""
 
     def stall(self, feed, seconds=4.0, after=20.0):
         """The source sends nothing for `seconds`, then sends on; the target after."""
@@ -2881,6 +2896,10 @@ class BackOffTests(LiveSessionCase):
         feed.run(after)
         return self.timelines[-1]["target"]
 
+    def dry_stall(self, feed, after=120.0):
+        """A stall that runs VLC dry for a second and a half (its lag and that much more)."""
+        return self.stall(feed, seconds=self.timelines[-1]["lag"] + 1.5, after=after)
+
     def settled(self, *, latency=AUTO, **kwargs):
         """A steady source, played 20 s from 3 s behind (within Normal's band: 1x)."""
         sid = self.start(latency=latency)
@@ -2888,23 +2907,26 @@ class BackOffTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["target"], TARGETS.get(latency, TARGETS["normal"]))
         return feed
 
-    def test_each_stall_raises_the_target_in_steps_up_to_the_cap(self):
+    def test_each_dry_run_raises_the_target_up_to_the_cap(self):
         feed = self.settled()
         plays, rates = len(self.playback.plays), len(self.playback.rates)
-        # Each stall runs out the cushion, built again at 0.95x before the next (2 min): the
-        # slow-down a stall is owed starts as soon as VLC plays, beyond the budget (2.1: ramped
-        # in and out in three steps, so not only 0.95x and 1x).
-        targets = [self.stall(feed, after=120.0) for _ in range(6)]
-        self.assertEqual(targets, [4.0, 5.5, 7.0, 8.5, 10.0, 10.0])  # Stable + 4 s at most
+        # Each stall runs VLC dry once its cushion was built again at 0.95x (3 minutes): the
+        # slow-down owed starts as soon as VLC plays, beyond the budget.
+        targets = [self.dry_stall(feed, after=180.0) for _ in range(8)]
+        top = next(k for k, target in enumerate(targets) if target >= 9.9)
+        self.assertEqual(targets[: top + 1], sorted(set(targets[: top + 1])))  # each higher ...
+        self.assertGreater(top, 2)
+        self.assertGreaterEqual(targets[-1], 9.9)  # ... up to Stable + 4 s
+        self.assertLessEqual(max(state["target"] for state in self.timelines), 10.0)
         self.assertEqual(len(self.playback.plays), plays)  # never a jump back for room
         built = self.playback.rates[rates:]
         self.assertTrue(all(0.95 <= rate <= 1.0 for rate in built))  # room built slowly
-        self.assertEqual((min(built), changes(built)), (0.95, 2 * 6))
+        self.assertEqual(min(built), 0.95)
 
     def test_a_starvation_that_runs_out_a_full_cushion_raises_the_target(self):
-        # At the target (2.7 s of room), the source sends nothing for 1.6 s three times with
-        # a quarter second between: never a stall (under 2 s), but VLC runs dry and waits,
-        # its clock standing still while it says Playing (libVLC 3).
+        # At the target, the source sends nothing for 1.6 s three times with a quarter second
+        # between: never a stall (under 2 s), but VLC runs dry and waits, its clock standing
+        # still while it says Playing (libVLC 3): one dry run.
         feed = self.settled(starved=PlaybackState.PLAYING)
         timelines = len(self.timelines)
         for _ in range(3):
@@ -2915,7 +2937,9 @@ class BackOffTests(LiveSessionCase):
         feed.run(10.0)
         self.assertGreater(feed.starved_s, 0.5)
         self.assertFalse(any(state["stalled"] for state in self.timelines[timelines:]))
-        self.assertEqual(self.timelines[-1]["target"], 4.0)  # one starvation, one rise
+        target = self.timelines[-1]["target"]
+        self.assertGreater(target, TARGETS["normal"] + 1.0)  # a margin, at once ...
+        self.assertLess(target, TARGETS["normal"] + 3.0)  # ... once
 
     def test_starvations_before_the_first_cushion_do_not_raise_it(self):
         # Played from a second behind the edge, under the target (silent for the second the
@@ -2931,50 +2955,73 @@ class BackOffTests(LiveSessionCase):
 
     def test_a_long_stall_is_one_rise(self):
         feed = self.settled()
-        self.assertEqual(self.stall(feed, seconds=60.0), 4.0)
+        target = self.stall(feed, seconds=60.0)
+        self.assertGreater(target, TARGETS["normal"] + 1.0)
+        self.assertLess(target, TARGETS["normal"] + 3.0)
 
-    def test_quiet_minutes_lower_it_back_to_where_it_started(self):
+    def quick_quiet(self):
+        """The learned target's hold and half-life cut to two minutes each."""
+        self.enterContext(mock.patch.object(learned_target, "HOLD_S", 120.0))
+        self.enterContext(mock.patch.object(learned_target, "HALF_LIFE_S", 120.0))
+
+    def test_quiet_playing_takes_it_down_slowly_once_it_held(self):
+        self.quick_quiet()
         feed = self.settled()
-        for _ in range(3):  # each cushion built again before the next stall, but the last
-            self.stall(feed, after=0.0 if _ == 2 else 120.0)
-        self.assertEqual(self.timelines[-1]["target"], 7.0)
-        feed.run(299.0)  # 5 minutes after the last trouble, less a second
-        self.assertEqual(self.timelines[-1]["target"], 7.0)
-        feed.run(2.0)
-        self.assertEqual(self.timelines[-1]["target"], 6.5)
-        feed.run(300.0 * 8)
-        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
+        raised = self.dry_stall(feed, after=60.0)
+        self.assertGreater(raised, TARGETS["normal"] + 1.0)
+        feed.run(30.0)  # within the hold: as it was
+        self.assertEqual(self.timelines[-1]["target"], raised)
+        targets = []
+        for _ in range(4 * 1200):  # 20 minutes of quiet playing
+            feed.run(0.25)
+            targets.append(self.timelines[-1]["target"])
+        self.assertTrue(all(a >= b - 1e-9 for a, b in zip(targets, targets[1:])))  # never up
+        steps = [a - b for a, b in zip(targets, targets[1:])]
+        self.assertLess(max(steps), 0.01)  # never a step down: Auto's quiet pace at most
+        self.assertLess(targets[-1], raised - 1.0)
         self.assertEqual(len(self.playback.plays), 1)
-        self.assertNotIn(1.10, self.playback.rates)  # each half second is caught up gently
+        self.assertNotIn(1.10, self.playback.rates)
 
     def test_paused_minutes_are_not_quiet_ones(self):
+        self.quick_quiet()
         feed = self.settled()
-        self.stall(feed, after=10.0)
+        raised = self.dry_stall(feed, after=10.0)
         self.live.toggle_pause()
         feed.run(600.0)
         self.live.go_live()
         feed.sync()
-        feed.run(280.0)  # 10 + 280 quiet seconds at the edge: under 5 minutes
-        self.assertEqual(self.timelines[-1]["target"], 4.0)
-        feed.run(20.0)
-        self.assertEqual(self.timelines[-1]["target"], 3.5)
+        feed.run(20.0)  # 30 s of playing in all since: still within the hold
+        self.assertEqual(self.timelines[-1]["target"], raised)
 
-    def test_a_bursty_source_goes_up_to_its_burst_plus_two_seconds(self):
-        # 10 s segments (HLS): each counted stall moves the target in force at once (2.0.2
-        # review, I2), up to the burst plus 2 s.
+    def test_a_bursty_source_goes_up_to_two_seconds_above_what_it_needs(self):
+        # 10 s segments (the helper's burst): a stall is trouble at once (R37); the margin
+        # takes the target 2 s above the larger of the burst and what its batches need at
+        # most (2.0.2: the burst plus 2 s). Batches 23 s apart now and then are part of the
+        # rhythm the need learns (not 3 cycles: no stall to the arrival model).
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=10.0, edge=20.0).ready().run(60.0)
-        self.assertEqual(self.timelines[-1]["target"], 10.0)  # the burst, above Normal's
-        targets = [self.stall(feed, seconds=13.0, after=150.0) for _ in range(3)]
-        self.assertEqual(targets, [11.5, 12.0, 12.0])  # 10 + 2 > Stable + 4
-        self.assertEqual(max(state["target"] for state in self.timelines), 12.0)
+        self.assertEqual(self.timelines[-1]["target"], 11.0)  # its batches need a second more
+        targets = []
+        for _ in range(3):  # 13 s late: what it owes comes after (lost, it would be a need)
+            missed = feed.nominal
+            feed.stalled = True
+            feed.run(13.0)
+            feed.stalled = False
+            feed.edge += round((feed.nominal - missed) / feed.chunk) * feed.chunk
+            feed.push()
+            feed.run(150.0)
+            targets.append(self.timelines[-1]["target"])
+        learned = self.live._learned
+        need = max(10.0, learned.need(10.0))
+        self.assertAlmostEqual(learned.target(10.0), need + 2.0, delta=0.01)  # at the cap
+        self.assertGreater(targets[0], 11.0)
 
     def test_a_channel_that_cannot_change_speed_builds_its_room_by_waiting(self):
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=0.0, edge=4.0, crawl=True).ready().run(24.0)
         rates = list(self.playback.rates)
         self.assertEqual(rates[-1], 1.0)  # rate health: 1x for good
-        self.assertEqual(self.stall(feed, seconds=4.0, after=60.0), 4.0)
+        self.assertGreater(self.dry_stall(feed, after=60.0), TARGETS["normal"] + 1.0)
         self.assertEqual(self.playback.rates, rates)  # no 0.95x to build the room
         self.assertEqual(len(self.playback.plays), 1)  # and no jump back
 
@@ -2990,18 +3037,17 @@ class BackOffTests(LiveSessionCase):
     def test_auto_can_be_chosen_while_a_channel_plays_and_left_again(self):
         feed = self.settled(latency="normal")
         self.live.set_latency(AUTO)
-        self.assertEqual(self.stall(feed), 4.0)
+        self.assertGreater(self.dry_stall(feed), TARGETS["normal"] + 1.0)
         self.live.set_latency("stable")
         feed.run(1.0)
         self.assertEqual(self.timelines[-1]["target"], TARGETS["stable"])
 
-    def test_the_timeline_says_auto_and_whether_its_target_moved(self):
+    def test_the_timeline_says_auto_and_whether_trouble_raised_its_target(self):
         feed = self.settled()
         self.assertEqual(
             (self.timelines[-1]["auto"], self.timelines[-1]["adjusted"]), (True, False)
         )
-        self.stall(feed)
-        self.assertEqual(self.timelines[-1]["target"], 4.0)
+        self.assertGreater(self.dry_stall(feed), TARGETS["normal"] + 1.0)
         self.assertTrue(self.timelines[-1]["adjusted"])
         self.live.set_latency("normal")
         feed.run(0.25)
@@ -3009,19 +3055,19 @@ class BackOffTests(LiveSessionCase):
             (self.timelines[-1]["auto"], self.timelines[-1]["adjusted"]), (False, False)
         )
 
-    def test_adjusted_means_auto_added_to_the_target_not_a_burst(self):
+    def test_adjusted_means_trouble_raised_the_target_not_its_segments(self):
         # Most HLS channels' segments are longer than Normal's 2.5 s: their target is the
-        # burst from the start, under any latency, and that is no adjustment. Auto adds to
-        # it, at once (2.0.2 review, I2).
+        # burst from the start under any latency (Auto's learned one a second more, what its
+        # batches need), and that is no adjustment. A stall there is trouble at once.
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=6.0, edge=20.0).ready().run(1.0)
-        self.assertEqual(self.timelines[-1]["target"], 6.0)
+        self.assertEqual(self.timelines[-1]["target"], 7.0)
         self.assertFalse(self.timelines[-1]["adjusted"])
         feed.stalled = True
-        feed.run(9.0)  # a stall (the burst plus 2 s) after a full cushion: 6.0 -> 7.5
+        feed.run(9.0)  # a stall (the burst plus 2 s) after a full cushion
         feed.stalled = False
         feed.run(10.0)
-        self.assertEqual(self.timelines[-1]["target"], 7.5)
+        self.assertGreater(self.timelines[-1]["target"], 7.5)
         self.assertTrue(self.timelines[-1]["adjusted"])
 
     def test_auto_opens_the_buffer_as_normal_does(self):
@@ -3070,8 +3116,11 @@ class MemoryTests(LiveSessionCase):
                     feed.stalled = False
                     feed.run(5.0)
                     self.assertGreater(feed.starved_s, 0.5)
-                    self.assertEqual(self.timelines[-1]["target"], target)
-        self.assertEqual(self.tuning.get("A"), Tuning(extra=1.5))
+                    self.assertAlmostEqual(self.timelines[-1]["target"], target, delta=0.05)
+        # A's 2.0.2 extra became what it learned (the prior it was read as), B learned nothing.
+        kept = self.tuning.get("A")
+        self.assertIsNone(kept.extra)
+        self.assertAlmostEqual(LearnedTarget(kept.learned).target(), 4.0, delta=0.05)
         self.assertEqual(self.tuning.get("B"), Tuning())
 
     def test_a_channel_that_cannot_change_speed_plays_at_1x_from_its_next_tune(self):
@@ -3113,13 +3162,21 @@ class MemoryTests(LiveSessionCase):
 
     def test_auto_starts_a_channel_where_its_last_tune_left_it(self):
         feed = self.tune("A").run(20.0)
-        self.stall(feed)
-        self.assertEqual(self.timelines[-1]["target"], 4.0)
-        self.assertEqual(self.tuning.get("A"), Tuning(extra=1.5))
+        feed.stalled = True  # VLC runs dry
+        feed.run(self.timelines[-1]["lag"] + 1.5)
+        feed.stalled = False
+        feed.run(5.0)
+        target = self.timelines[-1]["target"]
+        self.assertGreater(target, TARGETS["normal"] + 1.0)
+        self.assertIsNotNone(self.tuning.get("A").learned)
         self.tune("B").run(1.0)
         self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
+        kept = self.tuning.get("A").learned  # as A's tune left it when B's began
         self.tune("A").run(1.0)
-        self.assertEqual(self.timelines[-1]["target"], 4.0)
+        self.assertGreater(self.timelines[-1]["target"], TARGETS["normal"] + 1.0)
+        self.assertAlmostEqual(
+            self.timelines[-1]["target"], LearnedTarget(kept).target(), delta=0.05
+        )
         self.assertEqual(self.tuning.get("B"), Tuning())  # nothing learned, nothing kept
 
     def test_a_fixed_latency_keeps_its_own_target_and_the_channels_locked_rate(self):
@@ -3137,7 +3194,7 @@ class MemoryTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"])
         self.live.set_latency(AUTO)
         feed.run(1.0)
-        self.assertEqual(self.timelines[-1]["target"], 5.5)
+        self.assertAlmostEqual(self.timelines[-1]["target"], 5.5, delta=0.01)
 
     def test_a_target_back_where_auto_starts_is_forgotten(self):
         self.tuning.remember("A", Tuning(extra=0.5))
@@ -3147,8 +3204,11 @@ class MemoryTests(LiveSessionCase):
 
     def test_a_channel_without_a_key_teaches_nothing(self):
         feed = self.tune("").run(20.0)
-        self.stall(feed)
-        self.assertEqual(self.timelines[-1]["target"], 4.0)  # for this tune
+        feed.stalled = True  # VLC runs dry
+        feed.run(self.timelines[-1]["lag"] + 1.5)
+        feed.stalled = False
+        feed.run(5.0)
+        self.assertGreater(self.timelines[-1]["target"], TARGETS["normal"] + 1.0)  # this tune's
         self.assertEqual(self.tuning.get(""), Tuning())
 
 
@@ -3299,7 +3359,9 @@ class SparseClockTests(LiveSessionCase):
         self.live = self.make(tuning=LiveTuning(None))
 
     def tune(self, *, edge=12.0, burst=6.0, **kwargs):
-        sid = self.start(latency=AUTO, channel="A")
+        # Under Normal (the 6 s segments' target): the clock is the subject here; Auto's
+        # learned target on such channels is tested in LearnedTargetTests and on the air.
+        sid = self.start(latency="normal", channel="A")
         return Feed(self, sid, burst=burst, edge=edge, hls=True, pcr=2.0, **kwargs).ready()
 
     def errors(self, feed, seconds):
@@ -4230,6 +4292,334 @@ class HelperDeathTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), 2)
         self.assertEqual(self.notices, [LOST])
         self.assertEqual(self.modes, ["pipeline", "direct"])
+
+
+class LearnedTargetTests(LiveSessionCase):
+    """2.1 stage 4b: under Auto the channel's learned target (`LearnedTarget`, stage 4a) in
+    place of 2.0.2's `AutoTarget`, wired by the integration contract of 4a's final review;
+    Low, Normal and Stable stay as they were."""
+
+    def setUp(self):
+        self.tuning = LiveTuning(None)
+        super().setUp()
+
+    def make(self, **kwargs):
+        kwargs.setdefault("tuning", self.tuning)
+        return super().make(**kwargs)
+
+    def spy(self, cls, name):
+        real = getattr(cls, name)
+        return self.enterContext(mock.patch.object(cls, name, autospec=True, side_effect=real))
+
+    def tune(self, *, burst=0.0, edge=6.0, latency=AUTO, channel="ch", **kwargs):
+        """Tune `channel` (a zap: the channel before closes first) and play it from the start
+        Go live would pick."""
+        self.start(latency=latency, channel=channel)
+        self.engine.answer()
+        feed = Feed(self, self.engine.last_sid, burst=burst, edge=edge, **kwargs)
+        return feed.ready(backlog_after_start=False)
+
+    def late(self, feed, seconds):
+        """The source sends nothing for `seconds`, then all it owes at once (late, not lost)."""
+        feed.stalled = True
+        feed.run(seconds)
+        feed.stalled = False
+        feed.edge += seconds
+        feed.push()
+
+    def starve(self, feed, times=3):
+        """VLC runs dry and waits (its clock still while it says Playing): the source sends
+        nothing for 1.6 s `times` times, a quarter second apart (never a stall)."""
+        for _ in range(times):
+            feed.stalled = True
+            feed.run(1.6)
+            feed.stalled = False
+            feed.run(0.25)
+
+    # ---- contract 1, 9: one per tune, from what the channel taught; kept for the next ----
+    def test_one_learned_target_per_tune_from_what_the_channel_taught(self):
+        self.tuning.remember("ch", Tuning(learned=Learned(need=6.0)))
+        self.tune(edge=10.0).run(0.25)
+        first = self.live._learned
+        self.assertIsInstance(first, LearnedTarget)
+        self.assertEqual((first.floor, first.arrivals.remembered), (TARGETS["normal"], 6.0))
+        self.assertEqual(first.segment_floor, live_session.SEGMENT_FLOOR)
+        self.assertEqual(self.timelines[-1]["target"], 6.0)  # its next tune starts there
+        self.tune(edge=10.0)
+        self.assertIsNot(self.live._learned, first)  # one per tune
+        for latency in ("low", "normal", "stable"):
+            with self.subTest(latency=latency):
+                self.tune(latency=latency, edge=10.0).run(2.0)
+                self.assertIsNone(self.live._learned)
+                self.assertEqual(self.timelines[-1]["target"], TARGETS[latency])
+
+    def test_the_burst_floor_switch_is_read_once_per_run(self):
+        self.enterContext(mock.patch.object(live_session, "SEGMENT_FLOOR", False))
+        self.tune()
+        self.assertFalse(self.live._learned.segment_floor)
+
+    def test_a_2_0_2_extra_is_a_prior_and_is_kept_as_what_was_learned(self):
+        self.tuning.remember("ch", Tuning(extra=3.0))
+        self.tune(edge=8.0).run(0.25)
+        self.assertEqual(self.timelines[-1]["target"], TARGETS["normal"] + 3.0)
+        self.live.stop()
+        kept = self.tuning.get("ch")
+        self.assertIsNone(kept.extra)  # read as the prior: never read so again
+        self.assertIsNotNone(kept.learned)
+        self.assertEqual(LearnedTarget(kept.learned).target(), TARGETS["normal"] + 3.0)
+
+    def test_a_tune_that_learned_nothing_leaves_nothing(self):
+        self.tuning.remember("ch", Tuning(extra=0.4))  # under half a second: no margin
+        feed = self.tune()
+        feed.run(30.0)
+        self.live.stop()
+        self.assertEqual(self.tuning.get("ch"), Tuning())
+
+    # ---- contract 2: the edge every tick; arrivals start afresh only with a new stream ----
+    def test_the_edge_every_tick_and_a_vlc_reopen_restarts_no_arrivals(self):
+        add = self.spy(ArrivalModel, "add")
+        reset = self.spy(ArrivalModel, "reset")
+        feed = self.tune(edge=40.0)
+        feed.run(0.25)
+        calls, resets = add.call_count, reset.call_count  # (the first edge: one of its own)
+        feed.run(10.0)
+        self.assertEqual(add.call_count - calls, 40)  # every tick
+        self.live.toggle_pause()  # paused: the source goes on arriving
+        feed.run(5.0)
+        self.live.toggle_pause()
+        self.live.seek_relative(-20.0)  # VLC reopens
+        feed.sync()
+        feed.run(5.0)
+        self.live.go_live()
+        feed.sync()
+        feed.run(5.0)
+        self.assertEqual(add.call_count - calls, 40 + 20 + 20 + 20)
+        self.assertEqual(reset.call_count, resets)
+        self.engine.sessionFailed.emit(self.engine.last_sid, "internal", "The helper died.")
+        self.assertEqual(reset.call_count, resets + 1)  # the helper's stream starts afresh
+
+    # ---- contract 3: the steering target from the filter's burst ----
+    def test_a_burst_the_helper_reports_for_a_moment_lifts_no_target(self):
+        feed = self.tune(edge=6.0)
+        feed.run(60.0)
+        target = self.timelines[-1]["target"]
+        # 15 s of a measured "burst" (a backlog's), then none again: longer than a rise must
+        # hold to be steered by, shorter than the filter takes a larger burst in.
+        feed.burst = 10.0  # what the helper reports with each state (it arrives as before)
+        feed.run(15.0)
+        feed.burst = 0.0
+        feed.run(30.0)
+        self.assertEqual({t["target"] for t in self.timelines[-180:]}, {target})
+
+    # ---- contract 4, 7: a stall once when it begins; absorbed when it ends with room ----
+    def test_a_stall_is_told_once_when_it_begins_with_the_bounds_burst(self):
+        stalled = self.spy(LearnedTarget, "stalled")
+        absorbed = self.spy(LearnedTarget, "absorbed")
+        self.tuning.remember("ch", Tuning(extra=3.0))  # a 5.5 s target: room for a stall
+        feed = self.tune(edge=12.0)
+        feed.run(30.0)
+        lag = self.timelines[-1]["lag"]
+        feed.stalled = True
+        feed.run(1.75)
+        self.assertFalse(stalled.called)  # under the bound (a steady source: 2 s)
+        feed.run(1.0)
+        self.assertEqual(stalled.call_count, 1)
+        self.assertEqual(stalled.call_args.args[1:], (0.0,))  # the 2 s bound's burst
+        feed.run(1.0)  # still the same stall
+        self.late(feed, 0.0)
+        feed.run(1.0)
+        self.assertEqual(stalled.call_count, 1)
+        # It ended with VLC still playing: the least headroom it had meanwhile, the lag less
+        # the 3.75 s it lasted.
+        self.assertEqual(absorbed.call_count, 1)
+        self.assertAlmostEqual(absorbed.call_args.args[1], lag - 3.75, delta=0.5)
+
+    def test_a_stall_is_not_told_while_paused_or_before_the_cushion(self):
+        stalled = self.spy(LearnedTarget, "stalled")
+        feed = self.tune(edge=8.0)
+        feed.run(30.0)
+        self.live.toggle_pause()
+        feed.stalled = True
+        feed.run(5.0)
+        feed.stalled = False
+        feed.run(1.0)
+        self.assertFalse(stalled.called)
+        self.live = self.make()
+        sid = self.start(latency=AUTO, channel="ch")  # from the oldest, short of the target
+        feed = Feed(self, sid, burst=0.0, edge=1.0, starved=PlaybackState.PLAYING).ready()
+        feed.stalled = True
+        feed.run(3.0)
+        self.assertFalse(stalled.called)
+
+    def test_a_stall_the_2_s_bound_found_is_told_without_a_burst(self):
+        # The helper's burst went (a raw TS meter's estimate) while the filter still holds it.
+        stalled = self.spy(LearnedTarget, "stalled")
+        feed = self.tune(burst=6.0, edge=20.0)
+        feed.run(60.0)
+        feed.burst = 0.0  # the helper reports none now (the filter keeps 6 for 30 s)
+        feed.push()
+        feed.run(0.25)
+        self.assertEqual(self.live._filter.burst, 6.0)
+        feed.stalled = True
+        feed.run(8.0)
+        self.assertEqual(stalled.call_count, 1)
+        self.assertEqual(stalled.call_args.args[1:], (0.0,))
+
+    # ---- contract 5: VLC running dry, once per dry run ----
+    def test_running_dry_is_told_once_per_dry_run(self):
+        starved = self.spy(LearnedTarget, "starved")
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        self.starve(feed)  # three dry spells a quarter second apart: VLC refilling
+        self.assertEqual(starved.call_count, 1)
+        feed = self.tune(edge=8.0, channel="other", starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        calls = starved.call_count
+        for _ in range(2):  # dry runs with the cushion built back between them
+            self.late(feed, self.timelines[-1]["lag"] + 1.0)  # a second dry, then all of it
+            feed.run(240.0)  # the owed slow-down builds the room back (a cushion again)
+        self.assertEqual(starved.call_count, calls + 2)
+
+    def test_a_refills_flicker_is_one_dry_run(self):
+        # At the cap (a 2.0.2 extra of 7.5 s: 10 s), so running dry raises nothing and every
+        # dry spell would count were they not one.
+        starved = self.spy(LearnedTarget, "starved")
+        self.tuning.remember("ch", Tuning(extra=7.5))
+        feed = self.tune(edge=14.0)
+        feed.run(30.0)
+        lag = self.timelines[-1]["lag"]
+        feed.stalled = True
+        feed.run(lag + 0.25)  # VLC runs dry ...
+        for _ in range(3):  # ... and refills in pieces: dry, playing, dry
+            feed.edge += 0.25
+            feed.push()
+            feed.run(0.25)
+            feed.run(0.5)
+        feed.stalled = False
+        feed.edge += lag
+        feed.push()
+        feed.run(5.0)
+        self.assertEqual(starved.call_count, 1)
+
+    # ---- contract 6: near-misses ----
+    def test_a_near_miss_is_the_headroom_before_a_batch_less_vlcs_caching(self):
+        near = self.spy(LearnedTarget, "near_miss")
+        feed = self.tune(burst=6.0, edge=20.0)
+        feed.run(60.0)
+        self.assertGreater(near.call_count, 5)  # one per batch
+        before = feed.before[-1]  # the headroom just before the last batch
+        # On the tick before it (a quarter second earlier, when VLC had a little more).
+        self.assertAlmostEqual(near.call_args.args[1], before - 0.3, delta=0.3)
+
+    def test_no_near_miss_while_the_start_fills_its_cushion(self):
+        near = self.spy(LearnedTarget, "near_miss")
+        self.live = self.make(ready_timeout_ms=50)
+        sid = self.start(latency=AUTO, channel="ch")
+        feed = Feed(self, sid, burst=6.0, edge=4.0, first=6.0).ready(backlog_after_start=False)
+        self.wait_until(lambda: self.playback.plays)
+        feed.run(20.0)  # the lag short of the target the whole time
+        self.assertLess(self.timelines[-1]["lag"], self.timelines[-1]["target"])
+        self.assertFalse(near.called)
+
+    # ---- contract 8: playing at the live edge only ----
+    def test_only_playing_at_the_live_edge_counts(self):
+        played = self.spy(LearnedTarget, "played")
+        feed = self.tune(edge=40.0)
+        feed.run(20.0)
+        self.assertAlmostEqual(sum(c.args[1] for c in played.call_args_list), 20.0, delta=0.5)
+        for step in ("paused", "time-shifted"):
+            calls = played.call_count
+            if step == "paused":
+                self.live.toggle_pause()
+                feed.run(10.0)
+                self.live.toggle_pause()
+            else:
+                self.live.seek_relative(-20.0)
+                feed.sync()
+                feed.run(10.0)
+            self.assertEqual(played.call_count, calls, step)
+            self.live.go_live()
+            feed.sync()
+            feed.run(1.0)
+
+    # ---- contract 10: "· adjusted" means trouble raised it ----
+    def test_adjusted_says_trouble_raised_the_target_not_a_burst(self):
+        feed = self.tune(burst=6.0, edge=20.0, hls=True, starved=PlaybackState.PLAYING)
+        feed.run(60.0)
+        self.assertGreater(self.timelines[-1]["target"], 6.0)  # its arrivals need more
+        self.assertEqual(
+            (self.timelines[-1]["auto"], self.timelines[-1]["adjusted"]), (True, False)
+        )
+        feed.stalled = True
+        feed.run(10.0)  # a stall of a segmented source: trouble at once (R37)
+        feed.stalled = False
+        feed.run(1.0)
+        self.assertTrue(self.timelines[-1]["adjusted"])
+
+    # ---- the learned target in play ----
+    def test_a_steady_source_learns_its_need_and_the_next_tune_starts_there(self):
+        feed = self.tune(burst=2.0, edge=8.0)  # 2 s of media every 2 s
+        feed.run(120.0)
+        target = self.timelines[-1]["target"]
+        self.assertGreaterEqual(target, 2.5)
+        self.assertLessEqual(target, 3.5)
+        self.assertEqual(changes(self.playback.rates), 0)
+        self.tune(burst=2.0, edge=8.0)
+        self.assertAlmostEqual(self.timelines[-1]["target"], target, delta=0.1)
+
+    def test_an_uneven_batch_hls_source_rises_to_about_8(self):
+        # 6 s every 7 s, every sixth 12 s (a public HLS channel, measured).
+        feed = self.tune(burst=7.0, edge=20.0, hls=True)
+        feed.sizes = iter([12.0 if k % 6 == 5 else 6.0 for k in range(1000)])
+        feed.run(300.0)
+        self.assertGreaterEqual(self.live._learned.target(7.0), 7.5)
+        self.assertLessEqual(self.live._learned.target(7.0), 9.5)
+        steered = self.timelines[-1]["target"]  # its falls slow: at most a step above
+        self.assertGreaterEqual(steered, 7.5)
+        self.assertLessEqual(steered, 9.5)
+        rates = self.playback.rates
+        # Gentle builds only, two at most: the start's own shortfall (its pick from the
+        # arrival in progress reads the 12 s batch's dip short), and the learned rise beyond
+        # the band once the dips were measured (the next tune starts there).
+        self.assertLessEqual(changes(rates), 4)
+        self.assertTrue(all(0.97 <= rate <= 1.0 for rate in rates))
+
+    def test_batches_rarer_than_the_target_duration_say_are_waited_for_before_any_dry_run(self):
+        # A sparse-PCR channel: 10 s segments (its playlist's target duration), each batch 12 s
+        # after the last.
+        feed = self.tune(burst=12.0, edge=30.0, hls=True)
+        feed.burst = 10.0  # what the playlist says
+        feed.run(120.0)
+        self.assertGreaterEqual(self.timelines[-1]["target"], 12.5)
+        self.assertEqual(feed.starved_s, 0.0)
+
+    def test_a_dry_run_raises_the_target_at_once_and_the_slow_down_runs_once(self):
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        before, rates = self.timelines[-1]["target"], len(self.playback.rates)
+        with self.assertLogs("services.live.live_session", "INFO") as logs:
+            self.late(feed, 3.0)  # VLC runs dry a second, then all of it arrives
+            feed.run(0.25)
+        self.assertGreaterEqual(self.timelines[-1]["target"], before + 1.0)
+        self.assertTrue(any("trouble" in line for line in logs.output))
+        self.assertFalse(any("://" in line for line in logs.output))
+        feed.run(120.0)
+        built = self.playback.rates[rates:]
+        self.assertEqual((min(built), changes(built)), (0.95, 2))
+
+    def test_quiet_brings_it_down_slowly(self):
+        self.enterContext(mock.patch.object(learned_target, "HOLD_S", 60.0))
+        self.enterContext(mock.patch.object(learned_target, "HALF_LIFE_S", 60.0))
+        feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
+        feed.run(30.0)
+        self.late(feed, 3.0)
+        feed.run(0.25)
+        raised = self.timelines[-1]["target"]
+        feed.run(1200.0)
+        targets = [t["target"] for t in self.timelines[-4800:]]
+        self.assertLess(targets[-1], raised - 1.0)
+        self.assertTrue(all(a >= b - 1e-9 for a, b in zip(targets, targets[1:])))  # never up
+        self.assertNotIn(1.10, self.playback.rates)
 
 
 if __name__ == "__main__":

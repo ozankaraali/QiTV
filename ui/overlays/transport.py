@@ -5,8 +5,8 @@ the bar over the buffered range, or, while the session's stay-live mode is LIVE,
 latency indicator (it reads "catching up" while stay-live nudges the rate up, "adding buffer"
 while it nudges it down, and "Reconnecting…" while the source has stalled). It shows the settled
 lag (2.1: in half seconds, changed only once the lag moved for a few seconds): "≈ 2.5 s behind
-source"; under Auto latency "≈ 7 s behind", with "adjusted" once the channel's Auto target moved
-from its start. Its dot is green while stay-live plays at 1x and amber whenever the rate is
+source"; under Auto latency "≈ 7 s behind", with "adjusted" while trouble holds the channel's
+learned target up (its starvation prior's margin; not what its arrivals need). Its dot is green while stay-live plays at 1x and amber whenever the rate is
 another (0.95x included) or the source stalled. The bar and the Go live chip show only when the
 viewer left live (shifted, or a chosen speed); a drag keeps the bar.
 

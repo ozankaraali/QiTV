@@ -66,10 +66,12 @@ On some channels VLC cannot play at any rate but 1x: its position crawls instead
 then calls `lock_rate()`: from there on stay-live keeps 1x and only reopens at live when the
 lag is beyond the target plus 20 s, as before, or far behind by a jump (2.1 stage 5).
 
-"Auto" latency (`AUTO`, `AutoTarget`) learns what each channel adds to the target in force: it
-starts at nothing, rises with each starvation or stall and falls again while the channel plays
-without one. A target raised above the lag is reached without a jump back: by a nudge below 1x
-unless the rate is locked, else as VLC waits at the live edge, which adds to the lag by itself.
+"Auto" latency (`AUTO`) steers by the channel's learned target (2.1 stage 4b:
+`services.live.learned_target`, fed by the caller), as `SteeredTarget` moves it: rises in steps
+(at once with trouble), falls slowly. A target raised above the lag is reached without a jump
+back: by a nudge below 1x unless the rate is locked, else as VLC waits at the live edge, which
+adds to the lag by itself. `AutoTarget` is 2.0.2's Auto (1.5 s per starvation or stall, 0.5 s
+off per 5 quiet minutes), kept as the reference the learned target is measured against.
 
 Pure logic; the caller feeds the measured lag and applies the returned Decision.
 """
@@ -141,6 +143,11 @@ _BURST_ON_S = 10.0  # a larger burst counts once the source reported it this lon
 _BURST_OFF_S = 30.0  # ... a smaller one (or none) once it reported that this long
 _BURST_STEP_S = 0.5  # burst changes smaller than this leave it as it was
 
+# SteeredTarget: the learned target (Auto, 2.1 stage 4b) as stay-live steers by it.
+_STEER_STEP_S = 0.5  # a rise moves it in a step this big at least ...
+_STEER_HOLD_S = 10.0  # ... once it held this long (at once with trouble) ...
+_STEER_FALL = _AUTO_DOWN / _AUTO_QUIET_S  # ... and a fall at most this fast (Auto's decay)
+
 # SettledLag: the lag as shown.
 _SHOWN_STEP_S = 0.5
 _SHOWN_HOLD_S = 3.0
@@ -210,8 +217,42 @@ class RateHealth:
         return True
 
 
+class SteeredTarget:
+    """The learned target (Auto latency, 2.1 stage 4b: `services.live.learned_target`) as
+    stay-live steers by it. The learned target moves with every estimate (the arrival need
+    once a second, the margin as it fades); steered by as it is, each move would be a new
+    target to build or catch up to. So a rise counts in a step of at least `_STEER_STEP_S`
+    once it held `_STEER_HOLD_S` (as a larger burst counts), at once when trouble raised it
+    (its owed slow-down comes with it: `StayLive.trouble`); a fall comes at most at
+    `_STEER_FALL` (Auto's quiet decay, half a second per 5 minutes), never as a step.
+    """
+
+    def __init__(self) -> None:
+        self.value: Optional[float] = None
+        self._rising = 0.0  # seconds the learned target held a step above it
+
+    def update(self, learned: float, dt: float, *, trouble: bool = False) -> float:
+        """The target to steer by, `dt` seconds after the last update, the learned target now
+        `learned`; `trouble`: trouble raised it this moment."""
+        value = self.value
+        if value is None or (trouble and learned > value):
+            self.value, self._rising = learned, 0.0
+        elif learned >= value + _STEER_STEP_S - 1e-9:
+            self._rising += dt
+            if self._rising >= _STEER_HOLD_S - 1e-9:
+                self.value, self._rising = learned, 0.0
+        else:
+            self._rising = 0.0
+            if learned < value:
+                self.value = max(learned, value - _STEER_FALL * max(0.0, dt))
+        assert self.value is not None
+        return self.value
+
+
 class AutoTarget:
-    """One channel's Auto latency (2.0.2): what it adds to the target in force.
+    """One channel's Auto latency as 2.0.2 had it: what it adds to the target in force. Since
+    2.1 stage 4b the session steers Auto by the learned target instead
+    (`services.live.learned_target`); this stays as the reference its tests measure it by.
 
     The target in force is Normal's, or the source's burst when that is larger, as under any
     latency; Auto adds `extra` on top: 0 at first, or where the channel's last tune left it.
@@ -382,6 +423,11 @@ class LagFilter:
 
     def spread(self) -> float:
         return self._spread
+
+    def burst_for(self, reported: float) -> float:
+        """The burst it holds (with its hysteresis), or, before its first edge, the one the
+        source reports: the first report counts at once."""
+        return self.burst if self._burst_seen else max(0.0, reported)
 
     def _classify(self, now: float, reported: float) -> None:
         if not self._burst_seen:
