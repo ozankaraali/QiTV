@@ -808,6 +808,19 @@ class LibraryPlayTests(PipCase):
         self.controller.handle(Action.CH_NEXT)  # zapping goes on from One
         self.assertEqual(self.requested()[-1], "Two")
 
+    def test_a_film_whose_open_fails_gives_the_channel_the_big_picture_back(self):
+        # Review M2: the open raising (no player, say) left the big picture black.
+        self.start_large(0)
+        self.controller.enter_library_playing()
+        self.controller.play_vod(MOVIE, "movie", play_context())
+        with mock.patch.object(self.pip_session, "play", side_effect=RuntimeError("No player")):
+            with self.assertLogs("ui.tv_controller", "WARNING"):
+                self.ready("http://vod/heat.mkv")
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertFalse(self.sessions.pip_open())
+        self.assertNotIn(("stop",), self.live.calls)
+        self.assertEqual(self.toast.messages()[-1], ("Heat: No player", "error"))
+
     def test_a_failed_sign_in_of_the_movies_provider_gives_the_channel_back_too(self):
         self.start_large(0)
         self.controller.enter_library_playing()
@@ -997,6 +1010,17 @@ class TitleBesideChannelTests(PipCase):
         self.next_card.activate()
         self.ready("http://vod/night-ferry.mkv")
         self.assert_one_plays_small_beside("http://vod/night-ferry.mkv")
+
+    def test_a_film_that_fails_large_gives_the_channel_the_big_picture_back(self):
+        # Review M2: only a failed link or sign-in did; a film whose playback failed left the
+        # big picture black with the channel small.
+        self.pip_session.errorOccurred.emit("The stream could not be opened")  # Heat, large
+        self.assertIs(self.sessions.large(), self.main_slot)
+        self.assertFalse(self.sessions.pip_open())  # the failed film closed
+        self.assertFalse(self.session.muted)
+        self.assertNotIn(("stop",), self.live.calls)
+        self.assertEqual(self.controller._channel, CHANNELS[0])  # INFO, ★, the guide
+        self.assertEqual(self.toast.messages(), [("Heat: The stream could not be opened", "error")])
 
     def test_the_channel_kept_small_that_fails_opens_again_beside_the_film(self):
         # Review I1: the STB retry's fresh link was dropped because a movie plays, and

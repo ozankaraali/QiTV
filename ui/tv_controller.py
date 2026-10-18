@@ -34,9 +34,10 @@ shows swaps instead of opening it twice. A movie or an episode started from the 
 a channel plays takes the large picture and the channel goes small without reopening (a
 previous small picture closes first; when the title's provider has no second stream the
 channel closes instead, and a small picture plays on), and takes it back if the title's link
-fails; what follows the title (Next, autoplay, another title) keeps the channel small. A swap
-drops the Next card, and a title that ended small offers it once swapped large. Files and a
-title with no channel streaming close the small picture first: it is for live TV.
+or its playback fails; what follows the title (Next, autoplay, another title) keeps the
+channel small. A swap drops the Next card, and a title that ended small offers it once
+swapped large. Files and a title with no channel streaming close the small picture first: it
+is for live TV.
 
 Provider setups (the loading and welcome hints, the last channel, the drawer on an idle player)
 are ProviderFlow's (ui/provider_flow.py). Opening the window's Library (spec §5.4) keeps what
@@ -1091,6 +1092,8 @@ class TVController(QObject):
                 self._reset_speed(session)
 
             self._tuner.open(self._guarded(target, open_vod), direct=True, provider=provider_name)
+            if self._current is not None and self._current is not target:
+                return  # its open failed at once: the channel kept small took the picture back
             if start:
                 self._toast(f"Resumed at {fmt_duration(start)}")
             self.overlays.banner.dismiss()  # the transport takes the bottom of the video
@@ -1109,6 +1112,8 @@ class TVController(QObject):
                 # What played before was stopped to open this: nothing is current now.
                 self._current, self._cid = None, None
                 self._log_failure(f"play {target.title}", e)
+                if not target.live:
+                    self._give_small_channel_large()
                 self._restore_channel()
                 self._error(f"{target.title}: {e}")
 
@@ -1590,8 +1595,21 @@ class TVController(QObject):
         if current is not None and self._live_controls.may_retry(current):
             self._live_controls.retry(current)  # STB play tokens expire: a fresh link first
             return
-        title = self._current.title if self._current is not None else ""
+        title = current.title if current is not None else ""
+        if current is not None and not current.live:
+            self._give_small_channel_large()
         self._error(f"{title}: {message}" if title else message)
+
+    def _give_small_channel_large(self) -> None:
+        """The movie or the episode playing large failed: a channel shown small beside it
+        (kept small for a title from the Library) takes the big picture back, and the failed
+        title closes; the caller says why."""
+        sessions, pip = self.sessions, self._pip
+        small = sessions.small() if sessions is not None else None
+        if pip is None or small is None or small.channel is None:
+            return
+        if self.swap():
+            pip.close()  # the failed title, small now
 
     def _on_ended(self) -> None:
         if self._closed or self._current is None:
