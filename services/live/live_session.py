@@ -275,15 +275,24 @@ _LOADING_AFTER_S = 1.0
 # Within this long after a tune's start, a backlog step that raises the lag is part of the
 # landing (raw TS whose backlog came after the hold).
 _RELAND_S = 10.0
-# Within this long after a tune's first open, a backlog step that leaves the lag far above the
-# target (more than a burst) re-picks the start once, as Go live would, once the source then
-# flowed at about real time for `_REPICK_FLOW_S` (`_REPICK_FLOW_SHARE` of it: a dump, then a
-# steady source; a bursty source's edge stands still after its burst, which was no backlog):
-# the 1-stream raw-TS provider sent 2 s, then 18-22 s a moment after the open, and the viewer
-# sat 23 s behind for a minute (the jumps' cooldown counts from the tune).
+# The re-pick (2.1 stage 4b, owner's item; ruling R46): within `_REPICK_S` of a tune's first
+# open a dump (the edge `_REPICK_DUMP_S` up in a tick), then the source flowing on at about
+# real time for `_REPICK_FLOW_S` (`_REPICK_RATE` of it, never standing still `_REPICK_GAP_S`),
+# that leaves the lag far above the target picks the start again once, as Go live would: the
+# 1-stream raw-TS provider's random channel sent 2 s, then 18-22 s a moment after the open,
+# then 2 s every 2 s, and the viewer sat 23 s behind for a minute (the jumps' cooldown counts
+# from the tune). A burst flows at 3x and more, then stands still for most of its period: it
+# never qualifies, whatever the tick it lands on or how it is spread (re-reviews 1 and 2: the
+# unmeasured burst read as a backlog ran VLC dry 4-7 s). Only while VLC played within
+# `_REPICK_PLAY_S` of the open, and never later than `_REPICK_DEADLINE_S` after it.
+REPICK = True
 _REPICK_S = 5.0
-_REPICK_FLOW_S = 2.5
-_REPICK_FLOW_SHARE = 0.7
+_REPICK_DUMP_S = 4.0
+_REPICK_FLOW_S = 6.0
+_REPICK_RATE = (0.6, 1.6)
+_REPICK_GAP_S = 3.0
+_REPICK_PLAY_S = 3.0
+_REPICK_DEADLINE_S = 20.0
 _REPICK_GAIN_S = 1.0  # (stay-live's band) the least the new start must gain, and exceed by
 _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) ...
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
@@ -471,8 +480,9 @@ class LiveSession(QObject):
         self._reland_edge = 0.0  # the live edge at the last tick, meanwhile
         self._repick_until = -math.inf  # a backlog step before this re-picks the tune's start
         self._repick_step: Optional[float] = None  # when the step to re-pick for began ...
-        self._repick_last = 0.0  # ... and when the edge last stepped since ...
-        self._repick_edge = 0.0  # ... to where
+        self._repick_edge = 0.0  # ... the edge then ...
+        self._repick_moved = 0.0  # ... and when it last moved since
+        self._repick_opened = -math.inf  # the tune's first open
         self._rewound = False  # "Rewound past the buffer" was said; VLC has not played since
         # The mean lag over the source's arrival rhythm, and the lag as shown (2.1).
         self._filter = LagFilter()
@@ -1079,6 +1089,7 @@ class LiveSession(QObject):
         self._reland_until = self._clock() + _RELAND_S
         self._reland_edge = self._live_edge(snapshot)
         self._repick_until, self._repick_step = self._clock() + _REPICK_S, None
+        self._repick_opened = self._clock()
 
     def _open_first_again(self) -> None:
         """The tune's first open failed (no helper served it): pick its start again."""
@@ -1446,30 +1457,43 @@ class LiveSession(QObject):
         """Within `_RELAND_S` of a tune's start, a backlog step (the live edge grew by more
         than `_SETTLE_GROWTH_S` in a tick) that took the lag further above the target is part
         of the landing (`StayLive.landed_further`): raw TS whose backlog came after the hold.
-        One that began within `_REPICK_S` of the tune's open, after which the source flowed
-        at about real time, and that leaves the lag far above the target re-picks the start
-        once, as Go live would (no jump's cooldown; a Go live right after it is merged): True
-        then."""
+        A dump within `_REPICK_S` of the tune's open, after which the source flowed on at
+        about real time, that leaves the lag far above the target re-picks the start once, as
+        Go live would (see `REPICK`; no jump's cooldown; a Go live right after it is merged):
+        True then."""
         now = self._clock()
         if now >= self._reland_until and self._repick_step is None:
             return False
         edge = self._live_edge(snapshot)
-        stepped, self._reland_edge = edge - self._reland_edge > _SETTLE_GROWTH_S, edge
-        if stepped:
+        grown, self._reland_edge = edge - self._reland_edge, edge
+        if grown > _SETTLE_GROWTH_S and now < self._reland_until:
             self._stay.landed_further(lag - self._stay.target)
-            if now < self._repick_until:
-                if self._repick_step is None:
-                    self._repick_step = now
-                self._repick_last, self._repick_edge = now, edge
+        if not REPICK or self._repick_until == -math.inf:
             return False
-        flowed = now - self._repick_last
-        if self._repick_step is None or flowed < _REPICK_FLOW_S - 1e-9:
+        played = self._opened_at is None and self._last_ms != 0
+        since = now - self._repick_opened
+        if since > _REPICK_DEADLINE_S or (not played and since > _REPICK_PLAY_S):
+            self._repick_until, self._repick_step = -math.inf, None  # never, this tune
             return False
-        if self._opened_at is not None or self._last_ms == 0:
-            return False  # VLC has not played the open yet: no second open before its picture
-        self._repick_step = None  # a later step within the window is its own
-        if edge - self._repick_edge < _REPICK_FLOW_SHARE * flowed:
-            return False  # nothing flowed after it: a burst, the source's rhythm
+        if grown > _REPICK_DUMP_S and now < self._repick_until:
+            # A dump, or a further piece of it: the source's own flow is judged from here.
+            self._repick_step, self._repick_edge, self._repick_moved = now, edge, now
+            return False
+        step = self._repick_step
+        if step is None:
+            return False
+        if grown >= _ARRIVAL_S:
+            self._repick_moved = now
+        elif now - self._repick_moved > _REPICK_GAP_S:
+            self._repick_step = None  # it stood still: a burst, the source's rhythm
+            return False
+        flowed = now - step
+        if flowed < _REPICK_FLOW_S - 1e-9 or not played:
+            return False
+        self._repick_step = None
+        low, high = _REPICK_RATE
+        if not low * flowed <= edge - self._repick_edge <= high * flowed:
+            return False  # no steady flow after it
         if self._stay.mode is not Mode.LIVE or self._paused:
             return False
         # The mean lag the step leaves (the edge less the position, less half a burst: the
@@ -1648,6 +1672,7 @@ class LiveSession(QObject):
         now = self._clock()
         edge = self._live_edge(snapshot)
         began = learned.arrivals.add(now, edge)
+        learned.reported(_number(snapshot.get("burst_s")), now)
         headroom = edge - position
         dry = self._starved(snapshot, position)
         burst = self._filter.burst_for(_number(snapshot.get("burst_s")))

@@ -1029,9 +1029,13 @@ class LearnedTargetTests(unittest.TestCase):
     def test_a_short_tune_of_a_segmented_source_keeps_its_burst_as_the_need(self):
         target = LearnedTarget()
         Source(target.arrivals).run(regular(10.0, 10.0, 60), 60)  # six bursts: not warm
-        target.target(10.0)  # the session asks for its burst's target
+        target.reported(10.0, 0.0)  # what the source reports ...
+        self.assertIsNone(target.learned())  # (a moment: maybe a one-off first "burst")
+        target.reported(10.0, 20.0)  # ... two bursts on
         self.assertEqual(target.learned().need, 10.0)
         self.assertEqual(LearnedTarget(target.learned()).target(), 10.0)
+        target.reported(0.0, 21.0)  # dropped again: none kept
+        self.assertIsNone(target.learned())
 
     def test_a_short_tune_keeps_the_need_it_was_given(self):
         again = LearnedTarget(Learned(need=13.0))

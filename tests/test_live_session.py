@@ -1234,20 +1234,19 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 9))
         self.assertTrue(self.landed.called)
 
-    def test_a_backlog_step_right_after_the_start_picks_it_again(self):
+    def test_a_backlog_step_right_after_the_start_is_part_of_the_landing(self):
         # Review M8: raw TS whose backlog came after the 1.5 s hold ran 1.10x for ~100 s;
-        # stage 3 took it in as part of the landing (a gentle nudge for a minute, 9 s above
-        # the target here); since 4b's review the start is picked again, once.
+        # stage 3 takes it in as part of the landing (a gentle nudge). With 10 s keyframes a
+        # start picked again once the source flowed on gains nothing on it (`RepickTests`).
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=13.5, gop=10.0).ready(backlog_after_start=False)
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 1))  # 4 s
         feed.run(3.0)
         feed.edge += 9.0  # the rest of the backlog
         feed.push()
-        feed.run(45.0)
+        feed.run(45.0)  # within the landing's window (after it a backlog is drift: R32)
         self.assertLessEqual(max(self.playback.rates or [1.0]), 1.03)
-        self.assertEqual(len(self.playback.plays), 2)
-        self.assertLess(self.timelines[-1]["lag"], TARGETS["normal"] + 10.0)  # a GOP above
+        self.assertEqual(len(self.playback.plays), 1)
 
     def test_hls_that_does_not_say_what_is_to_come_waits_until_every_segment_arrived(self):
         # A sparse-PCR channel's 10 s segments (2 s keyframe intervals), 36 s fetched.
@@ -4327,6 +4326,169 @@ class HelperDeathTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), 2)
         self.assertEqual(self.notices, [LOST])
         self.assertEqual(self.modes, ["pipeline", "direct"])
+
+
+class RepickTests(LiveSessionCase):
+    """A tune's start picked again (`REPICK`, ruling R46): only a dump right after the open
+    that the source then flows on from at about real time, never a burst (which flows at 3x
+    and more, then stands still), however it lands or is spread, never long after the open or
+    when VLC is slow to play it. Each case against 4bb2d7c's (stage 4b re-reviews 1-2): one
+    open and VLC never dry, where that ran dry 4-7 s."""
+
+    def tune(self, latency, **kwargs):
+        self.live = self.make(tuning=LiveTuning(None))
+        sid = self.start(latency=latency, channel="A")
+        return Feed(self, sid, metered=True, starved=PlaybackState.PLAYING, **kwargs)
+
+    def opened(self, feed):
+        for _ in range(40):
+            if self.playback.plays:
+                return
+            feed.run(0.05)
+        self.fail("the tune never opened")
+
+    def outcome(self, feed, seconds=60.0):
+        feed.run(seconds)
+        out = (len(self.playback.plays), round(feed.starved_s, 2))
+        self.live.stop()
+        self.engine.answer()
+        return out
+
+    def unchanged(self, play):
+        """`play()` (a case: its plays and dry seconds) as it goes without the re-pick: one
+        open, and VLC as dry (its start's own, 4bb2d7c's) as there."""
+        with mock.patch.object(live_session, "REPICK", False):
+            without = play()
+        self.assertEqual(without[0], 1)
+        self.assertEqual(play(), without)
+
+    @staticmethod
+    def segmented(late, split=1):
+        """10 s bursts every 10 s as five 2 s segments within 0.2 s, the last `split` of them
+        `late` s after the rest: a tick can hold the step and the next one a 2.0 s segment
+        (the 1-stream raw-TS provider's recordings: [6.08, 2.0] and [2.08, 4.0, 2.0])."""
+        sizes, gaps = [], []
+        for _ in range(100):
+            first = 5 - split
+            parts = [0.05] * (first - 1) + [late] + [0.05] * (split - 1)
+            sizes += [2.0] * 5
+            gaps += parts + [10.0 - sum(parts)]
+        return iter(sizes), iter(gaps)
+
+    @staticmethod
+    def spread(rate, seed, every=0.1):
+        """10 s bursts every 10 s arriving at `rate` x real time in jittered pieces."""
+        rng = random.Random(seed)
+        sizes, gaps = [], []
+        for _ in range(100):
+            count = max(1, math.ceil(10.0 / rate / every - 1e-9))
+            parts = [rng.uniform(0.5, 1.5) for _ in range(count)]
+            sizes += [10.0 * part / sum(parts) for part in parts]
+            gaps += [every] * (count - 1) + [10.0 - (count - 1) * every]
+        return iter(sizes), iter(gaps)
+
+    def test_a_bursts_late_tail_at_every_phase_picks_nothing_again(self):
+        for latency, phases in (
+            (AUTO, range(25)),
+            ("normal", range(25)),
+            ("low", range(0, 25, 4)),
+            ("stable", range(0, 25, 4)),
+        ):
+            for k in phases:
+                for late, split in ((0.25, 1), (0.15, 1), (0.25, 2)):
+                    first = 0.5 + 0.17 * k
+                    with self.subTest(latency=latency, first=first, late=late, split=split):
+
+                        def play(first=first, late=late, split=split):
+                            feed = self.tune(latency, burst=10.0, edge=2.0, first=first)
+                            feed.sizes, feed.gaps = self.segmented(late, split)
+                            feed.ready(backlog_after_start=False)
+                            return self.outcome(feed)
+
+                        self.unchanged(play)
+
+    def test_spread_bursts_pick_nothing_again(self):
+        for latency in (AUTO, "normal"):
+            for rate in (7.0, 8.0, 10.0):
+                for seed in range(3):
+                    for first in (0.5, 1.0, 2.0):
+                        with self.subTest(latency=latency, rate=rate, seed=seed, first=first):
+
+                            def play(rate=rate, seed=seed, first=first):
+                                feed = self.tune(latency, burst=10.0, edge=12.0, first=first)
+                                feed.sizes, feed.gaps = self.spread(rate, seed)
+                                feed.ready(backlog_after_start=False)
+                                return self.outcome(feed)
+
+                            self.unchanged(play)
+
+    def test_spread_bursts_behind_a_dump_pick_nothing_again(self):
+        for latency in (AUTO, "normal"):
+            for rate in (7.0, 10.0):
+                for seed in range(3):
+                    with self.subTest(latency=latency, rate=rate, seed=seed):
+
+                        def play(rate=rate, seed=seed):
+                            feed = self.tune(latency, burst=10.0, edge=2.0, first=1.7)
+                            feed.sizes, feed.gaps = self.spread(rate, seed)
+                            feed.ready(backlog_after_start=False)
+                            self.opened(feed)
+                            feed.run(0.7)
+                            feed.edge += 20.0
+                            feed.push()
+                            return self.outcome(feed, 50.0)
+
+                        self.unchanged(play)
+
+    def test_a_vlc_slow_to_play_its_first_open_gets_no_late_re_pick(self):
+        for latency in (AUTO, "normal"):
+            for burst in (4.0, 6.0, 10.0):
+                for slow in (5.0, 8.0, 15.0):
+                    for first in (1.0, 2.0, 3.0):
+                        with self.subTest(latency=latency, burst=burst, slow=slow, first=first):
+
+                            def play(burst=burst, slow=slow, first=first):
+                                feed = self.tune(
+                                    latency, burst=burst, edge=burst + 2.0, first=first
+                                )
+                                feed.ready(backlog_after_start=False)
+                                self.opened(feed)
+                                feed.frozen_until = self.clock.now + slow  # VLC's clock still
+                                return self.outcome(feed, 50.0)
+
+                            self.unchanged(play)
+
+    def test_a_dump_then_a_flow_is_still_picked_again_once_early(self):
+        # The re-pick's own case: 2 s at the open, a 20 s dump 0.7 s later, then 1x (0.25 s
+        # pieces, or 2 s every 2 s as the provider's random channel sends it).
+        for latency in (AUTO, "normal", "low"):
+            for chunk in (0.0, 2.0):
+                with self.subTest(latency=latency, chunk=chunk):
+                    feed = self.tune(latency, burst=chunk, edge=2.0)
+                    feed.ready(backlog_after_start=False)
+                    self.opened(feed)
+                    opened = self.clock.now
+                    feed.run(0.7)
+                    feed.edge += 20.0
+                    feed.push()
+                    for _ in range(80):
+                        feed.run(0.25)
+                        if len(self.playback.plays) > 1:
+                            break
+                    self.assertLess(self.clock.now - opened, 10.0)  # early
+                    lag = self.timelines[-1]["lag"]
+                    self.assertEqual(self.outcome(feed), (2, 0.0))
+                    self.assertLess(lag, 22.0)
+
+    def test_the_re_pick_can_be_switched_off(self):
+        self.enterContext(mock.patch.object(live_session, "REPICK", False))
+        feed = self.tune("normal", burst=0.0, edge=2.0)
+        feed.ready(backlog_after_start=False)
+        self.opened(feed)
+        feed.run(0.7)
+        feed.edge += 20.0
+        feed.push()
+        self.assertEqual(self.outcome(feed, 30.0)[0], 1)  # (stay-live's jump: after a minute)
 
 
 class LearnedTargetTests(LiveSessionCase):

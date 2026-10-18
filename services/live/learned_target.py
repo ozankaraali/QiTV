@@ -836,7 +836,9 @@ class LearnedTarget:
         under its burst (None: the module's `SEGMENT_FLOOR` now; False: learned only)."""
         self.floor = floor
         self.segment_floor = _floored(segment_floor)
-        self._burst = 0.0  # the last burst a target was asked for (a segmented source's)
+        self._burst = 0.0  # the burst the source reports now (`reported`) ...
+        self._burst_since: Optional[float] = None  # ... since when
+        self._burst_now: Optional[float] = None
         if learned is not None:
             self.arrivals = ArrivalModel(learned.need)
             self.prior = StarvationPrior(learned.events, learned.hours, learned.hold)
@@ -853,9 +855,17 @@ class LearnedTarget:
         (unless `segment_floor` is off); before the batches are measured the burst also stands
         in for the need."""
         need, margin = self.need(burst), self.prior.margin()
-        if _burst(burst) > 0:
-            self._burst = _burst(burst)
         return learned_target(need, margin, self.floor, burst, self.segment_floor)
+
+    def reported(self, burst: float, now: float) -> None:
+        """The burst the source reports at `now` (the helper's; 0.0: none). A tune too short
+        to measure its need keeps it as one (`learned`) once it was reported two bursts' time
+        (the meter's estimate confirmed), so a one-off first "burst" is kept by none (a
+        connect backlog the meter took for 10 s bursts for 4-8 s: re-review 2, M-m)."""
+        burst = _burst(burst)
+        if burst != self._burst:
+            self._burst, self._burst_since = burst, now
+        self._burst_now = now
 
     def margin(self, burst: float = 0.0) -> float:
         """The margin in force: what the target holds above max(floor, burst, need) (learned
@@ -919,7 +929,9 @@ class LearnedTarget:
         2.1 stage 4b re-review: a bursty raw TS channel's next tune started at the floor and a
         starvation's margin, and ran dry until the meter measured the burst again)."""
         need = self.arrivals.summary()
-        if need is None and self._burst > 0:
+        since, now = self._burst_since, self._burst_now
+        held = since is not None and now is not None and now - since >= 2 * self._burst
+        if need is None and self._burst > 0 and held:
             need = self._burst
         learned = Learned(
             None if need is None else round(need, 2),
