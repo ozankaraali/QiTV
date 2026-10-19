@@ -5,6 +5,7 @@ manager and budget), then once in the window with libVLC's dummy outputs."""
 import os
 import sys
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -806,6 +807,30 @@ class MultiviewTests(MultiviewCase):
         self.grid_frame.tileClicked.emit("t2")  # focus and try again
         self.assertEqual(self.sessions.large().name, "t2")
         self.assertEqual(len(self.catalog.links), links + 1)
+
+    def test_a_focused_tile_left_while_it_waits_to_reconnect_says_its_stream_ended(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (80, 120)))
+        self.catalog.ptype = "XTREAM"  # no link to make again: it reconnects
+        self.start_large(0)
+        self.live.play_direct()  # the big picture's live session fell back
+        self.session.stateChanged.emit("playing")
+        self.open_small(CHANNELS[1])
+        self.pip_session.stateChanged.emit("playing")
+        self.v()
+        plays = len(self.session.plays)
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+        self.grid_frame.focusRequested.emit("pip")  # the focus moves on during its back-off
+        self.assertEqual(self.grid.state("main"), FAILED)
+        self.assertEqual(self.grid.label("main"), ("One", "The stream ended"))
+        self.assertEqual(self.live.calls[-1], ("stop",))  # its stream stops
+        self.live.released.emit()
+        self.assertEqual(self.budget.holders("Home"), ["pip"])
+        QTest.qWait(150)
+        self.assertEqual(len(self.session.plays), plays)  # never opened again behind its card
+        self.grid_frame.focusRequested.emit("main")  # the focus back: nothing reopens either
+        QTest.qWait(150)
+        self.assertEqual(len(self.session.plays), plays)
 
     def test_a_channel_that_cannot_be_time_shifted_plays_directly_and_says_when_it_fails(self):
         self.catalog.ptype = "XTREAM"

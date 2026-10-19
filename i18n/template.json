@@ -349,7 +349,7 @@
     "The provider's server has a problem ({status})": "status is the server's answer code (500 to 599)",
     "The stream could not be opened": "error toast",
     "The stream could not be played": "error toast",
-    "The stream ended": "a toast",
+    "The stream ended": "a multiview tile's card: its stream ended, and it does not open again by itself; a toast",
     "There are no recordings yet": "a message: the Recordings folder could not be opened (the first recording makes it)",
     "This channel is already playing": "a toast",
     "This channel's archive isn't available right now": "a toast: the provider's archive of this channel failed lately, so it isn't asked",

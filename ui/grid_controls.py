@@ -17,13 +17,15 @@ time-shifted plays directly): the focused tile's buffer is the memory per stream
 others' a small one (`ring_sizes`), and the focus moves them (`SessionManager.set_large`).
 
 Before the focused tile asks for a link, its provider's limit is checked (an STB portal mints
-one per request): when the provider's other streams take all of it, the tile shows "No
-stream to spare at <provider>" with the channel, and asks for nothing; so does a tile whose
-stream the budget then refuses (`SessionManager.slotDenied`). A tile whose stream fails says
-so too. A click on the card tries again; nothing queues or asks again by itself, but for a
-tile without the focus whose STB channel failed: its link is made again once (the portal's
-play token may have expired), as the big picture's and the PiP's are. Zapping onto a channel
-another tile shows moves the focus there.
+one per request): when the provider's other streams take all of it, the tile shows "No stream
+to spare at <provider>" with the channel, and asks for nothing; so does a tile whose stream the
+budget then refuses (`SessionManager.slotDenied`). A tile whose stream fails says so too; the
+focused tile's direct stream reconnects as the big picture's does, and once the focus moves on
+during its back-off the tile stops and says the stream ended (`stream_ended`). A click on the
+card tries again; nothing queues or asks again by itself, but for a tile without the focus
+whose STB channel failed: its link is made again once (the portal's play token may have
+expired), as the big picture's and the PiP's are. Zapping onto a channel another tile shows
+moves the focus there.
 
 A tile without the focus plays at 1x: muted, it needs no nudge, so its stay-live only jumps
 it to live when it fell far behind (`SessionManager.set_large`); a tile paused or rewound is
@@ -93,6 +95,8 @@ TILE_NAMES = ("main", "pip", "t2", "t3", "t4", "t5", "t6", "t7", "t8")
 # i18n: a multiview tile's card and a toast: the provider's connections are all in use
 NO_STREAM = N_("No stream to spare at {provider}")
 TILE_FAILED = N_("Couldn't play this channel")  # i18n: a multiview tile's card
+# i18n: a multiview tile's card: its stream ended, and it does not open again by itself
+STREAM_ENDED = N_("The stream ended")
 LIVE_ONLY = N_("Multiview is for live TV")  # i18n: a toast
 EXTERNAL_ONLY = N_("Multiview is off while channels play in an external player")  # i18n: a toast
 # i18n: a toast: no player could be made for another tile
@@ -792,6 +796,16 @@ class GridControls(QObject):
 
     def _on_slot_failed(self, name: str, message: str) -> None:
         """A tile's stream failed: it stops (its provider's stream goes back) and says so."""
+        self._fail(name, message, translate(TILE_FAILED))
+
+    def stream_ended(self, name: str) -> None:
+        """Tile `name`'s direct stream ended while it had the focus, and the focus moved on
+        before it opened again (the shell reconnects the focused tile only): as a tile beside
+        the focus whose stream fails, it stops (its provider's stream goes back) and its card
+        says the stream ended."""
+        self._fail(name, "", translate(STREAM_ENDED))
+
+    def _fail(self, name: str, message: str, detail: str) -> None:
         if not self._shown or name not in self._names:
             return
         slot = self._slot(name)
@@ -803,7 +817,7 @@ class GridControls(QObject):
             return
         logger.info("A tile's stream failed: %s", channel.get("name") or "")
         self._stop(name)
-        self._cards[name] = _Card(FAILED, channel, translate(TILE_FAILED))
+        self._cards[name] = _Card(FAILED, channel, detail)
         self._refresh()
         if self._may_retry(name, channel, message):
             # Its play token, or its portal's session, may have expired (as the big

@@ -2037,6 +2037,10 @@ class TVController(QObject):
         self._tracks.refresh()  # an open panel shows the large picture's sound or subtitles
         self._picture.refresh()  # and the Picture panel and the statistics its picture
         if grid:
+            if large_reopen is not None and self._grid is not None:
+                # A tile beside the focus never reconnects by itself (its direct stream that
+                # ends fails): one the focus left during its back-off says its stream ended.
+                self._grid.stream_ended(old.name)
             return  # the grid follows the focus itself (its ring, the tiles' labels)
         pip.after_swap()
         if self._tuner_of(old).idle():
