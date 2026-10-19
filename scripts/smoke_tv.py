@@ -182,8 +182,6 @@ BUNDLED_VLC_CHECK = "the packaged app plays with its own libVLC and plugins"
 # output (offscreen) no freeze is judged at all.
 DECODING_CHECK = "no stream falls back to software decoding more than once"
 
-MUTE_ENV = "QITV_SMOKE_MUTE"  # "1"/"0": dummy audio output or real sound; unset: dummy unless CI
-
 RUNNER_LOG = "runner.log"
 APP_LOG = "app.log"
 FAULTS = "faults.txt"  # Python stacks of a hang or crash when there is no stderr (Windows app)

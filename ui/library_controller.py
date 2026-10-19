@@ -61,7 +61,6 @@ EMPTY_TEXT = "Nothing here"
 RETRY_TEXT = "Couldn't load — press Enter to retry"
 SERIES_FAILED_NOTICE = "Couldn't load that series"
 UNKNOWN_PROVIDER_NOTICE = "That title's provider is no longer in your list"
-ZONES = ("nav", "genres", "grid", "series", "search")
 _MOVES = {
     Action.NAV_LEFT: (-1, 0),
     Action.NAV_RIGHT: (1, 0),

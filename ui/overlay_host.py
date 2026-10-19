@@ -52,7 +52,6 @@ class OverlayHost(QWidget):
         self._overlays: list[QWidget] = []
         self._hole = QRect()  # the PiP (see set_hole)
         self._only: QWidget | None = None  # see show_only
-        self._attached_id = 0
         # macOS: from a minimize until the platform reports the window restored, the window
         # counts as in the Dock here, whatever Qt's state says (see _update_visibility).
         self._in_dock = False
@@ -206,10 +205,7 @@ class OverlayHost(QWidget):
                 # is ordered out. A child is ordered above its parent: no raise there, since
                 # on macOS raise_() activates QiTV, and an overlay shown over the inactive
                 # window (a wheel zap's banner) must not take the focus from another app.
-                native_id = int(self.winId())
-                if attach_child_window(self._window, self):
-                    self._attached_id = native_id
-                else:
+                if not attach_child_window(self._window, self):
                     self.raise_()
         elif self.isVisible():
             self.hide()

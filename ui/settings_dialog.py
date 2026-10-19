@@ -275,7 +275,6 @@ class OptionsDialog(QDialog):
         self.settings_layout.addRow(self.channel_logos_checkbox)
 
         # Add cache options
-        self.cache_options_layout = QVBoxLayout()
         self.cache_image_size_label = QLabel(
             f"Max size of image cache (actual size: {self.get_cache_image_size():.2f} MB)",
             self.settings_tab,

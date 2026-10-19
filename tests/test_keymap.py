@@ -373,7 +373,7 @@ class ContextTests(unittest.TestCase):
             self.assertIsNone(resolve(K.Key_P.value, CTRL, "p", context=context), context)
 
     def test_new_actions_exist(self):
-        for name in ("SEARCH", "FAVORITE", "NAV_HOME", "NAV_END", "LIBRARY", "GUIDE", "OPEN_FILE"):
+        for name in ("SEARCH", "FAVORITE", "NAV_HOME", "NAV_END", "LIBRARY", "GUIDE"):
             self.assertIn(name, Action.__members__)
 
 

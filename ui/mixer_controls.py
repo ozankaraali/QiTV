@@ -34,7 +34,7 @@ from ui.overlays.mixer import MixerRow
 logger = logging.getLogger(__name__)
 
 VOLUME_STEP = 5
-MAIN_ROW, PIP_ROW = 0, 1
+MAIN_ROW = 0  # the mixer's first row; the PiP's is the second
 MAIN_TITLE, PIP_TITLE = "Main", "PiP"
 _UP, _DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value
 _OTHER_ROW = (Action.SEEK_BACK, Action.SEEK_FWD, Action.TAB)

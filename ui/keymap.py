@@ -45,7 +45,6 @@ class Action(str, Enum):
     SEARCH = "search"
     FAVORITE = "favorite"
     LIBRARY = "library"
-    OPEN_FILE = "open_file"
     PIP = "pip"  # picture in picture: open (the previous or highlighted channel) or close
     SWAP = "swap"  # the large and the small picture trade places
     TAB = "tab"  # the mixer's other row
