@@ -33,6 +33,12 @@ import orjson as json
 from services import failure_reasons as reasons, provider_link
 from services.account_check import check_account
 from services.config_manager import ConfigManager
+from services.epg_view import (
+    GUIDE_OFFSET_KEY,
+    GUIDE_OFFSET_MAX,
+    GUIDE_OFFSET_STEP,
+    guide_offset_minutes,
+)
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.provider_api import CLIENT_HEADERS
@@ -55,6 +61,22 @@ PASTE_LINK_TIP = (
     " Pasting the link into the address does the same."
 )
 NO_LINK_TEXT = "The clipboard holds no provider link."
+GUIDE_OFFSET_TIP = (
+    "When this provider's guide is off by whole hours, move its programmes here: with +1 h,"
+    " a programme the guide lists at 20:00 shows at 21:00 (the guide, the banner, now and next"
+    " and the time-shift bar)."
+)
+
+
+def offset_text(minutes: int) -> str:
+    """A guide time offset as the setting lists it: "No offset", "+1 h 30 min", "−30 min"."""
+    if not minutes:
+        return "No offset"
+    hours, rest = divmod(abs(minutes), 60)
+    parts = ([f"{hours} h"] if hours else []) + ([f"{rest} min"] if rest else [])
+    return f"{'+' if minutes > 0 else '−'}{' '.join(parts)}"
+
+
 FILLED_TEXT = "Filled in from the link ({kind}). {next} then press Verify Provider."
 LINK_KINDS = {
     provider_link.XTREAM: "Xtream",
@@ -581,6 +603,15 @@ class OptionsDialog(QDialog):
         )
         self.providers_layout.addRow(self.max_streams_label, self.max_streams_input)
 
+        # 2.2: a guide whose times are off by whole hours moves by this (an optional key).
+        self.guide_offset_label = QLabel("Guide time offset:", self.providers_tab)
+        self.guide_offset_combo = QComboBox(self.providers_tab)
+        for minutes in range(-GUIDE_OFFSET_MAX, GUIDE_OFFSET_MAX + 1, GUIDE_OFFSET_STEP):
+            self.guide_offset_combo.addItem(offset_text(minutes), minutes)
+        self.guide_offset_combo.setCurrentIndex(self.guide_offset_combo.findData(0))
+        self.guide_offset_combo.setToolTip(GUIDE_OFFSET_TIP)
+        self.providers_layout.addRow(self.guide_offset_label, self.guide_offset_combo)
+
         self.verify_apply_group = QWidget(self.providers_tab)
         self.verify_button = QPushButton("Verify Provider", self.verify_apply_group)
         self.verify_button.clicked.connect(self.verify_provider)
@@ -803,6 +834,8 @@ class OptionsDialog(QDialog):
             max_streams = 0  # a hand-edited bad value means Automatic
         self.max_streams_input.setValue(max(0, min(10, max_streams)))
         self._loaded_max_streams = self.max_streams_input.value()
+        offset = guide_offset_minutes(self.edited_provider)
+        self.guide_offset_combo.setCurrentIndex(self.guide_offset_combo.findData(offset))
         self._loaded_provider_network = {
             "prefer_https": self.provider_prefer_https_checkbox.isChecked(),
             "ssl_verify": self.provider_ssl_verify_checkbox.isChecked(),
@@ -1131,6 +1164,12 @@ class OptionsDialog(QDialog):
         # Automatic is the absence of the key; an existing key keeps its explicit 0.
         if "max_streams" in provider or self.max_streams_input.value() != self._loaded_max_streams:
             provider["max_streams"] = self.max_streams_input.value()
+        # No offset is the absence of the key (the provider's guide as it comes, as before).
+        offset = int(self.guide_offset_combo.currentData() or 0)
+        if offset:
+            provider[GUIDE_OFFSET_KEY] = offset
+        else:
+            provider.pop(GUIDE_OFFSET_KEY, None)
         for key, checkbox in (
             ("prefer_https", self.provider_prefer_https_checkbox),
             ("ssl_verify", self.provider_ssl_verify_checkbox),

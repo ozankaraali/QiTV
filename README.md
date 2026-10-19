@@ -224,7 +224,7 @@ Press <kbd>G</kbd> (or the guide button in the player controls) for the programm
 
 ![The programme guide](docs/screenshots/07-guide.png)
 
-The guide comes from your provider (STB and Xtream), or from a guide file or web address of your own (XMLTV): choose it in Settings → EPG.
+The guide comes from your provider (STB and Xtream), or from a guide file or web address of your own (XMLTV): choose it in Settings → EPG. If a provider's guide is off by whole hours (programmes start an hour before or after the guide says), set its **Guide time offset** in Settings → Providers (−12 to +12 hours, in half hours): the guide, the banner, what is on now and next, and the marks on the time-shift bar all move together.
 
 ## The Library: movies and series
 

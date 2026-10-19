@@ -1615,6 +1615,11 @@ class TVController(QObject):
             self.catalog.use_guides(names)
 
     def _on_epg_ready(self) -> None:
+        self.guides_changed()
+
+    def guides_changed(self) -> None:
+        """A guide loaded, or its times moved (a provider's guide time offset): the rows and
+        the guide read it again (the time-shift bar's ticks do at its next timeline)."""
         if not self._closed:
             self._repaint()
             self._guide.invalidate()

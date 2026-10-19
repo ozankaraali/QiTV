@@ -1139,9 +1139,11 @@ class TVWindow(QMainWindow):
         return self.catalog.shown_providers() | self.library_catalog.shown_providers()
 
     def providers_saved(self) -> None:
-        """Settings changed the provider list: catalogs of removed or edited providers go."""
+        """Settings changed the provider list: catalogs of removed or edited providers go, and
+        what shows the guide reads it again (a provider's guide time offset may have moved)."""
         self.catalogs.reload()
         self.menus.rebuild_providers()
+        self.controller.guides_changed()
 
     def save_config(self) -> None:
         """Settings → Save: the new settings apply even when config.json cannot be written."""

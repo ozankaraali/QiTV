@@ -21,6 +21,7 @@ import tzlocal  # the GUI thread's guide lookups use it: loaded with the window
 from services.content_loader import ContentLoader
 from services.epg_store import PackedGuide, read_guide, write_guide
 from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_as
+from services.epg_view import guide_offset
 from services.jobs import Cancelled, cancel_requested
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
@@ -948,7 +949,14 @@ class EpgManager:
         elif epg_source == "URL":
             self._fetch_epg_from_url(self.config_manager.epg_url)
 
+    def guide_offset(self) -> timedelta:
+        """The provider's guide time offset (epg_view.GUIDE_OFFSET_KEY): its programmes move by
+        it (epg_view.normalize), and the lookup window below moves the other way."""
+        return guide_offset(getattr(self.provider_manager, "current_provider", None))
+
     def get_programs_for_channel(self, channel_data, start_time=None, max_programs=5):
+        """The guide's raw entries of a channel from `start_time` (now by default; a real
+        time, which the provider's guide time offset turns into the guide's own)."""
         epg_source = self.config_manager.epg_source
         provider_type = self.provider_manager.current_provider.get("type", "").upper()
 
@@ -967,6 +975,7 @@ class EpgManager:
             return sorted(programs, key=lambda program: parse_stb(program["time"]))
         if start_time is None:
             start_time = datetime.now()
+        start_time -= self.guide_offset()  # in the guide's own times
         # Apply end-of-window limit based on config (0 = unlimited)
         window_hours = self.config_manager.epg_list_window_hours
         end_time = start_time + timedelta(hours=window_hours) if window_hours > 0 else None
@@ -990,6 +999,7 @@ class EpgManager:
                 start_time = datetime.now(tzlocal.get_localzone())
             except Exception:
                 start_time = datetime.now()
+        start_time -= self.guide_offset()  # in the guide's own times
 
         # Candidate keys in priority order: explicit xmltv_id, then channel name variants
         candidates: List[str] = []
