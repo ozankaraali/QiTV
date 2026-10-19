@@ -167,7 +167,6 @@ class ConfigManager:
     DEFAULT_OPTION_AUTO_PLAY_EPISODES = True
     DEFAULT_OPTION_AUTO_PLAY_MOVIES = True
     DEFAULT_WATCH_HISTORY_LIMIT = 100
-    DEFAULT_WATCHED_THRESHOLD = 0.90  # 90% = watched
 
     def __init__(self):
         self.config = {}
@@ -674,49 +673,6 @@ class ConfigManager:
             "timestamp": datetime.now().isoformat(),
         }
         self.playback_positions = positions
-
-    def get_playback_position(self, content_id: str) -> int | None:
-        """Get saved playback position for content.
-
-        Args:
-            content_id: Unique content identifier
-
-        Returns:
-            Position in milliseconds, or None if not found
-        """
-        positions = self.playback_positions or {}
-        entry = positions.get(content_id)
-        if entry:
-            pos = entry.get("position")
-            return int(pos) if pos is not None else None
-        return None
-
-    def get_watched_status(self, content_id: str) -> str:
-        """Get the watched status of content.
-
-        Args:
-            content_id: Unique content identifier
-
-        Returns:
-            "watched" if >90% complete, "partial" if started, "unwatched" otherwise
-        """
-        positions = self.playback_positions or {}
-        entry = positions.get(content_id)
-        if not entry:
-            return "unwatched"
-
-        position = entry.get("position", 0)
-        duration = entry.get("duration", 0)
-
-        if duration <= 0:
-            return "unwatched"
-
-        ratio = position / duration
-        if ratio >= self.DEFAULT_WATCHED_THRESHOLD:
-            return "watched"
-        elif ratio > 0.01:  # More than 1% watched
-            return "partial"
-        return "unwatched"
 
     def clear_playback_position(self, content_id: str) -> None:
         """Clear saved playback position for content.

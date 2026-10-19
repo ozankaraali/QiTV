@@ -92,8 +92,7 @@ class WatchState:
         self._save_timer.start()  # restarted: one save once the zapping settles
 
     def resume_position(self, cid: str) -> Optional[int]:
-        # ConfigManager.get_playback_position returns only the position (int); the
-        # duration needed for the 90% rule lives in the stored entry.
+        # The duration needed for the 90% rule lives in the stored entry.
         saved = (getattr(self.config, "playback_positions", None) or {}).get(cid) or {}
         position, duration = int(saved.get("position") or 0), int(saved.get("duration") or 0)
         if position <= RESUME_MIN_MS:

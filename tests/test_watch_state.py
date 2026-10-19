@@ -26,7 +26,6 @@ def make_config():
     cfg.save_playback_position = lambda cid, pos, dur: cfg.playback_positions.__setitem__(
         cid, {"position": pos, "duration": dur}
     )
-    cfg.get_playback_position = lambda cid: (cfg.playback_positions.get(cid) or {}).get("position")
     cfg.clear_playback_position = lambda cid: (
         cfg.cleared.append(cid),
         cfg.playback_positions.pop(cid, None),
