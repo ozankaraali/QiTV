@@ -1140,7 +1140,7 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.played_urls(), ["http://stream/2"])
 
     def test_another_providers_failed_sign_in_says_so_and_info_follows_what_plays(self):
-        # Final review I3: the list shows Home; a channel of Harbor was picked (Recent, the
+        # The list shows Home; a channel of Harbor was picked (Recent, the
         # Library's search, the previous channel) and Harbor can't sign in.
         self.catalog.hub_ready("Home")
         self.play(0)  # One plays
@@ -1199,7 +1199,7 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.played_urls(), ["http://stream/1"])
 
     def test_a_ready_provider_never_asks_while_another_providers_tune_is_in_flight(self):
-        # Sweep B8: Home's choice waits behind Backup's request, and one link at a time.
+        # Home's choice waits behind Backup's request, and one link at a time.
         self.catalog.provider = "@all"
         self.tune_stamped(BACKUP_TWO)  # in flight
         self.tune_stamped(HOME_ONE)  # the newest choice, queued
@@ -1212,7 +1212,7 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.played_urls(), ["http://stream/1"])
 
     def test_a_loading_providers_failure_lets_another_providers_newer_choice_go(self):
-        # Sweep B8: Backup's choice, queued behind Home's request, waited for Home's setup
+        # Backup's choice, queued behind Home's request, waited for Home's setup
         # (only Home's own choices are asked again when it is ready): the tune hung.
         self.catalog.provider = "@all"
         self.tune_stamped(HOME_ONE)
@@ -1255,7 +1255,7 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.toast.messages(), [("One: The stream could not be opened", "error")])
 
     def test_a_playback_error_in_the_corner_shows_on_the_librarys_toast(self):
-        # Final review M2: the player's own toast is hidden while it sits in the corner.
+        # The player's own toast is hidden while it sits in the corner.
         self.catalog.ptype = "M3UPLAYLIST"  # no link to make again
         self.play(0)
         self.controller.enter_library_playing()
@@ -1268,8 +1268,8 @@ class LinkPipelineTests(ControllerTestCase):
         self.assertEqual(self.toast.messages(), expected)  # back on the player page
 
     def test_an_stb_channel_failing_in_direct_play_makes_its_link_again_once(self):
-        # STB play tokens expire: a fresh link before the error toast (H11), as the
-        # pipeline's final failure does.
+        # STB play tokens expire: a fresh link before the error toast, as the pipeline's
+        # final failure does.
         self.play(0)  # the controller plays it itself (no time-shift pipeline)
         self.session.errorOccurred.emit("The stream could not be opened")
         self.assertEqual(self.toast.messages(), [])
@@ -1496,7 +1496,7 @@ class StartupTests(ControllerTestCase):
         self.assertEqual(self.catalog.links, [])
 
     def test_a_rebuilt_providers_live_failure_ends_a_later_wait(self):
-        # Sweep A review M7: the flow heard the live list failures of the catalog it first
+        # The flow heard the live list failures of the catalog it first
         # waited on (by name); a provider rebuilt since (an edit in Settings) failed unheard,
         # and the wait ran until its timeout.
         hub = self.start_with_last_of_harbor()
@@ -1587,7 +1587,7 @@ class KeyTests(ControllerTestCase):
         self.assertEqual(self.requested(), ["One", "Two", "Three"])
 
     def test_the_column_opens_alone_and_the_rest_tune_announces_its_channel(self):
-        # H19: the banner stayed under the column, showing the previous channel.
+        # The banner stayed under the column, showing the previous channel.
         self.play(0)
         self.controller.handle(Action.CH_NEXT)  # Two: the banner announces it
         self.assertTrue(self.banner.visible)
@@ -2058,7 +2058,7 @@ class RealOverlayTests(ControllerTestCase):
 
 
 class DebugLogRedactionTests(ControllerTestCase):
-    """DEBUG logs never carry raw provider text: it can hold Xtream credentials (Minor 8)."""
+    """DEBUG logs never carry raw provider text: it can hold Xtream credentials."""
 
     SECRET = "http://h:80/get.php?username=bob&password=hunter2"
 
@@ -2157,7 +2157,7 @@ class UnnumberedChannelTests(ControllerTestCase):
 
 
 class TuningBannerTests(ControllerTestCase):
-    """The banner stays up while a slow link resolves (Minor 11)."""
+    """The banner stays up while a slow link resolves."""
 
     def setUp(self):
         super().setUp()
@@ -2255,8 +2255,8 @@ class BottomOverlayTests(ControllerTestCase):
         self.assertFalse(self.transport.isVisible())
 
 
-class ReviewFixTests(ControllerTestCase):
-    """Fix round 1: findings from the review of the first controller."""
+class TuneFailureAndKeyTests(ControllerTestCase):
+    """Tunes, failures and keys: what the first controller got wrong."""
 
     LEAK = "Error: http://h/player_api.php?username=u&password=p failed"
 
@@ -2466,8 +2466,8 @@ class ReviewFixTests(ControllerTestCase):
         self.assertEqual(self.column.calls, [])
 
 
-class FixRound2Tests(ControllerTestCase):
-    """Fix round 2: the loading queue, OK versus the drawer, re-choosing the playing channel."""
+class LoadingQueueAndDrawerTests(ControllerTestCase):
+    """The loading queue, OK versus the drawer, re-choosing the playing channel."""
 
     def setUp(self):
         super().setUp()
@@ -2657,7 +2657,7 @@ class LogoTests(ControllerTestCase):
         self.assertEqual(self.transport.named("set_logo"), [(pixmap,)])
 
     def test_a_logo_for_a_channel_not_shown_yet_does_not_replace_the_shown_one(self):
-        # Review M3: during a zap the controller's channel is the requested one, but the
+        # During a zap the controller's channel is the requested one, but the
         # transport still names the playing one: its logo must not sit beside that name.
         logos = self.with_logos()
         self.tune_logo(0)
@@ -2796,7 +2796,7 @@ class PipelineTuneTests(PipelineCase):
         self.assertEqual(self.budget.holders("Home"), ["main"])
 
     def test_a_budget_denial_toasts_and_opens_nothing(self):
-        self.budget.request("Home", 1, purpose="pip")  # Phase 4: the PiP holds the only slot
+        self.budget.request("Home", 1, purpose="pip")  # the PiP holds the only slot
         self.play(0)
         elapse(30)
         self.assertEqual(
@@ -2962,7 +2962,7 @@ class ReleaseOrderTests(PipelineCase):
 
 
 class LocalFileExternalTests(PipelineCase):
-    """Review I1: an opened file sent to VLC keeps play_file's contract: no provider slot,
+    """An opened file sent to VLC keeps play_file's contract: no provider slot,
     no history."""
 
     def test_an_opened_file_sent_to_vlc_takes_no_slot_and_leaves_no_history(self):
@@ -3368,7 +3368,7 @@ class PipelineReferrerTests(PipelineCase):
 
 
 class ReconnectTests(PipelineCase):
-    """A live channel played directly whose stream ends (2.0.1, L2b): an on-demand restream
+    """A live channel played directly whose stream ends (2.0.1): an on-demand restream
     may show its placeholder and end. It opens again in the same player, so in the same
     budget slot, twice at most, before "The stream ended"."""
 
@@ -3850,7 +3850,7 @@ class FavoriteTests(ControllerTestCase):
 
 
 class PlayerButtonTests(ControllerTestCase):
-    """The player controls' buttons for the player's keys (the owner's mouse-only rule)."""
+    """The player controls' buttons for the player's keys (every key has a control on screen)."""
 
     def setUp(self):
         super().setUp()
@@ -3975,7 +3975,7 @@ class ContextMenuTests(ControllerTestCase):
         ]
 
     def test_menu_links_waiting_for_a_providers_setup_are_all_asked_once_it_is_ready(self):
-        # Sweep (A concern 3): of two menu actions, the one waiting behind the other was
+        # Of two menu actions, the one waiting behind the other was
         # dropped without a word when their provider's setup ended.
         self.choose(self.menu_for(self.channels[2]), "Copy stream link")
         self.choose(self.menu_for(self.channels[3]), "Copy stream link")  # waits behind Three
@@ -4214,7 +4214,7 @@ class RecentsTests(ControllerTestCase):
 
 
 class ExternalButtonTests(ControllerTestCase):
-    """Owner (2026-10-15): the player controls send what plays now to VLC or MPV, the way the
+    """The player controls send what plays now to VLC or MPV, the way the
     channel list's right-click does: the in-app stream is released first."""
 
     BUTTON = QPoint(300, 600)  # the button's top-left, as the transport says it
@@ -4284,7 +4284,7 @@ class ExternalButtonTests(ControllerTestCase):
         self.choose("Play in VLC")
         self.assertEqual(self.catalog.links, [])  # a file is no provider's: no link to ask for
         self.assertEqual(self.external.calls, [("vlc", path.absolute().as_uri())])
-        # Nor its history: record_play keeps the watch history and last_watched (review I1).
+        # Nor its history: record_play keeps the watch history and last_watched.
         self.assertEqual(self.watch.plays, [])
 
     def test_with_nothing_played_there_is_no_menu(self):
@@ -4293,7 +4293,7 @@ class ExternalButtonTests(ControllerTestCase):
 
 
 class LibraryMenuTests(ControllerTestCase):
-    """Owner (2026-10-15): a right-click on a Library title or episode offers VLC, MPV and its
+    """A right-click on a Library title or episode offers VLC, MPV and its
     link, as a channel's menu does, while the Library shows."""
 
     def setUp(self):
@@ -4502,7 +4502,7 @@ class MouseLayerTests(ControllerTestCase):
 
 
 class LibraryTests(AutoplayCase):
-    """The window's Library hooks (Task 12, R5): stop for it, back to live TV, its plays."""
+    """The window's Library hooks: stop for it, back to live TV, its plays."""
 
     LAST = {"provider_name": "Home", "group_id": "10", "item": CHANNELS[2]}
 
@@ -4743,7 +4743,7 @@ class AllProvidersLaunchTests(ControllerTestCase):
         self.controller = self.make_controller(self.column)
 
     def test_the_last_channel_of_the_provider_ready_second_tunes_once_and_no_drawer(self):
-        # Final review I2: another provider's setup no longer replaces the last channel's
+        # Another provider's setup no longer replaces the last channel's
         # autotune, and the drawer never opens on the idle player meanwhile.
         self.controller.start()
         QTest.qWait(20)

@@ -170,8 +170,8 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(self.b.in_use("p"), 0)
 
     def test_relabel_changes_a_held_or_queued_tickets_purpose(self):
-        # Phase 4: a swap hands the large picture's slot to the tuner and the small one's to
-        # the PiP; their tickets take the new roles' purposes, and nothing is counted twice.
+        # A swap hands the large picture's slot to the tuner and the small one's to the PiP;
+        # their tickets take the new roles' purposes, and nothing is counted twice.
         held = self.b.request("p", 1, purpose="pip")
         self.pump()
         queued = self.b.request("p", 1, purpose="main")

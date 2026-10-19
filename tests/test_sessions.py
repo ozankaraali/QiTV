@@ -1,4 +1,4 @@
-"""The two-slot session manager: picture in picture and swap (Phase 4 Task 1)."""
+"""The two-slot session manager: picture in picture and swap."""
 
 import os
 import unittest
@@ -192,7 +192,7 @@ class SessionManagerTests(_Fixture):
         self.assertEqual(self.log, [("main", "player", "set_volume", MAIN_LEVEL)])
 
     def test_the_main_player_is_given_its_level_so_it_never_inherits_the_pips(self):
-        # Review I1: VLC 3 starts every new audio output at the last level any player set
+        # VLC 3 starts every new audio output at the last level any player set
         # (volume-save). A player with no wanted level took the PiP's 30 on its next media.
         # With a wanted level PlaybackSession applies it again on every media it opens.
         self.assertEqual(self.calls("main", "player"), [("set_volume", MAIN_LEVEL)])
@@ -337,7 +337,7 @@ class SessionManagerTests(_Fixture):
 
 
 class RoleTests(_Fixture):
-    """The PiP is whichever slot is small: its channel changes and closes (owner's ruling)."""
+    """The PiP is whichever slot is small: its channel changes and closes."""
 
     def swapped(self):
         self.run_main(2)
@@ -399,7 +399,7 @@ class RoleTests(_Fixture):
         self.assertTrue(self.manager.swap())
 
     def test_the_small_streams_start_is_said_on_open_and_after_a_change(self):
-        # Review M3: the shell's swap back waits for a change on its way to start.
+        # The shell's swap back waits for a change on its way to start.
         started = []
         self.manager.pipStarted.connect(lambda: started.append(self.manager.changing()))
         self.swapped()
@@ -433,7 +433,7 @@ class RoleTests(_Fixture):
 
 
 class LevelTests(_Fixture):
-    """Per-stream volume levels for the mixer (owner amendment)."""
+    """Per-stream volume levels for the mixer."""
 
     def test_pip_starts_muted_at_its_own_level(self):
         self.open_granted(B)
@@ -452,7 +452,7 @@ class LevelTests(_Fixture):
         )
 
     def test_lowering_a_muted_small_slot_keeps_it_muted(self):
-        # Review M3: only raising the PiP's level makes it audible ("raised above 0").
+        # Only raising the PiP's level above 0 makes it audible.
         self.open_granted(B)
         self.manager.set_level("pip", 25)
         self.assertTrue(self.manager.muted("pip"))

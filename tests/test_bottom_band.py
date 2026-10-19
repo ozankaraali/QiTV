@@ -1,4 +1,4 @@
-"""The PiP and the mixer keep clear of the transport's controls (Phase 4 rulings)."""
+"""The PiP and the mixer keep clear of the transport's controls."""
 
 from datetime import datetime, timedelta, timezone
 import os

@@ -84,7 +84,7 @@ class ExternalPlayersTest(unittest.TestCase):
         popen.assert_called_once_with(["/usr/bin/mpv", "--", "http://x/s"], env=mock.ANY)
 
     def test_url_that_looks_like_an_option_is_not_one(self):
-        # Finding m8: an untrusted URL beginning with "-" became a player option.
+        # An untrusted URL beginning with "-" became a player option.
         url = "--script=/tmp/evil.lua"
         with (
             mock.patch.dict(sys.modules, {"mpv": None}),
@@ -100,7 +100,7 @@ class ExternalPlayersTest(unittest.TestCase):
             self.assertEqual(argv[-2:], ["--", url])
 
     def test_a_player_never_sees_the_apps_own_vlc(self):
-        # M5: VLC_PLUGIN_PATH made an installed VLC scan the bundle's plugins as well.
+        # VLC_PLUGIN_PATH made an installed VLC scan the bundle's plugins as well.
         environ = {
             "PATH": "/usr/bin",
             "VLC_PLUGIN_PATH": "/tmp/_MEI1/vlc/plugins",

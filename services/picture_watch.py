@@ -31,7 +31,7 @@ waits `FIRST_PICTURE_S` from then: with a 20 s GOP VideoToolbox showed the I pic
 after it came, and a reopen then would have joined after it and waited for the next. The
 sound is the audio played (`played_abuffers`), not the audio decoded: after a precise seek
 (on-demand HLS: no fast seek) both decoders decode and drop what comes before the target,
-and libVLC still says Playing (review I1). A stalled source (nothing decodes, sound
+and libVLC still says Playing. A stalled source (nothing decodes, sound
 included), an audio-only stream (no video reaches the decoder), such a preroll (no sound
 plays), a pause or a wait for data (VLC not Playing), and a display that drops pictures as
 late (lost pictures grow: the decoder sends them) are no frozen picture.

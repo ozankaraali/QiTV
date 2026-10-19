@@ -1,4 +1,4 @@
-"""The learned live target (2.1 stay-live stage 4): arrivals, the starvation prior, the target."""
+"""The learned live target (2.1, Auto latency): arrivals, the starvation prior, the target."""
 
 from collections import deque
 import math
@@ -378,7 +378,7 @@ class ArrivalModelTests(unittest.TestCase):
                         self.assertTrue(target.adjusted(burst))
 
     def test_a_sparse_pcr_rhythm_needs_what_keeps_vlc_from_running_dry_and_no_more(self):
-        # Two sparse-PCR channels, measured (2.1 stage 4b): 10 s batches 12, 12 and 6 s apart,
+        # Two sparse-PCR channels, measured (2.1): 10 s batches 12, 12 and 6 s apart,
         # their playlists' target duration 12 s. A 12 s target kept 4.9 s of headroom before
         # every batch; read as gaps plus lateness the need was 16 s. Whole, over 1-12 ticks or
         # downloading for 0.05-0.2 s: never dry at the need, and no more than 12 s.
@@ -1068,7 +1068,7 @@ class LearnedTargetTests(unittest.TestCase):
         self.assertAlmostEqual(steady.target(), 6.0 + math.log2(3))
 
     def test_learned_only_a_segmented_source_has_its_need_and_a_segment_covered_when_dry(self):
-        # The burst floor off (stage 4b's A/B): the need alone, the cap leaving room for a lost
+        # The burst floor off (its A/B switch): the need alone, the cap leaving room for a lost
         # segment (the burst + 1 s), and VLC running dry there covers a segment at once.
         self.assertEqual(learned_target(6.0, 0.0, burst=15.0, segment_floor=False), 6.0)
         self.assertEqual(learned_target(6.0, 20.0, segment_floor=False), 10.0)  # today's cap
@@ -1104,8 +1104,8 @@ class LearnedTargetTests(unittest.TestCase):
         self.assertAlmostEqual(floored.target(30.0), 32.0)
 
     def test_a_stall_is_noted_and_counts_only_once_vlc_runs_dry(self):
-        # Ruling R37 counted a segmented source's stall at once, as 2.0.2 did: an ordinary
-        # HLS stall the target held through held it up 1.6-2 s for an hour (stage 4b review).
+        # Earlier in 2.1 a segmented source's stall counted at once, as 2.0.2 did: an ordinary
+        # HLS stall the target held through held it up 1.6-2 s for an hour (measured).
         # Any source's stall is noted; a dry run is trouble (`starved`), one the target held
         # out is `absorbed`.
         for target, burst in (
@@ -1125,8 +1125,8 @@ class LearnedTargetTests(unittest.TestCase):
         # HLS 15 s segments downloading at 1.45x, one lost every 3-5 minutes, VLC holding the
         # target: the first loss runs VLC dry once (with the burst floor its starvation's
         # margin, learned only a segment covered at once), the later ones are held out. (This
-        # loop takes a raised target in at once, so R37's stall counted at its bound held
-        # even the first out here, and 2.0.2's does; in the session a raise in the middle of a
+        # loop takes a raised target in at once, so a stall counted at its bound held even
+        # the first out here, and 2.0.2's does; in the session a raise in the middle of a
         # stall brings no media.)
         for seed in range(2):
             pieces = lossy_hls(seed, 3600.0, 15.0, (10.2, 10.8))
@@ -1144,7 +1144,7 @@ class LearnedTargetTests(unittest.TestCase):
         self.assertTrue(lt.SEGMENT_FLOOR)
         self.assertTrue(LearnedTarget().segment_floor)
         self.assertEqual(learned_target(6.0, 0.0, burst=15.0), 15.0)
-        with mock.patch.object(lt, "SEGMENT_FLOOR", False):  # stage 4b's A/B flips it
+        with mock.patch.object(lt, "SEGMENT_FLOOR", False):  # the A/B switch flips it
             self.assertFalse(LearnedTarget().segment_floor)
             self.assertTrue(LearnedTarget(segment_floor=True).segment_floor)
             self.assertEqual(learned_target(6.0, 0.0, burst=15.0), 6.0)

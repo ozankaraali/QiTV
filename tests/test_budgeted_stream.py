@@ -130,7 +130,7 @@ class BudgetedStreamTests(_Fixture):
 
 
 class PurposeTests(_Fixture):
-    """A swap gives the stream another role: its tickets follow (Phase 4)."""
+    """A swap gives the stream another role: its tickets follow."""
 
     def test_set_purpose_relabels_the_running_and_the_releasing_tickets(self):
         self.running_stream()

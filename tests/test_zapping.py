@@ -28,7 +28,7 @@ class ZapContextTests(unittest.TestCase):
         self.assertEqual(ctx.peek(1), (0, CHANNELS[0]))
 
     def test_by_number_falls_back_to_all_channels(self):
-        # Finding m2: "101" in Sports said "No channel 101"; TV numbers are global.
+        # "101" in Sports said "No channel 101"; TV numbers are global.
         everything = CHANNELS + [{"id": 101, "name": "C101", "number": "101"}]
         sports = ZapContext("sports", CHANNELS[:2], fallback=everything)
         self.assertEqual(sports.by_number("101")["id"], 101)
@@ -179,8 +179,8 @@ class ZapControllerTests(unittest.TestCase):
         self.assertTrue(ZapContext.same({"id": 1, "name": "A"}, {"id": "1", "name": "B"}))
 
     def test_same_prefers_cmd_over_positional_ids(self):
-        # Finding I8: M3U ids are list positions, so after a playlist change the id
-        # pointed at another channel. The stream address is the identity when both have it.
+        # M3U ids are list positions, so after a playlist change the id pointed at another
+        # channel. The stream address is the identity when both have it.
         old = {"id": 3, "name": "News", "cmd": "http://x/news.ts"}
         self.assertFalse(ZapContext.same(old, {"id": 3, "name": "Kids", "cmd": "http://x/kids.ts"}))
         self.assertTrue(ZapContext.same(old, {"id": 9, "name": "News", "cmd": "http://x/news.ts"}))
@@ -198,7 +198,7 @@ class ZapControllerTests(unittest.TestCase):
         self.assertEqual(self.tunes[-1]["name"], "B")
 
     def test_reset_forgets_the_previous_provider(self):
-        # Finding I9: Backspace after a provider switch asked for the old provider's channel.
+        # Backspace after a provider switch asked for the old provider's channel.
         self.zap.tuned(CHANNELS[2])  # previous: CHANNELS[0]
         self.clock.now += 0.1
         self.zap.step(1)

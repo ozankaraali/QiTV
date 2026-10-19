@@ -17,7 +17,7 @@ interpreter's own teardown.
 Commands (parent to helper):
 - `("open", sid, url, headers, verify_ssl, ring, live_delay[, start])`, where `ring` is
   `{"kind": "ram", "max_bytes": n}` or `{"kind": "disk", "root": path, "dir": name,
-  "max_bytes": n}` (`root` defaults to the helper's own root) and `start` (2.1 stage 3) is
+  "max_bytes": n}` (`root` defaults to the helper's own root) and `start` (2.1) is
   `{"target": seconds, "extra": seconds}`: the session's target and what it adds to it, so an
   HLS source starts far enough back for a start at that target (`HlsSource._depth`);
 - `("close", sid)`, always answered by `("closed", sid)`, once the session's upstream
@@ -138,11 +138,11 @@ _DISK_FAILED = "The temporary playback buffer could not be created."
 
 # seq, start, end, discontinuity, start_quality
 _Addition = tuple[int, float, float, bool, StartQuality]
-# PTS jumps the timeline left out, in the state while the ring holds them (2.1 stage 2; and
+# PTS jumps the timeline left out, in the state while the ring holds them (2.1; and
 # `_BREAK_SLACK_S` after), at
 # most this many (a memory bound: a flaky source that reconnects every few seconds)
 _BREAKS_KEPT = 64
-# A break stays this long after the ring's start passed it (2.1 stage 5): a player still
+# A break stays this long after the ring's start passed it (2.1): a player still
 # playing evicted media it read before may reach it yet (a sparse-PCR clock's 2 s step and a
 # second more).
 _BREAK_SLACK_S = 3.0
@@ -154,7 +154,7 @@ _FIRST_BURST_S = 1.5  # a burst this long counts at once, before a second one co
 # The connect burst counts for its period (up to the next burst) when that is longer than its
 # media, but at most this many times its media and this many seconds:
 _CONNECT_PERIOD_RATIO = 3.0
-_CONNECT_PERIOD_MAX_S = 10.0  # the owner's cadence: 10 s bursts (the gap read 8.5 s)
+_CONNECT_PERIOD_MAX_S = 10.0  # a measured channel's cadence: 10 s bursts (gap read 8.5 s)
 _BURST_SPREAD = 1.5  # two bursts in a row are alike when neither is larger by more than this
 _BURST_RUN = 3  # the estimate is the largest of this many latest bursts
 _STEADY_BURSTS = 3.0  # this many estimates' worth of seconds without a gap: steady again
@@ -198,9 +198,9 @@ class BurstMeter:
     seconds pass without a gap, the source is steady again (0.0); for an estimate from a single
     burst that no second one has confirmed yet, once `_STEADY_UNCONFIRMED` estimate's worth has.
     A bursty source shows its next gap within half a period of a burst's first byte, inside an
-    estimate of about its period (the owner's channel: 2-4 s at connect, then 10 s every 10 s),
+    estimate of about its period (a measured channel: 2-4 s at connect, then 10 s every 10 s),
     while a steady source that paused after connect (4 s, then 12 s without a byte, then real
-    time) is taken for 10 s bursts for 10 s (before 2.0.1's review: for 12 s ones for 36 s).
+    time) is taken for 10 s bursts for 10 s (before 2.0.1: for 12 s ones for 36 s).
 
     Pure logic: no clock of its own.
     """
@@ -935,7 +935,7 @@ class _Session:
     def _backlog(self, source: Source | None) -> float | None:
         """HLS: the media its playlist listed still to come: what the segment being fetched
         holds beyond the live edge and the listed ones after it, by their EXTINF scaled by
-        the media/EXTINF ratio of the whole segments so far (2.1 stage 3: EXTINF 10 on 8 s
+        the media/EXTINF ratio of the whole segments so far (2.1: EXTINF 10 on 8 s
         segments moved the start). None until one was measured; 0.0 for a finished playlist
         (it plays from its beginning) and for raw TS."""
         fetching = getattr(source, "segment_s", None)
@@ -1007,15 +1007,15 @@ class _Session:
             # HLS: every segment its playlist listed has arrived, once at least (the backlog
             # fetched at the start has landed). Never for raw TS, whose end is not known.
             "caught_up": self._caught_up,
-            # HLS: the live edge once every listed segment arrived is this much further (2.1
-            # stage 3: a tune need not wait for all of its backlog); 0.0 for raw TS.
+            # HLS: the live edge once every listed segment arrived is this much further (2.1:
+            # a tune need not wait for all of its backlog); 0.0 for raw TS.
             "backlog_s": self._backlog(source),
             # HLS: the playlist is finished (ENDLIST): a clip, played from its beginning.
             "finite": bool(source is not None and getattr(source, "finite", False) is True),
             # How cleanly playback starts at the open segment ("key", "open", "none"; None:
             # none is open), as `start_quality` tells it for the closed ones.
             "open_quality": self._segmenter.open_quality,
-            # The program has a video PID (2.1 stage 5): an audio-only stream's starts are
+            # The program has a video PID (2.1): an audio-only stream's starts are
             # all "none", which is no reason to say anything.
             "video": self._segmenter.video_pid is not None,
             # The source answered (2.1): its headers came, though no byte may have yet.

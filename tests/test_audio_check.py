@@ -1,4 +1,4 @@
-"""The smoke's audio read-back rule (Review I1)."""
+"""The smoke's audio read-back rule."""
 
 import unittest
 

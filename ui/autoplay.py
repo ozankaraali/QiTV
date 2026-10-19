@@ -1,4 +1,4 @@
-"""Autoplay and Next for movies and episodes (Review Focus 3).
+"""Autoplay and Next for movies and episodes.
 
 When a movie or an episode with a play context ends, the Next card offers what follows: the
 next episode of its series, or the next title of its genre. Enter (or the countdown) plays it,

@@ -1,5 +1,5 @@
 """2.0.2's Auto latency, the reference the learned target's tests measure it by (a helper, not
-a test module). Since 2.1 stage 4b the session steers Auto by the learned target
+a test module). Since 2.1 the session steers Auto by the learned target
 (`services.live.learned_target`)."""
 
 from __future__ import annotations

@@ -263,7 +263,7 @@ class LiveTuningTests(unittest.TestCase):
 
     def test_a_time_in_the_future_counts_as_expired(self):
         # The computer's clock was set back: a lock or direct play set "later" is not kept
-        # until the clock passes it again (2.0.2 review, M2).
+        # until the clock passes it again (2.0.2).
         store = self.store()
         store.remember("a", Tuning(rate_locked=True, direct=True))
         self.clock.now -= 3600
@@ -356,7 +356,7 @@ class LiveTuningTests(unittest.TestCase):
         self.assertAlmostEqual(again.target(10.0), target.target(10.0), delta=0.01)
 
     def test_a_learned_only_segment_cover_round_trips_through_the_file(self):
-        # The burst floor off (stage 4b's A/B), a lost 30 s segment covered over a 6 s need:
+        # The burst floor off (its A/B switch), a lost 30 s segment covered over a 6 s need:
         # a margin beyond today's 7.5 s, which the file keeps whole.
         target = LearnedTarget(Learned(need=6.0), segment_floor=False)
         target.starved(30.0)

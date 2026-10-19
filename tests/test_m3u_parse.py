@@ -159,7 +159,7 @@ def names(items):
 
 
 class GroupTitleSplitTests(unittest.TestCase):
-    """Owner (2026-10-15): a group title with ";" names several groups (M3U only)."""
+    """A group title with ";" names several groups (M3U only)."""
 
     def setUp(self):
         self.playlist = parse_m3u(MULTI_GROUP, categorize=True)

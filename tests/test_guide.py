@@ -432,7 +432,7 @@ class GuideMouseTests(unittest.TestCase):
 
 
 class GuideHeaderTests(unittest.TestCase):
-    """The owner's mouse-only rule (2.0.1): the guide's keys have buttons in its header."""
+    """Every key has a control on screen (2.0.1): the guide's keys have buttons in its header."""
 
     BUTTONS = ("earlier", "later", "search", "fullscreen", "close")
 

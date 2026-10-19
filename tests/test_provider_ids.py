@@ -74,7 +74,7 @@ class ProviderIdsTests(unittest.TestCase):
         self.assertEqual(split_group_id(key), ("Harbor IPTV", "10"))
         self.assertEqual(split_group_id("10"), ("", "10"))
 
-    def test_same_id_at_two_providers_is_two_channels(self):  # Review Focus 1
+    def test_same_id_at_two_providers_is_two_channels(self):
         a = with_provider({"id": 7, "name": "News", "cmd": "http://a/7.ts"}, "A")
         b = with_provider({"id": 7, "name": "News", "cmd": "http://a/7.ts"}, "B")
         self.assertFalse(ZapContext.same(a, b))

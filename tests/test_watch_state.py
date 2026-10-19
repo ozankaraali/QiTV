@@ -136,7 +136,7 @@ def wait_until(predicate, timeout_ms=2000):
 
 
 class DeferredSaveTests(unittest.TestCase):
-    """The shell saves plays on a timer, not on the GUI thread at every tune (Minor 7)."""
+    """The shell saves plays on a timer, not on the GUI thread at every tune."""
 
     @classmethod
     def setUpClass(cls):

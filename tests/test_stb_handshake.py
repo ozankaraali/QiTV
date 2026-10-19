@@ -122,7 +122,7 @@ class StbHandshakeTests(unittest.TestCase):
 
 
 class ProviderSetupWorkerTests(unittest.TestCase):
-    """Finding I7: a rejected STB handshake is a setup failure, not a ready provider."""
+    """A rejected STB handshake is a setup failure, not a ready provider."""
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="qitv-setup-")

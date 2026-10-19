@@ -28,7 +28,7 @@ class CornerTooltipTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_the_sound_button_names_no_key(self):
-        # Final review M3: M types into the Library's search there.
+        # M types into the Library's search there.
         host = QWidget()
         host.resize(427, 240)
         self.addCleanup(host.deleteLater)
@@ -61,7 +61,7 @@ class Host(QWidget):
 
 
 class CornerInputTests(unittest.TestCase):
-    """The corner's buttons keep what they are given (sweep B2): the host's wheel zapped the
+    """The corner's buttons keep what they are given: the host's wheel zapped the
     channel playing in the corner, its Back and Forward opened the hidden channel list."""
 
     @classmethod
@@ -238,7 +238,7 @@ class CornerPlayerTests(WindowCase):
         self.assertFalse(window.overlays.drawer.isVisible())
         self.assertFalse(window.controller.overlay_open())
         window.screens.back_to_player()
-        window.controller.handle(Action.GUIDE)  # sweep B2: the guide was never checked
+        window.controller.handle(Action.GUIDE)  # the guide, not checked before
         self.assertTrue(window.overlays.guide.isVisible())
         window.screens.open_library("movies")
         self.assertFalse(window.overlays.guide.isVisible())
@@ -290,7 +290,7 @@ class CornerPlayerTests(WindowCase):
         self.assertFalse(window.isFullScreen())
 
     def test_a_double_click_on_stop_acts_once(self):
-        # Review M1: its second click landed on the Library under the pointer, where a press
+        # Its second click landed on the Library under the pointer, where a press
         # on the current poster or a ▶ button plays that title.
         self.play_channel()
         window = self.window
@@ -339,7 +339,7 @@ class CornerPlayerTests(WindowCase):
         play.assert_called_once()
         self.assertEqual(window.pages.mode(), PageStack.PLAYER)
 
-    def test_from_the_mini_player_and_fullscreen(self):  # Review Focus 5
+    def test_from_the_mini_player_and_fullscreen(self):
         self.play_channel()
         window = self.window
         window.toggle_mini_player()  # into the mini player

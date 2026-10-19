@@ -370,7 +370,7 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.actions, [SETTINGS_ROW, REFRESH_ACTION])
 
     def test_the_header_has_search_left_of_refresh(self):
-        # The owner's mouse-only rule (2.0.1): Ctrl/⌘+F has a button in the channel list.
+        # Every key has a control on screen (2.0.1): Ctrl/⌘+F has a button in the channel list.
         self.drawer.open_drawer("1")
         self.record_hand_offs()
         d = self.drawer
@@ -435,7 +435,7 @@ class DrawerTests(unittest.TestCase):
         self.click(self.drawer.settings_gear_rect().center())
         self.assertEqual(self.actions, [SETTINGS_ROW])
 
-    # ---- the header row's left end: ‹ back and the names (owner, 2.0.1) ----------------------
+    # ---- the header row's left end: ‹ back and the names (2.0.1) -----------------------------
 
     def crumb(self, index):
         """The header's name for the path's `index`-th node (None: the elided head)."""
@@ -460,7 +460,7 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.actions, [])
 
     def test_a_quick_second_click_on_back_goes_up_again(self):
-        # 2.0.1 review M1: as the guide's ‹ ›, a double-click on ‹ counts twice: two layers.
+        # 2.0.1: as the guide's ‹ ›, a double-click on ‹ counts twice: two layers.
         self.drawer.open_drawer("1")
         back = self.drawer.mapTo(self.host, self.drawer.back_rect().center().toPoint())
         QTest.mouseDClick(self.host.windowHandle(), Qt.LeftButton, Qt.NoModifier, back)
@@ -542,7 +542,7 @@ class DrawerTests(unittest.TestCase):
                 ("Settings", "gear"),
                 ("Add provider", "plus"),
                 ("Free channels…", "plus"),
-                ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (owner, 2.0.1)
+                ("Open file", "file"),  # Ctrl/⌘+O without the menu bar (2.0.1)
             ],
         )
         self.assertEqual(self.drawer.highlighted().key, "Home")
@@ -779,7 +779,7 @@ class HostedDrawerInputTests(unittest.TestCase):
         QTest.mouseMove(self.host.windowHandle(), point)
 
     def test_pointer_moves_over_the_drawer_still_reach_the_host(self):
-        # Review Minor 5: the drawer tracks the pointer for its header buttons and passes the
+        # The drawer tracks the pointer for its header buttons and passes the
         # moves on, so the host still hears them (the cursor, the player's controls).
         moved = []
         self.host.mouseMoved.connect(lambda: moved.append(True))
@@ -927,8 +927,8 @@ GENRES = 300  # more than a batch of rows (the list views lay rows out 100 at a 
 
 
 class GenrePlaceTests(unittest.TestCase):
-    """A genre chosen far down the list keeps its place (owner, 2.1.0: "when clicked to a
-    genre, list resets back to the top instead of holding position")."""
+    """A genre chosen far down the list keeps its place (2.1.0: a click on a genre sent the
+    list back to its top)."""
 
     @classmethod
     def setUpClass(cls):
@@ -1075,7 +1075,7 @@ def provider_content(genres: dict[str, list[str]]) -> dict:
 
 
 class FindTests(unittest.TestCase):
-    """The find (owner's design A): typing, or a click on ⌕ Find, finds genres and channels at
+    """The find: typing, or a click on ⌕ Find, finds genres and channels at
     every provider, whichever column has the focus; a genre opens as if walked to, a channel
     plays, the last row asks the Library; Esc, ✕ or ← take the list back to where it was."""
 

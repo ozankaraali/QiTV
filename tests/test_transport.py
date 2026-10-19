@@ -43,7 +43,7 @@ class TransportCase(unittest.TestCase):
 
     def test_the_shades_leave_the_small_picture_alone(self):
         # The bottom shade, cut to the PiP label's row by the host's mask, showed as a dark
-        # rectangle behind the label (owner's screenshot): it is not painted over the PiP.
+        # rectangle behind the label: it is not painted over the PiP.
         t = self.make()
         t.show_vod("Salt Roads", "2024")
         pip = QRect(880, 400, 360, 200)  # a bottom-right PiP, in the bottom shade's reach
@@ -64,7 +64,7 @@ class TransportCase(unittest.TestCase):
         self.assertEqual(t._pip_rect, QRect(100, 200, 50, 30))
 
     def test_a_late_report_of_the_small_picture_after_teardown_is_dropped(self):
-        # 2.0.2 review (M6): the PiP frame may report once more while the window closes;
+        # 2.0.2: the PiP frame may report once more while the window closes;
         # a slot without a receiver would reach a deleted transport.
         class Frame(QObject):
             smallRectChanged = Signal(QRect)
@@ -133,7 +133,7 @@ class TransportCase(unittest.TestCase):
         self.assertEqual([spy.at(0)[0], spy.at(1)[0]], [-10_000, 10_000])
 
     def test_mini_player_and_second_channel_buttons_sit_left_of_fullscreen(self):
-        # Owner (Phase 4): clickable controls for both pictures-in-picture.
+        # Clickable controls for both pictures-in-picture.
         t = self.make()
         t.show_live("One", "")
         self.assertNotIn("pip", t._layout())  # no PiP until the window says it can
@@ -164,7 +164,7 @@ class TransportCase(unittest.TestCase):
         self.assertLess(t.button_rect("pip").right(), t.button_rect("mini").left())
 
     def test_the_external_player_button_sits_with_the_picture_buttons(self):
-        # Owner (2026-10-15): what plays now goes to VLC or MPV from the player controls.
+        # What plays now goes to VLC or MPV from the player controls.
         t = self.make()
         t.show_live("One", "")
         t.set_pip_state(True, False)
@@ -267,7 +267,7 @@ class TransportCase(unittest.TestCase):
         yield "shifted"
 
     def test_the_volume_button_sits_left_of_the_audio_track_button(self):
-        # Owner (2.0.1): ♪ picks the audio track; nothing opened the volume mixer.
+        # 2.0.1: ♪ picks the audio track; nothing opened the volume mixer.
         t = self.make()
         t.set_pip_state(True, False)
         for mode in self.modes(t):
@@ -386,7 +386,7 @@ class TransportCase(unittest.TestCase):
         self.assertEqual(host.changes, changes)
 
     def test_its_controls_top_is_the_top_of_its_band(self):
-        # The PiP rises above it and the mixer sits on it (review I2, I3).
+        # The PiP rises above it and the mixer sits on it.
         t = self.make()
         t.show_live("One", "")
         top = t.geometry().top()  # host coordinates: a test window sits where the WM put it
@@ -559,12 +559,12 @@ LIVE_EDGE = {
     "rate": 1.0,
     "paused": False,
 }
-MIN_HIT_PX = 28  # the owner's mouse-only rule: every new control, at the default window
+MIN_HIT_PX = 28  # every new control on screen for a key, at the default window
 
 
 class OnScreenKeysTests(unittest.TestCase):
-    """The owner's mouse-only rule (2.0.1): the player's keys have buttons too, each naming
-    its key, at least 28 px wide at the default window, and kept over the PiP."""
+    """Every key has a control on screen (2.0.1): the player's keys have buttons too, each
+    naming its key, at least 28 px wide at the default window, and kept over the PiP."""
 
     @classmethod
     def setUpClass(cls):
@@ -692,7 +692,7 @@ class OnScreenKeysTests(unittest.TestCase):
         QTest.mouseDClick(t.windowHandle(), Qt.LeftButton, Qt.NoModifier, point.toPoint())
 
     def test_a_quick_second_click_counts_once_on_toggles_and_jumps(self):
-        # 2.0.1 review M1: ★ would toggle twice and ⟲ zap back again, ⛶ go in and out.
+        # 2.0.1: ★ would toggle twice and ⟲ zap back again, ⛶ go in and out.
         t = self.make()
         t.set_pip_state(True, False)
         t.show_live("One", "")
@@ -718,7 +718,7 @@ class OnScreenKeysTests(unittest.TestCase):
         self.assertEqual([spy.at(i)[0] for i in range(spy.count())], [-10_000, -10_000])
 
     def test_the_sound_buttons_say_what_they_do(self):
-        # 2.0.1 review M3: ♪ and the subtitles had no tooltip; 2.2: they name their sync keys.
+        # 2.0.1: ♪ and the subtitles had no tooltip; 2.2: they name their sync keys.
         t = self.make()
         t.show_vod("Film", "")
         t.update_position(0, 100_000)

@@ -317,7 +317,7 @@ class TVWindowTests(WindowCase):
             self.assertTrue(hasattr(self.window, name), name)
 
     def test_close_cancels_the_catalogs_and_the_librarys_running_jobs(self):
-        # An XMLTV download or an STB crawl held the close for up to 30 s (H10).
+        # An XMLTV download or an STB crawl held the close for up to 30 s.
         window = self.window
         with (
             mock.patch.object(self.tv_catalog().runner, "cancel_all", create=True) as catalog,
@@ -676,7 +676,7 @@ class TVWindowTests(WindowCase):
         self.assertFalse(guide.isVisible())
 
     def test_the_player_controls_search_button_opens_the_search(self):
-        # The owner's mouse-only rule (2.0.1): Ctrl/⌘+F has a button on the player too.
+        # Every key has a control on screen (2.0.1): Ctrl/⌘+F has a button on the player too.
         self.show()
         drawer = self.wait_for_drawer()
         drawer.close_drawer()
@@ -1115,7 +1115,7 @@ class GeometryRestoreTests(WindowCase):
 
 
 class OffScreenRestoreTests(WindowCase):
-    """A geometry saved on a monitor that is gone (Minor 13)."""
+    """A geometry saved on a monitor that is gone."""
 
     def prepare_config(self):
         positions = self.config.config["window_positions"]
@@ -1427,7 +1427,7 @@ class LivePipelineWindowTests(WindowCase):
         self.assertEqual(window.zap.context.current()["name"], "Channel 1")
 
     def test_pip_plays_two_channels_at_once_and_a_swap_restarts_neither(self):
-        """Phase 4: the fixture's two local channels in both pictures, then a swap."""
+        """Picture in picture: the fixture's two local channels in both pictures, then a swap."""
         window = self.window
         main, pip = window.session, window.pip_session
         live, pip_live = window.live_session, window.pip_live
@@ -1501,12 +1501,12 @@ class LivePipelineWindowTests(WindowCase):
         self.assertTrue(wait_until(lambda: window.budget.holders(PROVIDER_NAME) == ["pip"]))
         self.assertTrue(playing(pip, pip_live)())  # Channel 1 plays on, large
         self.assertEqual(window.pip_surface.geometry(), page)
-        self.assertTrue(window.pip_surface.isVisible())  # on screen, not black (review C1)
+        self.assertTrue(window.pip_surface.isVisible())  # on screen, not black
         self.assertFalse(window.surface.isVisible())
         self.assertFalse(label.isVisible())
 
 
-# ---- the Library, menus, exports (Phase 3 Task 12) -------------------------------------------
+# ---- the Library, menus, exports -------------------------------------------------------------
 
 XTREAM = local_xtream.PROVIDER_NAME
 LIBRARY_WAIT_MS = 15000  # a provider setup and a section over the local HTTP fixture
@@ -1731,7 +1731,7 @@ class LibraryWindowTests(TwoProviderCase):
         )
 
     def test_the_providers_menu_chooses_all_providers_and_a_provider_from_there(self):
-        # Final review M5: the browsed source is checked (never a provider that loads), and a
+        # The browsed source is checked (never a provider that loads), and a
         # provider can be chosen from All providers.
         self.show()
         self.wait_for_drawer()
@@ -1822,7 +1822,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.stop_corner_player()
 
     def test_the_library_button_returns_to_the_library_where_it_was(self):
-        # 2.0.1 review I1: ‹ Library on the player controls does what Esc does after a movie.
+        # 2.0.1: ‹ Library on the player controls does what Esc does after a movie.
         plays = self.play_spy()
         self.show()
         self.wait_ready(XTREAM)
@@ -1861,7 +1861,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertIs(series.current_season(), season)
         self.assertIs(series.current_episode(), episode)
         # A double-click's second click lands on the Library under the pointer (an episode
-        # there would play): it reaches nothing (2.0.1 review M1).
+        # there would play): it reaches nothing (2.0.1).
         point = window.mapFromGlobal(at)
         heard = MouseHeard(window.childAt(point) or window.library_page)
         QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, pos=point)
@@ -1870,7 +1870,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.stop_corner_player()
 
     def test_a_posters_right_click_menu_copies_its_link_and_says_so_on_the_library(self):
-        # Owner (2026-10-15): a Library title offers the channels' Play in VLC/MPV and link.
+        # A Library title offers the channels' Play in VLC/MPV and link.
         self.show()
         self.wait_ready(XTREAM)
         window = self.window
@@ -1908,7 +1908,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.wait_for_titles()
 
     def test_a_search_hit_on_another_provider_plays_once_it_is_ready(self):
-        # Review Focus 4: the play waits for its provider (set up beside the shown one in 2.1,
+        # The play waits for its provider (set up beside the shown one in 2.1,
         # no provider change), and an older request being dropped never drops it.
         plays = self.play_spy()
         self.show()
@@ -1967,7 +1967,7 @@ class LibraryOnAnotherProviderTests(TwoProviderCase):
 
 
 class LibraryReturnTests(WindowCase):
-    """Esc back to the Library and the mini player (review findings)."""
+    """Esc back to the Library and the mini player."""
 
     MOVIE = {"id": "m1", "name": "Quiet Pier", "cmd": "http://127.0.0.1:9/movie/1.mp4"}
 
@@ -2023,7 +2023,7 @@ class LibraryReturnTests(WindowCase):
         self.assertFalse(self.window.controller.overlay_open())
 
     def test_the_player_controls_offer_the_way_back_only_for_the_librarys_titles(self):
-        # 2.0.1 review I1: ‹ Library on the player controls, as Esc after a movie.
+        # 2.0.1: ‹ Library on the player controls, as Esc after a movie.
         ids = self.held_links()
         self.play_from_the_library()
         self.window.catalog.linkReady.emit(ids[0], self.MOVIE["cmd"])
@@ -2071,7 +2071,7 @@ class DrawerSettingsTests(WindowCase):
         self.assertTrue(drawer.isVisible())
 
     def test_the_drawers_search_button_opens_the_search(self):
-        # The owner's mouse-only rule (2.0.1): Ctrl/⌘+F has a button in the channel list.
+        # Every key has a control on screen (2.0.1): Ctrl/⌘+F has a button in the channel list.
         self.show()
         drawer = self.wait_for_drawer()
         QTest.mouseClick(
@@ -2085,7 +2085,7 @@ class DrawerSettingsTests(WindowCase):
         self.assertFalse(drawer.isVisible())
 
     def test_a_double_clicks_second_click_on_search_reaches_nothing_in_the_library(self):
-        # ⌕ shows the Library at once: the second click would land on it (2.0.1 review).
+        # ⌕ shows the Library at once: the second click would land on it (2.0.1).
         self.show()
         drawer = self.wait_for_drawer()
         host = drawer.window()
@@ -2226,7 +2226,7 @@ class DrawerSettingsTests(WindowCase):
                 drawer, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point
             )
             set_provider.assert_called_once_with(force_update=True)
-            # The forced provider setup loads the guide with force itself (review Minor 1).
+            # The forced provider setup loads the guide with force itself.
             reload_epg.assert_not_called()
             self.assertEqual(self.toasts[-1], ("Refreshing channels and guide…", "info"))
             refresh = self.menu_actions()["Refresh Channels and Guide"]

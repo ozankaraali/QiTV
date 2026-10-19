@@ -1,4 +1,4 @@
-"""The multiview (stage 1): the grid's rects, its frame, its tiles overlay, the session
+"""The multiview: the grid's rects, its frame, its tiles overlay, the session
 manager's tiles, and the shell's grid over fake players (test_tv_pip's PipCase: real tuners,
 manager and budget), then once in the window with libVLC's dummy outputs."""
 
@@ -200,7 +200,7 @@ class GridFrameTests(FrameCase):
         self.assertEqual(self.frame.tiles(), [])
 
     def test_a_tile_without_a_player_yet_is_laid_out_once_its_surface_comes(self):
-        # Review: a "+" tile has no player; it is made when the tile first takes the focus
+        # A "+" tile has no player; it is made when the tile first takes the focus
         # or a channel, and its surface is laid out then.
         self.frame.show_grid(["main", "pip", "t2", "t3", "t4", "t5"], "main", {"t4"})
         self.assertEqual(len(self.frame.tiles()), 6)
@@ -780,7 +780,7 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(len(self.grid.names()), 4)
 
     def test_a_tile_whose_stream_fails_stops_and_says_so_until_clicked(self):
-        self.catalog.ptype = "XTREAM"  # no portal: no fresh link by itself (see stage 3)
+        self.catalog.ptype = "XTREAM"  # no portal: no fresh link by itself (STB tiles: below)
         self.start_large(0)
         self.v()
         t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
@@ -812,7 +812,7 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(self.budget.holders("Home"), ["main"])
 
     def test_the_focused_tiles_buffer_is_the_full_one_and_the_others_small(self):
-        # Stage 2: a tile out of focus keeps 64 MiB; the focus grows it to the memory per
+        # A tile out of focus keeps 64 MiB; the focus grows it to the memory per
         # stream (and shrinks the one that had it); leaving gives the PiP its full buffer.
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
         self.two_pictures()
@@ -839,7 +839,7 @@ class MultiviewTests(MultiviewCase):
         self.config.multiview_tile_ram_mib = 512
         self.assertEqual(self.grid.ring_sizes(), (128 * MIB, 128 * MIB))
 
-    # ---- stage 3: stay-live per tile, labels, an STB tile's fresh link ----------------------
+    # ---- stay-live per tile, labels, an STB tile's fresh link -------------------------------
 
     def test_tiles_without_the_focus_play_at_1x_and_only_jump_to_live(self):
         self.two_pictures()
@@ -971,7 +971,7 @@ class OneStreamMultiviewTests(MultiviewCase):
 
 
 class LastGridTests(MultiviewCase):
-    """Stage 4: the grid left is kept (config `multiview`) and comes back on a click."""
+    """The grid left is kept (config `multiview`) and comes back on a click."""
 
     def setUp(self):
         super().setUp()
@@ -1159,7 +1159,7 @@ class HardwareMultiviewTests(MultiviewCase):
             self.grid.names(), ["main", "pip", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]
         )
         self.assertEqual(self.transport.named("set_grid_state")[-1], (True, True, LAYOUT_NAMES[9]))
-        # Review: no player is made for a "+" tile (each one when its tile first needs it).
+        # No player is made for a "+" tile (each one when its tile first needs it).
         self.assertEqual([slot.name for slot in self.sessions.slots()], ["main", "pip"])
 
     def test_a_smaller_layout_keeps_the_focused_tile_and_stops_the_rest(self):
@@ -1174,7 +1174,7 @@ class HardwareMultiviewTests(MultiviewCase):
 
 
 class TileLifecycleTests(MultiviewCase):
-    """Review fixes: nothing opens, or stays open, in a tile the grid no longer has; an open
+    """Nothing opens, or stays open, in a tile the grid no longer has; an open
     on its way survives leaving; a tile's size, rate and sound follow it when it opens."""
 
     hardware = True

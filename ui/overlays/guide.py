@@ -1,11 +1,11 @@
-"""EPG guide overlay (spec §5.1, R4): channels as rows, time as columns, with a now-line.
+"""EPG guide overlay (spec §5.1): channels as rows, time as columns, with a now-line.
 
 The grid paints only the rows that fit on screen, and looks up programmes only for those
 rows, so groups with thousands of channels stay cheap.
 
-Its header has a button for each of its keys (the owner's mouse-only rule): ‹ and › beside the
-day move the time window (← →, dimmed at its ends), and ⌕ (Search), ⛶ (Fullscreen) and ×
-(close, as G or Esc) sit at its right end. Each names its key when hovered.
+Its header has a button for each of its keys (every key has a control on screen): ‹ and ›
+beside the day move the time window (← →, dimmed at its ends), and ⌕ (Search), ⛶ (Fullscreen)
+and × (close, as G or Esc) sit at its right end. Each names its key when hovered.
 
 Catch-up (2.2): when a listed channel's provider keeps an archive (`archive_days(channel)`:
 its days, 0 for none or one that did not answer lately), the window also moves back, as far
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 SLOT = timedelta(minutes=30)
 SLOTS = 5
-WINDOW = SLOTS * SLOT  # 2.5 h on screen (R4)
+WINDOW = SLOTS * SLOT  # 2.5 h on screen
 MAX_AHEAD = timedelta(hours=24)
 MAX_BACK = timedelta(days=7)  # the furthest back the window goes (a channel's archive)
 LOOKUP_LIMIT = 12

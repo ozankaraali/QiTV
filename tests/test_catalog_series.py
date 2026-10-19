@@ -99,7 +99,7 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(episodes[0]["name"], "Show")
 
     def test_stb_episodes_carry_their_season(self):
-        # Finding I4: episodes copied the series dict without a season, so S1E1 == S2E1.
+        # Episodes copied the series dict without a season, so S1E1 == S2E1.
         from services.navigation import _item_node
         from services.watch_state import WatchState
 

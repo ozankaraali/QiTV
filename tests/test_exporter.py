@@ -200,7 +200,7 @@ class ExporterTests(unittest.TestCase):
         )
         self.assertEqual(export_available(ExportKind.COMPLETE_SERIES, stb, "movies"), reason)
 
-    def test_complete_series_xtream_gives_r3_message(self):
+    def test_complete_series_xtream_says_it_is_for_stb_series_only(self):
         out = self.run_worker(
             self.worker(ExportKind.COMPLETE_SERIES, {"type": "XTREAM"}, series_content(), "series")
         )

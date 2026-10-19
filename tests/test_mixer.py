@@ -1,4 +1,4 @@
-"""The volume mixer overlay: one row per picture (Phase 4 Task 3b, the owner's amendment)."""
+"""The volume mixer overlay: one row per picture."""
 
 import os
 import unittest

@@ -1,4 +1,4 @@
-"""Named playback slots and their roles: which is large, which is the PiP (spec §7, Phase 4).
+"""Named playback slots and their roles: which is large, which is the PiP (spec §7).
 
 Each slot has its own player (`Session`) and `LiveSession`: "main" and "pip" from the start,
 and a multiview's tiles ("t2" … "t8", `add_slot`) once the grid wants them. One slot is

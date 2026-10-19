@@ -296,8 +296,8 @@ class MixedNavigationTests(unittest.TestCase):
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
         recent = next(n for n in nav.children(nav.path[-1]) if n.key == RECENT_GROUP)
-        # Sweep A7: an entry older than 2.1 (no provider in it) names its provider too, as
-        # with two (the drawer's focus key names the provider of what plays).
+        # An entry older than 2.1 (no provider in it) names its provider too, as with two
+        # (the drawer's focus key names the provider of what plays).
         self.assertEqual(
             nav.children(recent)[0].payload, with_provider({"id": 5, "name": "Demo 5"}, "Demo TV")
         )
@@ -333,7 +333,7 @@ class MixedNavigationTests(unittest.TestCase):
         drawer.open_drawer()
         self.assertEqual(model.index(0).data(ChannelRowsModel.ProviderRole), "")
 
-    # ---- one provider's setup while "All providers" shows (final review I2, M8) -------------
+    # ---- one provider's setup while "All providers" shows -----------------------------------
 
     def test_another_providers_setup_keeps_the_path(self):
         self.open_all()
@@ -408,8 +408,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertIn("Demo TV", [n.title for n in nav.children(nav.path[1])])
 
     def test_only_a_failed_refresh_of_a_saved_list_says_the_saved_channels_show(self):
-        # Sweep A10: the toast came for a provider without a cache whose list failed too
-        # (nothing saved of it shows; its heading says why).
+        # The toast came for a provider without a cache whose list failed too (nothing
+        # saved of it shows; its heading says why).
         _config, view, nav = self.build([DEMO, HARBOR], {"Demo TV": demo_content()})
         notices = []
         nav.notice.connect(notices.append)
@@ -426,8 +426,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertIn("News", [n.title for n in nav.children(nav.path[1])])
 
     def test_moving_through_all_asks_nothing_of_providers_whose_setup_failed(self):
-        # Sweep A11: a failed provider was not signed in again, but its lists were still
-        # asked for (an STB portal: a request with the failed session at every move).
+        # A failed provider was not signed in again, but its lists were still asked for
+        # (an STB portal: a request with the failed session at every move).
         _config, view, nav = self.build([DEMO, HARBOR], {})
         self.factory.fail_setup("Demo TV", "Portal down")
         self.factory.fail_setup("Harbor IPTV", "Portal down")
@@ -511,8 +511,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual(len(self.nav.children(harbor_group)), 41)
 
     def test_a_channel_of_a_providers_own_group_is_revealed_in_all(self):
-        # Sweep A13: tuned from Harbor's own list (group "41"), then the page went to All
-        # providers, which lists that group under a mixed id: the list missed it.
+        # Tuned from Harbor's own list (group "41"), then the page went to All providers,
+        # which lists that group under a mixed id: the list missed it.
         self.open_all()
         channel = self.view.catalogs.catalog("Harbor IPTV").items("live", "41")[3]
         self.nav.reveal(ALL_PROVIDERS, "live", "41", channel)
@@ -521,8 +521,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertIs(self.nav.revealed(), channel)
 
     def test_a_channel_outside_the_group_it_was_tuned_in_is_revealed_in_all(self):
-        # Sweep A13: a number typed outside the group tunes a channel of another group (TV
-        # numbers are global); the list opened on that group, without the channel.
+        # A number typed outside the group tunes a channel of another group (TV numbers
+        # are global); the list opened on that group, without the channel.
         _config, view, nav = self.build([DEMO], {"Demo TV": demo_content()})
         nav.open(nav.children(None)[0])
         sports = view.items("live", "Sports")[0]
@@ -533,8 +533,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual([n.key for n in nav.path], ["Demo TV", "live", "News"])
 
     def test_a_provider_whose_only_group_is_all_lists_it_under_its_heading(self):
-        # Sweep A6: a playlist without group titles had an empty heading; its channels were
-        # only in the mixed All, among the others'.
+        # A playlist without group titles had an empty heading; its channels were only in
+        # the mixed All, among the others'.
         plain = live_content(["Plain 1", "Plain 2"], {})
         _config, _view, nav = self.build(
             [DEMO, HARBOR], {"Demo TV": plain, "Harbor IPTV": harbor_content()}

@@ -140,7 +140,7 @@ _MEDIA_KEYS = {
     _K.Key_VolumeDown.value: Action.VOL_DOWN,
     _K.Key_VolumeMute.value: Action.MUTE,
 }
-# Shortcuts that work in every context: Ctrl/⌘+F is the quick search (the owner's ruling),
+# Shortcuts that work in every context: Ctrl/⌘+F is the quick search,
 # and fullscreen is F11 or ⌃⌘F (Ctrl+Meta+F) anywhere, plain F on the player and in the guide.
 _CTRL_KEYS = {
     _K.Key_Space.value: Action.PLAY_PAUSE,
@@ -189,7 +189,7 @@ def resolve(
     """Map a key press to (action, payload); the payload is the digit or the typed text.
 
     `context` is "player", "drawer", "library", "guide" or "subtitles". `drawer_open` is the
-    Phase 1B spelling (True means "drawer", False "player") and is used only when `context`
+    older spelling (True means "drawer", False "player") and is used only when `context`
     is not given.
     """
     if context is None:

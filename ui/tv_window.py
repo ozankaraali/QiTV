@@ -3,7 +3,7 @@
 Two pages share the window (a PageStack, ui/page_stack.py): the player (the native video
 surfaces, with the overlay host glued over them) and the Library (Movies and Series, spec
 §5.4); with the Library open, what plays goes on in a corner of it. The player has
-two surfaces, each with its own player, live session and tuner (spec §7, Phase 4): the PiP
+two surfaces, each with its own player, live session and tuner (spec §7): the PiP
 frame (ui/pip.py) fills the page with the large one and puts the other in a corner while
 picture in picture is open; the SessionManager says which is large. The moves between
 them are ui/tv_pages.py's, the menu bar ui/tv_menus.py's; this window lays them out, owns the
@@ -1304,7 +1304,7 @@ class TVWindow(QMainWindow):
             self.screens.notify(translate(SAVE_FAILED_TEXT), "error", ERROR_MS)
 
     def _fit_restored(self) -> None:
-        """Bring the saved geometry onto a screen: its monitor may be gone (Minor 13).
+        """Bring the saved geometry onto a screen: its monitor may be gone.
 
         Run once shown, when the frame margins are known; on the screen under the window's
         centre, else the one Qt put it on.

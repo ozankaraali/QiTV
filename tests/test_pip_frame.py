@@ -182,7 +182,7 @@ class PipFrameTests(FrameCase):
         self.assertEqual(self.main.geometry(), self.container.rect())
 
     def test_after_a_swap_closing_keeps_the_large_picture_on_screen(self):
-        # Review C1: the picture left after closing a swapped PiP went black (both hidden).
+        # The picture left after closing a swapped PiP went black (both hidden).
         frame = self.make()
         frame.show_pip()
         frame.set_large("pip")
@@ -201,7 +201,7 @@ class PipFrameTests(FrameCase):
         self.assertTrue(self.pip.isHidden())
 
     def test_a_lift_raises_a_bottom_corner_pip_and_settles_back(self):
-        # Ruling (review I2): over the transport band, a bottom-corner PiP rises, animated.
+        # Over the transport band, a bottom-corner PiP rises, animated.
         frame = self.make()
         frame.show_pip()
         rects = []

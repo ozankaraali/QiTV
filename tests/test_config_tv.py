@@ -106,7 +106,7 @@ class TvConfigTests(unittest.TestCase):
         self.assertEqual(config.config["window_positions"]["tv_window"], tv)
 
     def test_save_replaces_the_file_atomically(self):
-        # Finding m4: save_config truncated config.json before writing it, so a failure
+        # save_config truncated config.json before writing it, so a failure
         # mid-write (full disk, crash) lost every setting.
         config, path = self._load({"favorites": ["Kept"]})
         config.save_config()
@@ -245,7 +245,7 @@ class TvConfigTests(unittest.TestCase):
         )
 
     def test_an_old_always_play_externally_setting_is_switched_off_once(self):
-        # Owner (2026-10-15): 1.x's "play in MPV" made 2.0 open every channel in MPV.
+        # 1.x's "play in MPV" made 2.0 open every channel in MPV.
         config, path = self._load({"play_in_vlc": True, "play_in_mpv": True})
         self.assertFalse(config.play_in_vlc)
         self.assertFalse(config.play_in_mpv)
@@ -336,8 +336,8 @@ class TvConfigTests(unittest.TestCase):
 
 
 class EpgExpirationTests(unittest.TestCase):
-    """M6: Settings offered "Weeks" and "Monthes", which epg_expiration did not know: every
-    guide refresh failed."""
+    """Settings offered "Weeks" and "Monthes", which epg_expiration did not know: every guide
+    refresh failed."""
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -470,7 +470,7 @@ class TimeshiftConfigTests(unittest.TestCase):
 
 
 class RamRingConfigTests(unittest.TestCase):
-    """Owner (M5): every stream not on the disk ring keeps this much in memory."""
+    """Every stream not on the disk ring keeps this much in memory."""
 
     _load = TvConfigTests._load
 
@@ -493,7 +493,7 @@ class RamRingConfigTests(unittest.TestCase):
 
 
 class PipConfigTests(unittest.TestCase):
-    """Phase 4: the PiP's corner and its own volume level."""
+    """The PiP's corner and its own volume level."""
 
     _load = TvConfigTests._load
 

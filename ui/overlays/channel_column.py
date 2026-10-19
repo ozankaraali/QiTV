@@ -1,4 +1,4 @@
-"""The fast-zap channel column (A2): a left-side list over the video."""
+"""The fast-zap channel column: a left-side list over the video."""
 
 import logging
 

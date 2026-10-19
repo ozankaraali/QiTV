@@ -213,7 +213,7 @@ class LogPathTests(unittest.TestCase):
 
 
 class RawUrlLogTests(unittest.TestCase):
-    """The remaining log lines that named a URL, or an exception text naming one (H5)."""
+    """The remaining log lines that named a URL, or an exception text naming one."""
 
     @classmethod
     def setUpClass(cls):

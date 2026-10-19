@@ -155,9 +155,10 @@ class ModeTests(unittest.TestCase):
 
 
 class SteeringTests(unittest.TestCase):
-    """2.1 (the owner: a public HLS channel flapped between 1x and 1.05x every few seconds, and each
-    change crackled): the rate changes only for a lasting drift outside a dead band, once,
-    gently, ramped and sized to end at the target; at most one such nudge per 5 minutes."""
+    """2.1 (seen on a public HLS channel: the rate flapped between 1x and 1.05x every few
+    seconds, and each change crackled): the rate changes only for a lasting drift outside a
+    dead band, once, gently, ramped and sized to end at the target; at most one such nudge per
+    5 minutes."""
 
     def test_a_lag_wandering_inside_the_band_never_changes_the_rate(self):
         rng = random.Random(7)
@@ -227,7 +228,7 @@ class SteeringTests(unittest.TestCase):
         self.assertAlmostEqual(lag, T, delta=0.15)
 
     def test_a_target_that_rises_does_not_stop_a_far_nudge_to_start_it_again(self):
-        # Seen on a public HLS channel after a network change (2.1 review round): a backlog
+        # Seen on a public HLS channel after a network change (2.1): a backlog
         # landed during a 1.10x catch-up and Auto raised the target; the nudge stopped short
         # of it and the next one started 3 s later.
         stay, clock = live(), Clock()
@@ -301,7 +302,7 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(changes(rates), 2)
 
     def test_a_bursty_source_short_of_room_slows_to_0_95_at_once(self):
-        # 2.0.1, the owner's channel: 10 s bursts, the player meets the edge before each
+        # 2.0.1, a measured channel: 10 s bursts, the player meets the edge before each
         # one. Less than half a second of room left when a burst lands: 0.95x after 3 s,
         # whatever the budget, until the target.
         stay, clock = live(10.0, burst=10.0), Clock()
@@ -335,7 +336,7 @@ class SteeringTests(unittest.TestCase):
 
     def test_trouble_owes_a_slow_down_at_once_beyond_the_budget(self):
         # 2.0.2 built a raised Auto target at once at 0.95x; 2.1 first made it wait for the
-        # budget when the stall left more than half a second of room (review, R14).
+        # budget when the stall left more than half a second of room.
         stay, clock = live(T, latency=AUTO), Clock()
         _, rates = drive(stay, T + 2.0, 120.0, clock=clock)  # a nudge spends the budget
         self.assertEqual(changes(rates), 2)
@@ -344,8 +345,8 @@ class SteeringTests(unittest.TestCase):
         _, waiting = drive(stay, 1.5, 8.0, clock=clock, buffering=True)  # VLC waits
         self.assertEqual(set(waiting), {1.0})
         lag, rates = drive(stay, 1.5, 120.0, clock=clock)
-        # Once VLC played a second short of the target (stage 2: the first tick after a
-        # stall holds one sample of the lag filter, and is no measure on its own).
+        # Once VLC played a second short of the target (the first tick after a stall holds
+        # one sample of the lag filter, and is no measure on its own).
         self.assertEqual(rates[:4], [1.0, 1.0, 1.0, 0.9833])
         self.assertEqual(calls(rates), [0.9833, 0.9667, 0.95, 0.9667, 0.9833, 1.0])
         self.assertAlmostEqual(lag, T + 1.5, delta=0.15)
@@ -370,7 +371,7 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(max(rates), 1.03)
 
     def test_trouble_far_behind_leaves_a_catch_up_alone(self):
-        # Review round 2: a stall while catching up from far behind ended the catch-up, and
+        # A stall while catching up from far behind ended the catch-up, and
         # it started again 3 s later, at every stall; VLC had all the room it needed.
         for target in (T, T + 1.5):  # Auto may raise the target with the stall
             with self.subTest(target=target):
@@ -386,7 +387,7 @@ class SteeringTests(unittest.TestCase):
                 self.assertAlmostEqual(lag, target, delta=0.15)
 
     def test_backfilled_stalls_never_restart_a_catch_up_free_of_the_budget(self):
-        # Stage 1's last review: a source whose 3 s stalls are backfilled, so the lag is back
+        # A source whose 3 s stalls are backfilled, so the lag is back
         # at once; the first tick after each (the lag filter holds one sample) reads a second
         # short of the target. It cut a gentle catch-up near the target, which then started
         # again free of the budget, about twice a minute without end.
@@ -412,7 +413,7 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(changes(rates), 2)  # and no second nudge within the budget
 
     def test_a_cut_catch_up_counts_when_the_lag_is_back_just_after_its_ramp_out(self):
-        # Stage 2 review: the catch-up ramped out to 1x one tick before the lag came back,
+        # The catch-up ramped out to 1x one tick before the lag came back,
         # and so escaped the budget.
         stay, clock = live(), Clock()
         _, rates = drive(stay, T + 3.0, 20.0, clock=clock)
@@ -443,7 +444,7 @@ class SteeringTests(unittest.TestCase):
         self.assertEqual(max(more), 1.0)  # it counted: the band widens instead
 
     def test_trouble_then_go_live_owes_nothing(self):
-        # Review round 2: an owed slow-down outlived a Go live and slowed the stream that
+        # An owed slow-down outlived a Go live and slowed the stream that
         # opened at the target (a little short of it while VLC opens).
         stay, clock = live(), Clock()
         stay.trouble()  # VLC ran dry ...
@@ -462,7 +463,7 @@ class SteeringTests(unittest.TestCase):
 
     def test_a_vlc_that_runs_dry_again_and_again_still_slows_down(self):
         # Short of room, VLC plays a second and waits a second, over and over: the urgent
-        # count pauses while it waits rather than starting again (review, R14).
+        # count pauses while it waits rather than starting again.
         stay, clock = live(10.0, burst=10.0), Clock()
         rates = []
         for k in range(40):
@@ -628,7 +629,7 @@ class LagFilterTests(unittest.TestCase):
         self.assertIsNone(flt.lag(1.0, 0.0))
 
     def test_its_mean_settles_after_ten_seconds_and_two_bursts_since_a_restart(self):
-        # 2.1 stage 5 (re-review N2): only a settled mean's picks are learned from.
+        # 2.1: only a settled mean's picks are learned from.
         for burst, settles in ((0.0, 10.0), (10.0, 20.0)):
             with self.subTest(burst=burst):
                 flt = LagFilter()
@@ -763,7 +764,7 @@ class RateHealthTests(unittest.TestCase):
 
 class StretchTests(unittest.TestCase):
     def test_a_window_holds_two_stretches_at_least(self):
-        # Stretches end at VLC's steps (2.1 stage 2): a step that came late, then one early,
+        # Stretches end at VLC's steps (2.1): a step that came late, then one early,
         # are judged together, not the late one alone (52% of 1.10x).
         health = RateHealth()
         self.assertFalse(health.add(3.5, 2.0, 1.10))
@@ -772,7 +773,7 @@ class StretchTests(unittest.TestCase):
 
 
 class ConsecutiveWindowTests(unittest.TestCase):
-    """The HLS crawl verdict needs two bad windows in a row (2.0.2 review, I3)."""
+    """The HLS crawl verdict needs two bad windows in a row (2.0.2)."""
 
     def window(self, health, share, seconds=8.0):
         return [health.add(0.25, share * 0.25, 1.0) for _ in range(round(seconds / 0.25))]
@@ -873,7 +874,7 @@ class AutoTargetTests(unittest.TestCase):
 
 
 class LandingTests(unittest.TestCase):
-    """2.1 stage 3: a stream opened at the start Go live picks (a tune, Go live, a reopen at
+    """2.1: a stream opened at the start Go live picks (a tune, Go live, a reopen at
     live) lands where the source's keyframes allow. Above the target by up to a keyframe
     interval (the 1-stream raw-TS provider: one every 10 s) it is nudged gently, never
     caught up at 1.10x nor reopened; short of it (nothing further back was buffered) it is
@@ -912,7 +913,7 @@ class LandingTests(unittest.TestCase):
         self.assertEqual(max(rates), 1.10)
 
     def test_after_the_first_minute_a_backlog_is_caught_up_as_ever(self):
-        # Review R32: the landing's allowance lasts the start window only. A reconnect's
+        # The landing's allowance lasts the start window only. A reconnect's
         # backlog 2 minutes on is drift: 1.10x after 3 s, and the reopen at 20 s beyond.
         stay, clock = live(), Clock()
         stay.landed(9.0)
@@ -926,7 +927,7 @@ class LandingTests(unittest.TestCase):
         self.assertTrue(decision.reopen_live)
 
     def test_a_backlog_step_right_after_the_start_is_part_of_the_landing(self):
-        # Review M8: raw TS whose backlog came after the 1.5 s hold: 1.10x for ~100 s.
+        # Raw TS whose backlog came after the 1.5 s hold ran 1.10x for ~100 s.
         stay, clock = live(), Clock()
         stay.landed(1.5)
         drive(stay, T + 1.5, 3.0, clock=clock)
@@ -948,7 +949,7 @@ class LandingTests(unittest.TestCase):
         self.assertEqual(max(rates), 1.10)
 
     def test_a_go_live_that_opens_nothing_keeps_the_landing(self):
-        # Review M4: a Go live merged into stay-live's reopen a moment before opens nothing:
+        # A Go live merged into stay-live's reopen a moment before opens nothing:
         # the stream that opened then keeps its landing (no 1.10x for its keyframe interval).
         stay, clock = live(), Clock()
         stay.landed(9.0)
@@ -999,11 +1000,11 @@ class LandingTests(unittest.TestCase):
         self.assertAlmostEqual(lag, 10.0, delta=0.15)
 
     def test_a_target_that_rises_after_the_start_is_built_once_as_ever(self):
-        # 2.1 stage 5 (the landing rule for the start too): only the start's own shortfall is
-        # built at 0.97x for 20 s and the rest accepted. A target that rises above the one the
-        # tune aimed at (a higher latency, a burst measured after the start, Auto, a learned
-        # target) is built as without the start: once, by a gentle budgeted nudge (stage 3
-        # built 20 s of it, then accepted the rest: 3.0 s behind a 6 s target for good), or
+        # 2.1 (the landing rule for the start too): only the start's own shortfall is built
+        # at 0.97x for 20 s and the rest accepted. A target that rises above the one the tune
+        # aimed at (a higher latency, a burst measured after the start, Auto, a learned
+        # target) is built as without the start: once, by a gentle budgeted nudge (before,
+        # 20 s of it was built, then the rest accepted: 3.0 s behind a 6 s target for good), or
         # at 2.0.1's 0.95x where VLC would run dry before each burst.
         for target, burst, rate in ((6.0, 0.0, 0.97), (10.0, 10.0, 0.95)):
             with self.subTest(target=target, burst=burst):
@@ -1021,14 +1022,14 @@ class LandingTests(unittest.TestCase):
         stay.landed(-3.5)
         lag, rates = drive(stay, 3.5, 60.0, clock=clock)  # built for 20 s, then accepted
         self.assertTrue(stay.shortfall_accepted)
-        stay.target = 8.5  # Auto, or stage 4b's learned target, rises
+        stay.target = 8.5  # Auto, or its learned target, rises
         lag, rates = drive(stay, lag, 300.0, clock=clock)
         self.assertFalse(stay.shortfall_accepted)
         self.assertEqual((min(rates), changes(rates)), (0.97, 2))
         self.assertAlmostEqual(lag, 8.5, delta=0.2)
 
     def test_a_start_with_no_more_room_is_built_once_however_long_it_plays(self):
-        # Why the rest is accepted (stage 3): a source that sent nothing further back gets
+        # Why the rest is accepted: a source that sent nothing further back gets
         # one gentle build, never one after another.
         stay, clock = live(7.0, burst=7.0), Clock()
         stay.landed(-3.5)
@@ -1037,7 +1038,7 @@ class LandingTests(unittest.TestCase):
         self.assertLess(lag, 7.0 - 2.5)
 
     def test_a_moment_in_the_band_does_not_end_what_was_accepted(self):
-        # Stage 5b's last review: a quarter second in the band (the estimate's wander) ended
+        # A quarter second in the band (the estimate's wander) ended
         # the acceptance, and a second full build followed. It takes `_BACK_IN_S` there.
         for blip, builds in ((0.25, 1), (2.0, 1), (4.0, 2)):
             with self.subTest(blip=blip):
@@ -1049,7 +1050,7 @@ class LandingTests(unittest.TestCase):
                 self.assertEqual(changes(rates + more), 2 * builds)
 
     def test_the_target_a_start_aimed_at_is_taken_once_the_source_sent(self):
-        # Stage 5b's last review: a stalled first tick (no burst classified yet) made
+        # A stalled first tick (no burst classified yet) made
         # Normal's 2.5 s the reference, and the HLS 7 s target "a rise": 0.95x for 73 s
         # instead of the start's 0.97x build for at most 20 s.
         stay, clock = live(T), Clock()
@@ -1061,7 +1062,7 @@ class LandingTests(unittest.TestCase):
         self.assertLessEqual(sum(1 for rate in rates if rate < 1.0) * TICK, 20.0)
 
     def test_a_learned_rise_within_the_band_is_drift(self):
-        # Stage 4b: a rise counts as one after the landing only beyond the band; a smaller one
+        # A rise counts as one after the landing only beyond the band; a smaller one
         # (the learned target creeping) builds nothing by itself.
         for rise, rates_seen in ((0.8, {1.0}), (1.2, {1.0, 0.99, 0.98, 0.97})):
             with self.subTest(rise=rise):
@@ -1107,7 +1108,7 @@ def keyframes(every, *, since=1000.0):
 
 
 class JumpTests(unittest.TestCase):
-    """2.1 stage 5 (safe jumps): far behind, one clean jump to live replaces a long 1.10x
+    """2.1 (safe jumps): far behind, one clean jump to live replaces a long 1.10x
     catch-up (8 s at 1.10x takes 80 s): when the clean start Go live would pick lands within
     the band or 5 s nearer, and nothing jumped (a tune, Go live, a reopen at live) within a
     minute. Never two within a minute; the keyframes' grain is never a reason for 1.10x."""
@@ -1177,7 +1178,7 @@ class JumpTests(unittest.TestCase):
         self.assertEqual(max(rates), 1.10)
 
     def test_the_keyframes_grain_is_no_reason_for_1_10(self):
-        # Stage 3's open concern: a landing 9.7 s above the target (the newer keyframe just
+        # A landing 9.7 s above the target (the newer keyframe just
         # short of the floor) was nudged gently for its minute, then caught up at 1.10x.
         # When no jump does better than the lag less a second, the gentle nudge goes on.
         stay, clock = live(), Clock()
@@ -1210,7 +1211,7 @@ class JumpTests(unittest.TestCase):
         self.assertEqual(len(jumps), 1)
 
     def test_a_locked_rate_still_jumps_far_behind_and_never_changes_the_rate(self):
-        # Review I2: a channel VLC cannot play at another rate sat up to 20 s behind.
+        # A channel VLC cannot play at another rate sat up to 20 s behind.
         stay, clock = live(), Clock()
         stay.lock_rate()
         lag, rates, jumps = steer(stay, T + 15.0, 20.0, clock=clock, landing=lambda *_: T)
@@ -1222,7 +1223,7 @@ class JumpTests(unittest.TestCase):
         self.assertEqual((jumps, set(rates)), ([], {1.0}))
 
     def test_a_jump_or_go_live_that_lands_short_changes_no_rate(self):
-        # Review I3: on a sparse-PCR channel each jump read 1.2-1.4 s short once VLC played,
+        # On a sparse-PCR channel each jump read 1.2-1.4 s short once VLC played,
         # and the start's 0.97x build followed (six rate changes). A jump is made with the
         # ring full and picked at the target: its shortfall is no missing room.
         stay, clock = live(12.0, burst=10.0), Clock()
@@ -1250,7 +1251,7 @@ class JumpTests(unittest.TestCase):
         self.assertAlmostEqual(lag, 7.0, delta=0.15)
 
     def test_only_the_landings_own_shortfall_is_tolerated(self):
-        # Re-review N1: the tolerance outlived the landing: a target raised after a Go live
+        # The tolerance outlived the landing: a target raised after a Go live
         # (Normal to Stable, a larger burst, Auto) was never built, and a slow drift down was
         # left until VLC had under half a second of room.
         cases = {
@@ -1306,7 +1307,7 @@ class JumpTests(unittest.TestCase):
         self.assertGreater(lag, 6.5 + 1.0)
 
     def test_the_keyframes_grain_never_widens_the_band(self):
-        # Review: a "gentle" verdict while the budget is spent widened the band to the far
+        # A "gentle" verdict while the budget is spent widened the band to the far
         # lag (8 s and more), on both sides. The band stays as it was.
         stay, clock = live(), Clock()
         drive(stay, T + 2.0, 120.0, clock=clock)  # the budget is spent
@@ -1348,7 +1349,7 @@ class JumpTests(unittest.TestCase):
 
 
 class SteeredTargetTests(unittest.TestCase):
-    """2.1 stage 4b: the learned target as stay-live steers by it. A rise moves it in a step
+    """2.1: the learned target as stay-live steers by it. A rise moves it in a step
     of at least half a second once it held 10 s (at once with trouble: its owed slow-down
     comes with it); a fall is never a step: what trouble raised falls at Auto's quiet decay
     (half a second per 5 minutes), what the arrivals alone raised half a second a minute; what

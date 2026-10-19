@@ -140,7 +140,7 @@ class TimeshiftSettingsTests(base.WindowCase):
 
 
 class EpgExpirationSettingsTests(base.WindowCase):
-    """M6: the guide's update period offers units the guide knows, saved as it reads them."""
+    """The guide's update period offers units the guide knows, saved as it reads them."""
 
     def dialog(self):
         dialog = OptionsDialog(self.window)
@@ -213,7 +213,7 @@ class MaxStreamsTests(base.WindowCase):
 
 
 class ExternalPlayerSettingsTests(base.WindowCase):
-    """Owner (2026-10-15): playing in VLC or MPV is picked in-app; Settings keeps it as a mode."""
+    """Playing in VLC or MPV is picked in-app; Settings keeps it as a mode."""
 
     def dialog(self):
         dialog = OptionsDialog(self.window)

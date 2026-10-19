@@ -1,4 +1,4 @@
-"""The TV window's two pages, the player and the Library (spec §5.4, R5), and the moves between.
+"""The TV window's two pages, the player and the Library (spec §5.4), and the moves between.
 
 Opening the Library (View → Movies, Series or Search, Ctrl/⌘+F, Movies or Series chosen in
 the drawer) shows the Library page; what plays goes on in a corner of it (the PageStack's
@@ -220,7 +220,7 @@ class TVPages(QObject):
         window.controller.tune_live(channel)
 
     def back_to_tv(self) -> None:
-        """Live TV: the last channel again (R5), or the drawer."""
+        """Live TV: the last channel again, or the drawer."""
         window = self._window
         if window.closing():
             return

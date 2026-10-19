@@ -283,7 +283,7 @@ class LibraryModelTests(unittest.TestCase):
         self.assertIsNone(model.details(movie(2)).resume_ms)
 
     def test_a_title_without_a_genre_never_takes_a_shelfs_or_all_s_name(self):
-        # "Continue", "New", "My list" and the provider's "All" are no genres (H18).
+        # "Continue", "New", "My list" and the provider's "All" are no genres.
         m = movie(1)
         cfg = make_config()
         history(cfg, m, "movie")
@@ -723,8 +723,8 @@ class MixedProvidersTests(unittest.TestCase):
         self.assertFalse(model.is_favorite(with_provider(movie(1, "Salt Roads"), DEMO_TV)))
 
     def test_a_providers_all_or_titles_without_a_category_name_no_genre(self):
-        # Sweep A6: under a provider's heading (mixed ids) its "All" and its "Unknown
-        # Category" group named the strip's genre; with one provider they name none.
+        # Under a provider's heading (mixed ids) its "All" and its "Unknown Category"
+        # group named the strip's genre; with one provider they name none.
         cat, ledger, *_ = mixed_catalog()
         for own, title in (("*", "All"), ("None", "Unknown Category")):
             gid = f"{DEMO_TV}{SEP}{own}"

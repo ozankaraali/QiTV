@@ -737,7 +737,7 @@ class SegmenterTests(unittest.TestCase):
                 self.assert_closed_pts(events)
 
     def test_a_jump_left_out_of_the_timeline_is_reported_where_and_how_much(self):
-        # 2.1 stage 2: the player's clock jumps by what the timeline leaves out. The +5 s
+        # 2.1: the player's clock jumps by what the timeline leaves out. The +5 s
         # step at frame 120 (4.8 s) is in segment 2, 0.8 s after its start at 4.0 s.
         seg, _ = run(shift_pts(fx.make_stream(12), 120, 5 * CLOCK))
         self.assertEqual(len(seg.dropped), 1)

@@ -151,7 +151,7 @@ def home_tv() -> dict:
 
 
 class RankingTests(unittest.TestCase):
-    """The owner's real lists buried their own provider's channels under a free list's: what
+    """With real lists, the user's own provider's channels sank under a free list's: what
     matches better comes first, then the user's provider, then what they starred or watched."""
 
     def setUp(self):

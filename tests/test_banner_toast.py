@@ -75,7 +75,7 @@ class BannerTest(Base):
         self.assertEqual(b.width(), 1280)
 
     def test_programme_times_are_local_for_a_guide_in_another_zone(self):
-        # H16: the banner showed the guide's own zone ("17:15 – 18:15" at 20:03 local).
+        # The banner showed the guide's own zone ("17:15 – 18:15" at 20:03 local).
         local_now = datetime(2026, 10, 15, 20, 3).astimezone()
         guide_zone = timezone(local_now.utcoffset() + timedelta(hours=3))
 

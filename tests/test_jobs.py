@@ -150,7 +150,7 @@ class ImmediateRunnerTests(unittest.TestCase):
 
 class JobCancellationTests(unittest.TestCase):
     """Quitting cancels the catalog's running jobs: an XMLTV download or an STB crawl stops
-    at once instead of holding the close for up to 30 s (H10)."""
+    at once instead of holding the close for up to 30 s."""
 
     @classmethod
     def setUpClass(cls):

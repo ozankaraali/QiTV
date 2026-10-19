@@ -12,7 +12,7 @@ def reading_matches(
     """Does libVLC's (mute, volume) read-back agree with what the manager says?
 
     `got` is None while a worker holds the player. A player the manager has at `level` must
-    not play at another one (review I1: VLC 3's volume-save made a new output start at the
+    not play at another one (VLC 3's volume-save made a new output start at the
     PiP's 30 while the mixer said 100).
     """
     if got is None or got[0] != int(muted):

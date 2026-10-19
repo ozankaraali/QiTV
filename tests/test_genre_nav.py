@@ -285,7 +285,7 @@ class TopNavTests(unittest.TestCase):
         self.assertEqual(self.tabs, [])
 
     def test_a_fullscreen_button_ends_the_bar(self):
-        # The owner's mouse-only rule (2.0.1): F11 (⌃⌘F) has a button in the Library too.
+        # Every key has a control on screen (2.0.1): F11 (⌃⌘F) has a button in the Library too.
         fullscreens = []
         self.nav.fullscreenRequested.connect(lambda: fullscreens.append(True))
         rects = self.nav._item_rects()
@@ -306,14 +306,14 @@ class TopNavTests(unittest.TestCase):
         QTest.mouseDClick(host, Qt.LeftButton, Qt.NoModifier, self.nav.mapTo(self.host, point))
 
     def test_a_quick_second_click_on_fullscreen_asks_once(self):
-        # 2.0.1 review M1: not into fullscreen and straight out again.
+        # 2.0.1: not into fullscreen and straight out again.
         fullscreens = []
         self.nav.fullscreenRequested.connect(lambda: fullscreens.append(True))
         self.double_click(self.nav._item_rects()["fullscreen"].center().toPoint())
         self.assertEqual(fullscreens, [True])
 
     def test_a_click_on_fullscreen_leaves_the_keys_where_they_were(self):
-        # 2.0.1 review M2: ⛶ is not in the keys' order, so it never takes their focus.
+        # 2.0.1: ⛶ is not in the keys' order, so it never takes their focus.
         self.nav.set_active("movies")
         self.nav.fullscreenRequested.connect(lambda: None)
         button = self.nav._item_rects()["fullscreen"].center().toPoint()

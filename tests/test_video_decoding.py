@@ -114,14 +114,14 @@ class FrozenPictureTests(unittest.TestCase):
         self.assertEqual(self.stream.play(10.0, shown=0), [13.25])
 
     def test_video_without_sound_played_is_no_frozen_picture(self):
-        # The preroll after a precise seek (on-demand HLS, review I1): both decoders decode
+        # The preroll after a precise seek (on-demand HLS): both decoders decode
         # and drop what comes before the target, so audio decodes but none plays; and VLC's
         # buffering after a reset, where audio waits after its first frame.
         self.stream.play(5.0)
         self.assertEqual(self.stream.play(10.0, shown=0, played=0), [])
 
     def test_a_stall_of_the_ticks_starts_the_count_afresh(self):
-        # The GUI thread stood still 3 s (review M2): what rose meanwhile is seen at once, as
+        # The GUI thread stood still 3 s: what rose meanwhile is seen at once, as
         # video reaching the decoder again, so the count starts afresh with a first picture's
         # time.
         self.stream.play(5.0)
@@ -360,7 +360,7 @@ class HardwareFallbackTests(unittest.TestCase):
         self.assertEqual(len(self.froze), 1)  # FIRST_PICTURE_S after it played
 
     def test_a_film_that_prerolls_after_a_seek_stays_as_it_is(self):
-        # Review I1: on-demand HLS seeks precisely (no fast seek): both decoders decode and
+        # On-demand HLS seeks precisely (no fast seek): both decoders decode and
         # drop what comes before the target, so video and audio decode, nothing is shown,
         # nothing plays, and libVLC still says Playing. That is no frozen picture.
         session = self.make()
@@ -396,7 +396,7 @@ class HardwareFallbackTests(unittest.TestCase):
         self.assertEqual(len(self.froze), 1)
 
     def test_the_reopen_drops_what_waited_for_the_old_media(self):
-        # Review M4: a stall's audio track still to be restored is the old media's.
+        # A stall's audio track still to be restored is the old media's.
         session = self.make()
         session.play(sessions.A, kind=PlayKind.LIVE)
         self.tick(session, 3.0)

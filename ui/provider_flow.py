@@ -1,4 +1,4 @@
-"""Provider setups as the TV shell sees them (spec §8, R5).
+"""Provider setups as the TV shell sees them (spec §8).
 
 A setup shows "Loading <provider>…" until the first live section (or a failure); with no
 provider at all, the welcome card shows instead. When a provider becomes ready, the newest
@@ -165,7 +165,7 @@ class ProviderFlow(QObject):
         self._foreign_timer.stop()
 
     def resume_live(self) -> None:
-        """Back to live TV from the Library (R5): the last live channel again, else the drawer.
+        """Back to live TV from the Library: the last live channel again, else the drawer.
 
         Tuned whatever the "start with the last channel" setting says (that one is about
         launching QiTV). During a provider setup it is tuned once the provider is ready.
@@ -220,7 +220,7 @@ class ProviderFlow(QObject):
         return names[0] if names else ""
 
     def _show_loading(self, name: str) -> None:
-        """From a setup's start until the first live section or a failure (Review Focus 5)."""
+        """From a setup's start until the first live section or a failure."""
         self._drop_autoplay()  # a provider setup: and the hint is the setup's
         self.overlays.welcome.dismiss()  # a provider exists now
         self._loading = True

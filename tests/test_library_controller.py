@@ -372,7 +372,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual([value for value, _label in grid._sorts], ["az", "year", "rating"])
 
     def test_a_genre_of_one_title_says_title(self):
-        # The header read "1 titles" (H17).
+        # The header read "1 titles".
         self.catalog.item_map[("movies", "d")] = [SALT]
         self.catalog.item_map[("movies", "c")] = [movie(100 + i, f"M{i}") for i in range(1200)]
         ctl = self.open_movies()
@@ -505,7 +505,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertIsNone(context["episodes"])
 
     def test_a_movie_posters_right_click_menu_is_for_a_movie(self):
-        # Owner (2026-10-15): Play in VLC/MPV and Copy stream link, as for channels.
+        # Play in VLC/MPV and Copy stream link, as for channels.
         self.open_movies()
         grid = self.screen.grid
         grid.contextRequested.emit(1, QPoint(30, 40))
@@ -794,7 +794,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.make_ready("Q")
         self.assertEqual(len(self.played), 1)
 
-    def test_a_second_enter_while_waiting_plays_once(self):  # review (a)
+    def test_a_second_enter_while_waiting_plays_once(self):
         ctl = self.search_salt()
         self.activate_name(ctl, "Salt Lake")
         ctl.handle(Action.NAV_ACTIVATE)
@@ -802,7 +802,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.make_ready("Q")
         self.assertEqual(self.played_names(), ["Salt Lake"])
 
-    def test_the_latest_activation_wins_while_waiting(self):  # review (b)
+    def test_the_latest_activation_wins_while_waiting(self):
         ctl = self.search_salt()
         self.catalog.catalogs.ready.discard("P")  # P is still setting up too
         self.activate_name(ctl, "Salt Lake")  # Q
@@ -813,7 +813,7 @@ class LibraryControllerTests(unittest.TestCase):
         self.make_ready("P")
         self.assertEqual(self.played_names(), ["Salt Roads"])
 
-    def test_leaving_the_library_drops_the_pending_hit(self):  # review (c)
+    def test_leaving_the_library_drops_the_pending_hit(self):
         ctl = self.build()
         ctl.open_search()
         self.type_text("salt lake")
@@ -1028,9 +1028,9 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(ctl.mode, "search")
 
     def test_a_series_hit_of_a_provider_rebuilt_since_still_opens(self):
-        # Sweep A review I1: the Library heard the section of the catalog it first asked (by
-        # name); once Settings rebuilt that provider's catalog (an edit while no page showed
-        # it), the new one's section came to no one: nothing opened and nothing was said.
+        # The Library heard the section of the catalog it first asked (by name); once
+        # Settings rebuilt that provider's catalog (an edit while no page showed it), the new
+        # one's section came to no one: nothing opened and nothing was said.
         self.test_a_series_hit_from_another_provider_waits_for_its_section()
         ctl, hub = self.ctl, self.catalog.catalogs
         del hub._by_name["R"]  # the hub dropped it; the next use builds a new one
@@ -1192,8 +1192,8 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.catalog.current_provider_name(), ALL_PROVIDERS)
 
     def test_all_providers_titles_have_their_menu_while_another_provider_sets_up(self):
-        # Sweep A6: in All providers is_loading() is true while any provider sets up, so no
-        # title had a menu meanwhile; a title's links wait for its own provider at the hub.
+        # In All providers is_loading() is true while any provider sets up, so no title had
+        # a menu meanwhile; a title's links wait for its own provider at the hub.
         self.mix()
         ctl = self.build()
         ctl.open("movies")
@@ -1260,7 +1260,7 @@ class LibraryControllerTests(unittest.TestCase):
         ctl.handle(Action.NAV_ACTIVATE)
         self.assertEqual(self.played[-1][0]["name"], "Dune Songs")
 
-    # review minors -----------------------------------------------------------------------
+    # focus, typing, layout and failures --------------------------------------------------
     def test_up_from_the_first_genre_reaches_nav_and_down_returns(self):
         ctl = self.open_movies()
         ctl.handle(Action.NAV_LEFT)

@@ -6,8 +6,8 @@ tabs start the same gap after it as they did after the wordmark. Its name stays 
 technology (the accessible name) and as the logo's tooltip.
 
 The fullscreen button (⛶) ends the bar: the Library's F11 (⌃⌘F on a Mac) for the mouse, since
-Windows and Linux hide the menu bar in fullscreen (the owner's mouse-only rule). The keys never
-focus it; they have F11.
+Windows and Linux hide the menu bar in fullscreen, and every key has a control on screen. The
+keys never focus it; they have F11.
 """
 
 import sys
