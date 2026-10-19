@@ -39,7 +39,7 @@ from services.epg_view import (
     GUIDE_OFFSET_STEP,
     guide_offset_minutes,
 )
-from services.i18n import tr
+from services.i18n import N_, tr, tr_n, translate
 from services.lazy_import import lazy_module
 from services.multikeydict import MultiKeyDict
 from services.opensubtitles import ANONYMOUS_DAILY, CONSUMERS_URL, built_in_key
@@ -49,34 +49,45 @@ from services.redact import safe_exc
 from services.thread_cleanup import ThreadCleanup
 from ui.update_dialogs import check_for_updates
 
-OPENSUBTITLES_HINT = (
-    f'QiTV finds subtitles on <a href="{CONSUMERS_URL}">OpenSubtitles.com</a>. It needs a free'
-    " OpenSubtitles account and an API key: sign up there, create a key on its API consumers"
-    " page, and paste it here. The subtitles panel's “Search OpenSubtitles…” asks for it too."
-)
-OPENSUBTITLES_BUILT_IN_HINT = (
+
+def opensubtitles_hint() -> str:
+    return tr(
+        'QiTV finds subtitles on <a href="{url}">OpenSubtitles.com</a>. It needs a free'
+        " OpenSubtitles account and an API key: sign up there, create a key on its API consumers"
+        " page, and paste it here. The subtitles panel's “Search OpenSubtitles…” asks for it too.",
+        url=CONSUMERS_URL,
+    )
+
+
+OPENSUBTITLES_BUILT_IN_HINT = N_(
     "This copy of QiTV has a key of its own: yours is optional, and is used instead when set."
 )
-OPENSUBTITLES_SIGN_IN_HINT = (
-    f"Signing in is optional: without it OpenSubtitles allows {ANONYMOUS_DAILY} downloads a day"
-    " per connection; with your account, as many as it allows you. Sign out clears both."
-)
-EXTERNAL_PLAYERS_HINT = (
+
+
+def opensubtitles_sign_in_hint() -> str:
+    return tr_n(
+        "Signing in is optional: without it OpenSubtitles allows {n} download a day"
+        " per connection; with your account, as many as it allows you. Sign out clears both.",
+        "Signing in is optional: without it OpenSubtitles allows {n} downloads a day"
+        " per connection; with your account, as many as it allows you. Sign out clears both.",
+        ANONYMOUS_DAILY,
+    )
+
+
+EXTERNAL_PLAYERS_HINT = N_(
     "Any channel or movie can also go to VLC or MPV from its right-click menu or the player"
     " controls."
 )
 
-VERIFIED_TEXT = "Provider verified successfully."
-VERIFY_FAILED_TEXT = "Failed to verify provider"
 WARNING_COLOR = "#b26a00"  # verified, with a note (a portal profile dated in the past)
-PASTE_LINK_TEXT = "Paste link"
-PASTE_LINK_TIP = (
+PASTE_LINK_TEXT = N_("Paste link")  # i18n: a button beside the provider's address (verb)
+PASTE_LINK_TIP = N_(
     "Fill in this provider from one link your provider gave you: an Xtream link with the"
     " username and password in it, an M3U playlist's address or an STB portal's address."
     " Pasting the link into the address does the same."
 )
-NO_LINK_TEXT = "The clipboard holds no provider link."
-GUIDE_OFFSET_TIP = (
+NO_LINK_TEXT = N_("The clipboard holds no provider link.")
+GUIDE_OFFSET_TIP = N_(
     "When this provider's guide is off by whole hours, move its programmes here: with +1 h,"
     " a programme the guide lists at 20:00 shows at 21:00 (the guide, the banner, now and next"
     " and the time-shift bar)."
@@ -86,17 +97,45 @@ GUIDE_OFFSET_TIP = (
 def offset_text(minutes: int) -> str:
     """A guide time offset as the setting lists it: "No offset", "+1 h 30 min", "−30 min"."""
     if not minutes:
-        return "No offset"
+        return tr("No offset")  # i18n: the guide time offset setting's choice of none
     hours, rest = divmod(abs(minutes), 60)
-    parts = ([f"{hours} h"] if hours else []) + ([f"{rest} min"] if rest else [])
-    return f"{'+' if minutes > 0 else '−'}{' '.join(parts)}"
+    sign = "+" if minutes > 0 else "−"
+    if hours and rest:
+        # i18n: a guide time offset: sign is + or −, h hours and m minutes (abbreviated)
+        return tr("{sign}{h} h {m} min", sign=sign, h=hours, m=rest)
+    if hours:
+        # i18n: a guide time offset: sign is + or −, h hours (abbreviated)
+        return tr("{sign}{h} h", sign=sign, h=hours)
+    # i18n: a guide time offset: sign is + or −, m minutes (abbreviated)
+    return tr("{sign}{m} min", sign=sign, m=rest)
 
 
-FILLED_TEXT = "Filled in from the link ({kind}). {next} then press Verify Provider."
+def _mib_text(size) -> str:
+    return tr("{size} MiB", size=size)  # i18n: a size in mebibytes (MiB)
+
+
+def _gib_text(size) -> str:
+    return tr("{size} GiB", size=size)  # i18n: a size in gibibytes (GiB), as "1.5"
+
+
+def epg_unit_label(unit: str) -> str:
+    """The guide's update period unit (a config value, "Hours") as Settings shows it."""
+    labels = {
+        # i18n: the unit of the guide's update period: "Check update every [2] [Hours]"
+        "Minutes": tr("Minutes"),
+        "Hours": tr("Hours"),  # i18n: the unit of "Check update every [2] [Hours]"
+        "Days": tr("Days"),  # i18n: the unit of "Check update every [2] [Days]"
+        "Weeks": tr("Weeks"),  # i18n: the unit of "Check update every [2] [Weeks]"
+        "Months": tr("Months"),  # i18n: the unit of "Check update every [2] [Months]"
+    }
+    return labels.get(unit, unit)
+
+
+# A provider link's kind, as Paste link names it.
 LINK_KINDS = {
     provider_link.XTREAM: "Xtream",
-    provider_link.M3U: "M3U playlist",
-    provider_link.STB: "STB portal",
+    provider_link.M3U: N_("M3U playlist"),
+    provider_link.STB: N_("STB portal"),
 }
 
 requests = lazy_module("requests")
@@ -203,26 +242,27 @@ class WidgetGroup:
 class AddXmltvMappingDialog(QDialog):
     def __init__(self, parent=None, channel_name="", logo_url="", channel_ids=""):
         super().__init__(parent)
-        self.setWindowTitle("Add/Edit XMLTV Mapping")
+        self.setWindowTitle(tr("Add/Edit XMLTV Mapping"))
 
         form_layout = QFormLayout(self)
 
         self.channel_name_input = QLineEdit(self)
         self.channel_name_input.setText(channel_name)
-        form_layout.addRow("Channel Name:", self.channel_name_input)
+        form_layout.addRow(tr("Channel Name:"), self.channel_name_input)
 
         self.logo_url_input = QLineEdit(self)
         self.logo_url_input.setText(logo_url)
-        form_layout.addRow("Logo URL:", self.logo_url_input)
+        form_layout.addRow(tr("Logo URL:"), self.logo_url_input)
 
         self.channel_ids_input = QLineEdit(self)
         self.channel_ids_input.setText(channel_ids)
-        form_layout.addRow("Channel IDs (comma-separated):", self.channel_ids_input)
+        # i18n: the XMLTV guide's ids of a channel, separated by commas
+        form_layout.addRow(tr("Channel IDs (comma-separated):"), self.channel_ids_input)
 
         self.button_box = QHBoxLayout()
-        self.ok_button = QPushButton("OK", self)
+        self.ok_button = QPushButton(tr("OK"), self)  # i18n: a button
         self.ok_button.clicked.connect(self.accept)
-        self.cancel_button = QPushButton("Cancel", self)
+        self.cancel_button = QPushButton(tr("Cancel"), self)  # i18n: a button
         self.cancel_button.clicked.connect(self.reject)
         self.button_box.addWidget(self.ok_button)
         self.button_box.addWidget(self.cancel_button)
@@ -241,7 +281,7 @@ class OptionsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.setWindowTitle("Settings")
+        self.setWindowTitle(tr("Settings"))  # i18n: the Settings window's title
 
         self.config_manager = parent.config_manager
         self.provider_manager = parent.provider_manager
@@ -273,7 +313,7 @@ class OptionsDialog(QDialog):
 
         self.create_options_ui()
 
-        self.save_button = QPushButton("Save", self)
+        self.save_button = QPushButton(tr("Save"), self)  # i18n: a button (verb)
         self.save_button.clicked.connect(self.save_settings)
 
         self.main_layout.addWidget(self.options_tab)
@@ -297,7 +337,8 @@ class OptionsDialog(QDialog):
 
     def create_settings_ui(self):
         self.settings_tab = QWidget(self)
-        self.options_tab.addTab(self.settings_tab, "Settings")
+        # i18n: the Settings window's first tab (the general settings)
+        self.options_tab.addTab(self.settings_tab, tr("Settings"))
         self.settings_layout = QFormLayout(self.settings_tab)
 
         # The language: every text is read as it is shown, so a new one shows from the next
@@ -320,44 +361,41 @@ class OptionsDialog(QDialog):
         self.settings_layout.addRow(tr("Language"), language_row)
 
         # Add check button to allow checking for updates
-        self.check_updates_checkbox = QCheckBox("Allow Check for Updates", self.settings_tab)
+        self.check_updates_checkbox = QCheckBox(tr("Allow Check for Updates"), self.settings_tab)
         self.check_updates_checkbox.setChecked(self.config_manager.check_updates)
         self.check_updates_checkbox.stateChanged.connect(self.on_check_updates_toggled)
         self.settings_layout.addRow(self.check_updates_checkbox)
 
         # Add check button to enable channel logos
-        self.channel_logos_checkbox = QCheckBox("Enable Channel Logos", self.settings_tab)
+        self.channel_logos_checkbox = QCheckBox(tr("Enable Channel Logos"), self.settings_tab)
         self.channel_logos_checkbox.setChecked(self.config_manager.channel_logos)
         self.settings_layout.addRow(self.channel_logos_checkbox)
 
         # Add cache options
-        self.cache_image_size_label = QLabel(
-            f"Max size of image cache (actual size: {self.get_cache_image_size():.2f} MB)",
-            self.settings_tab,
-        )
+        self.cache_image_size_label = QLabel(self._cache_image_size_text(), self.settings_tab)
         self.cache_image_size_input = QLineEdit(self.settings_tab)
         self.cache_image_size_input.setText(str(self.config_manager.max_cache_image_size))
         self.settings_layout.addRow(self.cache_image_size_label, self.cache_image_size_input)
 
-        self.clear_image_cache_button = QPushButton("Clear Image Cache", self.settings_tab)
+        self.clear_image_cache_button = QPushButton(tr("Clear Image Cache"), self.settings_tab)
         self.clear_image_cache_button.clicked.connect(self.clear_image_cache)
         self.settings_layout.addRow(self.clear_image_cache_button)
 
         # Network security options
         self.prefer_https_checkbox = QCheckBox(
-            "Prefer HTTPS when available (Xtream/STB/M3U)", self.settings_tab
+            tr("Prefer HTTPS when available (Xtream/STB/M3U)"), self.settings_tab
         )
         self.prefer_https_checkbox.setToolTip(
-            "When enabled, the app will try HTTPS endpoints first when providers support them."
+            tr("When enabled, the app will try HTTPS endpoints first when providers support them.")
         )
         self.prefer_https_checkbox.setChecked(self.config_manager.prefer_https)
         self.settings_layout.addRow(self.prefer_https_checkbox)
 
         self.ssl_verify_checkbox = QCheckBox(
-            "Verify SSL certificates (recommended)", self.settings_tab
+            tr("Verify SSL certificates (recommended)"), self.settings_tab
         )
         self.ssl_verify_checkbox.setToolTip(
-            "Disable only if your provider uses self-signed certificates."
+            tr("Disable only if your provider uses self-signed certificates.")
         )
         self.ssl_verify_checkbox.setChecked(self.config_manager.ssl_verify)
         self.settings_layout.addRow(self.ssl_verify_checkbox)
@@ -365,49 +403,61 @@ class OptionsDialog(QDialog):
         # TV playback
         self.live_latency_combo = QComboBox(self.settings_tab)
         for label, value in (
-            ("Auto (recommended)", "auto"),
-            ("Low", "low"),
-            ("Normal", "normal"),
-            ("Stable", "stable"),
+            # i18n: the Live latency setting's choices
+            (tr("Auto (recommended)"), "auto"),
+            (tr("Low"), "low"),  # i18n: the Live latency setting's choice (low latency)
+            (tr("Normal"), "normal"),  # i18n: the Live latency setting's choice
+            (tr("Stable"), "stable"),  # i18n: the Live latency setting's choice
         ):
             self.live_latency_combo.addItem(label, value)
         self.live_latency_combo.setCurrentIndex(
             max(0, self.live_latency_combo.findData(self.config_manager.live_latency))
         )
         self.live_latency_combo.setToolTip(
-            "Auto adjusts each channel: it starts at Normal and plays further behind on "
-            "channels that run dry, coming back over time.\n"
-            "Low starts live channels sooner; Stable buffers more for unreliable streams."
+            tr(
+                "Auto adjusts each channel: it starts at Normal and plays further behind on "
+                "channels that run dry, coming back over time.\n"
+                "Low starts live channels sooner; Stable buffers more for unreliable streams."
+            )
         )
-        self.settings_layout.addRow("Live latency", self.live_latency_combo)
+        # i18n: a setting: how far behind live a channel plays
+        self.settings_layout.addRow(tr("Live latency"), self.live_latency_combo)
 
-        self.hardware_decoding_checkbox = QCheckBox("Hardware video decoding", self.settings_tab)
+        self.hardware_decoding_checkbox = QCheckBox(
+            tr("Hardware video decoding"), self.settings_tab
+        )
         self.hardware_decoding_checkbox.setToolTip(
-            "Decode video with your graphics chip instead of the processor: it uses less CPU."
-            " A channel whose picture freezes while its sound plays switches to software"
-            " decoding by itself, for a day. Applies after QiTV restarts."
+            tr(
+                "Decode video with your graphics chip instead of the processor: it uses less CPU."
+                " A channel whose picture freezes while its sound plays switches to software"
+                " decoding by itself, for a day. Applies after QiTV restarts."
+            )
         )
         self.hardware_decoding_checkbox.setChecked(self.config_manager.hardware_decoding)
         self.settings_layout.addRow(self.hardware_decoding_checkbox)
 
         self.mouse_wheel_combo = QComboBox(self.settings_tab)
-        for label, value in (("Change channel", "channel"), ("Volume", "volume")):
+        for label, value in (
+            (tr("Change channel"), "channel"),  # i18n: the Mouse wheel setting's choice
+            (tr("Volume"), "volume"),  # i18n: the Mouse wheel setting's choice
+        ):
             self.mouse_wheel_combo.addItem(label, value)
         self.mouse_wheel_combo.setCurrentIndex(
             max(0, self.mouse_wheel_combo.findData(self.config_manager.mouse_wheel_action))
         )
-        self.mouse_wheel_combo.setToolTip("Ctrl/⌘ + wheel always changes the volume.")
-        self.settings_layout.addRow("Mouse wheel", self.mouse_wheel_combo)
+        self.mouse_wheel_combo.setToolTip(tr("Ctrl/⌘ + wheel always changes the volume."))
+        # i18n: a setting: what the mouse wheel does over the picture
+        self.settings_layout.addRow(tr("Mouse wheel"), self.mouse_wheel_combo)
 
         self.start_last_channel_checkbox = QCheckBox(
-            "Start with the last channel", self.settings_tab
+            tr("Start with the last channel"), self.settings_tab
         )
         self.start_last_channel_checkbox.setChecked(self.config_manager.start_with_last_channel)
         self.settings_layout.addRow(self.start_last_channel_checkbox)
 
         # External players as a mode: every channel opens there instead of the TV screen.
-        self.play_in_vlc_checkbox = QCheckBox("Always play in VLC", self.settings_tab)
-        self.play_in_mpv_checkbox = QCheckBox("Always play in MPV", self.settings_tab)
+        self.play_in_vlc_checkbox = QCheckBox(tr("Always play in VLC"), self.settings_tab)
+        self.play_in_mpv_checkbox = QCheckBox(tr("Always play in MPV"), self.settings_tab)
         self.play_in_vlc_checkbox.setChecked(self.config_manager.play_in_vlc)
         self.play_in_mpv_checkbox.setChecked(
             self.config_manager.play_in_mpv and not self.config_manager.play_in_vlc
@@ -419,29 +469,36 @@ class OptionsDialog(QDialog):
             # One player at most; both off plays on the TV screen.
             box.toggled.connect(lambda on, other=other: other.setChecked(False) if on else None)
             self.settings_layout.addRow(box)
-        self.external_players_hint = QLabel(EXTERNAL_PLAYERS_HINT, self.settings_tab)
+        self.external_players_hint = QLabel(translate(EXTERNAL_PLAYERS_HINT), self.settings_tab)
         self.external_players_hint.setWordWrap(True)
         self.settings_layout.addRow(self.external_players_hint)
 
         # Auto-play settings section
-        self.autoplay_section_label = QLabel("<b>Auto-Play Settings</b>", self.settings_tab)
+        self.autoplay_section_label = QLabel(
+            "<b>" + tr("Auto-Play Settings") + "</b>", self.settings_tab
+        )
         self.settings_layout.addRow(self.autoplay_section_label)
 
         self.auto_play_episodes_checkbox = QCheckBox(
-            "Auto-play next episode (10s countdown)", self.settings_tab
+            tr("Auto-play next episode (10s countdown)"), self.settings_tab
         )
         self.auto_play_episodes_checkbox.setToolTip(
-            "Automatically play the next episode when one ends. "
-            "Shows a 10-second countdown to cancel."
+            tr(
+                "Automatically play the next episode when one ends. "
+                "Shows a 10-second countdown to cancel."
+            )
         )
         self.auto_play_episodes_checkbox.setChecked(self.config_manager.auto_play_episodes)
         self.settings_layout.addRow(self.auto_play_episodes_checkbox)
 
         self.auto_play_movies_checkbox = QCheckBox(
-            "Suggest next movie from category (10s countdown)", self.settings_tab
+            tr("Suggest next movie from category (10s countdown)"), self.settings_tab
         )
         self.auto_play_movies_checkbox.setToolTip(
-            "After a movie ends, suggest another from the same category. Shows a 10-second countdown."
+            tr(
+                "After a movie ends, suggest another from the same category. Shows a 10-second"
+                " countdown."
+            )
         )
         self.auto_play_movies_checkbox.setChecked(self.config_manager.auto_play_movies)
         self.settings_layout.addRow(self.auto_play_movies_checkbox)
@@ -450,36 +507,39 @@ class OptionsDialog(QDialog):
         """OpenSubtitles: the API key and an optional sign-in, masked (never logged)."""
         tab = QWidget(self)
         tab.setObjectName("subtitlesSettings")
-        self.options_tab.addTab(tab, "Subtitles")
+        self.options_tab.addTab(tab, tr("Subtitles"))  # i18n: a tab of the Settings window
         layout = QFormLayout(tab)
-        intro = QLabel(OPENSUBTITLES_HINT, tab)
+        intro = QLabel(opensubtitles_hint(), tab)
         intro.setWordWrap(True)
         intro.setOpenExternalLinks(True)
         intro.setTextFormat(Qt.TextFormat.RichText)
         layout.addRow(intro)
         built_in = bool(built_in_key())
         if built_in:
-            note = QLabel(OPENSUBTITLES_BUILT_IN_HINT, tab)
+            note = QLabel(translate(OPENSUBTITLES_BUILT_IN_HINT), tab)
             note.setWordWrap(True)
             layout.addRow(note)
         self.opensubtitles_key_input = QLineEdit(tab)
         self.opensubtitles_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.opensubtitles_key_input.setPlaceholderText(
-            "Optional: your own key" if built_in else "Paste your API key"
-        )
+        if built_in:
+            placeholder = tr("Optional: your own key")  # i18n: the API key field's placeholder
+        else:
+            placeholder = tr("Paste your API key")  # i18n: the API key field's placeholder
+        self.opensubtitles_key_input.setPlaceholderText(placeholder)
         self.opensubtitles_key_input.setText(self.config_manager.opensubtitles_api_key)
-        layout.addRow("API key", self.opensubtitles_key_input)
-        sign_in = QLabel(OPENSUBTITLES_SIGN_IN_HINT, tab)
+        layout.addRow(tr("API key"), self.opensubtitles_key_input)
+        sign_in = QLabel(opensubtitles_sign_in_hint(), tab)
         sign_in.setWordWrap(True)
         layout.addRow(sign_in)
         self.opensubtitles_username_input = QLineEdit(tab)
         self.opensubtitles_username_input.setText(self.config_manager.opensubtitles_username)
-        layout.addRow("Username", self.opensubtitles_username_input)
+        layout.addRow(tr("Username"), self.opensubtitles_username_input)
         self.opensubtitles_password_input = QLineEdit(tab)
         self.opensubtitles_password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.opensubtitles_password_input.setText(self.config_manager.opensubtitles_password)
-        layout.addRow("Password", self.opensubtitles_password_input)
-        self.opensubtitles_sign_out_button = QPushButton("Sign out", tab)
+        layout.addRow(tr("Password"), self.opensubtitles_password_input)
+        # i18n: a button: forget the OpenSubtitles username and password
+        self.opensubtitles_sign_out_button = QPushButton(tr("Sign out"), tab)
         self.opensubtitles_sign_out_button.clicked.connect(self.sign_out_of_opensubtitles)
         layout.addRow(self.opensubtitles_sign_out_button)
 
@@ -491,12 +551,14 @@ class OptionsDialog(QDialog):
     def create_timeshift_ui(self):
         tab = QWidget(self)
         tab.setObjectName("timeshiftSettings")
-        self.options_tab.addTab(tab, "Time-shift")
+        self.options_tab.addTab(tab, tr("Time-shift"))  # i18n: a tab of the Settings window
         layout = QVBoxLayout(tab)
         self.timeshift_checkbox = QCheckBox(
-            "Use disk for a longer time-shift buffer.\n"
-            "QiTV deletes the oldest data automatically and cleans up when you stop, "
-            "change channel or quit.",
+            tr(
+                "Use disk for a longer time-shift buffer.\n"
+                "QiTV deletes the oldest data automatically and cleans up when you stop, "
+                "change channel or quit."
+            ),
             tab,
         )
         self.timeshift_checkbox.setObjectName("timeshiftEnabled")
@@ -504,24 +566,25 @@ class OptionsDialog(QDialog):
         layout.addWidget(self.timeshift_checkbox)
 
         # Every stream not on the disk ring: without disk, and the small picture always.
-        memory = QGroupBox("Memory per stream", tab)
+        memory = QGroupBox(tr("Memory per stream"), tab)  # i18n: a group's title
         memory_layout = QFormLayout(memory)
         self.timeshift_ram_combo = QComboBox(memory)
         self.timeshift_ram_combo.setObjectName("timeshiftMemoryPerStream")
-        self.timeshift_ram_combo.setAccessibleName("Time-shift memory per stream")
+        self.timeshift_ram_combo.setAccessibleName(tr("Time-shift memory per stream"))
         for mib in ConfigManager.TIMESHIFT_RAM_CHOICES:
-            self.timeshift_ram_combo.addItem(f"{mib} MiB", mib)
+            self.timeshift_ram_combo.addItem(_mib_text(mib), mib)
         self.timeshift_ram_combo.setCurrentIndex(
             self.timeshift_ram_combo.findData(self.config_manager.timeshift_ram_mib)
         )
         self.timeshift_ram_estimate = QLabel(memory)
-        memory_layout.addRow("Memory per stream:", self.timeshift_ram_combo)
-        memory_layout.addRow("Estimated rewind:", self.timeshift_ram_estimate)
+        memory_layout.addRow(tr("Memory per stream:"), self.timeshift_ram_combo)
+        # i18n: how far back the time-shift buffer reaches
+        memory_layout.addRow(tr("Estimated rewind:"), self.timeshift_ram_estimate)
         self.timeshift_ram_combo.currentIndexChanged.connect(self._update_ram_estimate)
         self._update_ram_estimate()
         layout.addWidget(memory)
 
-        cache = QGroupBox("Disk cache", tab)
+        cache = QGroupBox(tr("Disk cache"), tab)  # i18n: a group's title
         cache_layout = QVBoxLayout(cache)
         self.timeshift_size_label = QLabel(cache)
         self.timeshift_size_label.setObjectName("timeshiftCacheSizeLabel")
@@ -529,7 +592,7 @@ class OptionsDialog(QDialog):
 
         self.timeshift_size_slider = QSlider(Qt.Orientation.Horizontal, cache)
         self.timeshift_size_slider.setObjectName("timeshiftCacheSize")
-        self.timeshift_size_slider.setAccessibleName("Time-shift disk cache size")
+        self.timeshift_size_slider.setAccessibleName(tr("Time-shift disk cache size"))
         self.timeshift_size_slider.setRange(256, 16384)
         self.timeshift_size_slider.setSingleStep(256)
         self.timeshift_size_slider.setPageStep(1024)
@@ -538,22 +601,25 @@ class OptionsDialog(QDialog):
         self.timeshift_size_slider.setValue(self.config_manager.timeshift_max_mib)
         cache_layout.addWidget(self.timeshift_size_slider)
         scale = QHBoxLayout()
-        scale.addWidget(QLabel("256 MiB", cache))
+        scale.addWidget(QLabel(_mib_text(256), cache))
         scale.addStretch()
-        scale.addWidget(QLabel("16 GiB", cache))
+        scale.addWidget(QLabel(_gib_text("16"), cache))
         cache_layout.addLayout(scale)
 
-        cache_layout.addWidget(QLabel("<b>Estimated rewind</b>", cache))
+        cache_layout.addWidget(QLabel("<b>" + tr("Estimated rewind") + "</b>", cache))
         estimates = QFormLayout()
         self.timeshift_1080p_estimate = QLabel(cache)
         self.timeshift_4k_estimate = QLabel(cache)
-        estimates.addRow("1080p at 8 Mb/s:", self.timeshift_1080p_estimate)
-        estimates.addRow("4K at 25 Mb/s:", self.timeshift_4k_estimate)
+        # i18n: an example video stream: its resolution and bitrate (megabits per second)
+        estimates.addRow(tr("1080p at 8 Mb/s:"), self.timeshift_1080p_estimate)
+        estimates.addRow(tr("4K at 25 Mb/s:"), self.timeshift_4k_estimate)
         cache_layout.addLayout(estimates)
         assumptions = QLabel(
-            "These are example bitrates, not quality settings. Actual rewind time "
-            "depends on the channel's bitrate, codec and audio tracks. "
-            "Video and audio are not re-encoded.",
+            tr(
+                "These are example bitrates, not quality settings. Actual rewind time "
+                "depends on the channel's bitrate, codec and audio tracks. "
+                "Video and audio are not re-encoded."
+            ),
             cache,
         )
         assumptions.setWordWrap(True)
@@ -565,12 +631,14 @@ class OptionsDialog(QDialog):
         layout.addWidget(cache)
 
         explanation = QLabel(
-            "Without disk, each picture keeps its memory per stream (picture-in-picture's "
-            "small picture always does).\n\n"
-            "This is temporary playback history, not a permanent recording. The cache size "
-            "is the only history limit: when it fills, the oldest content is replaced. "
-            "Recording continues while paused or rewound.\n\n"
-            "After Save, enabling and size changes apply on the next channel you open.",
+            tr(
+                "Without disk, each picture keeps its memory per stream (picture-in-picture's "
+                "small picture always does).\n\n"
+                "This is temporary playback history, not a permanent recording. The cache size "
+                "is the only history limit: when it fills, the oldest content is replaced. "
+                "Recording continues while paused or rewound.\n\n"
+                "After Save, enabling and size changes apply on the next channel you open."
+            ),
             tab,
         )
         explanation.setWordWrap(True)
@@ -582,50 +650,62 @@ class OptionsDialog(QDialog):
             self.timeshift_ram_combo.currentData() or ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB
         )
         minutes = max(1, round(mib * 1024 * 1024 * 8 / (8 * 1_000_000 * 60)))
-        self.timeshift_ram_estimate.setText(f"≈ {minutes} min of HD at 8 Mb/s")
+        # i18n: how far back the memory reaches: n minutes (abbreviated) of HD video at 8 Mb/s
+        self.timeshift_ram_estimate.setText(tr("≈ {n} min of HD at 8 Mb/s", n=minutes))
 
     def _update_timeshift_estimates(self, mib):
-        size = f"{mib} MiB" if mib < 1024 else f"{mib / 1024:.2f}".rstrip("0").rstrip(".") + " GiB"
-        self.timeshift_size_label.setText(f"<b>Cache size: {size}</b>")
-        self.timeshift_size_label.setToolTip(f"{mib:,} MiB of disk space, not RAM.")
+        if mib < 1024:
+            size = _mib_text(mib)
+        else:
+            size = _gib_text(i18n.decimal(f"{mib / 1024:.2f}".rstrip("0").rstrip(".")))
+        # i18n: size as "512 MiB" or "1.5 GiB"
+        self.timeshift_size_label.setText("<b>" + tr("Cache size: {size}", size=size) + "</b>")
+        self.timeshift_size_label.setToolTip(
+            # i18n: size is a number of mebibytes, as "4,096"
+            tr("{size} MiB of disk space, not RAM.", size=i18n.number(mib))
+        )
         for bitrate, label in (
             (8, self.timeshift_1080p_estimate),
             (25, self.timeshift_4k_estimate),
         ):
             minutes = max(1, round(mib * 1024 * 1024 * 8 / (bitrate * 1_000_000 * 60)))
             hours, remainder = divmod(minutes, 60)
-            duration = f"{hours} h {remainder} min" if hours else f"{minutes} min"
-            label.setText(f"About {duration}")
+            if hours:
+                # i18n: an estimated rewind: h hours and m minutes (abbreviated)
+                label.setText(tr("About {h} h {m} min", h=hours, m=remainder))
+            else:
+                # i18n: an estimated rewind: m minutes (abbreviated)
+                label.setText(tr("About {m} min", m=minutes))
 
     def create_providers_ui(self):
         self.providers_tab = QWidget(self)
-        self.options_tab.addTab(self.providers_tab, "Providers")
+        self.options_tab.addTab(self.providers_tab, tr("Providers"))  # i18n: a Settings tab
         self.providers_layout = QFormLayout(self.providers_tab)
 
-        self.provider_label = QLabel("Select Provider:", self.providers_tab)
+        self.provider_label = QLabel(tr("Select Provider:"), self.providers_tab)
         self.provider_combo = QComboBox(self.providers_tab)
         self.provider_combo.currentIndexChanged.connect(self.load_provider_settings)
         self.providers_layout.addRow(self.provider_label, self.provider_combo)
 
-        self.add_provider_button = QPushButton("Add Provider", self.providers_tab)
+        self.add_provider_button = QPushButton(tr("Add Provider"), self.providers_tab)
         self.add_provider_button.clicked.connect(self.add_new_provider)
         self.providers_layout.addWidget(self.add_provider_button)
 
-        self.remove_provider_button = QPushButton("Remove Provider", self.providers_tab)
+        self.remove_provider_button = QPushButton(tr("Remove Provider"), self.providers_tab)
         self.remove_provider_button.clicked.connect(self.remove_provider)
         self.providers_layout.addWidget(self.remove_provider_button)
 
-        self.name_label = QLabel("Name:", self.providers_tab)
+        self.name_label = QLabel(tr("Name:"), self.providers_tab)  # i18n: a provider's name
         self.name_input = QLineEdit(self.providers_tab)
         self.providers_layout.addRow(self.name_label, self.name_input)
 
         self.create_stream_type_ui()
 
-        self.url_label = QLabel("Server URL:", self.providers_tab)
+        self.url_label = QLabel(tr("Server URL:"), self.providers_tab)
         self.url_input = QLineEdit(self.providers_tab)
         # One link from the provider fills the form: this button, or a link pasted here.
-        self.paste_link_button = QPushButton(PASTE_LINK_TEXT, self.providers_tab)
-        self.paste_link_button.setToolTip(PASTE_LINK_TIP)
+        self.paste_link_button = QPushButton(translate(PASTE_LINK_TEXT), self.providers_tab)
+        self.paste_link_button.setToolTip(translate(PASTE_LINK_TIP))
         self.paste_link_button.clicked.connect(self.paste_link)
         url_row = QHBoxLayout()
         url_row.setContentsMargins(0, 0, 0, 0)
@@ -636,65 +716,72 @@ class OptionsDialog(QDialog):
         self.url_input.textEdited.connect(self._on_url_edited)
         self.url_input.textChanged.connect(self._remember_url)
 
-        self.mac_label = QLabel("MAC Address:", self.providers_tab)
+        self.mac_label = QLabel(tr("MAC Address:"), self.providers_tab)
         self.mac_input = QLineEdit(self.providers_tab)
         self.providers_layout.addRow(self.mac_label, self.mac_input)
 
-        self.serial_label = QLabel("Serial Number (Optional):", self.providers_tab)
+        self.serial_label = QLabel(tr("Serial Number (Optional):"), self.providers_tab)
         self.serial_input = QLineEdit(self.providers_tab)
-        self.serial_input.setPlaceholderText("Leave empty if not required")
+        # i18n: an optional field's placeholder
+        self.serial_input.setPlaceholderText(tr("Leave empty if not required"))
         self.providers_layout.addRow(self.serial_label, self.serial_input)
 
-        self.device_id_label = QLabel("Device ID (Optional):", self.providers_tab)
+        self.device_id_label = QLabel(tr("Device ID (Optional):"), self.providers_tab)
         self.device_id_input = QLineEdit(self.providers_tab)
-        self.device_id_input.setPlaceholderText("Leave empty if not required")
+        self.device_id_input.setPlaceholderText(tr("Leave empty if not required"))
         self.providers_layout.addRow(self.device_id_label, self.device_id_input)
 
-        self.file_button = QPushButton("Load File", self.providers_tab)
+        # i18n: a button: choose a playlist file (verb)
+        self.file_button = QPushButton(tr("Load File"), self.providers_tab)
         self.file_button.clicked.connect(self.load_file)
         self.providers_layout.addWidget(self.file_button)
 
-        self.username_label = QLabel("Username:", self.providers_tab)
+        self.username_label = QLabel(tr("Username:"), self.providers_tab)
         self.username_input = QLineEdit(self.providers_tab)
         self.providers_layout.addRow(self.username_label, self.username_input)
 
-        self.password_label = QLabel("Password:", self.providers_tab)
+        self.password_label = QLabel(tr("Password:"), self.providers_tab)
         self.password_input = QLineEdit(self.providers_tab)
         self.providers_layout.addRow(self.password_label, self.password_input)
 
         # Per-provider network preferences
         self.provider_prefer_https_checkbox = QCheckBox(
-            "Prefer HTTPS for this provider", self.providers_tab
+            tr("Prefer HTTPS for this provider"), self.providers_tab
         )
         self.provider_ssl_verify_checkbox = QCheckBox(
-            "Verify SSL certificates for this provider", self.providers_tab
+            tr("Verify SSL certificates for this provider"), self.providers_tab
         )
         self.providers_layout.addRow(self.provider_prefer_https_checkbox)
         self.providers_layout.addRow(self.provider_ssl_verify_checkbox)
 
-        self.max_streams_label = QLabel("Max simultaneous streams:", self.providers_tab)
+        self.max_streams_label = QLabel(tr("Max simultaneous streams:"), self.providers_tab)
         self.max_streams_input = QSpinBox(self.providers_tab)
         self.max_streams_input.setRange(0, 10)
-        self.max_streams_input.setSpecialValueText("Automatic")
+        # i18n: the Max simultaneous streams setting's value for "as the provider reports"
+        self.max_streams_input.setSpecialValueText(tr("Automatic"))
         self.max_streams_input.setToolTip(
-            "How many streams this provider allows at once. Automatic uses what the provider "
-            "reports."
+            tr(
+                "How many streams this provider allows at once. Automatic uses what the provider "
+                "reports."
+            )
         )
         self.providers_layout.addRow(self.max_streams_label, self.max_streams_input)
 
         # 2.2: a guide whose times are off by whole hours moves by this (an optional key).
-        self.guide_offset_label = QLabel("Guide time offset:", self.providers_tab)
+        self.guide_offset_label = QLabel(tr("Guide time offset:"), self.providers_tab)
         self.guide_offset_combo = QComboBox(self.providers_tab)
         for minutes in range(-GUIDE_OFFSET_MAX, GUIDE_OFFSET_MAX + 1, GUIDE_OFFSET_STEP):
             self.guide_offset_combo.addItem(offset_text(minutes), minutes)
         self.guide_offset_combo.setCurrentIndex(self.guide_offset_combo.findData(0))
-        self.guide_offset_combo.setToolTip(GUIDE_OFFSET_TIP)
+        self.guide_offset_combo.setToolTip(translate(GUIDE_OFFSET_TIP))
         self.providers_layout.addRow(self.guide_offset_label, self.guide_offset_combo)
 
         self.verify_apply_group = QWidget(self.providers_tab)
-        self.verify_button = QPushButton("Verify Provider", self.verify_apply_group)
+        # i18n: a button: check that the provider answers (verb)
+        self.verify_button = QPushButton(tr("Verify Provider"), self.verify_apply_group)
         self.verify_button.clicked.connect(self.verify_provider)
-        self.apply_button = QPushButton("Apply Change", self.verify_apply_group)
+        # i18n: a button: keep this provider's edits (verb)
+        self.apply_button = QPushButton(tr("Apply Change"), self.verify_apply_group)
         self.apply_button.clicked.connect(self.apply_provider)
         verify_apply_layout = QHBoxLayout(self.verify_apply_group)
         verify_apply_layout.addWidget(self.verify_button)
@@ -704,11 +791,11 @@ class OptionsDialog(QDialog):
         self.providers_layout.addWidget(self.verify_result)
 
     def create_stream_type_ui(self):
-        self.type_label = QLabel("Stream Type:", self)
+        self.type_label = QLabel(tr("Stream Type:"), self)  # i18n: a provider's kind
         self.type_group = QButtonGroup(self)
         self.type_STB = QRadioButton("STB", self)
-        self.type_M3UPLAYLIST = QRadioButton("M3U Playlist", self)
-        self.type_M3USTREAM = QRadioButton("M3U Stream", self)
+        self.type_M3UPLAYLIST = QRadioButton(tr("M3U Playlist"), self)
+        self.type_M3USTREAM = QRadioButton(tr("M3U Stream"), self)
         self.type_XTREAM = QRadioButton("Xtream", self)
         self.type_group.addButton(self.type_STB)
         self.type_group.addButton(self.type_M3UPLAYLIST)
@@ -733,24 +820,33 @@ class OptionsDialog(QDialog):
         self.epg_layout = QFormLayout(self.epg_tab)
 
         # Add EPG settings
-        self.epg_source_label = QLabel("EPG Source")
+        self.epg_source_label = QLabel(tr("EPG Source"))  # i18n: where the guide comes from
         self.epg_source_combo = QComboBox()
-        self.epg_source_combo.addItems(["No Source", "STB", "Local File", "URL"])
-        self.epg_source_combo.setCurrentText(self.config_manager.epg_source)
+        # Shown in the language, saved as the config's value (the item's data).
+        for source, label in (
+            ("No Source", tr("No Source")),  # i18n: the EPG Source setting's choice: no guide
+            ("STB", "STB"),
+            ("Local File", tr("Local File")),  # i18n: the EPG Source setting's choice
+            ("URL", tr("URL")),  # i18n: the EPG Source setting's choice: a web address
+        ):
+            self.epg_source_combo.addItem(label, source)
+        source_index = self.epg_source_combo.findData(self.config_manager.epg_source)
+        if source_index >= 0:
+            self.epg_source_combo.setCurrentIndex(source_index)
         self.epg_source_combo.currentIndexChanged.connect(self.on_epg_source_changed)
         self.epg_layout.addRow(self.epg_source_label)
         self.epg_layout.addRow(self.epg_source_combo)
 
-        self.epg_url_label = QLabel("EPG URL")
+        self.epg_url_label = QLabel(tr("EPG URL"))
         self.epg_url_input = QLineEdit()
         self.epg_url_input.setText(self.config_manager.epg_url)
         self.epg_layout.addRow(self.epg_url_label)
         self.epg_layout.addRow(self.epg_url_input)
 
-        self.epg_file_label = QLabel("EPG File")
+        self.epg_file_label = QLabel(tr("EPG File"))
         self.epg_file_input = QLineEdit()
         self.epg_file_input.setText(self.config_manager.epg_file)
-        self.epg_file_button = QPushButton("Browse")
+        self.epg_file_button = QPushButton(tr("Browse"))  # i18n: a button: choose a file (verb)
         self.epg_file_button.clicked.connect(self.browse_epg_file)
         self.epg_layout.addRow(self.epg_file_label)
         self.epg_layout.addRow(self.epg_file_input)
@@ -758,7 +854,8 @@ class OptionsDialog(QDialog):
 
         # Add expiring EPG settings
         self.epg_expiration_layout = QHBoxLayout()
-        self.epg_expiration_label = QLabel("Check update every")
+        # i18n: before a number and a unit: "Check update every [2] [Hours]"
+        self.epg_expiration_label = QLabel(tr("Check update every"))
         self.epg_expiration_spinner = QSpinBox()
         self.epg_expiration_spinner.setValue(self.config_manager.epg_expiration_value)
         self.epg_expiration_spinner.setMinimum(1)
@@ -769,8 +866,11 @@ class OptionsDialog(QDialog):
         units = list(ConfigManager.EPG_EXPIRATION_CHOICES)
         if unit not in units and unit in ConfigManager.EPG_EXPIRATION_SECONDS:
             units.insert(0, unit)  # "Minutes" from an older version stays as it was
-        self.epg_expiration_combo.addItems(units)
-        self.epg_expiration_combo.setCurrentText(unit)
+        for choice in units:  # shown in the language, saved as the config's value
+            self.epg_expiration_combo.addItem(epg_unit_label(choice), choice)
+        unit_index = self.epg_expiration_combo.findData(unit)
+        if unit_index >= 0:
+            self.epg_expiration_combo.setCurrentIndex(unit_index)
         self.epg_expiration_layout.addWidget(self.epg_expiration_label)
         self.epg_expiration_layout.addWidget(self.epg_expiration_spinner)
         self.epg_expiration_layout.addWidget(self.epg_expiration_combo)
@@ -779,7 +879,7 @@ class OptionsDialog(QDialog):
         # Create a vertical layout for the settings, XMLTV mapping table, and buttons
         self.xmltv_group_widget = QWidget()
         self.xmltv_group_layout = QVBoxLayout(self.xmltv_group_widget)
-        self.xmltv_group_label = QLabel("XMLTV Mapping")
+        self.xmltv_group_label = QLabel(tr("XMLTV Mapping"))
         self.xmltv_group_layout.addWidget(self.xmltv_group_label)
 
         # XMLTV mapping table
@@ -788,7 +888,8 @@ class OptionsDialog(QDialog):
         self.xmltv_mapping_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.xmltv_mapping_table.setColumnCount(3)
         self.xmltv_mapping_table.setHorizontalHeaderLabels(
-            ["Channel Name", "Logo URL", "Channel IDs"]
+            # i18n: the XMLTV mapping table's columns
+            [tr("Channel Name"), tr("Logo URL"), tr("Channel IDs")]
         )
         self.xmltv_mapping_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents
@@ -802,23 +903,24 @@ class OptionsDialog(QDialog):
 
         # Create a horizontal layout for the buttons
         self.xmltv_buttons_layout = QHBoxLayout()
-        self.add_xmltv_mapping_button = QPushButton("Add")
+        # i18n: the XMLTV mapping table's buttons (verbs)
+        self.add_xmltv_mapping_button = QPushButton(tr("Add"))
         self.add_xmltv_mapping_button.clicked.connect(self.add_xmltv_mapping)
         self.xmltv_buttons_layout.addWidget(self.add_xmltv_mapping_button)
 
-        self.edit_xmltv_mapping_button = QPushButton("Edit")
+        self.edit_xmltv_mapping_button = QPushButton(tr("Edit"))  # i18n: a button (verb)
         self.edit_xmltv_mapping_button.clicked.connect(self.edit_xmltv_mapping)
         self.xmltv_buttons_layout.addWidget(self.edit_xmltv_mapping_button)
 
-        self.delete_xmltv_mapping_button = QPushButton("Delete")
+        self.delete_xmltv_mapping_button = QPushButton(tr("Delete"))  # i18n: a button (verb)
         self.delete_xmltv_mapping_button.clicked.connect(self.delete_xmltv_mapping)
         self.xmltv_buttons_layout.addWidget(self.delete_xmltv_mapping_button)
 
-        self.import_xmltv_mapping_button = QPushButton("Import")
+        self.import_xmltv_mapping_button = QPushButton(tr("Import"))  # i18n: a button (verb)
         self.import_xmltv_mapping_button.clicked.connect(self.import_xmltv_mapping)
         self.xmltv_buttons_layout.addWidget(self.import_xmltv_mapping_button)
 
-        self.export_xmltv_mapping_button = QPushButton("Export")
+        self.export_xmltv_mapping_button = QPushButton(tr("Export"))  # i18n: a button (verb)
         self.export_xmltv_mapping_button.clicked.connect(self.export_xmltv_mapping)
         self.xmltv_buttons_layout.addWidget(self.export_xmltv_mapping_button)
 
@@ -828,7 +930,7 @@ class OptionsDialog(QDialog):
         self.epg_layout.addRow(self.xmltv_group_widget)
 
         # EPG list window (hours; 0 = unlimited)
-        self.epg_list_window_label = QLabel("EPG List Window (hours; 0 = unlimited)")
+        self.epg_list_window_label = QLabel(tr("EPG List Window (hours; 0 = unlimited)"))
         self.epg_list_window_spinner = QSpinBox()
         self.epg_list_window_spinner.setMinimum(0)
         self.epg_list_window_spinner.setMaximum(168)
@@ -839,7 +941,7 @@ class OptionsDialog(QDialog):
         self.epg_layout.addRow(self.epg_list_window_label, self.epg_list_window_spinner)
 
         # STB EPG fetch period (server period in hours)
-        self.epg_stb_period_label = QLabel("STB EPG Server Fetch Period (hours)")
+        self.epg_stb_period_label = QLabel(tr("STB EPG Server Fetch Period (hours)"))
         self.epg_stb_period_spinner = QSpinBox()
         self.epg_stb_period_spinner.setMinimum(1)
         self.epg_stb_period_spinner.setMaximum(168)
@@ -923,7 +1025,7 @@ class OptionsDialog(QDialog):
         self.update_inputs()
 
     def on_epg_source_changed(self):
-        epg_source = self.epg_source_combo.currentText()
+        epg_source = self.epg_source_combo.currentData()  # the config's value, never the label
 
         # Hide all EPG-related widget groups by default
         self._epg_url_group.hide()
@@ -1062,8 +1164,10 @@ class OptionsDialog(QDialog):
         )
         self.config_manager.opensubtitles_password = self.opensubtitles_password_input.text()
 
-        if self.epg_source_combo.currentText() != self.config_manager.epg_source:
-            self.config_manager.epg_source = self.epg_source_combo.currentText()
+        # The combos' data: the values as the config has always had them ("STB", "Hours").
+        epg_source = self.epg_source_combo.currentData()
+        if epg_source != self.config_manager.epg_source:
+            self.config_manager.epg_source = epg_source
             self.epg_settings_modified = True
         if self.config_manager.epg_url != self.epg_url_input.text():
             self.config_manager.epg_url = self.epg_url_input.text()
@@ -1074,7 +1178,7 @@ class OptionsDialog(QDialog):
         if self.config_manager.epg_expiration_value != self.epg_expiration_spinner.value():
             self.config_manager.epg_expiration_value = self.epg_expiration_spinner.value()
         # Always: an old "Monthes" reads as "Months" and is saved so.
-        self.config_manager.epg_expiration_unit = self.epg_expiration_combo.currentText()
+        self.config_manager.epg_expiration_unit = self.epg_expiration_combo.currentData()
 
         self.config_manager.selected_provider_name = self.selected_provider_name
 
@@ -1121,7 +1225,7 @@ class OptionsDialog(QDialog):
         """Paste link: the clipboard's provider link fills the form (it is never logged)."""
         link = parse_provider_link(QGuiApplication.clipboard().text())
         if link is None:
-            self.verify_result.setText(NO_LINK_TEXT)
+            self.verify_result.setText(translate(NO_LINK_TEXT))
             self.verify_result.setStyleSheet("color: red;")
             return
         self.fill_from_link(link)
@@ -1162,8 +1266,21 @@ class OptionsDialog(QDialog):
         if not self.name_input.text().strip():
             self.name_input.setText(link.name)
         mac_missing = link.type == provider_link.STB and not self.mac_input.text().strip()
-        step = "Add the portal's MAC address," if mac_missing else "Check the details,"
-        self.verify_result.setText(FILLED_TEXT.format(kind=LINK_KINDS[link.type], next=step))
+        kind = translate(LINK_KINDS[link.type])
+        if mac_missing:
+            text = tr(
+                # i18n: kind is the link's kind: Xtream, M3U playlist or STB portal
+                "Filled in from the link ({kind}). Add the portal's MAC address, then press"
+                " Verify Provider.",
+                kind=kind,
+            )
+        else:
+            text = tr(
+                # i18n: kind is the link's kind: Xtream, M3U playlist or STB portal
+                "Filled in from the link ({kind}). Check the details, then press Verify Provider.",
+                kind=kind,
+            )
+        self.verify_result.setText(text)
         self.verify_result.setStyleSheet("")
 
     def load_file(self):
@@ -1176,7 +1293,7 @@ class OptionsDialog(QDialog):
         provider = self._verification_provider()
         self._verification_request += 1
         request_id = self._verification_request
-        self.verify_result.setText("Verifying...")
+        self.verify_result.setText(tr("Verifying..."))
         self.verify_result.setStyleSheet("")
         self.verify_button.setEnabled(False)
         thread = QThread()
@@ -1212,12 +1329,21 @@ class OptionsDialog(QDialog):
         if provider != self._verification_provider():
             self.verify_result.clear()
             return
+        # `why` is the account check's reason, already in the language.
         if verified:
             self._refresh_provider_ids.add(id(self.edited_provider))
-            text = f"{VERIFIED_TEXT} Note: {why}." if why else VERIFIED_TEXT
+            if why:
+                # i18n: why is a warning, as "The portal says your subscription ended on 3 Oct 2026"
+                text = tr("Provider verified successfully. Note: {why}.", why=why)
+            else:
+                text = tr("Provider verified successfully.")
             color = WARNING_COLOR if why else "green"
         else:
-            text = f"{VERIFY_FAILED_TEXT}: {why}." if why else f"{VERIFY_FAILED_TEXT}."
+            if why:
+                # i18n: why is the reason, as "The username or password is wrong"
+                text = tr("Failed to verify provider: {why}.", why=why)
+            else:
+                text = tr("Failed to verify provider.")
             color = "red"
         self.verify_result.setText(text)
         self.verify_result.setStyleSheet(f"color: {color};")
@@ -1286,9 +1412,13 @@ class OptionsDialog(QDialog):
 
     def clear_image_cache(self):
         self.parent().image_manager.clear_cache()
-        self.cache_image_size_label = QLabel(
-            f"Max size of image cache (actual size: {self.get_cache_image_size():.2f} MB)",
-            self.settings_tab,
+        self.cache_image_size_label = QLabel(self._cache_image_size_text(), self.settings_tab)
+
+    def _cache_image_size_text(self):
+        return tr(
+            # i18n: size is in megabytes, as "12.34"
+            "Max size of image cache (actual size: {size} MB)",
+            size=i18n.decimal(f"{self.get_cache_image_size():.2f}"),
         )
 
     def get_cache_image_size(self):
@@ -1316,11 +1446,11 @@ class OptionsDialog(QDialog):
             if not channel_name or not channel_ids:
                 # Show an error message if the input is invalid
                 error_dialog = QDialog(self)
-                error_dialog.setWindowTitle("Error")
+                error_dialog.setWindowTitle(tr("Error"))  # i18n: a message window's title
                 error_layout = QVBoxLayout(error_dialog)
-                error_label = QLabel("Channel Name and Channel IDs are required.", error_dialog)
+                error_label = QLabel(tr("Channel Name and Channel IDs are required."), error_dialog)
                 error_layout.addWidget(error_label)
-                error_button = QPushButton("OK", error_dialog)
+                error_button = QPushButton(tr("OK"), error_dialog)
                 error_button.clicked.connect(error_dialog.accept)
                 error_layout.addWidget(error_button)
                 error_dialog.exec()
@@ -1362,11 +1492,11 @@ class OptionsDialog(QDialog):
             if not channel_name or not channel_ids:
                 # Show an error message if the input is invalid
                 error_dialog = QDialog(self)
-                error_dialog.setWindowTitle("Error")
+                error_dialog.setWindowTitle(tr("Error"))  # i18n: a message window's title
                 error_layout = QVBoxLayout(error_dialog)
-                error_label = QLabel("Channel Name and Channel IDs are required.", error_dialog)
+                error_label = QLabel(tr("Channel Name and Channel IDs are required."), error_dialog)
                 error_layout.addWidget(error_label)
-                error_button = QPushButton("OK", error_dialog)
+                error_button = QPushButton(tr("OK"), error_dialog)
                 error_button.clicked.connect(error_dialog.accept)
                 error_layout.addWidget(error_button)
                 error_dialog.exec()

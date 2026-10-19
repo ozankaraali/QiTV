@@ -29,6 +29,7 @@ from PySide6.QtCore import QObject, Signal
 
 from services import failure_reasons as reasons
 from services.failure_reasons import Reason
+from services.i18n import translate
 from services.jobs import JobRunner
 from services.lazy_import import lazy_module
 from services.provider_api import (
@@ -119,7 +120,7 @@ def check_stb(
     if by_status is not None and by_status.kind != reasons.NOT_FOUND:
         return by_status
     if handshake.failure == HANDSHAKE_REJECTED:
-        return Reason(reasons.DEVICE, reasons.DEVICE_MESSAGE)
+        return Reason(reasons.DEVICE, translate(reasons.DEVICE_MESSAGE))
     if by_status is not None:
         return by_status  # every path answered 404: the portal's address is wrong
     if handshake.failure == HANDSHAKE_UNREACHABLE:
@@ -212,7 +213,7 @@ def _check(
     if kind == "XTREAM":
         username, password = provider.get("username"), provider.get("password")
         if not username or not password:
-            return Reason(reasons.WRONG_LOGIN, reasons.WRONG_LOGIN_MESSAGE)
+            return Reason(reasons.WRONG_LOGIN, translate(reasons.WRONG_LOGIN_MESSAGE))
         return check_xtream(
             url, str(username), str(password), prefer_https=https, ssl_verify=verify, now=now
         )

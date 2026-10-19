@@ -15,11 +15,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from services.i18n import N_, translate
 from ui.keymap import SHORTCUT_TITLES, SHORTCUTS
 from ui.theme import PALETTE, RADIUS_CARD, qcolor
 
-TITLE = "Keyboard Shortcuts"
-HEADERS = ("Keys", "Action")
+TITLE = N_("Keyboard Shortcuts")  # i18n: the window's title (Help → Keyboard Shortcuts)
+# i18n: the columns of Help → Keyboard Shortcuts: the keys, and the action they do (noun)
+HEADERS = (N_("Keys"), N_("Action"))
 
 
 def key_label(keys: str) -> str:
@@ -35,21 +37,22 @@ def key_label(keys: str) -> str:
 
 
 def table_rows() -> list[tuple[str, str, bool]]:
-    """(keys, action, is_heading) in display order: each section's title, then its rows."""
+    """(keys, action, is_heading) in display order: each section's title, then its rows (the
+    titles and actions in the active language)."""
     rows: list[tuple[str, str, bool]] = []
     for context, entries in SHORTCUTS.items():
-        rows.append((SHORTCUT_TITLES[context], "", True))
-        rows += [(key_label(keys), what, False) for keys, what in entries]
+        rows.append((translate(SHORTCUT_TITLES[context]), "", True))
+        rows += [(key_label(keys), translate(what), False) for keys, what in entries]
     return rows
 
 
 class ShortcutsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(TITLE)
+        self.setWindowTitle(translate(TITLE))
         self.rows = table_rows()
         self.table = QTableWidget(len(self.rows), len(HEADERS), self)
-        self.table.setHorizontalHeaderLabels(list(HEADERS))
+        self.table.setHorizontalHeaderLabels([translate(header) for header in HEADERS])
         self.table.verticalHeader().hide()
         self.table.setShowGrid(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)

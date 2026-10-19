@@ -3,8 +3,9 @@
 An export first checks that it can run (`export_available`), then asks where to save, then runs
 ExportWorker off the GUI thread on a snapshot of the provider's loaded content. Its progress is
 a lasting toast; Esc cancels it (the window asks `cancel()` first). The worker's messages are
-fixed strings, so they are shown as they are. While the page shows "All providers" the export
-is still one provider's (the one the page returns to): the save dialog and the result name it.
+fixed strings (English, shown with `translate`) or its own words for a failure. While the page
+shows "All providers" the export is still one provider's (the one the page returns to): the save
+dialog and the result name it.
 """
 
 from __future__ import annotations
@@ -25,17 +26,11 @@ from services.exporter import (
     ExportWorker,
     export_available,
 )
+from services.i18n import N_, tr, tr_n, translate
 
 logger = logging.getLogger(__name__)
 
-BUSY_TEXT = "An export is already running"
-STARTED_TEXT = "Exporting…"
-PROGRESS_TEXT = "Exporting… {done}/{total}"
-DONE_TEXT = "Exported {n} items to {filename}"
-PROVIDER_DONE_TEXT = "Exported {n} items from {name} to {filename}"  # in All providers
-FILE_FILTER = "M3U files (*.m3u)"
-DIALOG_TITLE = "Export"
-PROVIDER_DIALOG_TITLE = "Export {name}'s {what}"  # in All providers
+BUSY_TEXT = N_("An export is already running")
 _WHAT = {"live": "channels", "movies": "movies", "series": "series"}
 INFO_MS = 3000
 ERROR_MS = 6000
@@ -52,12 +47,26 @@ def default_path(provider_name: str, kind: ExportKind) -> str:
 
 
 def _what(kind: ExportKind, section: str) -> str:
-    """What an export holds, for its dialog's title: "channels", "movies" or "series"."""
+    """What an export holds: "channels", "movies", "series" or "items"."""
     if kind is ExportKind.ALL_LIVE:
         return "channels"
     if kind is ExportKind.COMPLETE_SERIES:
         return "series"
     return _WHAT.get(section, "items")
+
+
+def _dialog_title(kind: ExportKind, section: str, name: str) -> str:
+    """The save dialog's title; in All providers it names the provider exported."""
+    if not name:
+        return tr("Export")  # i18n: the save dialog's title (verb)
+    what = _what(kind, section)
+    if what == "channels":
+        return tr("Export {name}'s channels", name=name)  # i18n: name is a provider's
+    if what == "movies":
+        return tr("Export {name}'s movies", name=name)
+    if what == "series":
+        return tr("Export {name}'s series", name=name)
+    return tr("Export {name}'s items", name=name)
 
 
 def _snapshot(value: Any) -> Any:
@@ -102,7 +111,7 @@ class ExportFlow(QObject):
         if self._closed:
             return
         if self.running():
-            self._notify(BUSY_TEXT, "info", INFO_MS)
+            self._notify(translate(BUSY_TEXT), "info", INFO_MS)
             return
         page = catalog or self._catalog
         manager = page.provider_manager
@@ -110,16 +119,16 @@ class ExportFlow(QObject):
         content = manager.current_provider_content or {}
         reason = export_available(kind, provider, section, content)
         if reason is not None:
-            self._notify(reason, "info", INFO_MS)
+            self._notify(translate(reason), "info", INFO_MS)
             return
         name = str(provider.get("name") or "")
         # All providers lists every provider, but the export is this one's: say whose.
         named = name if getattr(page, "all_providers", lambda: False)() else ""
-        title = DIALOG_TITLE
-        if named:
-            title = PROVIDER_DIALOG_TITLE.format(name=named, what=_what(kind, section))
         path, _filter = QFileDialog.getSaveFileName(
-            self._dialog_parent, title, default_path(name, kind), FILE_FILTER
+            self._dialog_parent,
+            _dialog_title(kind, section, named),
+            default_path(name, kind),
+            tr("M3U files (*.m3u)"),  # i18n: the save dialog's file type; keep "(*.m3u)"
         )
         if not path or self._closed or self.running():
             return
@@ -137,7 +146,7 @@ class ExportFlow(QObject):
         )
         self._cancel, self._path, self._named = cancel, path, named
         worker.progress.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
-        self._notify(STARTED_TEXT, "info", PROGRESS_MS)
+        self._notify(tr("Exporting…"), "info", PROGRESS_MS)
         self._runner.run_worker(worker, self._on_finished, self._on_error)
 
     def cancel(self) -> bool:
@@ -158,17 +167,29 @@ class ExportFlow(QObject):
     def _on_progress(self, done: int, total: int, _label: str) -> None:
         if self._closed or self._cancel is None or self._cancel.is_set():
             return
-        self._notify(PROGRESS_TEXT.format(done=done, total=total), "info", PROGRESS_MS)
+        # i18n: an export's progress: done of total (series, for a complete series)
+        self._notify(tr("Exporting… {done}/{total}", done=done, total=total), "info", PROGRESS_MS)
 
     def _on_finished(self, _context, count) -> None:
         path, self._cancel = self._path, None
         if self._closed:
             return
         filename = Path(path).name
-        if self._named:
-            text = PROVIDER_DONE_TEXT.format(n=count, name=self._named, filename=filename)
+        if self._named:  # in All providers
+            text = tr_n(
+                "Exported {n} item from {name} to {filename}",
+                "Exported {n} items from {name} to {filename}",
+                count,
+                name=self._named,
+                filename=filename,
+            )
         else:
-            text = DONE_TEXT.format(n=count, filename=filename)
+            text = tr_n(
+                "Exported {n} item to {filename}",
+                "Exported {n} items to {filename}",
+                count,
+                filename=filename,
+            )
         self._notify(text, "info", INFO_MS)
 
     def _on_error(self, _context, message: str) -> None:
@@ -176,7 +197,7 @@ class ExportFlow(QObject):
         if self._closed:
             return
         if message == MSG_CANCELLED:
-            self._notify(MSG_CANCELLED, "info", INFO_MS)
+            self._notify(translate(MSG_CANCELLED), "info", INFO_MS)
         else:
             logger.info("Export failed: %s", message)
-            self._notify(message, "error", ERROR_MS)
+            self._notify(translate(message), "error", ERROR_MS)

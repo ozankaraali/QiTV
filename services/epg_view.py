@@ -8,6 +8,7 @@ import logging
 from typing import Any, Iterable, Optional
 
 from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_naive
+from services.i18n import tr
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,8 @@ def parse_programme(raw: dict) -> Optional[Programme]:
         return None
     if start is None or stop is None or stop <= start:
         return None
-    return Programme(title or "Untitled", start, stop, description)
+    # i18n: a guide programme that has no title
+    return Programme(title or tr("Untitled"), start, stop, description)
 
 
 def _piece(programme: Programme, start: datetime, stop: datetime) -> Programme:

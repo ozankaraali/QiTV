@@ -20,6 +20,7 @@ from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signa
 from packaging.version import parse
 
 from services.config_manager import ConfigManager, get_app_version
+from services.i18n import tr
 from services.lazy_import import lazy_module
 from services.redact import safe_message
 from services.thread_cleanup import ThreadCleanup, has_pending_threads
@@ -33,6 +34,8 @@ ASSET_PATTERNS = {
     "Darwin": "qitv-macos",  # Will match qitv-macos-universal.zip or qitv-macos-intel.zip
     "Linux": "qitv-linux",
 }
+# A cancelled download's `failed` message: English, never shown (ui/update_dialogs.py).
+DOWNLOAD_CANCELLED = "Download cancelled"
 
 
 class UpdateUI(Protocol):
@@ -313,7 +316,7 @@ class UpdateDownloader(QObject):
                     if self._cancelled:
                         f.close()
                         download_path.unlink(missing_ok=True)
-                        self.error.emit("Download cancelled")
+                        self.error.emit(DOWNLOAD_CANCELLED)
                         return
 
                     if chunk:
@@ -330,15 +333,21 @@ class UpdateDownloader(QObject):
             # Verify download size
             if total_size > 0 and downloaded < total_size * 0.9:
                 download_path.unlink(missing_ok=True)
-                self.error.emit(f"Download incomplete: {downloaded}/{total_size} bytes")
+                self.error.emit(
+                    tr(
+                        "Download incomplete: {done}/{total} bytes",
+                        done=downloaded,
+                        total=total_size,
+                    )
+                )
                 return
 
             self.finished.emit(str(download_path))
 
-        except requests.RequestException as e:
-            self.error.emit(f"Download failed: {e}")
+        except requests.RequestException as e:  # shown by the download dialog
+            self.error.emit(tr("Download failed: {error}", error=e))
         except OSError as e:
-            self.error.emit(f"Failed to save file: {e}")
+            self.error.emit(tr("Failed to save file: {error}", error=e))
 
 
 # Keep reference to download jobs to avoid GC

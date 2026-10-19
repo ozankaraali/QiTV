@@ -12,8 +12,9 @@ import webbrowser
 
 from PySide6.QtWidgets import QCheckBox, QGridLayout, QMessageBox, QProgressDialog
 
-from services import update_checker
+from services import i18n, update_checker
 from services.config_manager import ConfigManager, get_app_version
+from services.i18n import tr
 
 logger = logging.getLogger(__name__)
 
@@ -29,17 +30,17 @@ class _Dialogs:
     def up_to_date(self) -> None:
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle("No Updates")
-        msg.setText(f"You're running the latest version ({get_app_version()}).")
+        msg.setWindowTitle(tr("No Updates"))  # i18n: a message box's title
+        msg.setText(tr("You're running the latest version ({version}).", version=get_app_version()))
         _polish_msgbox(msg)
         msg.exec_()
 
     def check_failed(self, message: str) -> None:
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle("Update Check Failed")
-        msg.setText("Could not check for updates.")
-        msg.setInformativeText(message)
+        msg.setWindowTitle(tr("Update Check Failed"))
+        msg.setText(tr("Could not check for updates."))
+        msg.setInformativeText(message)  # the network's own error, as it came
         _polish_msgbox(msg)
         msg.exec_()
 
@@ -49,10 +50,13 @@ class _Dialogs:
     def launch_failed(self, downloaded_path: str, release_url: str) -> None:
         error_dialog = QMessageBox()
         error_dialog.setIcon(QMessageBox.Warning)
-        error_dialog.setWindowTitle("Update Failed")
-        error_dialog.setText("Failed to launch the update.")
-        error_dialog.setInformativeText(f"The update was downloaded to:\n{downloaded_path}")
-        open_btn = error_dialog.addButton("Open Release Page", QMessageBox.ActionRole)
+        error_dialog.setWindowTitle(tr("Update Failed"))
+        error_dialog.setText(tr("Failed to launch the update."))
+        error_dialog.setInformativeText(
+            tr("The update was downloaded to:\n{path}", path=downloaded_path)
+        )
+        # i18n: a button: opens the release's web page
+        open_btn = error_dialog.addButton(tr("Open Release Page"), QMessageBox.ActionRole)
         error_dialog.addButton(QMessageBox.Close)
         _polish_msgbox(error_dialog)
 
@@ -64,11 +68,14 @@ class _Dialogs:
         """macOS/Linux: say where the update is, then open the Downloads folder."""
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle("Update Downloaded")
-        msg.setText("Update downloaded successfully!")
+        msg.setWindowTitle(tr("Update Downloaded"))
+        msg.setText(tr("Update downloaded successfully!"))
         msg.setInformativeText(
-            f"The new version has been saved to:\n{downloaded_path}\n\n"
-            "Please replace the current application with the downloaded file."
+            tr(
+                "The new version has been saved to:\n{path}\n\n"
+                "Please replace the current application with the downloaded file.",
+                path=downloaded_path,
+            )
         )
         _polish_msgbox(msg)
         msg.exec_()
@@ -147,25 +154,26 @@ def show_update_dialog(
 
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Information)
-    msg.setText(f"A new version ({version}) is available!")
-    msg.setWindowTitle("Update Available")
+    msg.setText(tr("A new version ({version}) is available!", version=version))
+    msg.setWindowTitle(tr("Update Available"))
 
     # "Do not remind me" checkbox — only shown for automatic checks
     mute_checkbox: Optional[QCheckBox] = None
     if not manual and config_manager is not None:
-        mute_checkbox = QCheckBox("Do not remind me about updates")
+        mute_checkbox = QCheckBox(tr("Do not remind me about updates"))
         msg.setCheckBox(mute_checkbox)
 
     download_btn = None
     if download_url and is_frozen:
-        msg.setInformativeText("Would you like to download and install the update?")
-        download_btn = msg.addButton("Download && Install", QMessageBox.AcceptRole)
-        browser_btn = msg.addButton("Open Release Page", QMessageBox.ActionRole)
+        msg.setInformativeText(tr("Would you like to download and install the update?"))
+        # i18n: a button; "&&" shows as "&" (a single "&" would underline the next letter)
+        download_btn = msg.addButton(tr("Download && Install"), QMessageBox.AcceptRole)
+        browser_btn = msg.addButton(tr("Open Release Page"), QMessageBox.ActionRole)
     else:
         # Fallback: running from source or no download URL available
-        msg.setInformativeText("Would you like to open the release page?")
-        browser_btn = msg.addButton("Open Release Page", QMessageBox.AcceptRole)
-    skip_btn = msg.addButton("Skip This Version", QMessageBox.RejectRole)
+        msg.setInformativeText(tr("Would you like to open the release page?"))
+        browser_btn = msg.addButton(tr("Open Release Page"), QMessageBox.AcceptRole)
+    skip_btn = msg.addButton(tr("Skip This Version"), QMessageBox.RejectRole)  # i18n: a button
 
     _polish_msgbox(msg)
     msg.exec_()
@@ -193,8 +201,8 @@ _progress_dialogs: list[QProgressDialog] = []
 
 def start_download(download_url: str, file_size: int, release_url: str):
     """Download the update with a progress dialog; then launch it, or say why not."""
-    progress = QProgressDialog("Downloading update...", "Cancel", 0, 100)
-    progress.setWindowTitle("Downloading Update")
+    progress = QProgressDialog(tr("Downloading update..."), tr("Cancel"), 0, 100)
+    progress.setWindowTitle(tr("Downloading Update"))
     progress.setMinimumDuration(0)
     progress.setValue(0)
     _progress_dialogs.append(progress)
@@ -205,7 +213,14 @@ def start_download(download_url: str, file_size: int, release_url: str):
         progress.setValue(int(downloaded * 100 / total))
         mb_downloaded = downloaded / (1024 * 1024)
         mb_total = total / (1024 * 1024)
-        progress.setLabelText(f"Downloading update... {mb_downloaded:.1f} / {mb_total:.1f} MB")
+        progress.setLabelText(
+            tr(
+                # i18n: done and total are megabytes, as "12.5"
+                "Downloading update... {done} / {total} MB",
+                done=i18n.decimal(f"{mb_downloaded:.1f}"),
+                total=i18n.decimal(f"{mb_total:.1f}"),
+            )
+        )
 
     def done():
         progress.canceled.disconnect(cancel)
@@ -218,7 +233,7 @@ def start_download(download_url: str, file_size: int, release_url: str):
 
     def on_failed(message: str):
         done()
-        if "cancelled" not in message.lower():
+        if "cancelled" not in message.lower():  # the English DOWNLOAD_CANCELLED: never shown
             _show_download_error(message, release_url)
 
     cancel = update_checker.start_download(
@@ -232,10 +247,10 @@ def _show_download_error(error_msg: str, release_url: str):
     """Show download error with option to open release page."""
     error_dialog = QMessageBox()
     error_dialog.setIcon(QMessageBox.Warning)
-    error_dialog.setWindowTitle("Download Failed")
-    error_dialog.setText("Failed to download update.")
+    error_dialog.setWindowTitle(tr("Download Failed"))
+    error_dialog.setText(tr("Failed to download update."))
     error_dialog.setInformativeText(error_msg)
-    open_btn = error_dialog.addButton("Open Release Page", QMessageBox.ActionRole)
+    open_btn = error_dialog.addButton(tr("Open Release Page"), QMessageBox.ActionRole)
     error_dialog.addButton(QMessageBox.Close)
     _polish_msgbox(error_dialog)
 

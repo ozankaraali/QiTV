@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLay
 
 from services.config_manager import get_app_version
 from services.exporter import ExportKind
+from services.i18n import N_, tr, translate
 from services.navigation import ADD_PROVIDER_ROW, FREE_CHANNELS_ROW, OPEN_FILE_ROW, SETTINGS_ROW
 from services.provider_ids import ALL_PROVIDERS, ALL_PROVIDERS_TITLE
 from ui.brand import logo_pixmap
@@ -38,10 +39,10 @@ ABOUT_LOGO_PX = 64
 ABOUT_TEXT_MIN_W = 340  # wide enough for the links on one line each
 ABOUT_TEXT = (
     "<p><b>QiTV {version}</b></p>"
-    "<p>A TV-first IPTV player for STB portals, Xtream and M3U playlists.</p>"
-    '<p><a href="{home}">{home}</a><br><a href="{issues}">Report an issue</a></p>'
+    "<p>{tagline}</p>"
+    '<p><a href="{home}">{home}</a><br><a href="{issues}">{report}</a></p>'
 )
-NO_PROVIDERS_TEXT = "No providers"
+NO_PROVIDERS_TEXT = N_("No providers")  # i18n: the Providers menu's only entry, when it is empty
 _SHORTCUT_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier
     | Qt.KeyboardModifier.AltModifier
@@ -51,7 +52,13 @@ _SHORTCUT_MODIFIERS = (
 
 def about_text() -> str:
     """About's text: the version (pyproject.toml, as packaged) and the project's links."""
-    return ABOUT_TEXT.format(version=get_app_version(), home=HOME_URL, issues=ISSUES_URL)
+    return ABOUT_TEXT.format(
+        version=get_app_version(),
+        tagline=tr("A TV-first IPTV player for STB portals, Xtream and M3U playlists."),
+        home=HOME_URL,
+        issues=ISSUES_URL,
+        report=tr("Report an issue"),  # i18n: a link in About QiTV, to the project's issues
+    )
 
 
 class AboutDialog(QDialog):
@@ -60,7 +67,7 @@ class AboutDialog(QDialog):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("About QiTV")
+        self.setWindowTitle(tr("About QiTV"))
         self.logo = QLabel(self)
         ratio = (parent if parent is not None else self).devicePixelRatioF()
         pixmap = logo_pixmap(ABOUT_LOGO_PX, ratio)
@@ -97,46 +104,54 @@ class TVMenus(QObject):
     def build(self) -> None:
         window, screens = self._window, self._window.screens
         bar, add, role = window.menuBar(), self._add_action, QAction.MenuRole
-        app_menu = bar.addMenu("QiTV")
-        add(app_menu, "About QiTV", "", self.show_about, role.AboutRole)
-        add(app_menu, "Check for Updates…", "", self.check_updates, role.ApplicationSpecificRole)
-        add(app_menu, "Settings…", "Ctrl+,", window.options_dialog, role.PreferencesRole)
-        add(app_menu, "Quit", "Ctrl+Q", window.close, role.QuitRole)
-        file_menu = bar.addMenu("File")
-        add(file_menu, "Open File…", "Ctrl+O", screens.open_file)
-        export = file_menu.addMenu("Export")
+        app_menu = bar.addMenu("QiTV")  # the app's name (macOS's application menu)
+        add(app_menu, tr("About QiTV"), "", self.show_about, role.AboutRole)
+        add(
+            app_menu,
+            tr("Check for Updates…"),  # i18n: a menu entry
+            "",
+            self.check_updates,
+            role.ApplicationSpecificRole,
+        )
+        # i18n: a menu entry (opens the Settings window)
+        add(app_menu, tr("Settings…"), "Ctrl+,", window.options_dialog, role.PreferencesRole)
+        add(app_menu, tr("Quit"), "Ctrl+Q", window.close, role.QuitRole)  # i18n: a menu entry
+        file_menu = bar.addMenu(tr("File"))  # i18n: the menu bar's File menu
+        add(file_menu, tr("Open File…"), "Ctrl+O", screens.open_file)
+        export = file_menu.addMenu(tr("Export"))  # i18n: a submenu of File (verb)
         for text, kind in (
-            ("Cached Content…", ExportKind.CACHED),
-            ("All Live Channels…", ExportKind.ALL_LIVE),
-            ("Complete Series (Fetch All)…", ExportKind.COMPLETE_SERIES),
+            (tr("Cached Content…"), ExportKind.CACHED),  # i18n: File → Export's entries
+            (tr("All Live Channels…"), ExportKind.ALL_LIVE),
+            (tr("Complete Series (Fetch All)…"), ExportKind.COMPLETE_SERIES),
         ):
             add(export, text, "", partial(screens.export, kind))
-        view = bar.addMenu("View")
-        add(view, "Live TV", "Ctrl+1", screens.back_to_tv)
-        add(view, "Movies", "Ctrl+2", lambda: screens.open_library("movies"))
-        add(view, "Series", "Ctrl+3", lambda: screens.open_library("series"))
+        view = bar.addMenu(tr("View"))  # i18n: the menu bar's View menu
+        add(view, tr("Live TV"), "Ctrl+1", screens.back_to_tv)
+        add(view, tr("Movies"), "Ctrl+2", lambda: screens.open_library("movies"))
+        add(view, tr("Series"), "Ctrl+3", lambda: screens.open_library("series"))
         # The multiview's grid over live TV (V on the player), or back to one picture.
-        add(view, "Multiview", "Ctrl+4", screens.toggle_multiview)
-        add(view, "Restore Last Multiview", "", screens.restore_multiview)
-        add(view, "Search", "Ctrl+F", screens.open_search)
-        add(view, "Refresh Channels and Guide", "Ctrl+R", self.refresh_content)
+        add(view, tr("Multiview"), "Ctrl+4", screens.toggle_multiview)
+        add(view, tr("Restore Last Multiview"), "", screens.restore_multiview)
+        add(view, tr("Search"), "Ctrl+F", screens.open_search)  # i18n: a menu entry (verb)
+        add(view, tr("Refresh Channels and Guide"), "Ctrl+R", self.refresh_content)
         player = self._player_actions  # the player's keys: off while the Library shows
-        player.append(add(view, "Guide", "G", self._handler(Action.GUIDE)))
-        player.append(add(view, "Channel List", "Return", self._handler(Action.OPEN_DRAWER)))
-        add(view, "Fullscreen", "F", window.toggle_fullscreen)
-        player.append(add(view, "Mini Player", "Alt+P", self._handler(Action.MINI_PLAYER)))
-        playback = bar.addMenu("Playback")
-        player.append(add(playback, "Play/Pause", "Space", self._handler(Action.PLAY_PAUSE)))
-        player.append(add(playback, "Mute", "M", self._handler(Action.MUTE)))
+        player.append(add(view, tr("Guide"), "G", self._handler(Action.GUIDE)))
+        player.append(add(view, tr("Channel List"), "Return", self._handler(Action.OPEN_DRAWER)))
+        add(view, tr("Fullscreen"), "F", window.toggle_fullscreen)
+        player.append(add(view, tr("Mini Player"), "Alt+P", self._handler(Action.MINI_PLAYER)))
+        playback = bar.addMenu(tr("Playback"))  # i18n: the menu bar's Playback menu
+        player.append(add(playback, tr("Play/Pause"), "Space", self._handler(Action.PLAY_PAUSE)))
+        # i18n: a menu entry (verb)
+        player.append(add(playback, tr("Mute"), "M", self._handler(Action.MUTE)))
         player.append(
-            add(playback, "Previous Channel", "Backspace", self._handler(Action.PREVIOUS))
+            add(playback, tr("Previous Channel"), "Backspace", self._handler(Action.PREVIOUS))
         )
-        player.append(add(playback, "Go Live", "L", self._handler(Action.GO_LIVE)))
-        self.providers_menu = bar.addMenu("Providers")
+        player.append(add(playback, tr("Go Live"), "L", self._handler(Action.GO_LIVE)))
+        self.providers_menu = bar.addMenu(tr("Providers"))  # i18n: the menu bar's Providers menu
         self.rebuild_providers()
-        help_menu = bar.addMenu("Help")
-        add(help_menu, "Keyboard Shortcuts…", "", self.show_shortcuts)
-        add(help_menu, "Report an Issue…", "", self.report_issue)
+        help_menu = bar.addMenu(tr("Help"))  # i18n: the menu bar's Help menu
+        add(help_menu, tr("Keyboard Shortcuts…"), "", self.show_shortcuts)
+        add(help_menu, tr("Report an Issue…"), "", self.report_issue)
         catalog = window.catalog
         catalog.providerReady.connect(lambda _name: self.rebuild_providers())
         catalog.providerFailed.connect(lambda _name, _message: self.rebuild_providers())
@@ -191,12 +206,12 @@ class TVMenus(QObject):
         catalog = self._window.catalog
         names = catalog.provider_names()
         if not names:
-            menu.addAction(NO_PROVIDERS_TEXT).setEnabled(False)
+            menu.addAction(translate(NO_PROVIDERS_TEXT)).setEnabled(False)
             return
         current = catalog.source()
         entries = [(name, name) for name in names]
         if len(names) >= 2:
-            entries.insert(0, (ALL_PROVIDERS, ALL_PROVIDERS_TITLE))
+            entries.insert(0, (ALL_PROVIDERS, translate(ALL_PROVIDERS_TITLE)))
         if self._provider_group is not None:
             self._provider_group.deleteLater()
         self._provider_group = group = QActionGroup(self)
@@ -258,4 +273,4 @@ class TVMenus(QObject):
         The forced provider setup loads the guide with force once it is ready.
         """
         self._window.set_provider(force_update=True)
-        self._window.screens.notify("Refreshing channels and guide…")
+        self._window.screens.notify(tr("Refreshing channels and guide…"))

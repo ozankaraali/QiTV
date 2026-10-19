@@ -1,9 +1,14 @@
-"""Why a provider failed, in plain words: the one place QiTV words a provider's failures (no Qt).
+"""Why a provider failed, in plain words: the one place QiTV words a provider's failures (no
+widgets).
 
 The catalog's failure messages (`friendly_error`), an HTTP status, and an account check's answer
 (`services.account_check`: Xtream's `user_info`, an STB portal's handshake and profile) all come
 here for their words. Every text is fixed or built from numbers and dates only: never a URL,
 a host or a credential.
+
+The catalog's messages stay English (services.catalog compares them, and `status_message` gives
+them so); `shown_message` shows one in the active language. A `Reason`'s text is made in the
+active language.
 
 The time-shift helper's own refusal texts (services/live/refusals.py: STREAM_LIMIT and
 STREAM_REFUSED) stay there, free of imports for the helper's process; the account check that
@@ -18,24 +23,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import re
 from typing import Any, Iterable, Optional
 
+from services.i18n import N_, tr, tr_n, translate
+
 # --- the catalog's fixed failure messages (services.catalog re-exports them) -----------------
-UNREACHABLE_MESSAGE = "Couldn't reach the provider"
-LOGIN_REFUSED_MESSAGE = "The provider refused the login"
-TOO_SLOW_MESSAGE = "The provider took too long to answer"
-UNEXPECTED_ANSWER_MESSAGE = "The provider sent an unexpected answer"
+# English, as the catalog compares them: `translate` (or `shown_message`) shows them.
+UNREACHABLE_MESSAGE = N_("Couldn't reach the provider")
+LOGIN_REFUSED_MESSAGE = N_("The provider refused the login")
+TOO_SLOW_MESSAGE = N_("The provider took too long to answer")
+UNEXPECTED_ANSWER_MESSAGE = N_("The provider sent an unexpected answer")
 # HTTP answers worth their own words (the code stays: it is what a provider's support asks for).
-FORBIDDEN_MESSAGE = "The server refused QiTV (403)"
-NOT_FOUND_MESSAGE = "The server has nothing at this address (404)"
-PROXY_MESSAGE = "A proxy on your network asks for a sign-in (407)"
+FORBIDDEN_MESSAGE = N_("The server refused QiTV (403)")
+NOT_FOUND_MESSAGE = N_("The server has nothing at this address (404)")
+PROXY_MESSAGE = N_("A proxy on your network asks for a sign-in (407)")
+# The English start of a block's catalog message (services.catalog lets a message starting
+# with it through) and of a server error's; their whole texts: blocked_text, server_text.
 BLOCKED_PREFIX = "The provider blocked this connection"
 SERVER_TROUBLE_PREFIX = "The provider's server has a problem"
 # What an account check found.
-WRONG_LOGIN_MESSAGE = "The username or password is wrong"
-EXPIRED_MESSAGE = "Your subscription has expired"
-DISABLED_MESSAGE = "The provider has disabled this account"
-DEVICE_MESSAGE = "The provider rejected this device (check the MAC address or subscription)"
+WRONG_LOGIN_MESSAGE = N_("The username or password is wrong")
+EXPIRED_MESSAGE = N_("Your subscription has expired")
+DISABLED_MESSAGE = N_("The provider has disabled this account")
+DEVICE_MESSAGE = N_("The provider rejected this device (check the MAC address or subscription)")
 
 # Reason kinds.
 OK = "ok"
@@ -66,12 +77,16 @@ _WRONG_LOGIN_STATUS = (401, 513)
 _STATUS_RANK = {407: 6, 451: 5, 456: 5, 458: 5, 403: 4, 401: 3, 513: 3}
 _EXPIRY_KEYS = ("expire_billing_date", "end_date", "expire_date", "tariff_expired_date")
 _NO_DATE = ("", "0", "0000-00-00", "0000-00-00 00:00:00", "null", "none")
+# A block's catalog message, as `status_message` words it (in English).
+_BLOCKED_MESSAGE = re.compile(
+    re.escape(BLOCKED_PREFIX) + r" \((\d+)\); it may not serve your region"
+)
 
 
 @dataclass(frozen=True)
 class Reason:
     kind: str
-    text: str
+    text: str  # in the active language: what Verify Provider and the toasts show
     # A LIMIT's numbers, as the account reported them (the GUI compares them with QiTV's own
     # streams at that provider, `own_streams_text`).
     limit: Optional[int] = field(default=None, compare=False)
@@ -83,21 +98,30 @@ class Reason:
         return self.kind not in (OK, UNEXPECTED)
 
 
-def _streams(count: int) -> str:
-    return "1 stream" if count == 1 else f"{count} streams"
-
-
 def limit_text(limit: int, active: int) -> str:
     """ "Your account allows 1 stream; one is in use" (the account's own count)."""
     if active <= 1 or limit == 1:
-        used = "one is in use"
-    elif limit == 2:
-        used = "both are in use"
-    elif active >= limit:
-        used = f"all {limit} are in use"
-    else:
-        used = f"{active} are in use"
-    return f"Your account allows {_streams(limit)}; {used}"
+        return tr_n(
+            "Your account allows {n} stream; one is in use",
+            "Your account allows {n} streams; one is in use",
+            limit,
+        )
+    if limit == 2:
+        return tr("Your account allows 2 streams; both are in use")
+    if active >= limit:
+        return tr_n(
+            # i18n: n (the streams the account allows) is 3 or more here
+            "Your account allows {n} stream; all {n} are in use",
+            "Your account allows {n} streams; all {n} are in use",
+            limit,
+        )
+    return tr_n(
+        # i18n: n (the streams the account allows) is 3 or more; active (in use) 2 or more
+        "Your account allows {n} stream; {active} are in use",
+        "Your account allows {n} streams; {active} are in use",
+        limit,
+        active=active,
+    )
 
 
 def own_streams_text(limit: Optional[int]) -> Optional[str]:
@@ -106,40 +130,72 @@ def own_streams_text(limit: Optional[int]) -> Optional[str]:
     if not limit:
         return None
     if limit == 1:
-        return "QiTV's other picture is using the account's only stream"
-    return f"QiTV is already using all {limit} streams your account allows"
+        return tr("QiTV's other picture is using the account's only stream")
+    return tr_n(
+        # i18n: n (the streams the account allows) is 2 or more here
+        "QiTV is already using all {n} streams your account allows",
+        "QiTV is already using all {n} streams your account allows",
+        limit,
+    )
 
 
 def _day(when: datetime) -> str:
-    return f"{when.day} {when.strftime('%b %Y')}"
+    """ "3 Oct 2026", the month as the active language names it."""
+    from PySide6.QtCore import QDate
+
+    from services.i18n import app_locale
+
+    return str(app_locale().toString(QDate(when.year, when.month, when.day), "d MMM yyyy"))
 
 
 def expired_text(when: Optional[datetime]) -> str:
     if when is None:
-        return EXPIRED_MESSAGE
-    return f"Your subscription expired on {_day(when)}"
+        return translate(EXPIRED_MESSAGE)
+    # i18n: date as "3 Oct 2026"
+    return tr("Your subscription expired on {date}", date=_day(when))
 
 
 def dated_text(when: datetime) -> str:
-    return f"The portal says your subscription ended on {_day(when)}"
+    # i18n: date as "3 Oct 2026"
+    return tr("The portal says your subscription ended on {date}", date=_day(when))
 
 
 def blocked_text(status: int) -> str:
-    return f"{BLOCKED_PREFIX} ({status}); it may not serve your region"
+    return tr(
+        # i18n: status is the server's answer code (451, 456 or 458)
+        "The provider blocked this connection ({status}); it may not serve your region",
+        status=status,
+    )
 
 
 def server_text(status: int) -> str:
-    return f"{SERVER_TROUBLE_PREFIX} ({status})"
+    # i18n: status is the server's answer code (500 to 599)
+    return tr("The provider's server has a problem ({status})", status=status)
 
 
 def status_message(status: int) -> Optional[str]:
-    """The words for a refusal status that has its own: 403, 404, 407 and the blocks (None:
-    the caller's own message, also for a 401 or a server error, which mean more than one
-    thing to a catalog request)."""
-    reason = status_reason(status)
-    if reason is None or reason.kind not in (FORBIDDEN, NOT_FOUND, PROXY, BLOCKED):
-        return None
-    return reason.text
+    """The catalog's words for a refusal status that has its own: 403, 404, 407 and the blocks
+    (None: the caller's own message, also for a 401 or a server error, which mean more than
+    one thing to a catalog request). English, as the catalog keeps its messages
+    (`shown_message` shows one)."""
+    if status == 403:
+        return FORBIDDEN_MESSAGE
+    if status == 404:
+        return NOT_FOUND_MESSAGE
+    if status == 407:
+        return PROXY_MESSAGE
+    if status in BLOCKED_STATUS:
+        return f"{BLOCKED_PREFIX} ({status}); it may not serve your region"
+    return None
+
+
+def shown_message(message: str) -> str:
+    """A catalog failure message (kept in English: services.catalog compares them) in the
+    active language, where it is shown; any other text comes back as `translate` gives it."""
+    blocked = _BLOCKED_MESSAGE.fullmatch(message)
+    if blocked is not None:
+        return blocked_text(int(blocked.group(1)))
+    return translate(message)
 
 
 def status_reason(status: Optional[int]) -> Optional[Reason]:
@@ -147,13 +203,13 @@ def status_reason(status: Optional[int]) -> Optional[Reason]:
     if status is None:
         return None
     if status in _WRONG_LOGIN_STATUS:
-        return Reason(WRONG_LOGIN, WRONG_LOGIN_MESSAGE)
+        return Reason(WRONG_LOGIN, translate(WRONG_LOGIN_MESSAGE))
     if status == 403:
-        return Reason(FORBIDDEN, FORBIDDEN_MESSAGE)
+        return Reason(FORBIDDEN, translate(FORBIDDEN_MESSAGE))
     if status == 404:
-        return Reason(NOT_FOUND, NOT_FOUND_MESSAGE)
+        return Reason(NOT_FOUND, translate(NOT_FOUND_MESSAGE))
     if status == 407:
-        return Reason(PROXY, PROXY_MESSAGE)
+        return Reason(PROXY, translate(PROXY_MESSAGE))
     if status in BLOCKED_STATUS:
         return Reason(BLOCKED, blocked_text(status))
     if 500 <= status < 600:
@@ -216,7 +272,8 @@ def xtream_reason(body: Any, now: datetime) -> Reason:
     """
     user_info = body.get("user_info") if isinstance(body, dict) else None
     if not isinstance(user_info, dict):
-        return Reason(WRONG_LOGIN, WRONG_LOGIN_MESSAGE)  # [] or {} : the panel's refusal
+        # [] or {} : the panel's refusal
+        return Reason(WRONG_LOGIN, translate(WRONG_LOGIN_MESSAGE))
     status = str(user_info.get("status") or "").strip().lower()
     expires = _date(user_info.get("exp_date"))
     if status == "expired" or (expires is not None and expires <= now):
@@ -224,9 +281,9 @@ def xtream_reason(body: Any, now: datetime) -> Reason:
             EXPIRED, expired_text(expires if expires is not None and expires <= now else None)
         )
     if status in ("banned", "disabled"):
-        return Reason(DISABLED, DISABLED_MESSAGE)
+        return Reason(DISABLED, translate(DISABLED_MESSAGE))
     if str(user_info.get("auth", "")).strip() != "1":
-        return Reason(WRONG_LOGIN, WRONG_LOGIN_MESSAGE)
+        return Reason(WRONG_LOGIN, translate(WRONG_LOGIN_MESSAGE))
     limit, active = _int(user_info.get("max_connections")), _int(user_info.get("active_cons"))
     if limit and limit > 0 and active is not None and active >= limit:
         return Reason(LIMIT, limit_text(limit, active), limit=limit, active=active)
@@ -240,7 +297,7 @@ def stb_profile_reason(profile: Any, now: datetime) -> Optional[Reason]:
     if not isinstance(profile, dict):
         return None
     if str(profile.get("blocked", "")).strip() == "1":
-        return Reason(DISABLED, DISABLED_MESSAGE)
+        return Reason(DISABLED, translate(DISABLED_MESSAGE))
     for key in _EXPIRY_KEYS:
         expires = _date(profile.get(key))
         if expires is not None and expires <= now:
@@ -249,6 +306,6 @@ def stb_profile_reason(profile: Any, now: datetime) -> Optional[Reason]:
 
 
 def unreachable(timed_out: bool) -> Reason:
-    return (
-        Reason(TIMEOUT, TOO_SLOW_MESSAGE) if timed_out else Reason(UNREACHABLE, UNREACHABLE_MESSAGE)
-    )
+    if timed_out:
+        return Reason(TIMEOUT, translate(TOO_SLOW_MESSAGE))
+    return Reason(UNREACHABLE, translate(UNREACHABLE_MESSAGE))
