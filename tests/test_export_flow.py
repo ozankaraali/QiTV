@@ -84,7 +84,7 @@ class ExportFlowTests(unittest.TestCase):
         self.assertEqual(self.toasts[-1], ("Exported 2 items to home.m3u", "info", 3000))
 
     def test_the_dialog_and_the_result_name_the_provider_in_all_providers(self):
-        # Final review M6: All providers lists every provider; the export is one provider's.
+        # All providers lists every provider; the export is one provider's.
         self.flow._catalog = SimpleNamespace(
             provider_manager=self.manager, all_providers=lambda: True
         )

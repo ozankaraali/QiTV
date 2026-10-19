@@ -220,7 +220,7 @@ def segmented(parts, chunk=7 * 188):
 
 
 class SegmentedTimelineTests(unittest.TestCase):
-    """The review's probes: the timeline must end within 0.2 s of the media it was fed."""
+    """The timeline must end within 0.2 s of the media it was fed."""
 
     def assert_sized(self, parts):
         tl, lead = segmented(parts)

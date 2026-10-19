@@ -1,4 +1,4 @@
-"""Picture in picture and the volume mixer in the TV shell's controller (Phase 4 Tasks 3, 3b).
+"""Picture in picture and the volume mixer in the TV shell's controller.
 
 The controller's fakes are tests/test_tv_controller.py's; here the two players are fake
 sessions and live sessions with real LiveTuners, under the real SessionManager and budget.
@@ -286,7 +286,7 @@ class PipTests(PipCase):
         self.assertEqual(len(self.live.named("start")), 2)  # the large picture plays on
 
     def test_the_small_picture_keeps_its_buffer_in_memory(self):
-        # Ruling (M5): never a second disk ring; the small picture's is the memory per stream.
+        # Never a second disk ring; the small picture's is the memory per stream.
         self.config.timeshift_enabled = True
         self.config.timeshift_max_mib = 4096
         self.config.timeshift_ram_mib = 512
@@ -358,7 +358,7 @@ class PipTests(PipCase):
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
 
     def test_a_swap_records_the_channel_now_watched(self):
-        # Review I4: Recent and "start with the last channel" follow the large picture.
+        # Recent and "start with the last channel" follow the large picture.
         self.start_large(0)
         self.open_small(GROUP_B[0], "20", GROUP_B)
         plays = len(self.watch.plays)
@@ -692,7 +692,7 @@ class PipTests(PipCase):
         self.assertNotIn(("stop",), self.pip_live.calls)
 
     def test_an_external_play_closes_the_small_picture_first(self):
-        # Review M6: external players are outside the budget; the PiP gives its slot back.
+        # External players are outside the budget; the PiP gives its slot back.
         self.start_large(0)
         self.open_small(CHANNELS[1])
         self.config.play_in_vlc = True
@@ -701,7 +701,7 @@ class PipTests(PipCase):
         self.assertEqual(self.pip_live.calls[-1], ("stop",))
 
     def test_with_an_external_player_picture_in_picture_says_no(self):
-        # Review M4: the external player holds the provider's stream; a PiP would be a second.
+        # The external player holds the provider's stream; a PiP would be a second.
         self.start_large(0)
         self.config.play_in_vlc = True
         self.play(1)  # Two plays in VLC once the in-app stream let go
@@ -737,7 +737,7 @@ class PipTests(PipCase):
         self.assertFalse(self.sessions.pip_open())
 
     def test_a_full_provider_says_so_before_asking_for_a_link(self):
-        # Review M7: an STB portal mints a link per request; its one stream is taken.
+        # An STB portal mints a link per request; its one stream is taken.
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB"}
         self.start_large(0)
         self.start_large(1)
@@ -749,7 +749,7 @@ class PipTests(PipCase):
         )
 
     def test_a_provider_setup_while_the_pips_link_is_on_its_way_asks_again(self):
-        # Review I1: a setup drops every link request; the PiP's must not stay stuck.
+        # A setup drops every link request; the PiP's must not stay stuck.
         self.catalog.hub_ready("Home")
         self.start_large(0)
         self.start_large(1)
@@ -794,7 +794,7 @@ class PipTests(PipCase):
         self.assertEqual(self.live.calls[-1], ("stop",))
         self.controller.handle(Action.SWAP)
         self.assertIs(self.sessions.large(), self.main_slot)  # nothing swapped
-        self.assertEqual(self.toast.messages()[-1], (SWITCHING, "info"))  # review M1
+        self.assertEqual(self.toast.messages()[-1], (SWITCHING, "info"))
         self.frame.swapRequested.emit()  # a click on the PiP says so too
         self.assertEqual(self.toast.named("show_message")[-1], (SWITCHING, "info", SWITCHING_MS))
         self.live.released.emit()
@@ -920,7 +920,7 @@ class LibraryPlayTests(PipCase):
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["main"])
 
     def test_the_movies_limit_says_the_channel_closes_only_once_its_link_comes(self):
-        # Review M9: said before the link came; when that failed, One played on.
+        # The close was said before the link came; when that failed, One played on.
         self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
         self.ready("http://stream/1")
         self.assertTrue(wait_until(lambda: self.live.named("start")))
@@ -933,7 +933,7 @@ class LibraryPlayTests(PipCase):
         self.assertNotIn(("stop",), self.live.calls)  # One plays on, large
 
     def test_the_movies_limit_keeps_another_providers_small_picture(self):
-        # Sweep B5: the small picture closed before the limit was looked at, for nothing.
+        # The small picture closed before the limit was looked at, for nothing.
         self.controller.tune(HARBOR_ONE, group_key="10", channels=[HARBOR_ONE])
         self.ready("http://stream/1")
         self.assertTrue(wait_until(lambda: self.live.named("start")))
@@ -954,7 +954,7 @@ class LibraryPlayTests(PipCase):
         self.assertEqual(self.budget.holders("Home"), ["pip"])
 
     def test_a_failed_link_gives_the_channel_the_big_picture_back(self):
-        # Sweep B5: the channel stayed small beside an empty big picture.
+        # The channel stayed small beside an empty big picture.
         self.start_large(0)
         self.controller.enter_library_playing()
         self.controller.play_vod(MOVIE, "movie", play_context())
@@ -983,7 +983,7 @@ class LibraryPlayTests(PipCase):
         return film
 
     def test_a_failed_link_while_the_small_picture_changes_waits_for_it(self):
-        # Review M3: the swap is refused while the change is on its way, and the big picture
+        # The swap is refused while the change is on its way, and the big picture
         # stayed empty.
         film = self.change_small_while_the_film_comes()
         self.catalog.linkFailed.emit(film, "Not found")
@@ -1017,7 +1017,7 @@ class LibraryPlayTests(PipCase):
         self.assertEqual(self.requested()[-1], "Four")
 
     def test_a_film_whose_open_fails_gives_the_channel_the_big_picture_back(self):
-        # Review M2: the open raising (no player, say) left the big picture black.
+        # The open raising (no player, say) left the big picture black.
         self.start_large(0)
         self.controller.enter_library_playing()
         self.controller.play_vod(MOVIE, "movie", play_context())
@@ -1064,7 +1064,7 @@ class LibraryPlayTests(PipCase):
         return PagesForTest(window), stack
 
     def test_back_to_the_library_before_the_films_link_came_keeps_the_channel_playing(self):
-        # Sweep B follow-up: ‹ Library (or Esc) then found nothing playing and stopped both.
+        # ‹ Library (or Esc) then found nothing playing and stopped both.
         self.start_large(0)
         self.controller.enter_library_playing()
         pages, stack = self.pages()
@@ -1102,7 +1102,7 @@ class LibraryPlayTests(PipCase):
         self.assertEqual(self.budget.holders("Harbor IPTV"), ["pip"])
 
     def test_swapping_twice_keeps_the_movies_resume_point_and_controls(self):
-        # Final review I1: S, then S again, while a film from the Library plays large.
+        # S, then S again, while a film from the Library plays large.
         cid = "Home:movie:m7"
         self.start_large(0)
         self.play_from_library()
@@ -1157,7 +1157,7 @@ class LibraryPlayTests(PipCase):
 
 class TitleBesideChannelTests(PipCase):
     """A film from the Library large and the channel kept small: what follows it, and its end
-    in the small picture (sweep B6: nothing said it ended there and nothing offered Next; Next
+    in the small picture (nothing said it ended there and nothing offered Next; Next
     and autoplay closed the channel kept small)."""
 
     FERRY = {"id": "m8", "name": "Night Ferry", "cmd": "http://vod/night-ferry.mkv"}
@@ -1202,7 +1202,7 @@ class TitleBesideChannelTests(PipCase):
     def test_a_title_of_the_channels_provider_without_a_second_stream_closes_it(self):
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
         self.controller.play_vod(self.FERRY, "movie", play_context())  # Home's, as One
-        self.assertTrue(self.sessions.pip_open())  # review M9: until its link comes
+        self.assertTrue(self.sessions.pip_open())  # until its link comes
         self.assertEqual(self.toast.messages(), [])
         self.ready("http://vod/night-ferry.mkv")
         self.assertEqual(
@@ -1212,7 +1212,7 @@ class TitleBesideChannelTests(PipCase):
         self.assertFalse(self.sessions.pip_open())
 
     def test_a_title_whose_link_fails_closes_nothing_and_says_only_that(self):
-        # Review M9: "Closed One to play …" was said before the link came; One played on.
+        # "Closed One to play …" was said before the link came; One played on.
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 1}
         self.controller.play_vod(self.FERRY, "movie", play_context())
         self.catalog.linkFailed.emit(self.catalog.links[-1][0], "Not found")
@@ -1233,7 +1233,7 @@ class TitleBesideChannelTests(PipCase):
         self.assert_one_plays_small_beside("http://vod/night-ferry.mkv")
 
     def test_a_film_that_fails_large_gives_the_channel_the_big_picture_back(self):
-        # Review M2: only a failed link or sign-in did; a film whose playback failed left the
+        # Only a failed link or sign-in did; a film whose playback failed left the
         # big picture black with the channel small.
         self.pip_session.errorOccurred.emit("The stream could not be opened")  # Heat, large
         self.assertIs(self.sessions.large(), self.main_slot)
@@ -1244,7 +1244,7 @@ class TitleBesideChannelTests(PipCase):
         self.assertEqual(self.toast.messages(), [("Heat: The stream could not be opened", "error")])
 
     def test_the_channel_kept_small_that_fails_opens_again_beside_the_film(self):
-        # Review I1: the STB retry's fresh link was dropped because a movie plays, and
+        # The STB retry's fresh link was dropped because a movie plays, and
         # nothing was said (before the retry: "Couldn't open this channel in PiP").
         self.live.failed.emit("The stream could not be opened")  # One, Home's portal, small
         self.assertFalse(self.sessions.pip_open())
@@ -1261,7 +1261,7 @@ class TitleBesideChannelTests(PipCase):
         self.assertEqual(self.toast.messages(), [(PIP_FAILED, "error")])
 
     def test_a_film_that_fails_small_says_why_once(self):
-        # Sweep B follow-up: the small player's errors had no listener.
+        # The small player's errors had no listener.
         self.session.errorOccurred.emit("Broken")  # One's, small: its live session's to recover
         self.assertEqual(self.toast.messages(), [])
         self.controller.handle(Action.SWAP)  # One large, Heat small
@@ -1308,7 +1308,7 @@ class PipLinkSettlingTests(PipCase):
         self.assertEqual(self.pip_live.named("start"), [])
 
     def test_another_providers_failed_sign_in_says_why_the_small_picture_never_opens(self):
-        # Final review I3: the list shows Home; Harbor's channel was opened small.
+        # The list shows Home; Harbor's channel was opened small.
         self.controller.open_pip(HARBOR_TWO, group_key="10", channels=[HARBOR_TWO])
         self.catalog.catalogs.providerFailed.emit("Harbor IPTV", "Portal down")
         self.assertEqual(self.toast.messages()[-1], ("Harbor IPTV: Portal down", "error"))
@@ -1330,8 +1330,8 @@ class PipLinkSettlingTests(PipCase):
 
 class PipRetryTests(PipCase):
     """An STB channel that fails small gets a fresh link once, as the large picture does
-    (sweep B7, ruling R11: the PiP toasted at once, so an expired portal session of a provider
-    shown only small needed the channel opened again by hand)."""
+    (the PiP toasted at once, so an expired portal session of a provider shown only small
+    needed the channel opened again by hand)."""
 
     PORTAL_TWO = {**CHANNELS[1], "_provider": "Portal B"}  # an STB portal, not browsed
 
@@ -1364,7 +1364,7 @@ class PipRetryTests(PipCase):
         self.assertFalse(self.sessions.pip_open())
 
     def test_both_pictures_failing_on_one_portal_sign_it_in_once(self):
-        # Review M5: each retry signed the portal in again: two handshakes, one of them wasted.
+        # Each retry signed the portal in again: two handshakes, one of them wasted.
         self.catalog.specs["Portal B"]["max_streams"] = 2
         three = {**CHANNELS[2], "_provider": "Portal B"}
         self.controller.tune(three, group_key="10", channels=[three])
@@ -1503,7 +1503,7 @@ class OneStreamPipTests(PipCase):
 
 
 class MixerTests(PipCase):
-    """The volume keys on the mixer: a row per picture (Phase 4 Task 3b)."""
+    """The volume keys on the mixer: a row per picture."""
 
     def setUp(self):
         self.mixer = FakeMixer()
@@ -1568,7 +1568,7 @@ class MixerTests(PipCase):
         self.open_small(CHANNELS[1])
         self.controller.handle(Action.VOL_DOWN)
         self.mixer.levelRequested.emit(0, 80)
-        self.mixer.levelRequested.emit(1, 20)  # lower: the PiP stays muted (review M3)
+        self.mixer.levelRequested.emit(1, 20)  # lower: the PiP stays muted
         self.assertEqual(
             self.mixer.shown(), ([("Main", "One", 80, False), ("PiP", "Two", 20, True)], 1)
         )
@@ -1682,7 +1682,7 @@ class MixerTests(PipCase):
         self.assertEqual(self.mixer.shown(), ([("Main", "Heat", 95, False)], 0))
 
     def test_with_one_row_left_and_right_still_seek(self):
-        # Review M2: ←/→ switch rows only when there are two.
+        # ←/→ switch rows only when there are two.
         self.controller.play_vod(MOVIE, "movie", play_context())
         self.ready("http://vod/heat.mkv")
         self.session.seekable = True
@@ -1692,7 +1692,7 @@ class MixerTests(PipCase):
         self.assertEqual(self.session.relative, [10_000])
 
     def test_channel_keys_zap_while_the_mixer_shows(self):
-        # Review M2: PageUp/PageDown and the remote's Ch± are never the mixer's arrows.
+        # PageUp/PageDown and the remote's Ch± are never the mixer's arrows.
         self.start_large(0)
         self.controller.handle(Action.VOL_DOWN)
         self.assertTrue(self.mixer.visible)
@@ -1703,7 +1703,7 @@ class MixerTests(PipCase):
     def test_a_swap_and_a_main_row_change_within_the_delay_do_not_replace_the_remembered_level(
         self,
     ):
-        # Review M7: the level was read when the mixer hid, by which time the "pip" player
+        # The level was read when the mixer hid, by which time the "pip" player
         # could be large and changed from the Main row.
         self.start_large(0)
         self.open_small(CHANNELS[1])

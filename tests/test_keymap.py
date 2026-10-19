@@ -115,7 +115,7 @@ class ClosedKeymapTests(unittest.TestCase):
 
     def test_alt_p_mini_player(self):
         self.assertEqual(closed(K.Key_P, "π", ALT), (Action.MINI_PLAYER, ""))
-        self.assertEqual(closed(K.Key_P, "p"), (Action.PIP, ""))  # plain P: Phase 4's PiP
+        self.assertEqual(closed(K.Key_P, "p"), (Action.PIP, ""))  # plain P: picture in picture
 
     def test_p_picture_in_picture_and_s_swap(self):
         self.assertEqual(closed(K.Key_P, "p"), (Action.PIP, ""))
@@ -363,7 +363,7 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(opened(K.Key_Slash, "/"), (Action.NAV_TEXT, "/"))
 
     def test_ctrl_f_searches_and_f11_or_ctrl_meta_f_toggle_fullscreen_everywhere(self):
-        # Owner's ruling: Ctrl/⌘+F is the quick search in every context; plain F stays the
+        # Ctrl/⌘+F is the quick search in every context; plain F stays the
         # player's fullscreen, and F11 and ⌃⌘F (Ctrl+Meta+F) toggle it from anywhere.
         for context in ("player", "drawer", "guide", "library"):
             with self.subTest(context=context):
@@ -395,7 +395,7 @@ class ContextTests(unittest.TestCase):
 
 
 class KeyHintTests(unittest.TestCase):
-    """On-screen controls name their key in their tooltip (owner's mouse-only rule, 2.0.1)."""
+    """On-screen controls name their key in their tooltip (2.0.1)."""
 
     def test_a_hint_names_the_key_as_this_computer_does(self):
         native = QKeySequence.SequenceFormat.NativeText
@@ -486,7 +486,7 @@ class ShortcutTableTests(unittest.TestCase):
                     with self.subTest(key=key, what=what, context=context):
                         self.assertIsNone(resolve_text(key, context))
 
-    def test_search_and_fullscreen_rows_follow_the_ruling(self):
+    def test_search_is_ctrl_f_everywhere_and_fullscreen_lists_its_three_keys(self):
         rows = {
             (context, what): keys
             for context, entries in SHORTCUTS.items()

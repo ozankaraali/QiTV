@@ -88,7 +88,7 @@ class DirectSlotTests(unittest.TestCase):
         return self.budget.holders(PROVIDER)
 
     def test_a_direct_play_waits_while_the_other_pictures_stream_closes(self):
-        # M3: a closing PiP may still hold the provider's last slot.
+        # A closing PiP may still hold the provider's last slot.
         peer_session = FakeSession()
         peer = LiveTuner(peer_session, self.tuner.config, FakeLive(), self.budget, purpose="pip")
         wait_for_each_other(self.tuner, peer)
@@ -228,7 +228,7 @@ class DirectSlotTests(unittest.TestCase):
 
 
 class SlotRoleTests(unittest.TestCase):
-    """Phase 4: one tuner per player; a swap gives each another role (its purpose)."""
+    """One tuner per player; a swap gives each another role (its purpose)."""
 
     def setUp(self):
         self.session = FakeSession()
@@ -303,7 +303,7 @@ class SlotRoleTests(unittest.TestCase):
                 "user_agent": "QiTV",
                 "disk": True,
                 "max_bytes": 4096 * 1024 * 1024,
-                # What the helper falls back to if the disk fails: the memory per stream (H12).
+                # What the helper falls back to if the disk fails: the memory per stream.
                 "ram_bytes": 256 * 1024 * 1024,
             },
         )
@@ -330,7 +330,7 @@ class SlotRoleTests(unittest.TestCase):
         self.assertNotIn("channel", start_kwargs(LiveStart(URL, "QiTV", True), self.config))
 
     def test_one_disk_ring_at_most_the_other_player_keeps_it(self):
-        # Ruling (M5): the user's disk cap is the total: a second stream goes to RAM.
+        # The user's disk cap is the total: a second stream goes to RAM.
         self.config.timeshift_ram_mib = 128
         other = SimpleNamespace(disk=True)
         self.tuner.set_disk_allowed(lambda: not other.disk)

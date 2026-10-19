@@ -42,10 +42,10 @@ from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer
 from services import i18n
 from services.i18n import N_, tr, translate
 from services.sound_sync import LIMIT_MS, STEP_MS, SoundSync, clamp
-from services.zapping import ZapContext
 from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
 from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync
+from ui.player_keys import PlayerKeys
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ class TrackControls(QObject):
         session: Callable[[], Any],
         current: Callable[[], Optional[Target]],
         playing: Callable[[], bool],
-        channel_key: Callable[[dict], str],
+        keys: PlayerKeys,
         store: SoundSync,
         toast: Callable[..., None],
         show_transport: Callable[[], None],
@@ -134,7 +134,7 @@ class TrackControls(QObject):
     ) -> None:
         """`sound_panel` and `subtitle_panel` are TrackPanels (None: toasts); `session()` the
         large picture's player, `current()` what it plays and `playing()` whether it has
-        media; `channel_key` a live channel's key in `store`. `pick_file(folder)` asks for a
+        media; `keys` each player's channel key in `store`. `pick_file(folder)` asks for a
         subtitle file ("" when none was chosen; None: no "Load a file…"); `config` keeps its
         folder (`subtitle_folder`). `online` is the OpenSubtitles search (an OnlineSubtitles;
         None: no "Search OpenSubtitles…")."""
@@ -148,10 +148,7 @@ class TrackControls(QObject):
         self._session = session
         self._current = current
         self._playing = playing
-        self._key = channel_key
-        # Per player: the live channel it opened last and that channel's key then (a channel
-        # without its provider's stamp is the browsed provider's, which may change meanwhile).
-        self._keys: dict[Any, tuple[dict, str]] = {}
+        self._keys = keys  # each player's channel and its key as it opened (shared)
         self._store = store
         self._toast = toast
         self._show_transport = show_transport
@@ -185,29 +182,16 @@ class TrackControls(QObject):
         if previous is not None and previous.same_as(target):
             return
         if not target.live:
-            self._keys.pop(session, None)
+            self._keys.forget(session)
             session.set_audio_delay(0)
         else:
-            session.set_audio_delay(self._store.audio_ms(self._opens(session, target.item)))
+            session.set_audio_delay(self._store.audio_ms(self._keys.opens(session, target.item)))
         session.clear_subtitles()
 
     def prepare_small(self, session, channel: dict) -> None:
         """A channel opens in the small picture's player: its sound as set last."""
-        session.set_audio_delay(self._store.audio_ms(self._opens(session, channel)))
+        session.set_audio_delay(self._store.audio_ms(self._keys.opens(session, channel)))
         session.clear_subtitles()
-
-    def _opens(self, session, channel: dict) -> str:
-        """`channel` opens in `session`: its sync key, kept for the J and K that follow."""
-        key = self._key(channel)
-        self._keys[session] = (channel, key)
-        return key
-
-    def _key_of(self, session, channel: dict) -> str:
-        """`channel`'s sync key: the one it opened with in `session`, else as it is now."""
-        kept = self._keys.get(session)
-        if kept is not None and (kept[0] is channel or ZapContext.same(kept[0], channel)):
-            return kept[1]
-        return self._key(channel)
 
     # ---- the keys -----------------------------------------------------------------------------
 
@@ -486,7 +470,7 @@ class TrackControls(QObject):
             return int(session.subtitle_delay())
         target = self._current()
         if target is not None and target.live:
-            return self._store.audio_ms(self._key_of(session, target.item))
+            return self._store.audio_ms(self._keys.key_of(session, target.item))
         return int(session.audio_delay())
 
     def _set_delay(self, name: str, ms: int) -> int:
@@ -500,7 +484,7 @@ class TrackControls(QObject):
         session.set_audio_delay(ms)
         target = self._current()
         if target is not None and target.live:
-            self._store.set_audio_ms(self._key_of(session, target.item), ms)
+            self._store.set_audio_ms(self._keys.key_of(session, target.item), ms)
         return ms
 
     def _cycle(self, name: str) -> None:

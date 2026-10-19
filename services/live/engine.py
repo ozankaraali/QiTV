@@ -60,7 +60,7 @@ session no helper holds now is answered "failed". Nothing follows `shutdown()`.
 Known limits:
 - Commands are sent with a blocking write, one small command at a time between reads. Only
   a helper whose command loop hangs while several KiB of commands are unread could block
-  the supervisor; the helper's own sends never block (Task 7's writer thread).
+  the supervisor; the helper's own sends never block (a writer thread sends them).
 - The supervisor QThread stays registered with `ThreadCleanup` for the whole run, so
   `has_pending_threads()` is True until `shutdown()`. Call `shutdown()` before waiting for
   pending threads (window close, self-update).
@@ -564,7 +564,7 @@ class LiveEngine(QObject):
     ) -> str:
         """`ram_bytes`: a disk session's memory if its disk fails (_RAM_BYTES when None).
         `target` and `extra`: the target the session steers to and what it adds to it (Auto's
-        learned extra), so an HLS source starts far enough back for it (2.1 stage 3); without
+        learned extra), so an HLS source starts far enough back for it (2.1); without
         `target`, `live_delay` seconds back."""
         sid = secrets.token_hex(8)
         if self._shut:

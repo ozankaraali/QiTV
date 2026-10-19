@@ -451,7 +451,7 @@ class CatalogServiceTests(unittest.TestCase):
         self.assertEqual(service.items("movies", "5"), [{"id": 1, "_provider": "S"}])
 
     def test_group_result_with_unloaded_section_fails(self):
-        # Formerly dropped silently, which left the drawer loading forever (finding m1).
+        # Formerly dropped silently, which left the drawer loading forever.
         runner = ManualRunner()
         provider = {"name": "S", "type": "STB", "url": "http://portal/c/"}
         service, providers, factory, _ = make_service(provider, runner=runner)

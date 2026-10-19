@@ -128,7 +128,7 @@ class ProviderCacheTests(unittest.TestCase):
         manager._cache_writer.submit(lambda: None).result(timeout=5)
 
     def test_a_playlist_cached_before_the_split_is_split_when_it_loads(self):
-        # Review Minor 3: upgraders see split groups at once, with no download.
+        # Upgraders see split groups at once, with no download.
         self.cache(self.playlist_cached_before_the_split())
         manager = self.manager
         manager.set_current_provider(self.progress)

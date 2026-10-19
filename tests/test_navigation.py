@@ -354,7 +354,7 @@ class NavModelTests(unittest.TestCase):
         self.assertNotIn(FAVORITES_GROUP, [n.key for n in groups])
 
     def test_group_children_are_memoized_until_the_catalog_changes(self):
-        # Finding m5: columns() rebuilt every node on each call (~70 ms for 50k channels).
+        # columns() rebuilt every node on each call (~70 ms for 50k channels).
         self.nav.reset_to("live", "10")
         group = self.nav.path[-1]
         first = self.nav.children(group)
@@ -363,6 +363,16 @@ class NavModelTests(unittest.TestCase):
         self.assertEqual(self.catalog.items_calls, calls)
         self.catalog.live["10"] = [{"id": 3, "name": "Three"}]
         self.assertEqual([n.title for n in self.nav.children(group)], ["Three"])
+
+    def test_a_memoized_list_keeps_its_token_while_it_is_kept(self):
+        # The drawer tells the same list from another by its token, as a long list's.
+        self.nav.reset_to("live", "10")
+        group = self.nav.path[-1]
+        first, again = self.nav.children(group), self.nav.children(group)
+        self.assertIsNot(first, again)  # each a copy: the memo's own is never handed out
+        self.assertEqual(first.token, again.token)
+        self.catalog.live["10"] = [{"id": 3, "name": "Three"}]
+        self.assertNotEqual(self.nav.children(group).token, first.token)
 
     def test_a_zap_does_not_rescan_favorites_or_rebuild_groups(self):
         home = self.nav.children(None)[1]
@@ -417,8 +427,8 @@ class NavModelTests(unittest.TestCase):
         self.assertEqual([n.title for n in nav.children(group)], ["Three"])
 
     def test_section_failure_stops_loading_and_retry_requests_again(self):
-        # Nothing saved for the section: the failure is an error row (finding I2 keeps a
-        # saved catalog instead; see test_failed_refresh_keeps_the_saved_groups).
+        # Nothing saved for the section: the failure is an error row (a saved catalog is
+        # kept instead; see test_failed_refresh_keeps_the_saved_groups).
         self.catalog.ptype = "XTREAM"
         self.catalog.loaded = False
         self.nav.reset_to("movies")
@@ -439,7 +449,7 @@ class NavModelTests(unittest.TestCase):
         self.assertTrue(self.nav.children(section))
 
     def test_failed_refresh_keeps_the_saved_groups(self):
-        # Finding I2: a stale cache whose refresh fails is still shown, with a notice.
+        # A stale cache whose refresh fails is still shown, with a notice.
         notices, changes = [], []
         self.nav.notice.connect(notices.append)
         self.nav.reset_to("live", "10")

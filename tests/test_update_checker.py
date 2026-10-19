@@ -374,7 +374,7 @@ class ShortDownloadTests(unittest.TestCase):
 
 
 class LockedConfigTests(unittest.TestCase):
-    """M9: a locked config.json (Windows antivirus, an indexer) must not stop the update flow."""
+    """A locked config.json (Windows antivirus, an indexer) must not stop the update flow."""
 
     @classmethod
     def setUpClass(cls):
@@ -421,7 +421,7 @@ class LockedConfigTests(unittest.TestCase):
 
 
 class LayoutTests(unittest.TestCase):
-    """Review M9 (ruling): services/ holds the update logic; its dialogs are ui/'s."""
+    """services/ holds the update logic; its dialogs are ui/'s."""
 
     def test_the_service_builds_no_widgets(self):
         source = Path(update_checker.__file__).read_text(encoding="utf-8")

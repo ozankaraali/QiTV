@@ -44,13 +44,19 @@ _REORDER_TICKS = _CLOCK
 # A PCR never steps back on its PID: one more than this behind the last starts a new clock,
 # which VLC takes only with the discontinuity_indicator (more than any PCR jitter).
 _PCR_BACK_TICKS = _CLOCK // 10
-# A longer forward step between two PES is a timestamp jump, unless the stream's own cadence
-# (its previous forward step) is at least half as long: a slideshow's stills seconds apart.
-# A jump is left out of the timeline (`Segmenter.dropped`); a shorter step stays media.
+# A longer forward step between two of the cut PID's PES (pictures) is a timestamp jump, unless
+# the stream's own cadence (its previous forward step) is at least half as long (a slideshow's
+# stills seconds apart), or it was a gap in real time: the pictures stopped while the source
+# went on, so the other timestamps (sound, a PCR) ran on through it, or the stall-free time
+# since the last picture explains it, either to within this much (as `ClockJoiner` tells).
+# A jump is left out of the timeline (`Segmenter.dropped`); a shorter step, or a gap, stays media.
 JUMP_S = 3.0
 _JUMP_TICKS = round(JUMP_S * _CLOCK)
+_PCR_RUN = 0x2000  # added to a PID (13 bits): the key of its PCRs' run (`Segmenter._cover`)
 _SCRAMBLED_PACKETS = 8  # scrambled cut-PID packets that prove scrambling ...
-_SCRAMBLED_WINDOW_S = 2.0  # ... in total within this first wall time, later in a row
+# ... in total within this much real time from the first input (stalls included: under bursty
+# input the stall-free clock barely moves), later in a row
+_SCRAMBLED_WINDOW_S = 2.0
 _STALL_S = 5.0  # a longer pause between feeds is a stalled source: removed from the clock
 # A segment's PTS span may pass the forced cut by this much: the cut lands on the first frame at
 # or past it (10.01 s at 29.97 fps).
@@ -229,7 +235,7 @@ class Segmenter:
         self._flushed: list[Event] = []  # the old input's last packet, after `discontinuity()`
         self._pcrs: dict[int, int] = {}  # the latest PCR base by PID
         self._probe: bytearray | None = bytearray()
-        self._start_wall: float | None = None
+        self._started: float | None = None  # the injected clock at the first input
         self._feed_wall: float | None = None  # the injected clock at the latest input
         self._stalled = 0.0  # stalls so far: removed from every wall time used and reported
         self._wall = 0.0  # the stall-free time of the latest input
@@ -258,6 +264,12 @@ class Segmenter:
         self._pusi_wall = 0.0  # wall time of the last cut-PID PES start (or cut)
         # Other PIDs' (first PTS, last PTS) since then: media time while the cut PID is quiet.
         self._quiet: dict[int, tuple[int, int]] = {}
+        # Since the latest cut-PID PES with a PTS (a picture): its wall time (None before one,
+        # and from a discontinuity until the next), and the other timestamps' runs (`_cover`)
+        # with how far the furthest went on: what tells a gap in real time from a jump.
+        self._picture_wall: float | None = None
+        self._runs: dict[int, tuple[int, int]] = {}
+        self._covered = 0
         self._scrambled_total = 0
         self._scrambled_run = 0
         # The open segment.
@@ -323,6 +335,10 @@ class Segmenter:
         self._latch()
         self._media_ref = None  # measure the new content's age from its first PTS
         self._look = None  # the rest of the open segment's first PES never comes
+        # The step across it is no gap in real time: nothing measured before it tells.
+        self._picture_wall = None
+        self._runs.clear()
+        self._covered = 0
         self._pos += len(self._buf)
         self._buf = b""
         self._searching = True
@@ -369,7 +385,9 @@ class Segmenter:
     def _tick(self) -> float:
         """The stall-free wall time now (see `wall`)."""
         now = self._clock()
-        if self._feed_wall is not None and now - self._feed_wall > _STALL_S:
+        if self._feed_wall is None:
+            self._started = now
+        elif now - self._feed_wall > _STALL_S:
             self._stalled += now - self._feed_wall
         self._feed_wall = now
         self._wall = now - self._stalled
@@ -402,8 +420,6 @@ class Segmenter:
         discontinuity_indicator gets it, so VLC takes the new clock (ContinuityJoiner does the
         same at an HLS discontinuity). The segmenter rewrites no timestamp (for raw TS,
         `ClockJoiner` re-bases a restarted run's before it)."""
-        if self._start_wall is None:
-            self._start_wall = wall
         # The cut PID went quiet while other packets flow: cut at the next PES start of any PID.
         silent = self._open and wall - self._pusi_wall >= self._forced_s
         n = len(data)
@@ -475,12 +491,14 @@ class Segmenter:
                     logger.debug("flagged a PCR %.2f s back", -pts_delta(previous, pcr) / _CLOCK)
                     # Once per new clock: a copy with that one bit set.
                     data = data[: off + 5] + bytes([data[off + 5] | 0x80]) + data[off + 6 :]
+                if pid != cut_pid or not b1 & 0x40:  # (a picture's own PCR is its own time)
+                    self._cover(pid | _PCR_RUN, pcr)
             if pid == cut_pid:
                 if not b1 & 0x80:  # with the transport error flag the header is untrusted
                     if b3 & 0xC0:
                         scrambled += 1
                         self._scrambled_total += 1
-                        self._check_scrambled(scrambled, wall)
+                        self._check_scrambled(scrambled)
                     else:
                         scrambled = 0
                         if b1 & 0x40:
@@ -493,16 +511,16 @@ class Segmenter:
                                 if self._look is not None:
                                     self._read_ahead(data, end, last)
             else:
-                if (
-                    (b1 & 0xC0) == 0x40  # a PES or section start without a transport error
-                    and self._open
-                    and (silent or self._media_quiet(pid, data[off:end]))
-                ):
-                    silent = False
-                    logger.debug("PID %#x went quiet; cutting at PID %#x", cut_pid, pid)
-                    emit(run, off)
-                    events.extend(self._cut(None, wall, True))
-                    run = off
+                if (b1 & 0xC0) == 0x40:  # a PES or section start without a transport error
+                    pts = _pes_start(data[off:end])[1]
+                    if pts is not None and not b3 & 0xC0:
+                        self._cover(pid, pts)
+                    if self._open and (silent or self._media_quiet(pid, pts)):
+                        silent = False
+                        logger.debug("PID %#x went quiet; cutting at PID %#x", cut_pid, pid)
+                        emit(run, off)
+                        events.extend(self._cut(None, wall, True))
+                        run = off
                 if pid == 0 or pid == pmt_pid:
                     if not b1 & 0x80:
                         self._on_psi(pid, data[off:end])
@@ -517,13 +535,13 @@ class Segmenter:
         self._searching = searching
         self._scrambled_run = scrambled
 
-    def _media_quiet(self, pid: int, pkt: bytes) -> bool:
-        """Whether another PID's PTS advanced `forced_s` since the cut PID's last PES start.
+    def _media_quiet(self, pid: int, pts: int | None) -> bool:
+        """Whether another PID's PTS (`pts`, of its PES start) advanced `forced_s` since the
+        cut PID's last PES start.
 
         Media time also notices a silent cut PID when the input arrives in bursts. Each PID is
         measured on its own clock, which may be offset, sparse or jump (then it starts over).
         """
-        pts = _pes_start(pkt)[1]
         if pts is None:
             return False
         span = self._quiet.get(pid)
@@ -538,10 +556,42 @@ class Segmenter:
         self._quiet[pid] = (first, pts)
         return pts_delta(first, pts) >= self._forced
 
-    def _check_scrambled(self, run: int, wall: float) -> None:
-        """Isolated scrambling bits are corruption; many mean the stream is encrypted."""
-        start = wall if self._start_wall is None else self._start_wall
-        early = wall - start < _SCRAMBLED_WINDOW_S
+    def _cover(self, key: int, value: int) -> None:
+        """Another timestamp since the latest picture: a PCR (`key` its PID plus `_PCR_RUN`) or
+        another PID's PTS (`key` that PID). Its run goes on from its first since the picture
+        while each step is at most `JUMP_S` on (or a reordering back): a leap or a reset starts
+        it afresh, so a clock that jumped covers nothing. `_covered` is the furthest any ran."""
+        run = self._runs.get(key)
+        if run is not None:
+            first, last = run
+            if -_REORDER_TICKS <= pts_delta(last, value) <= _JUMP_TICKS:
+                self._runs[key] = (first, value)
+                ran = pts_delta(first, value)
+                if ran > self._covered:
+                    self._covered = ran
+                return
+        self._runs[key] = (value, value)
+
+    def _in_real_time(self, step: int, wall: float) -> bool:
+        """Whether a picture's forward `step` (in ticks, at stall-free `wall`) was a gap in real
+        time (the pictures stopped while the source went on), not a timestamp jump: the other
+        timestamps ran on through it to within `JUMP_S` of it (as `ClockJoiner` lets a gap the
+        sound fills pass), or the stall-free time since the last picture leaves no more of it
+        (up to `_JUMP_MAX_TICKS`: a longer step is a clock of its own). A stalled source's
+        pause is no such time, and across a discontinuity nothing tells: those stay jumps."""
+        since = self._picture_wall
+        if since is None:
+            return False
+        if step - self._covered <= _JUMP_TICKS:
+            return True
+        return step <= _JUMP_MAX_TICKS and step - (wall - since) * _CLOCK <= _JUMP_TICKS
+
+    def _check_scrambled(self, run: int) -> None:
+        """Isolated scrambling bits are corruption; many mean the stream is encrypted: `run` in
+        a row, or as many in total within the first `_SCRAMBLED_WINDOW_S` of real time (stalls
+        included: bursty HLS barely moves the stall-free clock)."""
+        started, now = self._started, self._feed_wall
+        early = started is None or now is None or now - started < _SCRAMBLED_WINDOW_S
         if run >= _SCRAMBLED_PACKETS or (early and self._scrambled_total >= _SCRAMBLED_PACKETS):
             raise Unsupported("scrambled")
 
@@ -559,7 +609,9 @@ class Segmenter:
                 step = pts_delta(last, pts)
                 cadence = self._cadence
                 if step < -_REORDER_TICKS or (
-                    cadence is not None and step > max(_JUMP_TICKS, 2 * cadence)
+                    cadence is not None
+                    and step > max(_JUMP_TICKS, 2 * cadence)
+                    and not self._in_real_time(step, wall)
                 ):
                     logger.debug("PTS jumped by %.2f s", step / _CLOCK)
                     self._latch()
@@ -582,6 +634,9 @@ class Segmenter:
                 self._top = pts
             if self._media_ref is None:
                 self._media_ref = pts
+            self._picture_wall = wall  # the other timestamps' runs are measured from here
+            self._runs.clear()
+            self._covered = 0
         if rai:
             self._rai_seen = True
         if not self._open:  # the first segment, or the first after finish(), which left a gap
@@ -3324,7 +3379,13 @@ class AudioRelabeler:
     again until its PES disagree anew. From the first renaming on, the version_number is this
     stage's: the last one written plus one whenever the section written differs from the last
     one (so VLC re-creates the stream with the right decoder, and a seek back to a segment
-    whose header PMT names the stream otherwise sees another version), else the same. A PMT
+    whose header PMT names the stream otherwise sees another version), else the same. So it is
+    too from the first PMT whose content changed while its version did not: an encoder that
+    restarts may switch its sound from MPEG audio to AAC and back on one PID, say so in its
+    PMT and keep version 0 each time, and VLC 3 ignores a PMT whose version it has seen (it
+    decodes the AAC as MPEG audio: silence until the old codec returns). Until then every PMT
+    passes as it came. Only the map of the program the PAT lists first counts: another
+    program's on the same PID passes as it came. A PMT
     section spanning packets is held with the packets after it until it ends
     (`_RELABEL_HOLD_PACKETS` at most, then it passes as it came), and only a section whose CRC
     holds is changed. While the PES agree with the PMT nothing changes. It reads the bytes on
@@ -3335,6 +3396,7 @@ class AudioRelabeler:
     def __init__(self) -> None:
         self._buf = b""  # a partial packet, or a PMT section that spans packets and the rest
         self._pmt_pid: int | None = None
+        self._program: int | None = None  # the program the PAT lists first
         self._declared: dict[int, int] = {}  # audio PID -> the stream type its PMT declares
         self._renamed: dict[int, int] = {}  # audio PID -> the stream type written instead
         self._streak: dict[int, tuple[int, int]] = {}  # PID -> (sniffed type, PES in a row)
@@ -3390,13 +3452,17 @@ class AudioRelabeler:
         if section is None or section[0] != 0x00 or _crc32(section):
             return
         for i in range(8, len(section) - 4 - 3, 4):
-            if (section[i] << 8) | section[i + 1]:  # program 0 is the network table
+            program = (section[i] << 8) | section[i + 1]
+            if program:  # program 0 is the network table
                 pmt_pid = ((section[i + 2] & 0x1F) << 8) | section[i + 3]
                 if pmt_pid != self._pmt_pid:
                     self._pmt_pid = pmt_pid
                     self._declared.clear()
                     self._renamed.clear()
                     self._streak.clear()
+                    if not self._managed:  # a map elsewhere: nothing to compare it with yet
+                        self._version, self._written = None, b""
+                self._program = program
                 return
 
     def _on_pmt(self, data: bytes, off: int) -> list[tuple[int, int]] | None:
@@ -3408,6 +3474,10 @@ class AudioRelabeler:
         section = bytearray(data[at] for at in places)
         if len(section) < 16 or section[0] != 0x02 or _crc32(bytes(section)):
             return []
+        if self._program is not None and (section[3] << 8) | section[4] != self._program:
+            return []  # another program's map on the same PID
+        if not section[5] & 1:
+            return []  # a map announced for later (current_next 0): VLC applies the current one
         end = len(section) - 4
         i = 12 + (((section[10] & 0x0F) << 8) | section[11])
         declared: dict[int, int] = {}
@@ -3428,6 +3498,10 @@ class AudioRelabeler:
         self._declared = declared
         written = bytes(section[:5]) + bytes([section[5] & 0xC1]) + bytes(section[6:-4])
         version = (section[5] >> 1) & 0x1F
+        if not self._managed and self._written and written != self._written:
+            if version == self._version:
+                self._managed = True  # VLC would ignore this one: the versions are ours now
+                logger.info("The program map changed under the same version: it is renumbered.")
         if self._managed:
             if written != self._written and self._version is not None:
                 version = (self._version + 1) & 0x1F

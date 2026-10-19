@@ -288,8 +288,8 @@ class LiveControls(QObject):
     def tune_pipeline(self, target: Target, url: str) -> bool:
         """Ask for a budget slot for `target` (spec §6.9); it starts once the old one is released.
 
-        False when the provider's limit is taken by other streams (Phase 4: picture in
-        picture): the toast says so and the running channel goes on.
+        False when the provider's limit is taken by other streams (picture in picture, say):
+        the toast says so and the running channel goes on.
         """
         if self.refuse_over_limit(target):
             return False
@@ -466,7 +466,7 @@ class LiveControls(QObject):
             return
         if text == UNAVAILABLE:
             # Said when it matters, not at every tune: a rewind on a channel that plays
-            # directly says it (the owner found the toast on load noise on slow channels).
+            # directly says it (at each tune the toast also came on load noise on slow channels).
             return
         self._toast(translate(text))  # LiveSession's notices are English (N_) texts
 

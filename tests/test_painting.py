@@ -114,7 +114,7 @@ class PaintingTest(unittest.TestCase):
         self.assertEqual(fmt_clock(datetime(2026, 1, 2, 9, 5)), "09:05")
 
     def test_the_clock_shows_local_time_for_a_guide_in_another_zone(self):
-        # A UTC guide at 20:03 local read "17:15 – 18:15" on the banner (H16).
+        # A UTC guide at 20:03 local read "17:15 – 18:15" on the banner.
         local = datetime(2026, 10, 15, 20, 3).astimezone()
         guide_zone = timezone(local.utcoffset() + timedelta(hours=3))  # never the local zone
         start = local.astimezone(guide_zone)

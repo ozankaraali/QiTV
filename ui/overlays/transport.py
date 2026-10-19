@@ -27,12 +27,12 @@ whether that picture is muted, and else its volume (a wave per third). ♫ opens
 above it and the subtitles button the Subtitles panel (ui/track_controls.py), and the Picture
 button beside them the Picture panel (ui/picture_controls.py): the controls stay up while one
 shows (`hold`).
-Without a keyboard every key of the player has a control here too (the owner's mouse-only
-rule): left of the speaker sit Search, and on live TV the guide and the previous channel; a
-time-shifted channel at its live edge has ◀10 beside play; on live TV the channel's name (and
-logo) shows its info, and a star after the name adds or removes it from the favorites. Each
-names its key when hovered. A movie or an episode played from the Library has "‹ Library" at the
-left of the right-hand buttons: back to where it came from, as Esc.
+Without a keyboard every key of the player has a control here too: left of the speaker sit
+Search, and on live TV the guide and the previous channel; a time-shifted channel at its live
+edge has ◀10 beside play; on live TV the channel's name (and logo) shows its info, and a star
+after the name adds or removes it from the favorites. Each names its key when hovered. A movie
+or an episode played from the Library has "‹ Library" at the left of the right-hand buttons:
+back to where it came from, as Esc.
 At a small width (or in a longer language) the Stay live indicator first leaves out "adjusted",
 then its name (the LIVE badge beside it says live), then its text is cut short, or the
 indicator left out, so it never runs under the play button. A row whose LIVE, Go live or

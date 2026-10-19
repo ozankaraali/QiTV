@@ -127,7 +127,7 @@ class CatalogsTests(unittest.TestCase):
         QTest.qWait(30)
         self.assertEqual([rid for rid, _ in self.failures], [request])
 
-    def test_a_provider_deleted_while_it_plays_stays_until_out_of_use(self):  # Review Focus 3
+    def test_a_provider_deleted_while_it_plays_stays_until_out_of_use(self):
         self.in_use = {"Harbor IPTV"}
         old = self.catalogs.catalog("Harbor IPTV")
         self.delete_provider("Harbor IPTV")
@@ -145,8 +145,8 @@ class CatalogsTests(unittest.TestCase):
         self.assertIsNot(self.catalogs.catalog("Demo TV"), old)
 
     def test_an_edited_provider_in_use_is_set_up_again_once_with_its_new_settings(self):
-        # Final review I4: a renewed password must reach the pinned manager of a provider a
-        # page shows; Settings' own forced refresh of it is not a second sign-in.
+        # A renewed password must reach the pinned manager of a provider a page shows;
+        # Settings' own forced refresh of it is not a second sign-in.
         runner = HeldSetups()
         catalogs = Catalogs(
             self.config,
@@ -216,8 +216,8 @@ class CatalogsTests(unittest.TestCase):
         self.assertEqual(manager.current_provider.get("password"), original.get("password"))
 
     def test_an_edited_provider_in_use_is_not_set_up_again_by_the_next_reload(self):
-        # Sweep A4: the record its catalog was built for follows the edit, so a later save
-        # without changes renews nothing.
+        # The record its catalog was built for follows the edit, so a later save without
+        # changes renews nothing.
         self.in_use = {"Harbor IPTV"}
         self.catalogs.ensure("Harbor IPTV")
         self.registry.providers[1] = {**self.registry.providers[1], "password": "renewed"}
@@ -227,7 +227,7 @@ class CatalogsTests(unittest.TestCase):
         self.assertEqual(self.factory.setups, ["Harbor IPTV", "Harbor IPTV"])
 
     def test_an_unstamped_item_goes_to_the_first_provider_without_a_selection(self):
-        # Final review M7: one provider, a stale selection (an old 2.0 Recent entry).
+        # One provider, a stale selection (an old 2.0 Recent entry).
         self.config.selected_provider_name = "Gone"
         request = self.catalogs.request_link({"id": 9, "cmd": "http://d/9.ts"}, section="live")
         self.assertEqual(self.ready_links(), [(request, "http://d/9.ts")])
@@ -265,8 +265,8 @@ class CatalogsTests(unittest.TestCase):
         self.assertEqual(self.factory.epg_loads, ["Demo TV"])
 
     def test_a_guide_released_while_it_loads_and_wanted_again_loads_again(self):
-        # Sweep A3: the load that ran ended "ready" although its guide may have been
-        # released after it was stored: the guide stayed empty until the next refresh.
+        # The load that ran ended "ready" although its guide may have been released after
+        # it was stored: the guide stayed empty until the next refresh.
         runner = HeldGuides()
         catalogs = Catalogs(
             self.config,
@@ -305,8 +305,8 @@ class CatalogsTests(unittest.TestCase):
         self.assertEqual(self.factory.epg_loads, ["Demo TV"])
 
     def test_a_dropped_catalog_gives_its_guide_and_lists_back(self):
-        # Sweep A3: the hub forgot a removed provider's catalog, but the pages' views still
-        # held it, and with it its guide and its channel lists, until QiTV quit.
+        # The hub forgot a removed provider's catalog, but the pages' views still held it,
+        # and with it its guide and its channel lists, until QiTV quit.
         self.catalogs.ensure("Harbor IPTV")
         QTest.qWait(30)
         catalog = self.catalogs.catalog("Harbor IPTV")
@@ -338,8 +338,8 @@ print(manager._provider_cache_name("Demo TV"), flush=True)
 
 class CacheWriteAtExitTests(unittest.TestCase):
     def test_a_cache_write_queued_at_quit_ends_before_the_hard_exit(self):
-        # Sweep A5: Catalogs._stop does not wait for the cache writer; the interpreter joins
-        # its thread before any atexit handler runs, _exit_now's os._exit included.
+        # Catalogs._stop does not wait for the cache writer; the interpreter joins its
+        # thread before any atexit handler runs, _exit_now's os._exit included.
         repo = Path(__file__).resolve().parent.parent
         directory = tempfile.TemporaryDirectory(prefix="qitv-exit-cache-")
         self.addCleanup(directory.cleanup)
@@ -420,8 +420,8 @@ class LinksDuringSetupTests(unittest.TestCase):
         return lanes
 
     def test_a_link_asked_during_a_refresh_waits_for_it(self):
-        # Sweep A2: a refresh left the provider "ready", so a link asked meanwhile failed
-        # with "The provider is still loading" instead of waiting for the refresh.
+        # A refresh left the provider "ready", so a link asked meanwhile failed with
+        # "The provider is still loading" instead of waiting for the refresh.
         self.hub.ensure("Demo TV")
         self.runner.held.add("Demo TV")
         self.hub.select("Demo TV", force_refresh=True)  # ↻: its channels and guide again
@@ -435,9 +435,9 @@ class LinksDuringSetupTests(unittest.TestCase):
         self.assertEqual(self.hub_failures, [])
 
     def test_links_held_for_a_setup_reach_their_lanes_once(self):
-        # Sweep A2: the shell dropped every request of a provider that became ready (its
-        # catalog drops what it was asked before), also those the hub held for the setup:
-        # a tune was asked twice (two STB links) and a menu's link was lost without a word.
+        # The shell dropped every request of a provider that became ready (its catalog
+        # drops what it was asked before), also those the hub held for the setup: a tune
+        # was asked twice (two STB links) and a menu's link was lost without a word.
         self.runner.held.add("Demo TV")
         demo = self.hub.catalog("Demo TV")
         asked = []
@@ -453,16 +453,16 @@ class LinksDuringSetupTests(unittest.TestCase):
         QTest.qWait(30)
         self.assertEqual(self.dropped, [None])  # nothing to ask again: the hub answers them
         self.assertEqual(self.tunes, ["http://127.0.0.1:9/live/1.ts"])
-        # The menu's second link waited behind the first (sweep A, concern 3: it was lost).
+        # The menu's second link waited behind the first (before, it was lost).
         self.assertEqual(
             self.side, ["http://127.0.0.1:9/live/2.ts", "http://127.0.0.1:9/live/1.ts"]
         )
         self.assertEqual(len(asked), 3)
 
     def test_a_newer_choice_goes_at_once_past_a_tune_held_for_another_providers_setup(self):
-        # Sweep A review M1: a tune held for Harbor's refresh kept a newer choice of a ready
-        # provider queued until that refresh ended. The newest choice goes now; the held one
-        # is never answered, nor asked of its portal.
+        # A tune held for Harbor's refresh kept a newer choice of a ready provider queued
+        # until that refresh ended. The newest choice goes now; the held one is never
+        # answered, nor asked of its portal.
         seven = with_provider({"id": 7, "cmd": "http://127.0.0.1:9/live/7.ts"}, "Harbor IPTV")
         self.hub.ensure("Demo TV")
         self.hub.ensure("Harbor IPTV")

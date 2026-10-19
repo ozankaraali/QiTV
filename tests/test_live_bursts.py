@@ -1,4 +1,4 @@
-"""Raw MPEG-TS that arrives in bursts (2.0.1, L1).
+"""Raw MPEG-TS that arrives in bursts (2.0.1).
 
 Some providers' restreams send ~10 s of media at once every ~10 s. The helper measures that
 (`BurstMeter`) and reports it as the session's `burst_s`, so LiveSession handles it as it
@@ -79,7 +79,7 @@ class BurstMeterTests(unittest.TestCase):
         self.assertEqual(set(readings[10:]), {1.2})
 
     def test_a_connect_backlog_counts_only_up_to_the_next_burst(self):
-        # The owner's provider: 12 s at connect, then 10 s every 10 s. Only what plays
+        # A measured provider: 12 s at connect, then 10 s every 10 s. Only what plays
         # until the next burst lands counts; the rest was a backlog.
         series = bursts(0.0, 12.0, 10.0, 1)
         series += bursts(10.0, 10.0, 10.0, 5, media=12.0)
@@ -93,7 +93,7 @@ class BurstMeterTests(unittest.TestCase):
         self.assertEqual(set(measured(series)[5:]), {10.0})
 
     def test_a_short_connect_burst_takes_its_gap_as_the_period(self):
-        # Re-measured on the owner's channel: 3.84 s at connect, the first 10 s burst 8.5 s
+        # Re-measured on a bursty channel: 3.84 s at connect, the first 10 s burst 8.5 s
         # later, then 10 s every 10 s. The gap says more than the connect burst's media.
         series = bursts(0.0, 3.84, 0.0, 1)
         series += bursts(8.5, 10.0, 10.0, 4, media=3.84)
@@ -111,7 +111,7 @@ class BurstMeterTests(unittest.TestCase):
         self.assertEqual(set(readings[5 + round(6.0 / 0.1) + 1 :]), {0.0})  # 6 s steady
 
     def test_an_unconfirmed_estimate_drops_after_one_estimate_without_a_gap(self):
-        # The 2.0.1 review's case: a steady source sends 4 s at connect, pauses 12 s while it
+        # Seen in 2.0.1: a steady source sends 4 s at connect, pauses 12 s while it
         # starts up, then sends in real time. The connect burst counts for its gap, at most
         # 10 s, but no second burst confirms it: steady again after 10 s, not after 36 s.
         series = bursts(0.0, 4.0, 0.0, 1) + steady(12.2, 60.0, media=4.0)
@@ -121,7 +121,7 @@ class BurstMeterTests(unittest.TestCase):
         self.assertEqual(set(readings[5 + window + 1 :]), {0.0})
 
     def test_a_short_connect_burst_holds_while_the_next_bursts_arrive(self):
-        # The owner's channel: 2 s at connect, the first 10 s burst 8.5 s later, then 10 s
+        # A measured channel: 2 s at connect, the first 10 s burst 8.5 s later, then 10 s
         # every 10 s, each arriving over 2 s. The unconfirmed estimate never drops meanwhile.
         series = bursts(0.0, 2.0, 0.0, 1)
         series += bursts(8.5, 10.0, 10.0, 4, media=2.0, spread=2.0, chunks=20)

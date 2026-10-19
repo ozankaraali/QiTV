@@ -159,7 +159,7 @@ class PageStackTests(StackCase):
         self.assertEqual(stack.mode(), PageStack.CORNER)  # the window decides what a click does
 
     def test_a_click_on_the_corner_player_gives_the_keys_back_to_the_window(self):
-        # Final review M1: macOS beeped at the next key typed in the Library after a click.
+        # macOS beeped at the next key typed in the Library after a click.
         stack = self.make_stack()
         stack.show_library(corner=True)
         point = stack.mapToGlobal(stack.corner_rect().center())
@@ -193,7 +193,7 @@ class PageStackTests(StackCase):
         self.assertEqual(len(seen), 1)  # in the corner: the stack took it
 
     def test_views_added_to_the_player_later_are_the_stacks_in_the_corner_too(self):
-        # Sweep B2: only the views there when the stack was made were the stack's.
+        # Only the views there when the stack was made were the stack's.
         seen = []
 
         class View(QWidget):
@@ -213,7 +213,7 @@ class PageStackTests(StackCase):
         self.assertEqual(seen, [inner])  # on the player page: its own
 
     def test_a_stack_collected_with_its_views_reports_no_error(self):
-        # Review M4: in a reference cycle (as a test case or a window makes), the collector
+        # In a reference cycle (as a test case or a window makes), the collector
         # clears the stack's attributes before Qt deletes it and its views, whose last events
         # still reach its filter: "AttributeError: no attribute '_mode'" on stderr.
         player, library = QWidget(), QWidget()

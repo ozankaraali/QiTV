@@ -194,6 +194,17 @@ class SyncFollowsTheChannelTests(PipCase):
         self.controller.handle(Action.SOUND_LATER)
         self.assertEqual(store.audio_ms(ONE), 100)
 
+    def test_the_sound_and_the_shape_share_one_key_memory_that_a_closed_pip_leaves(self):
+        keys = self.controller._player_keys
+        self.assertIs(self.controller._tracks._keys, keys)
+        self.assertIs(self.controller._picture._keys, keys)
+        self.start_large(0)
+        self.open_small(GROUP_B[0], "20", GROUP_B)
+        self.assertCountEqual(keys.players(), [self.session, self.pip_session])
+        self.controller.handle(Action.PIP)  # the small picture closes
+        self.assertFalse(self.sessions.pip_open())
+        self.assertEqual(keys.players(), [self.session])
+
     def test_a_zap_of_the_large_picture_after_a_swap_takes_that_channels_sync(self):
         store = self.controller._tracks._store
         store.set_audio_ms(TWO, 250)

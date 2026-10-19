@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import tomllib
 from PyInstaller.utils.win32.versioninfo import (
     VSVersionInfo,
@@ -104,6 +105,21 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
+
+# Qt's PDF library comes in only with Qt's image plugin for PDF files (imageformats/qpdf), and
+# QiTV opens no PDF: neither ships (8 MB in the macOS app). Qt's web engine, a wheel of its own
+# from PySide6 6.12, is never imported, so PyInstaller leaves it out by itself.
+QT_PDF = re.compile(r'QtPdf\.framework/|Qt6Pdf|imageformats/(lib)?qpdf\.', re.IGNORECASE)
+
+
+def ships(entry):
+    """False for Qt's PDF library and plugin, and for the links PyInstaller makes to them."""
+    return not any(QT_PDF.search(str(part).replace('\\', '/')) for part in entry[:2])
+
+
+a.binaries = [entry for entry in a.binaries if ships(entry)]
+a.datas = [entry for entry in a.datas if ships(entry)]
+
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

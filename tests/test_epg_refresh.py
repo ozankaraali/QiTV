@@ -389,7 +389,7 @@ class SavedGuideTests(_GuideCase):
         fetch.assert_not_called()
 
     def test_a_truncated_saved_guide_is_removed_and_fetched_again(self):
-        # Review M5: it stayed unreadable, and the guide stayed empty, until the index expired.
+        # It stayed unreadable, and the guide stayed empty, until the index expired.
         def truncate(path):
             with open(path, "rb+") as f:
                 f.truncate(os.path.getsize(path) // 2)
@@ -404,7 +404,7 @@ class SavedGuideTests(_GuideCase):
         self.assert_unreadable_guide_is_fetched_again(future)
 
     def test_reindexing_the_guide_unpickles_no_channel(self):
-        # Review M4: re-keying a saved guide on the GUI thread read every channel back.
+        # Re-keying a saved guide on the GUI thread read every channel back.
         self.load(self.manager())
         manager = self.manager()  # a new session: the guide comes off the disk, still packed
         manager.set_current_epg()
@@ -523,9 +523,8 @@ class SharedUrlGuideTests(_GuideCase):
     """The URL guide is global: each provider in use loads it with its own manager."""
 
     def test_two_managers_download_a_shared_url_guide_once(self):
-        # Final review M4: both wrote the same <hash>.xml.download (a forced refresh).
-        # Sweep A9: the one that waited downloaded and parsed it again; it reads the guide
-        # the other just stored.
+        # Both wrote the same <hash>.xml.download (a forced refresh), and the one that
+        # waited downloaded and parsed it again; it reads the guide the other just stored.
         self.config.epg_source = "URL"
         self.config.epg_url = "http://127.0.0.1:9/guide.xml"
         managers = [self.manager(), self.manager()]
@@ -567,8 +566,8 @@ class SharedUrlGuideTests(_GuideCase):
         self.assertEqual([f for f in os.listdir(cache) if f.endswith((".xml", ".download"))], [])
 
     def test_a_manager_reads_the_url_guide_another_stored_since_it_read_the_index(self):
-        # Sweep A9: each provider's manager read the shared index when its catalog was made;
-        # the guide another provider downloaded later was downloaded and parsed again.
+        # Each provider's manager read the shared index when its catalog was made; the
+        # guide another provider downloaded later was downloaded and parsed again.
         self.config.epg_source = "URL"
         self.config.epg_url = "http://127.0.0.1:9/guide.xml"
         first, second = self.manager(), self.manager()
@@ -579,9 +578,9 @@ class SharedUrlGuideTests(_GuideCase):
         self.assertEqual(self.titles(second), ["New"])
 
     def test_a_waiter_downloads_when_nothing_was_stored_while_it_waited(self):
-        # Sweep A review M3: the waiter took any change of the shared index entry while it
-        # waited (here a third manager saving when it last read the guide, while the download
-        # it waited for failed) for a guide just stored, and downloaded nothing.
+        # The waiter took any change of the shared index entry while it waited (here a
+        # third manager saving when it last read the guide, while the download it waited
+        # for failed) for a guide just stored, and downloaded nothing.
         self.config.epg_source = "URL"
         self.config.epg_url = "http://127.0.0.1:9/guide.xml"
         with patch("services.epg_manager.requests.get", side_effect=serving(xmltv("Old"))):

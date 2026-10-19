@@ -737,7 +737,7 @@ class SegmenterTests(unittest.TestCase):
                 self.assert_closed_pts(events)
 
     def test_a_jump_left_out_of_the_timeline_is_reported_where_and_how_much(self):
-        # 2.1 stage 2: the player's clock jumps by what the timeline leaves out. The +5 s
+        # 2.1: the player's clock jumps by what the timeline leaves out. The +5 s
         # step at frame 120 (4.8 s) is in segment 2, 0.8 s after its start at 4.0 s.
         seg, _ = run(shift_pts(fx.make_stream(12), 120, 5 * CLOCK))
         self.assertEqual(len(seg.dropped), 1)
@@ -759,6 +759,60 @@ class SegmenterTests(unittest.TestCase):
                 else:
                     self.assertEqual(len(seg.dropped), 1)
                     self.assertAlmostEqual(seg.dropped[0][2], reported, places=3)
+
+    def test_a_gap_in_the_pictures_that_the_sound_fills_stays_on_the_timeline(self):
+        # The pictures stop for 4 s (14 s to 18 s) while the sound goes on: a gap in real time,
+        # not a timestamp jump, however the bytes arrive (in one burst nothing in the arrival
+        # explains it). The segment from 12 s holds it whole, up to the keyframe at 18 s, and
+        # nothing is left out of the timeline.
+        data = fx.make_stream(24, video_gaps=((14.0, 18.0),))
+        cases = {
+            "one burst": lambda: run(data),
+            "read 187 bytes at a time": lambda: run(data, chunk=187),
+            "live": lambda: run_at(data, by_pts(data)),
+        }
+        for name, replay in cases.items():
+            with self.subTest(name):
+                seg, events = replay()
+                o = opens(events)
+                self.assertEqual(
+                    [frame_of(e.first_pts) for e in o],
+                    [0, 50, 100, 150, 200, 250, 300, 450, 500, 550],
+                )
+                self.assertFalse(any(e.discontinuity for e in o))
+                self.assertEqual(closes(events)[6].next_first_pts, 900000 + 18 * CLOCK)
+                self.assertEqual(seg.dropped, [])
+
+    def test_a_gap_nothing_else_fills_stays_where_the_arrival_shows_the_time_passed(self):
+        # No sound, and the PCR rides on the pictures: nothing else goes on through a 4 s gap
+        # in them. Where the source paused as long (live), it stays media; in one burst it is a
+        # jump, left out as before.
+        data = fx.make_stream(24, audio=False, video_gaps=((14.0, 18.0),))
+        seg, events = run_at(data, by_pts(data))
+        self.assertFalse(any(e.discontinuity for e in opens(events)))
+        self.assertEqual(closes(events)[6].next_first_pts, 900000 + 18 * CLOCK)
+        self.assertEqual(seg.dropped, [])
+        seg, events = run(data)
+        self.assertEqual([e.discontinuity for e in opens(events)].count(True), 1)
+        self.assertEqual(len(seg.dropped), 1)
+        self.assertAlmostEqual(seg.dropped[0][2], 4.0, places=3)
+
+    def test_a_jump_stays_one_whatever_else_goes_on_around_it(self):
+        # Every timestamp 5 s on at 12 s: with the bytes arriving at the pictures' pace (no
+        # pause), with the sound muxed 0.3 s ahead of its pictures (it leaps before they do),
+        # or with subtitles 12 s ahead of the pictures between them, it is a jump, left out.
+        jumped = fx.make_stream(20, jumps=((12.0, 5.0),))
+        cases = {
+            "paced by the pictures": lambda: run_at(jumped, by_frame(jumped)),
+            "sound ahead": lambda: run(fx.make_stream(20, jumps=((12.0, 5.0),), audio_ahead_s=0.3)),
+            "subtitles ahead": lambda: run(with_subtitles(jumped, 12 * CLOCK)),
+        }
+        for name, replay in cases.items():
+            with self.subTest(name):
+                seg, events = replay()
+                self.assertEqual([e.discontinuity for e in opens(events)].count(True), 1)
+                self.assertEqual(len(seg.dropped), 1)
+                self.assertAlmostEqual(seg.dropped[0][2], 5.0, places=3)
 
     def test_a_slideshow_with_frames_seconds_apart_is_not_a_discontinuity(self):
         # A radio channel's still picture every 5 s with continuous audio: steps of the
@@ -919,6 +973,43 @@ class SegmenterTests(unittest.TestCase):
                     _, events = run_at(bytes(data), points)
                     expected = [3 * CLOCK, TARGET] if key in marked else [TARGET] * 2
                     self.assertEqual(deltas(events), expected)
+
+    def test_the_first_seconds_of_scrambling_are_real_time_under_bursty_feeding(self):
+        # HLS-like: each 6 s of media arrives in one burst, and the pauses between them are
+        # stalls the stall-free clock removes. The first 2 s of real time end with the first
+        # burst all the same: isolated scrambled packets after it are damage (the stream goes
+        # on), while 8 within it, or 8 in a row later, still prove scrambling.
+        clean = fx.make_stream(30)
+        starts = by_pts(clean)
+        points = [(off, int(t // 6) * 6.0) for off, t in starts]  # the first burst at 0 s
+        media = {}  # packet index -> media time of the PES start before it
+        for k, (off, t) in enumerate(starts):
+            end = starts[k + 1][0] if k + 1 < len(starts) else len(clean)
+            for i in range(off // PACKET, end // PACKET):
+                media[i] = t
+        video = [i for i, p in enumerate(split_packets(clean)) if pid_of(p) == fx.VIDEO_PID]
+        inner = [i for i in video if not clean[i * PACKET + 1] & 0x40]  # inside a PES
+        later = [i for i in inner if media[i] >= 6.5]  # after the first burst
+        spread = later[:: len(later) // 10][:10]
+        first = [i for i in inner if media[i] < 5.5]
+        in_a_row = [i for i in video if media[i] >= 20.1][:8]
+        cases = {
+            "10 apart in later bursts": (spread, False),
+            "8 apart in the first burst": (first[::9][:8], True),
+            "8 in a row later": (in_a_row, True),
+        }
+        for name, (marked, raises) in cases.items():
+            with self.subTest(name):
+                data = bytearray(clean)
+                for i in marked:
+                    data[i * PACKET + 3] |= 0x80
+                if raises:
+                    with self.assertRaises(Unsupported) as raised:
+                        run_at(bytes(data), points)
+                    self.assertEqual(str(raised.exception), "scrambled")
+                else:
+                    _, events = run_at(bytes(data), points)
+                    self.assertEqual(deltas(events), [TARGET] * 14)
 
     # 10
     def test_gop_longer_than_ten_seconds_is_force_cut_at_ten_seconds(self):

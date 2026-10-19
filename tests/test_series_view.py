@@ -110,7 +110,7 @@ class SeriesViewTests(unittest.TestCase):
         self.assertEqual(got, [(ss[0], eps[0])])
 
     def test_a_right_click_asks_for_the_episodes_menu_and_leaves_the_current_row(self):
-        # Owner (2026-10-15): an episode's menu plays it in VLC or MPV, or copies its link.
+        # An episode's menu plays it in VLC or MPV, or copies its link.
         view = self.make()
         view.show()
         got = []

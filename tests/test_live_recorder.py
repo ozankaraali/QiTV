@@ -68,7 +68,7 @@ class FullDisk:
 
 class RacingRing(RamRing):
     """A ring whose segment `seq` is made just after the recorder's first read of it: that
-    read misses it, the wait right after finds it open (the race of review 1)."""
+    read misses it, the wait right after finds it open (a race the recorder once lost)."""
 
     def __init__(self, max_bytes, seq):
         super().__init__(max_bytes)
@@ -285,7 +285,7 @@ class RecorderTests(RecorderCase):
         self.assertEqual(Path(path).stat().st_size, written)
 
     def test_a_segment_made_between_a_read_and_its_wait_is_read(self):
-        # Review 1: "open" after a missed read is no closed ring (which ended it as saved).
+        # "open" after a missed read is no closed ring (which once ended it as saved).
         racing = RacingRing(64 * SEGMENT, seq=1)
         self.ring, self.writer = racing, Writer(racing)
         self.segments(1)  # 0 closed, 1 open

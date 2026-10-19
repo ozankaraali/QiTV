@@ -93,7 +93,7 @@ class OverlayHostTests(HostCase):
         self.assertEqual(self.host.mask().boundingRect(), QRect(0, 0, 200, 100))
 
     def test_clicks_on_the_pip_reach_it_unless_an_overlay_claims_them(self):
-        # Phase 4: a PiP under the host's overlays takes the clicks no overlay claims there.
+        # A PiP under the host's overlays takes the clicks no overlay claims there.
         class Buttons(Overlay):  # a bar with one button inside the hole
             def hole_claims(self):
                 return QRegion(QRect(500, 300, 30, 30))
@@ -164,7 +164,7 @@ class PlatformReports(QObject):
 class RestoreFromDockTests(HostCase):
     """macOS animates a restore out of the Dock and reports it once the window has landed,
     while Qt reports a restore it asked for itself (showNormal()) at once. A host shown on
-    Qt's word sat in its final place before the window had flown in (the owner's report)."""
+    Qt's word sat in its final place before the window had flown in."""
 
     def setUp(self):
         super().setUp()

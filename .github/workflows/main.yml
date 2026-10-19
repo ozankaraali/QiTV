@@ -342,16 +342,13 @@ jobs:
         # ditto keeps the bundle's symlinks, which its signature seals (zip -r copies them).
         run: cd dist && ditto -c -k --keepParent qitv.app qitv-macos-universal.zip
       - name: Make the macOS disk image
-        # QiTV.app beside a shortcut to Applications, to drag onto it. ditto copies the bundle
-        # with its symlinks, so the signature still seals it.
+        # QiTV.app beside a shortcut to Applications, in a window drawn for dragging it there
+        # (scripts/make_dmg.py, headless: dmgbuild writes the window's layout itself). ditto
+        # copies the bundle with its symlinks, so the signature still seals it.
         run: |
-          stage="$RUNNER_TEMP/dmg-stage"
-          rm -rf "$stage" && mkdir -p "$stage"
-          ditto dist/QiTV.app "$stage/QiTV.app"
-          ln -s /Applications "$stage/Applications"
           for attempt in 1 2 3; do
             # A runner's hdiutil sometimes answers "Resource busy" at first.
-            hdiutil create -volname QiTV -srcfolder "$stage" -ov -format UDZO dist/qitv-macos-universal.dmg && break
+            uv run python scripts/make_dmg.py dist/QiTV.app dist/qitv-macos-universal.dmg && break
             if [ "$attempt" = 3 ]; then exit 1; fi
             sleep 10
           done
@@ -361,6 +358,8 @@ jobs:
           hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$volume" dist/qitv-macos-universal.dmg
           codesign --verify --deep --strict "$volume/QiTV.app"
           test "$(readlink "$volume/Applications")" = /Applications
+          # The window's layout and its background.
+          test -s "$volume/.DS_Store" && test -s "$volume/.background.tiff"
           hdiutil detach "$volume"
       - name: Upload macOS artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -460,16 +459,13 @@ jobs:
         # ditto keeps the bundle's symlinks, which its signature seals (zip -r copies them).
         run: cd dist && ditto -c -k --keepParent qitv.app qitv-macos-intel.zip
       - name: Make the macOS disk image
-        # QiTV.app beside a shortcut to Applications, to drag onto it. ditto copies the bundle
-        # with its symlinks, so the signature still seals it.
+        # QiTV.app beside a shortcut to Applications, in a window drawn for dragging it there
+        # (scripts/make_dmg.py, headless: dmgbuild writes the window's layout itself). ditto
+        # copies the bundle with its symlinks, so the signature still seals it.
         run: |
-          stage="$RUNNER_TEMP/dmg-stage"
-          rm -rf "$stage" && mkdir -p "$stage"
-          ditto dist/QiTV.app "$stage/QiTV.app"
-          ln -s /Applications "$stage/Applications"
           for attempt in 1 2 3; do
             # A runner's hdiutil sometimes answers "Resource busy" at first.
-            hdiutil create -volname QiTV -srcfolder "$stage" -ov -format UDZO dist/qitv-macos-intel.dmg && break
+            uv run python scripts/make_dmg.py dist/QiTV.app dist/qitv-macos-intel.dmg && break
             if [ "$attempt" = 3 ]; then exit 1; fi
             sleep 10
           done
@@ -479,6 +475,8 @@ jobs:
           hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$volume" dist/qitv-macos-intel.dmg
           codesign --verify --deep --strict "$volume/QiTV.app"
           test "$(readlink "$volume/Applications")" = /Applications
+          # The window's layout and its background.
+          test -s "$volume/.DS_Store" && test -s "$volume/.background.tiff"
           hdiutil detach "$volume"
       - name: Upload macOS artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

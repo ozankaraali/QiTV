@@ -29,7 +29,7 @@ from ui.overlays.guide import Guide
 logger = logging.getLogger(__name__)
 
 DIGITS_MS = 1200  # a pause this long ends a channel number, as for number entry
-MAX_DIGITS = 4
+MAX_DIGITS = 5  # as the zapping's: channel numbers run past 9999
 _CLOSERS = (Action.OPEN_DRAWER, Action.PREVIOUS)
 _IGNORED = (Action.MEDIA_NEXT, Action.MEDIA_PREV)
 

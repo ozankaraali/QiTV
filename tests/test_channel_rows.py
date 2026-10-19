@@ -15,6 +15,7 @@ from services.provider_ids import PROVIDER_KEY
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import (
+    BATCH_ROWS,
     SINGLE_PASS_ROWS,
     ChannelListView,
     ChannelRowDelegate,
@@ -562,6 +563,110 @@ class FarRowTests(unittest.TestCase):
         self.assertTrue(shown(view, 550))
         middle = view.visualRect(column._model.index(550)).center().y()
         self.assertAlmostEqual(middle, view.viewport().rect().center().y(), delta=40)
+
+
+MANY = 11_000  # a provider's long list: laid out in batches of BATCH_ROWS
+FAR = 9593  # channel 9594's row
+
+
+def top_row(view):
+    return view.indexAt(view.viewport().rect().topLeft()).row()
+
+
+class FarRowRestTests(unittest.TestCase):
+    """A list resting far down a long list stays there through what refreshes its rows
+    (reported on 2.3.0: channel 9594 played, and the list showed, and kept going back to, the
+    channels around 995. Each logo or guide update laid the 11,000 rows out again, in batches,
+    and the scroll position was cut back to the first batch)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        host = QWidget()
+        host.resize(600, 400)
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        self.logos = FakeLogos()
+        self.view = ChannelListView(host)
+        self.view.units_width = 1280
+        self.view.setGeometry(0, 0, 500, 400)
+        self.delegate = ChannelRowDelegate(1.0, self.view)
+        self.view.setItemDelegate(self.delegate)
+        self.model = ChannelRowsModel(self.logos, now_provider, self.view)
+        self.view.setModel(self.model)
+        host.show()
+        self.model.set_channels(items(MANY))
+        index = self.model.index(FAR)
+        self.view.setCurrentIndex(index)
+        self.view.scrollTo(index, ChannelListView.ScrollHint.PositionAtCenter)
+        self.assertTrue(wait_until(lambda: shown(self.view, FAR), 5000))
+        self.assertTrue(wait_until(self.laid_out, 5000))
+        self.bar = self.view.verticalScrollBar()
+        self.value, self.top = self.bar.value(), top_row(self.view)
+        self.moves = []
+        self.bar.valueChanged.connect(self.moves.append)
+
+    def laid_out(self):
+        return placed(self.view, MANY - 1)
+
+    def assertStill(self):
+        """The list never moved: not even for a moment."""
+        self.assertTrue(wait_until(self.laid_out, 5000))
+        elapse(20)
+        self.assertEqual(self.moves, [])
+        self.assertTrue(shown(self.view, FAR))
+
+    def test_the_guides_now_and_next_refreshed(self):
+        self.model.refresh_now()
+        self.assertStill()
+
+    def test_a_logo_arrives(self):
+        self.logos.logoReady.emit("http://x/9590.png")
+        self.assertStill()
+
+    def test_the_same_list_set_again_comes_back_where_it_was(self):
+        self.model.set_channels(items(MANY))  # e.g. the catalog refreshed: the rows anew
+        self.assertTrue(wait_until(self.laid_out, 5000))
+        elapse(20)
+        self.assertEqual(self.bar.value(), self.value)
+        self.assertTrue(shown(self.view, FAR))
+
+    def test_a_wider_window_keeps_the_same_rows_in_sight(self):
+        self.view.units_width = 1600  # taller rows
+        self.view.doItemsLayout()  # as the drawer and the column do at a new size
+        self.assertTrue(wait_until(self.laid_out, 5000))
+        elapse(20)
+        self.assertEqual(top_row(self.view), self.top)
+        self.assertTrue(placed(self.view, FAR))
+
+    def test_a_wheel_turn_before_the_list_comes_back_keeps_the_users_scroll(self):
+        self.model.set_channels(items(MANY))
+        self.view.executeDelayedItemsLayout()  # the first batch: the rows near the top
+        center = QPointF(self.view.viewport().rect().center())
+        QTest.wheelEvent(self.view.window().windowHandle(), center, QPoint(0, 120))
+        self.assertTrue(wait_until(self.laid_out, 5000))
+        elapse(20)
+        self.assertFalse(placed(self.view, FAR) and shown(self.view, FAR))
+        self.assertLess(top_row(self.view), BATCH_ROWS)
+
+    def test_the_fast_zap_column_stays_on_a_channel_far_down(self):
+        host = QWidget()
+        host.resize(1280, 720)
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        column = ChannelColumn(self.logos, now_provider, parent=host, idle_ms=60_000)
+        host.show()
+        column.open("All", items(MANY), FAR)
+        view = column._view
+        self.assertTrue(wait_until(lambda: shown(view, FAR) and placed(view, MANY - 1), 5000))
+        value = view.verticalScrollBar().value()
+        column.refresh_now()  # a guide loaded
+        self.logos.logoReady.emit("http://x/9590.png")
+        elapse(50)
+        self.assertEqual(view.verticalScrollBar().value(), value)
+        self.assertTrue(shown(view, FAR))
 
 
 class HostedColumnInputTests(unittest.TestCase):

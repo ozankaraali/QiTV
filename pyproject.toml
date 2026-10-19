@@ -1,6 +1,6 @@
 [project]
 name = "qitv"
-version = "2.3.0"
+version = "2.3.1"
 description = "A cross-platform STB and IPTV player client"
 # Qt and the theme package currently support Python 3.14, but not 3.15.
 requires-python = ">=3.14,<3.15"
@@ -12,7 +12,8 @@ dependencies = [
     "packaging>=26.3",
     "pycryptodomex>=3.24.1",
     "pyqtdarktheme-fork>=2.3.6",
-    "pyside6>=6.11.2",
+    # 6.12 needs macOS 14.4; QiTV supports macOS 13 (README).
+    "pyside6>=6.11.2,<6.12",
     "python-vlc==3.0.21203",
     "requests>=2.34.2",
     "tzlocal>=5.4.4",
@@ -55,9 +56,10 @@ select = ["E9", "F63", "F7", "F82"]
 [dependency-groups]
 dev = [
   "pyinstaller>=6.22.3",
-  "black==26.5.1",
-  "isort==9.0.1",
-  "mypy==2.3.1",
-  "flake8==7.3.0",
+  "black==26.10.1",
+  "isort==9.0.2",
+  "mypy==2.4.0",
+  "flake8==7.4.1",
   "types-requests==2.33.0.20260906",
+  "dmgbuild>=1.6.7",
 ]

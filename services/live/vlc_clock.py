@@ -1,4 +1,4 @@
-"""VLC's play position from its get_time() readings (2.1 stage 2: an honest clock).
+"""VLC's play position from its get_time() readings (2.1: an honest clock).
 
 libVLC reports the time of a stream it plays in quanta: the stream's own timestamps as its
 demuxer meets them. On a steady channel they come every 0.2-0.5 s (measured, about one tick in
@@ -163,7 +163,7 @@ class VlcClock:
         """How long VLC's clock may stand still at `rate` because its cadence just turned
         coarse, before the steps it learns say so: two of the coarsest steps met
         (`_COARSE_STEP_S`: one stamp missing) and two holds' pad. Rate health waits that long
-        before a still clock counts as nothing played (stage 2 review: fine quanta, then 2 s
+        before a still clock counts as nothing played (measured: fine quanta, then 2 s
         stamps with one of the first three missing, at 1.10x or 0.95x, locked a healthy
         channel at 1x for a day)."""
         return 2 * _COARSE_STEP_S / max(rate, 1e-6) + 2 * _HOLD_PAD_S

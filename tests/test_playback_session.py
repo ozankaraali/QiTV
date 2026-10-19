@@ -190,7 +190,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertGreaterEqual(session._stalls, 1)
 
     def test_stall_budget_resets_after_healthy_playback(self):
-        # Finding m3: after a recovery the budget never refilled, so a later stall went
+        # After a recovery the budget never refilled, so a later stall went
         # straight to the last resort.
         session = self._stalling_session()
         with (
@@ -270,7 +270,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertTrue(errors)
 
     def test_open_timeout_stops_the_player(self):
-        # Finding I1: the session reported a timeout but libVLC kept opening, then played
+        # The session reported a timeout but libVLC kept opening, then played
         # behind the error and held the provider connection.
         data = FIXTURE.read_bytes()
 
@@ -1283,7 +1283,7 @@ class DefaultArgsTests(unittest.TestCase):
             self.assertIn("--aout=directsound", default_args())
 
     def test_no_player_inherits_the_last_level_another_one_set(self):
-        # Review I1: VLC 3's volume-save keeps the last level set on any audio output in the
+        # VLC 3's volume-save keeps the last level set on any audio output in the
         # process's config, and every output opened later starts there. The PiP's 30 became
         # the large picture's (verified with a real output on macOS; the dummy output keeps
         # no volume, so only the argument can be asserted here).

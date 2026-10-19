@@ -15,7 +15,7 @@ own one):
 
 A `HeldSlot` is the slot of a stream that plays outside a `LiveSession`: the main player's
 direct channel, movie or episode. It is taken at once, whatever the limit (the player's own
-release gate already orders its streams), so that other consumers (Phase 4's PiP) see the
+release gate already orders its streams), so that other consumers (the PiP) see the
 slot taken; its owner gives it back once the player let go of that stream. A multiview tile
 takes it only within the limit (`try_take`): the other tiles' streams count against it.
 """

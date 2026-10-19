@@ -25,7 +25,7 @@ streams. It waits for the other pictures' tuners of its provider, though
 the open runs at that tuner's `released`; another provider's closing stream holds none. A local file (`local=True`) is no provider's stream: it is stopped and waited for
 like a direct play, but holds no slot.
 
-Picture in picture (Phase 4) and the multiview's tiles give each player a tuner of its own.
+Picture in picture and the multiview's tiles give each player a tuner of its own.
 Its budget slots carry the player's slot name as their purpose ("main", "pip", "t2" …): a
 stream keeps its tuner across swaps, so a swap moves nothing, and `refused` counts every
 other player's streams. `released` says when nothing of the player is left open after a
@@ -99,7 +99,7 @@ def start_kwargs(start: LiveStart, config: Any, *, disk: Optional[bool] = None) 
 
 def one_disk_ring(*tuners: "LiveTuner") -> None:
     """The pictures' tuners: while one keeps its time-shift on disk, the others' tunes keep
-    theirs in memory (the user's disk cap is the total; owner's M5 ruling). Called again with
+    theirs in memory (the user's disk cap is the total). Called again with
     every tuner when one is added (a multiview tile's)."""
 
     def allowed(others: list[LiveTuner]) -> Callable[[], bool]:

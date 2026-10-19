@@ -321,7 +321,7 @@ def _shown_rows(
     a refreshed catalog brings new item dicts) and number. A genre's payload is told by its
     value: the catalog makes its Group anew at each catalog event and at each zap.
     """
-    if isinstance(nodes, NodeSeq):  # a long list is told by its identity, not row by row
+    if isinstance(nodes, NodeSeq):  # a long list is told by its token, not row by row
         return (live, ("rows", nodes.token), getattr(numbers, "signature", None), tagged)
     rows = tuple(
         (
@@ -624,6 +624,10 @@ class _Column:
         self.message: str | None = None
         self.rect = QRect()
         self.shown: tuple = ()  # what the list shows (_shown_rows), to skip refilling it
+        # The token of the list `shown` was read from (a NodeSeq's or a memoized list's), and
+        # its live and tagged flags: the same again shows the same rows, compared no further
+        # (emptied wherever `shown` is set from anything else).
+        self.shown_token: tuple = ()
 
 
 class Drawer(Overlay):
@@ -1040,16 +1044,19 @@ class Drawer(Overlay):
 
     def _on_nav_changed(self) -> None:
         if self.isVisible():
-            self._refresh()
+            self._refresh(reveal=False)
 
-    def _refresh(self) -> None:
+    def _refresh(self, *, reveal: bool = True) -> None:
+        """Fill both columns from the NavModel. A list whose rows and highlight stay as they
+        were is scrolled to its highlight only when `reveal` (not at a guide's or a catalog's
+        update: the list stays where it was, scrolled by the user or not)."""
         (left_parent, left_children), (right_parent, right_children) = self._nav.columns()
         left, right = self._columns["left"], self._columns["right"]
         was = {side: self._place(col) for side, col in self._columns.items()}
         # After a find, the right column's list comes back as it was (unless the path moved).
         restore, self._restore = self._restore, None
         back = restore if restore is not None and restore.parent == right_parent else None
-        self._fill(left, left_parent, left_children, was["right"])
+        self._fill(left, left_parent, left_children, was["right"], reveal)
         if self.finding():
             self._fill_found(right)
         else:
@@ -1057,7 +1064,7 @@ class Drawer(Overlay):
             # whose list the right column showed, not a genre only highlighted (previewed) on
             # the left.
             up = replace(was["left"], current=was["right"].parent)
-            self._fill(right, right_parent, right_children, back or up)
+            self._fill(right, right_parent, right_children, back or up, reveal)
         for side, col in self._columns.items():
             col.view.setProperty("columnFocused", side == self.focus_side)
             col.view.viewport().update()
@@ -1073,10 +1080,12 @@ class Drawer(Overlay):
         parent: NavNode | None,
         children: Sequence[NavNode] | None,
         other: _Place,
+        reveal: bool = True,
     ) -> None:
         """Show `parent`'s children in `col`; `other` is where the other column was before
         (or where this one was before a find)."""
         parent_changed = parent != col.parent
+        was_current = col.current
         # The highlighted row's place, should it leave the list (taken out of ⟲ Recent).
         was_row = None if parent_changed else col.rows.get(col.current)
         # The other column's list comes over (a layer down: the genres go left; up: right).
@@ -1105,8 +1114,14 @@ class Drawer(Overlay):
         # The same rows again (e.g. the section reported ready once more): the list keeps its
         # model, so it is neither laid out nor repainted from scratch.
         tagged = live and self._nav.shows_provider(parent)
-        shown = _shown_rows(nodes, live, numbers, tagged)
-        if shown != col.shown:
+        token = getattr(nodes, "token", None)
+        if token is not None and (token, live, tagged) == col.shown_token:
+            shown = col.shown  # the same list as last time: no row is compared
+        else:
+            shown = _shown_rows(nodes, live, numbers, tagged)
+        col.shown_token = (token, live, tagged) if token is not None else ()
+        refilled = shown != col.shown
+        if refilled:
             col.shown = shown
             col.nodes = nodes
             col.rows = _RowIndex(nodes)
@@ -1146,7 +1161,8 @@ class Drawer(Overlay):
                 col.current = next((n for n in nodes if _selectable(n)), None)
             if children is not None:
                 self._pending_key = None  # a stale focus key must not outlive the first fill
-        self._show_current(col)
+        if reveal or refilled or parent_changed or col.current != was_current:
+            self._show_current(col)
 
     def _choose_left(self, col: _Column, nodes: Sequence[NavNode]) -> None:
         path = self._nav.path
@@ -1199,6 +1215,7 @@ class Drawer(Overlay):
         col.parent = FIND_PARENT
         col.message = None
         shown = ("find", _shown_rows(nodes, False, None, labels))
+        col.shown_token = ()  # the find's rows are no list of the channel list's
         if shown != col.shown:
             col.shown = shown
             col.nodes = nodes

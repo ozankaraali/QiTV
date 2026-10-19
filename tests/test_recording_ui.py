@@ -51,7 +51,7 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(recording.safe_name("Çay  TV ★"), "Çay TV ★")
 
     def test_a_long_name_is_cut_by_bytes_between_characters_and_stays_unique(self):
-        # Review 3: 255 bytes is the limit of most file systems, whatever the characters.
+        # 255 bytes is the limit of most file systems, whatever the characters.
         for long in ("ğ" * 200, "電視" * 100, "x" * 300, "é" * 59 + "x" + "é" * 100):
             with self.subTest(long[:3]):
                 name = recording.file_name(long, self.WHEN)
@@ -115,7 +115,7 @@ class NamingTests(unittest.TestCase):
         )
 
     def test_without_a_file_only_a_folder_error_blames_the_folder(self):
-        # Review 2: the helper restarting, a closed channel, a busy one, an empty recording.
+        # The helper restarting, a closed channel, a busy one, an empty recording.
         for reason, kind in ((FAILED, "error"), (WRITE, "error"), (STOPPED, "info")):
             with self.subTest(reason):
                 self.assertEqual(

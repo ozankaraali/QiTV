@@ -118,7 +118,7 @@ class ZapController(QObject):
         rest_ms: int = 400,
         burst_ms: int = 1000,
         digits_ms: int = 1200,
-        max_digits: int = 4,
+        max_digits: int = 5,  # channel numbers run past 9999 in long lists
         clock: Callable[[], float] = time.monotonic,
         parent: Optional[QObject] = None,
     ):

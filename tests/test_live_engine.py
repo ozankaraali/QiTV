@@ -150,7 +150,7 @@ def paced_route(payload, stop, hung_up):
 
 
 class RamFallbackSizeTests(unittest.TestCase):
-    """After a disk failure a session goes on in memory of timeshift_ram_mib (H12)."""
+    """After a disk failure a session goes on in memory of timeshift_ram_mib."""
 
     def test_a_disk_session_names_its_memory_fallback_size(self):
         import queue
@@ -188,7 +188,7 @@ class RamFallbackSizeTests(unittest.TestCase):
 
 
 class StartTargetTests(unittest.TestCase):
-    """2.1 stage 3: the session's target reaches the helper, so an HLS source starts far
+    """2.1: the session's target reaches the helper, so an HLS source starts far
     enough back for a start at it; a reopen keeps it."""
 
     def test_the_open_command_carries_the_target_and_extra(self):

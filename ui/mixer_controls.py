@@ -1,4 +1,4 @@
-"""The TV shell's volume: the volume keys, mute and the wheel, shown on the mixer (Phase 4).
+"""The TV shell's volume: the volume keys, mute and the wheel, shown on the mixer.
 
 Every volume action (+/-, the media volume keys, M, ↑/↓ and the wheel during a movie) acts on
 the large picture and shows the mixer (`ui/overlays/mixer.py`), as the transport's speaker

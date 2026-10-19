@@ -9,11 +9,11 @@ title), in a worker: the languages found, the viewer's last one and then this co
 first, and each language's subtitles ranked. Searching again for the same words keeps the
 id; other words search by themselves. Only the subtitles made for the title asked for are
 listed (the line names it when OpenSubtitles calls it otherwise: a translated title's film);
-when OpenSubtitles found only subtitles for titles named otherwise, it lists them, each row
-naming its title, and the line says to check it. A subtitle chosen is downloaded in a worker into the subtitles folder,
-shown with what plays (as a file loaded from the panel is: it is chosen, under its own
-name), kept as the title's pick (services.subtitle_picks) and said in a toast with the
-downloads left today; the page closes.
+when OpenSubtitles found only subtitles for titles named otherwise, it lists them at once,
+each row naming its title, and the line says to check it. A subtitle chosen is downloaded in
+a worker into the subtitles folder, shown with what plays (as a file loaded from the panel
+is: it is chosen, under its own name), kept as the title's pick (services.subtitle_picks) and
+said in a toast with the downloads left today; the page closes.
 What went wrong shows on the page in plain words; a key OpenSubtitles refuses brings the key
 page back.
 
@@ -74,10 +74,6 @@ DOWNLOADING_TEXT = N_("Downloading {name}…")
 LOADING_TEXT = "Loading {name}…"
 # i18n: the OpenSubtitles page's status line; {query}: what was searched for
 NOTHING_FOUND_TEXT = N_('No subtitles found for "{query}". Try another spelling, or fewer words.')
-# i18n: the OpenSubtitles page's status line: what it found was for other films or series
-NOTHING_FOR_TITLE_TEXT = N_(
-    "No subtitles found for this title. Try its original title, or its English one."
-)
 NOTHING_TO_SEARCH_TEXT = N_("Type a title to search for.")  # i18n: the search field was empty
 FAILED_TEXT = N_("Something went wrong. Try again.")
 # i18n: a toast; {name}: the subtitle file's name; "it": the film or episode
@@ -134,11 +130,11 @@ def found_text_for(count: int, languages: int, title: str) -> str:
 
 
 def others_text(count: int, languages: int) -> str:
-    """ "64 subtitles in 4 languages for other titles: …" ("Show all results")."""
-    # i18n: the status line after "Show all results"; {found}: "64 subtitles in 4 languages"
+    """ "64 subtitles in 4 languages for other titles: …" (only other titles' were found)."""
+    # i18n: the OpenSubtitles page's status line when it found only other titles' subtitles
     return tr(
         "{found} for other titles: check the title under each one",
-        found=found_text(count, languages),
+        found=found_text(count, languages),  # i18n: {found}: "64 subtitles in 4 languages"
     )
 
 
@@ -188,7 +184,6 @@ class OnlineSubtitles(QObject):
         self._toast = toast
         self._target: Optional[Target] = None  # what the page searches for
         self._asked: Optional[SearchQuery] = None  # the last search asked for (its ids too)
-        self._result: Optional[SearchResult] = None  # what it found
         self._client: Optional[OpenSubtitlesClient] = None
         self._generation = 0  # the newest search: older results are dropped
         self._downloading = False
@@ -196,7 +191,6 @@ class OnlineSubtitles(QObject):
         page.saveKeyRequested.connect(self._on_save_key)
         page.getKeyRequested.connect(lambda: setup.open_url(CONSUMERS_URL))
         page.searchRequested.connect(self._on_search)
-        page.othersRequested.connect(self._on_others)
         page.fileChosen.connect(self._on_file)
 
     # ---- what the Subtitles panel asks ---------------------------------------------------------
@@ -305,7 +299,7 @@ class OnlineSubtitles(QObject):
         return [code for code in dict.fromkeys((last, system_language())) if code]
 
     def _search(self, query: SearchQuery) -> None:
-        self._asked, self._result = query, None
+        self._asked = query
         self._page.show_search(query.label(), translate(SEARCHING_TEXT))
         if not query.text:
             self._page.set_status(translate(NOTHING_TO_SEARCH_TEXT), "error")
@@ -356,7 +350,6 @@ class OnlineSubtitles(QObject):
             return
         if not isinstance(result, SearchResult):
             return
-        self._result = result
         if result.files:
             self._list(result.files, result.query)
         elif result.others:
@@ -368,12 +361,6 @@ class OnlineSubtitles(QObject):
             label = result.query.label()
             text = translate(NOTHING_FOUND_TEXT, query=label)
             self._page.set_results([], {}, text, kind="error")
-
-    def _on_others(self) -> None:
-        """ "Show all results": the subtitles found for other titles, each named."""
-        result = self._result
-        if result is not None and result.others and self.visible():
-            self._list(result.others, result.query, others=True)
 
     def _list(
         self, found: tuple[SubtitleFile, ...], query: SearchQuery, *, others: bool = False

@@ -76,7 +76,7 @@ def job_indexes(runner, kind):
 
 
 class ProviderSwitchRaceTests(unittest.TestCase):
-    """Finding C2: requests between select_provider() and providerReady."""
+    """Requests between select_provider() and providerReady."""
 
     @classmethod
     def setUpClass(cls):
@@ -237,7 +237,7 @@ class CatalogQueueTests(unittest.TestCase):
         self.assertEqual([c[0] for c in factory.calls], ["xtream", "xtream"])
 
     def test_failed_refresh_of_a_stale_section_keeps_the_saved_channels(self):
-        # Finding I2, end to end: the stale cache stays visible and autotune can use it.
+        # End to end: the stale cache stays visible and autotune can use it.
         service, providers, factory, _ = make_service({"name": "X", "type": "XTREAM", "url": "h"})
         providers.current_provider_content["itv"] = XTREAM_PAYLOAD
         providers.stale.add("itv")
@@ -408,7 +408,7 @@ class CatalogQueueTests(unittest.TestCase):
         self.assertEqual([c[0] for c in factory.calls].count("stb_list"), 2)
 
     def test_shutdown_cancels_the_running_jobs(self):
-        # An XMLTV download or an STB crawl must not hold the window's close (H10).
+        # An XMLTV download or an STB crawl must not hold the window's close.
         runner = ManualRunner()
         runner.cancel_all = mock.Mock()
         service, _, _ = self._stb_movies(runner)
@@ -444,7 +444,7 @@ class CatalogQueueTests(unittest.TestCase):
 
 
 class EpgSerializationTests(unittest.TestCase):
-    """Finding I6/I11: EPG loads never overlap setups or each other; refresh_epg()."""
+    """EPG loads never overlap setups or each other; refresh_epg()."""
 
     @classmethod
     def setUpClass(cls):

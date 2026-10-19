@@ -29,7 +29,7 @@ The Picture panel (2.3, ui/picture_controls.py) acts on the large picture as the
 does: its aspect ratio, kept per channel, deinterlacing, the statistics, and a sleep timer that
 stops playback the Library's way (`stop_for_sleep`) and leaves fullscreen.
 
-Picture in picture (spec §7, Phase 4) is PipControls' (ui/pip_controls.py) over the window's
+Picture in picture (spec §7) is PipControls' (ui/pip_controls.py) over the window's
 SessionManager: each player has its own LiveTuner, and `session`, `live` and the tuner here
 are always the large picture's, so zapping, the banner, the transport, seek and Go live act
 on it. A swap re-points them (`_use_slot`) and trades what each picture showed (its target
@@ -119,6 +119,7 @@ from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import BannerInfo, ZapBanner
 from ui.picture_controls import PictureControls
 from ui.pip_controls import PipControls
+from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
@@ -160,8 +161,8 @@ class Overlays:
     guide: Guide
     next_card: NextCard
     welcome: WelcomeCard
-    pip_label: Any = None  # the PipLabel (Phase 4), with picture in picture only
-    mixer: Any = None  # the volume mixer (Phase 4)
+    pip_label: Any = None  # the PipLabel, with picture in picture only
+    mixer: Any = None  # the volume mixer
     sound_panel: Any = None  # the Sound panel above ♫ (2.2)
     subtitle_panel: Any = None  # the Subtitles panel above its button (2.2)
     subtitle_search: Any = None  # its OpenSubtitles search page (2.2)
@@ -371,6 +372,9 @@ class TVController(QObject):
                 toast=self._toast,
                 parent=self,
             )
+        # Each player's live channel and the key it opened with: the channel's sound sync
+        # and shape are kept under that key while it plays there.
+        self._player_keys = PlayerKeys(self._sync_key)
         # The sound's and the subtitles' tracks and sync (their panels, J/K and Shift+J/K),
         # subtitle files; a channel's sound sync is kept.
         self._tracks = TrackControls(
@@ -383,7 +387,7 @@ class TVController(QObject):
             session=lambda: self.session,
             current=lambda: self._current,
             playing=self._has_media,
-            channel_key=self._sync_key,
+            keys=self._player_keys,
             store=sound_sync if sound_sync is not None else SoundSync(None),
             toast=self._toast,
             show_transport=self._show_transport,
@@ -400,7 +404,7 @@ class TVController(QObject):
             current=lambda: self._current,
             playing=self._has_media,
             players=lambda: [player for _name, player in self._players()],
-            channel_key=self._sync_key,
+            keys=self._player_keys,
             store=channel_pictures if channel_pictures is not None else ChannelPictures(None),
             config=config,
             toast=self._toast,
@@ -439,7 +443,7 @@ class TVController(QObject):
             )
             self._pip.changed.connect(self._mixer.refresh)
             self._pip.changed.connect(self._update_guides)
-        # The multiview's grid (stage 1): its tiles are slots, the focused one the large.
+        # The multiview's grid: its tiles are slots, the focused one the large.
         self._grid: Optional[GridControls] = None
         if sessions is not None and grid_frame is not None and make_slot is not None:
             self._grid = GridControls(
@@ -480,7 +484,7 @@ class TVController(QObject):
         # provider, group).
         self._waiting_tiles: list[tuple[str, dict, str, str]] = []
         self._column_wheel = PointerInput(self)
-        # While a live link resolves, the banner is shown again before it fades (Minor 11).
+        # While a live link resolves, the banner is shown again before it fades.
         self._tuning = QTimer(self, interval=TUNING_KEEP_MS)
         self._tuning.timeout.connect(self._keep_tuning_banner)
 
@@ -535,6 +539,7 @@ class TVController(QObject):
             self.sessions.largeChanged.connect(lambda *_: self._update_guides())
             self.sessions.pipStarted.connect(self._on_pip_started)
             self.sessions.pipStateChanged.connect(self._on_pip_state)
+            self.sessions.slotState.connect(self._on_slot_state)
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
@@ -550,7 +555,7 @@ class TVController(QObject):
         transport.miniPlayerRequested.connect(self.window_actions.toggle_mini_player)
         transport.externalRequested.connect(self._on_external_requested)
         transport.volumeRequested.connect(self._mixer.open_main)
-        # The buttons for the player's keys (the owner's mouse-only rule): they act as the keys.
+        # The buttons for the player's keys (every key has a control on screen) act as the keys.
         transport.guideRequested.connect(partial(self.handle, Action.GUIDE))
         transport.previousRequested.connect(partial(self.handle, Action.PREVIOUS))
         transport.infoRequested.connect(partial(self.handle, Action.INFO))
@@ -743,8 +748,8 @@ class TVController(QObject):
         return self._mixer.main_level()
 
     def resume_live(self) -> None:
-        """Back to live TV from the Library (R5): the last live channel again, else the drawer
-        (see ProviderFlow.resume_live)."""
+        """Back to live TV from the Library: the last live channel again, else the drawer (see
+        ProviderFlow.resume_live)."""
         if not self._closed:
             self._flow.resume_live()
 
@@ -1388,8 +1393,18 @@ class TVController(QObject):
             self.swap()  # the empty picture, small now, closes
 
     def _on_pip_state(self, open_: bool) -> None:
-        if not open_:
-            self._give_back_later = False
+        sessions = self.sessions
+        if open_ or sessions is None:
+            return
+        self._give_back_later = False
+        closed = sessions.other()  # the small picture's slot: once closed, it plays nothing
+        if closed.channel is None and closed is not sessions.large():
+            self._player_keys.forget(closed.playback)
+
+    def _on_slot_state(self, name: str, open_: bool) -> None:
+        """A multiview tile opened or closed: a closed one's player keeps no channel key."""
+        if not open_ and self.sessions is not None:
+            self._player_keys.forget(self.sessions.slot(name).playback)
 
     def _restore_channel(self) -> None:
         """After a failed tune, INFO and the drawer follow the channel still playing."""
@@ -1599,8 +1614,8 @@ class TVController(QObject):
             self._pip.open_channel(channel, context)
 
     def _pip_takes(self, channel: dict, group_key: str, channels: list[dict]) -> bool:
-        """A tune of the large picture onto the PiP's channel (Review Focus 3): never a second
-        stream of it. Shown small, the pictures swap; on its way there, it opens large."""
+        """A tune of the large picture onto the PiP's channel: never a second stream of it.
+        Shown small, the pictures swap; on its way there, it opens large."""
         pip = self._pip
         if pip is None:
             return False
@@ -2022,6 +2037,10 @@ class TVController(QObject):
         self._tracks.refresh()  # an open panel shows the large picture's sound or subtitles
         self._picture.refresh()  # and the Picture panel and the statistics its picture
         if grid:
+            if large_reopen is not None and self._grid is not None:
+                # A tile beside the focus never reconnects by itself (its direct stream that
+                # ends fails): one the focus left during its back-off says its stream ended.
+                self._grid.stream_ended(old.name)
             return  # the grid follows the focus itself (its ring, the tiles' labels)
         pip.after_swap()
         if self._tuner_of(old).idle():
@@ -2346,7 +2365,7 @@ class TVController(QObject):
             return  # zap timers may fire while the window is torn down
         column = self.overlays.column
         if open_:
-            # The column stands alone over the video (mockup 01-shapes A): the banner, and a
+            # The column stands alone over the video: the banner, and a
             # number being typed, give way; the rest tune announces the channel again.
             if self._digits:
                 self.zap.cancel_digits()

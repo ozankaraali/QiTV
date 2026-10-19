@@ -312,8 +312,8 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertEqual(len(second), 1 + 69)
 
     def test_a_provider_rebuilt_after_an_edit_never_shows_its_old_lists(self):
-        # Sweep A6: the mixed lists were kept against the providers' content versions only;
-        # a catalog made anew (an edit while no page used it) counts from the start again,
+        # The mixed lists were kept against the providers' content versions only; a
+        # catalog made anew (an edit while no page used it) counts from the start again,
         # and its first versions matched the old lists'.
         view = self.view(ALL_PROVIDERS)
         self.assertIn("TR: Haber", [g.title for g in view.groups("live")])
@@ -326,8 +326,7 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertEqual(len(view.items("live", ALL_GROUP_ID)), 24)
 
     def test_a_page_lets_go_of_a_catalog_the_hub_dropped(self):
-        # Sweep A review M2: the page held a removed provider's catalog (its guide and its
-        # lists) until QiTV quit.
+        # The page held a removed provider's catalog (its guide and its lists) until QiTV quit.
         view = self.view("Demo TV")
         view.select_provider()
         self.catalogs.ensure("Harbor IPTV")
@@ -489,7 +488,7 @@ class RenewingFactory(ScriptedFactory):
 
 
 class EditedProviderTests(unittest.TestCase):
-    """Settings edits a provider a page shows (final review I4)."""
+    """Settings edits a provider a page shows."""
 
     @classmethod
     def setUpClass(cls):

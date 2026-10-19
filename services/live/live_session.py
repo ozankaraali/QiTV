@@ -4,7 +4,7 @@
 the helper's first hello: the engine queues it; an HLS source is told the target, Auto's
 learned extra included, so it fetches far enough back for a start there) and waits for its
 `sessionReady`; then VLC plays the loopback stream with the pipeline profile from the start
-Go live would pick (2.1 stage 3; before, the oldest segment: one provider sends a 20 s
+Go live would pick (2.1; before, the oldest segment: one provider sends a 20 s
 backlog at connect, and a sparse-PCR channel's one fetched segment ran VLC dry). The start
 waits for the backlog the source sends at connect (`_play_first`): an HLS source says how
 much listed media is still to come, so the starts are judged on the edge it will reach and
@@ -36,7 +36,7 @@ once, the body seconds later; an HLS channel only once segment bytes flow), gets
 answer (or an HLS one without segment bytes) falls back at `ready_timeout_ms`. Each such
 fallback logs why (no URL; the engine logs an HTTP status).
 
-Position (spec §6.3; 2.1 stage 2): the start of the opened segment plus VLC's clock as
+Position (spec §6.3; 2.1): the start of the opened segment plus VLC's clock as
 `VlcClock` follows its `get_time()` readings: a clock at the rate set while VLC plays,
 corrected towards each new reading, with the readings' steps learned (a sparse-PCR channel's
 get_time steps by 2 s every 2 s; a steady one's every tick or so). A jump of VLC's clock is
@@ -44,8 +44,8 @@ taken once the next reading agrees with it, unless it lands past the live edge o
 timestamp jump the helper reports having left out of its timeline (`breaks` in its state: an
 HLS discontinuity or a reconnect whose timestamps jumped 3 s or more; the position goes on
 at the rate); it never runs backwards. Seeking
-reopens the stream at a segment (about 2 s granularity) where playback starts cleanly (2.1
-stage 5, `_seek_start`: a keyframe, else an intra picture, at or within 10 s before the point
+reopens the stream at a segment (about 2 s granularity) where playback starts cleanly (2.1,
+`_seek_start`: a keyframe, else an intra picture, at or within 10 s before the point
 asked, or within 2 s after it; a start without either only when none is that near; a step
 back or on opens before or after where it plays) and keeps the pause intent: a
 reopened stream is paused again as soon as it plays (port map §8.19). A seek to within the
@@ -86,7 +86,7 @@ sooner and beyond that budget only far behind (1.10x), with under half a second 
 a burst lands (0.95x, 2.0.1's case) and once after trouble (a starvation or a stall that ran
 out the cushion: 0.95x back to the target, once VLC played a second short of it); not
 while paused, time-shifted or at a chosen speed. Far behind, a jump to live replaces
-the 1.10x catch-up (2.1 stage 5) when the clean start Go live would pick (`_jump_lag`) lands
+the 1.10x catch-up (2.1) when the clean start Go live would pick (`_jump_lag`) lands
 within stay-live's band or 5 s nearer and nothing jumped within a minute (a tune, Go live, a
 reopen: see `StayLive`). Its reopen at live (such a jump, or beyond the target plus 20 s)
 waits until a stream opened (Go live, a seek, a reopen) has played and `_REOPEN_HOLD_S`
@@ -117,11 +117,11 @@ software from then on: a time-shift stream opens again where it plays (as after 
 interruption, on a clean start), a direct play has opened itself again; every later open of
 the tune, and the channel's tunes for a day (`LiveTuning`), ask for software decoding.
 
-"Auto" latency (2.1 stage 4b) steers by the channel's learned target
+"Auto" latency (2.1) steers by the channel's learned target
 (`services.live.learned_target.LearnedTarget`, one per tune from what the channel taught, a
 2.0.2 `extra` read as its prior, on Normal's floor): what its arrivals need (the live edge,
 every tick) plus the margin its starvation prior believes in. It hears (`_feed_learned`, the
-integration contract of stage 4a's review) each stall once as it begins (the bound passed:
+learned target's integration contract) each stall once as it begins (the bound passed:
 silence beyond the helper's burst plus `STALL_S`, with that burst; noted, trouble only if VLC
 then runs dry), VLC running dry at the live edge (BUFFERING, or its clock standing still while
 Playing, within `_EDGE_S`) once per dry run (a refill's flicker within `_CALM_S` is the same
@@ -129,7 +129,7 @@ one; inside a stall told while it counted too), a near-miss (VLC's headroom befo
 less its caching; not the batch that ends a dry run), a stall VLC got through (its least
 headroom), and the time played at the live edge; trouble only while stay-live is LIVE and
 once it ran out a cushion (`_ran_out`: the lag had reached the target, less stay-live's band,
-since the tune; the tune started at a pick chosen for the target, ruling R33; or stay-live
+since the tune; the tune started at a pick chosen for the target; or stay-live
 accepted the start's shortfall), judged before the target rises with it. What it learned
 moves the target stay-live steers by (`SteeredTarget`): a rise in a step of half a second or
 more once it held 10 s, at once with trouble (and its owed slow-down); a fall of what trouble
@@ -140,14 +140,14 @@ going once the need is measured. The steering target reads the lag filter's burs
 helper's own, whose one-off backlog "burst" would lift it); the timeline's, Go live's, the
 start's and the cushion's add what the helper's burst changes in the learned target, at once,
 as under any latency, so stay-live never speeds up towards a target the burst is about to
-raise (stage 1's `slack`). The start fetches for the learned target itself (no extra: it
+raise (stay-live's `slack`). The start fetches for the learned target itself (no extra: it
 holds the segments). A move of half a second or more is said at INFO (trouble, the source's
 burst, arrivals or quiet moved it) and saved. What a channel taught (the learned target,
 a locked rate) is kept per channel (`start(channel=...)`, in the `LiveTuning` given; the
 learned target on trouble, on a move worth saying and when the tune ends, without a 2.0.2
 `extra` then, and leaving the lock and direct play as the store has them): its next tune
 starts there, a locked rate under any latency (for a day: then the store reads it as none,
-so a tune tries other rates again). The burst floor (`SEGMENT_FLOOR`, ruling R37) is on
+so a tune tries other rates again). The burst floor (`SEGMENT_FLOOR`) is on
 unless QITV_SEGMENT_FLOOR=0 is set for the run (`segment_floor_from`).
 
 Under any latency, a backlog step within `_REPICK_S` of the tune's first open that leaves the
@@ -164,7 +164,7 @@ measures it; see `_live_start`): never below the target less a quarter second,
 since stay-live wins buffer back only that slowly, and only for a bursty source; the nearest
 the target within stay-live's band; else the nearest above it ("behind live" for a moment
 while stay-live catches up). Every such open (a tune, Go live, stay-live's reopen) starts
-cleanly where it can (2.1 stage 5): a keyframe, else an intra picture, a start without either
+cleanly where it can (2.1): a keyframe, else an intra picture, a start without either
 (its picture breaks until the next keyframe) only when nothing else is far enough back, which
 a debug log says on a stream with video; a keyframe over an intra picture within that band.
 
@@ -253,7 +253,7 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger(__name__)
 
-# How far behind the provider's live point an HLS source starts, per latency (Phase 2A).
+# How far behind the provider's live point an HLS source starts, per latency.
 LIVE_DELAY = {"low": 3.0, "normal": 6.0, "stable": 12.0, AUTO: 6.0}
 # The notices (`notice`, `no_rewind_reason`) stay English: the shell compares them, and
 # shows them with services.i18n.translate.
@@ -284,7 +284,7 @@ _MEASURE_AHEAD_S = 3.0  # rate health counts only ticks with this much ahead at 
 _RATE_GRACE_S = 2.0  # and only from this long after an open plays or VLC was at the edge
 _CALM_S = 1.0  # Auto: trouble again within this is the same starvation (VLC refills, starves)
 _REOPEN_HOLD_S = 5.0  # no reopen at live within this of an open (and before VLC played it)
-# The tune's start (2.1 stage 3, `_play_first`). A source other than HLS is held until the
+# The tune's start (2.1, `_play_first`). A source other than HLS is held until the
 # backlog it sends at connect landed: its live edge grew by at most _SETTLE_GROWTH_S over the
 # last _SETTLE_S, or _SETTLE_MAX_S passed since ready.
 _SETTLE_S = 1.0
@@ -297,20 +297,20 @@ _LOADING_AFTER_S = 1.0
 # Within this long after a tune's start, a backlog step that raises the lag is part of the
 # landing (raw TS whose backlog came after the hold).
 _RELAND_S = 10.0
-# The re-pick (2.1 stage 4b, owner's item; ruling R46): within `_REPICK_S` of a tune's first
+# The re-pick (2.1): within `_REPICK_S` of a tune's first
 # open a dump (the edge `_REPICK_DUMP_S` up in a tick), then the source flowing on at about
 # real time for `_REPICK_FLOW_S` (`_REPICK_RATE` of it, never standing still `_REPICK_GAP_S`),
 # that leaves the lag far above the target picks the start again once, as Go live would: the
 # 1-stream raw-TS provider's random channel sent 2 s, then 18-22 s a moment after the open,
 # then 2 s every 2 s, and the viewer sat 23 s behind for a minute (the jumps' cooldown counts
 # from the tune). A burst flows at 3x and more, then stands still for most of its period: it
-# never qualifies, whatever the tick it lands on or how it is spread (re-reviews 1 and 2: the
-# unmeasured burst read as a backlog ran VLC dry 4-7 s). Only while VLC's clock moved within
-# `_REPICK_PLAY_S` of its playing (a sparse-PCR channel's first reading comes ~2 s after it:
-# re-review 2, M-r), with the dump's window open at least `_REPICK_S` past that playing (a
+# never qualifies, whatever the tick it lands on or how it is spread (an unmeasured burst read
+# as a backlog ran VLC dry 4-7 s). Only while VLC's clock moved within
+# `_REPICK_PLAY_S` of its playing (a sparse-PCR channel's first reading comes ~2 s after it),
+# with the dump's window open at least `_REPICK_S` past that playing (a
 # slow open), and never later than `_REPICK_DEADLINE_S` after the open. By design it moves the
 # chosen latency's exposure to a stalling source forward: the start it picks again is nearer
-# the edge (M-p).
+# the edge.
 REPICK = True
 _REPICK_S = 5.0
 _REPICK_DUMP_S = 4.0
@@ -324,20 +324,20 @@ _CRAWL_WINDOW_S = 8.0  # an HLS channel crawling at 1x for this long (counted) .
 _CRAWL_WINDOWS = 2  # ... this many times in a row plays directly (one freeze is not enough)
 _FROZEN_HOLDS = 2.0  # VLC's clock still for a window and this many holds has played nothing
 _ARRIVAL_S = 0.1  # the live edge moving less is no arrival (a closing segment's last frame)
-# Seeks (2.1 stage 5): a start without a keyframe gives way to a clean one this near the point
+# Seeks (2.1): a start without a keyframe gives way to a clean one this near the point
 # asked (a forced cut's length) ...
 _SEEK_REACH_S = 10.0
 # ... and an intra picture's to a keyframe's at most this much further (a common keyframe
 # interval).
 _KEY_REACH_S = 2.0
-# What a pick misses its landing by, learned per tune (2.1 stage 5, review I3: a sparse-PCR
-# channel's landings were each 0.1-0.7 s short; ruling R38: never kept with the channel): a Go
+# What a pick misses its landing by, learned per tune (2.1: a sparse-PCR channel's landings
+# were each 0.1-0.7 s short; never kept with the channel): a Go
 # live or a jump picked from a settled lag filter's mean is measured once VLC played it this
 # long at 1x, untroubled ...
 _LAND_CHECK_S = 8.0
 _LAND_WEIGHT = 0.5  # ... and this share of what it missed by is learned ...
 _LAND_OFFSET_MAX_S = 1.5  # ... up to this much either way
-# Auto's learned target (2.1 stage 4b). The pipeline's VLC holds this much ahead of what it
+# Auto's learned target (2.1). The pipeline's VLC holds this much ahead of what it
 # plays (its 300 ms of network caching, `services.vlc_profile`): VLC's headroom is less that.
 _CACHING_S = 0.3
 _PLAYED_MAX_S = 1.0  # a longer gap between two ticks counts as this much playing
@@ -350,9 +350,9 @@ def segment_floor_from(value: str) -> bool:
     return value.strip().lower() not in ("0", "off", "false", "no")
 
 
-# The burst floor (`learned_target.SEGMENT_FLOOR`, ruling R37, provisional): a segmented
+# The burst floor (`learned_target.SEGMENT_FLOOR`, provisional): a segmented
 # source never goes under its burst. QITV_SEGMENT_FLOOR=0 (or off, false, no) in the
-# environment turns it off for the whole run (read once, here: stage 4b's A/B; keep each
+# environment turns it off for the whole run (read once, here: an A/B switch; keep each
 # channel in one arm, as a target learned without it reads high with it for hours).
 SEGMENT_FLOOR = segment_floor_from(os.environ.get("QITV_SEGMENT_FLOOR", ""))
 _PLAYING = PlaybackState.PLAYING.value
@@ -487,7 +487,7 @@ class LiveSession(QObject):
         self._after_update: Optional[float] = None  # then seek here; None: go live
         self._paused = False
         self._rate = 1.0
-        # Position: _base (the opened segment's start) + _elapsed, VLC's clock (2.1 stage 2).
+        # Position: _base (the opened segment's start) + _elapsed, VLC's clock (2.1).
         self._base = 0.0
         self._elapsed = 0.0
         self._vlc = VlcClock()
@@ -528,7 +528,7 @@ class LiveSession(QObject):
         self._rate_mark: Optional[tuple[float, float]] = None  # (wall, media ahead) last tick
         self._progress: Optional[_Progress] = None  # VLC's progress counted since
         self._rate_from: Optional[float] = None  # counted from here (after an open plays)
-        # Auto latency (2.1 stage 4b): the channel's learned target, as stay-live steers by it
+        # Auto latency (2.1): the channel's learned target, as stay-live steers by it
         # (`SteeredTarget`), and what is fed to it (see `_feed_learned`).
         self._learned: Optional[LearnedTarget] = None
         self._steered = SteeredTarget()
@@ -649,7 +649,7 @@ class LiveSession(QObject):
         self._said = None
         self._cushion = 0.0
         self._repick_until, self._repick_step = -math.inf, None
-        self._land_offset, self._land_check = 0.0, None  # each tune's own (ruling R38)
+        self._land_offset, self._land_check = 0.0, None  # each tune's own, never the channel's
         self._shrink_to = None
         self._open_args = {
             "headers": dict(headers),
@@ -661,7 +661,7 @@ class LiveSession(QObject):
             self._open_args["ram_bytes"] = ram_bytes
         self._stay = StayLive(self._latency)
         self._stay.set_background(self._background)  # a multiview tile without the focus
-        self._stay.jump_lag = self._jump_lag  # where a jump to live would land (stage 5)
+        self._stay.jump_lag = self._jump_lag  # where a jump to live would land
         if self._memory.rate_locked:
             self._stay.lock_rate()  # VLC could not play it at another rate before
         self._health = RateHealth()
@@ -761,8 +761,8 @@ class LiveSession(QObject):
 
     def seek_relative(self, dt: float) -> None:
         """A step back or on (←/→): it opens a segment starting before where it plays, or
-        after it (review I1: a keyframe after the point asked could take a step back to
-        where it played, again and again)."""
+        after it (a keyframe after the point asked could take a step back to where it played,
+        again and again)."""
         position = self.position()
         if dt < 0:
             self._seek(position + dt, hi=position)
@@ -788,7 +788,7 @@ class LiveSession(QObject):
         Stay-live hears where an open landed (`StayLive.landed`); `build` (default: neither
         `reopen` nor `merge`) whether a shortfall then is missing room, built once: a
         recovery's or the RAM ring's fresh buffer may hold little, while Go live and a jump
-        pick at the target in a full one (review I3)."""
+        pick at the target in a full one."""
         build = not (reopen or merge) if build is None else build
         landing: Optional[float] = None
         merged = False
@@ -816,7 +816,7 @@ class LiveSession(QObject):
                     merged = True
                     return  # stay-live reopened at live a moment ago
                 # A pick from a lag filter that settled since it last started afresh misses by
-                # its own error only: what it misses is learned (re-review N2).
+                # its own error only: what it misses is learned.
                 filtered = not self._was_stalled and self._filter.settled(self._clock())
                 pick = self._live_start()
                 if pick is None or not self._open_at(pick[0]):
@@ -989,7 +989,7 @@ class LiveSession(QObject):
             self._url,
             **self._open_args,
             live_delay=LIVE_DELAY[self._latency],
-            # An HLS source starts far enough back for a start at the target (2.1 stage 3),
+            # An HLS source starts far enough back for a start at the target (2.1),
             # under Auto the learned one: it holds the source's segments already (the helper
             # adds its own segment and a half of room to whichever is larger).
             target=start_target(self._latency) if learned is None else learned.target(0.0),
@@ -1181,7 +1181,7 @@ class LiveSession(QObject):
         return f"the channel did not answer within {waited:.0f} s"
 
     def _play_first(self, *, waited: bool = False) -> None:
-        """The tune's first play (2.1 stage 3), at the start Go live would pick: the nearest
+        """The tune's first play (2.1), at the start Go live would pick: the nearest
         the target from above (a keyframe start before any other, `_live_start`), never the
         oldest backlog when a start nearer it exists.
 
@@ -1238,7 +1238,7 @@ class LiveSession(QObject):
 
     def _open_first(self, seq: int, lag: Optional[float], *, aimed: bool = False) -> None:
         """Open the tune at `seq`. `aimed`: the start was chosen for the target, so its
-        cushion counts as reached (ruling R33): its lag may read a little short of it once
+        cushion counts as reached: its lag may read a little short of it once
         the source's rhythm is learned, and VLC running dry then is trouble all the same.
         A start that took less on purpose (the oldest segment, nothing further back) has
         none."""
@@ -1586,9 +1586,9 @@ class LiveSession(QObject):
         `_LAND_WEIGHT` of what its landing missed by (the mean lag now less the one
         predicted, less what the filter's mean edge moved meanwhile: the source's doing, not
         the pick's) is added to this tune's offset, up to `_LAND_OFFSET_MAX_S` either way, so
-        the next pick lands where it aims (review I3: VLC's clock started a little ahead on a
-        sparse-PCR channel). Anything else meanwhile measures nothing (re-review N2: a 5 s
-        backlog inside the check taught the cap). Kept for the tune only (ruling R38)."""
+        the next pick lands where it aims (VLC's clock started a little ahead on a sparse-PCR
+        channel). Anything else meanwhile measures nothing (a 5 s backlog inside the check
+        taught the cap). Kept for the tune only, never with the channel."""
         check = self._land_check
         if check is None:
             return
@@ -1659,7 +1659,7 @@ class LiveSession(QObject):
             return False
         if snapshot.get("hls") is True:
             # HLS never: its batches (a 12 s one, then the next 3 s later) read as a dump
-            # and a flow, and a start picked again ran VLC dry (re-review 2, round 3).
+            # and a flow, and a start picked again ran VLC dry.
             self._repick_until, self._repick_step = -math.inf, None
             return False
         tick, self._repick_seen = max(0.0, now - self._repick_seen), now
@@ -1746,7 +1746,7 @@ class LiveSession(QObject):
         since the tune (less `_BELOW_TARGET_S`; under Auto, less stay-live's band as wide as
         the estimate's wander, not the budget's widening: a learned rise within it is drift,
         built by nothing, so the lag in the band is at the target),
-        or the tune started at a pick chosen for it (R33), or stay-live accepted the start's
+        or the tune started at a pick chosen for it, or stay-live accepted the start's
         shortfall (nothing further back was buffered: it never had the cushion, so running
         dry is trouble all the same)."""
         below = _BELOW_TARGET_S
@@ -1864,7 +1864,7 @@ class LiveSession(QObject):
         cushioned: bool,
         dt: float,
     ) -> bool:
-        """Tell the learned target this tick (the integration contract of 2.1 stage 4a):
+        """Tell the learned target this tick (its integration contract):
 
         - the live edge, every tick the pipeline plays on (`arrivals.add`; not while the
           session waits for the helper, retries an open or defers one: no edge then); a VLC
@@ -1942,8 +1942,8 @@ class LiveSession(QObject):
         Counted only while stay-live is LIVE (not paused), VLC plays, at least
         `_MEASURE_AHEAD_S` is ahead at both ends of each tick, and from `_RATE_GRACE_S` after
         an opened stream plays or VLC was at the live edge (its restart after running dry is
-        no crawl). VLC's progress over a counted stretch is what its clock stepped (2.1 stage
-        2: a sparse-PCR channel's reading steps by 2 s every 2 s, so a tick says nothing),
+        no crawl). VLC's progress over a counted stretch is what its clock stepped (2.1: a
+        sparse-PCR channel's reading steps by 2 s every 2 s, so a tick says nothing),
         against what the rates asked meanwhile. A stretch starts at VLC's first step once
         counting starts (never a whole step against part of its time) and ends at a later
         step; a step that is late or missing (twice as long) counts at its end, and only a
@@ -2160,8 +2160,8 @@ class LiveSession(QObject):
             value = learned.target(steering)
         else:
             value += learned.target(reported) - learned.target(steering)
-        # Never under the burst floor for the burst reported (re-review 2, M-q: the steered
-        # target lagging a learned rise left a reopen 4.7 s behind a measured 10 s burst).
+        # Never under the burst floor for the burst reported (the steered target lagging a
+        # learned rise left a reopen 4.7 s behind a measured 10 s burst).
         return max(value, learned_target(0.0, 0.0, learned.floor, reported, learned.segment_floor))
 
     def _just_opened(self) -> bool:
@@ -2235,7 +2235,7 @@ class LiveSession(QObject):
         the newest GOP stays open until the next burst), by the lag it would give once VLC
         plays it (the edge moves on while VLC opens): for a bursty source the mean over a
         burst (`_lag`), for a steady source the lag itself. While playing, from where the lag
-        filter has the live edge on average (2.1 stage 5, review I3): the mean stay-live then
+        filter has the live edge on average (2.1): the mean stay-live then
         measures the landing with. Taken from the arrival now, a batch earlier or later than
         its rhythm (a sparse-PCR channel's 10 s batches, some 6 s apart, under a 12 s target
         duration) moved landings 1.7-2.3 s off either way."""
@@ -2303,7 +2303,7 @@ class LiveSession(QObject):
         return seq, lag
 
     def _jump_lag(self) -> Optional[float]:
-        """Where a jump to live (stay-live's reopen, 2.1 stage 5) would land now: the mean lag
+        """Where a jump to live (stay-live's reopen, 2.1) would land now: the mean lag
         once VLC plays the start Go live would pick, when it starts cleanly (a keyframe or an
         intra picture); None otherwise, and while none is far enough behind."""
         if self._sid is None or self._phase is not _Phase.PIPELINE:
@@ -2321,7 +2321,7 @@ class LiveSession(QObject):
     def _seek_start(
         self, t: float, *, lo: float = -math.inf, hi: float = math.inf
     ) -> Optional[Span]:
-        """Where a seek to `t` opens (2.1 stage 5), among segments starting in [`lo`, `hi`):
+        """Where a seek to `t` opens (2.1), among segments starting in [`lo`, `hi`):
         the clean start (a keyframe, or an intra picture) latest at or before `t` within
         `_SEEK_REACH_S`, a keyframe's if one is at most `_KEY_REACH_S` further back; without
         one, a clean start after `t` within `_KEY_REACH_S` (a keyframe's first); without
@@ -2373,7 +2373,7 @@ class LiveSession(QObject):
         )
 
     def _advance(self) -> float:
-        """VLC's position (spec §6.3; 2.1 stage 2): the opened segment's start plus VLC's
+        """VLC's position (spec §6.3; 2.1): the opened segment's start plus VLC's
         clock as `VlcClock` follows its readings."""
         ms = self._playback.time_ms()
         playing = self._playback.state() is PlaybackState.PLAYING

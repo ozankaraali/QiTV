@@ -167,7 +167,7 @@ class Helper:
         self.base_url = self.wait_for(lambda message: message[0] == "hello", timeout=60)[1]
 
     def open(self, url, ring=RAM, live_delay=6.0, start=None):
-        """`start`: the session's target and extra (2.1 stage 3); None sends the 2.0 command."""
+        """`start`: the session's target and extra (2.1); None sends the 2.0 command."""
         sid = secrets.token_hex(8)
         command = ("open", sid, url, {"User-Agent": "QiTV-test"}, True, ring, live_delay)
         self.conn.send(command if start is None else (*command, start))
@@ -436,7 +436,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assert_no_credentials(helper)
 
     def test_a_timestamp_jump_left_out_of_the_timeline_is_reported(self):
-        # 2.1 stage 2: the player's clock jumps by what the timeline leaves out (a reconnect
+        # 2.1: the player's clock jumps by what the timeline leaves out (a reconnect
         # after an outage, an HLS discontinuity): where on the timeline, and how much. A step
         # under 3 s stays media and is not reported.
         helper = self.helper()
@@ -493,7 +493,7 @@ class LiveWorkerTests(unittest.TestCase):
         # A flaky source whose timestamps jump at every discontinuity: 20 jumps of 5 s, 2 s
         # of media apart. A viewer far behind must still find each break the ring still holds
         # (a count of eight dropped them); those whose media was evicted go with it, but for
-        # those just before the ring's start (2.1 stage 5: a sparse-PCR clock's 2 s step and
+        # those just before the ring's start (2.1: a sparse-PCR clock's 2 s step and
         # a second more), which a player still reading evicted media may reach.
         names = [f"flaky{k}" for k in range(21)]
         routes = {"/user/secret/flaky.m3u8": (200, {}, discontinuous(*names, extinf=2))}
@@ -560,7 +560,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assert_no_credentials(helper)
 
     def test_an_hls_batch_reports_its_live_edge_once_delivered(self):
-        # 2.1 stage 3: states are throttled to four a second, so the end of a batch that
+        # 2.1: states are throttled to four a second, so the end of a batch that
         # arrived within a quarter second waited for the next batch (a 2 s keyframe interval
         # of a public HLS channel for 7 s): the start was chosen on a stale edge.
         routes = {
@@ -606,7 +606,7 @@ class LiveWorkerTests(unittest.TestCase):
         return [state for state in states if state["oldest"] is not None]
 
     def test_an_hls_backlog_reports_the_media_still_to_come(self):
-        # 2.1 stage 3: live edge + backlog_s is where the edge will be once every listed
+        # 2.1: live edge + backlog_s is where the edge will be once every listed
         # segment arrived, so a tune can start before all of them did; measured once a
         # segment came whole, not the first (before: None).
         playable = self.backlog_states(["a.ts", "b.ts", "c.ts", "d.ts"], extinf=4, seconds=4)
@@ -624,7 +624,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertIs(playable[-1]["finite"], False)
 
     def test_an_hls_backlog_follows_the_media_not_a_wrong_extinf(self):
-        # Review I3: EXTINF 10 on segments of 8 s moved the start 2 s a segment.
+        # EXTINF 10 on segments of 8 s moved the start 2 s a segment.
         playable = self.backlog_states(["a.ts", "b.ts", "c.ts", "d.ts"], extinf=10, seconds=8)
         measured = [state for state in playable if state["backlog_s"] is not None]
         self.assertGreater(len(measured), 1)
@@ -633,7 +633,7 @@ class LiveWorkerTests(unittest.TestCase):
             self.assertAlmostEqual(predicted, 32.0, delta=0.5, msg=state)
 
     def test_a_first_segment_without_a_keyframe_at_its_start_is_not_measured(self):
-        # Re-review minor 3: its media counts from its first keyframe (1.5 s in here), so it
+        # Its media counts from its first keyframe (1.5 s in here), so it
         # read short against its EXTINF and pulled the prediction low.
         playable = self.backlog_states(
             ["a.ts", "b.ts", "c.ts", "d.ts"], extinf=8, seconds=8, cut_first=True
@@ -647,7 +647,7 @@ class LiveWorkerTests(unittest.TestCase):
             self.assertAlmostEqual(predicted, final, delta=0.5, msg=state)
 
     def test_a_missing_segment_leaves_the_backlog(self):
-        # Review I3: a 404 segment was counted in, and never came: the start landed short.
+        # A 404 segment was counted in, and never came: the start landed short.
         playable = self.backlog_states(
             ["a.ts", "b.ts", "c.ts", "d.ts"], extinf=4, seconds=4, missing=("c.ts",)
         )
@@ -663,7 +663,7 @@ class LiveWorkerTests(unittest.TestCase):
             self.assertAlmostEqual(state["live_edge"] + state["backlog_s"], final, delta=0.1)
 
     def test_a_finished_playlist_says_so_and_has_no_backlog(self):
-        # Review I1: a finished (ENDLIST) playlist plays from its beginning.
+        # A finished (ENDLIST) playlist plays from its beginning.
         names = ["a.ts", "b.ts", "c.ts"]
         routes = {"/user/secret/clip.m3u8": (200, {}, leaf(*names))}
         for number, name in enumerate(names):
@@ -867,7 +867,7 @@ class LiveWorkerTests(unittest.TestCase):
         self.assert_no_credentials(helper)
 
     def test_bytes_before_anything_playable_are_reported_as_they_arrive(self):
-        # An on-demand restream starting up: bytes flow, but no keyframe yet (2.0.1, L2a).
+        # An on-demand restream starting up: bytes flow, but no keyframe yet (2.0.1).
         null = b"\x47\x1f\xff\x10" + b"\xff" * 184  # MPEG-TS null packets
         stream = make_stream(4)
 
@@ -934,7 +934,7 @@ class LiveWorkerTests(unittest.TestCase):
     def test_an_answer_that_turns_out_hls_is_taken_back_before_any_segment_byte(self):
         # A playlist the answer did not name as one (no type, no .m3u8 path): its open takes
         # the answer back as the playlist comes, so the GUI keeps the longer wait for raw TS
-        # (an HLS channel waits longer only once segment bytes flow; review M4).
+        # (an HLS channel waits longer only once segment bytes flow).
         go = threading.Event()
         self.addCleanup(go.set)
 
@@ -1223,7 +1223,7 @@ class OutboxTests(unittest.TestCase):
     """In process: one queue and one writer, so a parent that stops reading blocks nobody."""
 
     def test_a_parent_that_stops_reading_never_blocks_the_command_loop(self):
-        # The review's deadlock: a pipe buffers only 8 KiB per direction on macOS. With a
+        # A deadlock: a pipe buffers only 8 KiB per direction on macOS. With a
         # blocking send under one lock, a session blocked in send held the lock while the
         # command loop waited for it, and the parent's command sends then blocked as well.
         # Whether states merge here depends on the runner's pipe buffer and speed, so this
@@ -1602,7 +1602,7 @@ class StuckSessionTests(unittest.TestCase):
 
 
 class RamFallbackSizeTests(unittest.TestCase):
-    """The helper's own disk-failure fallback is sized by the ring spec's ram_bytes (H12)."""
+    """The helper's own disk-failure fallback is sized by the ring spec's ram_bytes."""
 
     def session(self, root, directory):
         from services.live.worker import _Session
@@ -1804,14 +1804,14 @@ class HeardEdgeTests(unittest.TestCase):
         self.assertEqual(seen["trims"], ["dropped"])
 
     def test_a_pause_with_nothing_held_leaves_the_pipeline_to_the_session(self):
-        # Review M4: the ticker looks at the trimmer and takes the pipeline only while
+        # The ticker looks at the trimmer and takes the pipeline only while
         # something is held.
         _, seen = self.paused_restart(1.3, restart=False)
         self.assertFalse(seen["held"])
         self.assertFalse(any(name.startswith("qitv-live-hold") for name in seen["takers"]))
 
     def test_a_tick_that_fails_ends_the_session_with_its_failure(self):
-        # Review I3: what a tick failed with is logged and raised in the session thread with
+        # What a tick failed with is logged and raised in the session thread with
         # its next item: the session ends as that item would have ended it.
         def failing(_self):
             raise Unsupported("scrambled")

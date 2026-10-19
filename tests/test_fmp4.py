@@ -420,7 +420,7 @@ class InitTests(unittest.TestCase):
         self.assertEqual((near.shift, near.edit_media), (3600, 3600))  # a B-frame offset
 
     def test_a_box_pointing_past_its_data_is_damaged_whatever_meets_it(self):
-        # Review I1: a struct.error or IndexError from a field past the data ended the session
+        # A struct.error or IndexError from a field past the data ended the session
         # (direct play); as Fmp4Error it skips the segment, or refuses the init, as any damage.
         normal = trak(1, b"vide", 90000, visual())
         mdia = normal[normal.index(b"mdia") - 4 :]  # the trak's last box
@@ -667,7 +667,7 @@ class RemuxTests(unittest.TestCase):
         self.assertTrue(all(f.pts >= f.dts for f in video))
 
     def test_the_first_segment_sets_the_dts_shift_for_good(self):
-        # Review M3: a later, more negative composition offset stepped every DTS (and the PCR)
+        # A later, more negative composition offset stepped every DTS (and the PCR)
         # back once; now that frame's DTS is clamped to its PTS and the rest keep their shift.
         first = [(3600, nals(IDR), SYNC_FLAGS, 0), (3600, nals(SLICE), NON_SYNC, 3600)]
         first += [(3600, nals(SLICE), NON_SYNC, -3600)]

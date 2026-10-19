@@ -63,7 +63,7 @@ class _Page(QWidget):
 
 class SecondClickGuardTests(unittest.TestCase):
     """A click that shows another page (‹ Library): a double-click's second click would land
-    on whatever that page shows under the pointer (2.0.1 review M1)."""
+    on whatever that page shows under the pointer (2.0.1)."""
 
     @classmethod
     def setUpClass(cls):
@@ -97,7 +97,7 @@ class SecondClickGuardTests(unittest.TestCase):
         self.assertEqual(self.page.events, [])
 
     def test_a_swallowed_click_gives_the_keys_back_to_its_window(self):
-        # Review I2 (macOS): the second click of a double-click on ⤢ lands on the video, where
+        # macOS: the second click of a double-click on ⤢ lands on the video, where
         # AppKit makes libVLC's view the first responder; the window's own filter, which gives
         # the keys back (2.0.1), never sees a click the guard swallowed: every key beeped.
         surface = QWidget(self.page)

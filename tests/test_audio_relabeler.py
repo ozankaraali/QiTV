@@ -56,7 +56,9 @@ def psi(section: bytes, cc: int) -> list[bytes]:
     return out
 
 
-def pmt_section(audio_type: int, filler_streams: int = 0) -> bytes:
+def pmt_section(
+    audio_type: int, filler_streams: int = 0, version: int = 0, program: int = 1
+) -> bytes:
     """A PMT section without its CRC: the picture, the sound as `audio_type`, and as many
     private streams with a 30-byte descriptor (to make it span packets)."""
     streams = bytes([0x1B]) + (0xE000 | VIDEO_PID).to_bytes(2, "big") + b"\xf0\x00"
@@ -66,15 +68,15 @@ def pmt_section(audio_type: int, filler_streams: int = 0) -> bytes:
         streams += b"\x52\x1e" + bytes(30)
     body = (0xE000 | VIDEO_PID).to_bytes(2, "big") + b"\xf0\x00" + streams
     head = bytes([0x02]) + (0xB000 | (5 + len(body) + 4)).to_bytes(2, "big")
-    return head + (1).to_bytes(2, "big") + bytes([0xC1, 0, 0]) + body
+    return head + program.to_bytes(2, "big") + bytes([0xC1 | version << 1, 0, 0]) + body
 
 
-def labelled(data: bytes, audio_type: int, filler_streams: int = 0) -> bytes:
+def labelled(data: bytes, audio_type: int, filler_streams: int = 0, version: int = 0) -> bytes:
     """`data` with each PMT replaced by one declaring the sound as `audio_type`."""
     out, cc = [], 0
     for p in packets(data):
         if pid_of(p) == PMT_PID:
-            pmt = psi(pmt_section(audio_type, filler_streams), cc)
+            pmt = psi(pmt_section(audio_type, filler_streams, version), cc)
             cc = (cc + len(pmt)) & 0x0F
             out.extend(pmt)
         else:
@@ -184,6 +186,76 @@ class AudioRelabelerTests(unittest.TestCase):
         self.assertIn((MPEG_AUDIO, 2, True), tables)
         self.assertEqual(versions, sorted(versions))
         self.assertTrue(all(intact for _, _, intact in tables))
+
+    def test_a_pmt_that_changes_under_the_same_version_gets_the_next_one(self):
+        # An encoder that restarts switches its sound from MPEG audio to AAC and back on one
+        # PID and says so in its PMT, whose version stays 0: VLC ignores a version it has seen
+        # (and keeps decoding AAC as MPEG audio: silence). Each change passes with the next
+        # version and its CRC recomputed, its repeats at that same version; the PMT before the
+        # first change passes byte for byte, and nothing is renamed (the PMT names the sound).
+        mpeg = b"\xff\xfd"  # MPEG-1 layer II
+        first = labelled(sound_from(make_stream(3), 0, mpeg), MPEG_AUDIO)
+        second = labelled(make_stream(3, pts_start=900000 + 3 * 90000), AAC)
+        third = labelled(sound_from(make_stream(3, pts_start=900000 + 6 * 90000), 0, mpeg), 3)
+        data = first + second + third
+        for chunk in (None, 1000, 100):
+            with self.subTest(chunk=chunk):
+                out, relabeler = relabelled(data, chunk)
+                self.assertEqual(len(out), len(data))
+                self.assertEqual(out[: len(first)], first)
+                tables = declared(out)
+                count = len(declared(first))
+                self.assertEqual(set(tables[:count]), {(MPEG_AUDIO, 0, True)})
+                self.assertEqual(set(tables[count : 2 * count]), {(AAC, 1, True)})
+                self.assertEqual(set(tables[2 * count :]), {(MPEG_AUDIO, 2, True)})
+                self.assertEqual(list(relabeler.renamings), [])
+                changed = {pid_of(a) for a, b in zip(packets(data), packets(out)) if a != b}
+                self.assertEqual(changed, {PMT_PID})
+
+    def test_a_pmt_that_changes_with_its_version_or_another_programs_passes_untouched(self):
+        # The same switch with the version moved by the encoder itself; and a second program's
+        # map on the same PID between the first's (not the program the PAT lists first).
+        second = labelled(make_stream(3, pts_start=900000 + 3 * 90000), AAC, version=1)
+        mpeg = labelled(sound_from(make_stream(3), 0, b"\xff\xfd"), MPEG_AUDIO)
+        other = psi(pmt_section(AAC, program=2), 0)
+        shared = []
+        for p in packets(make_stream(4)):
+            shared.append(p)
+            if pid_of(p) == PMT_PID:
+                shared.extend(other)
+        for name, data in (("versioned", mpeg + second), ("two programs", b"".join(shared))):
+            with self.subTest(name):
+                out, relabeler = relabelled(data, chunk=1000)
+                self.assertEqual(out, data)
+                self.assertEqual(list(relabeler.renamings), [])
+
+    def test_a_map_announced_for_later_and_then_applied_passes_untouched(self):
+        # current v0, next v1, current v1, next v1, current v1: the encoder moves its own
+        # version, and a "next" section (current_next 0) is never a change under one version.
+        from tests.ts_fixtures import pat
+
+        sections = [(MPEG_AUDIO, 0, True), (AAC, 1, False), (AAC, 1, True), (AAC, 1, False)]
+        sections += [(AAC, 1, True), (AAC, 1, True)]
+        data, cc = [pat()], 0  # the PAT names the map's PID
+        for audio, version, current in sections:
+            section = bytearray(pmt_section(audio, version=version))
+            if not current:
+                section[5] &= 0xFE
+            data.extend(psi(bytes(section), cc))
+            cc = (cc + 1) & 0x0F
+        data = b"".join(data)
+        out, _ = relabelled(data)
+        self.assertEqual(out, data)
+
+    def test_a_map_moved_to_another_pid_is_not_a_change_under_its_version(self):
+        from tests.ts_fixtures import _psi_packet, pat
+
+        moved = 0x1001
+        first = labelled(sound_from(make_stream(2), 0, b"\xff\xfd"), MPEG_AUDIO)
+        section = pmt_section(AAC)  # v0 again, on the new PID
+        data = first + pat(pmt_pid=moved) + _psi_packet(moved, section, 0)
+        out, _ = relabelled(data)
+        self.assertEqual(out, data)
 
     def test_a_section_too_short_to_read_passes(self):
         tiny = psi(bytes([0x02, 0xB0, 0x09, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1]), 0)

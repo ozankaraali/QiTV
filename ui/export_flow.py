@@ -1,4 +1,4 @@
-"""File → Export: one M3U export at a time, on a JobRunner worker (Task 12).
+"""File → Export: one M3U export at a time, on a JobRunner worker.
 
 An export first checks that it can run (`export_available`), then asks where to save, then runs
 ExportWorker off the GUI thread on a snapshot of the provider's loaded content. Its progress is

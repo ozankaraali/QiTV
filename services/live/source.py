@@ -278,8 +278,8 @@ def _names_limit(response: Any) -> bool:
 
 
 class _LimitAnswer(requests.exceptions.HTTPError):
-    """A 5xx answer whose body names the connection limit (2.1 review I1): it is no limit
-    refusal (the channel plays directly, as before), but the open never asks it again."""
+    """A 5xx answer whose body names the connection limit (2.1): it is no limit refusal
+    (the channel plays directly, as before), but the open never asks it again."""
 
 
 def _dns_failed(error: Exception) -> bool:
@@ -1104,8 +1104,8 @@ class HlsSource:
     @property
     def last_whole(self) -> tuple[int, float] | None:
         """(`segment_serial`, EXTINF) of the last segment that arrived whole: the helper
-        measures the media/EXTINF ratio of those (2.1 stage 3: a wrong EXTINF moved the
-        start). A segment that failed (404, skipped) is never one."""
+        measures the media/EXTINF ratio of those (2.1: a wrong EXTINF moved the start). A
+        segment that failed (404, skipped) is never one."""
         return self._last_whole
 
     @property
@@ -1116,8 +1116,8 @@ class HlsSource:
     @property
     def rest_s(self) -> float:
         """The EXTINF seconds of the listed segments after the one being fetched: with what
-        that one still holds, the media to come before the source has caught up (2.1 stage 3:
-        the helper predicts the live edge then, so a tune need not wait for all of it)."""
+        that one still holds, the media to come before the source has caught up (2.1: the
+        helper predicts the live edge then, so a tune need not wait for all of it)."""
         return self._rest
 
     def chunks(self) -> Iterator[Chunk]:
@@ -1150,7 +1150,7 @@ class HlsSource:
         return 0
 
     def _depth(self, playlist: Any) -> float:
-        """How far back from a live playlist's end the start goes (2.1 stage 3).
+        """How far back from a live playlist's end the start goes (2.1).
 
         Without the session's target, ``live_delay``. With it, the target (the source's
         segment duration, when that is larger, under any latency) and one and a half segments
@@ -1687,10 +1687,10 @@ def _answer(
     except BaseException:
         http.release(response)
         if report is not None:
-            report(False)  # taken back: asked again, or the end (review M2)
+            report(False)  # taken back: asked again, or the end
         raise
     if report is not None and content is not None:
-        report(False)  # a playlist after all: no cold raw-TS restream (review M4)
+        report(False)  # a playlist after all: no cold raw-TS restream
     return response, prefix, content
 
 
@@ -1715,7 +1715,7 @@ def _first_answer(
                 raise _Closed() from None
             if first is not None and isinstance(error, SourceError) and str(error) in REFUSALS:
                 # A panel that counted the first answer refuses the next for its limit: the
-                # first failure stands, so the channel plays directly as before (review M1).
+                # first failure stands, so the channel plays directly as before.
                 raise first from None
             first = first or error
             timed_out = isinstance(error, requests.exceptions.Timeout) or (

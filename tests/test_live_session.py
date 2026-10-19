@@ -295,7 +295,7 @@ class Clock:
 
 
 class Feed:
-    """A live source and a VLC around a test's fakes, modelled on the review's simulator.
+    """A simulated live source and VLC around a test's fakes.
 
     Media arrives `burst` seconds at a time every `burst` seconds (raw TS when 0: a quarter
     second at a time), each arrival optionally jittered, cut into `gop` second segments
@@ -309,14 +309,14 @@ class Feed:
     still and moves a quarter second every two seconds, while it reports PLAYING; with
     `crawl_1x` it crawls so at 1x too (measured on an HLS channel through the pipeline). With
     `recover`, VLC needs that long to restart after it ran dry (it refills its caching: its
-    clock stands still while it says Playing; the 2.0.2 review's model). While
+    clock stands still while it says Playing; as modelled in 2.0.2). While
     `stalled` the source sends nothing: the edge stands still and no state arrives. With
     `sizes` (an iterator) each arrival brings the next size instead of `burst` seconds, at
     the same rhythm (a public HLS channel: 6 s every 7 s, every sixth time 12 s), and with
     `gaps` (an iterator) each next one comes that many seconds later (two sparse-PCR channels:
     10 s batches 12, 12 and 6 s apart). With `pcr`
     VLC's get_time() moves only at the stream's timestamps, one each `pcr` seconds of media
-    (2.1 stage 2, measured on sparse-PCR HLS channels: 2000 ms steps every 2 s); with
+    (2.1, measured on sparse-PCR HLS channels: 2000 ms steps every 2 s); with
     `speed` VLC plays at that share of the rate set when it is not 1x, with `speed_1x` at 1x
     (a real crawl, on that clock). On that clock `missing(k)` drops the k-th stamp (a step
     twice as long now and then). Once VLC plays past `jump_at` its stamps jump by `jump_by`:
@@ -560,9 +560,9 @@ class LiveSessionCase(unittest.TestCase):
         `backlog_after_start` (the start most tests assume: they test stay-live from a lag,
         not the start): the session starts at the oldest segment, and the rest lands after
         it as drift (a reconnect's backlog, say), not as part of the start's landing. Ready
-        comes with only that segment buffered, as far back as the target (2.1 stage 3 starts
-        at the target), and the rest follows. Without it, or when the oldest segment cannot
-        be that far back, all of it is buffered at ready and the start policy picks."""
+        comes with only that segment buffered, as far back as the target (since 2.1 a tune
+        starts at the target), and the rest follows. Without it, or when the oldest segment
+        cannot be that far back, all of it is buffered at ready and the start policy picks."""
         sid = self.start(latency=latency)
         first = (spans[0].seq, spans[0].start) if spans else (open_seq, 0.0)
         limit = live_edge if live_edge is not None else (spans[-1].end if spans else 0.0)
@@ -643,7 +643,7 @@ class ResizeTests(LiveSessionCase):
         self.assertEqual(self.engine.resizes, [])
 
     def test_a_smaller_buffer_waits_while_it_plays_behind_live(self):
-        # Review: a paused (or rewound) tile losing the focus keeps the minutes it plays
+        # A paused (or rewound) tile losing the focus keeps the minutes it plays
         # until it is back at live; a larger buffer comes at once.
         sid = self.ready(segments(0, 10), live_edge=20.0)
         self.playback.set_state(PlaybackState.PLAYING)
@@ -727,7 +727,7 @@ class StartTests(LiveSessionCase):
                 self.assertEqual(self.playback.http[-1], ("QiTV-Test", referrer))
 
     def test_a_disk_buffer_carries_its_memory_fallback_size(self):
-        # The helper's disk-failure fallback follows timeshift_ram_mib, not 128 MiB (H12).
+        # The helper's disk-failure fallback follows timeshift_ram_mib, not 128 MiB.
         self.live.start(
             URL,
             headers={},
@@ -752,7 +752,7 @@ class StartTests(LiveSessionCase):
                 "disk": True,
                 "max_bytes": 2048 * MiB,
                 "live_delay": 6.0,
-                "target": 2.5,  # 2.1 stage 3: an HLS source starts far enough back for it
+                "target": 2.5,  # 2.1: an HLS source starts far enough back for it
                 "extra": 0.0,
             },
         )
@@ -794,7 +794,7 @@ class StartTests(LiveSessionCase):
         self.assertEqual(self.live.buffered_range(), (14.0, 20.5))
 
     def test_low_and_normal_start_at_their_targets_at_once(self):
-        # 2.1 stage 3 (before: the oldest segment under any latency but Stable).
+        # 2.1 (before: the oldest segment under any latency but Stable).
         for latency, seq in (("low", 1), ("normal", 0)):
             with self.subTest(latency=latency):
                 self.live = self.make()
@@ -890,7 +890,7 @@ class StartTests(LiveSessionCase):
         self.assertEqual(self.notices, [UNAVAILABLE])
 
     def test_bytes_without_anything_playable_extend_the_wait_with_a_hint(self):
-        """An on-demand restream starting up (2.0.1, L2a): bytes flow, no keyframe yet."""
+        """An on-demand restream starting up (2.0.1): bytes flow, no keyframe yet."""
         self.live = self.make(ready_timeout_ms=50, ready_max_ms=60_000)
         sid = self.start()
         self.engine.receive(sid, 188 * 20)
@@ -1058,7 +1058,7 @@ class StartTests(LiveSessionCase):
 
 
 class StartPolicyTests(LiveSessionCase):
-    """2.1 stage 3: a tune starts where Go live would land (the start nearest the target from
+    """2.1: a tune starts where Go live would land (the start nearest the target from
     above), once the backlog a source sends at connect has landed, never from the oldest
     backlog when a start nearer the target exists."""
 
@@ -1164,7 +1164,7 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.playback.plays, [])
         self.assertEqual(self.notices, [LOADING])  # after a second
         # 14.0 would be 7 s behind 24.0, but a segment or less is still to come: a wrong
-        # EXTINF or a missing segment could move it (review I3), so it waits for it.
+        # EXTINF or a missing segment could move it, so it waits for it.
         self.engine.buffer(sid, segments(0, 9), live_edge=18.0, open_seq=9, backlog=6.0, **hls)
         self.assertEqual(self.playback.plays, [])
         hls["caught_up"] = True
@@ -1173,7 +1173,7 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.notices, [LOADING])
 
     def test_hls_takes_a_start_inside_stay_lives_band_at_once(self):
-        # Review M9: a start already within the band is not held for a nearer one.
+        # A start already within the band is not held for a nearer one.
         # (Under Normal: the segments' target. Auto aims a second higher at first, its
         # learned need: LearnedTargetTests.)
         sid = self.start(latency="normal")
@@ -1186,7 +1186,7 @@ class StartPolicyTests(LiveSessionCase):
         self.assertAlmostEqual(self.landed.call_args.args[1], 0.0)
 
     def test_a_finished_playlist_fetched_at_once_plays_from_its_beginning(self):
-        # Review I1: a 60 s clip (ENDLIST) played its last 4 s.
+        # A 60 s clip (ENDLIST) played its last 4 s.
         sid = self.start(latency=AUTO)
         clip = {"burst": 2.0, "hls": True, "finite": True}
         self.engine.buffer(sid, segments(0, 30), live_edge=60.0, **clip)
@@ -1195,7 +1195,7 @@ class StartPolicyTests(LiveSessionCase):
         self.assertFalse(self.landed.called)  # nothing live to land near
 
     def test_a_finished_playlist_still_downloading_plays_from_its_beginning_at_once(self):
-        # Review I1: a long one waited the whole ready timeout, then started at the newest
+        # A long one waited the whole ready timeout, then started at the newest
         # segment fetched, with a landing an hour above the target.
         sid = self.start(latency=AUTO)
         clip = {"burst": 2.0, "hls": True, "finite": True, "caught_up": False, "backlog": 0.0}
@@ -1206,7 +1206,7 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.notices, [])
 
     def test_a_clip_still_downloading_is_not_steered_as_live(self):
-        # Re-review I1: a finished playlist downloading at ~8x started at 0, then ramped to
+        # A finished playlist downloading at ~8x started at 0, then ramped to
         # 1.067x and reopened at its newest segment after the 5 s hold.
         sid = self.start(latency=AUTO)
         clip = {"burst": 2.0, "hls": True, "finite": True, "caught_up": False, "backlog": 0.0}
@@ -1223,7 +1223,7 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), 1)
 
     def test_an_input_that_ends_mid_catch_up_plays_on_at_normal_speed(self):
-        # Re-review I1: a download that ended mid-ramp kept 1.033x for the rest of the clip.
+        # A download that ended mid-ramp kept 1.033x for the rest of the clip.
         for how in ("ended", "finished"):
             with self.subTest(how=how):
                 self.live = self.make()
@@ -1241,7 +1241,7 @@ class StartPolicyTests(LiveSessionCase):
                 self.assertEqual(self.playback.rates[-1], 1.0)
                 self.step(5.0)
                 self.assertEqual(self.playback.rates[-1], 1.0)
-                # And it shows so: no nudge left, no "catching up" (re-review round 3).
+                # And it shows so: no nudge left, no "catching up".
                 self.assertEqual(self.timelines[-1]["nudge"], 1.0)
                 transport = Transport(None, idle_ms=3000)
                 self.addCleanup(transport.deleteLater)
@@ -1249,7 +1249,7 @@ class StartPolicyTests(LiveSessionCase):
                 self.assertNotIn("catching up", transport.indicator_text())
 
     def test_a_clip_at_a_chosen_speed_plays_on_at_1x_near_its_download_edge(self):
-        # Re-review round 3: a finished playlist still downloading, played faster after a
+        # A finished playlist still downloading, played faster after a
         # seek back, never came back to 1x (stay-live no longer runs for it) and could run
         # dry on a slow download. As a video player does near its download, it hands back
         # at the target behind the download edge.
@@ -1286,8 +1286,8 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 0))
 
     def test_the_tune_prefers_a_keyframe_start(self):
-        # Review M6 (5a's start qualities): a cut without a keyframe (a forced one) starts
-        # broken; a keyframe 2 s further back first, an intra picture after it.
+        # A cut without a keyframe (a forced one) starts broken; a keyframe 2 s further back
+        # first, an intra picture after it.
         cases = (
             (("none", "key"), 8),  # 16.0 (4.5 s behind) over 18.0 (2.5 s), a forced cut
             (("none", "open"), 8),  # an intra picture before no keyframe at all
@@ -1311,7 +1311,7 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 8))
 
     def test_a_keyframe_is_preferred_only_within_stay_lives_band(self):
-        # Re-review I2: one IDR at the oldest segment, intra-picture starts every 2 s
+        # One IDR at the oldest segment, intra-picture starts every 2 s
         # (HEVC CRA, an open GOP): the tune started there, 18 s above its 2.5 s target.
         spans = [Span(0, 0.0, 2.0, False, "key")]
         spans += [Span(k, 2.0 * k, 2.0 * k + 2.0, False, "open") for k in range(1, 10)]
@@ -1328,7 +1328,7 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 9))
 
     def test_a_go_live_merged_into_stay_lives_reopen_keeps_its_landing(self):
-        # Review M4: the merged Go live opened nothing but wiped the reopen's landing (9 s
+        # The merged Go live opened nothing but wiped the reopen's landing (9 s
         # above the target on 10 s keyframe intervals): 1.10x came back.
         spans = segments(0, 3, length=10.0)
         sid = self.ready(spans, live_edge=31.0, backlog_after_start=False)
@@ -1344,7 +1344,7 @@ class StartPolicyTests(LiveSessionCase):
         self.assertEqual(self.playback.rates, [])
 
     def test_a_first_open_without_a_helper_picks_its_start_again_once_one_serves(self):
-        # Review M5: it reopened at the position (the oldest segment), with no landing.
+        # Before, it reopened at the position (the oldest segment), with no landing.
         sid = self.start()
         self.engine.up = False  # the helper is not serving yet: no stream URL
         self.engine.buffer(sid, segments(0, 10), live_edge=20.0)
@@ -1357,8 +1357,8 @@ class StartPolicyTests(LiveSessionCase):
         self.assertTrue(self.landed.called)
 
     def test_a_backlog_step_right_after_the_start_is_part_of_the_landing(self):
-        # Review M8: raw TS whose backlog came after the 1.5 s hold ran 1.10x for ~100 s;
-        # stage 3 takes it in as part of the landing (a gentle nudge). With 10 s keyframes a
+        # Raw TS whose backlog came after the 1.5 s hold ran 1.10x for ~100 s;
+        # the start takes it in as part of the landing (a gentle nudge). With 10 s keyframes a
         # start picked again once the source flowed on gains nothing on it (`RepickTests`).
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=13.5, gop=10.0).ready(backlog_after_start=False)
@@ -1366,7 +1366,7 @@ class StartPolicyTests(LiveSessionCase):
         feed.run(3.0)
         feed.edge += 9.0  # the rest of the backlog
         feed.push()
-        feed.run(45.0)  # within the landing's window (after it a backlog is drift: R32)
+        feed.run(45.0)  # within the landing's window (after it a backlog is drift)
         self.assertLessEqual(max(self.playback.rates or [1.0]), 1.03)
         self.assertEqual(len(self.playback.plays), 1)
 
@@ -1402,7 +1402,7 @@ class StartPolicyTests(LiveSessionCase):
 
     def test_the_source_is_told_the_target_it_steers_to(self):
         # Under Auto the learned one (here a 2.0.2 extra of 3 s read as its prior); nothing
-        # extra on top: the learned target holds what was added (stage 4b review M1).
+        # extra on top: the learned target holds what was added.
         tuning = LiveTuning(None)
         tuning.remember("ch", Tuning(3.0, False, False))
         for latency, target, extra in ((AUTO, 5.5, 0.0), ("stable", 6.0, 0.0), ("low", 1.0, 0.0)):
@@ -1414,10 +1414,10 @@ class StartPolicyTests(LiveSessionCase):
                 self.assertEqual(kwargs["live_delay"], live_session.LIVE_DELAY[latency])
 
     def test_no_catch_up_or_reopen_after_a_start_from_a_20_s_backlog(self):
-        """The 1-stream raw-TS provider: a 20 s backlog, one keyframe every 10 s. 2.1 stage 1
-        started 19 s behind, ran 1.10x for a minute and reopened at live 5 s in (R15). Now:
-        from the newest keyframe at or above the target, 9 s above it (8 s is far behind),
-        nudged gently."""
+        """The 1-stream raw-TS provider: a 20 s backlog, one keyframe every 10 s. Stay-live's
+        first version started 19 s behind, ran 1.10x for a minute and reopened at live 5 s in.
+        Now: from the newest keyframe at or above the target, 9 s above it (8 s is far
+        behind), nudged gently."""
         sid = self.start(latency=AUTO)
         feed = Feed(self, sid, burst=0.0, edge=21.0, gop=10.0).ready(backlog_after_start=False)
         self.assertEqual(self.playback.plays[0][0], self.engine.stream_url(sid, 1))  # not 21 s
@@ -1815,7 +1815,7 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), 1)
 
     def test_segmented_hls_arrivals_change_the_rate_once_at_most(self):
-        """The owner's report (a public HLS channel): every 7 s a batch of 6 s, every sixth
+        """Reported on a public HLS channel: every 7 s a batch of 6 s, every sixth
         12 s, so the lag saws by 6-12 s around a mean that wanders by itself. 2.0.x changed the
         rate 18 times in 5 minutes there. Now: at its target, the rate never changes; a second
         under it, one gentle nudge; and the indicator's text barely moves."""
@@ -1849,7 +1849,7 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["target"], 6.0)
         self.assertEqual(self.playback.rates, [])
         # A mean lag of 1 s is under half a burst of room: after 3 s the start's room is
-        # built, at 0.97x for 20 s at most (2.1 stage 3; 2.0.1 built it at 0.95x until half
+        # built, at 0.97x for 20 s at most (2.1; 2.0.1 built it at 0.95x until half
         # a burst, for minutes).
         for _ in range(25):
             self.step(0.25)
@@ -1857,7 +1857,7 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(self.timelines[-1]["nudge"], 0.97)
 
     def test_a_frame_more_at_a_segments_close_is_no_burst_landing(self):
-        # 2.1 stage 3: the helper reports a batch's end at once, so the next batch's first
+        # 2.1: the helper reports a batch's end at once, so the next batch's first
         # state (its last segment closing) moves the edge by one frame, 0.04 s, a moment
         # before the batch. Taken for the batch, it dropped the mean lag by a burst and, on a
         # public sparse-PCR channel, made the lag filter start afresh.
@@ -2013,7 +2013,7 @@ class StayLiveTests(LiveSessionCase):
                     self.assertFalse(self.timelines[-1]["paused"])
 
     def test_catching_up_on_bursts_never_chatters(self):
-        """The review's chatter cases: from a far start, one way down to 1.0."""
+        """Cases that chattered: from a far start, one way down to 1.0."""
         cases = [(6.0, 12.0, 5.0, 0.0, 1), (10.0, 40.0, 4.5, 0.0, 1)]  # burst, edge, first
         cases += [
             (burst, edge, first, 1.0, seed)  # arrivals jittered by up to a second
@@ -2050,7 +2050,7 @@ class StayLiveTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["lag"], before + 12.0, delta=0.3)
 
     def test_raw_ts_bursts_are_handled_as_hls_bursts_from_the_second_burst(self):
-        """The owner's channel (2.0.1, L1): raw TS, 12 s at connect, then 10 s at once every
+        """A measured channel (2.0.1): raw TS, 12 s at connect, then 10 s at once every
         10 s, measured as the helper does. From the second burst on: no stall shown between
         bursts, the burst is the target (never the 12 s backlog), no catch-up into the next
         gap and nothing starves; Go live keeps a burst's room."""
@@ -2104,7 +2104,7 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(feed.meter.burst_s, 0.0)
 
     def test_a_bursty_source_slows_a_little_to_build_its_room(self):
-        """The owner's channel re-measured (2.0.1): 3.84 s at connect (in the helper's view),
+        """A bursty channel re-measured (2.0.1): 3.84 s at connect (in the helper's view),
         the first 10 s burst 8.5 s later, then 10 s every 10 s. Once the bursts are measured
         the position met the edge just before each burst; now it slows (2.1: once the burst
         counts, gently, then at 0.95x as it leaves under half a second of room) until half a
@@ -2149,7 +2149,7 @@ class StayLiveTests(LiveSessionCase):
                 self.assertTrue(all(state["rate"] >= 1.0 for state in self.timelines))
 
     def test_a_steady_source_that_paused_after_connect_is_not_bursty_for_long(self):
-        """The 2.0.1 review: a steady source sends 4 s at connect, nothing for 12 s while it
+        """Found in 2.0.1: a steady source sends 4 s at connect, nothing for 12 s while it
         starts up, then real time. Its connect burst counts for its gap, at most 10 s, until a
         second burst confirms it, and none comes: steady again after 10 s (it was 12 s for
         36 s), so it never builds a burst's room (2.1: the burst does not count for stay-live
@@ -2187,7 +2187,7 @@ class StayLiveTests(LiveSessionCase):
 
     def test_bursts_measured_for_moments_move_neither_the_lag_nor_the_rate(self):
         """A raw TS source in ~1 s chunks that the helper measures as bursty for a few
-        seconds at a time (2.1 findings, one provider: 15 times in 5 minutes). 2.0.x moved
+        seconds at a time (one provider, measured in 2.1: 15 times in 5 minutes). 2.0.x moved
         the target and the lag formula with each, and changed the rate 40 times."""
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=3.0).ready()
@@ -2225,7 +2225,7 @@ class StayLiveTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), 2)
 
     def test_a_reopen_the_tick_retried_is_merged_with_a_go_live(self):
-        """Stage 1's last review: stay-live's reopen at live could not open (no stream from
+        """Stay-live's reopen at live could not open (no stream from
         the helper for a moment) and the tick made it later, but not as a reopen: a Go live
         right after it opened a second time."""
         sid = self.ready(segments(0, 20), live_edge=40.0)
@@ -2250,7 +2250,7 @@ class StayLiveTests(LiveSessionCase):
 
     def test_a_recovery_or_the_ram_ring_opens_even_just_after_a_reopen(self):
         # The merge (one open, not two) is for the Go live button and a seek to the edge:
-        # a helper's restart and the RAM ring after a disk failure always open (review 2).
+        # a helper's restart and the RAM ring after a disk failure always open.
         for case in ("recovery", "disk"):
             with self.subTest(case=case):
                 self.live = self.make()
@@ -2271,7 +2271,7 @@ class StayLiveTests(LiveSessionCase):
                 self.assertEqual(len(self.playback.plays), 3)
 
     def test_a_catch_up_from_far_behind_goes_on_through_stalls(self):
-        """Review round 2: a stall while catching up from far behind ended the catch-up (it
+        """A stall while catching up from far behind ended the catch-up (it
         counted as trouble, the cushion having existed), and it started again 3 s later, at
         every stall; a gentle one spent the budget and left the lag behind. A steady source
         20 s behind with three 3 s stalls: one catch-up, as in 4577a9e."""
@@ -2294,7 +2294,7 @@ class StayLiveTests(LiveSessionCase):
                 self.engine.answer()
 
     def test_go_live_then_a_backlog_is_one_open_not_two(self):
-        """One provider (2.1 review): after a stall it sent 21 s at once just after the
+        """One provider (2.1): after a stall it sent 21 s at once just after the
         viewer's Go live, and stay-live reopened at live 1.2 s later, measuring the new lag
         against the old position. Now an open waits for VLC to play it and 5 s before another
         reopen at live, so a Go live and stay-live's reopen are never two opens in a row."""
@@ -2337,7 +2337,7 @@ def spans_at(*starts, end=20.0):
 
 
 class SafeJumpTests(LiveSessionCase):
-    """2.1 stage 5 (safe jumps): Go live, stay-live's reopen at live and seeks open where
+    """Safe jumps (2.1): Go live, stay-live's reopen at live and seeks open where
     playback starts cleanly (a keyframe, else an intra picture; a start without either only
     when nothing else is in reach, which a debug log says), and far behind one such jump
     replaces a long 1.10x catch-up, never two within a minute."""
@@ -2388,7 +2388,7 @@ class SafeJumpTests(LiveSessionCase):
         self.engine.buffer(sid, spans, live_edge=20.0)
         for t, seq in (
             (0.5, 0),  # a keyframe start holds it
-            (5.0, 0),  # no clean start holds it: the one before it (review I1: never after)
+            (5.0, 0),  # no clean start holds it: the one before it (never after)
             (6.5, 3),  # an intra picture holds it (the keyframe start after it waits)
             (7.9, 3),
             (13.0, 4),  # the clean start before it, 5 s back
@@ -2419,7 +2419,7 @@ class SafeJumpTests(LiveSessionCase):
             self.live._tick()
 
     def test_back_steps_on_long_keyframe_intervals_always_move_back(self):
-        # Review I1: 20 s GOPs, playing at 42: ← asked for 32 (no clean start there), and the
+        # 20 s GOPs, playing at 42: ← asked for 32 (no clean start there), and the
         # keyframe at 40, 8 s on, won every time: four presses, four opens at 40.
         sid = self.gop20()
         self.live.seek_to(45.0)
@@ -2442,7 +2442,7 @@ class SafeJumpTests(LiveSessionCase):
         self.assertEqual(self.live.position(), 50.0)
 
     def test_an_evicted_position_reopens_no_earlier_than_the_margin(self):
-        # Review: a keyframe at the oldest point, starts without one after it: the reopen 5 s
+        # A keyframe at the oldest point, starts without one after it: the reopen 5 s
         # past the oldest point went back to it, which the next eviction may beat.
         sid = self.ready(segments(0, 3), live_edge=6.0)
         self.playback.set_state(PlaybackState.PLAYING)
@@ -2456,7 +2456,7 @@ class SafeJumpTests(LiveSessionCase):
         self.assertEqual(self.notices, [REWOUND])
 
     def test_on_an_audio_only_stream_far_behind_jumps(self):
-        # Review: every start is "none" there, so it never jumped (1.10x every time).
+        # Every start is "none" there, so it never jumped (1.10x every time).
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
         none = [Span(s.seq, s.start, s.end, False, "none") for s in self.engine.spans(sid)]
@@ -2475,7 +2475,7 @@ class SafeJumpTests(LiveSessionCase):
         self.assertEqual(self.playback.rates, [])
 
     def test_go_live_lands_where_stay_live_then_measures_it(self):
-        # Review I3's measurement (a sparse-PCR channel, 8 landings): Go live and jumps landed
+        # Measured on a sparse-PCR channel (8 landings): Go live and jumps landed
         # 1.7-2.3 s off their pick either way. The pick read the mean lag from the arrival
         # now (the helper's 12 s target duration; the batches were 10 s, some 6 s apart),
         # stay-live from the lag filter's mean over a dozen of them. The pick reads the
@@ -2503,10 +2503,10 @@ class SafeJumpTests(LiveSessionCase):
                 self.engine.answer()
 
     def test_what_landings_miss_by_is_learned_for_the_tune(self):
-        # Review I3's measurement after the pick read the filter's mean: 8 landings on a
+        # Measured after the pick read the filter's mean: 8 landings on a
         # sparse-PCR channel, every one 0.1-0.7 s short (mean 0.3). Learned from each clean
         # landing (picked while playing, then 8 s at 1x), half of it at a time, bounded; and
-        # afresh at each tune (ruling R38: not kept with the channel).
+        # afresh at each tune (not kept with the channel).
         real = StayLive.landed
         landed = self.enterContext(
             mock.patch.object(StayLive, "landed", autospec=True, side_effect=real)
@@ -2536,7 +2536,7 @@ class SafeJumpTests(LiveSessionCase):
                 self.engine.answer()
 
     def test_only_the_picks_own_error_is_learned(self):
-        # Re-review N2: a 5 s backlog 5.5 s after a Go live (no stall) was learned as a miss
+        # A 5 s backlog 5.5 s after a Go live (no stall) was learned as a miss
         # (+1.5 s, the cap), and picks right after the lag filter started afresh (a stall's
         # end, a step, a burst reclassified: when jumps happen) taught it its own wander.
         for case in ("a step inside the check", "a pick right after a restart"):
@@ -2574,7 +2574,7 @@ class SafeJumpTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["lag"], TARGETS["stable"], delta=0.5)
 
     def test_a_backlog_inside_the_check_on_a_bursty_source_teaches_nothing(self):
-        # Stage 5b's last review: on a bursty source a backlog under its burst moves the lag
+        # On a bursty source a backlog under its burst moves the lag
         # filter's level without starting it afresh (a step there is beyond the burst); 5 s
         # 5.5 s into the check taught +1.78. The check is dropped on such a step, and what the
         # filter's mean edge moved meanwhile is no miss of the pick's either.
@@ -2611,7 +2611,7 @@ class SafeJumpTests(LiveSessionCase):
                 self.engine.answer()
 
     def test_go_live_then_a_higher_latency_is_built_as_without_it(self):
-        # Re-review N1: after a Go live the shortfall a higher target left was tolerated for
+        # After a Go live the shortfall a higher target left was tolerated for
         # good (2.0 s behind a 6 s target for 5 minutes).
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=12.0).ready(backlog_after_start=False)
@@ -2641,7 +2641,7 @@ class SafeJumpTests(LiveSessionCase):
         self.assertEqual(stepped.call_count, 1)
 
     def test_a_jump_that_lands_short_changes_no_rate(self):
-        # Review I3: each jump on a sparse-PCR channel read 1.2-1.4 s short once VLC played,
+        # Each jump on a sparse-PCR channel read 1.2-1.4 s short once VLC played,
         # and 0.97x for 20 s followed (six rate changes).
         sid = self.start()
         feed = Feed(self, sid, burst=0.0, edge=6.0).ready(backlog_after_start=False)
@@ -2711,7 +2711,7 @@ class SafeJumpTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), 3)
 
     def test_a_landing_a_long_keyframe_interval_above_the_target_never_gets_1_10(self):
-        """Stage 3's open concern: one keyframe every 10 s (the 1-stream raw-TS provider's 4K
+        """One keyframe every 10 s (the 1-stream raw-TS provider's 4K
         channel), the tune 9.7 s above the target (the newer keyframe just short of the
         floor): nudged gently for its minute, then 1.10x. Now gently, then one jump on a
         keyframe that helps."""
@@ -2745,14 +2745,14 @@ class RateHealthTests(LiveSessionCase):
     """2.0.2: on some channels VLC cannot play at any rate but 1x; its position crawls (4.5 s
     of media in 37 s, measured). Stay-live sees it within its window (3 s counted, from two
     seconds after VLC plays) and keeps that channel at 1x: no rate change and no jump after.
-    2.1 stage 2: the window runs from VLC's first step after counting starts to a step at
+    Since 2.1 the window runs from VLC's first step after counting starts to a step at
     least 3 s on and two steps later; this simulated crawl steps every 2 s, so it is seen 6 s
     after the rate changed (2.0.2 judged each tick: 3 s)."""
 
     def test_a_bursty_channel_that_cannot_slow_down_plays_at_normal_speed(self):
         # The measured channel: 10 s segments and 8 s buffered at the start, so stay-live
         # slows down (after 3 s); in 2.0.1 VLC crawled and stay-live jumped to live twice.
-        # (2.1 stage 3: such a start comes only after the ready timeout, its room built at
+        # (2.1: such a start comes only after the ready timeout, its room built at
         # 0.97x.)
         self.live = self.make(ready_timeout_ms=50)
         sid = self.start()
@@ -2780,7 +2780,7 @@ class RateHealthTests(LiveSessionCase):
         self.assertGreater(self.timelines[-1]["lag"], TARGETS["normal"] + 8.0)  # far behind
         feed.run(120.0)
         self.assertEqual(self.playback.rates, rates)
-        # 2.1 stage 5 (review I2): far behind, once a minute passed since the tune, one jump
+        # 2.1: far behind, once a minute passed since the tune, one jump
         # to live, which changes no rate (before, it stayed far behind until 20 s beyond).
         self.assertEqual(len(self.playback.plays), 2)
         self.assertLess(abs(self.timelines[-1]["lag"] - TARGETS["normal"]), 1.0)
@@ -2800,8 +2800,8 @@ class RateHealthTests(LiveSessionCase):
 
     def test_vlc_waiting_at_the_live_edge_is_not_taken_for_a_crawl(self):
         """VLC meets the edge before the next burst and waits there, its clock standing still
-        while it reports Playing (libVLC 3), as stay-live builds the room: no crawl. (2.1
-        stage 3: a start this short comes only after the ready timeout.)"""
+        while it reports Playing (libVLC 3), as stay-live builds the room: no crawl. (2.1: a
+        start this short comes only after the ready timeout.)"""
         self.live = self.make(ready_timeout_ms=50)
         sid = self.start()
         feed = Feed(self, sid, burst=10.0, edge=3.0, starved=PlaybackState.PLAYING).ready()
@@ -2825,7 +2825,7 @@ class HlsRateTests(LiveSessionCase):
 
     def test_short_of_its_room_it_waits_until_a_start_is_far_enough_back(self):
         # The measured channel's shape: 10 s segments and 8 s buffered at the start. 2.0.1
-        # started there and slowed to 0.95x. 2.1 stage 3 waits for a start as far back as
+        # started there and slowed to 0.95x. 2.1 waits for a start as far back as
         # the 10 s target (its mean over a batch); the ready timeout comes first: from the
         # oldest then, 9.5 s behind once playing, 8.5 s of room to the next batch.
         sid = self.start(latency=AUTO)
@@ -2847,7 +2847,7 @@ class HlsRateTests(LiveSessionCase):
 
 
 class RestartTests(LiveSessionCase):
-    """2.0.2 review (I1): after VLC ran dry at the live edge it needs a moment to restart: it
+    """2.0.2: after VLC ran dry at the live edge it needs a moment to restart: it
     refills its caching while its clock stands still and libVLC 3 says Playing. That restart
     is no crawl: it never locks 1x or plays directly, on jittery raw TS or HLS."""
 
@@ -2904,7 +2904,7 @@ class CrawlFallbackTests(LiveSessionCase):
     def test_an_hls_channel_that_crawls_at_1x_plays_directly_once(self):
         feed = self.tune(crawl_1x=True)
         sid = self.engine.last_sid
-        # 2.1 stage 2: each 8 s window ends at a step of VLC's clock (2 s apart in this
+        # 2.1: each 8 s window ends at a step of VLC's clock (2 s apart in this
         # simulated crawl): direct play at 32 s (2.0.2, judged each tick: 30 s).
         feed.run(33.0)
         # Its nudge crawled first: 1x for good (rate health), and it still crawled at 1x.
@@ -2923,7 +2923,7 @@ class CrawlFallbackTests(LiveSessionCase):
 
     def test_a_single_freeze_does_not_send_it_to_direct_play(self):
         # A healthy HLS channel whose VLC stands still for 5 s once, with plenty buffered (a
-        # decoder or audio restart): one bad window, never two in a row (2.0.2 review, I3).
+        # decoder or audio restart): one bad window, never two in a row (2.0.2).
         feed = self.tune(edge=20.0)
         feed.run(30.0)
         feed.frozen_until = self.clock.now + 5.0
@@ -3042,7 +3042,7 @@ class SoftwareFallbackTests(LiveSessionCase):
         self.assertEqual((self.playback.plays[-1], self.playback.software[-1]), (DIRECT, True))
 
     def test_a_direct_reopen_refused_at_once_is_tried_again(self):
-        # Review M3: the reopen in software closes the stream first, and a provider allowing
+        # The reopen in software closes the stream first, and a provider allowing
         # one stream may still count it: refused at once, it is tried again, as after a
         # fallback, and only then reported.
         self.live = self.make(retry_ms=(20, 30, 40))
@@ -3066,7 +3066,7 @@ class SoftwareFallbackTests(LiveSessionCase):
         self.assertEqual(self.tuning.get("A"), Tuning(1.5, True, software=True))
 
     def test_auto_s_learned_target_and_software_decoding_are_both_kept(self):
-        # Stage 4b saves the learned target on its own (trouble, a move, the tune's end):
+        # Auto saves the learned target on its own (trouble, a move, the tune's end):
         # the flag the store holds goes with it, as the lock and direct play do.
         self.start(latency=AUTO, channel="A")
         feed = Feed(self, self.engine.last_sid, burst=0.0, edge=20.0).ready()
@@ -3095,7 +3095,7 @@ class SoftwareFallbackTests(LiveSessionCase):
 
 
 class StartCushionTests(LiveSessionCase):
-    """Ruling R33: a tune started at a pick chosen for the target has its cushion, so VLC
+    """A tune started at a pick chosen for the target has its cushion, so VLC
     running dry right after it is trouble (Auto adds its step, the owed slow-down runs). A
     start that deliberately took less (a steady source's oldest segment after a second, the
     ready timeout's) has not."""
@@ -3134,11 +3134,11 @@ class StartCushionTests(LiveSessionCase):
 
 
 class BackOffTests(LiveSessionCase):
-    """Auto latency's trouble (2.0.2; since 2.1 stage 4b the learned target's,
+    """Auto latency's trouble (2.0.2; since 2.1 the learned target's,
     `LearnedTarget`): VLC running dry once a cushion existed raises the channel's target at
     once (its starvation prior's margin, about 1.6 s for the first), up to today's cap
     (Stable's plus 4 s; a segmented source: its burst plus 2 s); a steady source's stall is
-    noted, a segmented one's is trouble at once (R37); quiet takes it down slowly, after it
+    noted, a segmented one's is trouble at once; quiet takes it down slowly, after it
     held for a while. A rise never jumps back: the room grows at 0.95x where the rate may
     change, else as VLC waits at 1x."""
 
@@ -3362,7 +3362,7 @@ class MemoryTests(LiveSessionCase):
             for _ in range(5):
                 with self.subTest(channel=channel, tune=_):
                     feed = self.tune(channel, edge=1.0, starved=PlaybackState.PLAYING)
-                    feed.stalled = True  # silent for the second the start waits (2.1 stage 3)
+                    feed.stalled = True  # silent for the second the start waits (2.1)
                     feed.run(1.0)
                     feed.stalled = False
                     feed.run(0.25)
@@ -3470,7 +3470,7 @@ class MemoryTests(LiveSessionCase):
 class StallTests(LiveSessionCase):
     """The source stops sending at the live edge; libVLC 3 keeps reporting Playing meanwhile.
 
-    The review's scenarios (6 s HLS bursts, Normal): stalls of 15, 30 and 60 s.
+    The scenarios (6 s HLS bursts, Normal): stalls of 15, 30 and 60 s.
     """
 
     def settle(self, *, burst=6.0):
@@ -3565,7 +3565,7 @@ class PositionTests(LiveSessionCase):
         self.playback.set_state(PlaybackState.PLAYING)
         self.step(0.25)
         self.step(0.25, media=0.3)
-        # 2.1 stage 2: a clock at the rate, moved half way to each new reading of VLC's.
+        # 2.1: a clock at the rate, moved half way to each new reading of VLC's.
         self.assertAlmostEqual(self.live.position(), 10.525)
         for _ in range(8):
             self.step(0.25)
@@ -3602,7 +3602,7 @@ class PositionTests(LiveSessionCase):
 
 
 class SparseClockTests(LiveSessionCase):
-    """2.1 stage 2, measured on two public sparse-PCR HLS channels: VLC's get_time() stands
+    """2.1, measured on two public sparse-PCR HLS channels: VLC's get_time() stands
     still and steps by 2000 ms every 2 s. The old position rule took each step for a jump and
     counted a tick's wall time instead (0.09-0.16 of what VLC played): the lag read far too
     high (false catch-ups, a reopen at live every ~22 s), rate health saw a crawl and locked
@@ -3663,7 +3663,7 @@ class SparseClockTests(LiveSessionCase):
                 self.assertEqual(len(self.playback.plays), plays + 1)  # nothing more opened
 
     def test_a_late_or_missing_step_never_locks_a_healthy_channels_rate(self):
-        # Stage 2 review: one 4 s step closed a window with nothing played at the clock's
+        # One 4 s step closed a window with nothing played at the clock's
         # hold, and a healthy channel at 1.10x was locked at 1x for a day. Here stay-live
         # holds 1.10x for 5 minutes while every 5th-10th of VLC's 2 s stamps is missing.
         rng, gaps, k = random.Random(5), set(), 0
@@ -3678,7 +3678,7 @@ class SparseClockTests(LiveSessionCase):
         self.assertEqual(self.playback.rates[-1], 1.10)
 
     def test_a_cadence_turning_coarse_at_another_rate_locks_nothing(self):
-        # Stage 2 review (parked): fine quanta, then 2 s stamps mid-channel while at 1.10x or
+        # Fine quanta, then 2 s stamps mid-channel while at 1.10x or
         # 0.95x, one of the first three new stamps missing: its clock stood still longer than
         # the old cadence's holds, a window counted nothing played, and rate health locked a
         # healthy channel at 1x for a day.
@@ -3725,7 +3725,7 @@ class SparseClockTests(LiveSessionCase):
         return errors
 
     def test_a_dropped_ten_second_jump_the_helper_reports_leaves_the_lag(self):
-        # Stage 2 review: an HLS discontinuity whose PCR jumps forward 10 s moves VLC's
+        # An HLS discontinuity whose PCR jumps forward 10 s moves VLC's
         # get_time with it, but neither the helper's timeline nor what VLC plays: taken for a
         # skip, the lag would read 10 s short (a false 0.95x until the next open).
         feed = self.tune(edge=8.0)
@@ -3737,7 +3737,7 @@ class SparseClockTests(LiveSessionCase):
         self.assertTrue(all(rate >= 1.0 for rate in self.playback.rates))
 
     def test_a_viewer_far_behind_still_matches_its_break_among_many(self):
-        # Stage 2 re-review: the helper kept the last eight breaks only, so a viewer minutes
+        # The helper kept the last eight breaks only, so a viewer minutes
         # behind on a flaky reconnecting source took older jumps for skips.
         feed = self.tune(edge=8.0)
         feed.run(30.0)
@@ -3747,7 +3747,7 @@ class SparseClockTests(LiveSessionCase):
         self.assertAlmostEqual(self.timelines[-1]["lag"], lag, delta=1.0)
 
     def test_a_two_second_step_the_timeline_kept_is_followed(self):
-        # Stage 2 re-review: the segmenter keeps a step under 3 s as media (a quick
+        # The segmenter keeps a step under 3 s as media (a quick
         # reconnect, an HLS sequence gap on 2 s segments): VLC's clock and the timeline agree,
         # so the position moves with it and the lag stays the timeline's.
         feed = self.tune(edge=8.0)
@@ -4131,12 +4131,12 @@ class InterruptionTests(LiveSessionCase):
         return plays
 
     def test_a_fallback_on_a_one_stream_provider_tries_its_direct_play_again(self):
-        """The owner's provider allows one stream (2.1 review): its source gave up at the
+        """A provider that allows one stream (2.1): its source gave up at the
         live edge, the direct play failed at once ("The stream could not be opened": the
         provider still counted the buffer's connection) and nothing played for minutes. The
         direct play opens only once the buffer's upstream is closed (never two connections),
         and a failure right after is tried again up to three times (3, 5 and 10 s apart),
-        "Reconnecting…" each time, and only then reported (ruling R19)."""
+        "Reconnecting…" each time, and only then reported."""
         for kind in ("network", "crashed"):
             with self.subTest(kind=kind):
                 plays = self.fall_back_on_one_stream(kind)
@@ -4154,7 +4154,7 @@ class InterruptionTests(LiveSessionCase):
                 self.assertEqual(self.notices.count(RECONNECTING), 3)
 
     def test_a_direct_play_that_timed_out_is_reported_at_once(self):
-        """Stage 1's last review: a provider that does not answer times out after VLC's open
+        """A provider that does not answer times out after VLC's open
         timeout (20 s), and retrying that showed "Reconnecting…" for a minute and a half.
         Only a failure within a few seconds of its play call is tried again."""
         plays = self.fall_back_on_one_stream()
@@ -4362,7 +4362,7 @@ class HelperDeathTests(LiveSessionCase):
         self.assertEqual(self.notices, [LOST, UNAVAILABLE])
 
     def test_a_backlog_step_right_after_a_recovery_is_part_of_its_landing(self):
-        # Re-review nit 4: the restarted helper's session went live at the target, then its
+        # The restarted helper's session went live at the target, then its
         # raw-TS backlog landed and was caught up at 1.10x as drift.
         sid = self.ready(segments(0, 3), live_edge=6.0)
         self.playback.set_state(PlaybackState.PLAYING)
@@ -4571,10 +4571,10 @@ class HelperDeathTests(LiveSessionCase):
 
 
 class RepickTests(LiveSessionCase):
-    """A tune's start picked again (`REPICK`, ruling R46): only a dump right after the open
+    """A tune's start picked again (`REPICK`): only a dump right after the open
     that the source then flows on from at about real time, never a burst (which flows at 3x
     and more, then stands still), however it lands or is spread, never long after the open or
-    when VLC is slow to play it. Each case against 4bb2d7c's (stage 4b re-reviews 1-2): one
+    when VLC is slow to play it. Each case against 4bb2d7c's: one
     open and VLC never dry, where that ran dry 4-7 s."""
 
     def tune(self, latency, **kwargs):
@@ -4723,7 +4723,7 @@ class RepickTests(LiveSessionCase):
                     self.assertLess(lag, 22.0)
 
     def test_a_dump_then_a_flow_is_picked_again_when_vlcs_first_reading_comes_late(self):
-        # Re-review 2, M-r: VLC slow to open (1.5 s) a sparse-PCR channel, whose clock reads
+        # VLC slow to open (1.5 s) a sparse-PCR channel, whose clock reads
         # its first time only at its next PCR (2 s): more than `_REPICK_PLAY_S` after the
         # open, within it of the playing. The dump then flow is picked again all the same.
         for latency in (AUTO, "normal"):
@@ -4786,7 +4786,7 @@ class RepickTests(LiveSessionCase):
         self.assertGreaterEqual(opens[2] - opens[1], live_session._REOPEN_HOLD_S)
 
     def test_an_hls_start_is_never_picked_again(self):
-        # Round 3 of re-review 2: a public HLS channel (6 s segments 7 s apart, every sixth
+        # A public HLS channel (6 s segments 7 s apart, every sixth
         # batch 12 s) whose 12 s batch landed 2 s after the open and the next 3.24 s later
         # read as a dump, then a flow: picked again 7 s behind, VLC ran dry twice. HLS never.
         for latency in ("low", "normal", "stable", AUTO):
@@ -4825,7 +4825,7 @@ class RepickTests(LiveSessionCase):
                 self.unchanged(play)
 
     def test_a_reopen_aims_at_least_at_the_measured_burst(self):
-        # Re-review 2's M-q: Auto, bursty raw TS (a dump, then 10 s bursts), VLC's clock
+        # Auto, bursty raw TS (a dump, then 10 s bursts), VLC's clock
         # still 25 s after the open: stay-live's reopen at live aimed 4.7 s behind though
         # the helper had measured a 10 s burst, and VLC ran dry 3.7-4.7 s. The timeline's
         # target (Go live's, a reopen's, a jump's) is never under the burst floor.
@@ -4861,8 +4861,8 @@ class RepickTests(LiveSessionCase):
 
 
 class LearnedTargetTests(LiveSessionCase):
-    """2.1 stage 4b: under Auto the channel's learned target (`LearnedTarget`, stage 4a) in
-    place of 2.0.2's `AutoTarget`, wired by the integration contract of 4a's final review;
+    """2.1: under Auto the channel's learned target (`LearnedTarget`) in place of 2.0.2's
+    `AutoTarget`, wired by its integration contract;
     Low, Normal and Stable stay as they were."""
 
     def setUp(self):
@@ -4984,8 +4984,8 @@ class LearnedTargetTests(LiveSessionCase):
         for _ in range(60):
             feed.run(0.25)
             steered.append(self.live._stay.target)
-        # Go live, the start and the timeline count with the helper's burst at once (stage
-        # 1), so stay-live never speeds up towards a target it may be about to raise.
+        # Go live, the start and the timeline count with the helper's burst at once (the
+        # slack), so stay-live never speeds up towards a target it may be about to raise.
         self.assertGreaterEqual(self.timelines[-1]["target"], 10.0)
         feed.burst = 0.0
         for _ in range(120):
@@ -5139,12 +5139,12 @@ class LearnedTargetTests(LiveSessionCase):
         feed.run(1.0)
         self.assertTrue(self.timelines[-1]["adjusted"])
 
-    # ---- review round 1 ----
+    # ---- late bursts, dry runs, stalls and starts picked again ----
     def test_a_burst_the_helper_measures_late_reaches_the_target_at_once(self):
         # Raw TS a meter measures (10 s bursts every 10 s), its first clear burst well after
-        # the start, as on the 1-stream raw-TS provider (C1): the timeline, Go live and the
+        # the start, as on the 1-stream raw-TS provider: the timeline, Go live and the
         # start count with it at once, and stay-live never speeds up towards a target the
-        # burst is about to raise (2.0.1's bursty handling, stage 1's slack).
+        # burst is about to raise (2.0.1's bursty handling, stay-live's slack).
         sid = self.start(latency=AUTO, channel="ch")
         feed = Feed(
             self, sid, burst=10.0, edge=12.0, metered=True, starved=PlaybackState.PLAYING
@@ -5162,7 +5162,7 @@ class LearnedTargetTests(LiveSessionCase):
 
     def test_a_one_off_first_burst_comes_back_down_within_a_minute(self):
         # A steady source whose helper measured its backlog as a "burst" in its first states,
-        # dropped by its next estimate (I1): down as the lag filter drops it, not at Auto's
+        # dropped by its next estimate: down as the lag filter drops it, not at Auto's
         # quiet pace (it held ~10.5 s for over an hour).
         sid = self.start(latency=AUTO, channel="ch")
         feed = Feed(self, sid, burst=0.0, edge=12.0, starved=PlaybackState.PLAYING)
@@ -5175,7 +5175,7 @@ class LearnedTargetTests(LiveSessionCase):
         self.assertLessEqual(self.timelines[-1]["target"], 3.5)
 
     def test_the_batch_that_ends_a_dry_run_is_no_near_miss(self):
-        # (I2) Its headroom on the tick before was the dry run's: one starvation, told once.
+        # Its headroom on the tick before was the dry run's: one starvation, told once.
         near = self.spy(LearnedTarget, "near_miss")
         starved = self.spy(LearnedTarget, "starved")
         feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
@@ -5188,7 +5188,7 @@ class LearnedTargetTests(LiveSessionCase):
         self.assertAlmostEqual(self.live._learned.prior.margin(), 1.58, delta=0.05)
 
     def test_running_dry_inside_a_counted_stall_is_told(self):
-        # (I3) A segmented source stalls beyond its bound, then VLC runs dry: both told.
+        # A segmented source stalls beyond its bound, then VLC runs dry: both told.
         stalled = self.spy(LearnedTarget, "stalled")
         starved = self.spy(LearnedTarget, "starved")
         self.tuning.remember("ch", Tuning(learned=Learned(need=10.0)))
@@ -5202,9 +5202,9 @@ class LearnedTargetTests(LiveSessionCase):
 
     def test_a_stall_vlc_got_through_is_no_trouble(self):
         # A source late by a stall the target covered (VLC never ran dry): nothing holds the
-        # target up for it (ruling R37 had counted every segmented source's stall at once,
+        # target up for it (earlier in 2.1 every segmented source's stall counted at once,
         # 2.0.2 every stall: a raw TS stall 23 s behind took the target from 2.5 to 5.5;
-        # part A's backlog idea: it is absorbed, a near-miss at most).
+        # now it is absorbed, a near-miss at most).
         for burst, late, channel in ((6.0, 9.0, "hls"), (0.0, 5.0, "raw")):
             with self.subTest(burst=burst):
                 self.tuning.remember(channel, Tuning(learned=Learned(need=10.0)))
@@ -5225,7 +5225,7 @@ class LearnedTargetTests(LiveSessionCase):
                 self.assertLessEqual(self.timelines[-1]["target"], target)
 
     def test_one_late_reload_is_a_near_miss_at_most(self):
-        # 4a's final review: a reload missed on a 6 s HLS channel at its burst (9 s silent,
+        # A reload missed on a 6 s HLS channel at its burst (9 s silent,
         # beyond the 8 s stall bound, VLC never dry) raised the target 1.3 s for about an
         # hour. A stall the target held out is no starvation: a near-miss at most.
         starved = self.spy(LearnedTarget, "starved")
@@ -5267,7 +5267,7 @@ class LearnedTargetTests(LiveSessionCase):
                 self.assertEqual(feed.starved_s, 0.0)
 
     def test_a_bursty_sources_first_burst_right_after_the_open_picks_nothing_again(self):
-        # Re-review C1: raw TS the meter has not measured yet (it can at the second burst),
+        # Raw TS the meter has not measured yet (it can at the second burst),
         # its first regular burst 1-4 s after the open, looked like a late backlog: the start
         # was picked again 2.5 s behind and VLC ran dry 4-7 s until the next burst. Under any
         # latency it plays on as before: no second open, no longer dry than before the re-pick.
@@ -5321,8 +5321,8 @@ class LearnedTargetTests(LiveSessionCase):
                 self.assertEqual(feed.starved_s, 0.0)
 
     def test_a_bursty_channels_second_tune_does_not_run_dry_either(self):
-        # Auto, the same channel again after two minutes (re-review C1: 0.95-4.95 s dry; M-c:
-        # a first tune too short to measure the need kept nothing of the burst, and the next
+        # Auto, the same channel again after two minutes (before: 0.95-4.95 s dry; a first
+        # tune too short to measure the need kept nothing of the burst, and the next
         # started at the floor and a starvation's margin, 1.95 s dry).
         for first in (1.0, 2.0, 3.0, 6.0):
             with self.subTest(first=first):
@@ -5342,7 +5342,7 @@ class LearnedTargetTests(LiveSessionCase):
                 self.assertEqual(feed.starved_s, 0.0)
 
     def test_a_backlog_a_while_after_the_open_is_part_of_the_landing(self):
-        # Later than the re-pick's few seconds: as stage 3 had it, steered gently.
+        # Later than the re-pick's few seconds: as before the re-pick, steered gently.
         plays = len(self.playback.plays)
         feed = self.tune(edge=2.0)
         self.played(feed, plays)
@@ -5353,7 +5353,7 @@ class LearnedTargetTests(LiveSessionCase):
         self.assertEqual(len(self.playback.plays), plays + 1)
 
     def test_an_hls_start_fetches_for_the_learned_target_once(self):
-        # (M1) The learned target already holds the source's segments: passed as the
+        # The learned target already holds the source's segments: passed as the
         # target, nothing extra on top (the helper adds a segment and a half itself).
         self.tuning.remember("ch", Tuning(learned=Learned(need=13.0)))
         self.start(latency=AUTO, channel="ch")
@@ -5365,7 +5365,7 @@ class LearnedTargetTests(LiveSessionCase):
         self.assertEqual((kwargs["target"], kwargs["extra"]), (TARGETS["normal"], 0.0))
 
     def test_a_learned_rise_left_in_the_band_still_counts_the_next_dry_run(self):
-        # (M2) A rise within the band is drift: stay-live builds nothing for it, so the lag
+        # A rise within the band is drift: stay-live builds nothing for it, so the lag
         # never reaches it; VLC running dry then still ran out the cushion.
         starved = self.spy(LearnedTarget, "starved")
         feed = self.tune(edge=8.0, starved=PlaybackState.PLAYING)
@@ -5379,7 +5379,7 @@ class LearnedTargetTests(LiveSessionCase):
         self.assertEqual(starved.call_count, 1)
 
     def test_the_burst_floor_switch_reads_the_environment(self):
-        # (M5) QITV_SEGMENT_FLOOR=0 (or off, false, no) turns it off; anything else is on.
+        # QITV_SEGMENT_FLOOR=0 (or off, false, no) turns it off; anything else is on.
         for value, on in (
             ("", True),
             ("1", True),
@@ -5394,7 +5394,7 @@ class LearnedTargetTests(LiveSessionCase):
                 self.assertEqual(live_session.segment_floor_from(value), on)
 
     def test_a_move_of_the_sources_burst_is_said_as_such(self):
-        # (M4) Not "arrivals" or "quiet": the lag filter took a larger burst in.
+        # Not "arrivals" or "quiet": the lag filter took a larger burst in.
         sid = self.start(latency=AUTO, channel="ch")
         feed = Feed(
             self, sid, burst=10.0, edge=12.0, metered=True, starved=PlaybackState.PLAYING

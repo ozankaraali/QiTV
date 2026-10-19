@@ -1,4 +1,4 @@
-"""The learned live target (2.1, stay-live stage 4): how far behind the live edge one channel can
+"""The learned live target (2.1, Auto latency): how far behind the live edge one channel can
 play without VLC running dry, learned from how its data arrives and from the trouble it had.
 
 `ArrivalModel` watches the live edge tick by tick (`add(now, edge)`). The edge grows while a
@@ -14,9 +14,9 @@ are forgotten (it flows now, say) it is judged afresh. Between two
 batches' starts VLC plays at 1x what it holds, so that gap is the media it must have in hand
 when a batch lands; the need is a mean lag (the target stay-live steers the mean to), and
 right after a batch the edge stands above its own mean, about half a batch on a regular
-rhythm, so a gap asks that much less of the mean lag (`MEDIA_SHARE`; the 2.1 stage 4b review:
-two sparse-PCR channels' 10 s batches 12, 12 and 6 s apart read 16 s, a 12 s target kept 4.9
-s of headroom before every batch). The need is the larger of two: the 95th percentile of the
+rhythm, so a gap asks that much less of the mean lag (`MEDIA_SHARE`; measured in 2.1: two
+sparse-PCR channels' 10 s batches 12, 12 and 6 s apart read 16 s, a 12 s target kept 4.9 s
+of headroom before every batch). The need is the larger of two: the 95th percentile of the
 gaps (the usual longest wait) plus half their interquartile range (lateness: nothing for a
 source that keeps its rhythm, more the more its gaps wander, as the window may not have shown
 the longest yet), less half the usual batch, plus a fixed margin; and the 95th percentile of
@@ -68,14 +68,13 @@ margin adds to max(floor, burst, need), not to a need under it: trouble at the f
 the target at once.
 
 The burst floor is a switch (`SEGMENT_FLOOR`, or `segment_floor` per target), on by default,
-so stage 4b can weigh it on real channels against the learned target alone (rebuffers, A/V
+so it can be weighed on real channels against the learned target alone (rebuffers, A/V
 sync, latency). Off, a segmented source has max(floor, need) + margin like a steady one, at
 most max(Stable's 6 s + 4 s, need + 2 s, burst + `CAP_BURST_S`): room for the margin to cover
 a whole lost segment where the need is well under one (a slow download), which its
 starvation then covers at once (the target to the burst + `CAP_BURST_S`, within the cap), and
-its stall is only noted. Any source's stall is only noted since the 2.1 stage 4b review (its
-trouble counts once VLC runs dry). Either way a steady source's target is the
-same.
+its stall is only noted. Any source's stall is only noted since 2.1 (its trouble counts once
+VLC runs dry). Either way a steady source's target is the same.
 `LearnedTarget` holds one channel's model and prior; `Learned` is what it remembers
 (`services.live.tuning`) when it says something about the next tune, and a 2.0.2 `extra`
 reads as a prior that needed that much.
@@ -138,7 +137,7 @@ from typing import Optional, Sequence
 
 # Mirrored from services.live.stay_live (a test keeps them equal; no import, so either module
 # may use the other).
-FLOOR_S = 2.5  # Normal's target: the learned target's floor in this stage
+FLOOR_S = 2.5  # Normal's target: the learned target's floor
 CAP_MIN_S = 10.0  # today's cap: Stable's 6 s + 4 s ...
 CAP_ABOVE_S = 2.0  # ... or the burst (here: the need) + 2 s, whichever is larger
 STALL_S = 2.0  # a source silent this much longer than its rhythm has stalled
@@ -861,7 +860,7 @@ class LearnedTarget:
         """The burst the source reports at `now` (the helper's; 0.0: none). A tune too short
         to measure its need keeps it as one (`learned`) once it was reported two bursts' time
         (the meter's estimate confirmed), so a one-off first "burst" is kept by none (a
-        connect backlog the meter took for 10 s bursts for 4-8 s: re-review 2, M-m)."""
+        connect backlog the meter took for 10 s bursts for 4-8 s)."""
         burst = _burst(burst)
         if burst != self._burst:
             self._burst, self._burst_since = burst, now
@@ -897,9 +896,9 @@ class LearnedTarget:
         """The source stalled (the session's stall bound passed) while VLC had its cushion:
         noted (`ArrivalModel.stall`), any source. Its trouble counts when VLC runs dry
         (`starved`); one the target covered is `absorbed` (a near-miss at most, when its batch
-        lands). (Ruling R37 had a segmented source's stall raise the margin at once, as 2.0.2
-        did; the 2.1 stage 4b review: an ordinary HLS stall the target held through then held
-        the target up 1.6-2 s.) `burst`: the one the session's bound used."""
+        lands). (Earlier in 2.1 a segmented source's stall raised the margin at once, as 2.0.2
+        did: an ordinary HLS stall the target held through then held the target up 1.6-2 s.)
+        `burst`: the one the session's bound used."""
         del burst
         self.arrivals.stall()
 
@@ -925,8 +924,8 @@ class LearnedTarget:
 
     def learned(self) -> Optional[Learned]:
         """What to remember (rounded); None unless it would change the next tune's target.
-        A tune too short to measure its need keeps the burst its source reported as one (the
-        2.1 stage 4b re-review: a bursty raw TS channel's next tune started at the floor and a
+        A tune too short to measure its need keeps the burst its source reported as one
+        (without it a bursty raw TS channel's next tune started at the floor and a
         starvation's margin, and ran dry until the meter measured the burst again)."""
         need = self.arrivals.summary()
         since, now = self._burst_since, self._burst_now

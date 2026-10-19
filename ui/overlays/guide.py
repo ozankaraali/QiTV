@@ -1,11 +1,11 @@
-"""EPG guide overlay (spec §5.1, R4): channels as rows, time as columns, with a now-line.
+"""EPG guide overlay (spec §5.1): channels as rows, time as columns, with a now-line.
 
 The grid paints only the rows that fit on screen, and looks up programmes only for those
 rows, so groups with thousands of channels stay cheap.
 
-Its header has a button for each of its keys (the owner's mouse-only rule): ‹ and › beside the
-day move the time window (← →, dimmed at its ends), and ⌕ (Search), ⛶ (Fullscreen) and ×
-(close, as G or Esc) sit at its right end. Each names its key when hovered.
+Its header has a button for each of its keys (every key has a control on screen): ‹ and ›
+beside the day move the time window (← →, dimmed at its ends), and ⌕ (Search), ⛶ (Fullscreen)
+and × (close, as G or Esc) sit at its right end. Each names its key when hovered.
 
 Catch-up (2.2): when a listed channel's provider keeps an archive (`archive_days(channel)`:
 its days, 0 for none or one that did not answer lately), the window also moves back, as far
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 SLOT = timedelta(minutes=30)
 SLOTS = 5
-WINDOW = SLOTS * SLOT  # 2.5 h on screen (R4)
+WINDOW = SLOTS * SLOT  # 2.5 h on screen
 MAX_AHEAD = timedelta(hours=24)
 MAX_BACK = timedelta(days=7)  # the furthest back the window goes (a channel's archive)
 LOOKUP_LIMIT = 12
@@ -230,6 +230,7 @@ class Guide(Overlay):
         self._programmes = programmes
         self._now = now
         self._channels: list[dict] = []
+        self._digits = 0  # the longest channel number listed
         self._current = -1
         self._top = 0
         self._archive_days = archive_days
@@ -256,6 +257,10 @@ class Guide(Overlay):
 
     def open_guide(self, channels: list[dict], current: int) -> None:
         self._channels = list(channels)
+        # The number column fits the longest number listed (a provider's own run past 9999).
+        self._digits = max(
+            (len(str(c.get("number") or "").strip()) for c in self._channels), default=0
+        )
         self._current = min(max(current, 0), len(self._channels) - 1)
         self._window_start = slot_start(self._now())
         self._picked = None
@@ -763,12 +768,18 @@ class Guide(Overlay):
             boxes.append((box, span.programme, on_now))
         return boxes
 
+    def _number_width(self, units: Units) -> float:
+        """The channel number column: as wide as the longest number listed, at least 3.4u."""
+        font = units.font(1.1, QFont.Weight.DemiBold)
+        widest = QFontMetrics(font).horizontalAdvance("0" * self._digits) + 0.2 * units.u
+        return max(3.4 * units.u, widest)
+
     def _paint_channel(self, p: QPainter, layout: _Layout, channel: dict, rect: QRectF) -> None:
         units = layout.units
         u = units.u
         x = rect.left() + SIDE_U * u
         number = channel.get("number")
-        num_w = 3.4 * u
+        num_w = self._number_width(units)
         if number is not None and str(number).strip():
             p.setFont(units.font(1.1, QFont.Weight.DemiBold))
             p.setPen(qcolor(PALETTE.accent))

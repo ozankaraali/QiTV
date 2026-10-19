@@ -1,4 +1,4 @@
-"""The volume mixer: one row per picture, TV-style, bottom-centre (Phase 4, owner's amendment).
+"""The volume mixer: one row per picture, TV-style, bottom-centre.
 
 One row ("Main") without picture in picture; two while it is open ("Main" for the large
 picture, "PiP" for the small one, each with its channel's name). Each row has a speaker

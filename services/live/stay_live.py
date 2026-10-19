@@ -31,7 +31,7 @@ target by itself (a step), and is resized when the target moves; a catch-up that
 counts against the budget only if no slow-down followed it. `SettledLag` gives the lag as
 shown: in half seconds, changed only after it differed for `_SHOWN_HOLD_S`.
 
-A stream opened at the start Go live picks (2.1 stage 3: a tune, Go live, a reopen at live;
+A stream opened at the start Go live picks (2.1: a tune, Go live, a reopen at live;
 the caller says so with `landed()`) lands where the source's keyframes allow. Above the
 target by up to a keyframe interval (one provider's 4K channel has one every 10 s) is no
 drift: for `_START_S` of playing, far behind and the reopen at live count from that landing
@@ -44,7 +44,7 @@ short then is accepted (no 2.0.1 slow-down, no nudge ahead) until the lag is bac
 band, or VLC runs dry
 (`trouble()`: the owed slow-down builds all of it then).
 
-Far behind, a jump to live is better than a long catch-up (2.1 stage 5: 8 s at 1.10x takes 80
+Far behind, a jump to live is better than a long catch-up (2.1: 8 s at 1.10x takes 80
 s). The caller says where one would land (`jump_lag`: the mean lag once VLC plays the clean
 start Go live would pick, a keyframe's or an intra picture's; None without one). Once far
 behind for `_URGENT_S`, and no jump (a tune, Go live, a reopen at live: whatever `landed()`
@@ -64,9 +64,9 @@ trouble, until a stall's end (the source's step, steered as ever).
 On some channels VLC cannot play at any rate but 1x: its position crawls instead (measured in
 2.0.2: 4.5 s of media in 37 s). `RateHealth` notices that from VLC's progress, and the caller
 then calls `lock_rate()`: from there on stay-live keeps 1x and only reopens at live when the
-lag is beyond the target plus 20 s, as before, or far behind by a jump (2.1 stage 5).
+lag is beyond the target plus 20 s, as before, or far behind by a jump (2.1).
 
-"Auto" latency (`AUTO`) steers by the channel's learned target (2.1 stage 4b:
+"Auto" latency (`AUTO`) steers by the channel's learned target (2.1:
 `services.live.learned_target`, fed by the caller), as `SteeredTarget` moves it: rises in steps
 (at once with trouble), falls slowly. A target raised above the lag is reached without a jump
 back: by a nudge below 1x unless the rate is locked, else as VLC waits at the live edge, which
@@ -120,7 +120,7 @@ _START_S = 60.0  # after a landing, a shortfall within this much playing is the 
 _START_BUILD_S = 20.0  # ... built at _GENTLE_DOWN for at most this much playing, then accepted
 _WIDEN_S = 0.01  # beyond the budget the band takes in the lag outside it, and this much
 _BACK_IN_S = 3.0  # a landing's shortfall back in the band this long is no more its own
-# Jumps (2.1 stage 5): far behind, a reopen at live instead of a long catch-up.
+# Jumps (2.1): far behind, a reopen at live instead of a long catch-up.
 _JUMP_GAP_S = 60.0  # never two jumps (a tune, Go live, a reopen at live) within this long
 _JUMP_CLOSER_S = 5.0  # a jump helps when it lands within the band, or at least this much nearer
 _JUMP_WAIT_S = 12.0  # far behind, waiting this long for one that helps (keyframes 10 s apart)
@@ -142,7 +142,7 @@ _BURST_ON_S = 10.0  # a larger burst counts once the source reported it this lon
 _BURST_OFF_S = 30.0  # ... a smaller one (or none) once it reported that this long
 _BURST_STEP_S = 0.5  # burst changes smaller than this leave it as it was
 
-# SteeredTarget: the learned target (Auto, 2.1 stage 4b) as stay-live steers by it.
+# SteeredTarget: the learned target (Auto, 2.1) as stay-live steers by it.
 _STEER_STEP_S = 0.5  # a rise moves it in a step this big at least ...
 _STEER_HOLD_S = 10.0  # ... once it held this long (at once with trouble) ...
 _STEER_FALL = _AUTO_DOWN / _AUTO_QUIET_S  # ... a fall of what trouble raised at most this
@@ -177,7 +177,7 @@ class RateHealth:
 
     The caller adds only time that says something about the rate: at a rate other than 1x,
     with VLC playing and media ahead of it (a VLC waiting at the live edge is starved, not
-    slow), in stretches that end at a step of VLC's clock (2.1 stage 2). Each window of
+    slow), in stretches that end at a step of VLC's clock (2.1). Each window of
     `window_s` counted seconds (default `_HEALTH_WINDOW_S`) and at least `_HEALTH_PIECES`
     stretches (so at least two of VLC's steps, on a channel whose clock steps every 2 s) is
     judged on its own; `share` is the last window's progress against what its rates asked.
@@ -219,7 +219,7 @@ class RateHealth:
 
 
 class SteeredTarget:
-    """The learned target (Auto latency, 2.1 stage 4b: `services.live.learned_target`) as
+    """The learned target (Auto latency, 2.1: `services.live.learned_target`) as
     stay-live steers by it. The learned target moves with every estimate (the arrival need
     once a second, the margin as it fades); steered by as it is, each move would be a new
     target to build or catch up to. So a rise counts in a step of at least `_STEER_STEP_S`
@@ -328,8 +328,8 @@ class LagFilter:
 
     def settled(self, now: float) -> bool:
         """Its mean has held `_WARMUP_S` and two bursts since it started afresh (or its whole
-        window, if shorter): a pick read from it misses only by its own error (2.1 stage 5
-        re-review N2: right after a restart the mean still moves with the arrivals)."""
+        window, if shorter): a pick read from it misses only by its own error (2.1: right
+        after a restart the mean still moves with the arrivals)."""
         if self._first is None:
             return False
         return now - self._first >= min(self.window, max(_WARMUP_S, 2 * self.burst)) - 1e-9
@@ -382,7 +382,7 @@ class LagFilter:
 
     def edge(self, now: float) -> Optional[float]:
         """Where the live edge is on average at `now` (what `lag` measures from; a start a
-        jump picks lands that far behind it, 2.1 stage 5); None before any edge."""
+        jump picks lands that far behind it, 2.1); None before any edge."""
         if self._weight <= 0:
             return None
         return self.level() + now
@@ -584,8 +584,8 @@ class StayLive:
         off by a gentle nudge. Short of it within `_START_S` of playing, the room is built
         once at `_GENTLE_DOWN` for at most `_START_BUILD_S`, then the rest is accepted (a
         source that sent nothing further back gets one build, never one after another).
-        Without `build` (a jump, Go live: picked at the target with the buffer full, 2.1
-        stage 5 review I3) the landing's own shortfall is the pick's, not missing room: it is
+        Without `build` (a jump, Go live: picked at the target with the buffer full, 2.1)
+        the landing's own shortfall is the pick's, not missing room: it is
         tolerated, but for too little room (`_short`, 2.0.1) and VLC running dry
         (`trouble()`), until the next landing or a stall's end (`source_stepped()`).
 
@@ -720,8 +720,8 @@ class StayLive:
             return Decision(1.0)  # asked for: the caller reopens (and calls user_go_live)
         if self.rate_locked or self.background:
             # 1x: set by lock_rate() (never changed after) or by set_background() (a tile
-            # without the focus); far behind, a jump changes no rate (review I2: the channel
-            # stay-live cannot nudge needs it most).
+            # without the focus); far behind, a jump changes no rate (the channel stay-live
+            # cannot nudge needs it most).
             if self._far_locked(dt, lag_s):
                 return self._jump(now)
             return Decision(self._rate)
@@ -734,14 +734,14 @@ class StayLive:
         return Decision(self._rate)
 
     def _own_shortfall(self, lag: float, dt: float) -> None:
-        """Only a landing's own shortfall is built at the start or tolerated (re-review N1,
+        """Only a landing's own shortfall is built at the start or tolerated (for jumps,
         then for the tune's build too): once the target rose above the one it landed at (a
         higher latency, a larger burst, Auto, a learned target) the start's build window, what
         its build accepted and a jump's tolerance end, so the rise is built once as without
         the landing; once the lag is in the band after the stream played (right after an
         open it reads where the pick aimed) what was accepted or tolerated ends, so a later
         shortfall is drift. A rise is one beyond the band (a smaller one, the learned target
-        creeping, is drift inside it: stage 4b); back in the band takes `_BACK_IN_S` there (a
+        creeping, is drift inside it); back in the band takes `_BACK_IN_S` there (a
         quarter second of the estimate's wander gave a second full build)."""
         landed_at = self._landed_at
         if landed_at is not None and self.target - landed_at > self.dead_band() + 1e-9:
@@ -779,7 +779,7 @@ class StayLive:
 
     def _landed(self) -> float:
         """What far behind and the reopen at live count from: the landing above the target,
-        while its window lasts (review R32: a backlog later is drift)."""
+        while its window lasts (a backlog later is drift)."""
         return self._floor if self._landing > 0 else 0.0
 
     def _budget_free(self, now: float) -> bool:

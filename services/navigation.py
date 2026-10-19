@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 import itertools
 import logging
+import operator
 from typing import Any, Callable, Optional, cast
 
 from PySide6.QtCore import QObject, Signal
@@ -144,6 +145,19 @@ def _item_node(item: dict, layer: str = "item") -> NavNode:
     return NavNode(layer, key, item_title(item, episode=episode), item)
 
 
+_TOKENS = itertools.count(1)  # NodeSeq's and MemoList's: a token names one list
+
+
+class MemoList(list):
+    """A memoized child list as `NavigationModel.children` hands it out (a copy of the memo's):
+    `token` names the memo entry, so lists with equal tokens hold the same nodes and a refresh
+    tells them apart without comparing rows, as a NodeSeq's token does."""
+
+    def __init__(self, values, token: int) -> None:
+        super().__init__(values)
+        self.token = token
+
+
 class NodeSeq(Sequence):
     """The item nodes of a long list (one provider's 57,000 channels, or all four's 200,000),
     made when a row is asked for: the drawer shows a screenful at a time, and making every
@@ -152,11 +166,9 @@ class NodeSeq(Sequence):
     `items` are the dicts behind the rows (the models take them as they are).
     """
 
-    _tokens = itertools.count(1)
-
     def __init__(self, items: list[dict]):
         self.items = items
-        self.token = next(self._tokens)  # tells one list from another without comparing rows
+        self.token = next(_TOKENS)  # tells one list from another without comparing rows
         self._made: dict[int, NavNode] = {}
         self._rows: dict[NavNode, int] = {}  # the nodes made so far -> their rows
         self._absent: set[NavNode] = set()  # nodes looked for here and not found
@@ -217,6 +229,17 @@ class NodeSeq(Sequence):
             self._digits = max((len(text) for text in map(_text, numbers) if text), default=0)
         return self._digits
 
+    def same_rows(self, other: "NodeSeq") -> bool:
+        """Whether `other` lists the very same item dicts in the same order (a catalog event
+        that changed nothing in this list; a refreshed catalog brings new dicts)."""
+        mine, theirs = self.items, other.items
+        return mine is theirs or (len(mine) == len(theirs) and all(map(operator.is_, mine, theirs)))
+
+
+def _same_long_list(old: Any, new: Any) -> bool:
+    """Whether two lists of nodes are long lists of the very same items (NodeSeq.same_rows)."""
+    return isinstance(old, NodeSeq) and isinstance(new, NodeSeq) and old.same_rows(new)
+
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
@@ -264,7 +287,7 @@ class NavModel(QObject):
         self._pending_group: Optional[tuple[str, str]] = None
         self._revealed: Optional[dict] = None  # the row the list opened on (see reveal)
         # children() results, keyed by parent and stamped with what they depend on.
-        self._memo: OrderedDict[tuple, tuple[tuple, Any]] = OrderedDict()
+        self._memo: OrderedDict[tuple, tuple[tuple, Any, int]] = OrderedDict()  # deps, list, token
         self._events = 0  # bumped by every catalog event handled here, and by retry()
         catalog.sectionReady.connect(self._on_section_ready)
         catalog.groupReady.connect(self._on_group_ready)
@@ -417,20 +440,26 @@ class NavModel(QObject):
     def _cached(
         self, key: tuple, deps: tuple, compute: Callable[[], Optional[list]]
     ) -> Optional[list]:
-        """compute() once per key while deps stay equal; None (still loading) is not kept."""
+        """compute() once per key while deps stay equal; None (still loading) is not kept.
+        A list comes as a MemoList whose token stays while the memo entry does."""
         entry = self._memo.get(key)
         if entry is not None and entry[0] == deps:
             self._memo.move_to_end(key)
-            return entry[1] if isinstance(entry[1], NodeSeq) else list(entry[1])
+            return entry[1] if isinstance(entry[1], NodeSeq) else MemoList(entry[1], entry[2])
         value = compute()
         if value is None:
             self._memo.pop(key, None)
             return None
-        self._memo[key] = (deps, value)
+        if entry is not None and _same_long_list(entry[1], value):
+            # Nothing in the long list changed (another list's event): the same list again,
+            # which the channel list neither lays out nor scrolls anew.
+            value = cast(list, entry[1])  # (a NodeSeq, read like the list of its nodes)
+        token = value.token if isinstance(value, NodeSeq) else next(_TOKENS)
+        self._memo[key] = (deps, value, token)
         self._memo.move_to_end(key)
         while len(self._memo) > _MEMO_LIMIT:
             self._memo.popitem(last=False)
-        return value if isinstance(value, NodeSeq) else list(value)
+        return value if isinstance(value, NodeSeq) else MemoList(value, token)
 
     def _load(self, key: tuple, request) -> Optional[list[NavNode]]:
         if key in self._errors:

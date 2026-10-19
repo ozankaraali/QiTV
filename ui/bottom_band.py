@@ -1,4 +1,4 @@
-"""The bottom of the player belongs to the transport's controls while they show (Phase 4).
+"""The bottom of the player belongs to the transport's controls while they show.
 
 While the transport shows, the mixer sits just above its controls (else 4u from the bottom),
 and while the transport, the mixer or the zap banner shows, a bottom corner's PiP rises above

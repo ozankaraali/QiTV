@@ -8,13 +8,13 @@ repos:
     -   id: check-added-large-files
     -   id: check-merge-conflict
 -   repo: https://github.com/psf/black
-    rev: 26.5.1
+    rev: 26.10.1
     hooks:
     -   id: black
         name: Black Linter
         exclude: ^.*\b(migrations)\b.*$
 -   repo: https://github.com/pycqa/flake8
-    rev: 7.3.0
+    rev: 7.4.1
     hooks:
     -   id: flake8
         name: Flake8 syntax errors or undefined names
@@ -25,14 +25,14 @@ repos:
         exclude: ^.*\b(migrations)\b.*$
         args: [--count, --exit-zero, --max-complexity=10, --max-line-length=127, --statistics]
 -   repo: https://github.com/pre-commit/mirrors-mypy
-    rev: 'v2.3.1'
+    rev: 'v2.4.0'
     hooks:
     -   id: mypy
         additional_dependencies:
               - types-requests==2.33.0.20260906
         exclude: ^.*\b(migrations)\b.*$
 -   repo: https://github.com/pycqa/isort
-    rev: 9.0.1
+    rev: 9.0.2
     hooks:
       - id: isort
         args: ["--profile", "black", "--filter-files"]

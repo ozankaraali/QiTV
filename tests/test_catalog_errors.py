@@ -1,4 +1,4 @@
-"""Finding I5: failure messages leave the catalog without URLs or credentials."""
+"""Failure messages leave the catalog without URLs or credentials."""
 
 import os
 from types import SimpleNamespace

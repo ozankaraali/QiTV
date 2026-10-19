@@ -1412,7 +1412,7 @@ class Driver:
         )
         self._check_glued(GLUE_STEPS[3], changed_at, quiet)
 
-        # Minimize and restore: nothing floats over other apps meanwhile (Review Focus 1).
+        # Minimize and restore: nothing floats over other apps meanwhile.
         report.step("minimize")
         quiet = yield from self._quiet()
         w.showMinimized()
@@ -1971,7 +1971,7 @@ class Driver:
         )
         frame, label = w.pip_frame, w.pip_label
         # The large picture must still be on screen: it plays on whichever surface the swap
-        # left it (Batch B C1: closing a swapped PiP blacked it out).
+        # left it (closing a swapped PiP once blacked it out).
         surface = w.pip_surface if stays.name == "pip" else w.surface
         alone = (
             closed
@@ -2137,7 +2137,7 @@ class Driver:
             readings[slot_name] = got
             manager_ok = manager_ok and sessions.muted(slot_name) == muted
             manager_ok = manager_ok and (level is None or sessions.level(slot_name) == level)
-            # libVLC's level is the manager's, whether or not the check names one (Review I1)
+            # libVLC's level is the manager's, whether or not the check names one
             vlc_ok = vlc_ok and reading_matches(muted, sessions.level(slot_name), got)
             parts.append(
                 f"{slot_name}: wanted {'muted' if muted else 'unmuted'}"

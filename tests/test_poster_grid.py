@@ -316,7 +316,7 @@ class PosterGridTests(unittest.TestCase):
         QApplication.sendEvent(viewport, event)
 
     def test_a_right_click_asks_for_the_posters_menu_and_leaves_the_current_title(self):
-        # Owner (2026-10-15): a poster's menu plays it in VLC or MPV, or copies its link.
+        # A poster's menu plays it in VLC or MPV, or copies its link.
         self.grid.set_sections([("", titles(30))])
         seen = []
         self.grid.contextRequested.connect(lambda i, pos: seen.append((i, pos)))

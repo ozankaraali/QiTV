@@ -111,8 +111,8 @@ class StarsPerProviderTests(unittest.TestCase):
         self.assertEqual(self.config.provider_favorites, held)
 
     def test_migrate_takes_the_stars_an_older_build_changed(self):
-        # Sweep A8: back on a build before 2.1, stars are edited in `favorites` only (names);
-        # upgraded again, `provider_favorites` ignored those edits.
+        # Back on a build before 2.1, stars are edited in `favorites` only (names); upgraded
+        # again, `provider_favorites` ignored those edits.
         self.config.favorites = ["News", "Film"]
         favorites.migrate(self.config)
         favorites.toggle(self.config, self.item("Sports", "Harbor IPTV"))  # at one provider

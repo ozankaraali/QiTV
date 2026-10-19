@@ -1,4 +1,4 @@
-"""The owner's mouse-only rule (2.0.1): every key in ui.keymap.SHORTCUTS has a control on screen.
+"""Every key in ui.keymap.SHORTCUTS has a control on screen (2.0.1).
 
 ON_SCREEN gives, per SHORTCUTS row, the controls that do the same as (screen, control), and this
 test finds each one on its screen: laid out (a button, the title row, a header), listed (a row,

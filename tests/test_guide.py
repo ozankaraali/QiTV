@@ -115,6 +115,22 @@ class GuideTests(unittest.TestCase):
         self.guide.tuneRequested.connect(self.tuned.append)
         self.guide.closed.connect(lambda: self.closed.append(True))
 
+    def test_the_number_column_fits_a_five_digit_number_whole(self):
+        from PySide6.QtGui import QFont, QFontMetrics
+
+        from ui.overlays.painting import Units
+
+        chans = channels(3)
+        chans[1] = dict(chans[1], number="88888")  # a long list's own numbering
+        self.guide.open_guide(chans, 1)
+        units = Units(self.guide.width())
+        font = units.font(1.1, QFont.Weight.DemiBold)
+        self.assertGreaterEqual(
+            self.guide._number_width(units), QFontMetrics(font).horizontalAdvance("88888")
+        )
+        self.guide.open_guide(channels(3), 0)  # short numbers: the column as before
+        self.assertAlmostEqual(self.guide._number_width(units), 3.4 * units.u)
+
     def test_open_sets_current_row_and_move_by_changes_channel(self):
         chans = channels(5)
         self.guide.open_guide(chans, 2)
@@ -432,7 +448,7 @@ class GuideMouseTests(unittest.TestCase):
 
 
 class GuideHeaderTests(unittest.TestCase):
-    """The owner's mouse-only rule (2.0.1): the guide's keys have buttons in its header."""
+    """Every key has a control on screen (2.0.1): the guide's keys have buttons in its header."""
 
     BUTTONS = ("earlier", "later", "search", "fullscreen", "close")
 

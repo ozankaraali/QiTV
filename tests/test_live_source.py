@@ -471,7 +471,7 @@ class LiveSourceTests(SourceTestCase):
             self.assertEqual(str(raised.exception), source_module._NON_HTTP)
 
     def test_a_live_playlists_key_methods_are_looked_at_whole(self):
-        # Review M6: a start further back than the URIs checked must meet no other key either.
+        # A start further back than the URIs checked must meet no other key either.
         base = "http://provider.test/live.m3u8"
         text = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n"
         text += (
@@ -673,7 +673,7 @@ video.m3u8
         self.assertEqual(server.counts["/audio.m3u8"], 2)  # read, then at the reload
 
     def test_a_burst_of_video_does_not_reload_the_audio_playlist_for_each_segment(self):
-        # Review I2: each video segment of a burst reloaded the audio playlist that did not
+        # Each video segment of a burst reloaded the audio playlist that did not
         # list its audio yet (up to 2 MB a second of a DVR window); at most every half target
         # duration now, and once more at a finished playlist's end.
         names = ["v0.ts", "v1.ts", "v2.ts", "v3.ts"]
@@ -703,7 +703,7 @@ video.m3u8
         self.assertEqual((len(listed), listed[-1]), (300, 499))
 
     def test_after_a_break_the_audio_playlist_is_read_again_before_its_audio_is_found(self):
-        # Review M7: after a break the audio was looked for in the list read before it.
+        # After a break the audio was looked for in the list read before it.
         def video_playlist(_request, _count):
             text = hls(0, ["v0.ts"], target=4).decode()
             text += "#EXT-X-DISCONTINUITY\n#EXTINF:4,\nv1.ts\n#EXT-X-ENDLIST\n"
@@ -1338,7 +1338,7 @@ video.m3u8
         self.assertEqual(drain(source), [self.video])
 
     def test_an_answer_is_taken_back_once_its_body_fails_or_turns_out_a_playlist(self):
-        # 2.1 review M2/M4: the GUI waits longer only while a raw-TS answer stands. One whose
+        # 2.1: the GUI waits longer only while a raw-TS answer stands. One whose
         # body ends before its first byte is taken back before it is asked for again, and so is
         # one whose body is a playlist after all (an HLS channel waits longer only once segment
         # bytes flow).
@@ -1411,7 +1411,7 @@ video.m3u8
                     self.assertEqual(server.counts[path], 2)
 
     def test_a_limit_met_on_asking_again_reports_the_first_failure(self):
-        # 2.1 review M1: a panel that counted the first answer may refuse the next with its
+        # 2.1: a panel that counted the first answer may refuse the next with its
         # limit. The channel then plays directly as before 2.1 (the first failure stands, and
         # the GUI's direct-play retries follow), and nothing more is asked.
         def counted(_request, count):
@@ -1680,7 +1680,7 @@ video.m3u8
                 self.assertEqual(fetched, names[first:])
 
     def test_live_hls_starts_far_enough_back_for_the_sessions_target(self):
-        # 2.1 stage 3: a sparse-PCR channel's 10 s segments fetched from 6 s before the end
+        # 2.1: a sparse-PCR channel's 10 s segments fetched from 6 s before the end
         # gave one segment, and VLC ran dry before the next landed. Now: at least three
         # target durations (or HOLD-BACK), and room for a start at the target (the segment
         # duration under Auto, plus what Auto added) and one more segment.
@@ -1718,7 +1718,7 @@ video.m3u8
                 self.assertEqual(requested_segments(server), names[first:])
 
     def test_hls_says_whether_its_playlist_is_finished_and_which_segments_came_whole(self):
-        # Review I1: a finished (ENDLIST) playlist plays from its beginning; I3: a segment
+        # A finished (ENDLIST) playlist plays from its beginning; a segment
         # that failed leaves the backlog, and the media/EXTINF ratio counts whole ones only.
         names = ["a.ts", "b.ts", "c.ts"]
         routes = {"/a.ts": (200, {}, self.video), "/c.ts": (200, {}, self.video)}
@@ -1774,7 +1774,7 @@ video.m3u8
         self.assertEqual(failed, [(2, 0.0)])
 
     def test_live_hls_says_how_much_listed_media_is_still_to_come(self):
-        # 2.1 stage 3: the helper predicts the live edge once the backlog fetched at the
+        # 2.1: the helper predicts the live edge once the backlog fetched at the
         # start has arrived, so the start need not wait for all of it.
         names = ["a.ts", "b.ts", "c.ts"]
         routes = {f"/{name}": (200, {}, self.video) for name in names}
@@ -2393,7 +2393,7 @@ class FragmentedMp4Tests(SourceTestCase):
         self.assertGreater(len(woven), 100)
 
     def test_a_damaged_segment_is_skipped_with_a_marker(self):
-        # Review I1: a field past the data (here a tfdt with nothing in it) was an IndexError
+        # A field past the data (here a tfdt with nothing in it) was an IndexError
         # that ended the session; it is a damaged segment, skipped as any other.
         tfhd = full(b"tfhd", 0, 0x20000, struct.pack(">I", 1))
         damaged = box(b"moof", box(b"traf", tfhd, box(b"tfdt")))

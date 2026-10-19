@@ -1,4 +1,4 @@
-"""Picture in picture in the TV shell (spec §7, Phase 4): a second channel, small.
+"""Picture in picture in the TV shell (spec §7): a second channel, small.
 
 P (or the transport's Second channel) opens the channel tuned before the current one small,
 or closes the small picture; the drawer's context menu and Ctrl/⌘+P open the drawer's
@@ -551,7 +551,7 @@ class PipControls(QObject):
         self._said.pop(slot.name, None)  # its new channel's notices are said again
         self._reopens.pop(slot.name, None)
         self._cancel_reopen()
-        # The small picture keeps its time-shift in memory: one disk ring at most (M5 ruling).
+        # The small picture keeps its time-shift in memory: one disk ring at most.
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
         sessions.open_pip(
             target.item,

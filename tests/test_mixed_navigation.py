@@ -13,7 +13,7 @@ from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from test_catalog_service import FakeWorker
-from timer_fixtures import elapse
+from timer_fixtures import elapse, wait_until
 
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
@@ -28,6 +28,7 @@ from services.provider_ids import (
     with_provider,
 )
 from services.zapping import ZapContext
+from tests.test_channel_rows import FakeLogos
 from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import Drawer
@@ -49,6 +50,18 @@ def harbor_content() -> dict:
     for category in content["categories"]:
         category["title"] = titles.get(category["id"], category["title"])
     return content
+
+
+def placed(drawer, row):
+    """Whether the right column's layout reached the row."""
+    view = drawer._columns["right"].view
+    return view.visualRect(view.model().index(row)).isValid()
+
+
+def in_sight(drawer, row):
+    view = drawer._columns["right"].view
+    rect = view.visualRect(view.model().index(row))
+    return rect.isValid() and view.viewport().rect().contains(rect)
 
 
 class MixedNavigationTests(unittest.TestCase):
@@ -296,8 +309,8 @@ class MixedNavigationTests(unittest.TestCase):
         nav.open(nav.children(None)[0])
         nav.reset_to("live")
         recent = next(n for n in nav.children(nav.path[-1]) if n.key == RECENT_GROUP)
-        # Sweep A7: an entry older than 2.1 (no provider in it) names its provider too, as
-        # with two (the drawer's focus key names the provider of what plays).
+        # An entry older than 2.1 (no provider in it) names its provider too, as with two
+        # (the drawer's focus key names the provider of what plays).
         self.assertEqual(
             nav.children(recent)[0].payload, with_provider({"id": 5, "name": "Demo 5"}, "Demo TV")
         )
@@ -333,7 +346,7 @@ class MixedNavigationTests(unittest.TestCase):
         drawer.open_drawer()
         self.assertEqual(model.index(0).data(ChannelRowsModel.ProviderRole), "")
 
-    # ---- one provider's setup while "All providers" shows (final review I2, M8) -------------
+    # ---- one provider's setup while "All providers" shows -----------------------------------
 
     def test_another_providers_setup_keeps_the_path(self):
         self.open_all()
@@ -408,8 +421,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertIn("Demo TV", [n.title for n in nav.children(nav.path[1])])
 
     def test_only_a_failed_refresh_of_a_saved_list_says_the_saved_channels_show(self):
-        # Sweep A10: the toast came for a provider without a cache whose list failed too
-        # (nothing saved of it shows; its heading says why).
+        # The toast came for a provider without a cache whose list failed too (nothing
+        # saved of it shows; its heading says why).
         _config, view, nav = self.build([DEMO, HARBOR], {"Demo TV": demo_content()})
         notices = []
         nav.notice.connect(notices.append)
@@ -426,8 +439,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertIn("News", [n.title for n in nav.children(nav.path[1])])
 
     def test_moving_through_all_asks_nothing_of_providers_whose_setup_failed(self):
-        # Sweep A11: a failed provider was not signed in again, but its lists were still
-        # asked for (an STB portal: a request with the failed session at every move).
+        # A failed provider was not signed in again, but its lists were still asked for
+        # (an STB portal: a request with the failed session at every move).
         _config, view, nav = self.build([DEMO, HARBOR], {})
         self.factory.fail_setup("Demo TV", "Portal down")
         self.factory.fail_setup("Harbor IPTV", "Portal down")
@@ -511,8 +524,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual(len(self.nav.children(harbor_group)), 41)
 
     def test_a_channel_of_a_providers_own_group_is_revealed_in_all(self):
-        # Sweep A13: tuned from Harbor's own list (group "41"), then the page went to All
-        # providers, which lists that group under a mixed id: the list missed it.
+        # Tuned from Harbor's own list (group "41"), then the page went to All providers,
+        # which lists that group under a mixed id: the list missed it.
         self.open_all()
         channel = self.view.catalogs.catalog("Harbor IPTV").items("live", "41")[3]
         self.nav.reveal(ALL_PROVIDERS, "live", "41", channel)
@@ -521,8 +534,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertIs(self.nav.revealed(), channel)
 
     def test_a_channel_outside_the_group_it_was_tuned_in_is_revealed_in_all(self):
-        # Sweep A13: a number typed outside the group tunes a channel of another group (TV
-        # numbers are global); the list opened on that group, without the channel.
+        # A number typed outside the group tunes a channel of another group (TV numbers
+        # are global); the list opened on that group, without the channel.
         _config, view, nav = self.build([DEMO], {"Demo TV": demo_content()})
         nav.open(nav.children(None)[0])
         sports = view.items("live", "Sports")[0]
@@ -533,8 +546,8 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual([n.key for n in nav.path], ["Demo TV", "live", "News"])
 
     def test_a_provider_whose_only_group_is_all_lists_it_under_its_heading(self):
-        # Sweep A6: a playlist without group titles had an empty heading; its channels were
-        # only in the mixed All, among the others'.
+        # A playlist without group titles had an empty heading; its channels were only in
+        # the mixed All, among the others'.
         plain = live_content(["Plain 1", "Plain 2"], {})
         _config, _view, nav = self.build(
             [DEMO, HARBOR], {"Demo TV": plain, "Harbor IPTV": harbor_content()}
@@ -547,6 +560,45 @@ class MixedNavigationTests(unittest.TestCase):
         self.assertEqual((rows[1].layer, rows[1].title), ("header", "Harbor IPTV"))
         mixed_all = nav.children(nav.path[1])[0]
         self.assertEqual((mixed_all.key, mixed_all.count), (ALL_GROUP_ID, 2 + 69))
+
+    # ---- a channel far down the mixed All -----------------------------------------------------
+
+    def test_the_list_rests_on_a_channel_far_down_all_through_refreshes(self):
+        # Reported on 2.3.0: channel 9594 played and the list showed, and kept going back to,
+        # the channels around 995. Here All mixes 11,000 and 6,000 channels on two-line rows.
+        def numbered(count, prefix):
+            return live_content([f"{prefix} {n}" for n in range(1, count + 1)], {})
+
+        _config, view, nav = self.build(
+            [DEMO, HARBOR],
+            {"Demo TV": numbered(11_000, "Demo"), "Harbor IPTV": numbered(6_000, "Harbor")},
+        )
+        nav.open(nav.children(None)[0])
+        nav.reset_to("live", ALL_GROUP_ID)
+        host = QWidget()
+        host.resize(1280, 720)
+        host.show()
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        logos = FakeLogos()
+        drawer = Drawer(nav, logos, lambda item: None, host)
+        model = drawer._columns["right"].model
+        bar = drawer._columns["right"].view.verticalScrollBar()
+        for provider, number, row in (("Demo TV", 9594, 9593), ("Harbor IPTV", 5000, 15_999)):
+            drawer.open_drawer(focus_key=(provider, str(number)))
+            self.assertTrue(wait_until(lambda: in_sight(drawer, row) and placed(drawer, 16_999)))
+            node = drawer.highlighted()
+            self.assertEqual((provider_of(node.payload), node.key), (provider, str(number)))
+            self.assertEqual(model.index(row).data(ChannelRowsModel.ProviderRole), provider)
+            moves = []
+            bar.valueChanged.connect(moves.append)
+            nav.changed.emit()  # a guide loaded
+            view.groupReady.emit("live", ALL_GROUP_ID)  # a catalog event
+            logos.logoReady.emit("http://127.0.0.1:9/logo.png")
+            elapse(50)
+            self.assertEqual(moves, [])
+            self.assertTrue(in_sight(drawer, row))
+            bar.valueChanged.disconnect(moves.append)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Zapping banner (mockup A1): number, logo, name, now/next with progress over a bottom scrim."""
+"""Zapping banner: number, logo, name, now/next with progress over a bottom scrim."""
 
 from dataclasses import dataclass, field
 from datetime import datetime

@@ -35,6 +35,7 @@ from ui.overlays.stats import StatsOverlay
 from ui.overlays.track_panel import TrackPanel
 from ui.overlays.transport import Transport
 from ui.picture_controls import PictureControls
+from ui.player_keys import PlayerKeys
 
 UP, DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value
 
@@ -123,7 +124,7 @@ class PictureCase(unittest.TestCase):
             current=lambda: self.current,
             playing=lambda: self.playing,
             players=lambda: [self.player, self.small],
-            channel_key=lambda item: f"key-{item['id']}",
+            keys=PlayerKeys(lambda item: f"key-{item['id']}"),
             store=self.store,
             config=self.config,
             toast=lambda text, *args: self.toasts.append(text),
@@ -324,7 +325,7 @@ class PanelTests(PictureCase):
             current=lambda: self.current,
             playing=lambda: True,
             players=lambda: [self.player],
-            channel_key=lambda item: f"key-{item['id']}",
+            keys=PlayerKeys(lambda item: f"key-{item['id']}"),
             store=self.store,
             config=self.config,
             toast=lambda text, *args: self.toasts.append(text),
@@ -377,6 +378,14 @@ class AspectMemoryTests(PictureCase):
         self.assertEqual(self.player.shape, STANDARD)
         self.controls.prepare_small(self.small, CHANNEL.item)  # PiP, a tile
         self.assertEqual(self.small.shape, FILL)
+
+    def test_a_film_leaves_no_channel_key_with_its_player(self):
+        keys = self.controls._keys
+        self.controls.prepare(self.player, CHANNEL, None)
+        self.controls.prepare_small(self.small, CHANNEL.item)
+        self.assertCountEqual(keys.players(), [self.player, self.small])
+        self.controls.prepare(self.player, FILM, CHANNEL)
+        self.assertEqual(keys.players(), [self.small])
 
 
 class ChannelPicturesTests(unittest.TestCase):
