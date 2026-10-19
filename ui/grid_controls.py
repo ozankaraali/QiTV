@@ -33,8 +33,10 @@ picture, the tile focused before it stays as the picture-in-picture if it plays,
 other tiles stop. Leaving keeps the grid (config `multiview`, versioned; older builds ignore
 it): the next grid offers a "Last grid" chip (and View → Restore Last Multiview) that brings
 its channels back into their tiles, each once its provider is ready, and its focus. A
-channel dragged from the channel list onto a tile plays there (`drag_over`, `tile_at`). The Library, films, files, the mini player and external players leave the
-grid first (the shell calls `leave`).
+channel dragged from the channel list onto a tile plays there (`drag_over`, `tile_at`). The
+Library, films, files, the mini player and external players leave the grid first (the shell
+calls `leave`). A smaller layout, and leaving, stop every player but the big picture and the
+PiP, and nothing still on its way for a tile that went opens there.
 """
 
 from __future__ import annotations
@@ -67,7 +69,8 @@ SOFTWARE_CELLS = (2, 4)  # without hardware decoding (Settings)
 DEFAULT_CELLS = 4
 LAYOUT_NAMES = {2: "1×2", 4: "2×2", 6: "3×2", 9: "3×3"}
 # The tiles' slots, in the order a grid takes free ones ("main" and "pip" are the players
-# picture in picture already has; the others are made when a grid first wants them).
+# picture in picture already has; a tile's player is made when it first takes the focus or a
+# channel, one at a time: a "+" tile has none).
 TILE_NAMES = ("main", "pip", "t2", "t3", "t4", "t5", "t6", "t7", "t8")
 NO_STREAM = "No stream to spare at {provider}"
 TILE_FAILED = "Couldn't play this channel"
@@ -120,6 +123,8 @@ class GridControls(QObject):
         toast: Callable[..., None],
         reopen: Optional[Callable[[str, dict], None]] = None,
         restore: Optional[Callable[[str, dict, str, str], None]] = None,
+        forget: Optional[Callable[[str], None]] = None,
+        pending: Optional[Callable[[], Optional[dict]]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` lays the surfaces out and `tiles` (the GridTiles overlay; None in tests)
@@ -133,7 +138,9 @@ class GridControls(QObject):
         plays or channels play in an external player; `reopen(name, channel)` makes a tile's
         link again (an STB portal's, once: `_may_retry`) and opens it in that tile;
         `restore(name, channel, provider, group)` opens a saved tile's channel there once its
-        provider is ready."""
+        provider is ready; `forget(name)` drops what the shell asked for tile `name` (its link
+        on its way, its wait for a provider): the tile left the grid; `pending()` is the
+        channel whose link the focused tile waits for (None: none)."""
         super().__init__(parent)
         self.sessions = sessions
         self.frame = frame
@@ -157,6 +164,8 @@ class GridControls(QObject):
         self._toast = toast
         self._reopen = reopen
         self._restore = restore
+        self._forget = forget
+        self._pending = pending
         self._restored = False  # the last grid came back since the grid showed
         self._shown = False
         self._cells = DEFAULT_CELLS
@@ -300,9 +309,6 @@ class GridControls(QObject):
         if small is not None:
             order.append(small.name)
         names = self._fill(order, cells)
-        if names is None:
-            self._toast(NO_PLAYERS, "error")
-            return False
         self._cells, self._names = cells, names
         self._previous = small.name if small is not None else None
         self._cards.clear()
@@ -334,9 +340,12 @@ class GridControls(QObject):
         large = sessions.large().name
         self._save()  # the grid as it is now, for "Last grid" next time
         keep = self._kept() if keep_pip else None
-        for name in self._names:
-            if name not in (large, keep):
-                self._stop(name)
+        for slot in sessions.slots():  # a tile left by a smaller layout too
+            if slot.name not in (large, keep):
+                self._stop(slot.name)
+        if self._forget is not None:
+            for name in self._names:  # no link on its way opens a tile any more
+                self._forget(name)
         self._shown = False
         self._cards.clear()
         self._wanted.clear()
@@ -372,17 +381,14 @@ class GridControls(QObject):
         large = self.sessions.large().name
         if cells > len(self._names):
             names = self._fill(self._names, cells)
-            if names is None:
-                self._toast(NO_PLAYERS, "error")
-                return
         else:
             names = self._names[:cells]
             if large not in names:
                 names[-1] = large
             for name in self._names:
-                if name not in names:
+                if name not in names:  # it stops, and nothing on its way opens there
                     self._stop(name)
-                    self._cards.pop(name, None)
+                    self._forget_tile(name)
         self._cells, self._names = cells, names
         if self._previous not in names:
             self._previous = None
@@ -413,7 +419,7 @@ class GridControls(QObject):
             return False
         provider_name = item_provider.provider_name(self.catalog, channel)
         tile = name if name is not None else self.sessions.large().name
-        others = [p for p in self._budget.holders(provider_name) if p != tile]  # its own go
+        others = self._taking(provider_name) - {tile}  # its own stream goes
         if limit > 0 and len(others) < limit:
             return False
         card = self._cards.get(tile)
@@ -424,6 +430,22 @@ class GridControls(QObject):
         if again:  # a click on the card: say it still holds
             self._toast(NO_STREAM.format(provider=provider_name or "your provider"), "error")
         return True
+
+    def _taking(self, provider: str) -> set[str]:
+        """The tiles that hold a stream of `provider`, or will: their link or their open is on
+        its way (several links before any stream would each take one, and some STB portals
+        let only the newest play)."""
+        taking = set(self._budget.holders(provider))
+        for name, channel in self._linking.items():
+            if item_provider.provider_name(self.catalog, channel) == provider:
+                taking.add(name)
+        for name, (_channel, wanted) in self._wanted.items():
+            if wanted == provider:
+                taking.add(name)
+        focused = self._pending() if self._pending is not None else None
+        if focused is not None and item_provider.provider_name(self.catalog, focused) == provider:
+            taking.add(self.sessions.large().name)
+        return taking
 
     def open_focused(
         self,
@@ -472,23 +494,28 @@ class GridControls(QObject):
         )
         self._refresh()
 
-    def linking(self, name: str, channel: dict) -> None:
+    def linking(self, name: str, channel: dict) -> bool:
         """Tile `name`'s link for `channel` is on its way (it opens beside the focused one):
-        it says "Connecting…" with the channel's name meanwhile."""
-        if self._shown and name in self._names:
-            self._cards.pop(name, None)
-            self._stop(name)
-            self._linking[name] = channel
-            self._refresh()
+        it says "Connecting…" with the channel's name meanwhile. False: it is not a tile of
+        the grid, or its player could not be made (said); nothing should be asked for."""
+        if not self._shown or name not in self._names or self._ensure_slot(name) is None:
+            return False
+        self._cards.pop(name, None)
+        self._stop(name)
+        self._linking[name] = channel
+        self._refresh()
+        return True
 
     def awaits(self, name: str, channel: dict) -> bool:
-        """Tile `name` still waits for `channel`'s link (`linking`)."""
-        return self._shown and self._linking.get(name) is channel
+        """Tile `name` is still in the grid and waits for `channel`'s link (`linking`)."""
+        return self._shown and name in self._names and self._linking.get(name) is channel
 
     def link_failed(self, name: str, channel: dict) -> None:
         """Tile `name`'s link never came: it says so (a click tries again)."""
-        if self._linking.get(name) is channel:
-            del self._linking[name]
+        if self._linking.get(name) is not channel:
+            return
+        del self._linking[name]
+        if self._shown and name in self._names:
             self._cards[name] = _Card(FAILED, channel, TILE_FAILED)
             self._refresh()
 
@@ -553,7 +580,7 @@ class GridControls(QObject):
         large = self.sessions.large().name
         if name == large:
             return True
-        if not self._focus_slot(name):
+        if self._ensure_slot(name) is None or not self._focus_slot(name):
             return False
         self._previous = large
         return True
@@ -629,28 +656,45 @@ class GridControls(QObject):
         except KeyError:
             return None
 
-    def _fill(self, names: list[str], cells: int) -> Optional[list[str]]:
-        """`names`, then free players' slots up to `cells` (made when missing)."""
+    def _fill(self, names: list[str], cells: int) -> list[str]:
+        """`names`, then the next tiles' slot names up to `cells` (their players are made
+        when they first take the focus or a channel: `_ensure_slot`)."""
         filled = list(names)[:cells]
         for name in TILE_NAMES:
             if len(filled) >= cells:
                 break
-            if name in filled:
-                continue
-            if self._slot(name) is None and self._make_slot(name) is None:
-                return None
-            filled.append(name)
-        return filled if len(filled) == cells else None
+            if name not in filled:
+                filled.append(name)
+        return filled
+
+    def _ensure_slot(self, name: str) -> Optional[Slot]:
+        """Tile `name`'s player, made now if it has none (None, said, when it cannot be)."""
+        slot = self._slot(name)
+        if slot is None:
+            slot = self._make_slot(name)
+            if slot is None:
+                self._toast(NO_PLAYERS, "error")
+        return slot
 
     def _kept(self) -> Optional[str]:
         """The tile that stays small when the grid goes: the one focused before, else the
-        first other that plays."""
+        first other that plays (one whose link is still on its way has nothing to show)."""
         large = self.sessions.large().name
         candidates = [self._previous, *self._names]
         for name in candidates:
-            if name and name != large and name in self._names and self.state(name) in _SHOWING:
+            if not name or name == large or name not in self._names or name in self._linking:
+                continue
+            slot = self._slot(name)
+            if slot is not None and slot.channel is not None and self.state(name) in _SHOWING:
                 return name
         return None
+
+    def _forget_tile(self, name: str) -> None:
+        """Tile `name` left the grid: what was on its way for it never opens."""
+        for kept in (self._cards, self._linking, self._wanted, self._retried, self._timelines):
+            kept.pop(name, None)
+        if self._forget is not None:
+            self._forget(name)
 
     def _stop(self, name: str) -> None:
         """Stop a tile's stream (nothing when it plays nothing)."""

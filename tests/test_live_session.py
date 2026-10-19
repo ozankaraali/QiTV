@@ -621,6 +621,30 @@ class ResizeTests(LiveSessionCase):
         self.live.resize(64 * MiB)
         self.assertEqual(self.engine.resizes, [])
 
+    def test_a_smaller_buffer_waits_while_it_plays_behind_live(self):
+        # Review: a paused (or rewound) tile losing the focus keeps the minutes it plays
+        # until it is back at live; a larger buffer comes at once.
+        sid = self.ready(segments(0, 10), live_edge=20.0)
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.live.toggle_pause()
+        self.live.resize(64 * MiB)
+        self.step(0.25, media=0)
+        self.assertEqual(self.engine.resizes, [])
+        self.assertEqual(self.live._open_args["max_bytes"], 128 * MiB)  # a reopen's too
+        self.live.go_live()
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.engine.resizes, [(sid, 64 * MiB)])
+        self.live.toggle_pause()
+        self.live.resize(256 * MiB)
+        self.assertEqual(self.engine.resizes[-1], (sid, 256 * MiB))
+        self.live.resize(32 * MiB)  # waits again, and a later larger one cancels it
+        self.live.resize(256 * MiB)
+        self.live.go_live()
+        self.playback.set_state(PlaybackState.PLAYING)
+        self.step(0.25)
+        self.assertEqual(self.engine.resizes[-1], (sid, 256 * MiB))
+
 
 class BackgroundTests(LiveSessionCase):
     """2.2, the multiview: a tile without the focus plays at 1x; stay-live only goes live."""

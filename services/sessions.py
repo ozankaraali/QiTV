@@ -35,8 +35,9 @@ provider's other streams leave it one; else `slotDenied` and nothing opens: a ti
 waits, nor asks again by itself. A tile's memory buffer is small and the focused tile's the
 user's memory per stream (`set_large` grows the new focus and shrinks the old one), and only
 the focused tile's stay-live changes its rate (the others play at 1x and only jump to live).
-A tile's stream that fails says so (`slotFailed`); `close_slot` stops one. Leaving the grid
-keeps one tile as the PiP, or none.
+A tile's stream that fails (or a direct one that ends) says so (`slotFailed`); `close_slot`
+stops one, and a tile closed is muted again. Leaving the grid keeps one tile as the PiP, or
+none; an open still on its way for the large or the kept tile goes on.
 
 Audio follows the large picture: the PiP (and a tile) opens muted, and while the slot taking
 the large role is muted it takes the user's mute from the old large slot, which is muted in
@@ -59,7 +60,7 @@ from services.budgeted_stream import RELEASE_CAP_MS, BudgetedStream
 from services.connection_budget import DENIED, ConnectionBudget
 from services.live.live_session import LiveSession
 from services.live.refusals import REFUSALS
-from services.playback import Session
+from services.playback import PlaybackState, Session
 from services.zapping import ZapContext
 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,8 @@ class SessionManager(QObject):
         if slot.name in self._slots:
             raise ValueError(f"There is a {slot.name} slot already")
         self._add(slot, PIP_LEVEL, muted=True)
+        if self._grid:  # a tile made while the grid shows: small, at 1x
+            self._as_tile(slot, focused=False)
 
     def _add(self, slot: Slot, level: int, *, muted: bool) -> None:
         tuner = slot.tuner
@@ -220,6 +223,9 @@ class SessionManager(QObject):
         errors = getattr(slot.playback, "errorOccurred", None)
         if errors is not None:
             errors.connect(partial(self._on_slot_error, slot.name))
+        states = getattr(slot.playback, "stateChanged", None)
+        if states is not None:
+            states.connect(partial(self._on_slot_player_state, slot.name))
 
     # ---- roles --------------------------------------------------------------------------------
 
@@ -349,8 +355,13 @@ class SessionManager(QObject):
         memory per stream, as a PiP's."""
         sizes = self._sizes
         self._grid = False
-        self._direct.clear()
-        self._tile_opens.clear()
+        # An open still on its way for the large or the kept tile goes on (a zap just before
+        # V); the other tiles' are the caller's to have closed.
+        spared = {self._large.name, keep}
+        self._direct = {name for name in self._direct if name in spared}
+        self._tile_opens = {
+            name: opening for name, opening in self._tile_opens.items() if name in spared
+        }
         for slot in self._slots.values():
             self._background(slot, False)  # a PiP's stay-live steers as ever
         if keep is not None and keep != self._large.name:
@@ -415,6 +426,8 @@ class SessionManager(QObject):
         slot = self._slot(name)
         tuner = self._tuners[name]
         self._tile_opens.pop(name, None)
+        if slot is not self._large:
+            self._muted[name] = True  # a tile beside the focus opens muted
         if start_kwargs is not None:
             self._stop(slot)
             self._direct.discard(name)
@@ -439,6 +452,8 @@ class SessionManager(QObject):
         slot = self._slot(name)
         self._tile_opens.pop(name, None)
         slot.playback.set_muted(True)  # its next start applies its own mute again
+        if slot is not self._large:
+            self._muted[name] = True  # its next channel is not heard beside the focused one
         self._tuners[name].stop()
         slot.channel = slot.group_key = None
         slot.ticket = None
@@ -453,8 +468,12 @@ class SessionManager(QObject):
         assert stream is not None
         slot.playback.set_volume(self._levels[slot.name])
         self._set_mute(slot, self._muted[slot.name])
+        kwargs = dict(opening.start_kwargs)
+        size = self.tile_bytes(slot is self._large)  # the focus may have moved since
+        if size is not None and not kwargs.get("disk"):
+            kwargs["max_bytes"] = size
         try:
-            stream.start(**opening.start_kwargs)
+            stream.start(**kwargs)
         except Exception as error:  # the stream gave its slot back and stopped the session
             logger.warning("Could not start a tile's channel (%s)", type(error).__name__)
             self.slotFailed.emit(slot.name, "")
@@ -469,6 +488,17 @@ class SessionManager(QObject):
         """A tile's direct play failed: its player's error (a channel's, never a title's)."""
         if name in self._direct:
             self.slotFailed.emit(name, message)
+
+    def _on_slot_player_state(self, name: str, state: str) -> None:
+        """A direct stream of a tile beside the focus ended (the focused one reconnects as
+        the big picture does): it failed, so its stream goes back and its card says so."""
+        if (
+            state == PlaybackState.ENDED.value
+            and self._grid
+            and name in self._direct
+            and self._slot(name) is not self._large
+        ):
+            self.slotFailed.emit(name, "")
 
     # ---- the small slot -----------------------------------------------------------------------
 

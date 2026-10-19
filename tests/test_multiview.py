@@ -187,14 +187,19 @@ class GridFrameTests(FrameCase):
         self.assertEqual(self.focus, [])
         self.assertEqual(self.frame.tiles(), [])
 
-    def test_a_tile_added_later_is_laid_out_and_unknown_ones_raise(self):
+    def test_a_tile_without_a_player_yet_is_laid_out_once_its_surface_comes(self):
+        # Review: a "+" tile has no player; it is made when the tile first takes the focus
+        # or a channel, and its surface is laid out then.
+        self.frame.show_grid(["main", "pip", "t2", "t3", "t4", "t5"], "main", {"t4"})
+        self.assertEqual(len(self.frame.tiles()), 6)
         later = Recorder(self.page)
         self.frame.add_surface("t4", later)
-        self.frame.show_grid(["main", "pip", "t2", "t3", "t4", "pip"][:4], "main", set())
-        with self.assertRaises(ValueError):
-            self.frame.set_tiles(["main", "nine"], "main", set())
+        self.assertEqual(later.geometry(), grid_rects(PAGE, 6)[4])
+        self.assertTrue(later.isVisible())
         with self.assertRaises(ValueError):
             self.frame.add_surface("t4", later)
+        with self.assertRaises(ValueError):
+            self.frame.set_tiles(["main", "pip", "t2"], "main", set())  # no 3-tile layout
 
 
 class GridTilesTests(FrameCase):
@@ -472,7 +477,7 @@ class MultiviewTests(MultiviewCase):
         self.assertEqual(grid.state("pip"), OPENING)  # its player said nothing more yet
         self.assertEqual(grid.state("t2"), EMPTY)
         self.assertTrue(self.surfaces["main"].isVisibleTo(self.page))
-        self.assertFalse(self.surfaces["t2"].isVisibleTo(self.page))
+        self.assertNotIn("t2", self.surfaces)  # a "+" tile has no player yet
         self.assertEqual(self.transport.named("set_grid_state")[-1], (True, True, "2×2"))
         self.assertIs(self.sessions.large(), self.main_slot)
 
@@ -968,6 +973,8 @@ class HardwareMultiviewTests(MultiviewCase):
             self.grid.names(), ["main", "pip", "t2", "t3", "t4", "t5", "t6", "t7", "t8"]
         )
         self.assertEqual(self.transport.named("set_grid_state")[-1], (True, True, LAYOUT_NAMES[9]))
+        # Review: no player is made for a "+" tile (each one when its tile first needs it).
+        self.assertEqual([slot.name for slot in self.sessions.slots()], ["main", "pip"])
 
     def test_a_smaller_layout_keeps_the_focused_tile_and_stops_the_rest(self):
         self.start_large(0)
@@ -978,6 +985,153 @@ class HardwareMultiviewTests(MultiviewCase):
         self.assertEqual(self.grid.names(), ["main", "t5"])
         self.assertEqual(t5.playback.stops, 0)
         self.assertIs(self.sessions.large(), t5)
+
+
+class TileLifecycleTests(MultiviewCase):
+    """Review fixes: nothing opens, or stays open, in a tile the grid no longer has; an open
+    on its way survives leaving; a tile's size, rate and sound follow it when it opens."""
+
+    hardware = True
+
+    def setUp(self):
+        super().setUp()
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+
+    def others_hold_nothing(self):
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+        for slot in self.sessions.slots():
+            if slot is not self.main_slot:
+                self.assertIsNone(slot.channel, slot.name)
+
+    def test_a_link_on_its_way_never_opens_in_a_tile_a_smaller_layout_dropped(self):
+        self.start_large(0)
+        self.v()
+        self.grid.set_cells(9)
+        self.controller.play_in_tile("t6", CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.assertEqual(self.grid.state("t6"), OPENING)
+        self.grid.set_cells(4)  # tile 7 goes while its link is on its way
+        self.assertEqual(self.controller._tile_links, {})
+        self.ready("http://stream/3")
+        QTest.qWait(20)
+        self.assertEqual(self.sessions.slot("t6").live.named("start"), [])
+        self.others_hold_nothing()
+        self.v()
+        self.others_hold_nothing()
+
+    def test_a_link_on_its_way_never_opens_once_the_grid_is_left_nor_stays_small(self):
+        self.start_large(0)
+        self.v()
+        self.controller.play_in_tile("t3", CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.v()
+        self.assertFalse(self.sessions.pip_open())  # it had no picture to keep small
+        self.ready("http://stream/3")
+        QTest.qWait(20)
+        self.assertEqual(self.sessions.slot("t3").live.named("start"), [])
+        self.others_hold_nothing()
+
+    def test_leaving_stops_every_player_but_the_big_and_the_small_one(self):
+        self.start_large(0)
+        self.v()
+        self.grid.set_cells(9)
+        self.grid.set_cells(4)
+        t6 = self.sessions.slot("t6") if "t6" in self.surfaces else self.make_slot("t6")
+        kwargs = {"url": "http://stream/3", "headers": {}, "verify_ssl": True, "disk": False}
+        kwargs.update(latency="low", user_agent="QiTV", max_bytes=64 * MIB)
+        self.sessions.open_slot(  # a stream a tile left behind, however it came
+            "t6", channel=CHANNELS[2], provider="Home", limit=4, start_kwargs=kwargs
+        )
+        self.assertTrue(wait_until(lambda: t6.live.running))
+        self.v()
+        self.assertEqual(t6.live.calls[-1], ("stop",))
+        t6.live.released.emit()
+        self.others_hold_nothing()
+
+    def test_a_zap_just_before_leaving_still_plays_once_the_old_stream_is_released(self):
+        self.start_large(0)
+        self.v()
+        self.controller.tune(CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.ready("http://stream/3")  # tile 1's old stream is still closing
+        self.v()
+        self.live.released.emit()
+        self.assertTrue(wait_until(lambda: self.live.url == "http://stream/3"))
+        self.assertTrue(self.live.running)
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_open_in_picture_in_picture_says_to_leave_the_grid_first(self):
+        self.start_large(0)
+        self.v()
+        links = len(self.catalog.links)
+        self.controller._open_pip_node(NavNode("item", "3", "Three", CHANNELS[2]))
+        self.controller.open_pip(CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.assertEqual(self.toast.messages()[-2:], [(LEAVE_FIRST, "info")] * 2)
+        self.assertEqual(len(self.catalog.links), links)
+        self.assertEqual(self.grid.state("pip"), EMPTY)
+
+    def test_a_tile_focused_before_its_stream_starts_opens_with_the_full_buffer(self):
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.grid_frame.focusRequested.emit("main")
+        self.controller.play_in_tile("t2", CHANNELS[3], group_key="10", channels=CHANNELS)
+        self.ready("http://stream/4")  # it waits for its old stream's release
+        self.grid_frame.focusRequested.emit("t2")
+        t2.live.released.emit()
+        self.assertTrue(wait_until(lambda: t2.live.running and t2.live.url == "http://stream/4"))
+        self.assertEqual(t2.live.named("start")[-1][1]["max_bytes"], 256 * MIB)
+
+    def test_a_direct_tile_whose_stream_ends_gives_its_stream_back_and_says_so(self):
+        self.catalog.ptype = "XTREAM"  # no portal: no fresh link by itself
+        self.start_large(0)
+        self.v()
+        self.grid_frame.tileClicked.emit("t2")
+        self.controller.tune(CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.ready("rtsp://stream/3")  # not time-shifted: it plays directly
+        t2 = self.sessions.slot("t2")
+        self.grid_frame.focusRequested.emit("main")
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "t2"])
+        t2.playback.stateChanged.emit("ended")
+        self.assertEqual(self.grid.state("t2"), FAILED)
+        self.assertEqual(t2.playback.stops, 1)
+        self.assertEqual(self.budget.holders("Home"), ["main"])
+
+    def test_a_tile_made_while_the_grid_shows_is_small_and_at_1x(self):
+        self.start_large(0)
+        self.v()
+        self.controller.play_in_tile("t2", CHANNELS[2], group_key="10", channels=CHANNELS)
+        t2 = self.sessions.slot("t2")
+        self.assertTrue(t2.live.background)
+        self.assertEqual(t2.live.resizes, [64 * MIB])
+
+    def test_a_tile_made_heard_is_muted_again_for_its_next_channel(self):
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        self.grid_frame.focusRequested.emit("main")
+        self.sessions.set_level("t2", 80)  # the mixer: heard beside the focused tile
+        self.assertFalse(self.sessions.muted("t2"))
+        self.controller.play_in_tile("t2", CHANNELS[3], group_key="10", channels=CHANNELS)
+        self.assertTrue(self.sessions.muted("t2"))
+        t2.live.released.emit()
+        self.ready("http://stream/4")
+        self.assertTrue(wait_until(lambda: t2.live.running and t2.live.url == "http://stream/4"))
+        self.assertTrue(t2.playback.muted)
+
+    def test_links_on_their_way_count_against_the_providers_limit(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 2}
+        self.start_large(0)  # tile 1 holds one of Home's two streams
+        self.v()
+        self.grid_frame.tileClicked.emit("t2")  # tile 3 focused, its link on its way
+        self.controller.tune(CHANNELS[1], group_key="10", channels=CHANNELS)
+        links = len(self.catalog.links)
+        self.controller.play_in_tile("t3", CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.assertEqual(self.grid.state("t3"), DENIED)  # tile 1's and tile 3's: none left
+        self.assertEqual(len(self.catalog.links), links)
+        self.grid_frame.focusRequested.emit("main")  # tile 3's choice is dropped
+        self.controller.play_in_tile("pip", CHANNELS[2], group_key="10", channels=CHANNELS)
+        self.assertEqual(self.grid.state("pip"), OPENING)  # its link on its way
+        self.controller.play_in_tile("t3", CHANNELS[3], group_key="10", channels=CHANNELS)
+        self.assertEqual(self.grid.state("t3"), DENIED)  # tile 1's and tile 2's
+        self.assertEqual(len(self.catalog.links), links + 1)
 
 
 class MultiviewMixerTests(MultiviewCase):
@@ -1011,15 +1165,15 @@ class MultiviewWindowTests(WindowCase):
         grid = window.controller._grid
         self.assertTrue(grid.shown())
         self.assertEqual(grid.names(), ["main", "pip", "t2", "t3"])
-        self.assertEqual(set(window.surfaces), {"main", "pip", "t2", "t3"})
-        self.assertEqual([s.name for s in window.sessions.slots()], ["main", "pip", "t2", "t3"])
+        self.assertEqual(set(window.surfaces), {"main", "pip"})  # "+" tiles: no player yet
         tiles = window.grid_tiles.tiles()
         self.assertEqual([t.state for t in tiles], [EMPTY] * 4)
         self.assertTrue(tiles[0].focused)
         self.assertTrue(window.grid_tiles.isVisible())
         plus = tiles[2].rect.center()
         QTest.mouseClick(window.grid_tiles.hits, LEFT, pos=plus)
-        self.assertEqual(window.sessions.large().name, "t2")
+        self.assertEqual(window.sessions.large().name, "t2")  # its player made now
+        self.assertEqual([s.name for s in window.sessions.slots()], ["main", "pip", "t2"])
         self.assertTrue(wait_until(drawer.isVisible))
         QTest.keyClick(window, Qt.Key.Key_Escape)  # the list closes
         self.assertTrue(wait_until(lambda: not drawer.isVisible()))
@@ -1029,7 +1183,7 @@ class MultiviewWindowTests(WindowCase):
         self.assertEqual(window.surfaces["t2"].geometry(), page)  # the focused tile is big
         self.assertTrue(window.surfaces["t2"].isVisible())
         self.assertFalse(window.grid_tiles.isVisible())
-        for name in ("main", "pip", "t3"):
+        for name in ("main", "pip"):
             self.assertFalse(window.surfaces[name].isVisible(), name)
 
 

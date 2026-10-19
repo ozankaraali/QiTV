@@ -92,15 +92,19 @@ class GridFrame(QObject):
     # ---- public API ---------------------------------------------------------------------
 
     def add_surface(self, name: str, surface: QWidget) -> None:
-        """Another player's surface (a tile's, made when the grid first wants it)."""
+        """Another player's surface (a tile's, made when the tile first takes the focus or a
+        channel): laid out at once while its tile shows."""
         if name in self._surfaces:
             raise ValueError(f"There is a {name!r} surface already")
         self._surfaces[name] = surface
         if not self._closed:
             surface.installEventFilter(self)
+        if name in self._names:
+            self._layout()
 
     def show_grid(self, names: list[str], focused: str, playing: set[str]) -> None:
-        """Lay `names` out as tiles, in order; `focused` has the focus, `playing` show."""
+        """Lay `names` out as tiles, in order; `focused` has the focus, `playing` show (a tile
+        without a surface yet is the overlay's alone)."""
         self._check(names)
         self._names, self._focused, self._playing = list(names), focused, set(playing)
         self._shown = True
@@ -161,15 +165,14 @@ class GridFrame(QObject):
     def _check(self, names: list[str]) -> None:
         if len(names) not in LAYOUTS:
             raise ValueError(f"No layout for {len(names)} tiles")
-        unknown = [name for name in names if name not in self._surfaces]
-        if unknown:
-            raise ValueError(f"Unknown surfaces: {unknown}")
 
     def _layout(self) -> None:
         if not self._shown or self._closed:
             return
         for name, rect in self.tiles():
-            surface = self._surfaces[name]
+            surface = self._surfaces.get(name)
+            if surface is None:
+                continue  # no player yet: the overlay draws its "+"
             surface.setGeometry(rect)
             surface.setVisible(name in self._playing)
         for name, surface in self._surfaces.items():

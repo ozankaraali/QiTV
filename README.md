@@ -249,9 +249,9 @@ Watch several live channels side by side: press <kbd>V</kbd>, choose **View → 
 - The grid you leave is kept: next time, the **Last grid** chip beside the layout chip (or **View → Restore Last Multiview**) brings its channels back.
 - The chip beside the grid button switches between 2 and 4 tiles, and also 6 and 9 when hardware decoding is on (**Settings**).
 - Each tile asks your provider for a stream of its own. When a provider has no stream to spare, the tile says so and keeps the channel: click it to try again. QiTV never retries by itself.
-- <kbd>V</kbd>, <kbd>Esc</kbd> or a double-click on a tile goes back to one picture: the focused tile becomes the big picture and the tile you had before it stays as picture-in-picture.
+- <kbd>V</kbd>, <kbd>Esc</kbd> or a double-click on a tile goes back to one picture: the focused tile becomes the big picture and the tile you had before it stays as picture-in-picture. Picture-in-picture itself waits until you leave the grid.
 
-Each tile's label shows LIVE, or how far behind live it plays (−00:42). Tiles without the focus play at normal speed and only jump back to live when they fall far behind; each can be paused and rewound like the big picture once it has the focus. Its time-shift buffer is in memory: the focused tile gets the memory per stream (**Settings**), the others a short one of 64 MiB (`"multiview_tile_ram_mib"` in `config.json` changes it; at least 48, enough for a 4K channel).
+Each tile's label shows LIVE, or how far behind live it plays (−00:42). Tiles without the focus play at normal speed and only jump back to live when they fall far behind; each can be paused and rewound like the big picture once it has the focus. Its time-shift buffer is in memory: the focused tile gets the memory per stream (**Settings**), the others a short one of 64 MiB (`"multiview_tile_ram_mib"` in `config.json` changes it; at least 48, enough for a 4K channel). A tile you paused or rewound keeps what it plays until it is back at live.
 
 ## The guide
 

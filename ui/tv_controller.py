@@ -415,6 +415,8 @@ class TVController(QObject):
                 toast=self._toast,
                 reopen=self._reopen_tile,
                 restore=self._restore_tile,
+                forget=self._forget_tile,
+                pending=self._focused_link,
                 parent=self,
             )
             self._grid.changed.connect(self._mixer.refresh)
@@ -1460,6 +1462,9 @@ class TVController(QObject):
 
     def open_pip(self, channel: dict, *, group_key: str, channels: list[dict]) -> None:
         """Open `channel` small (the drawer's menu or Ctrl/⌘+P), or show it in the PiP."""
+        if self.multiview_shown():
+            self._toast(LEAVE_FIRST)  # the grid's tiles are the pictures meanwhile
+            return
         if self._pip is not None and not self._closed:
             source = item_provider.pick_source(self.catalog, channel, group_key)
             context = ZapContext(group_key, channels, fallback=self._all_live(), source=source)
@@ -1570,11 +1575,10 @@ class TVController(QObject):
         session = self.session  # the focused tile's, whatever has the focus when it opens
         limit = self._live_controls.limit(item)
         if self._live_controls.through_pipeline(url, kind):
+            # In memory: the session manager sizes the buffer as the tile starts (focused
+            # then, or not: `SessionManager.tile_bytes`).
             start = self._live_controls.live_start(target, url)
             kwargs = tune_kwargs(start, self.config, disk=False)
-            size = sessions.tile_bytes(True)
-            if size is not None:
-                kwargs["max_bytes"] = size
             grid.open_focused(item, provider=provider_name, limit=limit, start_kwargs=kwargs)
             # The old stream is stopped: the channel's sync waits for its player's open.
             self._tracks.prepare(session, target, previous)
@@ -1631,12 +1635,13 @@ class TVController(QObject):
             return
         if grid.tile_showing(channel) not in (None, name) or grid.refuse(channel, name):
             return  # another tile shows it, or its provider has no stream to spare
+        if not grid.linking(name, channel):
+            return  # its player could not be made (said)
         title = str(channel.get("name") or "")
         source = item_provider.pick_source(self.catalog, channel, group_key)
         target = Target(channel, "live", title, group_key=group_key, source=source, retried=retried)
         context = ZapContext(group_key, listed, fallback=self._all_live(), source=source)
         self._tile_links[name] = target
-        grid.linking(name, channel)
         self._lanes.request_side(
             target, lambda url: self._on_tile_link(name, target, context, url), play=False
         )
@@ -1664,9 +1669,6 @@ class TVController(QObject):
             kwargs = tune_kwargs(
                 self._live_controls.live_start(target, url), self.config, disk=False
             )
-            size = sessions.tile_bytes(False)
-            if size is not None:
-                kwargs["max_bytes"] = size
             grid.open_tile(name, item, provider=provider_name, limit=limit, start_kwargs=kwargs)
         else:
             session = slot.playback
@@ -1678,6 +1680,18 @@ class TVController(QObject):
 
             grid.open_tile(name, item, play_direct, provider=provider_name, limit=limit)
         self._tracks.prepare_small(slot.playback, item)  # its sound sync, kept per channel
+
+    def _forget_tile(self, name: str) -> None:
+        """Tile `name` left the grid (a smaller layout, or the grid went): its link on its way
+        and its wait for a provider are dropped, so nothing opens in it."""
+        self._tile_links.pop(name, None)
+        self._waiting_tiles = [entry for entry in self._waiting_tiles if entry[0] != name]
+
+    def _focused_link(self) -> Optional[dict]:
+        """The live channel whose link the focused tile waits for (the grid counts it as a
+        stream of its provider)."""
+        pending = self._lanes.pending()
+        return pending.item if pending is not None and pending.live else None
 
     def _may_reopen(self, target: Target) -> bool:
         """An ended direct stream opens again (a reconnect): in the multiview only while its
@@ -1762,7 +1776,10 @@ class TVController(QObject):
         return self._grid.mixer_rows() if self._grid is not None else None
 
     def _open_pip_node(self, node: NavNode) -> None:
-        if self._pip is not None:
+        """The channel list's "Open in picture-in-picture": never over the grid's tiles."""
+        if self.multiview_shown():
+            self._toast(LEAVE_FIRST)
+        elif self._pip is not None:
             self._pip.open_node(node)
 
     def _on_large_changed(self, name: str, old_name: str) -> None:

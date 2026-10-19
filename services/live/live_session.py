@@ -457,6 +457,7 @@ class LiveSession(QObject):
         self._open_args: dict[str, Any] = {}
         self._stay = StayLive()
         self._background = False  # a multiview tile without the focus (set_background)
+        self._shrink_to: Optional[int] = None  # a smaller buffer, once it is back at live
         self._snapshot_cache: dict[str, Any] = {}
         self._ended = False  # the session's input is over: no reopen, no stay-live
         self._source_lost = False  # ended by a source failure: fall back when it runs out
@@ -605,6 +606,7 @@ class LiveSession(QObject):
         self._cushion = 0.0
         self._repick_until, self._repick_step = -math.inf, None
         self._land_offset, self._land_check = 0.0, None  # each tune's own (ruling R38)
+        self._shrink_to = None
         self._open_args = {
             "headers": dict(headers),
             "verify_ssl": verify_ssl,
@@ -828,12 +830,24 @@ class LiveSession(QObject):
         """A memory buffer's size from now on (2.2, the multiview: the focused tile's grows to
         the memory per stream, the others' shrink): the running session's at once (a smaller
         one lets its oldest minutes go), and a session reopened later. A disk buffer keeps
-        the user's size."""
+        the user's size. A smaller buffer waits while it plays behind live (paused, rewound
+        or catching up): what it plays stays until it is back at live (`_tick`)."""
         if max_bytes <= 0 or self._open_args.get("disk"):
             return
-        self._open_args["max_bytes"] = int(max_bytes)
+        size = int(max_bytes)
+        current = self._open_args.get("max_bytes")
+        if self._sid is not None and isinstance(current, int) and size < current:
+            if self._away_from_live():
+                self._shrink_to = size
+                return
+        self._shrink_to = None
+        self._open_args["max_bytes"] = size
         if self._sid is not None:
-            self._engine.resize_session(self._sid, int(max_bytes))
+            self._engine.resize_session(self._sid, size)
+
+    def _away_from_live(self) -> bool:
+        """It plays away from the live edge by the user's choice: paused, or time-shifted."""
+        return self._paused or self._stay.mode is not Mode.LIVE
 
     def buffered_range(self) -> tuple[float, float]:
         """The buffered timeline seconds, from the oldest point to the live edge."""
@@ -1390,6 +1404,8 @@ class LiveSession(QObject):
             else:
                 self._emit_timeline()
             return
+        if self._shrink_to is not None and not self._away_from_live():
+            self.resize(self._shrink_to)  # back at live: the smaller buffer now
         snapshot = self._snapshot()
         position = self._advance()
         self._check_rate(snapshot, position)
