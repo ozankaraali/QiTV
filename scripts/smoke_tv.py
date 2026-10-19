@@ -23,6 +23,9 @@ segment's length (the starts it can land on are a segment apart) + 0.5 s (VLC's 
 and at the end of the 6 s it holds there or closes in (2.1's stay-live keeps 1x inside its dead
 band and nudges only after 15 s outside it: not drifting away is enough); ← moves
 the position back 8-12 s; 1.5x is applied and returns to 1x once stay-live is back at live;
+R records Channel 3 from the buffer into <out>/recordings for 3 s and R stops it: the file is
+saved (MPEG-TS from its first byte), the controls showed REC meanwhile and the toast says
+"Recording saved" (2.3; no connection is added: the sources' counts below include it);
 then Down zaps to Channel 4 (a second such source) and Up back to Channel 3 as soon as
 Channel 4's upstream delivers: each source, and both together, never had more than one
 connection open at once (spec §11; the sources see a client's close at once); after the
@@ -211,6 +214,10 @@ SPEED = 1.5
 SPEED_TIMEOUT_MS = 3_000
 CATCH_UP_TIMEOUT_MS = 60_000  # at 1.5x the lag shrinks by only 0.5 s a second
 RATE_TOLERANCE = 0.01
+RECORD_MS = 3_000  # how long R records (2.3)
+RECORD_END_MS = 5_000  # for the second R's file to be closed and its toast to show
+RECORDINGS_DIR = "recordings"  # in <out>: never the user's Movies folder
+PIPELINE_RECORDING = "06-recording.png"
 ZAP_CHANNEL = "Channel 4"  # the second paced source: Down from Channel 3, then Up back
 ZAP_OPEN_TIMEOUT_MS = 15_000  # Channel 3's release, then Channel 4's upstream delivering
 
@@ -229,6 +236,9 @@ ZAP_CHECK = (
     f"{PIPELINE_PREFIX}zapping {LIVE_CHANNEL} → {ZAP_CHANNEL} → {LIVE_CHANNEL} never has more "
     "than one source connection open"
 )
+RECORD_CHECK = (
+    f"{PIPELINE_PREFIX}R records {LIVE_CHANNEL} from the buffer to a saved MPEG-TS file, R stops it"
+)
 PIPELINE_CHECKS = (
     TUNED_CHECK,
     ON_DISK_CHECK,
@@ -237,6 +247,7 @@ PIPELINE_CHECKS = (
     SEEK_CHECK,
     SPEED_CHECK,
     LIVE_AGAIN_CHECK,
+    RECORD_CHECK,
     ZAP_CHECK,
     NO_HELPER_CHECK,
     EMPTY_DIR_CHECK,
@@ -1514,6 +1525,10 @@ class Driver:
             f"after {took:.1f} s: VLC rate {vlc_rate}; {self._describe(state)}",
         )
 
+        # 6b. R records from the buffer for a few seconds and R stops it (2.3).
+        report.step("pipeline 6b. record")
+        yield from self._record(live)
+
         # 7. Down to Channel 4, and Up back as soon as its upstream delivers: each opens only
         # once the other's upstream is closed. The parent judges it by what the sources saw.
         report.step("pipeline 7. zap to Channel 4 and back")
@@ -1526,6 +1541,47 @@ class Driver:
         )
         facts["zap"] = {"opened": opened, "back": back}
         report.save()
+
+    def _record(self, live: Any) -> Generator[int, None, None]:
+        """R, a few seconds, R: the file is saved where Settings says, and the toast says so."""
+        w, report = self.window, self.report
+        folder = self.out / RECORDINGS_DIR
+        w.config_manager.recordings_dir = str(folder)
+        ends: list[tuple[str, str, int]] = []
+        live.recordingEnded.connect(lambda *end: ends.append(end))
+        self._key(Qt.Key.Key_R)
+        started = yield from self._wait(live.recording, STATE_CHANGE_MS)
+        self._move_mouse()
+        yield from self._wait(w.overlays.transport.isVisible, TRANSPORT_TIMEOUT_MS)
+        lit = w.overlays.transport.recording()
+        yield RECORD_MS // 2
+        self._capture(PIPELINE_RECORDING)
+        yield RECORD_MS // 2
+        self._key(Qt.Key.Key_R)
+        ended = yield from self._wait(lambda: bool(ends), RECORD_END_MS)
+        reason, path, written = ends[0] if ends else ("", "", 0)
+        try:
+            with open(path, "rb") as handle:
+                head = handle.read(189)
+            size = os.path.getsize(path)
+        except OSError:
+            head, size = b"", 0
+        toast = w.overlays.toast.text()
+        stream = len(head) == 189 and head[0] == 0x47 and head[188] == 0x47
+        report.data["pipeline"]["recording"] = {"reason": reason, "bytes": size, "toast": toast}
+        report.check(
+            RECORD_CHECK,
+            started
+            and lit
+            and ended
+            and reason == "stopped"
+            and size == written > 0
+            and stream
+            and Path(path).parent == folder
+            and toast.startswith("Recording saved: "),
+            f"recording {started}, REC shown {lit}, ended {ended} ({reason}), {size} bytes "
+            f"(MPEG-TS {stream}) in {Path(path).parent.name if path else None}; toast {toast!r}",
+        )
 
     def _on_timeline(self, state: dict) -> None:
         self.timeline.append((time.monotonic(), dict(state)))

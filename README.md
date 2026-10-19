@@ -224,7 +224,7 @@ QiTV keeps the last few minutes of every live channel you watch, so you can paus
 Press <kbd>R</kbd>, or the red **●** after the channel's name and ★ at the top of the player controls, to record the live channel you are watching; press it again to stop. While it records, the **●** is lit and **● REC 01:23** beside it counts the time.
 
 - **From where you are watching.** If you have paused or rewound, the recording starts there, with what the time-shift buffer holds after it, and then goes on with the live stream.
-- **Until you stop it.** It also stops when you change channel or quit QiTV, after 4 hours, or when less than 2 GB is left on the disk. Each time a message says **Recording saved** with the file's name.
+- **Until you stop it.** It also stops, keeping what it recorded, when you change channel or quit QiTV, after 4 hours, or when less than 2 GB is left on the disk. A message then says **Recording saved** with the file's name (and why it stopped, if you did not stop it).
 - **In your Movies folder.** Recordings go to **QiTV** in your Movies folder (macOS) or Videos folder (Windows and Linux). **Settings → Time-shift → Recordings** changes the folder and opens it (so does **File → Open Recordings Folder**).
 - **As the channel sends it.** Each file is named after the channel and the time, for example `My Channel 2026-10-19 21.30.ts`: an MPEG-TS file with the channel's own picture and sound, not re-encoded, which VLC, MPV and most players play.
 - **No second stream.** A recording is written from the time-shift buffer, so it never asks your provider for another stream. That is also why a channel that plays without time-shift can't be recorded: its button is dimmed and says so.
