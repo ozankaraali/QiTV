@@ -205,6 +205,66 @@ class DesktopPipTests(unittest.TestCase):
         self.back()
         self.assertIs(self.main.parentWidget(), self.page)
 
+    def drag(self, start, end):
+        mouse(self.main, QEvent.Type.MouseButtonPress, start)
+        mouse(self.main, QEvent.Type.MouseMove, end)
+        mouse(self.main, QEvent.Type.MouseButtonRelease, end, Qt.MouseButton.NoButton)
+
+    def test_a_corner_drag_resizes_it_in_16_by_9_and_the_other_corner_stays(self):
+        places = []
+        self.pip._remember = None
+        self.away()
+        floating = self.pip._floating
+        floating.placed.connect(places.append)
+        start = floating.geometry()  # 320×180 at (900, 500)
+        self.drag(QPoint(318, 178), QPoint(318 + 160, 178 + 10))  # the bottom-right corner
+        geometry = floating.geometry()
+        self.assertEqual((geometry.width(), geometry.height()), (480, 270))  # the larger change
+        self.assertEqual(geometry.topLeft(), start.topLeft())
+        self.assertEqual(places, [geometry])
+        self.assertEqual(self.main.geometry(), floating.rect())  # the picture fills it
+
+    def test_the_top_left_corner_keeps_the_bottom_right_one(self):
+        self.away()
+        floating = self.pip._floating
+        start = floating.geometry()
+        self.drag(QPoint(2, 2), QPoint(2 - 160, 2 - 90))
+        geometry = floating.geometry()
+        self.assertEqual((geometry.width(), geometry.height()), (480, 270))
+        self.assertEqual(geometry.bottomRight(), start.bottomRight())
+
+    def test_an_edge_resizes_too_never_under_the_smallest(self):
+        self.away()
+        floating = self.pip._floating
+        self.drag(QPoint(318, 90), QPoint(0, 90))  # the right edge, far to the left
+        geometry = floating.geometry()
+        self.assertEqual((geometry.width(), geometry.height()), (desktop_pip.MIN_WIDTH, 135))
+        self.drag(QPoint(120, geometry.height() - 2), QPoint(120, geometry.height() + 133))
+        self.assertEqual(floating.height(), 270)  # the bottom edge: the width follows
+        self.assertEqual(floating.width(), 480)
+
+    def test_the_pointer_says_where_it_resizes(self):
+        self.away()
+        cursor = Qt.CursorShape
+        for at, shape in (
+            (QPoint(2, 2), cursor.SizeFDiagCursor),
+            (QPoint(318, 2), cursor.SizeBDiagCursor),
+            (QPoint(2, 90), cursor.SizeHorCursor),
+            (QPoint(160, 178), cursor.SizeVerCursor),
+        ):
+            mouse(self.main, QEvent.Type.MouseMove, at, Qt.MouseButton.NoButton)
+            self.assertEqual(self.main.cursor().shape(), shape, at)
+        mouse(self.main, QEvent.Type.MouseMove, QPoint(160, 90), Qt.MouseButton.NoButton)
+        self.assertEqual(self.main.cursor().shape(), cursor.ArrowCursor)
+
+    def test_a_move_or_a_resize_is_remembered(self):
+        remembered = []
+        self.pip._remember = remembered.append
+        self.pip.close()  # a new floating window connects to it
+        self.away()
+        self.drag(QPoint(160, 90), QPoint(200, 120))
+        self.assertEqual(remembered, [self.pip._floating.geometry()])
+
     def test_closing_puts_the_picture_back_and_drops_the_window(self):
         self.away()
         self.pip.close()
@@ -229,6 +289,16 @@ class DesktopPipTests(unittest.TestCase):
 
 
 class DesktopPipWindowTests(WindowCase):
+    def test_the_floating_picture_opens_where_it_was_left_while_that_is_on_a_screen(self):
+        window = self.window
+        screen = QApplication.primaryScreen().availableGeometry()
+        inside = QRect(screen.x() + 40, screen.y() + 40, 400, 225)
+        window._remember_floating_rect(inside)
+        self.assertEqual(window._floating_rect(), inside)
+        window.config_manager.desktop_pip_rect = [-90000, -90000, 400, 225]  # a screen gone
+        rect = window._floating_rect()
+        self.assertTrue(screen.contains(rect.center()))
+
     """The TV window floats its large picture and shows a note in its place meanwhile."""
 
     def test_fullscreen_watches_the_desktop_and_the_picture_floats_and_returns(self):

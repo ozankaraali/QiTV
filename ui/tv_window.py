@@ -553,6 +553,7 @@ class TVWindow(QMainWindow):
             take_back=self.pip_frame.take_back,
             place=self._floating_rect,
             join_all_spaces=macos_window.join_all_spaces,
+            remember=self._remember_floating_rect,
             parent=self,
         )
         # i18n: shown on the fullscreen player while its picture floats on another desktop
@@ -1126,10 +1127,26 @@ class TVWindow(QMainWindow):
         return state in playing or state is PlaybackState.PAUSED
 
     def _floating_rect(self) -> QRect:
-        """The floating picture: in the bottom-right corner of the screen under the pointer."""
+        """The floating picture: where the user last moved or resized it while that is on a
+        screen, else in the bottom-right corner of the screen under the pointer."""
+        saved = getattr(self.config_manager, "desktop_pip_rect", None)
+        if isinstance(saved, list) and len(saved) == 4 and all(isinstance(v, int) for v in saved):
+            rect = QRect(*saved)
+            if rect.width() > 0 and any(
+                screen.availableGeometry().contains(rect.center())
+                for screen in QGuiApplication.screens()
+            ):
+                return rect
         screen = QGuiApplication.screenAt(QCursor.pos()) or self.screen()
         screen = screen or QGuiApplication.primaryScreen()
         return corner_rect(screen.availableGeometry(), screen.geometry().width())
+
+    def _remember_floating_rect(self, rect: QRect) -> None:
+        self.config_manager.desktop_pip_rect = [rect.x(), rect.y(), rect.width(), rect.height()]
+        try:
+            self.config_manager.save_config()
+        except Exception as e:  # a locked config: remembered for this run only
+            logger.warning("Couldn't save the floating picture's place: %s", safe_message(e))
 
     def _on_picture_floating(self, floating: bool) -> None:
         note = self.floating_note
