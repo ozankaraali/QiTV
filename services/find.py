@@ -2,24 +2,40 @@
 
 The index is made in a worker from every provider's cached catalog (a catalog in memory is read
 instead of its file), once per snapshot: each provider's genres with their channel counts, and
-its channels' folded titles. The genres are few (a few thousand at four providers): they are
-matched on the GUI thread as the user types. The channels (200,000 and more) are matched in
-the worker.
+its channels' titles, folded, with anything but letters and digits made a space. Each find
+runs in the worker too, and ranks what it finds:
+
+1. how well it matches: every word typed is a whole word of the title, else every one starts a
+   word of it, else it is only somewhere in it ("moss 1" puts "Moss 1 (1440p)" before
+   "Moss 2 (1440p)");
+2. its provider: the one the list shows, then those the user watched a channel of most
+   recently, then the providers' order in Settings (`Preferences`);
+3. a channel the user starred or watched lately;
+4. the provider's own order.
+
+At most GENRE_LIMIT genres are kept, and CHANNEL_LIMIT channels of each provider, once ranked.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+import logging
+import time
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
+from services.navigation import item_key
 from services.search import Hit, _title, iter_items
 from services.text_fold import fold, fold_all
 
+logger = logging.getLogger(__name__)
+
 GENRE_LIMIT = 100  # genres shown, at most
 CHANNEL_LIMIT = 200  # channels shown per provider, at most
+WATCHED_LIMIT = 20  # the channels watched lately that rank first (as many as ⟲ Recent lists)
+_LINE = ord("\n")
 
 
 @dataclass(frozen=True)
@@ -33,14 +49,77 @@ class FoundGenre:
 @dataclass(frozen=True)
 class _Channels:
     provider: str
-    folded: list[str]
+    spaced: list[str]  # each title as `words()` makes it, a space before and after
     items: list[dict]
 
 
 @dataclass(frozen=True)
 class FindIndex:
-    genres: list[tuple[str, FoundGenre]]  # (folded title, genre), the providers in order
+    genres: list[tuple[str, FoundGenre]]  # (spaced title, genre), the providers in order
     channels: list[_Channels]
+
+
+@dataclass(frozen=True)
+class Preferences:
+    """What ranks the user's own first (plain data, made on the GUI thread)."""
+
+    providers: tuple[str, ...] = ()  # the order of their results; others after, as listed
+    watched: frozenset[tuple[str, str]] = frozenset()  # (provider, item key) watched lately
+    favorite: Optional[Callable[[dict], bool]] = field(default=None, compare=False)
+
+
+def preferences_for(
+    providers: list[str],
+    browsed: str,
+    history: list[dict],
+    favorite: Optional[Callable[[dict], bool]] = None,
+) -> Preferences:
+    """The provider the list shows first (none when it shows them all), then those of the
+    channels watched most recently, then the rest as listed; the channels watched lately; the
+    stars (`favorites.matcher`). On the GUI thread: plain data for the worker."""
+    order = [browsed] if browsed in providers else []
+    watched: set[tuple[str, str]] = set()
+    for entry in history or []:
+        provider = entry.get("provider_name")
+        if entry.get("item_type") != "channel" or provider not in providers:
+            continue
+        if provider not in order:
+            order.append(provider)
+        if len(watched) < WATCHED_LIMIT:
+            watched.add((provider, item_key(entry.get("item_data") or {})))
+    return Preferences(tuple(order), frozenset(watched), favorite)
+
+
+class _Gaps(dict):
+    """A str.translate table: anything but a letter, a digit or a line break is a space."""
+
+    def __missing__(self, code: int) -> int:
+        kept = code if code == _LINE or chr(code).isalnum() else 32
+        self[code] = kept
+        return kept
+
+
+_GAPS = _Gaps()
+
+
+def words(text: str) -> list[str]:
+    """The words of `text` as the find reads them: folded runs of letters and digits."""
+    return fold(text).translate(_GAPS).split()
+
+
+def _spaced(titles: list[str]) -> list[str]:
+    """Each title's words, a space between them and around them (" tr spor kanali ")."""
+    folded = fold_all(titles)
+    joined = "\n".join(folded).translate(_GAPS).split("\n")
+    if len(joined) != len(folded):  # a title with a line break of its own
+        joined = [title.translate(_GAPS).replace("\n", " ") for title in folded]
+    return [f" {' '.join(title.split())} " for title in joined]
+
+
+def matches(title: str, typed: list[str]) -> bool:
+    """Whether a title has every word typed (`words()`), whole or in part."""
+    spaced = f" {' '.join(words(title))} "
+    return all(w in spaced for w in typed)
 
 
 def live_genres(provider: str, content: Any) -> list[FoundGenre]:
@@ -76,7 +155,8 @@ def build_find_index(caches: list[tuple[str, dict]]) -> FindIndex:
     channels: list[_Channels] = []
     for provider, cache in caches:
         live = cache.get("itv")
-        genres += [(fold(g.title), g) for g in live_genres(provider, live)]
+        found = live_genres(provider, live)
+        genres += zip(_spaced([g.title for g in found]), found)
         seen: set[str] = set()
         items: list[dict] = []
         for item in iter_items(live):
@@ -84,66 +164,120 @@ def build_find_index(caches: list[tuple[str, dict]]) -> FindIndex:
             if ident not in seen:
                 seen.add(ident)
                 items.append(item)
-        channels.append(_Channels(provider, fold_all([_title(i) for i in items]), items))
+        channels.append(_Channels(provider, _spaced([_title(i) for i in items]), items))
     return FindIndex(genres, channels)
 
 
-def _words(text: str) -> list[str]:
-    return fold(text).split()
+def _tiers(spaced: list[str], rows: list[int], typed: list[str]) -> tuple[list[int], ...]:
+    """`rows` (those with every word typed) by how well they match: every word whole, every
+    word the start of one, the rest; each in the list's order."""
+    whole, starts = list(rows), list(rows)
+    for w in typed:
+        whole = [r for r in whole if f" {w} " in spaced[r]]
+        starts = [r for r in starts if f" {w}" in spaced[r]]
+    first = set(whole)
+    second = [r for r in starts if r not in first]
+    taken = first.union(second)
+    return whole, second, [r for r in rows if r not in taken]
 
 
-def find_genres(index: FindIndex, text: str, limit: int = GENRE_LIMIT) -> list[FoundGenre]:
-    """The genres whose title has every word of `text`: those that start with the first word
-    first, each part in the providers' order (on the GUI thread: a few thousand titles)."""
-    words = _words(text)
-    if not words:
+def _provider_rank(preferences: Preferences, providers: list[str]) -> dict[str, int]:
+    order = list(preferences.providers) + [p for p in providers if p not in preferences.providers]
+    return {name: at for at, name in enumerate(order)}
+
+
+def find_genres(
+    index: FindIndex, text: str, preferences: Preferences = Preferences(), limit: int = GENRE_LIMIT
+) -> list[FoundGenre]:
+    """The genres whose title has every word typed, ranked (see the module), `limit` at most."""
+    typed = words(text)
+    if not typed:
         return []
-    first: list[FoundGenre] = []
-    rest: list[FoundGenre] = []
-    for folded, genre in index.genres:
-        if all(w in folded for w in words):
-            (first if folded.startswith(words[0]) else rest).append(genre)
-    return (first + rest)[:limit]
+    spaced = [s for s, _genre in index.genres]
+    rows = [r for r, s in enumerate(spaced) if all(w in s for w in typed)]
+    rank = _provider_rank(preferences, [part.provider for part in index.channels])
+    ranked = []
+    for tier, members in enumerate(_tiers(spaced, rows, typed)):
+        ranked += [(tier, rank.get(index.genres[r][1].provider, len(rank)), r) for r in members]
+    ranked.sort()
+    return [index.genres[r][1] for _tier, _provider, r in ranked[:limit]]
 
 
-def find_channels(index: FindIndex, text: str, limit: int = CHANNEL_LIMIT) -> list[Hit]:
-    """Each provider's channels whose title has every word of `text`, up to `limit` each:
-    those that start with the first word first (in the worker: 200,000 titles)."""
-    words = _words(text)
-    if not words:
+def find_channels(
+    index: FindIndex,
+    text: str,
+    preferences: Preferences = Preferences(),
+    limit: int = CHANNEL_LIMIT,
+) -> list[Hit]:
+    """Each provider's channels whose title has every word typed, `limit` at most of each,
+    ranked (see the module)."""
+    typed = words(text)
+    if not typed:
         return []
-    head, others = words[0], words[1:]
-    hits: list[Hit] = []
+    rank = _provider_rank(preferences, [part.provider for part in index.channels])
+    favorite, watched = preferences.favorite, preferences.watched
+    ranked: list[tuple[int, int, int, Hit]] = []
     for part in index.channels:
-        folded = part.folded
-        rows = [row for row, title in enumerate(folded) if head in title]
-        if others:
-            rows = [row for row in rows if all(w in folded[row] for w in others)]
-        first = [row for row in rows if folded[row].startswith(head)]
-        rest = [row for row in rows if not folded[row].startswith(head)]
-        for row in (first + rest)[:limit]:
-            item = part.items[row]
-            hits.append(Hit(part.provider, "live", _title(item), item))
-    return hits
+        spaced, items, provider = part.spaced, part.items, part.provider
+
+        def liked(row: int) -> bool:
+            item = items[row]
+            if favorite is not None and favorite(item):
+                return True
+            return bool(watched) and (provider, item_key(item)) in watched
+
+        rows = [r for r, s in enumerate(spaced) if typed[0] in s]
+        for w in typed[1:]:
+            rows = [r for r in rows if w in spaced[r]]
+        taken: list[tuple[int, int]] = []
+        for tier, members in enumerate(_tiers(spaced, rows, typed)):
+            room = limit - len(taken)
+            if room <= 0:
+                break
+            if favorite is not None or watched:
+                first = [r for r in members if liked(r)]
+                if first:
+                    picked = set(first)
+                    members = first + [r for r in members if r not in picked]
+            taken += [(tier, r) for r in members[:room]]
+        at = rank.get(provider, len(rank))
+        for position, (tier, r) in enumerate(taken):
+            hit = Hit(provider, "live", _title(items[r]), items[r])
+            ranked.append((tier, at, position, hit))
+    ranked.sort(key=lambda entry: entry[:3])
+    return [hit for _tier, _provider, _position, hit in ranked]
 
 
 class FindWorker(QObject):
     """JobRunner worker: makes the index unless given one (every provider's cached content,
-    the catalogs' own in memory, else the disk), then finds the channels."""
+    the catalogs' own in memory, else the disk), then finds and ranks the genres and the
+    channels."""
 
-    finished = Signal(object)  # (index, channel hits)
+    finished = Signal(object)  # (index, genres, channel hits)
     error = Signal(str)
 
-    def __init__(self, provider_manager, text: str, index=None, loaded=None):
+    def __init__(
+        self,
+        provider_manager,
+        text: str,
+        index=None,
+        loaded=None,
+        preferences: Preferences = Preferences(),
+    ):
         super().__init__()
         self._provider_manager = provider_manager
         self._text = text
         self._index = index
         self._loaded = loaded  # provider name -> content its catalog holds (read only)
+        self._preferences = preferences
 
     def run(self) -> None:
         index = self._index
         if index is None:
             caches = self._provider_manager.get_all_providers_cached_content(self._loaded or None)
             index = build_find_index(caches)
-        self.finished.emit((index, find_channels(index, self._text)))
+        started = time.perf_counter()
+        genres = find_genres(index, self._text, self._preferences)
+        channels = find_channels(index, self._text, self._preferences)
+        logger.debug("A find took %.0f ms", (time.perf_counter() - started) * 1000)
+        self.finished.emit((index, genres, channels))

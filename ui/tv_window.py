@@ -52,10 +52,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services import free_channels, thread_cleanup
+from services import favorites, free_channels, thread_cleanup
 from services.browsed_catalog import BrowsedCatalog
 from services.catalogs import Catalogs
 from services.connection_budget import ConnectionBudget
+from services.find import Preferences, preferences_for
 from services.jobs import JobRunner
 from services.lazy_import import deferred_modules, load_module
 from services.live.engine import LiveEngine
@@ -543,6 +544,7 @@ class TVWindow(QMainWindow):
             self.jobs,
             loaded=self.catalog.loaded_contents,
             signature=self._find_signature,
+            preferences=self._find_preferences,
             parent=self,
         )
         self.overlays.drawer.set_finder(self.finder)
@@ -1183,6 +1185,14 @@ class TVWindow(QMainWindow):
         hub = self.catalogs
         versions = tuple((name, hub.catalog(name).content_version()) for name in hub.created())
         return tuple(hub.names()), versions
+
+    def _find_preferences(self) -> Preferences:
+        """What ranks first in the channel list's find: the provider it shows, the providers
+        and channels watched lately, the stars."""
+        catalog, config = self.catalog, self.config_manager
+        favorite = favorites.matcher(config)
+        names, browsed = catalog.provider_names(), catalog.current_provider_name()
+        return preferences_for(names, browsed, config.watch_history, favorite)
 
     def _shut_down(self) -> None:
         self.epg_refresh.stop()

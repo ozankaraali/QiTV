@@ -1,10 +1,10 @@
 """The channel list's find: genres and channels at every provider (see services.find).
 
 The first find makes the index in a worker; it is kept until the catalogs' content changes
-(`signature`), then made again at the next find. With an index, each letter typed shows the
-matching genres at once (matched here) and narrows the channels already found; the channels
-for the new text follow from a worker after a short pause. One worker runs at a time: a text
-typed meanwhile waits, and only the latest one runs.
+(`signature`), then made again at the next find. Each letter typed narrows what was found at
+once, here; the genres and channels for the new text, ranked, follow from a worker after a
+short pause (`preferences`, read here, rank the user's own first). One worker runs at a time:
+a text typed meanwhile waits, and only the latest one runs.
 """
 
 from __future__ import annotations
@@ -15,19 +15,13 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.find import FindIndex, FindWorker, FoundGenre, find_genres
+from services.find import FindIndex, FindWorker, FoundGenre, Preferences, matches, words
 from services.provider_ids import with_provider
 from services.search import Hit
-from services.text_fold import fold
 
 logger = logging.getLogger(__name__)
 
 DEBOUNCE_MS = 150
-
-
-def _matches(title: str, words: list[str]) -> bool:
-    folded = fold(title)
-    return all(w in folded for w in words)
 
 
 class FindSession(QObject):
@@ -40,6 +34,7 @@ class FindSession(QObject):
         *,
         loaded: Optional[Callable[[], dict]] = None,
         signature: Optional[Callable[[], Any]] = None,
+        preferences: Optional[Callable[[], Preferences]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -47,6 +42,7 @@ class FindSession(QObject):
         self._jobs = jobs
         self._loaded = loaded  # the content the catalogs hold: found without a re-read
         self._signature = signature  # changes when the catalogs' content may have
+        self._preferences = preferences  # the browsed provider, what was watched, the stars
         self._query = ""
         self._index: Optional[FindIndex] = None
         self._made_for: Any = None  # the signature the index was made for
@@ -57,7 +53,7 @@ class FindSession(QObject):
         self._closed = False
         self.genres: list[FoundGenre] = []
         self.channels: list[Hit] = []  # each item stamped with its provider
-        self.searching = False  # the channels for the text are on their way
+        self.searching = False  # the genres and channels for the text are on their way
         self.failed = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -76,12 +72,9 @@ class FindSession(QObject):
         if self._index is not None and self._signature is not None:
             if self._signature() != self._made_for:
                 self.drop_snapshot()
-        words = fold(text).split()
-        if self._index is not None:
-            self.genres = find_genres(self._index, text)
-        else:  # the index is on its way: what was found narrows meanwhile
-            self.genres = [g for g in self.genres if _matches(g.title, words)]
-        self.channels = [h for h in self.channels if _matches(h.title, words)]
+        typed = words(text)  # what was found narrows at once; the worker ranks anew
+        self.genres = [g for g in self.genres if matches(g.title, typed)]
+        self.channels = [h for h in self.channels if matches(h.title, typed)]
         self.searching = True
         self.failed = False
         self._timer.start()  # restarts the pause
@@ -120,23 +113,30 @@ class FindSession(QObject):
         if self._index is None:
             loaded = self._loaded() if self._loaded is not None else None
             signature = self._signature() if self._signature is not None else None
-        worker = FindWorker(self._provider_manager, self._query, index=self._index, loaded=loaded)
+        preferences = self._preferences() if self._preferences is not None else Preferences()
+        worker = FindWorker(
+            self._provider_manager,
+            self._query,
+            index=self._index,
+            loaded=loaded,
+            preferences=preferences,
+        )
         context = (self._generation, self._snapshot, signature, self._query)
         self._jobs.run_worker(worker, self._on_done, self._on_error, context=context)
 
     def _on_done(self, context: tuple, payload) -> None:
         generation, snapshot, signature, text = context
         self._running = False
-        index, hits = payload
+        index, genres, hits = payload
         if snapshot == self._snapshot and self._index is None:
             self._index, self._made_for = index, signature  # titles fold once per snapshot
         if self._closed:
             return
         if self._queued:
             self._queued = False
-            self._start()  # a newer text: these channels would only flash
+            self._start()  # a newer text: these would only flash
         elif generation == self._generation and text == self._query:
-            self.genres = find_genres(index, text)
+            self.genres = list(genres)
             self.channels = [replace(h, item=with_provider(h.item, h.provider)) for h in hits]
             self.searching = False
             self.changed.emit()

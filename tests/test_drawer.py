@@ -1027,15 +1027,15 @@ class FindTests(unittest.TestCase):
             rows[:4],
             [
                 ("header", "Genres"),
+                ("found_genre", "TR: Spor"),  # the word itself first (services.find ranks)
                 ("found_genre", "Sports"),
-                ("found_genre", "TR: Spor"),
                 ("header", "Channels"),
             ],
         )
         channels = [title for layer, title in rows if layer == "item"]
         self.assertEqual(len(channels), 201)  # 200 at most of a provider, then the other's
-        self.assertEqual(channels[0], "Northwind Sport 1")
-        self.assertEqual(channels[-1], "Harbor Spor 2")
+        self.assertEqual(channels[0], "Harbor Spor 2")
+        self.assertEqual(channels[1], "Northwind Sport 1")
         library = FIND_LIBRARY_TEXT
         self.assertEqual(rows[-1], ("found_library", library))
         self.assertEqual(self.data("Sports", CountRole), "Home · 300 channels")
@@ -1043,7 +1043,7 @@ class FindTests(unittest.TestCase):
         self.assertEqual(self.data("Harbor Spor 2", ChannelRowsModel.ProviderRole), "Backup")
         self.assertEqual(self.data(library, IconRole), "search")
         self.assertEqual(self.drawer.focus_side, "right")
-        self.assertEqual(self.drawer.highlighted().title, "Sports")
+        self.assertEqual(self.drawer.highlighted().title, "TR: Spor")
         self.assertFalse(self.drawer.grab().isNull())
 
     def test_typing_with_the_focus_on_the_genres_finds_there_too(self):
@@ -1107,7 +1107,8 @@ class FindTests(unittest.TestCase):
 
     def test_a_found_genre_opens_as_if_walked_to_and_back_returns_to_it(self):
         self.type("spor")
-        self.drawer.activate()  # Enter on "Sports" (the first row)
+        self.drawer.move_by(1)
+        self.drawer.activate()  # Enter on "Sports" (after "TR: Spor")
         self.assertEqual([n.key for n in self.nav.path], ["Home", "live", "Sports"])
         self.assertEqual(self.drawer.find_text, "")
         self.assertEqual(self.drawer._columns["left"].current.title, "Sports")
