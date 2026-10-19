@@ -143,9 +143,12 @@ def _day(when: datetime) -> str:
     """ "3 Oct 2026", the month as the active language names it."""
     from PySide6.QtCore import QDate
 
-    from services.i18n import app_locale
+    from services import i18n
 
-    return str(app_locale().toString(QDate(when.year, when.month, when.day), "d MMM yyyy"))
+    if i18n.language() == i18n.SOURCE_LANGUAGE:  # as before, whatever the region
+        return f"{when.day} {when.strftime('%b %Y')}"
+    day = QDate(when.year, when.month, when.day)
+    return str(i18n.app_locale().toString(day, "d MMM yyyy"))
 
 
 def expired_text(when: Optional[datetime]) -> str:

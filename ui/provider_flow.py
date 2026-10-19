@@ -365,7 +365,7 @@ class ProviderFlow(QObject):
         if section != "live" or self._foreign is None or self._foreign[0] != owner:
             return  # not the wait of this owner (a later wait ignores an old failure)
         if not self._closed():
-            self._error(f"{owner}: {shown_message(message)}")
+            self._error(tr("{name}: {message}", name=owner, message=shown_message(message)))
             self._explain(owner, owner)
         self._give_up_foreign()
 

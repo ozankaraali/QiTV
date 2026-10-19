@@ -23,6 +23,7 @@ from PySide6.QtCore import QObject, Signal
 
 from services import favorites
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
+from services.failure_reasons import shown_message
 from services.i18n import N_, tr, translate
 from services.provider_ids import (
     ALL_PROVIDERS,
@@ -343,7 +344,7 @@ class NavModel(QObject):
         if not error and section_error is not None:
             error = section_error(name, section)
         if error:
-            return error
+            return shown_message(error)  # kept English by the catalog
         loaded = getattr(self.catalog, "provider_loaded", None)
         if loaded is None or loaded(name, section):
             return ""

@@ -62,6 +62,12 @@ def stream_options(item: dict) -> dict[str, Any]:
     return options
 
 
+def _named(title: str, message: str) -> str:
+    """A failure after the channel's name, when it has one."""
+    # i18n: an error toast: a channel's, a film's or a provider's name, then what went wrong
+    return tr("{name}: {message}", name=title, message=message) if title else message
+
+
 class LiveControls(QObject):
     def __init__(
         self,
@@ -292,7 +298,7 @@ class LiveControls(QObject):
             message = translate(message)
             current = self._current()
             title = current.title if current is not None else ""
-            self._error(f"{title}: {message}" if title else message)
+            self._error(_named(title, message))
 
     def _on_live_mode(self, _mode: str) -> None:
         current = self._current()
@@ -354,7 +360,7 @@ class LiveControls(QObject):
             self._explain_failure(current)
             return
         message = translate(message)  # the player's, or LiveSession's N_ texts
-        self._error(f"{title}: {message}" if title else message)
+        self._error(_named(title, message))
         self._explain_failure(current)
 
     def _explain_failure(self, current: Optional[Target]) -> None:

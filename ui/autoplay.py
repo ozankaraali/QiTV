@@ -18,6 +18,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject
 
+from services.catalog import shown_label
 from services.i18n import N_, translate
 from services.navigation import episode_key, item_key, item_title
 from services.next_episode import (
@@ -192,7 +193,9 @@ class Autoplay(QObject):
         if episode:
             subtitle = episode_label(result.season, result.item)
         else:
-            groups = ((group.id, group.title) for group in self.catalog.groups("movies"))
+            groups = (
+                (group.id, shown_label(group.title)) for group in self.catalog.groups("movies")
+            )
             subtitle = genre_title(result.item, groups)
         self.card.show_next(item_title(result.item, episode=episode), subtitle, kind=kind)
 

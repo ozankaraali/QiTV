@@ -5,6 +5,8 @@ and Settings' Language choice."""
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -296,6 +298,34 @@ class ShippedCatalogTests(unittest.TestCase):
 
     def test_every_tr_call_uses_a_literal_and_runs_when_shown(self):
         self.assertEqual(self.problems, [])
+
+    def test_nothing_is_translated_while_the_modules_import(self):
+        # The language is chosen after the imports (main.py): a text read at import, even
+        # through a helper such as key_hint(), would stay English.
+        probe = textwrap.dedent("""
+            import importlib, pkgutil, sys
+            from services import i18n
+            calls = []
+            for name in ("tr", "tr_n"):
+                real = getattr(i18n, name)
+                def spy(*args, _real=real, **kwargs):
+                    caller = sys._getframe(1)
+                    calls.append(f"{caller.f_code.co_filename}:{caller.f_lineno} {args[0]!r}")
+                    return _real(*args, **kwargs)
+                setattr(i18n, name, spy)
+            import services, ui
+            for package in (services, ui):
+                for module in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
+                    importlib.import_module(module.name)
+            importlib.import_module("main")
+            print("\\n".join(calls))
+            """)
+        env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONPATH=str(ROOT))
+        done = subprocess.run(
+            [sys.executable, "-c", probe], cwd=ROOT, env=env, capture_output=True, text=True
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "")
 
     def test_the_template_is_up_to_date(self):
         # Regenerate with `uv run python scripts/i18n_extract.py`.

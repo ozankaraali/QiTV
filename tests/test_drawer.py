@@ -33,7 +33,6 @@ from ui.overlays import channel_rows as channel_rows_module, drawer as drawer_mo
 from ui.overlays.channel_rows import ChannelRowsModel, NumberRole
 from ui.overlays.drawer import (
     EMPTY_TEXT,
-    FIND_CLEAR_TOOLTIP,
     FIND_LIBRARY_TEXT,
     FIND_TOOLTIP,
     LOADING_TEXT,
@@ -45,6 +44,7 @@ from ui.overlays.drawer import (
     CountRole,
     Drawer,
     IconRole,
+    find_clear_tooltip,
 )
 
 PREVIEW_WAIT_MS = PREVIEW_DEBOUNCE_MS + 120
@@ -1062,7 +1062,7 @@ class FindTests(unittest.TestCase):
         self.click(self.drawer.find_rect())
         clear = self.drawer.find_clear_rect()
         self.assertFalse(clear.isEmpty())  # the box is open: a caret and ✕
-        self.assertEqual(self.drawer.tooltip_at(clear.center()), FIND_CLEAR_TOOLTIP)
+        self.assertEqual(self.drawer.tooltip_at(clear.center()), find_clear_tooltip())
         self.assertEqual(self.right.nodes[0].title, "Evening News")  # nothing typed yet
         self.type("news")
         self.assertIn(("found_genre", "News"), self.rows())

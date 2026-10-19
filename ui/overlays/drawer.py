@@ -124,7 +124,6 @@ _CRUMB = "crumb:"  # a name in the header, by its path index ("crumb:up": the el
 SEPARATOR = " › "
 # The texts below stay English (the code compares them); translate() shows them, and the
 # tooltips naming a key are made where they show.
-BACK_TOOLTIP = key_hint(N_("Back"), "Left")  # "Back (←)"
 PROVIDER_TOOLTIP = N_("Choose another provider")  # i18n: tooltip of the provider's name
 CRUMB_FONT_U = 1.15
 PREVIEW_DEBOUNCE_MS = 200
@@ -134,9 +133,14 @@ ERROR_TEXT = N_("Couldn't load — press Enter to retry")
 PROVIDER_ERROR_TEXT = N_("Couldn't connect — press Enter to retry")
 FIND_ACTION = "find"  # the ⌕ Find box above the right column
 FIND_CLEAR = "find_clear"  # its ✕
+
+
+def find_clear_tooltip() -> str:
+    return key_hint(tr("Clear the find"), "Esc")  # i18n: the find box's ✕ (tooltip)
+
+
 FIND_PLACEHOLDER = N_("Find a genre or channel")  # i18n: the empty find box's prompt
 FIND_TOOLTIP = N_("Find a genre or a channel at every provider: type its name")
-FIND_CLEAR_TOOLTIP = key_hint(N_("Clear the find"), "Esc")
 SEARCHING_TEXT = N_("Searching…")
 FIND_FAILED_TEXT = N_("Couldn't search — type again to retry")
 # The find's last row: the words in the box, for the Library's search (whole at 640 px wide).
@@ -1261,7 +1265,7 @@ class Drawer(Overlay):
         if button == FIND_ACTION:
             return translate(FIND_TOOLTIP)
         if button == FIND_CLEAR:
-            return key_hint(tr("Clear the find"), "Esc")  # i18n: the find box's ✕ (tooltip)
+            return find_clear_tooltip()
         if button == BACK_BUTTON:
             return key_hint(tr("Back"), "Left")  # i18n: tooltip of ‹: a layer up (verb)
         if button == _crumb_key(0):
