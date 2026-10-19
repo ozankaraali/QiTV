@@ -16,6 +16,8 @@ shortcut or native menu key equivalent (ShortcutOverride), so nothing fires twic
 
 A subtitle file dropped on the window (the video, its overlays or the Library with its corner
 player) loads with what plays (2.2; the controller says whether it would, while it is dragged).
+A dropped playlist file (.m3u, .m3u8) or provider link becomes a provider (ui/provider_drop.py);
+one drop may carry both kinds.
 """
 
 from __future__ import annotations
@@ -78,6 +80,7 @@ from services.playback import (
     create_instance,
     default_args,
 )
+from services.provider_link import ProviderLink
 from services.redact import safe_message, safe_traceback
 from services.sessions import SessionManager, Slot
 from services.sound_sync import FILE_NAME as SOUND_SYNC_FILE, SoundSync
@@ -85,6 +88,7 @@ from services.thread_cleanup import has_pending_threads
 from services.update_checker import call_before_update
 from services.watch_state import WatchState
 from services.zapping import ZapController
+from ui import provider_drop
 from ui.bottom_band import BottomBand
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
@@ -322,7 +326,7 @@ class TVWindow(QMainWindow):
 
         self.setWindowTitle("QiTV")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAcceptDrops(True)  # a subtitle file dropped on it (2.2)
+        self.setAcceptDrops(True)  # subtitle files, playlists or provider links dropped on it
         # The player page is the video container: the large surface fills it, and picture in
         # picture puts the other one in a corner (the PiP frame lays them out). The page paints
         # the black behind the video; the surfaces paint nothing (see ui/video_surface.py).
@@ -715,15 +719,44 @@ class TVWindow(QMainWindow):
             return []
         return [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
 
+    @staticmethod
+    def _dropped_texts(event: QDropEvent) -> list[str]:
+        """Dropped web addresses and text: a provider's link, maybe (2.2)."""
+        mime = event.mimeData()
+        if mime is None:
+            return []
+        texts = [url.toString() for url in mime.urls() if not url.isLocalFile()]
+        if mime.hasText():
+            texts.append(mime.text())
+        return texts
+
+    def _dropped_providers(self, event: QDropEvent) -> tuple[list[str], list[ProviderLink]]:
+        """The playlist files and provider links a drop carries (ui/provider_drop.py)."""
+        files = provider_drop.playlist_files(self._dropped_paths(event))
+        return files, provider_drop.links(self._dropped_texts(event))
+
     def _on_drag(self, event: QDropEvent) -> None:
-        """Dragged over the window (or its overlays): taken only when it would load."""
-        if not self._closing and self.controller.accepts_subtitles(self._dropped_paths(event)):
+        """Dragged over the window (or its overlays): taken only when it would load: subtitle
+        files for what plays, or a playlist file or a provider's link (2.2)."""
+        files, links = self._dropped_providers(event)
+        subtitles = self.controller.accepts_subtitles(self._dropped_paths(event))
+        if not self._closing and (subtitles or files or links):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def _on_drop(self, event: QDropEvent) -> None:
-        if not self._closing and self.controller.drop_subtitles(self._dropped_paths(event)):
+        """Subtitle files go to what plays; playlist files and links become providers."""
+        if self._closing:
+            event.ignore()
+            return
+        subtitles = self.controller.drop_subtitles(self._dropped_paths(event))
+        files, links = self._dropped_providers(event)
+        added = bool(files or links)
+        if added:
+            # After the drop: adding switches the list, and a portal's form is a dialog.
+            QTimer.singleShot(0, self, lambda: self.add_dropped_providers(files, links))
+        if subtitles or added:
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -1019,14 +1052,68 @@ class TVWindow(QMainWindow):
             OptionsDialog(self).exec()
             self.menus.rebuild_providers()
 
-    def add_provider(self) -> None:
-        """Settings on the Providers tab, with a new provider to fill in (spec §8)."""
+    def add_provider(self, link: Optional[ProviderLink] = None) -> None:
+        """Settings on the Providers tab, with a new provider to fill in (spec §8); from
+        `link` when one was dropped (a portal's, whose MAC the user adds)."""
         if self._closing:
             return
         dialog = OptionsDialog(self)
         dialog.start_new_provider()
+        if link is not None:
+            dialog.fill_from_link(link)
         dialog.exec()
         self.menus.rebuild_providers()
+
+    def add_dropped_providers(self, files: list[str], links: list[ProviderLink]) -> None:
+        """Playlist files and provider links dropped on the window (2.2) become providers, as
+        Free channels adds one: the list switches to the last one and a toast says so. One
+        already in the list is only switched to. A portal's link without its MAC opens the
+        add-provider form filled in instead."""
+        if self._closing:
+            return
+        entries = [provider_drop.file_entry(path) for path in files]
+        form: Optional[ProviderLink] = None
+        for link in links:
+            entry = provider_drop.link_entry(link)
+            if entry is not None:
+                entries.append(entry)
+            elif form is None:
+                form = link
+        added: list[str] = []
+        known: list[str] = []
+        for entry in entries:
+            name, existing = self._add_provider_entry(entry, provider_drop.same_provider)
+            (known if existing else added).append(name)
+        if added or known:
+            self._show_provider((added or known)[-1])
+            if added:
+                names = ", ".join(added)
+                self.screens.notify(f"Added {names} to your providers")
+            else:
+                self.screens.notify(f"{known[-1]} is already in your providers")
+        if form is not None:
+            self.add_provider(form)
+
+    def _add_provider_entry(self, entry: dict, same) -> tuple[str, bool]:
+        """Add provider `entry` (renamed "name (2)"… when its name is taken), unless the list
+        has it already (`same(listed, entry)`): (its name in the list, whether it was there)."""
+        providers = self.provider_manager.providers
+        existing = next((p for p in providers if same(p, entry)), None)
+        if existing is not None:
+            return str(existing.get("name", "")), True
+        entry["name"] = provider_drop.unique_name(entry["name"], (p.get("name") for p in providers))
+        providers.append(entry)
+        self.provider_manager.save_providers()
+        self.catalogs.reload()  # the find, the Library and All providers hear of it
+        return entry["name"], False
+
+    def _show_provider(self, name: str) -> None:
+        """The channel list shows provider `name` (loaded when it is not the one shown)."""
+        self.config_manager.selected_provider_name = name
+        self.save_config()
+        self.menus.rebuild_providers()
+        if name != self.catalog.current_provider_name():
+            self.set_provider()
 
     def show_free_channels(self, global_pos: QPoint) -> None:
         """The Free channels… menu under `global_pos` (the welcome card's and the drawer's)."""
@@ -1039,23 +1126,11 @@ class TVWindow(QMainWindow):
         if self._closing:
             return
         entry = free_channels.provider_entry(code)
-        providers = self.provider_manager.providers
-        existing = next((p for p in providers if p.get("url") == entry["url"]), None)
-        if existing is not None:
-            name = existing.get("name", "")
-        else:
-            taken = {p.get("name") for p in providers}
-            name, number = entry["name"], 2
-            while name in taken:
-                name = f"{entry['name']} ({number})"
-                number += 1
-            entry["name"] = name
-            providers.append(entry)
-            self.provider_manager.save_providers()
+        name, existing = self._add_provider_entry(entry, lambda p, e: p.get("url") == e["url"])
         self.config_manager.selected_provider_name = name
         self.save_config()
         self.menus.rebuild_providers()
-        if existing is None or name != self.catalog.current_provider_name():
+        if not existing or name != self.catalog.current_provider_name():
             self.set_provider()
 
     def _providers_in_use(self) -> set[str]:

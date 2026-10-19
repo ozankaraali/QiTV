@@ -56,6 +56,8 @@ On a first start QiTV opens with a [publicly available playlist](https://github.
    - **STB:** the portal address and your MAC address (serial number and device ID only if your provider asks for them).
 
    Got a single link from your provider? Copy it and press **Paste link** beside the address (or paste it into the address): an Xtream link with your username and password in it (`get.php?username=…&password=…` or `player_api.php?…`) fills in Xtream, the server, the username and the password; a playlist address ending in .m3u or .m3u8 fills in an M3U playlist; a portal address with `/c/` or `/stalker_portal/` in it fills in STB (add the MAC address yourself).
+
+   You can also drop a playlist file (.m3u or .m3u8) or such a link onto the QiTV window: it becomes a provider and the channel list switches to it (a portal's link opens this form, for its MAC address). A subtitle file dropped at the same time still goes to what plays.
 4. Press **Verify Provider** to check the details, then **Save**. QiTV loads the channels, and the Library loads the provider's movies and series.
 
 When a channel or a film doesn't open, or a provider can't be reached, QiTV asks the provider's account why (without opening a stream, at most once a minute) and says it in plain words: the subscription has expired, all the streams the account allows are in use ("Your account allows 1 stream; one is in use"), the username or password is wrong, the server refused or blocked QiTV, or it didn't answer. **Verify Provider** says the same when it fails.
