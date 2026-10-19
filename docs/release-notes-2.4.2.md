@@ -11,3 +11,5 @@ instead of using others' distributions, which may have malware.**
   fullscreen again.
 - **It floats sooner.** The small window appears as soon as you leave the fullscreen desktop,
   instead of up to a second later.
+- **Türkçe:** inside the opened guide, its timeline is called "Yayın akışı" (the guide itself is
+  still "Rehber").
