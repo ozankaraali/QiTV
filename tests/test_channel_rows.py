@@ -431,9 +431,15 @@ class ColumnTests(unittest.TestCase):
         return host, col
 
     def test_hover_keeps_the_column_open(self):
-        host, col = self.hosted_column(idle_ms=200)
+        # The pointer arrives with no idle time running out meanwhile (under load more than
+        # 200 ms could pass before the moves were handled): the test waits on the hover, then
+        # gives the column a short idle time again and lets three of them pass.
+        host, col = self.hosted_column(idle_ms=60_000)
         for x in (240, 250, 260):  # onto the column's rows, moving
             QTest.mouseMove(host.windowHandle(), QPoint(x, x + 100))
+        self.assertTrue(wait_until(lambda: col._hovering and col.underMouse()))
+        col._idle.setInterval(200)
+        col.highlight(0)  # a zap step: the idle time starts now
         elapse(600)
         self.assertTrue(col.isVisible())  # the pointer rests on it, about to click a row
         QTest.mouseMove(host.windowHandle(), QPoint(1000, 300))  # off the column
