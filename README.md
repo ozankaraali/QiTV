@@ -118,8 +118,9 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
 | <kbd>P</kbd> / <kbd>Ctrl/⌘+P</kbd> | Picture-in-picture with the previous channel, or close it |
 | <kbd>S</kbd> | Swap the large and the small picture |
+| <kbd>V</kbd> | Multiview: several channels at once, or back to one |
 | <kbd>Alt/⌥+P</kbd> | Mini player |
-| <kbd>Esc</kbd> | Close what is open, leave fullscreen; after a movie, back to the Library |
+| <kbd>Esc</kbd> | Close what is open, leave the multiview or fullscreen; after a movie, back to the Library |
 
 **Channel list**
 
@@ -183,6 +184,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Ctrl/⌘+1</kbd> | Live TV |
 | <kbd>Ctrl/⌘+2</kbd> | Movies |
 | <kbd>Ctrl/⌘+3</kbd> | Series |
+| <kbd>Ctrl/⌘+4</kbd> | Multiview |
 | <kbd>Ctrl/⌘+O</kbd> | Open a file |
 | <kbd>Ctrl/⌘+,</kbd> | Settings |
 | <kbd>Ctrl/⌘+R</kbd> | Refresh channels and guide |
@@ -238,6 +240,17 @@ Watch a second channel in a small picture in the bottom-right corner:
 Picture-in-picture is for live TV, and it needs two streams: a provider that allows two at a time, or one stream each from two providers. A film or an episode from the Library is the one exception: it takes the big picture and keeps the channel you were watching small (see [Keep watching while you browse](#keep-watching-while-you-browse)).
 
 ![Picture-in-picture with the volume mixer](docs/screenshots/08-pip.png)
+
+### Multiview
+
+Watch several live channels side by side: press <kbd>V</kbd>, choose **View → Multiview** (<kbd>Ctrl/⌘+4</kbd>) or click the grid button on the player controls. The channel you are watching becomes the first tile and an open picture-in-picture the second; the others show **+**.
+
+- Click a tile to give it the focus: its sound plays, and the player controls, the channel list, zapping and the banner act on it. Click **+** to choose a channel for that tile.
+- The chip beside the grid button switches between 2 and 4 tiles, and also 6 and 9 when hardware decoding is on (**Settings**).
+- Each tile asks your provider for a stream of its own. When a provider has no stream to spare, the tile says so and keeps the channel: click it to try again. QiTV never retries by itself.
+- <kbd>V</kbd>, <kbd>Esc</kbd> or a double-click on a tile goes back to one picture: the focused tile becomes the big picture and the tile you had before it stays as picture-in-picture.
+
+Tiles play live without rewind for now.
 
 ## The guide
 

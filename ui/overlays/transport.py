@@ -13,8 +13,10 @@ source stalled. The bar and the Go live chip show only when the viewer left live
 chosen speed); a drag keeps the bar.
 
 Left of fullscreen sit the mini player (the whole window small in a corner, Alt+P), on live
-TV while the window offers picture in picture the second channel (P), then "Open in external
-player" (the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
+TV while the window offers picture in picture the second channel (P) and the multiview (V,
+lit while its grid shows; the second channel gives way then), then "Open in external player"
+(the shell's VLC/MPV menu for what plays now). Hovering those names them and their keys.
+While the grid shows, a chip left of them names its layout ("2×2"): a click changes it.
 Left of the sound (♫) a speaker opens the volume mixer on the large picture's row; it shows
 whether that picture is muted. ♫ opens the Sound panel above it and the subtitles button
 the Subtitles panel (ui/track_controls.py): the controls stay up while one shows (`hold`).
@@ -76,6 +78,7 @@ WAITING = "Waiting for the channel…"  # the source stalled, its connection sti
 RECONNECTING = "Reconnecting…"  # the helper opens a new connection to it
 TOOLTIPS = {
     "pip": "Second channel (P)",
+    "layout": "Tiles: 2, 4, 6 or 9",
     "mini": "Mini player (Alt+P)",
     "fullscreen": "Fullscreen (F)",
     "mini_back": "Back to the full window (Alt+P)",
@@ -103,6 +106,7 @@ KEY_HINTS = {
     "subtitles": ("Subtitles: track, file and sync", "Shift+J, Shift+K"),
 }
 FAVORITE_KEY = "Ctrl+D"
+GRID_KEY = "V"  # the multiview: its grid, or back to one picture
 # button name -> painting icon, if they differ
 _ICONS = {"mini": "mini_player", "pip": "pip", "previous": "recent"}
 _LABELS = ("live", "indicator", "times")  # shown, not clicked: over the PiP, clicks go on
@@ -118,6 +122,7 @@ _ICON_BUTTONS = (  # painted as icons
     "volume",
     "external",
     "pip",
+    "grid",
     "mini",
     "fullscreen",
 )
@@ -212,6 +217,8 @@ class Transport(Overlay):
     programmeStartRequested = Signal()
     seekToRequested = Signal(float)
     pipRequested = Signal()  # the second channel: open picture in picture, or close it
+    gridRequested = Signal()  # the multiview: its grid, or back to one picture
+    layoutRequested = Signal()  # the grid's layout chip: the next layout
     miniPlayerRequested = Signal()
     # "Open in external player": the shell's menu opens from this point (the button's
     # top-left, global coordinates).
@@ -247,6 +254,9 @@ class Transport(Overlay):
         self._next_available = False
         self._pip_available = False  # the window can open a second channel
         self._pip_open = False
+        self._grid_available = False  # the window can show the multiview's grid
+        self._grid_shown = False
+        self._grid_layout = ""  # the grid's layout, as its chip names it ("2×2")
         self._pip_rect = QRect()  # the small picture: the shades leave it alone
         self._muted = False  # the large picture's mute: the speaker shows it
         self._mini = self._fullscreen = False  # their buttons then show the way back
@@ -373,6 +383,15 @@ class Transport(Overlay):
             self.update()
             self._controls_changed()
 
+    def set_grid_state(self, available: bool, shown: bool, layout: str = "") -> None:
+        """The multiview's button: shown on live TV when `available`; lit while its grid
+        shows, with the layout chip naming `layout` ("2×2") beside it."""
+        state = (available, shown, layout if shown else "")
+        if state != (self._grid_available, self._grid_shown, self._grid_layout):
+            self._grid_available, self._grid_shown, self._grid_layout = state
+            self.update()
+            self._controls_changed()
+
     def set_muted(self, muted: bool) -> None:
         """Whether the large picture is muted: its speaker shows it."""
         if muted != self._muted:
@@ -423,16 +442,24 @@ class Transport(Overlay):
 
     def hole_claims(self) -> QRegion:
         """Over the PiP, the clicks this keeps (host coordinates): its buttons and its bar, and
-        on live TV the channel's name and star."""
+        on live TV the channel's name and star. Over the multiview's grid (the whole picture)
+        also what it only says (LIVE, the times, the subtitle, the clock), so it shows whole."""
         region = QRegion()
         for name, rect in self._layout().items():
-            if name in _LABELS:
+            if name in _LABELS and not self._grid_shown:
                 continue
             if name == "seek":
                 rect = rect.adjusted(0, -rect.height(), 0, rect.height())  # its hit area
             region = region.united(QRegion(rect.toAlignedRect()))
         for rect in self.title_rects().values():
             region = region.united(QRegion(rect.toAlignedRect()))
+        if self._grid_shown:  # over the multiview's grid what it says shows whole too
+            row = self._title_row()
+            region = region.united(QRegion(row.clock_rect.toAlignedRect()))
+            if self._subtitle:
+                width = row.clock_rect.left() - Units(self.width()).px(2) - row.subtitle_x
+                subtitle = QRectF(row.subtitle_x, row.name_rect.y(), width, row.name_rect.height())
+                region = region.united(QRegion(subtitle.toAlignedRect()))
         return region.translated(self.geometry().topLeft())
 
     def controls_top(self) -> int:
@@ -453,10 +480,19 @@ class Transport(Overlay):
 
     def _controls_changed(self) -> None:
         """The host masks the PiP anew when this shows other controls (a mode, the bar)."""
+        layout = self._layout()
+        grid = self._grid_shown  # over the grid its labels and subtitle are claimed too
         claimed = (
             self.size(),
-            tuple(sorted(n for n in self._layout() if n not in _LABELS)),
+            tuple(sorted(n for n in layout if n not in _LABELS)),
             tuple((n, r.getRect()) for n, r in self.title_rects().items()),  # moves with the name
+            grid,
+            (
+                tuple((n, r.toAlignedRect().getRect()) for n, r in layout.items() if n in _LABELS)
+                if grid
+                else ()
+            ),
+            self._subtitle if grid else "",
         )
         if claimed == self._claimed:
             return
@@ -475,6 +511,8 @@ class Transport(Overlay):
         return ""
 
     def _tooltip(self, name: str) -> str:
+        if name == "grid":
+            return key_hint("Back to one picture" if self._grid_shown else "Multiview", GRID_KEY)
         if name == "favorite":
             what = "Remove from favorites" if self._favorite else "Add to favorites"
             return key_hint(what, FAVORITE_KEY)
@@ -706,6 +744,7 @@ class Transport(Overlay):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
                 x -= un.px(1.8)
+            x = self._put_layout_chip(rects, un, x, cy)
             pill_w = un.px(5.2)
             rects["live"] = QRectF(x - pill_w - un.px(0.4), cy - un.px(1.1), pill_w, un.px(2.2))
             if self._timeshift and self._edge_lag is not None:
@@ -741,6 +780,7 @@ class Transport(Overlay):
                 x -= icon
                 rects[name] = QRectF(x, cy - icon / 2, icon, icon)
                 x -= un.px(1.8)
+            x = self._put_layout_chip(rects, un, x, cy)
             if shifted and self._behind():
                 fm = QFontMetricsF(self._chip_font(un))
                 width = 2 * un.px(1.0) + un.px(0.7) + un.px(0.5) + fm.horizontalAdvance("Go live")
@@ -773,12 +813,23 @@ class Transport(Overlay):
             }
         return {"speed": QRectF(x, top, label, h)} if x + label <= room else {}
 
+    def _put_layout_chip(self, rects: dict[str, QRectF], un: Units, x: float, cy: float) -> float:
+        """While the grid shows, its layout chip ends at `x`; where the next control ends."""
+        if not (self._grid_shown and self._grid_layout):
+            return x
+        fm = QFontMetricsF(self._chip_font(un))
+        width = 2 * un.px(1.0) + fm.horizontalAdvance(self._grid_layout)
+        h = self._chip_h(un)
+        rects["layout"] = QRectF(x - width, cy - h / 2, width, h)
+        return x - width - un.px(1.2)
+
     def _right_buttons(self, *rest: str) -> tuple[str, ...]:
         """The icon buttons from the right edge inwards: the window's and the picture's, the
         sound's (`rest`), then Search and, on live TV, the guide and the previous channel."""
-        pip = ("pip",) if self._pip_available and self._live else ()
+        grid = ("grid",) if self._grid_available and self._live else ()
+        pip = ("pip",) if self._pip_available and self._live and not self._grid_shown else ()
         tv = ("search", "guide", "previous") if self._live else ("search",)
-        return ("fullscreen", "mini", *pip, "external", *rest, *tv)
+        return ("fullscreen", "mini", *pip, *grid, "external", *rest, *tv)
 
     def seek_rect(self) -> QRectF:
         return self._layout()["seek"]
@@ -842,8 +893,18 @@ class Transport(Overlay):
             self._paint_vod(p, un, rects, text)
         for name in _ICON_BUTTONS:
             if name in rects:
-                lit = (name == "pip" and self._pip_open) or name == self._held
+                lit = (
+                    (name == "pip" and self._pip_open)
+                    or (name == "grid" and self._grid_shown)
+                    or name == self._held
+                )
                 draw_icon(p, self.icon(name), rects[name], qcolor(PALETTE.accent) if lit else text)
+        chip = rects.get("layout")
+        if chip is not None:
+            fill_round(p, chip, qcolor(PALETTE.text, 0.14), chip.height() / 2)
+            p.setFont(self._chip_font(un))
+            p.setPen(text)
+            p.drawText(chip, Qt.AlignCenter, self._grid_layout)
         p.end()
 
     def _paint_scrims(self, p: QPainter) -> None:
@@ -1231,6 +1292,10 @@ class Transport(Overlay):
                 self.subtitleRequested.emit()
             elif name == "pip":
                 self.pipRequested.emit()
+            elif name == "grid":
+                self.gridRequested.emit()
+            elif name == "layout":
+                self.layoutRequested.emit()
             elif name == "mini":
                 self.miniPlayerRequested.emit()
             elif name == "external":

@@ -154,6 +154,17 @@ class DirectSlotTests(unittest.TestCase):
         self.session.let_go()
         self.assertEqual((self.played, self.holders()), (["first", "second"], ["main"]))
 
+    def test_a_direct_open_with_a_limit_plays_only_when_a_stream_is_spare(self):
+        # A multiview tile: other players' streams count against the provider's limit.
+        denied = []
+        self.tuner.denied.connect(denied.append)
+        self.budget.request(PROVIDER, 1, purpose="pip")
+        self.tuner.open(self.play("tile"), direct=True, provider=PROVIDER, limit=1)
+        self.assertEqual((self.played, denied, self.holders()), ([], [1], ["pip"]))
+        self.assertTrue(self.tuner.idle())
+        self.tuner.open(self.play("tile"), direct=True, provider=PROVIDER, limit=2)
+        self.assertEqual((self.played, sorted(self.holders())), (["tile"], ["main", "pip"]))
+
     def test_an_external_launch_holds_nothing(self):
         self.tuner.open(self.play("vlc"))
         self.assertEqual(self.played, ["vlc"])

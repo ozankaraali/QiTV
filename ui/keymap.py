@@ -47,6 +47,7 @@ class Action(str, Enum):
     LIBRARY = "library"
     PIP = "pip"  # picture in picture: open (the previous or highlighted channel) or close
     SWAP = "swap"  # the large and the small picture trade places
+    MULTIVIEW = "multiview"  # the grid of channels, or back to one picture
     TAB = "tab"  # the mixer's other row
     SOUND_EARLIER = "sound_earlier"  # J: the sound 50 ms earlier against the picture
     SOUND_LATER = "sound_later"  # K: 50 ms later (VLC's keys)
@@ -104,6 +105,7 @@ _PLAYER_CHARS = {
     _K.Key_Minus.value: Action.VOL_DOWN,
     _K.Key_P.value: Action.PIP,
     _K.Key_S.value: Action.SWAP,
+    _K.Key_V.value: Action.MULTIVIEW,
     _K.Key_J.value: Action.SOUND_EARLIER,
     _K.Key_K.value: Action.SOUND_LATER,
 }
@@ -283,8 +285,13 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+D", "Add or remove a favorite channel"),
         ("P, Ctrl+P", "Picture-in-picture with the previous channel, or close it"),
         ("S", "Swap the large and the small picture"),
+        ("V", "Multiview: several channels at once, or back to one"),
         ("Alt+P", "Mini player"),
-        ("Esc", "Close what is open, leave fullscreen; after a movie, back to the Library"),
+        (
+            "Esc",
+            "Close what is open, leave the multiview or fullscreen; after a movie, back to the "
+            "Library",
+        ),
     ],
     "drawer": [
         ("Up, Down", "Move"),
@@ -333,6 +340,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Ctrl+1", "Live TV"),
         ("Ctrl+2", "Movies"),
         ("Ctrl+3", "Series"),
+        ("Ctrl+4", "Multiview"),
         ("Ctrl+O", "Open a file"),
         ("Ctrl+,", "Settings"),
         ("Ctrl+R", "Refresh channels and guide"),

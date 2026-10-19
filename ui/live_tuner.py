@@ -122,6 +122,7 @@ def wait_for_each_other(*tuners: "LiveTuner") -> None:
 class LiveTuner(QObject):
     startFailed = Signal(str)  # LiveSession.start() raised: its message (scrub before showing)
     released = Signal()  # after a stop, nothing of the player is open any more
+    denied = Signal(int)  # a direct open with a limit found no stream to spare (the limit)
 
     def __init__(
         self,
@@ -154,6 +155,7 @@ class LiveTuner(QObject):
         self._action_direct = False
         self._action_slot = False  # that open plays a provider stream: it holds a slot
         self._action_provider: Optional[str] = None  # whose slot it holds
+        self._action_limit: Optional[int] = None  # within which it is taken (None: always)
         self._peers: list[LiveTuner] = []  # the other pictures' (wait_for_each_other)
         self._input_cap = QTimer(self, singleShot=True, interval=RELEASE_CAP_MS)
         self._input_cap.timeout.connect(self._on_input_cap)
@@ -208,17 +210,21 @@ class LiveTuner(QObject):
         direct: bool = False,
         local: bool = False,
         provider: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> None:
         """Stop what plays, then run `action` once it is released: now when nothing waits.
 
         `direct`: `action` plays a provider URL in the session, whose input the next open
         then waits for; its slot is `provider`'s (by default the selected provider's).
         `local`: it plays a local file instead, which takes no provider slot.
+        `limit` (a multiview tile's direct play): the slot is taken only when the provider's
+        other streams leave one; else `denied(limit)` and nothing plays.
         """
         self.stop()
         self._action, self._action_direct = action, direct or local
         self._action_slot = direct and not local
         self._action_provider = provider
+        self._action_limit = limit
         self._proceed()
 
     def tune(self, start: LiveStart, provider: str, limit: Optional[int]) -> None:
@@ -266,12 +272,18 @@ class LiveTuner(QObject):
             if self._action_slot and any(peer.releasing() for peer in self._peers):
                 return  # a closing stream may hold the provider's last slot (a PiP's)
             action, self._action = self._action, None
-            self._direct = self._action_direct
             if self._action_slot:
                 provider = self._action_provider
                 if provider is None:
                     provider = str(getattr(self.config, "selected_provider_name", "") or "")
-                self._held.take(provider)
+                limit = self._action_limit
+                if limit is None:
+                    self._held.take(provider)
+                elif not self._held.try_take(provider, limit):
+                    logger.info("No stream to spare for a tile: the provider allows %s", limit)
+                    self.denied.emit(limit)
+                    return  # nothing plays: the slot's stream was stopped already
+            self._direct = self._action_direct
             action()
         elif self._pending is not None and stream is not None and stream.is_granted():
             self._start()

@@ -15,6 +15,10 @@ muted one keeps it muted. Config `pip_volume` is the small picture's level: the 
 player's, saved (once the mixer hides) only from changes made while it is the small one,
 and given back to it at startup.
 
+While the multiview's grid shows, the rows are its tiles that play: the focused one first
+(it is the large picture: the keys act on it), then the others in the grid's order, each
+named "Tile N" after its place.
+
 Without a mixer (tests) or without picture in picture, a toast says the volume instead, and
 without a SessionManager the player's own volume and mute are used.
 """
@@ -51,12 +55,14 @@ class MixerControls(QObject):
         toast: Callable[..., None],
         names: Callable[[], tuple[str, str]],
         audio_changed: Callable[[], None],
+        tiles: Optional[Callable[[], Optional[list[tuple[str, str, str]]]]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`mixer` is the overlay (None: toasts); `session()` the large picture's player;
         `names()` the large and the small picture's channel names; `audio_changed()` runs
         after any level or mute change, and after PiP opened, closed or swapped (the PiP
-        label's and the transport's speakers follow)."""
+        label's and the transport's speakers follow); `tiles()` the multiview's rows while its
+        grid shows ((slot name, title, channel), the focused tile first), else None."""
         super().__init__(parent)
         self._overlay = mixer
         self.sessions = sessions
@@ -65,6 +71,7 @@ class MixerControls(QObject):
         self._toast = toast
         self._names = names
         self._audio_changed = audio_changed
+        self._tiles = tiles
         self._row = MAIN_ROW
         self._pip_level: Optional[int] = None  # the small picture's changed level, to remember
         self._main_muted = False  # without a SessionManager: the player's own mute
@@ -184,12 +191,11 @@ class MixerControls(QObject):
         self._audio_changed()
         if overlay is None:
             return
-        slots = self._slots()
-        self._row = max(0, min(row, len(slots) - 1))
-        names = self._names()
+        shown = self._rows()
+        self._row = max(0, min(row, len(shown) - 1))
         rows = [
-            MixerRow(title, names[index], self._level(index), self._muted(index))
-            for index, title in enumerate((MAIN_TITLE, PIP_TITLE)[: len(slots)])
+            MixerRow(title, channel, self._level(index), self._muted(index))
+            for index, (_slot, title, channel) in enumerate(shown)
         ]
         overlay.show_rows(rows, self._row)
 
@@ -208,13 +214,26 @@ class MixerControls(QObject):
 
     # ---- levels and mutes ---------------------------------------------------------------------
 
-    def _slots(self) -> list[Optional[Slot]]:
-        """The large picture's slot, then the small one's (None without a SessionManager)."""
+    def _rows(self) -> list[tuple[Optional[Slot], str, str]]:
+        """Each row's slot, title and channel: the large picture's, then the small one's (the
+        multiview's tiles while its grid shows; no slot without a SessionManager)."""
         sessions = self.sessions
+        names = self._names()
         if sessions is None:
-            return [None]
+            return [(None, MAIN_TITLE, names[0])]
+        tiles = self._tiles() if self._tiles is not None else None
+        if tiles:
+            return [(sessions.slot(name), title, channel) for name, title, channel in tiles]
         small = sessions.small()
-        return [sessions.large()] if small is None else [sessions.large(), small]
+        slots = [sessions.large()] if small is None else [sessions.large(), small]
+        return [
+            (slot, title, names[index])
+            for index, (slot, title) in enumerate(zip(slots, (MAIN_TITLE, PIP_TITLE)))
+        ]
+
+    def _slots(self) -> list[Optional[Slot]]:
+        """The rows' slots: the large picture's first (None without a SessionManager)."""
+        return [slot for slot, _title, _channel in self._rows()]
 
     def _slot(self, row: int) -> Optional[Slot]:
         slots = self._slots()

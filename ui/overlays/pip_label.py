@@ -56,6 +56,65 @@ _SMALLEST_STATE_PX = 6  # LIVE and the time behind live shrink down to this, nev
 _TYPICAL_BEHIND = "−00:00"  # the pill keeps room for this, or LIVE, before the buttons grow
 
 
+def paint_backdrop(p: QPainter, rect: QRectF, radius: float | None = None) -> None:
+    """The label's look behind a pill or a button (a multiview tile's card too): the panel
+    colour, round, with a faint edge."""
+    radius = rect.height() / 2 if radius is None else radius
+    fill_round(p, rect, qcolor(PALETTE.panel), radius)
+    p.save()
+    p.setPen(QPen(qcolor(PALETTE.text, 0.12), 1.0))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+    p.restore()
+
+
+def paint_pill(
+    p: QPainter,
+    pill: QRectF,
+    name: str,
+    state: str,
+    name_font: QFont,
+    state_font: QFont,
+    pad: float,
+    gap: float,
+    dot: float,
+    dot_gap: float,
+) -> None:
+    """A channel's name and its state in a pill, as the PiP label shows them (a multiview
+    tile's label too): LIVE after a red dot, a time behind live in the accent colour, any
+    other state muted. `name` and `state` fit already (elided)."""
+    paint_backdrop(p, pill)
+    p.save()
+    p.setClipRect(pill)
+    x = pill.left() + pad
+    if name:
+        p.setFont(name_font)
+        p.setPen(qcolor(PALETTE.text))
+        name_w = QFontMetrics(name_font).horizontalAdvance(name)
+        p.drawText(
+            QRectF(x, pill.top(), name_w + 1, pill.height()),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            name,
+        )
+        x += name_w + gap
+    p.setFont(state_font)
+    rest = QRectF(x, pill.top(), max(0.0, pill.right() - x), pill.height())
+    align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+    if state == LIVE:
+        fill_round(
+            p, QRectF(x, pill.center().y() - dot / 2, dot, dot), qcolor(PALETTE.live), dot / 2
+        )
+        p.setPen(qcolor(PALETTE.text, 0.9))
+        p.drawText(rest.adjusted(dot + dot_gap, 0, 0, 0), align, LIVE)
+    else:
+        shifted = state.startswith(_SHIFTED_PREFIXES)
+        p.setPen(
+            qcolor(PALETTE.accent) if shifted else qcolor(PALETTE.text, PALETTE.text_muted_alpha)
+        )
+        p.drawText(rest, align, state)
+    p.restore()
+
+
 @dataclass(frozen=True)
 class _Layout:
     """Label coordinates."""
@@ -305,48 +364,21 @@ class PipLabel(Overlay):
         p.end()
 
     def _paint_backdrop(self, p: QPainter, rect: QRectF) -> None:
-        radius = rect.height() / 2
-        fill_round(p, rect, qcolor(PALETTE.panel), radius)
-        p.save()
-        p.setPen(QPen(qcolor(PALETTE.text, 0.12), 1.0))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-        p.restore()
+        paint_backdrop(p, rect)
 
     def _paint_pill(self, p: QPainter, layout: _Layout) -> None:
-        pill = layout.pill
-        self._paint_backdrop(p, pill)
-        p.save()
-        p.setClipRect(pill)
-        x = pill.left() + layout.pad
-        if layout.name:
-            p.setFont(layout.name_font)
-            p.setPen(qcolor(PALETTE.text))
-            name_w = QFontMetrics(layout.name_font).horizontalAdvance(layout.name)
-            p.drawText(
-                QRectF(x, pill.top(), name_w + 1, pill.height()),
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                layout.name,
-            )
-            x += name_w + layout.gap
-        p.setFont(layout.state_font)
-        rest = QRectF(x, pill.top(), max(0.0, pill.right() - x), pill.height())
-        align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        if self._state == LIVE:
-            d = layout.dot
-            fill_round(p, QRectF(x, pill.center().y() - d / 2, d, d), qcolor(PALETTE.live), d / 2)
-            p.setPen(qcolor(PALETTE.text, 0.9))
-            p.drawText(rest.adjusted(d + layout.dot_gap, 0, 0, 0), align, LIVE)
-        else:
-            shifted = self._state.startswith(_SHIFTED_PREFIXES)
-            color = (
-                qcolor(PALETTE.accent)
-                if shifted
-                else qcolor(PALETTE.text, PALETTE.text_muted_alpha)
-            )
-            p.setPen(color)
-            p.drawText(rest, align, layout.state)
-        p.restore()
+        paint_pill(
+            p,
+            layout.pill,
+            layout.name,
+            LIVE if self._state == LIVE else layout.state,
+            layout.name_font,
+            layout.state_font,
+            layout.pad,
+            layout.gap,
+            layout.dot,
+            layout.dot_gap,
+        )
 
     def _paint_cross(self, p: QPainter, rect: QRectF) -> None:
         arm = rect.width() * 0.17

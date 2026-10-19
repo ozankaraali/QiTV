@@ -9,7 +9,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, Qt, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMenu
 
@@ -88,6 +88,20 @@ class FakeFrame(QObject):
     def set_large(self, name):
         self.calls.append(("set_large", name))
         self.large = name
+
+    def set_roles(self, large, small):  # the multiview leaves: these are the PiP's roles
+        self.calls.append(("set_roles", large, small))
+        self.large = large
+
+    def suspend(self):  # the multiview lays the surfaces out meanwhile
+        self.calls.append(("suspend",))
+        self.shown = False
+
+    def resume(self):
+        self.calls.append(("resume",))
+
+    def small_rect(self):
+        return QRect(900, 500, 320, 180) if self.shown else QRect()
 
 
 class FakePipLabel(FakeOverlay):

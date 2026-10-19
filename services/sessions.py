@@ -28,6 +28,13 @@ but this slot's" is the holders under other names. Opening the small slot:
 A swap waits for nothing: while the small slot's channel change is still on its way, it is
 refused (False).
 
+While a multiview's grid shows (`enter_grid` … `leave_grid`), picture in picture stands
+aside: the slots are tiles, the large one is the focused tile, and a tile opens a channel
+directly (`open_slot`: no time-shift) only when its provider's other streams leave it one;
+else `slotDenied` and nothing opens: a tile never waits, nor asks again by itself. A tile's
+stream that fails says so (`slotFailed`); `close_slot` stops one. Leaving the grid keeps one
+tile as the PiP, or none.
+
 Audio follows the large picture: the PiP (and a tile) opens muted, and while the slot taking
 the large role is muted it takes the user's mute from the old large slot, which is muted in
 its place. Once the user makes a small slot audible (the mixer's PiP row raised above 0, or
@@ -41,7 +48,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 import logging
-from typing import Any, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 from PySide6.QtCore import QObject, Signal, SignalInstance
 
@@ -142,6 +149,11 @@ class SessionManager(QObject):
     # granted (then without denied). PiP is closed by then.
     pipFailed = Signal(str)
     slotTimeline = Signal(str, dict)  # slot name, LiveSession timeline dict
+    # The multiview's tiles (slot names): a channel was asked for (True) or the tile closed;
+    # its provider had no stream to spare (the limit; nothing opened); its stream failed.
+    slotState = Signal(str, bool)
+    slotDenied = Signal(str, int)
+    slotFailed = Signal(str, str)
 
     def __init__(
         self,
@@ -167,6 +179,8 @@ class SessionManager(QObject):
         self._levels: dict[str, int] = {}
         self._muted: dict[str, bool] = {}
         self._tuners: dict[str, SlotTuner] = {}
+        self._grid = False  # the multiview's grid shows (enter_grid)
+        self._direct: set[str] = set()  # the tiles open_slot opened, until they stop
         self._add(main, MAIN_LEVEL, muted=False)
         self._add(pip, PIP_LEVEL, muted=True)
         # A wanted level makes PlaybackSession apply it on every media it opens; without one
@@ -195,6 +209,12 @@ class SessionManager(QObject):
         stream.granted.connect(self._on_granted)
         slot.live.failed.connect(partial(self._on_failed, slot.name))
         slot.live.timelineChanged.connect(partial(self._on_timeline, slot.name))
+        denied = getattr(tuner, "denied", None)  # LiveTuner's: a tile's direct open
+        if denied is not None:
+            denied.connect(partial(self._on_slot_denied, slot.name))
+        errors = getattr(slot.playback, "errorOccurred", None)
+        if errors is not None:
+            errors.connect(partial(self._on_slot_error, slot.name))
 
     # ---- roles --------------------------------------------------------------------------------
 
@@ -293,6 +313,82 @@ class SessionManager(QObject):
         self.pipStateChanged.emit(True)
         return True
 
+    # ---- the multiview's tiles ----------------------------------------------------------------
+
+    def grid(self) -> bool:
+        """The multiview's grid shows."""
+        return self._grid
+
+    def enter_grid(self) -> None:
+        """The multiview's grid shows: picture in picture stands aside, its slot a tile that
+        plays on (no pipStateChanged: the shell hides the PiP's frame and label itself). The
+        PiP's open or change on its way, if any, is the caller's to close first."""
+        self._grid = True
+        self._open = False
+
+    def leave_grid(self, keep: Optional[str] = None) -> None:
+        """Back from the grid: slot `keep` (one that plays, not the large one) is the PiP's and
+        PiP opens; None: PiP stays closed. pipStateChanged says which either way. The other
+        tiles are the caller's to close first."""
+        self._grid = False
+        self._direct.clear()
+        if keep is not None and keep != self._large.name:
+            self._small = self._slot(keep)
+            self._open = True
+            self.pipStateChanged.emit(True)
+            return
+        if self._small is self._large:  # never: set_large keeps them apart
+            self._small = next(s for s in self._slots.values() if s is not self._large)
+        self._open = False
+        self.pipStateChanged.emit(False)
+
+    def open_slot(
+        self,
+        name: str,
+        action: Callable[[], None],
+        *,
+        channel: dict,
+        provider: str,
+        limit: Optional[int],
+    ) -> None:
+        """Open `channel` in tile `name` directly: what it played stops, and once that is
+        released `action` plays the channel, if `provider`'s other streams leave one within
+        `limit`; else slotDenied(name, limit) and nothing plays. The tile's tuner holds the
+        stream's budget slot, under the tile's name, until it stops."""
+        slot = self._slot(name)
+        tuner = self._tuners[name]
+        open_ = getattr(tuner, "open", None)
+        if open_ is None:
+            raise TypeError(f"The {name} slot's tuner cannot open a channel directly")
+        slot.channel = channel
+        self._direct.add(name)
+        slot.playback.set_volume(self._levels[name])
+        self._set_mute(slot, self._muted[name])
+        self.slotState.emit(name, True)
+        open_(action, direct=True, provider=provider, limit=limit)
+
+    def close_slot(self, name: str) -> None:
+        """Stop tile `name` (muted first, so nothing is heard while it stops); its stream's
+        budget slot goes back once it is released."""
+        slot = self._slot(name)
+        slot.playback.set_muted(True)  # its next start applies its own mute again
+        self._tuners[name].stop()
+        slot.channel = slot.group_key = None
+        slot.ticket = None
+        self._direct.discard(name)
+        self.slotState.emit(name, False)
+
+    def _on_slot_denied(self, name: str, limit: int) -> None:
+        if name in self._direct:
+            self._direct.discard(name)
+            self._slot(name).channel = None  # it shows nothing
+            self.slotDenied.emit(name, limit)
+
+    def _on_slot_error(self, name: str, message: str) -> None:
+        """A tile's direct play failed: its player's error (a channel's, never a title's)."""
+        if name in self._direct:
+            self.slotFailed.emit(name, message)
+
     # ---- the small slot -----------------------------------------------------------------------
 
     def open_pip(
@@ -390,7 +486,13 @@ class SessionManager(QObject):
         slot's closes PiP; the large slot's failures are the shell's."""
         slot = self._slot(name)
         stream = self._tuners[name].stream
-        if slot is self._large or slot is not self._small:
+        if slot is self._large:
+            return
+        if self._grid:  # a tile's time-shifted stream (one that played before the grid)
+            if stream is not None and stream.running():
+                self.slotFailed.emit(name, message)
+            return
+        if slot is not self._small:
             return
         if stream is None or not stream.running():
             return
@@ -414,13 +516,15 @@ class SessionManager(QObject):
         return self._levels[slot_name]
 
     def set_level(self, slot_name: str, value: int) -> None:
-        """That stream's volume (0–100); raised on the small slot, it unmutes it too."""
+        """That stream's volume (0–100); raised on the small slot (or a tile that is not
+        focused), it unmutes it too."""
         slot = self._slot(slot_name)
         level = max(0, min(100, int(value)))
         raised = level > self._levels[slot.name]
         self._levels[slot.name] = level
         slot.playback.set_volume(level)
-        if raised and slot is self.small():  # only raising it makes the PiP audible
+        small = slot is self.small() or (self._grid and slot is not self._large)
+        if raised and small:  # only raising it makes the PiP (or a tile) audible
             self._set_mute(slot, False)
 
     def _set_mute(self, slot: Slot, muted: bool) -> None:

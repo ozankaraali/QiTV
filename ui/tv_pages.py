@@ -23,6 +23,7 @@ from PySide6.QtWidgets import QFileDialog, QWidget
 
 from services.exporter import ExportKind
 from services.library import LibraryModel
+from ui.keymap import Action
 from ui.library_controller import LibraryController
 from ui.page_stack import PageStack
 from ui.pointer import SecondClickGuard
@@ -209,6 +210,16 @@ class TVPages(QObject):
         self._show_page(window.player_page)
         self._set_return_to_library(False)
         window.controller.resume_live()
+
+    def toggle_multiview(self) -> None:
+        """View → Multiview: the grid over live TV (from the Library, live TV first: what
+        plays in its corner, or the last channel), or back to one picture."""
+        window = self._window
+        if window.closing():
+            return
+        if self.library_shown():
+            self.back_to_tv()
+        window.controller.handle(Action.MULTIVIEW)
 
     def escape_to_library(self) -> bool:
         """Esc on a movie from the Library, with nothing open on the player: back to it.

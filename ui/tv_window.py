@@ -96,6 +96,7 @@ from ui.bottom_band import BottomBand
 from ui.export_flow import ExportFlow
 from ui.find_session import FindSession
 from ui.free_channels_menu import show_menu as show_free_channels_menu
+from ui.grid_frame import GridFrame
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
 from ui.live_tuner import LiveTuner, one_disk_ring, wait_for_each_other
@@ -105,6 +106,7 @@ from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.corner_controls import CornerControls
 from ui.overlays.drawer import Drawer
+from ui.overlays.grid_tiles import GridTiles
 from ui.overlays.guide import Guide
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
@@ -445,6 +447,7 @@ class TVWindow(QMainWindow):
             return catalog.programmes(channel, start, limit=limit)
 
         host = self.host
+        self.grid_tiles = GridTiles(host)  # the multiview's labels, focus ring, "+" and cards
         self.pip_label = PipLabel(host)
         self.mixer = Mixer(host)
         self.sound_panel = TrackPanel(host)
@@ -470,15 +473,18 @@ class TVWindow(QMainWindow):
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
         # PiP the transport keeps only its own buttons and bar, and other clicks reach the
-        # small picture (OverlayHost.set_hole). The mixer shows over both (it sits above the
-        # transport's controls and beside the PiP), and the Sound and Subtitles panels over it
-        # (above their buttons). The drawer and the guide cover them all; the OpenSubtitles
-        # search covers the player with its backdrop, under the corner player's controls and
-        # the toast.
+        # small picture (OverlayHost.set_hole). The multiview's tiles are drawn under all of
+        # them, and take their clicks over the transport but for its buttons and bar
+        # (GridTiles.hits). The mixer shows over them (it sits above the transport's controls
+        # and beside the PiP), and the Sound and Subtitles panels over it (above their
+        # buttons). The drawer and the guide cover them all; the OpenSubtitles search covers
+        # the player with its backdrop, under the corner player's controls and the toast.
         for overlay in (
+            self.grid_tiles,
             self.overlays.banner,
             self.overlays.column,
             self.overlays.transport,
+            self.grid_tiles.hits,
             self.pip_label,
             self.mixer,
             self.sound_panel,
@@ -512,6 +518,9 @@ class TVWindow(QMainWindow):
         self.pip_label.pillPressed.connect(self.pip_frame.pill_press)
         self.pip_label.pillMoved.connect(self.pip_frame.pill_move)
         self.pip_label.pillReleased.connect(self.pip_frame.pill_release)
+        # The multiview lays the surfaces out as tiles of the page (no surface moves pages);
+        # after the PiP frame's filters, so it sees the tiles' presses first.
+        self.grid_frame = GridFrame(self.player_page, self.surfaces, self.grid_tiles)
         controller = TVController(
             config=config_manager,
             catalog=self.catalog,
@@ -531,6 +540,10 @@ class TVWindow(QMainWindow):
             # Why a channel or a provider failed, asked of its account (no stream opened).
             account_checks=AccountChecks(config_manager, parent=self),
             online_subtitles=OnlineSetup(self.jobs, self.subtitle_picks, self.open_url),
+            grid_frame=self.grid_frame,
+            grid_tiles=self.grid_tiles,
+            host=self.host,
+            make_slot=self._make_slot,
             parent=self,
         )
         self.controller = controller
@@ -650,6 +663,7 @@ class TVWindow(QMainWindow):
         self.sessions.add_slot(slot)
         self._join_tuners()
         self.pip_frame.add_surface(name, surface)
+        self.grid_frame.add_surface(name, surface)
         self.pointer.add_widget(surface)
         self._wire_source(surface)
         self.controller.slot_added(slot)
@@ -959,6 +973,7 @@ class TVWindow(QMainWindow):
         """Frameless and on top, a quarter of the screen wide in the bottom-right corner."""
         if self._closing or self._mini_waiting:
             return
+        self.controller.leave_multiview()  # the mini player shows one picture
         if self._mini_restore is not None:
             self._leave_mini()
         elif self.isFullScreen():
@@ -1420,6 +1435,7 @@ class TVWindow(QMainWindow):
             ("cancel the Library's jobs", self.jobs.cancel_all),  # its searches
             ("stop the controller", self.controller.shutdown),
             ("stop following the surfaces", self.pip_frame.close),
+            ("stop laying out the tiles", self.grid_frame.close),
             ("stop loading logos", self.logos.shutdown),
             ("stop loading posters", self.posters.shutdown),
             ("save the window geometry", self._save_geometry),

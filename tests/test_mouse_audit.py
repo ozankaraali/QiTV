@@ -8,8 +8,8 @@ here, and so does a control that is gone. The menu bar never counts: Windows and
 in fullscreen.
 
 Screens and their controls:
-- "transport": the player controls' buttons by name, and on live TV the title row's "title"
-  (the channel's name and logo) and "favorite" (the star after it);
+- "transport": the player controls' buttons by name ("grid" is the multiview's), and on live
+  TV the title row's "title" (the channel's name and logo) and "favorite" (the star after it);
 - "picture": the video's own "click", "double-click" and "wheel";
 - "mixer": each row's "speaker" and "slider", and the "row" itself;
 - "sound": the Sound panel ♫ opens: its track "rows", its sync's "earlier" (−), "later" (+)
@@ -88,6 +88,8 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("player", "Ctrl+D"): (("transport", "favorite"),),
     ("player", "P, Ctrl+P"): (("transport", "pip"), ("pip_label", "close")),
     ("player", "S"): (("pip_label", "swap"), ("picture", "click")),
+    # The multiview's button on the player controls, lit while its grid shows.
+    ("player", "V"): (("transport", "grid"),),
     ("player", "Alt+P"): (("transport", "mini"),),
     # Close what is open: a click on the picture closes the channel list, × the guide (the
     # banner, the zap list and the mixer fade by themselves); ⛶ leaves fullscreen; after a
@@ -132,6 +134,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("menu", "Ctrl+1"): (("library", "live"), ("drawer", "rows")),
     ("menu", "Ctrl+2"): (("drawer", "Movies"), ("library", "movies")),
     ("menu", "Ctrl+3"): (("drawer", "Series"), ("library", "series")),
+    ("menu", "Ctrl+4"): (("transport", "grid"),),
     ("menu", "Ctrl+O"): (("drawer", "Open file"),),
     ("menu", "Ctrl+,"): (("drawer", "settings"), ("drawer", "Settings")),
     ("menu", "Ctrl+R"): (("drawer", "refresh"),),
@@ -186,6 +189,7 @@ def _transport(host: QWidget) -> set[str]:
     from the Library."""
     t = Transport(host)
     t.set_pip_state(True, False)
+    t.set_grid_state(True, False)
     found: set[str] = set()
 
     def take() -> None:

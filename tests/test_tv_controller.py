@@ -457,6 +457,8 @@ class FakeTransport(FakeOverlay):
     seekToRequested = Signal(float)
     nextRequested = Signal()
     pipRequested = Signal()
+    gridRequested = Signal()
+    layoutRequested = Signal()
     miniPlayerRequested = Signal()
     externalRequested = Signal(QPoint)
     volumeRequested = Signal()
@@ -478,6 +480,12 @@ class FakeTransport(FakeOverlay):
 
     def set_pip_state(self, available, open_):
         self.record("set_pip_state", available, open_)
+
+    def set_grid_state(self, available, shown, layout=""):
+        self.record("set_grid_state", available, shown, layout)
+
+    def follow_pip(self, rect):
+        self.record("follow_pip", rect)
 
     def show_vod(self, title, subtitle):
         self.record("show_vod", title, subtitle)

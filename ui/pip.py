@@ -128,6 +128,7 @@ class PipFrame(QObject):
         self._reported = QRect()
         self._closed = False
         self._interactive = True  # False: the player is a thumbnail over the Library
+        self._suspended = False  # True: the multiview lays the surfaces out (suspend)
         self._lift = 0  # pixels a bottom corner's PiP rises (the transport shows)
         self._lifting = QVariantAnimation(self)
         self._lifting.setDuration(LIFT_MS)
@@ -185,7 +186,7 @@ class PipFrame(QObject):
 
     def small_rect(self) -> QRect:
         """Where the small surface is, in container coordinates; empty while PiP is hidden."""
-        if not self._shown:
+        if not self._shown or self._suspended:
             return QRect()
         return QRect(self._small().geometry())
 
@@ -198,7 +199,7 @@ class PipFrame(QObject):
         if lift == self._lift:
             return
         self._lift = lift
-        if not self._shown or self._press is not None or self._closed:
+        if not self._shown or self._press is not None or self._closed or self._suspended:
             return  # shown, or once the drag ends, it lays out with the new lift
         small = self._small()
         target = self._small_target()
@@ -218,6 +219,29 @@ class PipFrame(QObject):
             self._press = None
             self._swap_at = None
 
+    def suspend(self) -> None:
+        """Stand aside while the multiview lays the surfaces out (ui/grid_frame.py): no
+        layout, no mouse, and the small rect reported empty. The PiP itself is hidden: it
+        shows again when picture in picture next opens (`show_pip`)."""
+        if self._suspended:
+            return
+        self._lifting.stop()
+        self._press = None
+        self._swap_at = None
+        self._shown = False
+        self._suspended = True
+        self._report()
+
+    def resume(self) -> None:
+        """Lay the surfaces out again after the multiview: the large one fills the page."""
+        if not self._suspended:
+            return
+        self._suspended = False
+        self._layout()
+
+    def suspended(self) -> bool:
+        return self._suspended
+
     def close(self) -> None:
         """Stop watching the player page and the surfaces (the window's shutdown)."""
         if self._closed:
@@ -230,7 +254,7 @@ class PipFrame(QObject):
 
     # The label's pill covers part of the small surface; it forwards its presses (globals).
     def pill_press(self, position: QPoint) -> None:
-        if self._shown and not self._closed and self._interactive:
+        if self._shown and not self._closed and self._interactive and not self._suspended:
             self._begin(self._small(), position, surface_events=False)
 
     def pill_move(self, position: QPoint) -> None:
@@ -269,6 +293,8 @@ class PipFrame(QObject):
 
     def _layout(self) -> None:
         self._lifting.stop()
+        if self._suspended:
+            return  # the multiview's grid lays them out
         if self._press is not None:
             self._press.void = True  # its release neither swaps nor snaps
         large = self._surfaces[self._large]
@@ -321,7 +347,12 @@ class PipFrame(QObject):
         if kind in _LAYOUT_EVENTS:
             if watched is self._container:
                 self._layout()
-        elif kind in _MOUSE_EVENTS and isinstance(event, QMouseEvent) and self._interactive:
+        elif (
+            kind in _MOUSE_EVENTS
+            and isinstance(event, QMouseEvent)
+            and self._interactive
+            and not self._suspended
+        ):
             return self._mouse(watched, event)
         return False
 

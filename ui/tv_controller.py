@@ -92,6 +92,7 @@ from services.zapping import ZapContext
 from ui import item_provider
 from ui.autoplay import FINISHED_TEXT, Autoplay
 from ui.context_actions import ContextActions, Launcher, is_channel
+from ui.grid_controls import LEAVE_FIRST, GridControls
 from ui.guide_controller import GuideController
 from ui.keymap import Action, as_int
 from ui.link_lanes import LinkLanes, Target
@@ -129,6 +130,7 @@ _VOLUME_MODIFIERS = (
     Qt.KeyboardModifier.ControlModifier.value | Qt.KeyboardModifier.MetaModifier.value
 )
 _DRAWER_ROWS = 40  # rows of a mixed list whose providers load their guides
+MULTIVIEW_TITLE = "Multiview"  # the controls' title over a focused tile with no channel
 _PINNED_TITLES = {FAVORITES_GROUP: "Favorites", RECENT_GROUP: "Recent"}
 
 
@@ -173,6 +175,10 @@ class TVController(QObject):
         pick_subtitle_file: Optional[Callable[[str], str]] = None,
         account_checks=None,
         online_subtitles: Optional[OnlineSetup] = None,
+        grid_frame=None,
+        grid_tiles=None,
+        host=None,
+        make_slot: Optional[Callable[[str], Optional[Slot]]] = None,
         parent: Optional[QObject] = None,
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
@@ -180,7 +186,10 @@ class TVController(QObject):
         sound sync (None: for this run only); `pick_subtitle_file(folder)` asks for a subtitle
         file (the Subtitles panel's "Load a file…"); with `online_subtitles` (and the overlays'
         `subtitle_search`) the panel searches OpenSubtitles too. `account_checks` (an
-        AccountChecks) says why a failure happened (None: the failure's own words only)."""
+        AccountChecks) says why a failure happened (None: the failure's own words only).
+        With `grid_frame` and `make_slot` (a tile's player, made by its slot's name) the
+        multiview's grid can show: `grid_tiles` draws over it, `host` is the overlay host
+        (both None-able in tests)."""
         super().__init__(parent)
         self._account_checks = account_checks
         self._toasts = 0  # toasts shown so far: a reason replaces only the one it explains
@@ -313,6 +322,7 @@ class TVController(QObject):
             toast=self._toast,
             names=self._picture_names,
             audio_changed=self._on_audio_changed,
+            tiles=self._mixer_tiles,
             parent=self,
         )
         # Subtitles from OpenSubtitles for a film or an episode (the Subtitles panel's search).
@@ -378,6 +388,34 @@ class TVController(QObject):
             )
             self._pip.changed.connect(self._mixer.refresh)
             self._pip.changed.connect(self._update_guides)
+        # The multiview's grid (stage 1): its tiles are slots, the focused one the large.
+        self._grid: Optional[GridControls] = None
+        if sessions is not None and grid_frame is not None and make_slot is not None:
+            self._grid = GridControls(
+                sessions=sessions,
+                frame=grid_frame,
+                tiles=grid_tiles,
+                pip_frame=pip_frame,
+                host=host,
+                transport=overlays.transport,
+                catalog=catalog,
+                budget=self.budget,
+                config=config,
+                make_slot=make_slot,
+                focus=self.focus_tile,
+                activate=self.video_clicked,
+                open_drawer=lambda: self.handle(Action.OPEN_DRAWER),
+                retry=self._retry_tile,
+                denied=self._on_tile_denied,
+                close_pip=self._drop_pip_on_its_way,
+                vod=self.vod_current,
+                external=lambda: self._external_launcher() is not None,
+                closed=lambda: self._closed,
+                toast=self._toast,
+                parent=self,
+            )
+            self._grid.changed.connect(self._mixer.refresh)
+            self._grid.changed.connect(self._update_guides)
         self._column_wheel = PointerInput(self)
         # While a live link resolves, the banner is shown again before it fades (Minor 11).
         self._tuning = QTimer(self, interval=TUNING_KEEP_MS)
@@ -456,6 +494,11 @@ class TVController(QObject):
         self._tracks.wire()
         if self._pip is not None:
             self._pip.wire()
+        if self._grid is not None:
+            self._grid.wire()
+            gridded = getattr(transport, "gridRequested", None)
+            if gridded is not None:
+                gridded.connect(partial(self.handle, Action.MULTIVIEW))
         if self._logos is not None:
             self._logos.logoReady.connect(self._on_logo_ready)
         # The column's list would scroll on its own; wheel over it zaps instead.
@@ -488,6 +531,8 @@ class TVController(QObject):
         except Exception as e:
             self._log_failure("save the picture-in-picture volume", e)
         try:
+            if self._grid is not None:
+                self._grid.shutdown()  # the tiles but the focused one stop
             self._close_pip()  # the small picture first, then the large one
             self._tuner.shutdown()
         except Exception as e:
@@ -499,6 +544,7 @@ class TVController(QObject):
     def stop_live(self) -> None:
         """Stop what plays (window close, self-update): its slot goes back once released."""
         self._resume = self._current if self._has_media() else None
+        self.leave_multiview(keep_pip=False)
         self._close_pip()
         self._live_controls.stop_tune()
 
@@ -523,6 +569,7 @@ class TVController(QObject):
         """
         if self._closed:
             return
+        self.leave_multiview(keep_pip=False)
         self._flow.enter_library()
         self._cancel_external()
         self._lanes.supersede()  # an external play waiting for its link no longer plays
@@ -567,6 +614,7 @@ class TVController(QObject):
         """
         if self._closed:
             return
+        self.leave_multiview()  # the focused tile plays on in the corner, as the big picture
         self._flow.enter_library()
         if self._title_on_its_way():
             # The title the channel went small for is dropped, as a link on its way is when the
@@ -617,6 +665,7 @@ class TVController(QObject):
         url = Path(path).absolute().as_uri()
         title = Path(path).name
         target = Target({"name": title, "cmd": url}, "movies", title, local=True)
+        self.leave_multiview(keep_pip=False)  # the multiview is for live TV
         self._close_pip()  # picture in picture is for live TV
         self._cancel_external()
         self._lanes.supersede()
@@ -758,12 +807,16 @@ class TVController(QObject):
             self.window_actions.toggle_fullscreen()
         elif action is Action.MINI_PLAYER:
             self.window_actions.toggle_mini_player()
+        elif action in (Action.PIP, Action.SWAP) and self.multiview_shown():
+            self._toast(LEAVE_FIRST)  # the grid's tiles are the pictures meanwhile
         elif action is Action.PIP:
             if self._pip is not None:
                 self._pip.pip_key()
         elif action is Action.SWAP:
             if self._pip is not None:
                 self._pip.swap_key()
+        elif action is Action.MULTIVIEW:
+            self.toggle_multiview()
         elif action is Action.MUTE:
             self._mixer.mute()
         elif action in (Action.SOUND_EARLIER, Action.SOUND_LATER):
@@ -796,7 +849,12 @@ class TVController(QObject):
             self.handle(Action.OPEN_DRAWER)
 
     def video_double_clicked(self) -> None:
-        self.window_actions.toggle_fullscreen()
+        """Fullscreen; on the multiview's grid, back to one picture (its first click focused
+        the tile, which becomes the big picture)."""
+        if self.multiview_shown():
+            self.leave_multiview()
+        else:
+            self.window_actions.toggle_fullscreen()
 
     def mouse_back(self) -> None:
         """The mouse's Back button: a drawer layer up (spec §5.3); closed, it opens."""
@@ -893,7 +951,7 @@ class TVController(QObject):
             context.source = picked  # a zap keeps the list its group was picked from
         playing = self._playing_live()
         stay = playing is not None and ZapContext.same(channel, playing.item)
-        if not stay and self._pip_takes(channel, group_key, channels):
+        if not stay and self._shown_elsewhere(channel, group_key, channels):
             return
         if not from_zap and not stay:
             self.zap.note_request(channel)  # ↑/↓ move on from it while its link is pending
@@ -906,6 +964,14 @@ class TVController(QObject):
             # pending choice when it settles (the "stay" marker is the playing target).
             if self._lanes.busy():
                 self._lanes.queued = playing
+            self.zap.tuned(channel)
+            return
+        if self._grid is not None and self._grid.refuse(channel):
+            # Its provider has no stream to spare for the focused tile: its card says so, and
+            # no link is asked for (an STB portal mints one per request).
+            self._lanes.drop_tune()
+            self._live_controls.new_target()
+            self._current, self._cid = None, None
             self.zap.tuned(channel)
             return
         title = str(channel.get("name") or "")
@@ -989,6 +1055,7 @@ class TVController(QObject):
             return
         if from_library is None:
             from_library = self._flow.in_library()
+        self.leave_multiview()  # live only: the focused tile is the big picture again
         self._flow.leave_library()
         context = play_context(context)
         episode = kind == "episode"
@@ -1207,6 +1274,7 @@ class TVController(QObject):
         self._live_controls.new_target()  # the old channel's ticks and held notice
         previous = self._current  # what the large picture played: a retry keeps its sync
         if launcher is not None:
+            self.leave_multiview(keep_pip=False)  # it is outside the budget too
             self._close_pip()  # an external player is outside the budget: the PiP gives way
             if target.live and target.zapped:
                 # Each zap step would start a player: only the one zapping settles on does.
@@ -1216,7 +1284,11 @@ class TVController(QObject):
             # The in-app stream is released first: the player opens the provider again.
             self._tuner.open(self._guarded(target, lambda: self._launch(target, url)))
             return
-        if target.live:
+        if target.live and self.multiview_shown():
+            self._open_in_tile(target, url, previous, provider_name)
+            if self.overlays.transport.isVisible():
+                self._live_controls.show_live_transport(target)
+        elif target.live:
             kind = classify(url, self.catalog.is_live("live"))
             if self._live_controls.through_pipeline(url, kind):
                 if not self._live_controls.tune_pipeline(target, url):
@@ -1401,6 +1473,116 @@ class TVController(QObject):
         if self._pip is not None:
             self._pip.close()
 
+    # ---- the multiview ------------------------------------------------------------------------
+
+    def multiview_shown(self) -> bool:
+        """The multiview's grid shows: its focused tile is the large picture."""
+        return self._grid is not None and self._grid.shown()
+
+    def toggle_multiview(self) -> None:
+        """V, View → Multiview, the grid button: the grid, or back to one picture."""
+        if self._grid is None or self._closed:
+            return
+        if self._digits:
+            self.zap.cancel_digits()
+        self.overlays.column.close()
+        self._grid.toggle()
+
+    def leave_multiview(self, *, keep_pip: bool = True) -> None:
+        """Back to one picture (nothing when the grid is not shown): the focused tile is the
+        big picture, and with `keep_pip` the tile focused before it stays small. What the big
+        picture shows is recorded, as a swap records it."""
+        grid = self._grid
+        if grid is None or not grid.shown():
+            return
+        grid.leave(keep_pip=keep_pip)
+        current = self._current
+        if current is not None and current.live and self._has_media() and self._current_url:
+            self._record_watched(current, self._current_url)
+
+    def focus_tile(self, name: str) -> bool:
+        """The multiview's tile `name` takes the focus (the large role): the controls, the
+        banner and zapping act on it, and its sound plays. A choice still on its way for the
+        tile that had the focus is dropped, as a swap drops it."""
+        sessions = self.sessions
+        if self._closed or sessions is None:
+            return False
+        if sessions.large().name == name:
+            return True
+        self._cancel_external()
+        self._lanes.drop_tune()
+        return sessions.set_large(name)
+
+    def _shown_elsewhere(self, channel: dict, group_key: str, channels: list[dict]) -> bool:
+        """A tune onto a channel another picture shows: never a second stream of it."""
+        if self.multiview_shown():
+            return self._grid_takes(channel, group_key, channels)
+        return self._pip_takes(channel, group_key, channels)
+
+    def _grid_takes(self, channel: dict, group_key: str, channels: list[dict]) -> bool:
+        """Another tile shows the channel: the focus moves there, with the zap group."""
+        grid, pip = self._grid, self._pip
+        name = grid.tile_showing(channel) if grid is not None else None
+        if name is None or pip is None:
+            return False
+        pip.view(name).context = ZapContext(
+            group_key,
+            channels,
+            fallback=self._all_live(),
+            source=item_provider.pick_source(self.catalog, channel, group_key),
+        )
+        self.overlays.column.close()
+        return self.focus_tile(name)
+
+    def _open_in_tile(
+        self, target: Target, url: str, previous: Optional[Target], provider_name: str
+    ) -> None:
+        """A live channel for the multiview's focused tile: it plays directly (no time-shift
+        in the grid's first stage), within its provider's limit."""
+        grid = self._grid
+        assert grid is not None
+        item = target.item
+        kind = classify(url, self.catalog.is_live("live"))
+        self._current, self._cid = target, None
+        session = self.session  # the focused tile's, whatever has the focus when it opens
+
+        def play_direct() -> None:
+            self._tracks.prepare(session, target, previous)
+            session.play(url, kind=kind, latency=self.config.live_latency, **stream_options(item))
+            self._reset_speed(session)
+
+        grid.open_focused(
+            item,
+            self._guarded(target, play_direct),
+            provider=provider_name,
+            limit=self._live_controls.limit(item),
+        )
+
+    def _on_tile_denied(self, name: str) -> None:
+        """A tile's stream was refused (its card says so): when it has the focus, nothing
+        plays large any more."""
+        sessions = self.sessions
+        if sessions is None or self._closed or sessions.large().name != name:
+            return
+        self._current, self._cid = None, None
+        self._live_controls.new_target()
+
+    def _retry_tile(self, channel: dict) -> None:
+        """A click on a tile's card: its channel again, in the zap group when it is there."""
+        context = self.zap.context
+        if context.index_of(channel) >= 0:
+            self.tune(channel, group_key=context.group_key, channels=context.channels)
+        else:
+            self.tune(channel, group_key=ALL_GROUP_ID, channels=self._all_live())
+
+    def _drop_pip_on_its_way(self) -> None:
+        """The grid shows: a channel still on its way to the small picture never opens."""
+        if self._pip is not None and self._pip.on_its_way():
+            self._pip.close()
+
+    def _mixer_tiles(self) -> Optional[list[tuple[str, str, str]]]:
+        return self._grid.mixer_rows() if self._grid is not None else None
+
     def _open_pip_node(self, node: NavNode) -> None:
         if self._pip is not None:
             self._pip.open_node(node)
@@ -1434,11 +1616,13 @@ class TVController(QObject):
         channel = self._channel
         transport = self.overlays.transport
         transport.set_paused(self._state == "paused")
+        grid = self.multiview_shown()  # a tile took the focus: no swap, nothing recorded yet
         if channel is not None:
             self.zap.tuned(channel)
             current = self._current
             if current is not None:
-                self._record_watched(current, view.url)  # Recent, the next start's channel
+                if not grid:
+                    self._record_watched(current, view.url)  # Recent, the next start's channel
                 # The transport takes the large picture's last timeline at once; the banner
                 # then announces the channel (they share the bottom of the video).
                 self._live_controls.show_live_transport(current)
@@ -1450,8 +1634,14 @@ class TVController(QObject):
             transport.show_vod(current.title, current.subtitle)
             if self._state == "ended":
                 self._autoplay.on_ended(current)  # it ended small: what follows, as at its end
-        pip.after_swap()
+        elif grid:  # a tile showing nothing took the focus: the grid's controls stay
+            self.overlays.banner.dismiss()
+            if transport.isVisible():
+                self._show_grid_transport()
         self._tracks.refresh()  # an open panel shows the large picture's sound or subtitles
+        if grid:
+            return  # the grid follows the focus itself (its ring, the tiles' labels)
+        pip.after_swap()
         if self._tuner_of(old).idle():
             pip.close()  # the old large picture was between two channels: nothing to show
 
@@ -1499,6 +1689,8 @@ class TVController(QObject):
         self._watch_player(slot.name, slot.playback)
         if self._pip is not None:
             self._pip.watch_slot(slot)
+        if self._grid is not None:
+            self._grid.watch_slot(slot)
 
     def _watch_player(self, name: str, player) -> None:
         """Follow a player's state, a title's position and its errors (it may be small)."""
@@ -1612,6 +1804,8 @@ class TVController(QObject):
         sessions = self.sessions
         if sessions is not None and (sessions.pip_open() or sessions.pip_opening()):
             items.append(sessions.other().channel)
+        if self._grid is not None:
+            items.extend(self._grid.channels())  # the multiview's tiles'
         names.update(provider_of(item) for item in items if item)
         source = self.catalog.current_provider_name()
         if source != ALL_PROVIDERS:
@@ -1968,6 +2162,8 @@ class TVController(QObject):
             overlays.column.close()  # the zap forgets its highlight, so no rest tune follows
         elif overlays.banner.isVisible():
             overlays.banner.dismiss()
+        elif self.multiview_shown():
+            self.leave_multiview()  # before fullscreen: the grid is what Esc closes first
         else:
             self.window_actions.leave_fullscreen()
 
@@ -2004,7 +2200,12 @@ class TVController(QObject):
 
     def _show_transport(self) -> None:
         target = self._current
-        if target is None or not self._has_media() or self.overlays.drawer.isVisible():
+        if self.overlays.drawer.isVisible():
+            return
+        if (target is None or not self._has_media()) and self.multiview_shown():
+            self._show_grid_transport()  # the grid's button and layout chip stay in reach
+            return
+        if target is None or not self._has_media():
             return
         if self._digits:
             return  # the banner shows the number being typed
@@ -2013,6 +2214,14 @@ class TVController(QObject):
             self._live_controls.show_live_transport(target)
         else:
             self.overlays.transport.poke()
+
+    def _show_grid_transport(self) -> None:
+        """The player controls over a grid whose focused tile plays nothing: live TV's, named
+        for the multiview, so its button and layout chip stay in reach."""
+        if self._digits:
+            return  # the banner shows the number being typed
+        self.overlays.banner.dismiss()
+        self.overlays.transport.show_live(MULTIVIEW_TITLE, "")
 
     def _change_volume(self, delta: int) -> None:
         self._mixer.change(delta)
@@ -2097,6 +2306,7 @@ class TVController(QObject):
         if self._closed:
             return
         self._cancel_external()
+        self.leave_multiview(keep_pip=False)  # an external player is outside the budget
         self._close_pip()  # an external player is outside the budget: the PiP gives way
         self._autoplay.drop()
         self._lanes.drop_tune()  # e.g. an STB retry still on its way would open in-app

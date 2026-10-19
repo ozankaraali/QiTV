@@ -187,6 +187,11 @@ class PipControls(QObject):
         sessions = self.sessions
         return self._wanted is not None or sessions.pip_open() or sessions.pip_opening()
 
+    def on_its_way(self) -> bool:
+        """A channel is on its way to the small picture: its link, its opening or its change."""
+        sessions = self.sessions
+        return self._wanted is not None or sessions.pip_opening() or sessions.changing()
+
     def small_showing(self, channel: dict) -> Optional[Slot]:
         """The small slot when it shows `channel` (the large picture may take it by a swap)."""
         small = self.sessions.small()
