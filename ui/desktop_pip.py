@@ -5,13 +5,14 @@ picture on a tab change.
 
 While the TV window is fullscreen (and the setting is on, one picture plays, the multiview's
 grid is away), `DesktopPip` asks every `POLL_MS` whether the window is on the desktop shown
-(`on_active_space`: on macOS [NSWindow isOnActiveSpace]). When it is no longer, the large
+(`on_active_space`: on macOS [NSWindow isOnActiveSpace]), and at once when the window loses or
+gets the focus (`nudge`), as it does on a desktop change. When it is no longer, the large
 picture's surface is lent by the player (`lend`, PipFrame.lend_large) and moved into the
 `FloatingPlayer`: the surface keeps its native view, and libVLC, which draws into a view of its
 own inside it, goes on drawing (measured: no picture lost, no reopen). The fullscreen window
 stays where it was, showing what the player page shows without its picture. Back on that
-desktop, the surface returns (`take_back`) and the floating window hides; a click on it brings
-the fullscreen desktop back, which puts the picture back the same way. Leaving fullscreen or
+desktop, the surface returns (`take_back`) and the floating window hides; a double-click on it
+brings the fullscreen desktop back, which puts the picture back the same way. Leaving fullscreen or
 closing QiTV puts it back first. The floating window can be dragged; it shows on every desktop
 (`join_all_spaces`), above other windows, and never takes the keyboard.
 """
@@ -34,6 +35,7 @@ EDGE_PX = 10  # a press this near an edge (or two: a corner) resizes the floatin
 MIN_WIDTH = 240  # the smallest it gets
 AWAY_CHECKS = 2  # answers "another desktop" in a row before the picture floats (the
 # fullscreen animation may answer it once)
+CONFIRM_MS = 150  # the second answer is asked this soon after the first, not a poll later
 _MOUSE_EVENTS = (
     QEvent.Type.MouseButtonPress,
     QEvent.Type.MouseButtonRelease,
@@ -54,7 +56,8 @@ def corner_rect(available: QRect, screen_width: int) -> QRect:
 
 class FloatingPlayer(QWidget):
     """A frameless panel on top that holds the large picture's surface; a click asks for the
-    fullscreen desktop again (`returnRequested`), a drag moves it, a drag of an edge or a corner
+    fullscreen desktop again on a double-click (`returnRequested`; a click alone does nothing, so
+    a press to grab it never does), a drag moves it, a drag of an edge or a corner
     resizes it in 16:9 (the pointer says so near them); where it ended up is told
     (`placed`). A panel that takes no focus
     (on macOS a non-activating one): a press on it leaves QiTV inactive and the desktop shown,
@@ -161,7 +164,10 @@ class FloatingPlayer(QWidget):
         left = Qt.MouseButton.LeftButton
         where = event.globalPosition().toPoint()
         kind = event.type()
-        if kind == QEvent.Type.MouseButtonPress and event.button() == left:
+        if kind == QEvent.Type.MouseButtonDblClick and event.button() == left:
+            self._press, self._dragged = None, False
+            self.returnRequested.emit()  # a double-click: the fullscreen desktop again
+        elif kind == QEvent.Type.MouseButtonPress and event.button() == left:
             self._press, self._origin, self._dragged = where, self.pos(), False
             self._edges = self._edges_at(self.mapFromGlobal(where))
             self._start = self.geometry()
@@ -180,12 +186,10 @@ class FloatingPlayer(QWidget):
             else:
                 watched.setCursor(shape)
         elif kind == QEvent.Type.MouseButtonRelease and event.button() == left:
-            clicked = self._press is not None and not self._dragged
+            # A click alone does nothing: a press to grab it must never send the user back.
             dragged = self._press is not None and self._dragged
             self._press, self._dragged = None, False
-            if clicked:
-                self.returnRequested.emit()
-            elif dragged:
+            if dragged:
                 self.placed.emit(self.geometry())
         return True  # the shell's clicks on the picture are for the fullscreen window
 
@@ -232,6 +236,12 @@ class DesktopPip(QObject):
     def floating(self) -> bool:
         return self._shown
 
+    def nudge(self) -> None:
+        """Something suggests the desktop changed (the window lost or got the focus): ask
+        now, not at the next poll."""
+        if self._timer.isActive():
+            self.check()
+
     def watch(self, on: bool) -> None:
         """Ask about the desktop (the window is fullscreen) or not; not puts the picture back."""
         if on:
@@ -239,6 +249,7 @@ class DesktopPip(QObject):
                 self._timer.start()
         else:
             self._timer.stop()
+            self._away = 0
             self.dock()
 
     def check(self) -> None:
@@ -254,6 +265,8 @@ class DesktopPip(QObject):
             self._float()
         elif shown and self._shown:
             self.dock()
+        elif self._away == 1 and not self._shown and self._timer.isActive():
+            QTimer.singleShot(CONFIRM_MS, self, self.nudge)  # (the poll would take longer)
 
     def dock(self) -> None:
         """The picture back in the fullscreen window (nothing when it is there)."""

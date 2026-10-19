@@ -1182,6 +1182,8 @@ class TVWindow(QMainWindow):
         self.overlays.transport.set_window_mode(mini=mini, fullscreen=self.isFullScreen())
 
     def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.ActivationChange:
+            self.desktop_pip.nudge()  # a desktop change takes or gives the focus
         if event.type() == QEvent.Type.WindowStateChange:
             self._update_menu_bar()
             # Fullscreen: the desktop shown is asked about (the picture may float); else the

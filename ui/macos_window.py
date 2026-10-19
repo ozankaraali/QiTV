@@ -16,6 +16,7 @@ _NS_WINDOW_ABOVE = 1
 # NSWindowCollectionBehavior: on every desktop (Space), and allowed beside a fullscreen window.
 _CAN_JOIN_ALL_SPACES = 1 << 0
 _FULL_SCREEN_AUXILIARY = 1 << 8
+_NONACTIVATING_PANEL = 1 << 7  # NSWindowStyleMaskNonactivatingPanel
 
 
 @functools.cache
@@ -137,8 +138,10 @@ def on_active_space(widget) -> Optional[bool]:
 
 
 def join_all_spaces(widget) -> bool:
-    """macOS: `widget`'s window shows on every desktop, beside a fullscreen one too, and stays
-    when QiTV is not the active app. Nothing happens elsewhere (False)."""
+    """macOS: `widget`'s window shows on every desktop, beside a fullscreen one too, stays
+    when QiTV is not the active app, and (a panel: Qt::Tool) a press on it never activates
+    QiTV, which would bring QiTV's fullscreen desktop (Qt leaves that style off). Nothing
+    happens elsewhere (False)."""
     if QGuiApplication.platformName() != "cocoa":
         return False
     try:
@@ -148,6 +151,9 @@ def join_all_spaces(widget) -> bool:
         behavior = _CAN_JOIN_ALL_SPACES | _FULL_SCREEN_AUXILIARY
         _send(ns_window, b"setCollectionBehavior:", None, (ctypes.c_ulong, behavior))
         _send(ns_window, b"setHidesOnDeactivate:", None, (ctypes.c_bool, False))
+        mask = _send(ns_window, b"styleMask", ctypes.c_ulong)
+        if not mask & _NONACTIVATING_PANEL:
+            _send(ns_window, b"setStyleMask:", None, (ctypes.c_ulong, mask | _NONACTIVATING_PANEL))
         return True
     except Exception as e:  # never let a Cocoa detail break the player
         logger.debug("Could not show the window on every desktop: %s", e)

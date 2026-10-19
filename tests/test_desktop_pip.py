@@ -122,17 +122,21 @@ class DesktopPipTests(unittest.TestCase):
         self.assertFalse(self.pip._timer.isActive())
         self.assertIs(self.main.parentWidget(), self.page)
 
-    def test_a_click_on_the_floating_picture_asks_for_the_fullscreen_desktop(self):
+    def test_a_click_does_nothing_and_a_double_click_brings_the_fullscreen_desktop(self):
         self.away()
         floating = self.pip._floating
         with (
             mock.patch.object(self.window, "raise_") as raised,
             mock.patch.object(self.window, "activateWindow") as activated,
         ):
-            mouse(self.main, QEvent.Type.MouseButtonPress, QPoint(10, 10))
+            # A press to grab it, released where it was: never back to fullscreen.
+            mouse(self.main, QEvent.Type.MouseButtonPress, QPoint(160, 90))
             mouse(
-                self.main, QEvent.Type.MouseButtonRelease, QPoint(10, 10), Qt.MouseButton.NoButton
+                self.main, QEvent.Type.MouseButtonRelease, QPoint(160, 90), Qt.MouseButton.NoButton
             )
+            activated.assert_not_called()
+            self.assertTrue(self.pip.floating())
+            mouse(self.main, QEvent.Type.MouseButtonDblClick, QPoint(160, 90))
         raised.assert_called_once()
         activated.assert_called_once()
         self.assertFalse(self.pip.floating())  # back at once, while macOS brings the desktop
@@ -264,6 +268,23 @@ class DesktopPipTests(unittest.TestCase):
         self.away()
         self.drag(QPoint(160, 90), QPoint(200, 120))
         self.assertEqual(remembered, [self.pip._floating.geometry()])
+
+    def test_the_second_away_answer_is_asked_soon_not_a_poll_later(self):
+        from timer_fixtures import wait_until
+
+        self.pip.watch(True)
+        self.shown = False
+        self.pip.check()  # the first answer
+        self.assertFalse(self.pip.floating())
+        self.assertTrue(wait_until(self.pip.floating, desktop_pip.CONFIRM_MS + 150))
+
+    def test_a_focus_change_asks_at_once_while_watching(self):
+        self.shown = False
+        self.pip.nudge()  # not watching: nothing is asked
+        self.assertEqual(self.pip._away, 0)
+        self.pip.watch(True)
+        self.pip.nudge()
+        self.assertEqual(self.pip._away, 1)
 
     def test_closing_puts_the_picture_back_and_drops_the_window(self):
         self.away()
