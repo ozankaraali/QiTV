@@ -25,6 +25,11 @@ _REPLACE_RETRY_DELAY_S = 0.05
 # After a failed save, saves try once without those retries for this long: a file that stays
 # locked must not stall every save (a settled zap's among them) by the whole retry wait.
 SAVE_BACKOFF_S = 30.0
+# A new config's keys that update_patcher does not add to a loaded one: its providers (a loaded
+# config has its own), its windows (added one by one) and what the one-time steps set.
+_SET_ELSEWHERE = frozenset(
+    "selected_provider_name data window_positions channel_epg tv_defaults_version".split()
+)
 
 
 def _one_of(choices, default):
@@ -252,36 +257,22 @@ class ConfigManager:
         if "tv_window" not in window_positions:
             window_positions["tv_window"] = self._initial_tv_window(window_positions)
             need_update = True
-        for window_name, settings in self.default_config()["window_positions"].items():
+        defaults = self.default_config()
+        for window_name, settings in defaults["window_positions"].items():
             if window_name not in window_positions:
                 window_positions[window_name] = settings
                 need_update = True
 
-        # Add settings introduced after the loaded config was written.
+        # Add settings introduced after the loaded config was written: a new config's (see
+        # _SET_ELSEWHERE), and these.
         missing_defaults: dict[str, object] = {
-            "favorites": [],
+            **{key: value for key, value in defaults.items() if key not in _SET_ELSEWHERE},
             "last_watched": None,
-            "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
-            "channel_logos": ConfigManager.DEFAULT_OPTION_CHANNEL_LOGO,
-            "max_cache_image_size": ConfigManager.DEFAULT_OPTION_MAX_CACHE_IMAGE_SIZE,
             "epg_source": ConfigManager.DEFAULT_OPTION_EPG_SOURCE,
             "epg_url": ConfigManager.DEFAULT_OPTION_EPG_URL,
             "epg_file": ConfigManager.DEFAULT_OPTION_EPG_FILE,
             "epg_expiration_value": ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_VALUE,
             "epg_expiration_unit": ConfigManager.DEFAULT_OPTION_EPG_EXPIRATION_UNIT,
-            "xmltv_channel_map": MultiKeyDict(),
-            "prefer_https": ConfigManager.DEFAULT_OPTION_PREFER_HTTPS,
-            "ssl_verify": ConfigManager.DEFAULT_OPTION_SSL_VERIFY,
-            "epg_list_window_hours": ConfigManager.DEFAULT_OPTION_EPG_LIST_WINDOW_HOURS,
-            "epg_stb_period_hours": ConfigManager.DEFAULT_OPTION_EPG_STB_PERIOD_HOURS,
-            "live_latency": ConfigManager.DEFAULT_OPTION_LIVE_LATENCY,
-            "mouse_wheel_action": ConfigManager.DEFAULT_OPTION_MOUSE_WHEEL,
-            "start_with_last_channel": ConfigManager.DEFAULT_OPTION_START_WITH_LAST_CHANNEL,
-            "last_live_channel": None,
-            "timeshift_enabled": ConfigManager.DEFAULT_OPTION_TIMESHIFT_ENABLED,
-            "hardware_decoding": ConfigManager.DEFAULT_OPTION_HARDWARE_DECODING,
-            "timeshift_max_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_MAX_MIB,
-            "timeshift_ram_mib": ConfigManager.DEFAULT_OPTION_TIMESHIFT_RAM_MIB,
         }
         if "timeshift_minutes" in self.config:  # the time limit was retired for a size limit
             del self.config["timeshift_minutes"]
@@ -491,6 +482,7 @@ class ConfigManager:
 
     @staticmethod
     def default_config():
+        """A new config.json (update_patcher adds its settings to an older one)."""
         return {
             "selected_provider_name": ALL_NAME,
             "check_updates": ConfigManager.DEFAULT_OPTION_CHECKUPDATE,
