@@ -318,6 +318,12 @@ class AccountChecksTests(unittest.TestCase):
 
     def test_nothing_to_ask_and_a_closed_window(self):
         self.assertFalse(self.checks.explain({"name": "M", "type": "XTREAM"}, print))
+        plain = {"name": "Free", "type": "M3UPLAYLIST", "url": "https://lists.example.test/a.m3u"}
+        self.assertFalse(self.checks.explain(plain, print))  # a playlist has no account
+        panel = {**plain, "url": "http://panel.example.test/get.php?username=a&password=b"}
+        self.assertTrue(self.checks.explain(panel, print))  # an Xtream panel's playlist has
+        self.assertEqual(len(self.runner.jobs), 1)
+        self.runner.jobs.clear()
         heard = []
         self.checks.explain(self.provider, heard.append)
         self.checks.close()

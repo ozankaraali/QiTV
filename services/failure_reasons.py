@@ -5,6 +5,10 @@ The catalog's failure messages (`friendly_error`), an HTTP status, and an accoun
 here for their words. Every text is fixed or built from numbers and dates only: never a URL,
 a host or a credential.
 
+The time-shift helper's own refusal texts (services/live/refusals.py: STREAM_LIMIT and
+STREAM_REFUSED) stay there, free of imports for the helper's process; the account check that
+follows a refusal says it in these words, with the account's numbers.
+
 A `Reason` is what an account check found: its `kind` (one of the constants below) and its
 text. Only a `plain` one says more than the failure already did (`OK`: the account is fine;
 `UNEXPECTED`: the answer said nothing).

@@ -125,6 +125,19 @@ def _from_statuses(statuses: list[int], timed_out: bool) -> Reason:
     return reasons.unreachable(timed_out)
 
 
+def has_account(provider: dict) -> bool:
+    """Whether `provider` has an account to ask: an Xtream panel or an STB portal, also a
+    playlist from an Xtream panel (no thread is started for a plain playlist's failure)."""
+    kind = str(provider.get("type", "")).upper()
+    url = str(provider.get("url") or "").strip()
+    if not url:
+        return False
+    if kind in ("XTREAM", "STB"):
+        return True
+    link = parse_provider_link(url) if kind in ("M3UPLAYLIST", "M3USTREAM") else None
+    return link is not None and link.type == XTREAM
+
+
 def check_account(
     provider: dict,
     *,
@@ -229,9 +242,9 @@ class AccountChecks(QObject):
     def explain(self, provider: dict, answer: Answer) -> bool:
         """Ask `provider`'s account why it failed; `answer(reason)` is called on the GUI
         thread (at once with the last answer when it was asked less than a minute ago).
-        False when there is nothing to ask (no name or address)."""
+        False when there is nothing to ask (no name, or no account: a plain playlist)."""
         name = str(provider.get("name") or "")
-        if self._closed or not name or not provider.get("url"):
+        if self._closed or not name or not has_account(provider):
             return False
         waiting = self._waiting.get(name)
         if waiting is not None:
