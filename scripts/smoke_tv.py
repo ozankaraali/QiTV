@@ -30,7 +30,7 @@ on-demand stream, on the transport's archive bar), and L tunes the channel live 
 source sees one connection at a time (the probe beside the live stream is counted apart).
 R records Channel 3 from the buffer into <out>/recordings for 3 s and R stops it: the file is
 saved (MPEG-TS from its first byte), the controls showed REC meanwhile and the toast says
-"Recording saved" (2.3; no connection is added: the sources' counts below include it);
+"Recording saved" (2.2; no connection is added: the sources' counts below include it);
 then Down zaps to Channel 4 (a second such source) and Up back to Channel 3 as soon as
 Channel 4's upstream delivers: each source, and both together, never had more than one
 connection open at once (spec §11; the sources see a client's close at once); after the

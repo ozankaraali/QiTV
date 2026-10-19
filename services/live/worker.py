@@ -438,7 +438,7 @@ class _Session:
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
         self._heard_edge = 0.0  # the live edge the latest state reported
-        self._recorder: Recorder | None = None  # 2.3: writes the ring to a file (`record`)
+        self._recorder: Recorder | None = None  # 2.2: writes the ring to a file (`record`)
         self._finishing: set[Recorder] = set()  # stopped, still writing up to the live edge
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
 

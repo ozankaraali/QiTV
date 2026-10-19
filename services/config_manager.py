@@ -452,7 +452,7 @@ class ConfigManager:
         DEFAULT_OPTION_DEINTERLACE,
         coerce=_one_of(DEINTERLACE_CHOICES, DEFAULT_OPTION_DEINTERLACE),
     )
-    # 2.3, optional (older builds ignore it): the Recordings folder Settings chose; "" is the
+    # 2.2, optional (older builds ignore it): the Recordings folder Settings chose; "" is the
     # system's Movies (Videos) folder's QiTV (services.recording).
     recordings_dir = _config_property(
         "recordings_dir", "", coerce=lambda value: value if isinstance(value, str) else ""

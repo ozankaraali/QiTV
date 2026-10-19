@@ -417,7 +417,7 @@ class LiveSession(QObject):
     notice = Signal(str)
     failed = Signal(str)
     released = Signal()
-    recordingChanged = Signal(bool)  # 2.3: it records now, or no longer
+    recordingChanged = Signal(bool)  # 2.2: it records now, or no longer
     # (reason, path, written): a recording it started ended (LiveEngine.recordingEnded)
     recordingEnded = Signal(str, str, int)
 
@@ -544,7 +544,7 @@ class LiveSession(QObject):
         self._said: Optional[tuple[float, float, float]] = None
         self._troubled_at: Optional[float] = None
         self._cushion = 0.0  # the largest lag at the live edge since the tune (or the target)
-        # 2.3: the recording under way (its id at the engine) and since when (the clock's);
+        # 2.2: the recording under way (its id at the engine) and since when (the clock's);
         # every recording started whose end the engine has not told yet.
         self._recording: Optional[str] = None
         self._recording_since: Optional[float] = None
