@@ -4,11 +4,16 @@
 opens the search page (ui/overlays/subtitle_search.py). Without an API key (neither the
 user's, from Settings or the page, nor one the build carries) the page asks for one; Save
 keeps it in the config and searches. With a key it searches at once for what plays
-(services.opensubtitles.search_query), in a worker: the languages found, the viewer's last
-one and then this computer's first, and each language's subtitles ranked. A subtitle chosen
-is downloaded in a worker into the subtitles folder, shown with what plays (as a file loaded
-from the panel is: it is chosen, under its own name), kept as the title's pick
-(services.subtitle_picks) and said in a toast with the downloads left today; the page closes.
+(services.opensubtitles.search_query: by the provider's id when it gives one, else by the
+title), in a worker: the languages found, the viewer's last one and then this computer's
+first, and each language's subtitles ranked. Searching again for the same words keeps the
+id; other words search by themselves. Only the subtitles made for the title asked for are
+listed (the line names it when OpenSubtitles calls it otherwise: a translated title's film);
+when OpenSubtitles found only subtitles for titles named otherwise, it lists them, each row
+naming its title, and the line says to check it. A subtitle chosen is downloaded in a worker into the subtitles folder,
+shown with what plays (as a file loaded from the panel is: it is chosen, under its own
+name), kept as the title's pick (services.subtitle_picks) and said in a toast with the
+downloads left today; the page closes.
 What went wrong shows on the page in plain words; a key OpenSubtitles refuses brings the key
 page back.
 
@@ -45,6 +50,7 @@ from services.opensubtitles import (
     SearchWorker,
     SubtitleFile,
     api_key,
+    found_for,
     group_languages,
     language_name,
     parse_query,
@@ -68,6 +74,10 @@ DOWNLOADING_TEXT = N_("Downloading {name}…")
 LOADING_TEXT = "Loading {name}…"
 # i18n: the OpenSubtitles page's status line; {query}: what was searched for
 NOTHING_FOUND_TEXT = N_('No subtitles found for "{query}". Try another spelling, or fewer words.')
+# i18n: the OpenSubtitles page's status line: what it found was for other films or series
+NOTHING_FOR_TITLE_TEXT = N_(
+    "No subtitles found for this title. Try its original title, or its English one."
+)
 NOTHING_TO_SEARCH_TEXT = N_("Type a title to search for.")  # i18n: the search field was empty
 FAILED_TEXT = N_("Something went wrong. Try again.")
 # i18n: a toast; {name}: the subtitle file's name; "it": the film or episode
@@ -108,6 +118,27 @@ def found_text(count: int, languages: int) -> str:
         "{subtitles} in {languages}",
         subtitles=tr_n("{n} subtitle", "{n} subtitles", count, n=i18n.number(count)),
         languages=tr_n("{n} language", "{n} languages", languages),
+    )
+
+
+def found_text_for(count: int, languages: int, title: str) -> str:
+    """ "4 subtitles in 3 languages for Harbour Lights (2019)"."""
+    found = found_text(count, languages)
+    if not title:
+        return found
+    return tr(
+        "{found} for {title}",  # i18n: the OpenSubtitles page's status line
+        found=found,  # i18n: {found}: "4 subtitles in 3 languages"
+        title=title,  # i18n: {title}: the film or episode, as OpenSubtitles names it
+    )
+
+
+def others_text(count: int, languages: int) -> str:
+    """ "64 subtitles in 4 languages for other titles: …" ("Show all results")."""
+    # i18n: the status line after "Show all results"; {found}: "64 subtitles in 4 languages"
+    return tr(
+        "{found} for other titles: check the title under each one",
+        found=found_text(count, languages),
     )
 
 
@@ -156,6 +187,8 @@ class OnlineSubtitles(QObject):
         self._load = load
         self._toast = toast
         self._target: Optional[Target] = None  # what the page searches for
+        self._asked: Optional[SearchQuery] = None  # the last search asked for (its ids too)
+        self._result: Optional[SearchResult] = None  # what it found
         self._client: Optional[OpenSubtitlesClient] = None
         self._generation = 0  # the newest search: older results are dropped
         self._downloading = False
@@ -163,6 +196,7 @@ class OnlineSubtitles(QObject):
         page.saveKeyRequested.connect(self._on_save_key)
         page.getKeyRequested.connect(lambda: setup.open_url(CONSUMERS_URL))
         page.searchRequested.connect(self._on_search)
+        page.othersRequested.connect(self._on_others)
         page.fileChosen.connect(self._on_file)
 
     # ---- what the Subtitles panel asks ---------------------------------------------------------
@@ -271,6 +305,7 @@ class OnlineSubtitles(QObject):
         return [code for code in dict.fromkeys((last, system_language())) if code]
 
     def _search(self, query: SearchQuery) -> None:
+        self._asked, self._result = query, None
         self._page.show_search(query.label(), translate(SEARCHING_TEXT))
         if not query.text:
             self._page.set_status(translate(NOTHING_TO_SEARCH_TEXT), "error")
@@ -286,8 +321,13 @@ class OnlineSubtitles(QObject):
         )
 
     def _on_search(self, text: str) -> None:
-        """Search (Enter in the field): what it says, as "Title (2019)" or "Series S01E02"."""
-        self._search(parse_query(text))
+        """Search (Enter in the field): what it says, as "Title (2019)" or "Series S01E02"; the
+        same words as the last search's, as it was (by the title's id, when it had one)."""
+        asked = self._asked
+        if asked is not None and " ".join(text.split()) == " ".join(asked.label().split()):
+            self._search(asked)
+        else:
+            self._search(parse_query(text))
 
     def _save_config(self) -> None:
         save = getattr(self._config, "save_config", None)
@@ -316,21 +356,46 @@ class OnlineSubtitles(QObject):
             return
         if not isinstance(result, SearchResult):
             return
-        if not result.files:
+        self._result = result
+        if result.files:
+            self._list(result.files, result.query)
+        elif result.others:
+            # Only subtitles made for titles named otherwise (a translated title OpenSubtitles
+            # knows by its original name, or other films): listed at once, each row naming
+            # its title and the line saying so, never as this one's.
+            self._list(result.others, result.query, others=True)
+        else:
             label = result.query.label()
             text = translate(NOTHING_FOUND_TEXT, query=label)
             self._page.set_results([], {}, text, kind="error")
-            return
+
+    def _on_others(self) -> None:
+        """ "Show all results": the subtitles found for other titles, each named."""
+        result = self._result
+        if result is not None and result.others and self.visible():
+            self._list(result.others, result.query, others=True)
+
+    def _list(
+        self, found: tuple[SubtitleFile, ...], query: SearchQuery, *, others: bool = False
+    ) -> None:
+        """`found` on the page by language, each language's best first; the line says how many
+        (and, when OpenSubtitles names it otherwise, the title they are for)."""
         prefer_hi = bool(getattr(self._config, "opensubtitles_hearing_impaired", False))
-        groups = group_languages(result.files, self._preferred())
+        groups = group_languages(found, self._preferred())
         files = {
-            code: ranked((f for f in result.files if f.language == code), prefer_hi=prefer_hi)
+            code: ranked((f for f in found if f.language == code), prefer_hi=prefer_hi)
             for code, _count in groups
         }
         rows = [LanguageRow(code, language_name(code), count) for code, count in groups]
-        status = found_text(len(result.files), len(groups))
+        if others:
+            status = others_text(len(found), len(groups))
+        else:
+            title = found_for(found)
+            same = title.casefold() == query.label().casefold()
+            status = found_text_for(len(found), len(groups), "" if same else title)
         left = remaining_text(self._remaining)
-        self._page.set_results(rows, files, f"{status} · {left}" if left else status)
+        status = f"{status} · {left}" if left else status
+        self._page.set_results(rows, files, status, named=others)
 
     def _on_search_failed(self, generation: int, message: str) -> None:
         logger.info("An OpenSubtitles search failed: %s", message)

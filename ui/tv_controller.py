@@ -25,6 +25,10 @@ with the link (`show_library_menu`); while the Library shows, the menus' message
 toast. Only this controller holds the LiveTuner and the session: the others call back
 play_vod, tune or the external play.
 
+The Picture panel (2.3, ui/picture_controls.py) acts on the large picture as the Sound panel
+does: its aspect ratio, kept per channel, deinterlacing, the statistics, and a sleep timer that
+stops playback the Library's way (`stop_for_sleep`) and leaves fullscreen.
+
 Picture in picture (spec §7, Phase 4) is PipControls' (ui/pip_controls.py) over the window's
 SessionManager: each player has its own LiveTuner, and `session`, `live` and the tuner here
 are always the large picture's, so zapping, the banner, the transport, seek and Go live act
@@ -56,7 +60,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 import logging
 from pathlib import Path
@@ -84,8 +88,10 @@ from services.navigation import (
     item_key,
     item_title,
     payloads,
+    recent_channel,
 )
 from services.next_episode import play_context
+from services.picture import SOURCE_DIRECT, ChannelPictures
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of, split_group_id
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot
@@ -111,6 +117,7 @@ from ui.overlays.toast import Toast
 from ui.overlays.transport import Transport
 from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import BannerInfo, ZapBanner
+from ui.picture_controls import PictureControls
 from ui.pip_controls import PipControls
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
@@ -158,6 +165,10 @@ class Overlays:
     sound_panel: Any = None  # the Sound panel above ♫ (2.2)
     subtitle_panel: Any = None  # the Subtitles panel above its button (2.2)
     subtitle_search: Any = None  # its OpenSubtitles search page (2.2)
+    picture_panel: Any = None  # the Picture panel above its button (2.3)
+    stats: Any = None  # the statistics over the picture (2.3)
+    sleep_notice: Any = None  # the sleep timer's last minute (2.3)
+    layout_row: Any = None  # the multiview's layouts above its layout chip
     library_toast: Any = None  # the Library page's toast: the menus' messages while it shows
 
 
@@ -181,6 +192,7 @@ class TVController(QObject):
         sessions: Optional[SessionManager] = None,
         pip_frame=None,
         sound_sync: Optional[SoundSync] = None,
+        channel_pictures: Optional[ChannelPictures] = None,
         catchup_memory: Optional[CatchupMemory] = None,
         pick_subtitle_file: Optional[Callable[[str], str]] = None,
         account_checks=None,
@@ -193,7 +205,8 @@ class TVController(QObject):
     ):
         """With `sessions` (picture in picture), its large slot's player, live session and
         tuner stand for `session`, `live` and `budget`. `sound_sync` keeps each channel's
-        sound sync (None: for this run only), `catchup_memory` whether each channel's provider
+        sound sync and `channel_pictures` its aspect ratio (None: for this run only),
+        `catchup_memory` whether each channel's provider
         archive answered (None: alike); `pick_subtitle_file(folder)` asks for a subtitle
         file (the Subtitles panel's "Load a file…"); with `online_subtitles` (and the overlays'
         `subtitle_search`) the panel searches OpenSubtitles too. `account_checks` (an
@@ -263,7 +276,7 @@ class TVController(QObject):
             explain=self._explain_item,
             may_reopen=self._may_reopen,
             memory=catchup_memory,
-            prepare=lambda session, target: self._tracks.prepare(session, target, None),
+            prepare=lambda session, target: self._prepare(session, target, None),
             archive_allowed=self._archive_allowed,
             parent=self,
         )
@@ -326,6 +339,8 @@ class TVController(QObject):
             play_external=self._play_external,
             notify=self._menu_notify,
             open_pip=self._open_pip_node if sessions is not None else None,
+            forget_recent=self._forget_recent,
+            clear_recents=self._clear_recents,
             parent=self,
         )
         # The volume keys, mute and the wheel, on the mixer (one row per picture).
@@ -374,6 +389,27 @@ class TVController(QObject):
             show_transport=self._show_transport,
             parent=self,
         )
+        # The picture's aspect ratio (kept per channel), deinterlacing, the statistics and the
+        # sleep timer: the Picture panel (2.3).
+        self._picture = PictureControls(
+            panel=overlays.picture_panel,
+            transport=overlays.transport,
+            stats=overlays.stats,
+            notice=overlays.sleep_notice,
+            session=lambda: self.session,
+            current=lambda: self._current,
+            playing=self._has_media,
+            players=lambda: [player for _name, player in self._players()],
+            channel_key=self._sync_key,
+            store=channel_pictures if channel_pictures is not None else ChannelPictures(None),
+            config=config,
+            toast=self._toast,
+            programme_left=self._programme_left,
+            live_info=self._live_info,
+            stop=self.stop_for_sleep,
+            show_transport=self._show_transport,
+            parent=self,
+        )
         self._pip: Optional[PipControls] = None
         if sessions is not None:
             self._pip = PipControls(
@@ -397,7 +433,7 @@ class TVController(QObject):
                 toast=self._toast,
                 swap=self.swap,
                 toggle_mute=self._mixer.toggle_small_mute,
-                sound=self._tracks.prepare_small,
+                sound=self._prepare_small,
                 explain=self._explain_item,
                 parent=self,
             )
@@ -431,6 +467,9 @@ class TVController(QObject):
                 restore=self._restore_tile,
                 forget=self._forget_tile,
                 pending=self._focused_link,
+                layouts=overlays.layout_row,
+                tile_action=self._on_tile_control,
+                show_controls=self._show_transport,
                 parent=self,
             )
             self._grid.changed.connect(self._mixer.refresh)
@@ -519,8 +558,10 @@ class TVController(QObject):
         self._live_controls.wire()  # its record button too (2.2)
         self._mixer.wire()
         self._tracks.wire()
+        self._picture.wire()
         if self._pip is not None:
             self._pip.wire()
+        self._on_audio_changed()  # the speakers show the remembered levels from the start
         if self._grid is not None:
             self._grid.wire()
             gridded = getattr(transport, "gridRequested", None)
@@ -551,6 +592,7 @@ class TVController(QObject):
         if self._online is not None:
             self._online.shutdown()  # a sign-in ends, never holding up the quit
         self._tuning.stop()
+        self._picture.shutdown()  # the sleep timer ends unsaid
         self._cancel_external()
         self._flow.shutdown()
         if self._account_checks is not None:
@@ -606,6 +648,22 @@ class TVController(QObject):
             return
         self.leave_multiview(keep_pip=False)
         self._flow.enter_library()
+        self._stop_all()
+
+    def stop_for_sleep(self) -> None:
+        """The sleep timer ended (2.3): what plays stops as for the Library (each stream
+        closed, its budget slot back once released) and fullscreen ends; nothing plays by
+        itself until the viewer chooses something."""
+        if self._closed:
+            return
+        self.leave_multiview(keep_pip=False)
+        self._flow.drop_autotune()  # a provider still setting up tunes nothing
+        self.window_actions.leave_fullscreen()
+        self._stop_all()
+
+    def _stop_all(self) -> None:
+        """Stop what plays: no link on its way opens, the player's overlays close, a movie's
+        position is saved, both pictures stop."""
         self._cancel_external()
         self._lanes.supersede()  # an external play waiting for its link no longer plays
         self._lanes.drop_tune()  # a link on its way never opens
@@ -620,6 +678,7 @@ class TVController(QObject):
         overlays.banner.dismiss()
         overlays.transport.dismiss()
         self._tracks.close()
+        self._picture.close()
         self._close_online()
         try:
             self.watch.flush()  # a movie's last position
@@ -666,6 +725,7 @@ class TVController(QObject):
         overlays.transport.dismiss()
         self._mixer.hide()
         self._tracks.close()
+        self._picture.close()
         self._close_online()
         self._autoplay.drop()  # the Next card, and a wait for the next season
 
@@ -677,6 +737,10 @@ class TVController(QObject):
     def main_muted(self) -> bool:
         """Whether the large picture is muted."""
         return self._mixer.main_muted()
+
+    def main_level(self) -> int:
+        """The large picture's volume (0-100)."""
+        return self._mixer.main_level()
 
     def resume_live(self) -> None:
         """Back to live TV from the Library (R5): the last live channel again, else the drawer
@@ -712,7 +776,7 @@ class TVController(QObject):
         session = self.session  # the large picture's, whatever swaps before it opens
 
         def open_file() -> None:
-            self._tracks.prepare(session, target, previous)
+            self._prepare(session, target, previous)
             session.play(url, kind=classify(url, False), start_ms=0)
             self._reset_speed(session)
 
@@ -754,6 +818,7 @@ class TVController(QObject):
             or self._guide.is_open()
             or self._mixer.visible()
             or self._tracks.visible()
+            or self._picture.visible()
             or overlays.drawer.isVisible()
             or self._autoplay.card_open()
             or self._autoplay.waiting()
@@ -787,8 +852,12 @@ class TVController(QObject):
         drawer = self.overlays.drawer
         if not drawer.isVisible() and self._tracks.handle(action, key):
             return  # a Sound or Subtitles panel shows: the arrows, Enter and Esc are its own
+        if not drawer.isVisible() and self._picture.handle(action, key):
+            return  # the Picture panel or the sleep timer's notice shows: Enter is theirs
         if not drawer.isVisible() and self._mixer.handle(action, key):
             return  # the mixer shows: the arrows, M, Tab and Esc are its own
+        if not drawer.isVisible() and self._grid is not None and self._grid.handle_key(action):
+            return  # the multiview's layouts show: ←/→, Enter and Esc are theirs
         if action in (Action.CH_NEXT, Action.CH_PREV):
             delta = 1 if action is Action.CH_NEXT else -1
             if self._on_demand():
@@ -856,6 +925,8 @@ class TVController(QObject):
             Action.SOUND_LATER: lambda: tracks.nudge_sound(1),
             Action.SUBTITLES_EARLIER: lambda: tracks.nudge_subtitles(-1),
             Action.SUBTITLES_LATER: lambda: tracks.nudge_subtitles(1),
+            Action.PICTURE: self._picture.open_from_key,
+            Action.STATS: self._picture.toggle_stats,
             Action.VOL_UP: lambda: self._change_volume(VOLUME_STEP),
             Action.VOL_DOWN: lambda: self._change_volume(-VOLUME_STEP),
             Action.ESCAPE: self._escape,
@@ -868,6 +939,7 @@ class TVController(QObject):
             Action.NAV_ACTIVATE: lambda: drawer.activate(),
             Action.NAV_TEXT: lambda: drawer.type_text(payload),
             Action.NAV_BACKSPACE: lambda: drawer.backspace(),
+            Action.FORGET: self._forget_highlighted,
         }
         return calls.get(action)
 
@@ -907,6 +979,8 @@ class TVController(QObject):
 
     def mouse_moved(self) -> None:
         self._show_transport()
+        if self._grid is not None:
+            self._grid.pointer_moved()  # the tile under the pointer shows its controls
 
     def _close_online(self) -> None:
         if self._online is not None:
@@ -1366,15 +1440,17 @@ class TVController(QObject):
                 if not self._live_controls.tune_pipeline(target, url):
                     return  # over the provider's stream limit: nothing opens
                 # The old stream is stopped: the channel's sync waits for its player's open.
-                self._tracks.prepare(self.session, target, previous)
+                self._prepare(self.session, target, previous)
                 self._current, self._cid = target, None
                 self.overlays.transport.set_speed(1.0)  # LiveSession starts every tune at 1x
             else:
+                if self._live_controls.refuse_over_limit(target, direct=True):
+                    return  # over the provider's stream limit: nothing opens
                 self._current, self._cid = target, None
                 session = self.session  # the large picture's, whatever swaps before it opens
 
                 def play_direct() -> None:
-                    self._tracks.prepare(session, target, previous)
+                    self._prepare(session, target, previous)
                     session.play(
                         url, kind=kind, latency=self.config.live_latency, **stream_options(item)
                     )
@@ -1392,7 +1468,7 @@ class TVController(QObject):
             session = self.session
 
             def open_vod() -> None:
-                self._tracks.prepare(session, target, previous)
+                self._prepare(session, target, previous)
                 session.play(url, kind=classify(url, False), start_ms=start)
                 self._reset_speed(session)
 
@@ -1633,12 +1709,12 @@ class TVController(QObject):
             kwargs = tune_kwargs(start, self.config, disk=False)
             grid.open_focused(item, provider=provider_name, limit=limit, start_kwargs=kwargs)
             # The old stream is stopped: the channel's sync waits for its player's open.
-            self._tracks.prepare(session, target, previous)
+            self._prepare(session, target, previous)
             self.overlays.transport.set_speed(1.0)  # LiveSession starts every tune at 1x
             return
 
         def play_direct() -> None:
-            self._tracks.prepare(session, target, previous)
+            self._prepare(session, target, previous)
             session.play(url, kind=kind, latency=self.config.live_latency, **stream_options(item))
             self._reset_speed(session)
 
@@ -1731,7 +1807,7 @@ class TVController(QObject):
                 )
 
             grid.open_tile(name, item, play_direct, provider=provider_name, limit=limit)
-        self._tracks.prepare_small(slot.playback, item)  # its sound sync, kept per channel
+        self._prepare_small(slot.playback, item)  # its sound sync and shape, kept per channel
 
     def _forget_tile(self, name: str) -> None:
         """Tile `name` left the grid (a smaller layout, or the grid went): its link on its way
@@ -1827,6 +1903,57 @@ class TVController(QObject):
     def _mixer_tiles(self) -> Optional[list[tuple[str, str, str]]]:
         return self._grid.mixer_rows() if self._grid is not None else None
 
+    def _on_tile_control(self, name: str, control: str) -> None:
+        """A multiview tile's own control (its strip): it acts on that tile, the focus stays.
+        "play" pauses or plays it (the focused one as Space does), "live" goes live,
+        "speaker" mutes or unmutes it, "close" stops the focused tile's stream and "closed"
+        forgets what a closed tile without the focus showed."""
+        sessions = self.sessions
+        if self._closed or sessions is None:
+            return
+        try:
+            slot = sessions.slot(name)
+        except KeyError:
+            return
+        focused = slot is sessions.large()
+        if control == "play":
+            if focused:
+                self._play_pause()
+            else:
+                self._tuner_of(slot).toggle_pause()
+        elif control == "live":
+            if focused:
+                self._live_controls.go_live()
+            else:
+                self._tuner_of(slot).go_live()
+        elif control == "speaker":
+            self._mixer.toggle_mute_of(name)
+        elif control == "close" and focused:
+            self._close_focused_tile()
+        elif control == "closed" and self._pip is not None:
+            self._pip.forget_view(name)  # it takes the focus as "+", never as its old channel
+
+    def _close_focused_tile(self) -> None:
+        """The focused tile's ✕: its stream stops (its provider's stream goes back once
+        released), a link on its way never opens, and the tile shows "+" with the focus; the
+        player controls are the grid's until a channel is picked there."""
+        sessions = self.sessions
+        if sessions is None:
+            return
+        self._lanes.drop_tune()
+        self._tuning.stop()
+        if self._digits:
+            self.zap.cancel_digits()
+        self._tracks.close()
+        self._live_controls.stop_tune()
+        large = sessions.large()
+        large.channel = large.group_key = None
+        self._current, self._cid, self._current_url = None, None, ""
+        self._restore_channel()
+        self.overlays.banner.dismiss()
+        if self.overlays.transport.isVisible():
+            self._show_grid_transport()
+
     def _open_pip_node(self, node: NavNode) -> None:
         """The channel list's "Open in picture-in-picture": never over the grid's tiles."""
         if self.multiview_shown():
@@ -1841,6 +1968,8 @@ class TVController(QObject):
         if sessions is None or pip is None or self._closed:
             return
         new, old = sessions.slot(name), sessions.slot(old_name)
+        # An ended stream on its way to open again goes with its player, in its new role.
+        reopens = self._live_controls.take_reopen(), pip.take_reopen(new.name)
         view = pip.take_large(
             old.name, new.name, self._current, self.zap.context, self._current_url, self._cid
         )
@@ -1850,6 +1979,11 @@ class TVController(QObject):
         self._use_slot(new)
         # A movie's resume key comes back with its slot: its position is saved again.
         self._current, self._cid, self._current_url = view.target, view.cid, view.url
+        large_reopen, small_reopen = reopens
+        if small_reopen is not None:
+            self._live_controls.adopt_reopen(small_reopen)
+        if large_reopen is not None and not self.multiview_shown():
+            pip.adopt_reopen(old.name, large_reopen)
         self._restore_channel()
         self._state = self._states.get(new.name, "idle")
         self._tuning.stop()
@@ -1886,6 +2020,7 @@ class TVController(QObject):
             if transport.isVisible():
                 self._show_grid_transport()
         self._tracks.refresh()  # an open panel shows the large picture's sound or subtitles
+        self._picture.refresh()  # and the Picture panel and the statistics its picture
         if grid:
             return  # the grid follows the focus itself (its ring, the tiles' labels)
         pip.after_swap()
@@ -1939,6 +2074,7 @@ class TVController(QObject):
             self._pip.watch_slot(slot)
         if self._grid is not None:
             self._grid.watch_slot(slot)
+        self._picture.add_player(slot.playback)  # deinterlacing, as every player's
 
     def _lives(self) -> list[Any]:
         """Every player's live session (the large picture's alone without picture in picture)."""
@@ -1968,6 +2104,47 @@ class TVController(QObject):
         tuner = slot.tuner
         assert isinstance(tuner, LiveTuner)
         return tuner
+
+    def _prepare(self, session, target: Target, previous: Optional[Target]) -> None:
+        """`target` is about to open in `session`, the large picture's player: its sound, its
+        subtitles and its picture's shape as the viewer set them (a retry keeps the player's)."""
+        self._tracks.prepare(session, target, previous)
+        self._picture.prepare(session, target, previous)
+
+    def _prepare_small(self, session, channel: dict) -> None:
+        """A channel opens in a small picture's player: its sound sync and shape."""
+        self._tracks.prepare_small(session, channel)
+        self._picture.prepare_small(session, channel)
+
+    def _live_lag(self) -> Optional[float]:
+        """How far the large picture's channel plays behind live, as the time-shift helper
+        reports it (None: it plays directly, an archive, or nothing yet)."""
+        live = self.live
+        if live is None or not live.is_pipeline() or self._live_controls.catchup.active():
+            return None
+        timeline = self._tuner.timeline
+        lag = timeline.get("lag") if timeline is not None else None
+        return float(lag) if isinstance(lag, (int, float)) else None
+
+    def _live_info(self) -> dict:
+        """The statistics' source and lag for the large picture."""
+        live = self.live
+        kind = live.source_kind() if live is not None and live.is_pipeline() else ""
+        return {"source": kind or SOURCE_DIRECT, "lag": self._live_lag()}
+
+    def _programme_left(self) -> Optional[float]:
+        """Seconds until the programme the large picture's channel shows ends (a time-shifted
+        channel's later by as much as it plays behind); None: not a channel, or not known."""
+        target = self._playing_live()
+        if target is None or self._live_controls.catchup.active():
+            return None
+        lag = self._live_lag() or 0.0
+        watched = self._now() - timedelta(seconds=lag)
+        for programme in self._programmes(target.item, watched, 1):
+            if programme.is_on(watched):
+                left = (programme.stop - watched).total_seconds()
+                return left if left > 0 else None
+        return None
 
     def _sync_key(self, item: dict) -> str:
         """A channel's key for its sound sync: its provider's and its own (as live_tuning's)."""
@@ -2221,6 +2398,7 @@ class TVController(QObject):
             self.overlays.transport.set_paused(state == "paused")
         if state == "playing":
             self._live_controls.on_playing()  # direct play: a held "unavailable" shows now
+            self._picture.on_playing()  # after the sleep timer: the computer stays awake again
 
     def _on_position(self, position_ms: int, length_ms: int) -> None:
         if self._closed or self._current is None or self._current.live:
@@ -2540,10 +2718,13 @@ class TVController(QObject):
 
     def _on_audio_changed(self) -> None:
         """A level or mute changed, or the pictures swapped: the PiP label's speaker and the
-        transport's follow."""
+        transport's follow (crossed out, or a wave per third of the volume)."""
         self.overlays.transport.set_muted(self._mixer.main_muted())
+        self.overlays.transport.set_level(self._mixer.main_level())
         if self._pip is not None:
             self._pip.refresh_label()
+        if self._grid is not None:
+            self._grid.refresh_tiles()  # a tile's speaker shows its mute
 
     # ---- favorites and context actions --------------------------------------------------------
 
@@ -2584,6 +2765,39 @@ class TVController(QObject):
             self._toast(translate(FAVORITES_SAVE_FAILED_TEXT), "error", ERROR_MS)
             return
         self._toast(tr("Added to favorites") if added else tr("Removed from favorites"))
+
+    def _forget_highlighted(self) -> None:
+        """Delete in the channel list: the highlighted channel leaves ⟲ Recent (nothing on any
+        other row, nor while the find lists what it found: Delete there is the find's)."""
+        drawer = self.overlays.drawer
+        if not drawer.isVisible() or drawer.finding():
+            return
+        node = drawer.highlighted()
+        if node is not None and self.nav.is_recent_row(node):
+            self._forget_recent(node.payload)
+
+    def _forget_recent(self, item: dict) -> None:
+        """The channel leaves ⟲ Recent: its plays leave the watch history (saved with it)."""
+        wanted = (provider_of(item), item_key(item))
+        if self.watch.forget(lambda entry: recent_channel(entry) == wanted):
+            self._recents_changed()
+            self._toast(tr("Removed from Recents"))  # i18n: a toast (see "Remove from Recents")
+
+    def _clear_recents(self) -> None:
+        """Clear Recents: every channel leaves ⟲ Recent (films and episodes stay in the
+        history: the Library's Continue)."""
+        if self.watch.forget(lambda entry: recent_channel(entry) is not None):
+            self._recents_changed()
+            self._toast(tr("Recents cleared"))  # i18n: a toast: the "Recent" list was emptied
+
+    def _recents_changed(self) -> None:
+        """⟲ Recent follows; emptied while it shows, the list goes a layer up to the genres
+        (its row is gone from them)."""
+        path = self.nav.path
+        if path and path[-1].key == RECENT_GROUP and not self.nav.recent_count():
+            self.nav.up()
+        else:
+            self.nav.changed.emit()
 
     def _on_context(self, node: NavNode, global_pos: QPoint) -> None:
         """A right-click on a drawer row: its context menu."""

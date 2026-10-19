@@ -17,7 +17,7 @@ form cannot import `ts_fixtures`).
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import logging
 import time
 from typing import Callable
@@ -82,6 +82,36 @@ _TRIMS_KEPT = 64  # the latest trims kept for a look (a memory bound)
 # ClockJoiner: a junction's packets wait at most this many for its first picture (a few
 # hundred milliseconds at 25 Mbit/s); then they pass on as they are.
 _CLOCK_PENDING_PACKETS = 4096
+# ClockJoiner's forward jumps (a source whose clock leaps ahead inside one connection or one run
+# of HLS segments: measured on a public news channel, every PID 13 s ahead between two pictures
+# of one 10 s segment, which VLC 3 sat out as a 15 s still, its clock gap limit being 60 s):
+# - a picture whose DTS (its PTS without one) steps more than `JUMP_S` past the last picture's,
+#   and more than twice the step before it (a slideshow's stills seconds apart are its cadence),
+#   jumped when arrival leaves more than `JUMP_S` of the step unexplained: the pictures' media
+#   less the arrival (raw TS: the wall clock; HLS: each segment's EXTINF as it begins) is
+#   measured against its highest within this much arrival (a raw TS burst of 10 s every 10 s,
+#   or a whole HLS segment's EXTINF, raised to 1.5 times it for longer segments);
+_JUMP_WINDOW_S = 15.0
+# - no step is judged before the pictures went on this much since the window began (the start,
+#   a junction, a discontinuity, a step back): their cadence is known by then, and the window
+#   holds a whole 10 s HLS segment or raw TS burst to measure arrival against (a still every
+#   5 s without sound, in one burst or in 6 s HLS segments, read as a 5 s jump at its first);
+_JUMP_HISTORY_TICKS = 10 * _CLOCK
+# - any other timestamp that lands more than `JUMP_S` past where its own last one leads (a PCR,
+#   sound, a picture's PTS ahead of its DTS) holds what follows for a picture that jumps, while
+#   the pictures advance at most this much (the capture's PTS leapt three pictures, 0.08 s,
+#   before its DTS);
+_JUMP_WAIT_TICKS = 2 * _CLOCK
+# - for this much of the pictures' media after the jump, each timestamp takes the old offset or
+#   the new, whichever lands nearer its own PID's last (pictures decoded before the jump but
+#   shown after it; sound muxed in blocks of 7 s that crossed 2.3 s after the pictures), and
+#   then the new offset alone.
+_JUMP_SETTLE_TICKS = 10 * _CLOCK
+# A longer step is a clock of its own, which VLC 3 takes by itself (its clock gap limit) as the
+# segmenter's timeline does: it passes as it came.
+_JUMP_MAX_TICKS = 60 * _CLOCK
+_PCR, _PTS, _DTS = 0, 1, 2  # a timestamp's kind: each PID's PCRs, PTSs and DTSs run on apart
+_PASS, _LEAP, _JUMP, _REWRITE = 0, 1, 2, 3  # what `ClockJoiner._watched` makes of a packet
 # ReconnectTrimmer
 _REJOIN_TAIL_BYTES = 8 * 1024 * 1024  # output kept to read the last PTS and pictures from
 _REJOIN_WINDOW_TICKS = 60 * _CLOCK  # a new connection's PTS this near the old's: one timebase
@@ -2433,8 +2463,29 @@ class LoopTrimmer:
             dropped.append((at, size))
 
 
+@dataclass(slots=True)
+class _Watch:
+    """What `ClockJoiner` keeps to tell a forward jump (copied while a leap is held)."""
+
+    # Each (PID, kind)'s last timestamp passed on, and the pictures' reference then.
+    stamps: dict[tuple[int, int], tuple[int, int | None]] = field(default_factory=dict)
+    progress: int = 0  # ticks the pictures advanced since the window began
+    # (arrival, lead) of the latest pictures, their leads falling: the first is the highest.
+    leads: deque[tuple[float, float]] = field(default_factory=deque)
+    cadence: int | None = None  # the pictures' latest forward step
+    # How far the other timestamps went past the last picture since it came (sound beyond
+    # its PTS, a PCR beyond its DTS): a gap in the pictures that they fill is no jump.
+    covered: int = 0
+
+    def copy(self) -> _Watch:
+        return _Watch(
+            dict(self.stamps), self.progress, deque(self.leads), self.cadence, self.covered
+        )
+
+
 class ClockJoiner:
-    """Re-bases each run after a restart inside one connection, so its clock runs on (raw TS).
+    """Re-bases each run after a restart inside one connection, so its clock runs on (raw TS),
+    and a clock that leaps ahead where arrival does not explain it (raw TS and HLS).
 
     A restarted muxer starts PTS, DTS and PCR over (its PCR 0.7 s below zero, wrapping 0.7 s
     in). VLC 3 takes a long step back well, but one onto timestamps it has just played (a few
@@ -2449,28 +2500,58 @@ class ClockJoiner:
     move with it. An offset that moves the clock by two frames or less leaves the junction be
     (the clock runs on already). Otherwise it leaves no trace: each PID's first
     discontinuity_indicator after it is cleared, and the counters run on
-    (`ContinuityJoiner`). The ring then holds rewritten bytes after a restart: the
-    original-bytes rule gives way there, for raw TS only.
+    (`ContinuityJoiner`). The ring then holds rewritten bytes after a restart (or a jump,
+    below): the original-bytes rule gives way there.
+
+    A clock can also leap ahead within a run: a public news channel's encoder lost 13 s of its
+    source, and every PID's timestamps stepped 13 s on between two pictures inside one HLS
+    segment, no discontinuity tag near. VLC 3 resets its clock only past a 60 s gap, so it
+    waited for the timestamps: a 15 s still. With an arrival clock (`clock`, raw TS) or once
+    HLS segments `arrive`, such a jump is looked for (the `_JUMP_*` constants say how), once
+    the pictures went on 10 s: a picture whose DTS steps on by more than `JUMP_S` that arrival
+    does not explain (raw TS: by the wall clock, as after a stalled source whose timestamps
+    went on in real time; HLS: by the EXTINF of the segments begun) is re-based like a
+    junction, onto the last picture by a frame, by its DTS (a picture's PTS may sit seconds
+    ahead of it). Where a timestamp leaps
+    before that picture (a PCR, sound, the PTS of pictures decoded before the jump and shown
+    after it), what follows is held until a picture jumps (or the pictures moved on
+    `_JUMP_WAIT_TICKS` without one: then it passes on as it came). For a while after the jump
+    (`_JUMP_SETTLE_TICKS`) each timestamp takes the old offset or the new, whichever keeps its
+    own PID running on; then the new one alone. A jump splits no piece (the segmenter sees one
+    clock running on, and the timeline leaves nothing out); the flags after it are cleared and
+    the counters run on as after a junction. Each is logged once and kept in `jumps`.
 
     `feed` returns what passes on in pieces: a junction re-based lies between two (the
     segmenter cuts the new run a segment of its own and learns afresh whether it flags its
-    keyframes). Until the first junction nothing is rewritten: each packet's header is read
-    (its counter, a video PES's timestamps). `discontinuity()` (a reconnect) ends the
-    re-basing: what follows passes on as it comes, as before, but for a junction that comes
+    keyframes). Until the first junction or jump nothing is rewritten: each packet's header is
+    read (its counter, a video PES's timestamps; while jumps are looked for, every PES header
+    and PCR). `discontinuity()` (a reconnect, an HLS discontinuity) ends the re-basing of
+    restarts: what follows passes on as it comes, as before, but for a junction that comes
     before the new connection passed a picture (where a loop `LoopTrimmer` dropped across the
-    reconnect ends): that is re-based onto the last picture before the reconnect. Pure logic:
-    the program's video PID is the caller's.
+    reconnect ends): that is re-based onto the last picture before the reconnect. What jumps
+    added stays when the first picture after it is within `_REJOIN_WINDOW_TICKS` of the last
+    before it as they came (one clock: the bytes in between wait for that picture), so a
+    source that goes on with its clock does not leap ahead again there. Pure logic: the
+    program's video PID is the caller's, and the clock is injected.
     """
 
-    def __init__(self, *, program: Callable[[], tuple[int | None, int | None]]) -> None:
+    def __init__(
+        self,
+        *,
+        program: Callable[[], tuple[int | None, int | None]],
+        clock: Callable[[], float] | None = None,
+    ) -> None:
         self._program = program
+        self._clock = clock
+        self._video_pid: int | None = None
         self._buf = b""
         self._searching = True  # the next packet start must be proven by three sync bytes
         self._offset = 0  # added to every PTS, DTS and PCR base once active (modulo 2**33)
         self._active = False
         self._last_pts: int | None = None  # the latest video PTS as it came
         self._top: int | None = None  # the furthest video PTS passed on (re-based)
-        self._last_dts: int | None = None  # the latest video DTS passed on (re-based)
+        # The latest video DTS passed on (re-based; its PTS without one): the pictures' clock.
+        self._last_dts: int | None = None
         # (`_top`, `_last_dts`, `_last_pts`) before a reconnect, until a picture passed after it
         self._before: tuple[int, int | None, int | None] | None = None
         self._frame = _CLOCK // 25  # the shortest forward PTS step seen: a frame
@@ -2481,19 +2562,51 @@ class ClockJoiner:
         self._unflag_left = 0  # packets after a junction in which those are looked for
         # (step it came with, step it goes on with), in seconds, per junction re-based
         self.junctions: deque[tuple[float, float]] = deque(maxlen=_TRIMS_KEPT)
+        # Forward jumps: looked for with an arrival clock, or once HLS segments `arrive`.
+        self._watching = clock is not None
+        self._listed = False  # HLS: arrival is the EXTINF of the segments begun, not the clock
+        self._credit = 0.0  # arrival so far, in seconds
+        self._window = _JUMP_WINDOW_S  # arrival over which the highest lead is taken
+        self._watch = _Watch()
+        # While a leap is held (`_pending` then holds what came since): the watch and the
+        # pictures' clock before it, and the pictures' clock when it came.
+        self._held: tuple[_Watch, tuple[int | None, ...]] | None = None
+        self._held_at: int | None = None
+        # The picture that jumped: (the new offset, its step, of it what arrival did not
+        # explain, the pictures' clock before it).
+        self._leap: tuple[int, int, float, int] = (0, 0, 0.0, 0)
+        # After a jump: (the offset before it, the pictures' clock before it) while it settles.
+        self._settle: tuple[int, int] | None = None
+        self._jumped = 0  # what jumps added to `_offset` (modulo 2**33): a reconnect keeps it
+        # After a discontinuity, until its first picture: (what jumps added, the pictures'
+        # clock before it as it came).
+        self._marked: tuple[int, int] | None = None
+        # (step it came with, of it what arrival did not explain), in seconds, per jump
+        self.jumps: deque[tuple[float, float]] = deque(maxlen=_TRIMS_KEPT)
 
     @property
     def offset_s(self) -> float:
         """What the re-basing adds to every timestamp now, in seconds."""
-        return self._offset / _CLOCK
+        return pts_delta(0, self._offset) / _CLOCK
+
+    def arrive(self, seconds: float) -> None:
+        """HLS: a segment of `seconds` (its EXTINF) begins with the next bytes. From the first,
+        forward jumps are looked for, with the EXTINF as the arrival (see the class
+        docstring)."""
+        self._watching = self._listed = True
+        self._credit += max(0.0, seconds)
+        self._window = max(_JUMP_WINDOW_S, 1.5 * seconds)
 
     def feed(self, data: bytes, junction: bool = False) -> list[bytes]:
         """Take input bytes (`junction`: a new run starts with them); return what passes on,
         in pieces (see the class docstring)."""
-        video_pid = self._program()[0]
+        video_pid = self._video_pid = self._program()[0]
+        if self._clock is not None and not self._listed:
+            self._credit = self._clock()
         out: list[bytes | None] = []  # None: a junction
         if junction:
             self._flush_pending(out)  # one that never met its picture passes on as it came
+            self._settle = None  # the junction re-bases what follows on its own
             self._pending = []
         data = self._buf + data if self._buf else data
         n = len(data)
@@ -2508,19 +2621,46 @@ class ClockJoiner:
                 continue
             end = off + PACKET
             b1 = data[off + 1]
-            video = bool(((b1 & 0x1F) << 8) | data[off + 2] == video_pid and b1 & 0x40)
+            pid = ((b1 & 0x1F) << 8) | data[off + 2]
+            video = bool(pid == video_pid and b1 & 0x40)
+            timed = self._watching and (
+                b1 & 0x40 or (data[off + 3] & 0x20 and data[off + 4] >= 7 and data[off + 5] & 0x10)
+            )
             if self._pending is None:
+                if timed:
+                    if run < off:  # passed on before a jump may change the offset
+                        self._place(data[run:off], out)
+                        run = off
+                    verdict, packet = self._watched(data, off, pid, pid == video_pid, held=False)
+                    if verdict != _PASS:
+                        if verdict == _LEAP:  # held from here until a picture jumps
+                            self._pending = [data[off:end]]
+                        else:  # _REWRITE: after a jump, each timestamp on its own
+                            self._put(packet, out)
+                        off = run = end
+                        continue
                 if not self._active:
                     self._count(data, off)
-                if video:
+                if video and not timed:
                     self._follow(data, off)
                 off = end
                 continue
             if run < off:
                 self._place(data[run:off], out)
             self._pending.append(data[off:end])
-            if video and not b1 & 0x80 and _pes_times(data, off)[0] is not None:
-                self._decide(out)
+            if self._held is not None:  # a leap waits for a picture that jumps
+                verdict = _PASS
+                if timed:
+                    verdict = self._watched(data, off, pid, pid == video_pid, held=True)[0]
+                if verdict == _JUMP:
+                    self._confirm(out)
+                elif len(self._pending) >= _CLOCK_PENDING_PACKETS or self._waited():
+                    self._release(out)
+            elif video and not b1 & 0x80 and _pes_times(data, off)[0] is not None:
+                if self._marked is not None:
+                    self._resume(out)
+                else:
+                    self._decide(out)
             elif len(self._pending) >= _CLOCK_PENDING_PACKETS:
                 self._flush_pending(out)
             off = run = end
@@ -2539,18 +2679,28 @@ class ClockJoiner:
         return pieces
 
     def discontinuity(self) -> bytes:
-        """A reconnect comes next: what waits passes on as it is, and the re-basing ends. A
-        junction that comes before the next connection passed a picture (where a loop
-        `LoopTrimmer` dropped across the reconnect ends) is re-based onto the last picture
-        before the reconnect, as if that had been a pause."""
+        """A reconnect (or an HLS discontinuity) comes next: what waits passes on as it is, and
+        the re-basing of restarts ends. A junction that comes before the next connection passed
+        a picture (where a loop `LoopTrimmer` dropped across the reconnect ends) is re-based
+        onto the last picture before the reconnect, as if that had been a pause. What jumps
+        added goes on if the clock does (see the class docstring)."""
+        marked = self._marked  # a discontinuity before, whose first picture never came
         out = self._end()
         if self._joiner is not None:
             self._counters = self._joiner.counters  # what passed on: the next joiner's start
         if self._top is not None:
             self._before = (self._top, self._last_dts, self._last_pts)
+        if marked is None and self._jumped and self._last_dts is not None:
+            marked = (self._jumped, (self._last_dts - self._offset) % _PTS_MODULO)
         self._active, self._offset, self._joiner = False, 0, None
         self._unflag_left = 0
         self._last_pts = self._top = self._last_dts = None
+        self._settle = None
+        self._jumped = 0
+        self._watch = _Watch()  # the step across it is no jump; the arrival goes on
+        if marked is not None:
+            self._marked = marked
+            self._pending = []  # what follows waits for its first picture (`_resume`)
         self._searching = True
         return out
 
@@ -2584,6 +2734,7 @@ class ClockJoiner:
         top, last_dts = self._top, self._last_dts
         if top is None and self._before is not None:
             top, last_dts, self._last_pts = self._before  # none passed on since a reconnect
+        self._watch = _Watch()  # the step across a junction is no jump
         if pts is None or top is None:
             self._pass_pending(pending, out)
             return
@@ -2611,7 +2762,28 @@ class ClockJoiner:
         logger.debug("a restart's clock re-based by %.2f s", moved / _CLOCK)
         for pkt in pending:
             self._place(pkt, out)
-        self._follow(first, 0)
+            self._note_packet(pkt)
+
+    def _resume(self, out: list[bytes | None]) -> None:
+        """The first picture after a discontinuity came while jumps had moved the clock: within
+        `_REJOIN_WINDOW_TICKS` of the last picture before it (as both came), the source's clock
+        goes on and so does what the jumps added; else what follows passes on as it comes."""
+        pending, marked = self._pending, self._marked
+        assert pending is not None and marked is not None
+        self._pending = self._marked = None
+        jumped, before = marked
+        pts, dts = _pes_times(pending[-1], 0)
+        now = pts if dts is None else dts
+        if now is not None and abs(pts_delta(before, now)) <= _REJOIN_WINDOW_TICKS:
+            self._offset = self._jumped = jumped
+            self._joiner = ContinuityJoiner(self._counters)  # the counters run on across it
+            self._active = True
+            logger.debug("a jump's re-basing goes on across a discontinuity")
+        for pkt in pending:
+            if not self._active:
+                self._count(pkt, 0)
+            self._place(pkt, out)
+            self._note_packet(pkt)
 
     def _pass_pending(self, pending: list[bytes], out: list[bytes | None]) -> None:
         """No junction to hide: the pending packets pass on as any would."""
@@ -2619,15 +2791,21 @@ class ClockJoiner:
             if not self._active:
                 self._count(pkt, 0)
             self._place(pkt, out)
-        self._follow(pending[-1], 0)
+            self._note_packet(pkt)
 
     def _flush_pending(self, out: list[bytes | None]) -> None:
-        """No picture came after a junction: its packets pass on as they are."""
+        """No picture came after a junction (or a discontinuity), or a leap was held when the
+        input ends or a junction comes: its packets pass on as they are."""
+        if self._held is not None:
+            self._release(out)
+            return
         pending, self._pending = self._pending, None
+        self._marked = None
         for pkt in pending or ():
             if not self._active:
                 self._count(pkt, 0)
             self._place(pkt, out)
+            self._note_packet(pkt)
 
     def _follow(self, data: bytes, off: int) -> None:
         """A video PES start (as it came) passes on: its PTS, and re-based the furthest PTS
@@ -2635,14 +2813,302 @@ class ClockJoiner:
         pts, dts = _pes_times(data, off)
         if pts is None:
             return
+        offset = self._offset
+        dts_out = None if dts is None else (dts + offset) % _PTS_MODULO
+        self._followed(pts, (pts + offset) % _PTS_MODULO, dts_out)
+
+    def _followed(self, pts: int, shifted: int, dts: int | None) -> None:
+        """A picture passed on: its PTS as it came and passed on, and its DTS passed on."""
         if self._last_pts is not None and 0 < pts_delta(self._last_pts, pts) < self._frame:
             self._frame = pts_delta(self._last_pts, pts)
         self._last_pts = pts
         self._before = None
-        shifted = (pts + self._offset) % _PTS_MODULO
         if self._top is None or pts_delta(self._top, shifted) > 0:
             self._top = shifted
-        self._last_dts = shifted if dts is None else (dts + self._offset) % _PTS_MODULO
+        self._last_dts = shifted if dts is None else dts
+
+    # -- forward jumps -----------------------------------------------------------------------
+
+    def _watched(
+        self, data: bytes, off: int, pid: int, video: bool, held: bool
+    ) -> tuple[int, bytes]:
+        """A packet that carries a PCR or starts a PES, while jumps are looked for: `_PASS` (it
+        passes on with the offset, noted), `_LEAP` (a timestamp leapt: hold from it, noted),
+        `_JUMP` (`held`: this picture jumped) or `_REWRITE` with the packet re-based on its own
+        (after a jump, or at it)."""
+        places = _stamps(data, off)
+        if not places:
+            return _PASS, b""
+        ref = _reference(places) if video else None
+        if self._settle is not None and not held:
+            return _REWRITE, self._settled(data[off : off + PACKET], pid, places, ref)
+        offset = self._offset
+        last = self._last_dts
+        if ref is not None and last is not None:
+            step = pts_delta(last, (ref[1] + offset) % _PTS_MODULO)
+            unexplained = self._unexplained(step)
+            if unexplained is not None:
+                # The new offset: this picture follows the last by a frame, by its DTS.
+                new = (last + self._frame - ref[1]) % _PTS_MODULO
+                self._leap = (new, step, unexplained, last)
+                if held:
+                    return _JUMP, b""
+                self._begin()
+                return _REWRITE, self._settled(data[off : off + PACKET], pid, places, ref)
+        leapt = not held and self._seasoned() and self._leaps(pid, places, ref, offset)
+        if leapt:
+            self._held = (self._watch.copy(), self._follow_state())
+            self._held_at = last
+        self._note(pid, places, ref, offset, cover=not held and not leapt)
+        return (_LEAP if leapt else _PASS), b""
+
+    def _unexplained(self, step: int) -> float | None:
+        """Of a picture's step, in seconds, what arrival does not explain, when that makes it a
+        jump (see `_JUMP_WINDOW_S`); else None."""
+        watch = self._watch
+        if not self._seasoned():
+            return None
+        if step <= max(_JUMP_TICKS, 2 * (watch.cadence or 0)) or step > _JUMP_MAX_TICKS:
+            return None
+        if step - watch.covered <= _JUMP_TICKS:  # the sound (or the PCR) went on through it
+            return None
+        lead = (watch.progress + step) / _CLOCK - self._credit
+        leads = watch.leads
+        horizon = self._credit - self._window
+        while len(leads) > 1 and leads[0][0] < horizon:
+            leads.popleft()
+        highest = leads[0][1] if leads else watch.progress / _CLOCK - self._credit
+        unexplained = lead - highest
+        return unexplained if unexplained > JUMP_S else None
+
+    def _seasoned(self) -> bool:
+        """Whether the pictures went on long enough for a step to be judged (see
+        `_JUMP_HISTORY_TICKS`)."""
+        return self._watch.progress >= _JUMP_HISTORY_TICKS
+
+    def _leaps(
+        self, pid: int, places: list[tuple[int, int, int]], ref: tuple[int, int] | None, offset: int
+    ) -> bool:
+        """Whether a timestamp other than a picture's own reference lands more than `JUMP_S`
+        (and at most `_JUMP_MAX_TICKS`) past where its last leads (that one plus how far the
+        pictures went on since)."""
+        stamps = self._watch.stamps
+        now = self._last_dts if ref is None else (ref[1] + offset) % _PTS_MODULO
+        for kind, _, value in places:
+            if ref is not None and kind == ref[0]:
+                continue
+            prior = stamps.get((pid, kind))
+            if prior is None:
+                continue
+            last, then = prior
+            ahead = 0
+            if then is not None and now is not None:
+                ahead = max(0, pts_delta(then, now))
+            leap = pts_delta(last, (value + offset) % _PTS_MODULO) - ahead
+            if _JUMP_TICKS < leap <= _JUMP_MAX_TICKS:
+                return True
+        return False
+
+    def _note(
+        self,
+        pid: int,
+        places: list[tuple[int, int, int]],
+        ref: tuple[int, int] | None,
+        offset: int,
+        cover: bool = True,
+    ) -> None:
+        """A packet's timestamps pass on with `offset`: the watch learns them (`cover`: how
+        far they go past the last picture too; not while a leap is held)."""
+        values = {kind: (value + offset) % _PTS_MODULO for kind, _, value in places}
+        if ref is not None:
+            self._advance(values[ref[0]])
+            pts = next(value for kind, _, value in places if kind == _PTS)
+            self._followed(pts, values[_PTS], values.get(_DTS))
+        self._record(pid, values, cover and ref is None)
+
+    def _record(self, pid: int, values: dict[int, int], cover: bool) -> None:
+        """The timestamps passed on (`values` by kind) are each kind's last on `pid`; with
+        `cover`, those of a packet that is no picture also say how far past the last picture
+        the other timestamps went (a PCR beyond its DTS, a PTS beyond its furthest PTS)."""
+        watch = self._watch
+        stamps = watch.stamps
+        for kind, value in values.items():
+            stamps[(pid, kind)] = (value, self._last_dts)
+            if not cover:
+                continue
+            mark = self._last_dts if kind == _PCR else self._top
+            if mark is not None:
+                watch.covered = max(watch.covered, pts_delta(mark, value))
+
+    def _note_packet(self, pkt: bytes) -> None:
+        """A packet passed on with the offset, out of the scan's order (pending): the watch
+        learns its timestamps, and a picture is followed."""
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        video = pid == self._video_pid and bool(pkt[1] & 0x40)
+        if not self._watching:
+            if video:
+                self._follow(pkt, 0)
+            return
+        places = _stamps(pkt, 0)
+        if places:
+            self._note(pid, places, _reference(places) if video else None, self._offset)
+
+    def _advance(self, now: int) -> None:
+        """The pictures' clock moves to `now` (passed on): their progress against arrival."""
+        watch = self._watch
+        if self._last_dts is not None:
+            step = pts_delta(self._last_dts, now)
+            if step < -_REORDER_TICKS:  # a restart no junction reported: measured afresh
+                watch.progress, watch.cadence = 0, None
+                watch.leads.clear()
+            else:
+                watch.progress += step
+                if step > 0:
+                    watch.cadence = step
+        watch.covered = 0  # a picture: what the others fill is measured from it
+        lead = watch.progress / _CLOCK - self._credit
+        leads = watch.leads
+        while leads and leads[-1][1] <= lead:
+            leads.pop()
+        leads.append((self._credit, lead))
+        horizon = self._credit - self._window
+        while len(leads) > 1 and leads[0][0] < horizon:
+            leads.popleft()
+
+    def _begin(self) -> None:
+        """A picture jumped (`_leap`): from here on the new offset, settling first."""
+        offset, step, unexplained, before = self._leap
+        moved = pts_delta(self._offset, offset)
+        self._settle = (self._offset, before)
+        self._offset = offset
+        self._jumped = (self._jumped + moved) % _PTS_MODULO
+        if self._joiner is None:
+            self._joiner = ContinuityJoiner(self._counters)
+        self._active = True
+        self._unflagged = set()
+        self._unflag_left = _CLOCK_PENDING_PACKETS
+        self.jumps.append((step / _CLOCK, unexplained))
+        logger.info(
+            "The channel's clock leapt %.1f s ahead (%.1f s more than arrived); it runs on.",
+            step / _CLOCK,
+            unexplained,
+        )
+
+    def _settled(
+        self,
+        packet: bytes,
+        pid: int,
+        places: list[tuple[int, int, int]],
+        ref: tuple[int, int] | None,
+    ) -> bytes:
+        """After a jump: the packet with each timestamp moved by the old offset or the new,
+        whichever lands nearer its own last (and where that leads); the picture's reference
+        first, which moves the pictures' clock the others are judged by."""
+        assert self._settle is not None
+        old, start = self._settle
+        new = self._offset
+        buf = bytearray(packet)
+        chosen: dict[int, int] = {}
+        first = ref[0] if ref is not None else -1
+        for kind, at, value in sorted(places, key=lambda place: place[0] != first):
+            moved = (value + new) % _PTS_MODULO
+            value_out = self._nearer((pid, kind), (value + old) % _PTS_MODULO, moved)
+            chosen[kind] = value_out
+            if kind == _PCR:
+                _write_pcr(buf, at, value_out)
+            else:
+                _write_timestamp(buf, at, value_out)
+            if kind == first:
+                self._advance(value_out)
+                self._last_dts = value_out
+        if ref is not None:
+            pts = next(value for kind, _, value in places if kind == _PTS)
+            self._followed(pts, chosen[_PTS], chosen.get(_DTS))
+        self._record(pid, chosen, ref is None)
+        last = self._last_dts
+        if last is not None and abs(pts_delta(start, last)) >= _JUMP_SETTLE_TICKS:
+            self._settle = None  # settled: the new offset alone from here
+        return bytes(buf)
+
+    def _nearer(self, key: tuple[int, int], kept: int, moved: int) -> int:
+        """`kept` (the old offset) or `moved` (the new): whichever lands nearer the last of its
+        kind on its PID, or where that leads now; `moved` for a first."""
+        prior = self._watch.stamps.get(key)
+        if prior is None:
+            return moved
+        last, then = prior
+        ahead = 0
+        if then is not None and self._last_dts is not None:
+            ahead = max(0, pts_delta(then, self._last_dts))
+        leads = (last + ahead) % _PTS_MODULO
+
+        def miss(value: int) -> int:
+            return min(abs(pts_delta(last, value)), abs(pts_delta(leads, value)))
+
+        return kept if miss(kept) < miss(moved) else moved
+
+    def _confirm(self, out: list[bytes | None]) -> None:
+        """A held picture jumped: the held packets pass on settled from the leap on, as if the
+        jump had been known there."""
+        pending, held = self._pending, self._held
+        assert pending is not None and held is not None
+        self._pending = self._held = None
+        self._held_at = None
+        self._watch = held[0]
+        self._restore_follow(held[1])
+        self._begin()
+        video_pid = self._video_pid
+        for pkt in pending:
+            places = _stamps(pkt, 0)
+            if not places:
+                self._place(pkt, out)
+                continue
+            pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+            video = pid == video_pid and bool(pkt[1] & 0x40)
+            ref = _reference(places) if video else None
+            if self._settle is None:  # (settled within what was held)
+                self._place(pkt, out)
+                self._note(pid, places, ref, self._offset)
+            else:
+                self._put(self._settled(pkt, pid, places, ref), out)
+
+    def _release(self, out: list[bytes | None]) -> None:
+        """No picture jumped after a leap: what was held passes on as it came (noted)."""
+        pending, self._pending = self._pending, None
+        self._held = None
+        self._held_at = None
+        for pkt in pending or ():
+            if not self._active:
+                self._count(pkt, 0)
+        self._place(b"".join(pending or ()), out)
+
+    def _waited(self) -> bool:
+        """Whether the pictures moved on `_JUMP_WAIT_TICKS` since a leap without a jump."""
+        held_at, last = self._held_at, self._last_dts
+        return (
+            held_at is not None
+            and last is not None
+            and (abs(pts_delta(held_at, last)) > _JUMP_WAIT_TICKS)
+        )
+
+    def _follow_state(self) -> tuple[int | None, ...]:
+        return (self._last_pts, self._top, self._last_dts, self._frame) + (
+            self._before if self._before is not None else (None, None, None)
+        )
+
+    def _restore_follow(self, state: tuple[int | None, ...]) -> None:
+        self._last_pts, self._top, self._last_dts, frame, top, last_dts, last_pts = state
+        self._frame = frame if frame is not None else self._frame
+        self._before = None if top is None else (top, last_dts, last_pts)
+
+    # -- passing on ------------------------------------------------------------------------
+
+    def _put(self, packet: bytes, out: list[bytes | None]) -> None:
+        """A packet rewritten on its own passes on (with the counters, unflagged)."""
+        if self._active:
+            self._join(packet, out)
+        else:
+            out.append(packet)
 
     def _place(self, data: bytes, out: list[bytes | None]) -> None:
         """Pass bytes on: as they are, or once active re-based, unflagged after a junction,
@@ -2706,6 +3172,46 @@ class ClockJoiner:
         return bytes(buf)
 
 
+def _stamps(data: bytes | bytearray, off: int) -> list[tuple[int, int, int]]:
+    """The timestamps a re-basing moves in the packet at `off` (as `_shift_packet` does): its
+    PCR base, its PES header's PTS and DTS, each as (kind, its place from the packet's start,
+    its value); none with the transport error flag."""
+    b1, b3 = data[off + 1], data[off + 3]
+    if b1 & 0x80:
+        return []
+    found: list[tuple[int, int, int]] = []
+    start = 4
+    if b3 & 0x20:
+        length = data[off + 4]
+        start = 5 + length
+        if length >= 7 and data[off + 5] & 0x10:
+            found.append((_PCR, 6, _pcr_base(data, off + 6)))
+    if not b1 & 0x40 or not b3 & 0x10 or start + 14 > PACKET:
+        return found
+    at = off + start
+    if data[at : at + 3] != _START_CODE or data[at + 3] in _NO_PES_HEADER:
+        return found
+    if data[at + 6] & 0xC0 != 0x80:
+        return found
+    flags = data[at + 7] >> 6
+    if flags & 2:
+        found.append((_PTS, start + 9, _timestamp(data, at + 9)))
+        if flags == 3 and start + 19 <= PACKET:
+            found.append((_DTS, start + 14, _timestamp(data, at + 14)))
+    return found
+
+
+def _reference(places: list[tuple[int, int, int]]) -> tuple[int, int] | None:
+    """A picture's reference on the pictures' clock: (kind, value) of its DTS, else its PTS."""
+    pts = None
+    for kind, _, value in places:
+        if kind == _DTS:
+            return kind, value
+        if kind == _PTS:
+            pts = (kind, value)
+    return pts
+
+
 # PES stream_ids without the optional header (no PTS or DTS): program stream map, padding,
 # private stream 2, ECM, EMM, DSM-CC, H.222.1 type E, program stream directory.
 _NO_PES_HEADER = frozenset((0xBC, 0xBE, 0xBF, 0xF0, 0xF1, 0xF2, 0xF8, 0xFF))
@@ -2745,6 +3251,15 @@ def _write_timestamp(buf: bytearray, at: int, value: int) -> None:
     buf[at + 4] = ((value << 1) & 0xFE) | 1
 
 
+def _write_pcr(buf: bytearray, at: int, base: int) -> None:
+    """Write a 33-bit PCR base into the six PCR bytes at `at`, keeping their extension."""
+    buf[at] = base >> 25
+    buf[at + 1] = (base >> 17) & 0xFF
+    buf[at + 2] = (base >> 9) & 0xFF
+    buf[at + 3] = (base >> 1) & 0xFF
+    buf[at + 4] = ((base & 1) << 7) | (buf[at + 4] & 0x7F)
+
+
 def _shift_packet(buf: bytearray, at: int, offset: int) -> None:
     """Move the PCR base and the PES header's PTS and DTS of the packet at `at` by `offset`."""
     b1, b3 = buf[at + 1], buf[at + 3]
@@ -2755,12 +3270,7 @@ def _shift_packet(buf: bytearray, at: int, offset: int) -> None:
         length = buf[at + 4]
         start = at + 5 + length
         if length >= 7 and buf[at + 5] & 0x10:
-            base = (_pcr_base(bytes(buf[at + 6 : at + 11]), 0) + offset) % _PTS_MODULO
-            buf[at + 6] = base >> 25
-            buf[at + 7] = (base >> 17) & 0xFF
-            buf[at + 8] = (base >> 9) & 0xFF
-            buf[at + 9] = (base >> 1) & 0xFF
-            buf[at + 10] = ((base & 1) << 7) | (buf[at + 10] & 0x7F)
+            _write_pcr(buf, at + 6, (_pcr_base(buf, at + 6) + offset) % _PTS_MODULO)
     end = at + PACKET
     if not b1 & 0x40 or not b3 & 0x10 or start + 14 > end:
         return
@@ -3108,7 +3618,7 @@ def _pes_start(pkt: bytes) -> tuple[bool, int | None, int]:
     return rai, pts, start + 9 + header_length
 
 
-def _pcr_base(data: bytes, at: int) -> int:
+def _pcr_base(data: bytes | bytearray, at: int) -> int:
     """The 33-bit base of the PCR whose six bytes start at `at` (90 kHz ticks)."""
     return (
         data[at] << 25

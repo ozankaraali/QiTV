@@ -57,6 +57,9 @@ class Action(str, Enum):
     SUBTITLES_LATER = "subtitles_later"  # Shift+K (VLC's G and H: G is the guide here)
     PASTE = "paste"  # Ctrl/⌘+V: the clipboard into the subtitles search's field
     RECORD = "record"  # R: record the channel being watched, or stop (2.2)
+    FORGET = "forget"  # Delete in the channel list: the highlighted channel leaves ⟲ Recent
+    PICTURE = "picture"  # A: the Picture panel; again while it shows, the next aspect (2.3)
+    STATS = "stats"  # Shift+I: the statistics over the picture, shown or hidden (2.3)
 
 
 # "subtitles": the OpenSubtitles search over the player (2.2): it types like the drawer.
@@ -112,11 +115,14 @@ _PLAYER_CHARS = {
     _K.Key_J.value: Action.SOUND_EARLIER,
     _K.Key_K.value: Action.SOUND_LATER,
     _K.Key_R.value: Action.RECORD,
+    _K.Key_A.value: Action.PICTURE,  # VLC's aspect key: the panel opens on the aspect ratio
 }
-# With Shift, the sound's sync keys move the subtitles (the player only).
+# With Shift, the sound's sync keys move the subtitles, and I (the channel's info) shows the
+# picture's statistics (the player only).
 _PLAYER_SHIFT_CHARS = {
     _K.Key_J.value: Action.SUBTITLES_EARLIER,
     _K.Key_K.value: Action.SUBTITLES_LATER,
+    _K.Key_I.value: Action.STATS,
 }
 # Remote channel keys (drawer closed, like the arrows they stand in for).
 _CHANNEL_KEYS = {
@@ -212,6 +218,8 @@ def resolve(
     if context == "drawer":
         if key in _DRAWER_KEYS:
             return _DRAWER_KEYS[key], ""
+        if key == _K.Key_Delete.value and not held:  # the row's "Remove from Recents"
+            return Action.FORGET, ""
         return _text(text, mods, windows=platform.startswith("win"))
     if context == "subtitles":
         if key in _DRAWER_KEYS:
@@ -287,6 +295,11 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Tab", N_("The mixer's other row (while it shows)")),
         ("J, K", N_("Sound 50 ms earlier / later (sync with the picture)")),
         ("Shift+J, Shift+K", N_("Subtitles 50 ms earlier / later")),
+        (
+            "A",
+            N_("Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio"),
+        ),
+        ("Shift+I", N_("Statistics over the picture: show or hide")),
         ("F, F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("Ctrl+F", N_("Search")),  # i18n: what a key does (verb)
         ("Ctrl+D", N_("Add or remove a favorite channel")),
@@ -311,6 +324,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Backspace", N_("Delete a letter of the find")),
         ("Ctrl+D", N_("Add or remove a favorite channel")),
         ("Ctrl+P", N_("Open the channel in picture-in-picture")),
+        ("Delete", N_("Remove the channel from Recents")),
         ("Ctrl+F", N_("Search")),
         ("F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("Esc", N_("End the find, then close")),

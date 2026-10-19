@@ -16,13 +16,16 @@ Screens and their controls:
 - "sound": the Sound panel ♫ opens: its track "rows", its sync's "earlier" (−), "later" (+)
   and "reset";
 - "subtitles": the Subtitles panel its button opens, alike, and its "Load a file…";
+- "picture_panel": the Picture panel its button opens (2.3): its setting rows' ‹ and › by
+  their keys ("aspect", "deinterlace", "sleep") and its "stats" row;
 - "subtitle_search": the OpenSubtitles search its "Search OpenSubtitles…" opens: the key page's
   "field", "clear" (✕), "get_key", "paste" and "save", the search's "field", "clear", "paste" and
   "search", its "languages" and "files" rows, and "close" (×);
 - "pip_label": the small picture's "swap", "speaker" and "close";
 - "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
   its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
-- "context": the channel list's right-click menu, by entry;
+- "context": the channel list's right-click menu, by entry (a channel of a genre's, and one of
+  ⟲ Recent's);
 - "guide": its header's buttons and its "rows";
 - "library": the top bar's items ("live", "search", "fullscreen" …), the grid's "posters", the
   highlighted title's strip buttons ("favorite", "play") and the A–Z "rail".
@@ -37,11 +40,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QApplication, QWidget
 
-from services.navigation import NavModel
+from services.navigation import RECENT_GROUP, NavModel
 from services.opensubtitles import SubtitleFile
 from tests.test_navigation import FakeCatalog
 from tests.test_poster_grid import FakePosters, details, titles
-from ui.context_actions import OPEN_PIP_TEXT, ContextActions
+from ui.context_actions import OPEN_PIP_TEXT, REMOVE_RECENT_TEXT, ContextActions
 from ui.keymap import SHORTCUTS
 from ui.library.poster_grid import PosterGrid
 from ui.library.top_nav import TopNav
@@ -53,6 +56,7 @@ from ui.overlays.pip_label import PipLabel
 from ui.overlays.subtitle_search import LanguageRow, SubtitleSearchPage
 from ui.overlays.track_panel import PanelModel, PanelRow, PanelSync, TrackPanel
 from ui.overlays.transport import Transport
+from ui.picture_controls import ASPECT, DEINTERLACE, SLEEP, STATS
 from ui.pip import corner_rect
 from ui.video_surface import VideoSurface
 
@@ -87,12 +91,16 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
         ("subtitles", "earlier"),
         ("subtitles", "later"),
     ),
+    # The Picture button opens the Picture panel; its aspect row's ‹ and › step the ratio.
+    ("player", "A"): (("transport", "picture"), ("picture_panel", "aspect")),
+    ("player", "Shift+I"): (("picture_panel", "stats"),),  # its Statistics row
     ("player", "F, F11, Ctrl+Meta+F"): (("transport", "fullscreen"), ("picture", "double-click")),
     ("player", "Ctrl+F"): (("transport", "search"),),
     ("player", "Ctrl+D"): (("transport", "favorite"),),
     ("player", "P, Ctrl+P"): (("transport", "pip"), ("pip_label", "close")),
     ("player", "S"): (("pip_label", "swap"), ("picture", "click")),
-    # The multiview's button on the player controls, lit while its grid shows.
+    # The multiview's button on the player controls (one picture, the way back, while its
+    # grid shows).
     ("player", "V"): (("transport", "grid"),),
     ("player", "Alt+P"): (("transport", "mini"),),
     # Close what is open: a click on the picture closes the channel list, × the guide (the
@@ -112,6 +120,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("drawer", "A…Z"): (("drawer", "find"),),  # a click on it, then the rows of what it finds
     ("drawer", "Ctrl+D"): (("context", "Add to favorites"),),
     ("drawer", "Ctrl+P"): (("context", OPEN_PIP_TEXT),),
+    ("drawer", "Delete"): (("context", REMOVE_RECENT_TEXT),),  # a channel of ⟲ Recent
     ("drawer", "Ctrl+F"): (("drawer", "search"),),
     # Beside the list: its first click closes the list, the double-click is fullscreen.
     ("drawer", "F11, Ctrl+Meta+F"): (("picture", "double-click"),),
@@ -263,6 +272,23 @@ def _subtitles(host: QWidget) -> set[str]:
     return found
 
 
+def _picture_panel(host: QWidget) -> set[str]:
+    panel = TrackPanel(host)
+    rows = (
+        PanelRow(ASPECT, "Aspect ratio", value="Auto", widest="Fill the window"),
+        PanelRow(DEINTERLACE, "Deinterlacing", value="Auto"),
+        PanelRow(SLEEP, "Sleep timer", value="Off", widest="1:30:00 left"),
+        PanelRow(STATS, "Statistics"),
+    )
+    panel.show_panel(PanelModel("Picture", rows))
+    found = set()
+    for index, row in enumerate(rows):
+        steps = not (panel.step_rect(index, -1).isEmpty() or panel.step_rect(index, 1).isEmpty())
+        if not panel.row_rect(index).isEmpty() and (steps or not row.value):
+            found.add(str(row.key))
+    return found
+
+
 def _subtitle_search(host: QWidget) -> set[str]:
     """The key page, a key typed into it, then the search with what it found."""
     page = SubtitleSearchPage(host)
@@ -294,7 +320,12 @@ def _pip_label(host: QWidget) -> set[str]:
 
 def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
     catalog = FakeCatalog()
-    config = SimpleNamespace(favorites=[], watch_history=[])
+    watched = {
+        "provider_name": "Home",
+        "item_type": "channel",
+        "item_data": {"id": 1, "name": "One"},
+    }
+    config = SimpleNamespace(favorites=[], watch_history=[watched])
     nav = NavModel(catalog, config)
     drawer = Drawer(nav, None, lambda item: None, host)
     nav.reset_to("live", "10")
@@ -320,9 +351,16 @@ def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
         play_external=lambda *args: None,
         notify=lambda text, kind: None,
         open_pip=lambda node: None,
+        forget_recent=lambda item: None,
+        clear_recents=lambda: None,
     )
-    menu = actions.menu(drawer._columns["right"].nodes[0])  # a right-click on a channel
-    entries = {a.text() for a in menu.actions() if not a.isSeparator()} if menu else set()
+    entries: set[str] = set()
+    for group in ("10", RECENT_GROUP):  # a right-click on a channel of a genre, of ⟲ Recent
+        nav.reset_to("live", group)
+        drawer.open_drawer()
+        menu = actions.menu(drawer._columns["right"].nodes[0])
+        if menu is not None:
+            entries.update(a.text() for a in menu.actions() if not a.isSeparator())
     nav.focus_source("Home")  # the sources on the left, the provider's sections on the right
     drawer.open_drawer(focus_side="left")
     for side in ("left", "right"):
@@ -373,6 +411,7 @@ class MouseOnlyAuditTests(unittest.TestCase):
             "mixer": _mixer(_child(host)),
             "sound": _sound(_child(host)),
             "subtitles": _subtitles(_child(host)),
+            "picture_panel": _picture_panel(_child(host)),
             "subtitle_search": _subtitle_search(_child(host)),
             "pip_label": _pip_label(_child(host)),
             "drawer": drawer,

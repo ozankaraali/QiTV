@@ -161,6 +161,18 @@ class BrowsedCatalogTests(unittest.TestCase):
         self.assertEqual(view.sections(), catalog.sections())
         self.assertIs(view.provider_manager, catalog.provider_manager)
 
+    def test_a_library_on_a_provider_not_set_up_yet_lists_its_sections_and_sets_it_up(self):
+        # The TV page on one provider, the Library on another not set up since QiTV started:
+        # its Movies said it "has no movies" (its type is read in its setup) and never set up.
+        self.view("Demo TV").select_provider()
+        self.config.library_provider_name = "Harbor IPTV"
+        library = self.library_view()
+        self.assertFalse(self.catalogs.is_ready("Harbor IPTV"))
+        self.assertEqual(library.sections(), ["live", "movies", "series"])
+        library.request_section("movies")  # the Library's Movies: its setup starts
+        self.assertTrue(self.catalogs.is_ready("Harbor IPTV"))
+        self.assertEqual(library.sections(), self.catalogs.catalog("Harbor IPTV").sections())
+
     def test_signals_of_other_providers_are_not_this_pages(self):
         view = self.view("Demo TV")
         ready = QSignalSpy(view.sectionReady)

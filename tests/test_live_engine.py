@@ -54,6 +54,7 @@ STATE_KEYS = {
     "burst_s",
     "received",
     "hls",
+    "fmp4",  # HLS of fragmented MP4 (the Picture panel's statistics name the source)
     "breaks",
     "caught_up",
     "backlog_s",

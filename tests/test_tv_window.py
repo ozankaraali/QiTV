@@ -1785,6 +1785,42 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertIs(grid.item(1), current)  # the same title, not a reloaded list
         self.stop_corner_player()
 
+    def test_a_film_chosen_while_its_provider_sets_up_again_plays_and_the_library_stays(self):
+        # Reported in 2.2.0: a film chosen in a genre down the list while its provider was set up
+        # again; the Library went back to its first genre, at the top. The film plays once its
+        # provider is ready, and Esc finds the Library on that genre and title.
+        plays = self.play_spy()
+        self.show()
+        self.wait_ready(XTREAM)
+        window = self.window
+        self.menu_actions()["Movies"].trigger()
+        grid = self.wait_for_titles()
+        genres, model = window.library_page.genres, window.screens.library_model
+        for key in (Qt.Key.Key_Left, Qt.Key.Key_Down, Qt.Key.Key_Down, Qt.Key.Key_Return):
+            QTest.keyClick(window, key)  # the last genre, then its titles
+        last = model.genres()[-1].id
+        self.assertEqual((genres.current_id(), model.genre_id), (last, last))
+        QTest.keyClick(window, Qt.Key.Key_Right)
+        current = grid.item(grid.current_index())
+        window.controller.select_provider(force_refresh=True)  # its lists load again
+        self.assertFalse(window.catalogs.is_ready(XTREAM))
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertTrue(wait_until(lambda: plays == [current["cmd"]], LIBRARY_WAIT_MS), plays)
+        self.assertIs(window.pages.currentWidget(), window.player_page)
+
+        def reloaded():  # the Library's list came again (new dicts), on the same title
+            shown = grid.item(1)
+            return shown is not None and shown is not current and shown["name"] == current["name"]
+
+        self.assertTrue(wait_until(reloaded, LIBRARY_WAIT_MS))
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        self.assertIs(window.pages.currentWidget(), window.library_page)
+        self.assertEqual((genres.current_id(), model.genre_id), (last, last))
+        self.assertEqual(grid.current_index(), 1)
+        elapse(300)
+        self.assertEqual(plays, [current["cmd"]])  # once
+        self.stop_corner_player()
+
     def test_the_library_button_returns_to_the_library_where_it_was(self):
         # 2.0.1 review I1: ‹ Library on the player controls does what Esc does after a movie.
         plays = self.play_spy()
@@ -1905,6 +1941,29 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertEqual(len(plays), 1)  # nothing plays twice, no channel after it
         self.assertIs(window.pages.currentWidget(), window.player_page)
         self.assertTrue(window.controller.vod_current())
+
+
+class LibraryOnAnotherProviderTests(TwoProviderCase):
+    """The TV page on the playlist, the Library on the Xtream provider (chosen in an earlier
+    session): nothing sets that one up until the Library asks for its films."""
+
+    def prepare_config(self):
+        super().prepare_config()
+        self.config.library_provider_name = XTREAM
+
+    def test_its_films_list_once_it_is_set_up_and_a_film_plays(self):
+        plays = self.play_spy()
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        self.assertFalse(window.catalogs.is_ready(XTREAM))
+        self.menu_actions()["Movies"].trigger()  # said "has no movies", and stayed so
+        grid = self.wait_for_titles()
+        self.assertEqual(window.library_catalog.current_provider_name(), XTREAM)
+        current = grid.item(grid.current_index())
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertTrue(wait_until(lambda: plays == [current["cmd"]], LIBRARY_WAIT_MS), plays)
+        self.assertEqual(window.catalog.current_provider_name(), PROVIDER_NAME)  # not moved
 
 
 class LibraryReturnTests(WindowCase):

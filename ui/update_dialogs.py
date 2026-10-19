@@ -64,8 +64,29 @@ class _Dialogs:
         if error_dialog.clickedButton() == open_btn:
             webbrowser.open(release_url)
 
+    def confirm_quit_and_open(self) -> bool:
+        """macOS: QiTV closes and opens the downloaded disk image (Update Now), or not now."""
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle(tr("Update Downloaded"))
+        msg.setText(tr("QiTV will close and open the update."))
+        msg.setInformativeText(
+            tr(
+                # i18n: Applications, Replace: as Finder names them; Not Now: this dialog's button
+                "In the window that opens, drag QiTV onto Applications and choose Replace.\n\n"
+                "Not Now keeps the update in your Downloads folder."
+            )
+        )
+        # i18n: a button: QiTV closes and opens the downloaded update
+        update_btn = msg.addButton(tr("Update Now"), QMessageBox.AcceptRole)
+        msg.addButton(tr("Not Now"), QMessageBox.RejectRole)  # i18n: a button
+        msg.setDefaultButton(update_btn)
+        _polish_msgbox(msg)
+        msg.exec_()
+        return msg.clickedButton() == update_btn
+
     def downloaded(self, downloaded_path: str) -> None:
-        """macOS/Linux: say where the update is, then open the Downloads folder."""
+        """A zip on macOS, or Linux: say where the update is, then open the Downloads folder."""
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Information)
         msg.setWindowTitle(tr("Update Downloaded"))

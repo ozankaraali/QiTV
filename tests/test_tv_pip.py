@@ -14,6 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMenu
 
 from services.connection_budget import ConnectionBudget
+from services.live.live_session import CRAWLING, LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import STREAM_LIMIT
 from services.live.tuning import channel_key
 from services.provider_ids import with_provider
@@ -39,6 +40,7 @@ from ui.page_stack import PageStack
 from ui.pip_controls import (
     ALREADY_LARGE,
     NO_PREVIOUS,
+    NOTICE_MS,
     OPEN_PIP_FIRST,
     PIP_EXTERNAL,
     PIP_LIVE_ONLY,
@@ -118,6 +120,9 @@ class FakePipLabel(FakeOverlay):
     def set_audible(self, audible):
         self.audible = audible
 
+    def set_level(self, level):
+        self.level = level
+
     def show(self):
         self.visible = True
 
@@ -129,13 +134,16 @@ class FakeMixer(FakeOverlay):
     levelRequested = Signal(int, int)
     muteRequested = Signal(int)
     rowSelected = Signal(int)
+    followRequested = Signal()  # the multiview's "Follow focus"
     closed = Signal()
     rows = ()
     selected = 0
 
-    def show_rows(self, rows, selected):
+    mode = None  # the multiview's line under the rows (MixerMode), else None
+
+    def show_rows(self, rows, selected, mode=None):
         self.record("show_rows", rows, selected)
-        self.rows, self.selected = list(rows), selected
+        self.rows, self.selected, self.mode = list(rows), selected, mode
         self.visible = True
 
     def dismiss(self):
@@ -415,6 +423,132 @@ class PipTests(PipCase):
         self.label.swapRequested.emit()  # refused meanwhile: it says so
         self.assertIs(self.sessions.large(), self.pip_slot)
         self.assertEqual(self.toast.named("show_message")[-1], (SWITCHING, "info", SWITCHING_MS))
+
+    def test_the_small_pictures_stream_notices_are_said_once_after_its_name(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        before = len(self.toast.named("show_message"))
+        for text in (RECONNECTING, LOADING, UNAVAILABLE, RECONNECTING, CRAWLING):
+            self.pip_live.notice.emit(text)
+        self.assertEqual(
+            self.toast.named("show_message")[before:],
+            [
+                ("Two: Reconnecting…", "info", NOTICE_MS),
+                ("Two: Plays without rewind for smoother playback", "info", NOTICE_MS),
+            ],
+        )
+        self.live.notice.emit(RECONNECTING)  # the large picture's, as before: unnamed
+        self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+        self.open_small(CHANNELS[2])  # another channel small: its notices are said again
+        self.pip_live.notice.emit(RECONNECTING)
+        self.assertEqual(self.toast.messages()[-1], ("Three: Reconnecting…", "info"))
+
+    def test_an_ended_direct_stream_of_the_small_picture_opens_again_in_its_slot(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.05))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()  # its live session fell back: VLC plays the stream itself
+        url, kwargs = self.pip_session.plays[-1]
+        holders, stops = sorted(self.budget.holders("Home")), self.pip_session.stops
+
+        def end_and_reopen():
+            plays = len(self.pip_session.plays)
+            self.pip_session.stateChanged.emit("ended")
+            self.assertEqual(self.toast.messages()[-1], ("Two: Reconnecting…", "info"))
+            self.assertEqual(len(self.pip_session.plays), plays)  # after a back-off
+            self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
+            self.assertEqual(self.pip_session.plays[-1][0], url)
+            self.assertEqual(self.pip_session.plays[-1][1]["kind"], kwargs["kind"])
+
+        end_and_reopen()
+        end_and_reopen()
+        self.pip_session.stateChanged.emit("playing")
+        QTest.qWait(80)  # it played a while since: twice more
+        end_and_reopen()
+        end_and_reopen()
+        self.pip_session.stateChanged.emit("ended")
+        self.assertEqual(self.toast.messages()[-1], ("Two: The stream ended", "info"))
+        QTest.qWait(200)
+        self.assertEqual(len(self.pip_session.plays), 6)  # the first, then four reopens
+        # One slot, the same one, all along: nothing was stopped or given back.
+        self.assertEqual(self.pip_session.stops, stops)
+        self.assertEqual(sorted(self.budget.holders("Home")), holders)
+        self.assertEqual(self.pip_live.named("stop"), [])
+
+    def test_the_small_pictures_reopen_decodes_in_software_as_its_stream_did(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()
+        self.pip_session.software = True  # hardware decoding froze its picture: software since
+        plays = len(self.pip_session.plays)
+        self.pip_session.stateChanged.emit("ended")
+        self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
+        self.assertIs(self.pip_session.plays[-1][1]["software"], True)
+
+    def test_a_swap_during_the_small_pictures_back_off_reopens_it_large(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (80, 120)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()
+        url = self.pip_session.plays[-1][0]
+        plays = len(self.pip_session.plays)
+        self.pip_session.stateChanged.emit("ended")
+        self.assertEqual(self.toast.messages()[-1], ("Two: Reconnecting…", "info"))
+        self.controller.handle(Action.SWAP)  # its player is the large picture's now
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
+        self.assertEqual(self.pip_session.plays[-1][0], url)
+        QTest.qWait(150)
+        self.assertEqual(len(self.pip_session.plays), plays + 1)  # once
+        self.assertNotIn(("The stream ended", "info"), self.toast.messages())
+
+    def test_a_swap_during_the_large_pictures_back_off_reopens_it_small(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (80, 120)))
+        self.catalog.ptype = "XTREAM"  # no link to make again: it reconnects
+        self.start_large(0)
+        self.live.play_direct()  # the large picture's live session fell back
+        self.open_small(CHANNELS[1])
+        url = self.session.plays[-1][0]
+        plays = len(self.session.plays)
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+        self.controller.handle(Action.SWAP)  # its player is the small picture's now
+        self.assertIs(self.sessions.small(), self.main_slot)
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        self.assertEqual(self.session.plays[-1][0], url)
+        QTest.qWait(150)
+        self.assertEqual(len(self.session.plays), plays + 1)  # once
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+
+    def test_a_time_shifted_small_picture_is_not_reopened_here(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        plays = len(self.pip_session.plays)
+        self.pip_session.stateChanged.emit("ended")  # LiveSession reopens its buffer itself
+        QTest.qWait(100)
+        self.assertEqual(len(self.pip_session.plays), plays)
+
+    def test_closing_the_small_picture_cancels_its_reopen(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()
+        self.pip_session.stateChanged.emit("ended")
+        self.controller.handle(Action.PIP)  # closed during the back-off
+        plays = len(self.pip_session.plays)
+        QTest.qWait(100)
+        self.assertEqual(len(self.pip_session.plays), plays)
+
+    def test_a_closed_small_picture_says_nothing(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.controller.handle(Action.PIP)  # closed
+        before = len(self.toast.named("show_message"))
+        self.pip_live.notice.emit(RECONNECTING)
+        self.assertEqual(len(self.toast.named("show_message")), before)
 
     def test_denied_toasts_the_providers_limit(self):
         self.catalog.current_provider = lambda: {"name": "Home", "type": "STB"}  # one stream
@@ -1356,6 +1490,17 @@ class OneStreamPipTests(PipCase):
         self.assertEqual(self.budget.holders("Home"), ["main"])
         self.assertEqual([url for url, _ in self.session.plays], ["rtmp://tv/3"])
 
+    def test_a_direct_channel_is_refused_while_the_small_picture_holds_the_only_stream(self):
+        self.open_small(CHANNELS[1])
+        self.tune(2)
+        self.ready("rtmp://tv/3")  # played directly: the same limit as a time-shifted tune
+        self.assertEqual(
+            self.toast.messages()[-1], ("Your provider allows 1 stream at a time", "error")
+        )
+        self.assertEqual(self.session.plays, [])
+        self.assertEqual(self.budget.holders("Home"), ["pip"])
+        self.assertTrue(self.sessions.pip_open())  # the small picture plays on
+
 
 class MixerTests(PipCase):
     """The volume keys on the mixer: a row per picture (Phase 4 Task 3b)."""
@@ -1418,7 +1563,7 @@ class MixerTests(PipCase):
         self.controller.handle(Action.MUTE)
         self.assertFalse(self.sessions.muted("main"))
 
-    def test_a_swap_moves_each_level_with_its_stream(self):
+    def test_a_swap_keeps_each_rows_level_with_its_role(self):
         self.start_large(0)
         self.open_small(CHANNELS[1])
         self.controller.handle(Action.VOL_DOWN)
@@ -1429,11 +1574,11 @@ class MixerTests(PipCase):
         )
         self.mixer.levelRequested.emit(1, 40)  # raised: audible
         self.assertEqual(self.mixer.shown()[0][1], ("PiP", "Two", 40, False))
-        self.controller.handle(Action.SWAP)
+        self.controller.handle(Action.SWAP)  # as loud as before: the levels are the roles'
         self.assertEqual(
-            self.mixer.shown()[0], [("Main", "Two", 40, False), ("PiP", "One", 80, False)]
+            self.mixer.shown()[0], [("Main", "Two", 80, False), ("PiP", "One", 40, False)]
         )
-        self.assertEqual((self.session.level, self.pip_session.level), (80, 40))
+        self.assertEqual((self.session.level, self.pip_session.level), (40, 80))
 
     def open_pip_row(self):
         """Show the mixer on the PiP's row (+ at full volume changes nothing, then Tab)."""
@@ -1485,6 +1630,16 @@ class MixerTests(PipCase):
         self.label.muteRequested.emit()  # the small picture is heard: a swap keeps mutes
         self.controller.handle(Action.SWAP)
         self.assertEqual(self.transport.named("set_muted")[-1], (False,))  # Two, heard
+
+    def test_the_speakers_show_each_picture_s_level(self):
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.assertEqual(self.label.level, 30)  # the small picture's
+        self.controller.handle(Action.VOL_DOWN)  # the large picture's 100 → 95
+        self.assertEqual(self.transport.named("set_level")[-1], (95,))
+        self.controller.handle(Action.SWAP)  # the levels stay with the roles
+        self.assertEqual(self.transport.named("set_level")[-1], (95,))
+        self.assertEqual(self.label.level, 30)
 
     def test_raising_the_pip_row_from_zero_unmutes_the_small_picture(self):
         self.start_large(0)
@@ -1560,17 +1715,30 @@ class MixerTests(PipCase):
         self.mixer.dismiss()  # within the 3 s
         self.assertEqual((self.config.pip_volume, self.config.saves), (35, 1))
 
-    def test_the_pip_level_is_remembered_only_while_the_pip_player_is_small(self):
-        # Review M4 (ruling): pip_volume is the small picture's level.
+    def test_the_main_and_the_pip_levels_are_remembered_by_role(self):
+        # volume is the large picture's level and pip_volume the small one's, whichever
+        # player has the role.
         self.start_large(0)
         self.open_small(CHANNELS[1])
         self.controller.handle(Action.SWAP)  # the "pip" player is large now
-        self.controller.handle(Action.VOL_DOWN)  # Main: the "pip" player's level
+        self.controller.handle(Action.VOL_DOWN)  # Main: 100 -> 95
         self.mixer.dismiss()
-        self.assertEqual((self.config.pip_volume, self.config.saves), (30, 0))
+        self.assertEqual(
+            (self.config.volume, self.config.pip_volume, self.config.saves), (95, 30, 1)
+        )
         self.controller.handle(Action.SWAP)
+        self.assertEqual(self.sessions.level("main"), 95)  # large again, as loud
         self.open_pip_row()
         self.controller.handle(Action.CH_PREV, key=UP)
         self.mixer.dismiss()
-        self.assertEqual(self.config.saves, 1)
+        self.assertEqual(self.config.saves, 2)
         self.assertEqual(self.config.pip_volume, self.sessions.level("pip"))
+
+    def test_the_main_level_comes_back_at_startup(self):
+        self.config.volume = 45
+        self.config.pip_volume = 12
+        controller = self.make_controller(self.column, sessions=self.sessions)
+        controller.start()
+        self.assertEqual((self.sessions.level("main"), self.sessions.level("pip")), (45, 12))
+        self.assertEqual(self.session.level, 45)
+        self.assertEqual(self.transport.named("set_level")[-1], (45,))  # its speaker too

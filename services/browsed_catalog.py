@@ -401,7 +401,13 @@ class BrowsedCatalog(QObject):
                 else ["live"]
             )
         catalog = self._cat()
-        return catalog.sections() if catalog is not None else []
+        if catalog is None:
+            return []
+        if not catalog.current_provider():
+            # Not set up yet (its type is read in its setup): its entry says, so that asking
+            # for its films sets it up (the Library's source, beside the TV page's).
+            return self._sections_of(self._single_source())
+        return catalog.sections()
 
     def is_live(self, section: str) -> Optional[bool]:
         if self.all_providers():

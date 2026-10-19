@@ -8,7 +8,8 @@ fresh link once per tune (its play token may have expired) before the error show
 refusal for the provider's connection limit is never retried and says so. A live channel
 played directly whose stream ends (an on-demand restream may show a placeholder and end)
 opens again in the same player, so in the same budget slot, twice per tune at most, after
-RECONNECT_MS: "Reconnecting…", and only then "The stream ended".
+RECONNECT_MS: "Reconnecting…", and only then "The stream ended"; once it has played for
+HEALTHY_S since it last opened, it may open again twice more.
 
 Recording (2.2): R and the record button record the time-shifted channel being watched from
 where it plays (rewound or not) into the Recordings folder (`services.recording`), or stop
@@ -27,9 +28,10 @@ session and player (`use_slot`); a multiview's focused tile is the large picture
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import logging
+import time
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
@@ -60,13 +62,14 @@ TICK_PROGRAMMES = 6  # programme starts marked on the time-shift bar
 LIMITED_TEXT = N_("Your provider limits concurrent streams")  # i18n: error toast
 ERROR_MS = 6000
 RECONNECT_MS = (1000, 3000)  # the back-off before each reopen of a live stream that ended
+HEALTHY_S = 60.0  # a stream that played this long before it ended has its reopens back
 # i18n: toast: a live channel's stream ended and is opened again
 RECONNECTING_TEXT = N_("Reconnecting…")
 # i18n: a toast: R or the record button was pressed while the channel is still opening
 NOT_YET_TEXT = N_("Recording can start once the channel plays")
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 # Never opened again: on-demand content, and a file listed as a channel ends for good.
-_NOT_LIVE = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
+NOT_REOPENED = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
 
 
 def stream_options(item: dict) -> dict[str, Any]:
@@ -76,6 +79,27 @@ def stream_options(item: dict) -> dict[str, Any]:
     if item.get("referrer"):
         options["referrer"] = item["referrer"]
     return options
+
+
+def reopen_options(player, item: dict) -> dict[str, Any]:
+    """An ended stream opened again in `player`: the channel's options, and software decoding
+    when its open decoded in software (a channel whose picture froze before, or since)."""
+    options = stream_options(item)
+    if player.decodes_in_software():
+        options["software"] = True
+    return options
+
+
+@dataclass
+class Reopen:
+    """An ended direct stream on its way to open again in its player, as a swap hands it to
+    the picture that has that player now (`take_reopen`, `adopt_reopen`)."""
+
+    target: Target
+    url: str
+    kind: PlayKind
+    remaining_ms: int  # of its back-off
+    count: int  # its reopens so far
 
 
 def _named(title: str, message: str) -> str:
@@ -145,6 +169,7 @@ class LiveControls(QObject):
         self._ticks: list[tuple[float, str]] = []
         self._wired = False
         self._reconnects = 0  # reopens of the current tune's ended stream so far
+        self._playing_since: Optional[float] = None  # the player's last "playing" (monotonic)
         self._reopen_due: Optional[tuple[Target, str, PlayKind]] = None  # after the back-off
         self._reopen_timer = QTimer(self, singleShot=True)
         self._reopen_timer.timeout.connect(self._reopen)
@@ -216,6 +241,7 @@ class LiveControls(QObject):
     def _forget_channel(self) -> None:
         self._ticks = []
         self._reconnects = 0
+        self._playing_since = None
         self._cancel_reopen()
 
     def open_archive(self, target: Target, url: str) -> bool:
@@ -265,14 +291,24 @@ class LiveControls(QObject):
         False when the provider's limit is taken by other streams (Phase 4: picture in
         picture): the toast says so and the running channel goes on.
         """
+        if self.refuse_over_limit(target):
+            return False
+        name = item_provider.provider_name(self.catalog, target.item)
+        self._tuner.tune(self.live_start(target, url), name, self.limit(target.item))
+        return True
+
+    def refuse_over_limit(self, target: Target, *, direct: bool = False) -> bool:
+        """Other players' streams (picture in picture, tiles) take the whole limit of
+        `target`'s provider: True, the toast says so and the running channel goes on.
+        `direct`: a channel played directly, whose open waits for a closing picture's
+        stream (that one does not count)."""
         name = item_provider.provider_name(self.catalog, target.item)
         limit = self.limit(target.item)
-        if self._tuner.refused(name, limit):
-            logger.info("Not opening %s: the provider allows %s streams", target.title, limit)
-            self._restore_channel()
-            self._toast(self.limit_text(limit), "error", ERROR_MS)
+        if not self._tuner.refused(name, limit, direct=direct):
             return False
-        self._tuner.tune(self.live_start(target, url), name, limit)
+        logger.info("Not opening %s: the provider allows %s streams", target.title, limit)
+        self._restore_channel()
+        self._toast(self.limit_text(limit), "error", ERROR_MS)
         return True
 
     def live_start(self, target: Target, url: str) -> LiveStart:
@@ -317,8 +353,11 @@ class LiveControls(QObject):
         if self._reopen_due is not None:
             return True  # already on its way
         url, kind = self.session.url, self.session.kind
-        if not url or kind is None or kind in _NOT_LIVE:
+        if not url or kind is None or kind in NOT_REOPENED:
             return False
+        since, self._playing_since = self._playing_since, None
+        if since is not None and time.monotonic() - since >= HEALTHY_S:
+            self._reconnects = 0  # it played well since it last opened: the back-off anew
         if self._reconnects >= len(RECONNECT_MS):
             return False
         self._reopen_due = (current, url, kind)
@@ -339,12 +378,33 @@ class LiveControls(QObject):
             return  # no stream of its provider to spare (the caller says so)
         logger.info("Opening %s again after its stream ended", target.title)
         session.play(
-            url, kind=kind, latency=self.config.live_latency, **stream_options(target.item)
+            url,
+            kind=kind,
+            latency=self.config.live_latency,
+            **reopen_options(session, target.item),
         )
 
     def _cancel_reopen(self) -> None:
         self._reopen_due = None
         self._reopen_timer.stop()
+
+    def take_reopen(self) -> Optional[Reopen]:
+        """A swap: the large picture's ended stream on its way to open again goes with its
+        player, to the small picture (None: none waits). It no longer opens here."""
+        due = self._reopen_due
+        if due is None:
+            return None
+        remaining = max(0, self._reopen_timer.remainingTime())
+        self._cancel_reopen()
+        target, url, kind = due
+        return Reopen(target, url, kind, remaining, self._reconnects)
+
+    def adopt_reopen(self, reopen: Reopen) -> None:
+        """A swap made the large picture a player whose ended stream was on its way to open
+        again (small): it opens here once the rest of its back-off is over."""
+        self._reopen_due = (reopen.target, reopen.url, reopen.kind)
+        self._reconnects = reopen.count
+        self._reopen_timer.start(reopen.remaining_ms)
 
     def retry(self, current: Target) -> None:
         logger.info("Making the link of %s again after a playback failure", current.title)
@@ -411,7 +471,8 @@ class LiveControls(QObject):
         self._toast(translate(text))  # LiveSession's notices are English (N_) texts
 
     def on_playing(self) -> None:
-        """The player plays (kept for the controller's call; nothing is held back now)."""
+        """The player plays: an ended stream counts how long it played since (HEALTHY_S)."""
+        self._playing_since = time.monotonic()
 
     def _on_live_failed(self, message: str) -> None:
         """Playback of the live channel failed for good (LiveSession recovered what it could)."""

@@ -33,6 +33,15 @@ plays, the chosen one chosen again, each once (one added meanwhile is not added 
 one that is gone by then is forgotten. `clear_subtitles()` forgets them and the subtitles'
 delay (another title).
 
+The picture's shape (`set_aspect`: the stream's own, 16:9, 4:3, or the window's shape,
+cropped; 2.3) and deinterlacing (`set_deinterlace`) are the player's, kept for every media it
+opens until set again (see `services.picture`). libVLC keeps them on the player, but a video
+output it kept from the media before (a zap reuses it) keeps the old ones: so once each media's
+video output exists they are set again. For the window's shape the shell reports the surface's
+size (`set_video_size`), and a crop follows it a moment after a resize stops. `video_stats()`
+reads what the statistics overlay shows. None of them reaches libVLC while a worker ends an
+input (`_player_free`): what is asked for meanwhile is set once the next media opens.
+
 With hardware decoding (Settings; `hardware`), each tick while a stream plays reads libVLC's
 media statistics: once its picture stood still while its sound played (`FrozenPicture`, which
 has the lab) where pictures can show (`_can_show`: on a window system, or once VLC made a video
@@ -47,6 +56,7 @@ channel that froze before).
 
 from __future__ import annotations
 
+import ctypes
 from enum import Enum
 import logging
 import os
@@ -58,6 +68,7 @@ from typing import Any, Callable, Optional, Protocol
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 
+from services import picture
 from services.i18n import N_, tr, translate
 from services.jobs import JobRunner
 from services.picture_watch import Counters, FrozenPicture
@@ -81,6 +92,7 @@ def _readable(path: str) -> bool:
 
 
 _AUDIO_RESTORE_MS = 500
+_SHAPE_SETTLE_MS = 150  # a Fill crop follows the window once a resize stops this long
 _RESTART_DELAY_MS = 300
 _RESUME_GIVE_UP_MS = 3000
 _RESUME_END_MARGIN_MS = 1000
@@ -296,8 +308,22 @@ class PlaybackSession(QObject):
         self._media_files: set[str] = set()  # the files added to this media
         self._spu_files: dict[int, tuple[str, str]] = {}  # a file's track id: (path, name)
         self._spu_known: set[int] = set()  # the tracks before the files on their way
-        self._spu_waiting: list[tuple[str, str]] = []  # files added, their tracks not seen
+        # Files added whose tracks were not seen yet: (path, name, added chosen).
+        self._spu_waiting: list[tuple[str, str, bool]] = []
         self._spu_wait = QElapsedTimer()
+        # The picture (2.3): its shape for every media, the window's size (Fill crops to its
+        # shape), and deinterlacing ("auto": never set on this player, libVLC's own).
+        self._aspect = picture.AUTO
+        self._video_size = (0, 0)
+        self._deinterlace = picture.AUTO
+        self._deinterlace_set = False  # libVLC was given on or off: Auto cannot come back
+        # What libVLC was given last: the method (on) or None (off); Auto chosen after either
+        # leaves it so, as this player then deinterlaces until QiTV starts again.
+        self._deinterlace_method: Optional[str] = None
+        self._picture_due = False  # set again once this media's video output exists
+        self._picture_set = False  # libVLC was given a shape or deinterlacing on this player
+        self._shape_timer = QTimer(self, singleShot=True, interval=_SHAPE_SETTLE_MS)
+        self._shape_timer.timeout.connect(self._apply_shape)
 
     def _player_free(self) -> bool:
         """The GUI thread may call into libVLC: not released, and no job holds its input lock.
@@ -343,6 +369,11 @@ class PlaybackSession(QObject):
     def holds_input(self) -> bool:
         """libVLC holds an input, or a worker still ends one: its connection may be open."""
         return self._has_input or self._job is not None
+
+    def decodes_in_software(self) -> bool:
+        """The media playing (or the last one opened) decodes in software: its open asked for
+        it, or its picture froze (a reopen of the stream passes it on)."""
+        return self._software
 
     # --- output -----------------------------------------------------------------------
     def set_window(self, win_id: int) -> None:
@@ -425,6 +456,9 @@ class PlaybackSession(QObject):
             self._player.audio_set_delay(self._audio_delay_ms * 1000)
         if self._subtitle_delay_ms:
             self._player.video_set_spu_delay(self._subtitle_delay_ms * 1000)
+        if self._picture_wanted():
+            self._apply_picture()  # the player's, for a new video output
+            self._picture_due = True  # and again for a kept one, once it is this media's
         self._spu_files, self._spu_known, self._spu_waiting = {}, set(), []
         self._media_files = set()
         self._files_due = bool(self._subtitle_files)  # added once it plays
@@ -689,26 +723,34 @@ class PlaybackSession(QObject):
             logger.info("libVLC did not take the subtitle file %s", name)
             return False
         self._media_files.add(path)
-        self._spu_waiting.append((path, name))
+        self._spu_waiting.append((path, name, select))
         return True
 
     def _name_files(self, ids: list[int]) -> None:
-        """Tell the tracks of the files added from the new ids: one each, after the media's
-        own, so the newest ones (with one file, the track chosen if it is new)."""
+        """Tell the files' tracks among the tracks that came since they were added; a media's
+        own track may show late too (a live stream's), and libVLC names both alike ("Track 2
+        - [English]" for a file named *.en.srt). The file added chosen last takes the track
+        libVLC chose as it came, never another; the others pair in order, once exactly as
+        many new tracks came as they are."""
         new = sorted(i for i in ids if i >= 0 and i not in self._spu_known)
-        if not new:
-            if self._spu_wait.elapsed() > _SUBTITLE_NAME_WAIT_MS:
-                self._spu_waiting = []  # never came: libVLC's own name stays
-            return
-        chosen = int(self._player.video_get_spu())
-        if len(self._spu_waiting) == 1 and chosen in new:
-            new.remove(chosen)
-            new.append(chosen)
-        pairs = list(zip(reversed(self._spu_waiting), reversed(new)))
+        waiting = self._spu_waiting
+        picked = next((file for file in reversed(waiting) if file[2]), None)
+        pairs: list[tuple[tuple[str, str, bool], int]] = []
+        if picked is not None and new:
+            chosen = int(self._player.video_get_spu())
+            if chosen in new:
+                pairs.append((picked, chosen))
+                new.remove(chosen)
+        others = [file for file in waiting if file is not picked]
+        if others and len(new) == len(others):
+            pairs += list(zip(others, new))
         for file, track in pairs:
-            self._spu_files[track] = file
-        self._spu_waiting = self._spu_waiting[: len(self._spu_waiting) - len(pairs)]
-        self._spu_known.update(new)
+            self._spu_files[track] = (file[0], file[1])
+            self._spu_known.add(track)
+        paired = [file for file, _track in pairs]
+        self._spu_waiting = [file for file in waiting if file not in paired]
+        if self._spu_waiting and self._spu_wait.elapsed() > _SUBTITLE_NAME_WAIT_MS:
+            self._spu_waiting = []  # never came: libVLC's own names stay
 
     def _replay_files(self) -> None:
         """A reopened media plays: its files again, the chosen one chosen, each once (one may
@@ -730,6 +772,106 @@ class PlaybackSession(QObject):
     def _decode(name) -> str:
         return name.decode("utf-8", "replace") if isinstance(name, bytes) else str(name)
 
+    # --- the picture (2.3) -------------------------------------------------------------
+    def aspect(self) -> str:
+        """The picture's shape: services.picture's AUTO, WIDE, STANDARD or FILL."""
+        return self._aspect
+
+    def set_aspect(self, aspect: str) -> None:
+        """Show this media and every one after it in `aspect`'s shape, until set again."""
+        if self._released or aspect not in picture.ASPECTS or aspect == self._aspect:
+            return
+        self._aspect = aspect
+        self._shape_timer.stop()
+        self._set_picture()
+
+    def set_video_size(self, width: int, height: int) -> None:
+        """The surface this player draws into is `width` × `height`: Fill's crop follows it."""
+        if self._released or (width, height) == self._video_size:
+            return
+        self._video_size = (int(width), int(height))
+        if self._aspect == picture.FILL:
+            self._shape_timer.start()  # once the resize stops
+
+    def deinterlace(self) -> str:
+        return self._deinterlace
+
+    def set_deinterlace(self, choice: str) -> bool:
+        """Deinterlace this media and every one after it: services.picture's AUTO, ON or OFF.
+        False when Auto cannot come back to this player (libVLC was given on or off: it stays
+        until QiTV starts again)."""
+        if self._released or choice not in picture.DEINTERLACING:
+            return False
+        self._deinterlace = choice
+        if choice == picture.AUTO:
+            return not self._deinterlace_set  # libVLC keeps what it was given last
+        self._deinterlace_set = True
+        self._deinterlace_method = picture.deinterlace_method(choice)
+        self._set_picture()
+        return True
+
+    def _set_picture(self) -> None:
+        """Set the shape and deinterlacing now, or, while a worker ends an input, as the next
+        media opens."""
+        if self._player_free():
+            self._apply_picture()
+            # A video output this media takes over yet (a kept one) is set once it has it.
+            self._picture_due = self._picture_due or self._has_input
+
+    def _picture_wanted(self) -> bool:
+        """Something to give libVLC: a shape or deinterlacing asked for, or one given before
+        (a video output it keeps would keep it)."""
+        return self._picture_set or self._aspect != picture.AUTO or self._deinterlace_set
+
+    def _apply_shape(self) -> None:
+        if self._aspect != picture.FILL:
+            return
+        if self._player_free():
+            self._apply_picture()
+        else:
+            self._shape_timer.start()  # a worker ends an input: once it has let go
+
+    def _apply_picture(self) -> None:
+        """libVLC's aspect ratio, crop and deinterlacing, as asked for (only while no worker
+        holds the player's input: libVLC takes its input lock to reach the video outputs)."""
+        self._picture_set = True
+        aspect, crop = picture.shape_args(self._aspect, *self._video_size)
+        self._player.video_set_aspect_ratio(aspect)
+        self._player.video_set_crop_geometry(crop)
+        if self._deinterlace_set:
+            self._player.video_set_deinterlace(self._deinterlace_method)
+
+    def video_stats(self) -> dict[str, Any]:
+        """What the statistics overlay shows of the media playing ({} when none): its video and
+        audio codec (libVLC's four-character codes), size and frame rate, sample rate, the
+        pictures decoded, shown and lost (dropped for coming too late), the bitrates read and
+        demuxed (kb/s), and whether it decodes in hardware ("hardware": VLC may, "software",
+        or "froze": back to software after a frozen picture)."""
+        if vlc is None or not self._player_free() or not self._has_input:
+            return {}
+        media = self._player.get_media()
+        if media is None:
+            return {}
+        try:
+            stats: dict[str, Any] = {}
+            counters = vlc.MediaStats()
+            if media.get_stats(counters):
+                stats.update(
+                    decoded=int(counters.decoded_video),
+                    shown=int(counters.displayed_pictures),
+                    lost=int(counters.lost_pictures),
+                    input_kbps=float(counters.input_bitrate) * picture.KBPS_PER_UNIT,
+                    demux_kbps=float(counters.demux_bitrate) * picture.KBPS_PER_UNIT,
+                )
+            stats.update(_track_stats(media))
+        finally:
+            media.release()
+        if not self._hardware:
+            stats["decoding"] = "software"
+        else:
+            stats["decoding"] = "froze" if self._software else "hardware"
+        return stats
+
     def release(self) -> None:
         """Release the player; with an input still open, after a worker has stopped it.
 
@@ -740,6 +882,7 @@ class PlaybackSession(QObject):
             return
         self._released = True
         self._poll.stop()
+        self._shape_timer.stop()
         self._cancel_pending()
         self._start_wanted = self._stop_owed = False
         if self._job is not None:
@@ -797,6 +940,9 @@ class PlaybackSession(QObject):
             self._apply_audio()
             if self._files_due:
                 self._replay_files()
+        if self._picture_due and int(self._player.has_vout() or 0) > 0:
+            self._picture_due = False
+            self._apply_picture()
         if self._spu_waiting:
             self.subtitle_tracks()  # names the files' tracks once they show
         if state in (PlaybackState.OPENING, PlaybackState.BUFFERING) and not self._ever_played:
@@ -968,6 +1114,8 @@ class Session(Protocol):
 
     def holds_input(self) -> bool: ...
 
+    def decodes_in_software(self) -> bool: ...
+
     def set_window(self, win_id: int) -> None: ...
 
     def play(
@@ -1026,6 +1174,18 @@ class Session(Protocol):
 
     def clear_subtitles(self) -> None: ...
 
+    def aspect(self) -> str: ...
+
+    def set_aspect(self, aspect: str) -> None: ...
+
+    def set_video_size(self, width: int, height: int) -> None: ...
+
+    def deinterlace(self) -> str: ...
+
+    def set_deinterlace(self, choice: str) -> bool: ...
+
+    def video_stats(self) -> dict[str, Any]: ...
+
     def release(self) -> None: ...
 
 
@@ -1065,6 +1225,9 @@ class NullSession(QObject):
         return False
 
     def holds_input(self) -> bool:
+        return False
+
+    def decodes_in_software(self) -> bool:
         return False
 
     def set_window(self, win_id: int) -> None:
@@ -1149,5 +1312,57 @@ class NullSession(QObject):
     def clear_subtitles(self) -> None:
         pass
 
+    def aspect(self) -> str:
+        return picture.AUTO
+
+    def set_aspect(self, aspect: str) -> None:
+        pass
+
+    def set_video_size(self, width: int, height: int) -> None:
+        pass
+
+    def deinterlace(self) -> str:
+        return picture.AUTO
+
+    def set_deinterlace(self, choice: str) -> bool:
+        return True
+
+    def video_stats(self) -> dict[str, Any]:
+        return {}
+
     def release(self) -> None:
         pass
+
+
+def _track_stats(media: Any) -> dict[str, Any]:
+    """The first video and audio track's codec, size, frame rate and sample rate, from libVLC's
+    track list (read through python-vlc's MediaTrack up to its union, which python-vlc lays
+    out as three pointers: the video or audio struct is the first, whatever the type)."""
+    tracks = ctypes.POINTER(vlc.MediaTrack)()
+    count = int(vlc.libvlc_media_tracks_get(media, ctypes.byref(tracks)) or 0)
+    if count <= 0:
+        return {}
+    found: dict[str, Any] = {}
+    try:
+        array = ctypes.cast(tracks, ctypes.POINTER(ctypes.POINTER(vlc.MediaTrack) * count))
+        for pointer in array.contents:
+            track = pointer.contents
+            fourcc = int(track.codec).to_bytes(4, "little").decode("latin-1")
+            details = ctypes.cast(track.audio, ctypes.c_void_p)
+            if track.type == vlc.TrackType.video and "video_codec" not in found:
+                found["video_codec"] = fourcc
+                if details.value:
+                    video = ctypes.cast(details, ctypes.POINTER(vlc.VideoTrack)).contents
+                    found["width"], found["height"] = int(video.width), int(video.height)
+                    if video.frame_rate_den:
+                        found["fps"] = video.frame_rate_num / video.frame_rate_den
+            elif track.type == vlc.TrackType.audio and "audio_codec" not in found:
+                found["audio_codec"] = fourcc
+                if details.value:
+                    audio = ctypes.cast(details, ctypes.POINTER(vlc.AudioTrack)).contents
+                    found["audio_rate"] = int(audio.rate)
+    finally:
+        vlc.libvlc_media_tracks_release(
+            ctypes.cast(tracks, ctypes.POINTER(ctypes.POINTER(vlc.MediaTrack))), count
+        )
+    return found

@@ -160,6 +160,9 @@ class ConfigManager:
     DEFAULT_OPTION_CORNER_PLAYER_CORNER = "bottom-right"  # what plays, small, over the Library
     CORNER_PLAYER_CORNER_CHOICES = ("top-left", "top-right", "bottom-left", "bottom-right")
     DEFAULT_OPTION_PIP_VOLUME = 30  # the small picture's own level once it is made audible
+    DEFAULT_OPTION_VOLUME = 100  # the large picture's level: libVLC's default
+    DEFAULT_OPTION_DEINTERLACE = "auto"  # 2.3: libVLC's own; "on" or "off" (the Picture panel)
+    DEINTERLACE_CHOICES = ("auto", "on", "off")
     # 2.2, the multiview: a tile's time-shift buffer while it has no focus (an optional key,
     # never written by default). 48 MiB holds one keyframe interval of a 4K channel.
     DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB = 64
@@ -431,9 +434,16 @@ class ConfigManager:
     pip_volume = _config_property(
         "pip_volume", DEFAULT_OPTION_PIP_VOLUME, coerce=int, clamp=(0, 100)
     )
+    # The large picture's level (2.2.1, optional; older builds ignore it and start at 100).
+    volume = _config_property("volume", DEFAULT_OPTION_VOLUME, coerce=int, clamp=(0, 100))
     # The last multiview grid (2.2, optional; older builds ignore it): {"version": 1, "cells",
     # "focus", "tiles": [a last_live_channel-style record, or None per tile]}.
     multiview = _config_property("multiview", None)
+    # The multiview's layouts showed once by themselves, as a hint (optional; older builds
+    # ignore it).
+    multiview_hinted = _config_property(
+        "multiview_hinted", False, coerce=lambda value: value is True
+    )
     multiview_tile_ram_mib = _config_property(
         "multiview_tile_ram_mib",
         DEFAULT_OPTION_MULTIVIEW_TILE_RAM_MIB,
@@ -441,7 +451,13 @@ class ConfigManager:
         clamp=MULTIVIEW_TILE_RAM_RANGE,
     )
     subtitle_folder = _config_property("subtitle_folder", "", coerce=str)  # 2.2: Load a file…
-    # 2.3, optional (older builds ignore it): the Recordings folder Settings chose; "" is the
+    # 2.3, optional (older builds ignore it): the Picture panel's deinterlacing, every player's.
+    deinterlace = _config_property(
+        "deinterlace",
+        DEFAULT_OPTION_DEINTERLACE,
+        coerce=_one_of(DEINTERLACE_CHOICES, DEFAULT_OPTION_DEINTERLACE),
+    )
+    # 2.2, optional (older builds ignore it): the Recordings folder Settings chose; "" is the
     # system's Movies (Videos) folder's QiTV (services.recording).
     recordings_dir = _config_property(
         "recordings_dir", "", coerce=lambda value: value if isinstance(value, str) else ""

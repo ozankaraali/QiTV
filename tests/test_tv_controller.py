@@ -26,9 +26,10 @@ from services.epg_view import Programme
 from services.live.live_session import CRAWLING, UNAVAILABLE
 from services.live.source import STREAM_LIMIT, STREAM_REFUSED
 from services.live.tuning import channel_key
-from services.navigation import FAVORITES_GROUP, NavModel, NavNode, item_key
+from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
 from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of
 from services.vlc_profile import DEFAULT_USER_AGENT, PlayKind
+from services.watch_state import WatchState
 from services.zapping import ZapController
 from tests.test_navigation import FakeCatalog as NavCatalog
 from ui.keymap import Action
@@ -241,12 +242,21 @@ class FakeSession(QObject):
         self.files = []  # add_subtitle_file()
         self.clears = 0  # clear_subtitles()
         self.url, self.kind = None, None  # what plays, as PlaybackSession.url and .kind
+        self.shape = "auto"  # aspect(): the picture's shape (2.3)
+        self.shapes = []  # every set_aspect()
+        self.deinterlacing = "auto"
+        self.stats = {}  # what video_stats() reads
+        self.software = False  # decodes_in_software(): asked for, or the picture froze
 
     def play(self, url, **kwargs):
         self.plays.append((url, kwargs))
         self.play_delays.append(self.delay)
         self.url, self.kind = url, kwargs.get("kind")
+        self.software = bool(kwargs.get("software"))
         self.stateChanged.emit("opening")
+
+    def decodes_in_software(self):
+        return self.software
 
     def stop(self):
         self.stops += 1
@@ -333,6 +343,26 @@ class FakeSession(QObject):
         self.clears += 1
         self.files, self.subtitle_ms = [], 0
 
+    def aspect(self):
+        return self.shape
+
+    def set_aspect(self, aspect):
+        self.shape = aspect
+        self.shapes.append(aspect)
+
+    def set_video_size(self, width, height):
+        pass
+
+    def deinterlace(self):
+        return self.deinterlacing
+
+    def set_deinterlace(self, choice):
+        self.deinterlacing = choice
+        return True
+
+    def video_stats(self):
+        return dict(self.stats)
+
 
 class FakeOverlay(QObject):
     def __init__(self):
@@ -399,9 +429,13 @@ class FakeDrawer(FakeOverlay):
     contextRequested = Signal(object, object)
     closed = Signal()
     highlight = None
+    found = False  # the find lists what it found
 
     def highlighted(self):
         return self.highlight
+
+    def finding(self):
+        return self.found
 
     def open_drawer(self, focus_key=None, focus_side="right"):
         if focus_side == "right":
@@ -452,6 +486,7 @@ class FakeTransport(FakeOverlay):
     fullscreenRequested = Signal()
     audioRequested = Signal()
     subtitleRequested = Signal()
+    pictureRequested = Signal()
     goLiveRequested = Signal()
     programmeStartRequested = Signal()
     seekToRequested = Signal(float)
@@ -475,6 +510,9 @@ class FakeTransport(FakeOverlay):
     def set_muted(self, muted):
         self.record("set_muted", muted)
 
+    def set_level(self, level):
+        self.record("set_level", level)
+
     def set_recording(self, since):
         self.record("set_recording", since)
         self.recording_since = since
@@ -488,12 +526,33 @@ class FakeTransport(FakeOverlay):
     def set_pip_state(self, available, open_):
         self.record("set_pip_state", available, open_)
 
-    def set_grid_state(self, available, shown, layout="", restorable=False):
+    def set_grid_state(self, available, shown, layout="", restorable=False, cells=0):
         self.record("set_grid_state", available, shown, layout)
         self.restorable = restorable
 
     def follow_pip(self, rect):
         self.record("follow_pip", rect)
+
+    held_button = ""  # hold(): the button whose panel shows
+
+    def hold(self, button):
+        self.record("hold", button)
+        self.held_button = button
+
+    def held(self):
+        return self.held_button
+
+    def button_rect(self, name):
+        return QRectF(1000, 650, 90, 28)  # where its buttons are, as far as panels need
+
+    def controls_top(self):
+        return 640
+
+    def control_at(self, pos):
+        return None
+
+    def pos(self):
+        return QPoint(0, 0)
 
     def show_vod(self, title, subtitle):
         self.record("show_vod", title, subtitle)
@@ -1346,6 +1405,26 @@ class StartupTests(ControllerTestCase):
         self.assertEqual(self.zap.context.group_key, "10")
         self.assertEqual(self.drawer.named("open_drawer"), [])
 
+    def start_with_an_old_address(self, ptype):
+        # The stored address holds the provider's old server and password.
+        self.catalog.ptype = ptype
+        self.config.last_live_channel = {
+            "provider_name": "Home",
+            "group_id": "10",
+            "item": {**CHANNELS[2], "cmd": "http://old.test:8080/live/user/oldpass/3.ts"},
+        }
+        self.controller.start()
+        self.catalog.hub_ready("Home")
+        self.catalog.sectionReady.emit("live")
+
+    def test_an_xtream_last_channel_survives_a_change_of_server_or_password(self):
+        self.start_with_an_old_address("XTREAM")
+        self.assertEqual(self.requested(), ["Three"])  # its stream id still names it
+
+    def test_another_providers_last_channel_is_matched_by_address_alone(self):
+        self.start_with_an_old_address("STB")  # an STB channel's id is not its stream
+        self.assertEqual(self.requested(), [])
+
     def test_last_channel_of_another_provider_opens_the_drawer(self):
         self.config.last_live_channel = {
             "provider_name": "Other",
@@ -1391,6 +1470,14 @@ class StartupTests(ControllerTestCase):
         )
         self.assertEqual(self.requested(), ["One"])
         self.assertEqual(self.zap.context.channels, hub.own["Harbor IPTV"].items("live", "*"))
+
+    def test_another_xtream_providers_last_channel_is_found_by_its_stream_id(self):
+        hub = self.start_with_last_of_harbor()
+        hub.own["Harbor IPTV"].channels[0] = {**HARBOR_ONE, "cmd": "http://new.test/live/u/p/1"}
+        hub.ready.add("Harbor IPTV")
+        hub.own["Harbor IPTV"].loaded = True
+        hub.contentChanged.emit("Harbor IPTV")
+        self.assertEqual(self.requested(), ["One"])
 
     def test_a_last_channel_whose_provider_failed_opens_the_drawer(self):
         hub = self.start_with_last_of_harbor()
@@ -1631,8 +1718,9 @@ class KeyTests(ControllerTestCase):
         self.assertIsNone(self.controller.now_title(CHANNELS[0]))
 
     def test_mouse_move_shows_the_live_transport_while_playing(self):
+        before = list(self.transport.calls)  # the speaker's remembered level, from the start
         self.controller.mouse_moved()
-        self.assertEqual(self.transport.calls, [])
+        self.assertEqual(self.transport.calls, before)
         self.play(0)
         self.controller.mouse_moved()
         self.assertEqual(self.transport.named("show_live"), [("One", "")])
@@ -3321,6 +3409,26 @@ class ReconnectTests(PipelineCase):
         self.assertEqual(self.live.named("stop"), [])
         self.assertEqual(self.budget.holders("Home"), ["main"])
 
+    def test_a_stream_that_played_a_while_since_may_reconnect_twice_again(self):
+        self.enterContext(mock.patch("ui.live_controls.HEALTHY_S", 0.05))
+        plays = self.fall_back()
+        self.end_and_reopen(plays)
+        self.end_and_reopen(plays + 1)
+        self.session.stateChanged.emit("playing")
+        QTest.qWait(80)  # it played HEALTHY_S since its last reopen
+        self.end_and_reopen(plays + 2)
+        self.session.stateChanged.emit("playing")  # too briefly this time
+        self.end_and_reopen(plays + 3)
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages()[-1], ("The stream ended", "info"))
+
+    def test_a_reopen_decodes_in_software_as_the_stream_did(self):
+        plays = self.fall_back()
+        self.assertNotIn("software", self.session.plays[-1][1])
+        self.session.software = True  # hardware decoding froze its picture: software since
+        self.end_and_reopen(plays)
+        self.assertIs(self.session.plays[-1][1]["software"], True)
+
     def test_each_tune_may_reconnect_twice(self):
         plays = self.fall_back(0)
         self.end_and_reopen(plays)
@@ -3989,6 +4097,120 @@ class ContextMenuTests(ControllerTestCase):
         )
         self.nav.reset_to("series")
         self.assertIsNone(self.menu_for(NavNode("item", "s9", "Harbour Lights", SERIES)))
+
+
+def watched(provider, channel, kind="channel"):
+    """A watch-history entry as ConfigManager.add_to_watch_history writes it."""
+    return {
+        "content_id": f"{provider}:{channel['id']}",
+        "item_data": dict(channel),
+        "item_type": kind,
+        "link": f"http://tv/{channel['id']}",
+        "provider_name": provider,
+        "timestamp": "2026-10-19T20:00:00",
+        "name": channel["name"],
+    }
+
+
+class RecentsTests(ControllerTestCase):
+    """A channel taken out of ⟲ Recent: its row's menu, Delete, and Clear Recents."""
+
+    menu_for = ContextMenuTests.menu_for
+    texts = staticmethod(ContextMenuTests.texts)
+    choose = staticmethod(ContextMenuTests.choose)
+
+    def setUp(self):
+        super().setUp()
+        self.film = watched("Home", {"id": 9, "name": "Film"}, "movie")
+        self.home_two, self.backup_two = watched("Home", CHANNELS[1]), watched(
+            "Backup", CHANNELS[1]
+        )
+        self.home_one, self.older_two = watched("Home", CHANNELS[0]), watched("Home", CHANNELS[1])
+        self.history = [self.home_two, self.film, self.backup_two, self.home_one, self.older_two]
+        self.config.watch_history = list(self.history)
+        self.controller.watch = WatchState(self.config)  # the real history keeper: it saves
+        self.controller.start()
+        self.nav.reset_to("live", RECENT_GROUP)
+        self.rows = self.nav.children(self.nav.path[-1])
+
+    def shown(self):
+        return [(provider_of(n.payload), n.title) for n in self.nav.children(self.nav.path[-1])]
+
+    def test_a_recent_channel_s_menu_takes_it_out_and_saves_the_history(self):
+        self.assertEqual(self.shown(), [("Home", "Two"), ("Backup", "Two"), ("Home", "One")])
+        menu = self.menu_for(self.rows[0])
+        self.assertEqual(
+            self.texts(menu),
+            [
+                "Add to favorites",
+                "Remove from Recents",
+                "Clear Recents",
+                "Play in VLC",
+                "Play in MPV",
+                "Copy stream link",
+            ],
+        )
+        saves = self.config.saves
+        self.choose(menu, "Remove from Recents")
+        # Both its plays at that provider go; the same channel at another provider, the other
+        # channels and the film stay, as they were (older builds read the same entries).
+        self.assertEqual(self.config.watch_history, [self.film, self.backup_two, self.home_one])
+        self.assertEqual(self.config.saves, saves + 1)
+        self.assertEqual(self.shown(), [("Backup", "Two"), ("Home", "One")])
+        self.assertEqual(self.toast.messages()[-1], ("Removed from Recents", "info"))
+
+    def test_a_channel_elsewhere_offers_no_recents_entries(self):
+        self.nav.reset_to("live", "10")
+        two = self.nav.children(self.nav.path[-1])[1]
+        texts = self.texts(self.menu_for(two))
+        self.assertNotIn("Remove from Recents", texts)
+        self.assertNotIn("Clear Recents", texts)
+
+    def test_clear_recents_asks_once_more_then_empties_the_list_and_goes_up(self):
+        menu = self.menu_for(self.rows[2])
+        sub = next(a for a in menu.actions() if a.text() == "Clear Recents").menu()
+        self.assertEqual(self.texts(sub), ["Clear all 3 channels"])
+        self.assertEqual(self.config.watch_history, self.history)  # the submenu only asks
+        saves = self.config.saves
+        self.choose(sub, "Clear all 3 channels")
+        self.assertEqual(self.config.watch_history, [self.film])  # the Library's Continue stays
+        self.assertEqual(self.config.saves, saves + 1)
+        self.assertEqual(self.toast.messages()[-1], ("Recents cleared", "info"))
+        # Its row is gone from the genres: the list is back on them.
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section"])
+        self.assertNotIn(RECENT_GROUP, [n.key for n in self.nav.children(self.nav.path[-1])])
+
+    def test_the_recent_row_itself_offers_clear_recents(self):
+        recent = next(n for n in self.nav.children(self.nav.path[1]) if n.key == RECENT_GROUP)
+        menu = self.menu_for(recent)
+        self.assertEqual(self.texts(menu), ["Clear Recents"])
+        sub = menu.actions()[0].menu()
+        self.choose(sub, "Clear all 3 channels")
+        self.assertEqual(self.config.watch_history, [self.film])
+        self.assertIsNone(self.menu_for(recent))  # nothing left to clear
+
+    def test_delete_takes_the_highlighted_recent_channel_out(self):
+        self.drawer.visible = True
+        self.drawer.highlight = self.rows[1]  # Two, at Backup
+        self.controller.handle(Action.FORGET)
+        self.assertEqual(
+            self.config.watch_history, [self.home_two, self.film, self.home_one, self.older_two]
+        )
+        self.assertEqual(self.toast.messages()[-1], ("Removed from Recents", "info"))
+        history = list(self.config.watch_history)
+        self.drawer.found = True  # the find lists what it found: Delete is the find's then
+        self.drawer.highlight = self.rows[0]
+        self.controller.handle(Action.FORGET)
+        self.assertEqual(self.config.watch_history, history)
+        self.drawer.found = False
+        self.nav.reset_to("live", "10")  # a genre's channel: nothing to take out
+        self.drawer.highlight = self.nav.children(self.nav.path[-1])[0]
+        self.controller.handle(Action.FORGET)
+        self.assertEqual(self.config.watch_history, history)
+        self.nav.reset_to("live", RECENT_GROUP)
+        self.drawer.highlight, self.drawer.visible = self.rows[0], False  # the list is closed
+        self.controller.handle(Action.FORGET)
+        self.assertEqual(self.config.watch_history, history)
 
 
 class ExternalButtonTests(ControllerTestCase):

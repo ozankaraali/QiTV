@@ -25,6 +25,12 @@ again, the Next card offers what follows, as at its end). The label's × closes 
 picture, its speaker mutes or unmutes it, and its ⇄, like a click on the small picture,
 swaps (the shell's `swap`).
 
+A channel the small picture plays directly (its live session fell back) whose stream ends
+opens again in the same player, so in its budget slot, as the large picture's does
+(`ui.live_controls`): after RECONNECT_MS, twice per channel (twice more once it played for
+HEALTHY_S), then "The stream ended". A swap during the back-off hands the reopen to the
+picture that has the player then (`take_reopen`, `adopt_reopen`, and LiveControls' own).
+
 What each slot shows (its target, the zap group it came from and, for a movie or an episode,
 its resume key) is kept here, so a swap can give the shell the new large picture's
 (`take_large`).
@@ -35,18 +41,21 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 import logging
+import time
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from services.catalog import ALL_GROUP_ID
-from services.i18n import N_, tr_n, translate
+from services.i18n import N_, tr, tr_n, translate
+from services.live.live_session import LOADING, RECONNECTING, UNAVAILABLE
 from services.live.refusals import STREAM_LIMIT
 from services.live.stay_live import TARGETS
 from services.navigation import payloads
 from services.sessions import SessionManager, Slot, limit_message
+from services.vlc_profile import PlayKind
 from services.zapping import ZapContext
-from ui import item_provider
+from ui import item_provider, live_controls
 from ui.autoplay import FINISHED_TEXT
 from ui.context_actions import is_channel
 from ui.link_lanes import LinkLanes, Target
@@ -70,6 +79,10 @@ SWITCHING = N_("Switching…")  # i18n: a toast: the two pictures are about to s
 SWITCHING_MS = 1500
 SHIFTED_MARGIN_S = 1.0  # the label says "−MM:SS" once the lag is this far beyond the target
 ERROR_MS = 6000
+NOTICE_MS = 3000  # a small picture's stream notice, after its channel's name
+# Not said for the small picture: its label says "Connecting…" while it loads, and the large
+# picture keeps "no time-shift" for a rewind too.
+_QUIET_NOTICES = (LOADING, UNAVAILABLE)
 
 
 @dataclass
@@ -160,6 +173,15 @@ class PipControls(QObject):
         self._closed_view: Optional[SlotView] = None  # what the small picture showed last
         self._ended: set[str] = set()  # the slots whose player's title ended
         self._room: Optional[_Room] = None  # what a title on its way closes when it comes
+        # Per slot: the channel it showed small and the notices said for it (once each).
+        self._said: dict[str, tuple[Optional[dict], set[str]]] = {}
+        # An ended direct stream of the small picture: reopens per slot since its channel
+        # opened, each player's last "playing" (monotonic), and the reopen after its back-off.
+        self._reopens: dict[str, int] = {}
+        self._playing_since: dict[str, float] = {}
+        self._reopen_due: Optional[tuple[str, Target, str, PlayKind]] = None
+        self._reopen_timer = QTimer(self, singleShot=True)
+        self._reopen_timer.timeout.connect(self._reopen)
 
     def wire(self) -> None:
         sessions = self.sessions
@@ -185,6 +207,7 @@ class PipControls(QObject):
         multiview adds it): the label shows the state of whichever is small."""
         slot.live.modeChanged.connect(self._refresh_label)
         slot.live.recordingChanged.connect(self._refresh_label)  # REC (2.2)
+        slot.live.notice.connect(partial(self._on_notice, slot.name))
         slot.playback.stateChanged.connect(partial(self._on_player_state, slot.name))
 
     # ---- state --------------------------------------------------------------------------------
@@ -216,6 +239,11 @@ class PipControls(QObject):
 
     def view(self, name: str) -> SlotView:
         return self._views.setdefault(name, SlotView())
+
+    def forget_view(self, name: str) -> None:
+        """Slot `name` (a multiview tile) closed: what it showed is forgotten."""
+        self._views.pop(name, None)
+        self._timelines.pop(name, None)
 
     def take_large(
         self,
@@ -473,6 +501,7 @@ class PipControls(QObject):
             self._room = None  # closed already: nothing to close, or say, for the title
         self._wanted = None
         self._link = None  # a late link for it is ignored (it is no longer `_link`)
+        self._cancel_reopen()
         sessions = self.sessions
         if sessions.pip_open() or sessions.pip_opening():
             sessions.close_pip()
@@ -519,6 +548,9 @@ class PipControls(QObject):
         self._views[slot.name] = SlotView(target, context, url)
         self._closed_view = None
         self._timelines.pop(slot.name, None)
+        self._said.pop(slot.name, None)  # its new channel's notices are said again
+        self._reopens.pop(slot.name, None)
+        self._cancel_reopen()
         # The small picture keeps its time-shift in memory: one disk ring at most (M5 ruling).
         kwargs = start_kwargs(self._live_start(target, url), self.config, disk=False)
         sessions.open_pip(
@@ -607,7 +639,12 @@ class PipControls(QObject):
         self._request(again)
 
     def _on_player_state(self, name: str, state: str) -> None:
-        """A player's state: a title that ended small says "Finished" on the label."""
+        """A player's state: a title that ended small says "Finished" on the label; a channel
+        played directly that ended small opens again."""
+        if state == "playing":
+            self._playing_since[name] = time.monotonic()
+        elif state == "ended":
+            self._reconnect_small(name)
         ended = state == "ended"
         if ended == (name in self._ended):
             return
@@ -618,6 +655,99 @@ class PipControls(QObject):
         small = self.sessions.small()
         if small is not None and small.name == name:
             self._refresh_label()
+
+    def _on_notice(self, name: str, text: str) -> None:
+        """The small picture's stream notice ("Reconnecting…", "Plays without rewind…"):
+        toasted after its channel's name, each text once per channel shown small. The large
+        picture's are LiveControls'."""
+        small = self.sessions.small()
+        if self._closed() or small is None or small.name != name or text in _QUIET_NOTICES:
+            return
+        said = self._said.get(name)
+        if said is None or said[0] is not small.channel:
+            said = self._said[name] = (small.channel, set())
+        if text in said[1]:
+            return
+        said[1].add(text)
+        self._say(name, translate(text))  # LiveSession's notices are English (N_) texts
+
+    def _say(self, name: str, message: str) -> None:
+        """Toast `message` (shown text) after the name of slot `name`'s channel."""
+        small = self.sessions.small()
+        target = self.view(name).target
+        channel = small.channel if small is not None else None
+        title = target.title if target is not None else str((channel or {}).get("name", ""))
+        shown = tr("{name}: {message}", name=title, message=message) if title else message
+        self._toast(shown, "info", NOTICE_MS)
+
+    def _reconnect_small(self, name: str) -> None:
+        """Slot `name`'s player ended: when it is the small picture's channel, played directly,
+        its stream opens again in the same player after the back-off (its budget slot is
+        kept: its live session still holds it); past the reopens, it says the stream ended."""
+        small = self.sessions.small()
+        if self._closed() or small is None or small.name != name:
+            return
+        if self._reopen_due is not None:
+            return  # already on its way
+        target = self.view(name).target
+        playback = small.playback
+        url, kind = getattr(playback, "url", None), getattr(playback, "kind", None)
+        if target is None or not target.live or not url:
+            return
+        if kind is None or kind in live_controls.NOT_REOPENED:
+            return  # the time-shift buffer reopens itself
+        count = self._reopens.get(name, 0)
+        since = self._playing_since.pop(name, None)
+        if since is not None and time.monotonic() - since >= live_controls.HEALTHY_S:
+            count = 0  # it played well since it last opened: the back-off anew
+        if count >= len(live_controls.RECONNECT_MS):
+            self._say(name, tr("The stream ended"))
+            return
+        self._reopens[name] = count + 1
+        self._reopen_due = (name, target, url, kind)
+        self._reopen_timer.start(live_controls.RECONNECT_MS[count])
+        self._say(name, translate(RECONNECTING))
+
+    def _reopen(self) -> None:
+        due, self._reopen_due = self._reopen_due, None
+        if due is None or self._closed():
+            return
+        name, target, url, kind = due
+        small = self.sessions.small()
+        if small is None or small.name != name or self.view(name).target is not target:
+            return  # closed or another channel small meanwhile (a swap hands it over)
+        playback = small.playback
+        if getattr(playback, "url", None) != url:
+            return
+        logger.info("Opening %s small again after its stream ended", target.title)
+        playback.play(
+            url,
+            kind=kind,
+            latency=self.config.live_latency,
+            **live_controls.reopen_options(playback, target.item),
+        )
+
+    def _cancel_reopen(self) -> None:
+        self._reopen_due = None
+        self._reopen_timer.stop()
+
+    def take_reopen(self, name: str) -> Optional[live_controls.Reopen]:
+        """A swap made slot `name` large: its ended stream on its way to open again goes with
+        it (to LiveControls; None: none waits). It no longer opens here."""
+        due = self._reopen_due
+        if due is None or due[0] != name:
+            return None
+        remaining = max(0, self._reopen_timer.remainingTime())
+        self._cancel_reopen()
+        _name, target, url, kind = due
+        return live_controls.Reopen(target, url, kind, remaining, self._reopens.get(name, 0))
+
+    def adopt_reopen(self, name: str, reopen: live_controls.Reopen) -> None:
+        """A swap made slot `name` small while its ended stream was on its way to open again
+        (large): it opens here once the rest of its back-off is over."""
+        self._reopens[name] = reopen.count
+        self._reopen_due = (name, reopen.target, reopen.url, reopen.kind)
+        self._reopen_timer.start(reopen.remaining_ms)
 
     def _on_timeline(self, name: str, state: dict) -> None:
         self._timelines[name] = state
@@ -636,6 +766,7 @@ class PipControls(QObject):
         name = target.title if target is not None else str((small.channel or {}).get("name", ""))
         label.set_info(name, self._state_text(small, live=target is None or target.live))
         label.set_audible(not self.sessions.muted(small.name))
+        label.set_level(self.sessions.level(small.name))
 
     def _state_text(self, slot: Slot, *, live: bool = True) -> str:
         if not live:  # a movie or an episode swapped small plays on: its title alone

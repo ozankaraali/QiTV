@@ -1,11 +1,11 @@
 """Corner controls: the buttons over the player while it sits in a corner of the Library.
 
 Three round buttons in the corner player's top-right: a speaker that mutes or unmutes what
-plays, ⤢ that gives the player the whole window back, and × that stops it (the Library stays).
-They are the only overlay shown in that mode (the window hides the others). The overlay fills
-the host, which is glued over the player page, but only the buttons take the mouse and the
-host's mask: a click anywhere else on the small video reaches the page below, which brings the
-player back as ⤢ does.
+plays (crossed out while muted, else its waves show the volume), ⤢ that gives the player the
+whole window back, and × that stops it (the Library stays). They are the only overlay shown in
+that mode (the window hides the others). The overlay fills the host, which is glued over the
+player page, but only the buttons take the mouse and the host's mask: a click anywhere else on
+the small video reaches the page below, which brings the player back as ⤢ does.
 
 The host's width is the corner player's, so u would make these tiny: each button is
 MIN_HIT_PX wide whatever the window size.
@@ -29,7 +29,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, translate
 from ui.overlays.base import Overlay
-from ui.overlays.painting import draw_icon, fill_round
+from ui.overlays.painting import draw_icon, fill_round, volume_icon
 from ui.theme import PALETTE, qcolor
 
 BUTTONS = ("sound", "back", "stop")  # left to right
@@ -58,6 +58,7 @@ class CornerControls(Overlay):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoMousePropagation)  # never the host's
         self._muted = False
+        self._level = 100  # the volume of what plays (libVLC's default until set_level)
         if parent is not None:
             parent.installEventFilter(self)
             self.setGeometry(parent.rect())
@@ -69,6 +70,12 @@ class CornerControls(Overlay):
     def set_muted(self, muted: bool) -> None:
         if muted != self._muted:
             self._muted = muted
+            self.update()
+
+    def set_level(self, level: int) -> None:
+        """The volume of what plays (0-100): the speaker's waves show it."""
+        if level != self._level:
+            self._level = level
             self.update()
 
     def button_rect(self, name: str) -> QRectF:
@@ -150,7 +157,8 @@ class CornerControls(Overlay):
             elif name == "back":
                 self._paint_expand(p, icon)
             else:
-                draw_icon(p, "mute" if self._muted else "volume", icon, qcolor(PALETTE.text, 0.85))
+                speaker = volume_icon(self._level, self._muted)
+                draw_icon(p, speaker, icon, qcolor(PALETTE.text, 0.85))
         p.end()
 
     @staticmethod

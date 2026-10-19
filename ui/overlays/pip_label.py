@@ -1,5 +1,6 @@
 """PiP label: the small surface's channel and state, then a swap button (⇄), a speaker that
-mutes or unmutes the small picture and a close button (×).
+mutes or unmutes the small picture (crossed out while muted, else its waves show the volume)
+and a close button (×).
 
 It covers the small surface (follow()), but only its pill and buttons take the mouse and the
 host's mask: a click anywhere else on the small video reaches the surface below. The pill
@@ -35,7 +36,7 @@ from PySide6.QtWidgets import QWidget
 
 from services.i18n import N_, translate
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, fill_round
+from ui.overlays.painting import Units, draw_icon, fill_round, volume_icon
 from ui.pointer import NAV_BUTTONS
 from ui.theme import PALETTE, qcolor
 
@@ -162,6 +163,7 @@ class PipLabel(Overlay):
         self._name = ""
         self._state = CONNECTING
         self._audible = False  # the small slot starts muted
+        self._level = 30  # its volume (the PiP's default until the mixer says)
         self._pill_held = False
         if parent is not None:
             parent.installEventFilter(self)
@@ -180,6 +182,16 @@ class PipLabel(Overlay):
         if audible != self._audible:
             self._audible = audible
             self.update()
+
+    def set_level(self, level: int) -> None:
+        """The small picture's volume (0-100): the speaker's waves while it is heard."""
+        if level != self._level:
+            self._level = level
+            self.update()
+
+    def speaker_icon(self) -> str:
+        """The speaker painted now (ui.overlays.painting.draw_icon's name)."""
+        return volume_icon(self._level, not self._audible)
 
     def follow(self, rect: QRect) -> None:
         """Cover the small surface: `rect` in host coordinates.
@@ -388,10 +400,9 @@ class PipLabel(Overlay):
                 self._paint_cross(p, rect)
             elif name == "swap":
                 draw_icon(p, "swap", icon, qcolor(PALETTE.text, 0.85))
-            elif self._audible:
-                draw_icon(p, "volume", icon, qcolor(PALETTE.accent))
             else:
-                draw_icon(p, "mute", icon, qcolor(PALETTE.text, 0.85))
+                color = qcolor(PALETTE.accent) if self._audible else qcolor(PALETTE.text, 0.85)
+                draw_icon(p, self.speaker_icon(), icon, color)
         p.end()
 
     def _paint_backdrop(self, p: QPainter, rect: QRectF) -> None:

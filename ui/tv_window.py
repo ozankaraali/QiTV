@@ -77,6 +77,7 @@ from services.live.engine import LiveEngine
 from services.live.live_session import LiveSession
 from services.live.tuning import FILE_NAME as TUNING_FILE, LiveTuning
 from services.navigation import NavModel
+from services.picture import FILE_NAME as PICTURE_FILE, ChannelPictures
 from services.playback import (
     NullSession,
     PlaybackSession,
@@ -110,9 +111,12 @@ from ui.overlays.corner_controls import CornerControls
 from ui.overlays.drawer import Drawer
 from ui.overlays.grid_tiles import GridTiles
 from ui.overlays.guide import Guide
+from ui.overlays.layout_row import LayoutRow
 from ui.overlays.mixer import Mixer
 from ui.overlays.next_card import NextCard
 from ui.overlays.pip_label import PipLabel
+from ui.overlays.sleep_notice import SleepNotice
+from ui.overlays.stats import StatsOverlay
 from ui.overlays.subtitle_search import SubtitleSearchPage
 from ui.overlays.toast import Toast
 from ui.overlays.track_panel import TrackPanel
@@ -431,6 +435,10 @@ class TVWindow(QMainWindow):
         self.watch = WatchState(config_manager, save_delay_ms=WATCH_SAVE_DELAY_MS)
         # Each channel's sound sync (J/K, the Sound panel), written off the GUI thread.
         self.sound_sync = SoundSync(os.path.join(config_manager.get_config_dir(), SOUND_SYNC_FILE))
+        # Each channel's aspect ratio (the Picture panel, 2.3), alike.
+        self.channel_pictures = ChannelPictures(
+            os.path.join(config_manager.get_config_dir(), PICTURE_FILE)
+        )
         # Whether each channel's provider archive answered (catch-up, 2.2).
         self.catchup_memory = CatchupMemory(
             os.path.join(config_manager.get_config_dir(), CATCHUP_FILE)
@@ -461,6 +469,10 @@ class TVWindow(QMainWindow):
         self.mixer = Mixer(host)
         self.sound_panel = TrackPanel(host)
         self.subtitle_panel = TrackPanel(host)
+        self.picture_panel = TrackPanel(host)
+        self.stats_overlay = StatsOverlay(host)
+        self.sleep_notice = SleepNotice(host)
+        self.layout_row = LayoutRow(host)  # the multiview's layouts, above its layout chip
         self.subtitle_search = SubtitleSearchPage(host)
         self.corner_controls = CornerControls(host)
         self.overlays = Overlays(
@@ -479,7 +491,11 @@ class TVWindow(QMainWindow):
             sound_panel=self.sound_panel,
             subtitle_panel=self.subtitle_panel,
             subtitle_search=self.subtitle_search,
+            picture_panel=self.picture_panel,
+            stats=self.stats_overlay,
+            sleep_notice=self.sleep_notice,
             library_toast=self.library_toast,
+            layout_row=self.layout_row,
         )
         # Bottom to top. The PiP label sits over the transport, whose bottom band covers a
         # bottom corner's PiP: its pill, ⇄, speaker and × stay within reach; elsewhere on the
@@ -487,25 +503,31 @@ class TVWindow(QMainWindow):
         # small picture (OverlayHost.set_hole). The multiview's tiles are drawn under all of
         # them, and take their clicks over the transport but for its buttons and bar
         # (GridTiles.hits). The mixer shows over them (it sits above the transport's controls
-        # and beside the PiP), and the Sound and Subtitles panels over it (above their
-        # buttons). The drawer and the guide cover them all; the OpenSubtitles search covers
-        # the player with its backdrop, under the corner player's controls and the toast.
+        # and beside the PiP), and the Sound, Subtitles and Picture panels and the multiview's
+        # layouts over it (above their buttons). The statistics sit over the transport, under
+        # its title row (they take no click). The drawer and the guide cover them all; the
+        # OpenSubtitles search covers the player with its backdrop, under the corner player's
+        # controls, the sleep timer's last minute and the toast.
         for overlay in (
             self.grid_tiles,
             self.overlays.banner,
             self.overlays.column,
             self.overlays.transport,
+            self.stats_overlay,
             self.grid_tiles.hits,
             self.pip_label,
             self.mixer,
             self.sound_panel,
             self.subtitle_panel,
+            self.picture_panel,
+            self.layout_row,
             self.overlays.drawer,
             self.overlays.guide,
             self.overlays.next_card,
             self.overlays.welcome,
             self.subtitle_search,
             self.corner_controls,
+            self.sleep_notice,
             self.overlays.toast,
         ):
             host.add_overlay(overlay)
@@ -547,6 +569,7 @@ class TVWindow(QMainWindow):
             sessions=self.sessions,
             pip_frame=self.pip_frame,
             sound_sync=self.sound_sync,
+            channel_pictures=self.channel_pictures,
             catchup_memory=self.catchup_memory,
             pick_subtitle_file=self.pick_subtitle_file,
             # Why a channel or a provider failed, asked of its account (no stream opened).
@@ -605,8 +628,8 @@ class TVWindow(QMainWindow):
         self.catalogs.contentChanged.connect(self.finder.content_changed)
         self.catalogs.providersChanged.connect(self.finder.content_changed)
         self.overlays.drawer.libraryFindRequested.connect(self.screens.open_search)
-        # A Windows self-update waits for background threads: the engine's must stop first,
-        # and start again if the update cannot launch.
+        # A self-update (Windows, a macOS disk image) waits for background threads: the
+        # engine's must stop first, and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
         sources = (*self.surfaces.values(), self.host)
         # The pointer over the video goes with the player controls (and comes back on a move).
@@ -682,6 +705,13 @@ class TVWindow(QMainWindow):
         self._bind_video()
         return slot
 
+    def _report_video_size(self, surface: QObject) -> None:
+        """A player's surface changed size: a picture filling the window follows its shape
+        (the Picture panel's Fill, 2.3)."""
+        for name, player in self._players():
+            if self.surfaces.get(name) is surface:
+                player.set_video_size(surface.width(), surface.height())
+
     def _players(self) -> list[tuple[str, Session]]:
         """Every player by its slot's name (the main one alone without libVLC)."""
         if self.sessions is None:
@@ -709,6 +739,7 @@ class TVWindow(QMainWindow):
         self.host.show_only(self.corner_controls if corner else None)
         if corner:
             self.corner_controls.set_muted(self.controller.main_muted())
+            self.corner_controls.set_level(self.controller.main_level())
             self.corner_controls.show()
         else:
             self.corner_controls.hide()
@@ -731,6 +762,7 @@ class TVWindow(QMainWindow):
     def _on_corner_sound(self) -> None:
         self.controller.handle(Action.MUTE)
         self.corner_controls.set_muted(self.controller.main_muted())
+        self.corner_controls.set_level(self.controller.main_level())
 
     # ---- input --------------------------------------------------------------------------------
 
@@ -868,6 +900,8 @@ class TVWindow(QMainWindow):
                 reclaim_first_responder(self)  # macOS: libVLC's view took the keys
             if event.type() in _MOUSE_EVENTS:
                 self._on_video_mouse(event)
+        elif event.type() == QEvent.Type.Resize and watched in self.surfaces.values():
+            self._report_video_size(watched)
         elif (
             watched is self.player_page
             and event.type() == QEvent.Type.Paint

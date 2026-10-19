@@ -2,13 +2,19 @@
 
 One row ("Main") without picture in picture; two while it is open ("Main" for the large
 picture, "PiP" for the small one, each with its channel's name). Each row has a speaker
-(a click mutes or unmutes it), a slider (a click or a drag sets its level) and the level.
-The selected row is outlined; the keys act on it (the shell routes them while the mixer
-shows). It hides itself 3 s after the last change, and says so (`closed`).
+(a click mutes or unmutes it; crossed out when muted, else a wave per third of its level), a
+slider (a click or a drag sets its level) and the level. The selected row is outlined; the keys
+act on it (the shell routes them while the mixer shows). It hides itself 3 s after the last
+change, and says so (`closed`).
 
 Bottom-centre: 4u from the bottom, or just above the transport's controls while the
 transport shows (`set_floor`), so both can show at once. Never over the PiP (`avoid`): over
 it, it moves up above the PiP, or beside it when there is no room above.
+
+While the multiview's grid shows, a short line under the rows says whose sound plays
+(`MixerMode`): "Sound follows the focused tile", or once the user mixed it "Your mix stays ·
+Follow focus", whose last part (in the accent colour) puts the sound back on the focused
+tile (`followRequested`).
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from PySide6.QtGui import QFont, QFontMetricsF, QMouseEvent, QPainter, QPaintEve
 from PySide6.QtWidgets import QWidget
 
 from ui.overlays.base import Overlay
-from ui.overlays.painting import Units, draw_icon, draw_progress, fill_round
+from ui.overlays.painting import Units, draw_icon, draw_progress, fill_round, volume_icon
 from ui.pointer import NAV_BUTTONS
 from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 
@@ -38,6 +44,8 @@ _SLIDER_U = 16.0
 _NAME_MAX_U = 15.0
 _VALUE_U = 3.4
 _MARGIN_U = 1.0  # from the PiP it avoids
+_MODE_GAP_U = 0.6  # between the rows and the mode line
+_SEPARATOR = " · "
 
 
 @dataclass(frozen=True)
@@ -46,6 +54,14 @@ class MixerRow:
     channel: str  # the picture's channel ("" when it has none)
     level: int  # 0-100
     muted: bool
+
+
+@dataclass(frozen=True)
+class MixerMode:
+    """The line under the rows (the multiview): what it says, and an action after it ("": none)."""
+
+    text: str
+    action: str = ""
 
 
 @dataclass(frozen=True)
@@ -61,12 +77,14 @@ class Mixer(Overlay):
     levelRequested = Signal(int, int)  # row, level: a click or a drag on its slider
     muteRequested = Signal(int)  # row: a click on its speaker
     rowSelected = Signal(int)  # a click on a row selects it
+    followRequested = Signal()  # the mode line's action: the sound follows the focus again
     closed = Signal()  # it hid itself (or was dismissed)
 
     def __init__(self, parent: QWidget | None = None, idle_ms: int = HIDE_MS) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._rows: list[MixerRow] = []
+        self._mode: MixerMode | None = None
         self._selected = 0
         self._drag: int | None = None  # the row whose slider the left button holds
         self._avoid = QRect()
@@ -79,9 +97,11 @@ class Mixer(Overlay):
 
     # ---- public API ---------------------------------------------------------------------
 
-    def show_rows(self, rows: list[MixerRow], selected: int) -> None:
-        """Show these rows (or update them), `selected` outlined; it hides 3 s from now."""
+    def show_rows(self, rows: list[MixerRow], selected: int, mode: MixerMode | None = None) -> None:
+        """Show these rows (or update them), `selected` outlined, and `mode`'s line under them
+        (None: none); it hides 3 s from now."""
         self._rows = list(rows)
+        self._mode = mode
         self._selected = max(0, min(selected, len(self._rows) - 1))
         self._layout()
         if self.isHidden():
@@ -124,6 +144,13 @@ class Mixer(Overlay):
     def slider_rect(self, row: int) -> QRectF:
         return self._rects()[row].slider
 
+    def mode(self) -> MixerMode | None:
+        return self._mode
+
+    def follow_rect(self) -> QRectF:
+        """The mode line's action ("Follow focus"); empty without one."""
+        return self._mode_rects()[1]
+
     # ---- layout -------------------------------------------------------------------------
 
     def _units(self) -> Units:
@@ -151,6 +178,40 @@ class Mixer(Overlay):
         heights = [QFontMetricsF(f).height() for f in self._fonts(un)]
         return max(float(un.px(_ROW_U)), max(heights) + un.px(0.8))
 
+    @staticmethod
+    def _mode_font(un: Units) -> QFont:
+        return un.font(1.05, QFont.Weight.DemiBold)
+
+    def _mode_height(self, un: Units) -> float:
+        if self._mode is None:
+            return 0.0
+        return QFontMetricsF(self._mode_font(un)).height() + un.px(_MODE_GAP_U)
+
+    def _mode_parts(self, un: Units) -> tuple[str, float, float]:
+        """The mode line's text as shown (with its separator), and its and the action's widths."""
+        mode = self._mode
+        if mode is None:
+            return "", 0.0, 0.0
+        fm = QFontMetricsF(self._mode_font(un))
+        text = f"{mode.text}{_SEPARATOR}" if mode.action else mode.text
+        action = fm.horizontalAdvance(mode.action) if mode.action else 0.0
+        return text, fm.horizontalAdvance(text), action
+
+    def _mode_rects(self) -> tuple[QRectF, QRectF]:
+        """The mode line's text and its action (this widget's coordinates; empty: none)."""
+        if self._mode is None or not self._rows:
+            return QRectF(), QRectF()
+        un = self._units()
+        pad = float(un.px(_PAD_U))
+        _text, text_w, action_w = self._mode_parts(un)
+        height = QFontMetricsF(self._mode_font(un)).height()
+        top = self.height() - pad - height
+        text = QRectF(pad, top, min(text_w, self.width() - 2 * pad), height)
+        if not action_w:
+            return text, QRectF()
+        action = QRectF(text.right(), top, action_w, height)
+        return text, action.adjusted(-un.px(0.3), -un.px(0.3), un.px(0.3), un.px(0.3))
+
     def _size(self) -> tuple[int, int]:
         un = self._units()
         rows = max(1, len(self._rows))
@@ -168,6 +229,9 @@ class Mixer(Overlay):
             + value
         )
         height = 2 * un.px(_PAD_U) + rows * self._row_height(un) + (rows - 1) * un.px(_ROW_GAP_U)
+        height += self._mode_height(un)
+        _text, text_w, action_w = self._mode_parts(un)
+        width = max(width, 2 * un.px(_PAD_U) + text_w + action_w)
         return math.ceil(width) + 2, math.ceil(height)  # 2 px: a name that fits is never cut
 
     def _layout(self) -> None:
@@ -254,7 +318,7 @@ class Mixer(Overlay):
                 p.restore()
             dim = row.muted or row.level == 0
             text = qcolor(PALETTE.text, PALETTE.text_muted_alpha if dim else 1.0)
-            draw_icon(p, "mute" if dim else "volume", rects.speaker, text)
+            draw_icon(p, volume_icon(row.level, row.muted), rects.speaker, text)
             p.setFont(title_font)
             p.setPen(qcolor(PALETTE.text))
             title_w = QFontMetricsF(title_font).horizontalAdvance(row.title)
@@ -289,7 +353,23 @@ class Mixer(Overlay):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                 str(row.level),
             )
+        self._paint_mode(p, un, align)
         p.end()
+
+    def _paint_mode(self, p: QPainter, un: Units, align: Qt.AlignmentFlag) -> None:
+        mode = self._mode
+        if mode is None:
+            return
+        shown, action = self._mode_rects()
+        text, _text_w, _action_w = self._mode_parts(un)
+        font = self._mode_font(un)
+        p.setFont(font)
+        p.setPen(qcolor(PALETTE.text, PALETTE.text_muted_alpha))
+        elided = QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, shown.width())
+        p.drawText(shown, align, elided)
+        if not action.isEmpty():
+            p.setPen(qcolor(PALETTE.accent))
+            p.drawText(action, Qt.AlignmentFlag.AlignCenter, mode.action)
 
     # ---- input --------------------------------------------------------------------------
 
@@ -316,6 +396,9 @@ class Mixer(Overlay):
         row = self._row_at(pos)
         if row is None:
             self._idle.start()
+            follow = self._mode_rects()[1]
+            if not follow.isEmpty() and follow.contains(pos):
+                self.followRequested.emit()
             return
         if row != self._selected:
             self._selected = row

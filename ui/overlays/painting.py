@@ -19,6 +19,18 @@ from PySide6.QtGui import (
 from ui.theme import PALETTE, qcolor
 
 MIN_FONT_PX = 11  # overlay text stays readable in the mini player (u is 3.6 px there)
+# The multiview's layouts as icons ("layout_4": its tiles): (columns, rows).
+LAYOUT_ICONS = {"layout_2": (2, 1), "layout_4": (2, 2), "layout_6": (3, 2), "layout_9": (3, 3)}
+_LAYOUT_WIDTH, _LAYOUT_GAP = 0.84, 0.07  # a layout icon's frame and the gaps between its tiles
+
+
+def layout_frame(columns: int, rows: int) -> tuple[float, float]:
+    """A layout icon's tiles, 16:9 each as on the grid: the frame's top and height in the
+    icon's unit box (it is `_LAYOUT_WIDTH` wide, centred)."""
+    cell_w = (_LAYOUT_WIDTH - _LAYOUT_GAP * (columns - 1)) / columns
+    height = rows * cell_w * 9 / 16 + _LAYOUT_GAP * (rows - 1)
+    return (1 - height) / 2, height
+
 
 _BADGE_COLORS = [
     "#2f6f7a",
@@ -161,7 +173,29 @@ def _rrect(x: float, y: float, w: float, h: float, r: float) -> QPainterPath:
 
 
 def _speaker() -> QPainterPath:
-    return _poly([(0.12, 0.38), (0.30, 0.38), (0.50, 0.2), (0.50, 0.8), (0.30, 0.62), (0.12, 0.62)])
+    return _poly([(0.06, 0.38), (0.24, 0.38), (0.44, 0.2), (0.44, 0.8), (0.24, 0.62), (0.06, 0.62)])
+
+
+# The speaker's sound waves, inner first, around the middle of its cone's mouth: one per third
+# of the volume (volume_icon), each a quarter circle.
+_WAVE_CX = 0.44
+_WAVE_RADII = (0.17, 0.31, 0.45)
+# Each speaker icon and its waves; "volume" is the two-wave one (a level not known).
+_SPEAKER_WAVES = {"volume_0": 0, "volume_1": 1, "volume_2": 2, "volume_3": 3, "volume": 2}
+VOLUME_LOW = 33  # up to this level the speaker shows one wave
+VOLUME_MID = 66  # up to this two, above it three
+
+
+def volume_icon(level: int, muted: bool = False) -> str:
+    """The speaker that shows a sound at `level` (0-100), as common players do: crossed out
+    when muted, else a wave per third of the way up (none at 0: silent, yet not muted)."""
+    if muted:
+        return "mute"
+    if level <= 0:
+        return "volume_0"
+    if level <= VOLUME_LOW:
+        return "volume_1"
+    return "volume_2" if level <= VOLUME_MID else "volume_3"
 
 
 def _arc(cx: float, cy: float, r: float, start: float, span: float) -> QPainterPath:
@@ -250,16 +284,16 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
                 Qt.AlignCenter,
                 "10",
             )
-        elif name == "volume":
+        elif name in _SPEAKER_WAVES:
             fill(_speaker())
-            line(_arc(0.5, 0.5, 0.2, -45, 90))
-            line(_arc(0.5, 0.5, 0.36, -45, 90))
+            for radius in _WAVE_RADII[: _SPEAKER_WAVES[name]]:
+                line(_arc(_WAVE_CX, 0.5, radius, -45, 90))
         elif name == "mute":
             fill(_speaker())
-            cross = QPainterPath(QPointF(0.64, 0.38))
-            cross.lineTo(0.88, 0.62)
-            cross.moveTo(0.88, 0.38)
-            cross.lineTo(0.64, 0.62)
+            cross = QPainterPath(QPointF(0.58, 0.38))
+            cross.lineTo(0.82, 0.62)
+            cross.moveTo(0.82, 0.38)
+            cross.lineTo(0.58, 0.62)
             line(cross)
         elif name == "fullscreen":
             brackets = QPainterPath()
@@ -355,9 +389,41 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
         elif name == "pip":  # a second channel: a screen with a picture inset
             line(_rrect(0.08, 0.2, 0.84, 0.6, 0.08))
             fill(_rrect(0.5, 0.48, 0.32, 0.24, 0.04))
+        elif name == "picture":  # the Picture panel: a screen, its shape's corners marked inside
+            line(_rrect(0.08, 0.2, 0.84, 0.6, 0.08))
+            corners = QPainterPath(QPointF(0.22, 0.46))
+            corners.lineTo(0.22, 0.34)
+            corners.lineTo(0.36, 0.34)
+            corners.moveTo(0.64, 0.66)
+            corners.lineTo(0.78, 0.66)
+            corners.lineTo(0.78, 0.54)
+            line(corners)
         elif name == "grid":  # multiview: four pictures, two by two
             for x, y in ((0.12, 0.2), (0.52, 0.2), (0.12, 0.52), (0.52, 0.52)):
                 fill(_rrect(x, y, 0.36, 0.28, 0.05))
+        elif name == "single":  # back from the multiview: one picture, where "grid" had four
+            line(_rrect(0.1, 0.22, 0.8, 0.56, 0.07))
+            fill(_rrect(0.22, 0.34, 0.56, 0.32, 0.04))
+        elif name in LAYOUT_ICONS:  # a multiview layout: its tiles, 16:9 each
+            columns, rows = LAYOUT_ICONS[name]
+            gap = _LAYOUT_GAP
+            top, _height = layout_frame(columns, rows)
+            cell_w = (_LAYOUT_WIDTH - gap * (columns - 1)) / columns
+            cell_h = cell_w * 9 / 16
+            left = (1 - _LAYOUT_WIDTH) / 2
+            for row in range(rows):
+                for column in range(columns):
+                    x = left + column * (cell_w + gap)
+                    y = top + row * (cell_h + gap)
+                    fill(_rrect(x, y, cell_w, cell_h, min(cell_w, cell_h) * 0.18))
+        elif name == "enlarge":  # a multiview tile made the big picture: arrows to two corners
+            shafts = QPainterPath(QPointF(0.56, 0.44))
+            shafts.lineTo(0.78, 0.22)
+            shafts.moveTo(0.44, 0.56)
+            shafts.lineTo(0.22, 0.78)
+            line(shafts)
+            fill(_poly([(0.86, 0.14), (0.86, 0.44), (0.56, 0.14)]))
+            fill(_poly([(0.14, 0.86), (0.14, 0.56), (0.44, 0.86)]))
         elif name == "swap":  # ⇄: the small and the large picture trade places
             shafts = QPainterPath(QPointF(0.16, 0.34))
             shafts.lineTo(0.72, 0.34)
@@ -418,6 +484,13 @@ def draw_icon(p: QPainter, name: str, rect: QRectF, color: QColor) -> None:
             chevron.lineTo(tip, 0.5)
             chevron.lineTo(back, 0.8)
             p.setPen(QPen(color, 0.12, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(chevron)
+        elif name == "chevron_down":  # ⌄: a chip that opens a choice
+            chevron = QPainterPath(QPointF(0.2, 0.36))
+            chevron.lineTo(0.5, 0.66)
+            chevron.lineTo(0.8, 0.36)
+            p.setPen(QPen(color, 0.14, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             p.setBrush(Qt.NoBrush)
             p.drawPath(chevron)
         elif name == "close":  # ×

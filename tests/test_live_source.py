@@ -2331,6 +2331,16 @@ class FragmentedMp4Tests(SourceTestCase):
             remuxer.remux((FIXTURES / folder / f"seg{k}.m4s").read_bytes()) for k in range(count)
         ]
 
+    def test_it_says_its_segments_are_fragmented_mp4(self):
+        # The statistics over the picture name the source (2.3).
+        server = self.server(self.routes("avc-aac"))
+        source = open_source(
+            server.url + "/index.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        self.assertFalse(source.fmp4)  # nothing read yet
+        drain(source)
+        self.assertTrue(source.fmp4)
+
     def test_a_fragmented_mp4_variant_plays_remuxed_to_ts(self):
         server = self.server(self.routes("avc-aac"))
         (out,) = media(server.url + "/index.m3u8")

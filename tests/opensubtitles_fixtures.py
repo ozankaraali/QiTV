@@ -88,9 +88,11 @@ def entry(
     trusted: bool = False,
     rank: str = "",
     file_name: str = "",
+    made_for: Optional[dict] = None,
 ) -> dict:
-    """One subtitle of a search's answer, as the API sends it."""
-    return {
+    """One subtitle of a search's answer, as the API sends it (`made_for`: its
+    "feature_details", the film or episode it was made for; see `feature`)."""
+    answer = {
         "id": str(file_id * 10),
         "type": "subtitle",
         "attributes": {
@@ -105,6 +107,44 @@ def entry(
             "files": [{"file_id": file_id, "cd_number": 1, "file_name": file_name or release}],
         },
     }
+    if made_for is not None:
+        answer["attributes"]["feature_details"] = made_for
+    return answer
+
+
+def feature(
+    title: str,
+    year: int,
+    *,
+    tmdb: Optional[int] = None,
+    imdb: Optional[int] = None,
+    series: str = "",
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
+    series_tmdb: Optional[int] = None,
+) -> dict:
+    """A subtitle's "feature_details" as the API sends it: a film's, or with `series` an
+    episode's (`title` its own)."""
+    details: dict[str, Any] = {
+        "feature_id": (tmdb or 1) + 500_000,
+        "feature_type": "Episode" if series else "Movie",
+        "year": year,
+        "title": title,
+        "movie_name": f"{year} - {title}",
+        "imdb_id": imdb,
+        "tmdb_id": tmdb,
+    }
+    if series:
+        details.update(
+            movie_name=f"{series} - S{season or 0:02d}E{episode or 0:02d}  {title}",
+            season_number=season,
+            episode_number=episode,
+            parent_title=series,
+            parent_tmdb_id=series_tmdb,
+            parent_imdb_id=None,
+            parent_feature_id=600_000,
+        )
+    return details
 
 
 def page(*entries: dict, total_pages: int = 1, number: int = 1) -> dict:

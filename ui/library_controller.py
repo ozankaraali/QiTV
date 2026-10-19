@@ -302,6 +302,7 @@ class LibraryController(QObject):
             grid.set_tile_provider(self._search.is_channel)
             grid.set_details_provider(self._search.details)
             grid.set_progress_provider(lambda _item: None)
+            grid.set_key_provider(None)
             grid.set_letter_index(None)
             grid.set_header("", "", [], "")
             self._show_hits()
@@ -318,6 +319,7 @@ class LibraryController(QObject):
         grid.set_tile_provider(None)
         grid.set_details_provider(self._model.details)
         grid.set_progress_provider(self._model.progress)
+        grid.set_key_provider(self._model.identity)  # a genre loaded again keeps its title
 
     def refresh(self) -> None:
         """Read the cached catalogs again for search, and repaint from the model.
@@ -551,7 +553,20 @@ class LibraryController(QObject):
             model.genre_id,
             model.sort,
         )
-        same = signature == self._grid_signature
+        items = model.items() if available else None
+        shown = self._grid_signature
+        if (
+            items is None
+            and available
+            and shown is not None
+            and shown[:3] == signature[:3]
+            and grid.current_index() >= 0
+        ):
+            # The genre shown loads again (its provider set up again, a refresh): its titles
+            # stay meanwhile, and the title and the place are found again in the new list.
+            # (Its default sort, which needs the titles, is not the one shown until then.)
+            return
+        same = signature == shown
         self._grid_signature = signature
         if not same:
             self._failed = False
@@ -561,7 +576,6 @@ class LibraryController(QObject):
             grid.set_letter_index(None)
             grid.set_message(_no_section_text(self._source_title(), model.section))
             return
-        items = model.items()
         sorts: list[tuple[str, str]] = []
         if model.genre_id not in PINNED_TITLES:
             sorts = [(s.value, translate(SORT_LABELS[s])) for s in model.available_sorts()]
@@ -755,11 +769,20 @@ class LibraryController(QObject):
             return
         self._search.drop_snapshot()
         mixed = self._catalog.all_providers()
+        moved = True  # the Library went to another source (not the one shown, ready again)
         if self._opened is not None and (not mixed or name == ALL_PROVIDERS):
-            self._opened = (name, self._model.section)  # the model re-opens its section
+            moved = self._opened[0] != name
+            # The model opens the new source's section, or keeps the genre of the one shown.
+            self._opened = (name, self._model.section)
         ran, self._ran_for = self._ran_for == name, ""
-        # The old provider's series goes, unless this ready just opened one (or providers mix).
-        if self._mode == "series" and not mixed and not (ran and self._series_provider == name):
+        # The old provider's series goes, unless this ready just opened one (or providers mix,
+        # or the provider shown is only ready again).
+        if (
+            self._mode == "series"
+            and not mixed
+            and moved
+            and not (ran and self._series_provider == name)
+        ):
             self._leave_series()
         self._sync_nav("search" if self._mode == "search" else self._model.section)
         if self._grid_content == "search":

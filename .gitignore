@@ -167,5 +167,7 @@ config.json
 
 # Local design/test tooling
 .superpowers/
+# Design notes and plans stay local, in .superpowers/ (never published).
+docs/superpowers/
 .playwright-mcp/
 .claude/worktrees/

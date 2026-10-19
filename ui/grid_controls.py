@@ -1,10 +1,11 @@
-"""The multiview in the TV shell: several live channels at once, on a grid (stage 1 of
-docs/superpowers/specs/2026-10-19-multiview-design.md).
+"""The multiview in the TV shell: several live channels at once, on a grid.
 
 V, View → Multiview (Ctrl/⌘+4) or the grid button on the player controls shows it over live
 TV: the channel playing becomes tile 1, an open picture-in-picture tile 2 (nothing opens
-again), and the other tiles show "+". The layout chip on the controls switches 2, 4, 6 and 9
-tiles; 6 and 9 only with hardware decoding (Settings), else 2 and 4.
+again), and the other tiles show "+". The layout chip on the controls (beside the grid
+button) opens the layouts to pick from (ui/overlays/layout_row.py): 2, 4, 6 and 9 tiles,
+drawn; 6 and 9 only with hardware decoding (Settings), else dimmed, saying so. The first grid
+ever shown opens them by itself, briefly, as a hint (config `multiview_hinted`, optional).
 
 One tile has the focus: it is the session manager's large slot, so the player controls, the
 banner, zapping, the channel list, rewind and Go live act on it as on the big picture, and
@@ -25,8 +26,16 @@ play token may have expired), as the big picture's and the PiP's are. Zapping on
 another tile shows moves the focus there.
 
 A tile without the focus plays at 1x: muted, it needs no nudge, so its stay-live only jumps
-it to live when it fell far behind (`SessionManager.set_large`). Its label says LIVE, or
-"−MM:SS" while it plays that far behind live.
+it to live when it fell far behind (`SessionManager.set_large`); a tile paused or rewound is
+never jumped. Its label says LIVE, or "−MM:SS" while it plays that far behind live.
+
+The tile under the pointer shows its own controls (the overlay's strip: `pointer_moved`),
+acting on that tile and never moving the focus: play/pause (its time-shift keeps buffering,
+as the big picture's does), its speaker (the shell's: a tile's mute, which mixes the grid's
+sound once a tile without the focus changes: `SessionManager.mixed`), LIVE or "−MM:SS" (a
+click goes live), the big picture (leave the grid with this tile big, as a double-click
+does) and ✕: the tile's stream stops and gives its provider's stream back, and it shows "+"
+(the focused tile's is the shell's to stop; it keeps the focus).
 
 Esc (with nothing else open), V or a double-click leaves: the focused tile is the big
 picture, the tile focused before it stays as the picture-in-picture if it plays, and the
@@ -46,7 +55,8 @@ from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QPoint, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Signal
+from PySide6.QtGui import QCursor
 
 from services.config_manager import ConfigManager
 from services.i18n import N_, tr, translate
@@ -58,9 +68,11 @@ from services.sessions import SessionManager, Slot
 from services.zapping import ZapContext
 from ui import item_provider
 from ui.grid_frame import GridFrame
+from ui.keymap import Action
 from ui.overlays.grid_tiles import DENIED, EMPTY, FAILED, OPENING, PLAYING, TileView
+from ui.overlays.layout_row import LayoutChoice
 from ui.overlays.pip_label import CONNECTING, LIVE, REC
-from ui.overlays.transport import fmt_behind
+from ui.overlays.transport import MINUS, fmt_behind
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +81,10 @@ SAVED_VERSION = 1  # config `multiview`'s format
 SOFTWARE_CELLS = (2, 4)  # without hardware decoding (Settings)
 DEFAULT_CELLS = 4
 LAYOUT_NAMES = {2: "1×2", 4: "2×2", 6: "3×2", 9: "3×3"}
+# i18n: tooltip (and toast) on a dimmed multiview layout; the setting's name as in Settings
+NEEDS_HARDWARE = N_(
+    "6 and 9 tiles need hardware decoding: Settings → Hardware video decoding, then restart QiTV"
+)
 # The tiles' slots, in the order a grid takes free ones ("main" and "pip" are the players
 # picture in picture already has; a tile's player is made when it first takes the focus or a
 # channel, one at a time: a "+" tile has none).
@@ -137,6 +153,9 @@ class GridControls(QObject):
         restore: Optional[Callable[[str, dict, str, str], None]] = None,
         forget: Optional[Callable[[str], None]] = None,
         pending: Optional[Callable[[], Optional[dict]]] = None,
+        layouts=None,
+        tile_action: Optional[Callable[[str, str], None]] = None,
+        show_controls: Optional[Callable[[], None]] = None,
         parent: Optional[QObject] = None,
     ) -> None:
         """`frame` lays the surfaces out and `tiles` (the GridTiles overlay; None in tests)
@@ -152,7 +171,13 @@ class GridControls(QObject):
         `restore(name, channel, provider, group)` opens a saved tile's channel there once its
         provider is ready; `forget(name)` drops what the shell asked for tile `name` (its link
         on its way, its wait for a provider): the tile left the grid; `pending()` is the
-        channel whose link the focused tile waits for (None: none)."""
+        channel whose link the focused tile waits for (None: none). `layouts` is the
+        LayoutRow the layout chip opens (None, in tests: the chip steps to the next layout);
+        `tile_action(name, control)` is the shell acting on tile `name`'s strip: "play"
+        (pause or play it), "live" (go live), "speaker" (mute or unmute it), "close" (the
+        focused tile: its stream stops) and "closed" (a tile without the focus was closed:
+        what it showed is forgotten); `show_controls()` shows the player controls (the
+        layouts' hint is drawn above them)."""
         super().__init__(parent)
         self.sessions = sessions
         self.frame = frame
@@ -178,6 +203,9 @@ class GridControls(QObject):
         self._restore = restore
         self._forget = forget
         self._pending = pending
+        self._layouts = layouts
+        self._tile_action = tile_action
+        self._show_controls = show_controls
         self._restored = False  # the last grid came back since the grid showed
         self._shown = False
         self._cells = DEFAULT_CELLS
@@ -207,14 +235,29 @@ class GridControls(QObject):
         frame.leaveRequested.connect(self._on_leave_requested)
         frame.tilesChanged.connect(self._paint)
         transport = self._transport
+        layouts = self._layouts
         if transport is not None:
-            transport.layoutRequested.connect(self.next_layout)
+            chip = self.open_layouts if layouts is not None else self.next_layout
+            transport.layoutRequested.connect(chip)
             restored = getattr(transport, "restoreRequested", None)
             if restored is not None:
                 restored.connect(self.restore_last)
             transport.set_grid_state(True, False)
-        if self._tiles_view is not None and transport is not None:
-            self._tiles_view.avoid(transport)
+            if layouts is not None:
+                layouts.set_controls(transport, transport.control_at)  # another button acts
+                transport.bandChanged.connect(self._follow_band)  # the bar came: it moves up
+                transport.installEventFilter(self)  # the controls' hide closes the layouts
+        if layouts is not None:
+            layouts.layoutChosen.connect(self.set_cells)
+            layouts.unavailableChosen.connect(
+                lambda _cells: self._toast(translate(NEEDS_HARDWARE), "info")
+            )
+            layouts.closed.connect(self._on_layouts_closed)
+        view = self._tiles_view
+        if view is not None:
+            view.tileAction.connect(self.tile_control)
+        if view is not None and transport is not None:
+            view.avoid(transport)
 
     def watch_slot(self, slot: Slot) -> None:
         """Follow a player's state and its live session's mode (a tile's when it is made)."""
@@ -341,6 +384,7 @@ class GridControls(QObject):
         self._paint()
         logger.info("Multiview: %d tiles", cells)
         self.changed.emit()
+        self._hint_layouts()
         return True
 
     def leave(self, *, keep_pip: bool = True) -> None:
@@ -352,6 +396,9 @@ class GridControls(QObject):
         sessions = self.sessions
         large = sessions.large().name
         self._save()  # the grid as it is now, for "Last grid" next time
+        if self._layouts is not None:
+            self._layouts.dismiss()
+        sessions.end_mix()  # before the tiles stop: the big picture is heard (normal rule)
         keep = self._kept() if keep_pip else None
         for slot in sessions.slots():  # a tile left by a smaller layout too
             if slot.name not in (large, keep):
@@ -410,11 +457,135 @@ class GridControls(QObject):
         self.changed.emit()
 
     def next_layout(self) -> None:
-        """The layout chip: the next layout offered (after the last, the first)."""
+        """The next layout offered (after the last, the first): the layout chip without its
+        layouts to pick from (tests)."""
         choices = self.choices()
         current = len(self._names)
         later = [cells for cells in choices if cells > current]
         self.set_cells(later[0] if later else choices[0])
+
+    # ---- the layouts to pick from -------------------------------------------------------
+
+    def open_layouts(self, *, hint: bool = False) -> None:
+        """The layout chip: the layouts above it (the one showing marked, those not offered
+        dimmed), or closed when they show; `hint`: shown by itself, briefly."""
+        row, transport = self._layouts, self._transport
+        if row is None or not self._shown:
+            return
+        if row.isVisible() and not row.hinting():
+            row.dismiss()
+            return
+        offered = self.choices()
+        choices = [
+            LayoutChoice(
+                cells,
+                LAYOUT_NAMES[cells],
+                cells in offered,
+                "" if cells in offered else translate(NEEDS_HARDWARE),
+            )
+            for cells in CELLS
+        ]
+        anchor, floor = None, None
+        if transport is not None:
+            try:
+                anchor = QRectF(transport.button_rect("layout")).translated(
+                    QPointF(transport.pos())
+                )
+            except KeyError:
+                anchor = None
+            floor = transport.controls_top() if transport.isVisible() else None
+            transport.hold("layout")  # it stays up while they show, its chip lit
+        row.show_layouts(choices, len(self._names), anchor, floor, hint=hint)
+
+    def handle_key(self, action: Action) -> bool:
+        """The keys while the layouts show: ←/→ move, Enter picks, Esc closes (False: not
+        theirs, or they are hidden)."""
+        row = self._layouts
+        if row is None or not row.isVisible():
+            return False
+        if action in (Action.SEEK_BACK, Action.SEEK_FWD):
+            row.move_focus(-1 if action is Action.SEEK_BACK else 1)
+        elif action is Action.OK:
+            row.activate()
+        elif action is Action.ESCAPE:
+            row.dismiss()
+        else:
+            return False
+        return True
+
+    def _hint_layouts(self) -> None:
+        """The first grid ever shown: the layouts show by themselves, briefly, above the chip
+        (config `multiview_hinted`, optional: older builds ignore it)."""
+        if self._layouts is None or getattr(self.config, "multiview_hinted", False):
+            return
+        self.config.multiview_hinted = True
+        try:
+            self.config.save_config()
+        except Exception as e:
+            logger.warning("Couldn't save the multiview hint: %s", safe_message(e))
+        if self._show_controls is not None:
+            self._show_controls()
+        self.open_layouts(hint=True)
+
+    def _on_layouts_closed(self) -> None:
+        transport = self._transport
+        if transport is not None and transport.held() == "layout":
+            transport.hold("")
+
+    def _follow_band(self) -> None:
+        row, transport = self._layouts, self._transport
+        if row is not None and transport is not None and row.isVisible():
+            row.set_floor(transport.controls_top() if transport.isVisible() else None)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            watched is self._transport
+            and event.type() == QEvent.Type.Hide
+            and self._layouts is not None
+        ):
+            self._layouts.dismiss()
+        return False
+
+    # ---- a tile's own controls (the overlay's strip) ------------------------------------
+
+    def pointer_moved(self, point: Optional[QPoint] = None) -> None:
+        """The pointer moved over the player (`point`, global; the cursor's by default): the
+        tile under it shows its controls."""
+        view = self._tiles_view
+        if view is None or not self._shown:
+            return
+        where = point if point is not None else QCursor.pos()
+        view.hover_at(QPointF(view.mapFromGlobal(where)))
+
+    def close_tile(self, name: str) -> None:
+        """A tile's ✕: its stream stops (its provider's stream goes back once released) and
+        it shows "+"; what was on its way for it never opens. The focused tile keeps the
+        focus (its stream is the shell's to stop)."""
+        if not self._shown or name not in self._names:
+            return
+        focused = name == self.sessions.large().name
+        if not focused:
+            self._stop(name)
+        self._forget_tile(name)
+        if self._tile_action is not None:
+            self._tile_action(name, "close" if focused else "closed")
+        logger.info("Multiview: a tile was closed")
+        self._refresh(force=True)
+        self.changed.emit()
+
+    def tile_control(self, name: str, control: str) -> None:
+        """A control of tile `name`'s strip (the overlay's CONTROLS): it acts on that tile."""
+        if not self._shown or name not in self._names:
+            return
+        if control == "big":
+            self._on_leave_requested(name)  # as a double-click: this tile big
+        elif control == "close":
+            self.close_tile(name)
+        elif control == "live" and not self._behind(name):
+            return  # at live already: LIVE only says so
+        elif self._tile_action is not None and self._slot(name) is not None:
+            self._tile_action(name, control)
+            self._paint()
 
     # ---- a tile's channel ---------------------------------------------------------------
 
@@ -739,18 +910,9 @@ class GridControls(QObject):
         """A playing tile's label state: LIVE, "−MM:SS" behind live, "Connecting…", or REC
         while its channel records (2.2)."""
         slot = self._slot(name)
-        if slot is None:
-            return CONNECTING
-        if slot.live.recording():
+        if slot is not None and slot.live.recording():
             return REC
-        timeline = self._timelines.get(name)
-        if slot.live.mode == "pipeline" and timeline is not None:
-            lag = float(timeline.get("lag", 0.0))
-            target = float(timeline.get("target", TARGETS["normal"]))
-            return fmt_behind(lag) if lag > target + SHIFTED_MARGIN_S else LIVE
-        if slot.live.mode == "direct" or self._states.get(name) in _PLAYING_STATES:
-            return LIVE
-        return CONNECTING
+        return self._strip_state(name)[3] or CONNECTING
 
     def _showing(self) -> set[str]:
         return {name for name in self._names if self.state(name) in _SHOWING}
@@ -780,8 +942,50 @@ class GridControls(QObject):
         tiles = []
         for name, rect in self.frame.tiles():
             title, detail = self.label(name)
-            tiles.append(TileView(name, rect, self.state(name), title, detail, name == large))
+            paused, muted, level, position = self._strip_state(name)
+            tiles.append(
+                TileView(
+                    name,
+                    rect,
+                    self.state(name),
+                    title,
+                    detail,
+                    name == large,
+                    paused=paused,
+                    muted=muted,
+                    level=level,
+                    position=position,
+                    behind=position.startswith(MINUS),
+                )
+            )
         view.set_tiles(tiles)
+
+    def refresh_tiles(self) -> None:
+        """A tile's sound changed (its speaker, the mixer): the tiles' controls follow."""
+        self._paint()
+
+    def _strip_state(self, name: str) -> tuple[bool, bool, int, str]:
+        """What tile `name`'s controls show: paused, muted, its level, and LIVE or "−MM:SS"
+        behind live ("" while it connects, or plays nothing)."""
+        slot = self._slot(name)
+        if slot is None or self.state(name) not in _SHOWING:
+            return False, True, 0, ""
+        timeline = self._timelines.get(name)
+        paused = self._states.get(name) == "paused"
+        if slot.live.mode == "pipeline" and timeline is not None:
+            paused = paused or bool(timeline.get("paused", False))
+            lag = float(timeline.get("lag", 0.0))
+            target = float(timeline.get("target", TARGETS["normal"]))
+            position = fmt_behind(lag) if lag > target + SHIFTED_MARGIN_S else LIVE
+        elif slot.live.mode == "direct" or self._states.get(name) in _PLAYING_STATES:
+            position = LIVE
+        else:
+            position = ""
+        sessions = self.sessions
+        return paused, sessions.muted(name), sessions.level(name), position
+
+    def _behind(self, name: str) -> bool:
+        return self._strip_state(name)[3].startswith(MINUS)
 
     def _follow_area(self) -> None:
         """The overlays let clicks through to the tiles over the whole page (but what they
@@ -794,8 +998,11 @@ class GridControls(QObject):
 
     def _update_transport(self) -> None:
         if self._transport is not None:
-            layout = LAYOUT_NAMES.get(len(self._names), "") if self._shown else ""
-            self._transport.set_grid_state(True, self._shown, layout, self.restorable())
+            cells = len(self._names) if self._shown else 0
+            layout = LAYOUT_NAMES.get(cells, "")
+            self._transport.set_grid_state(
+                True, self._shown, layout, self.restorable(), cells=cells
+            )
 
     # ---- the last grid ------------------------------------------------------------------
 

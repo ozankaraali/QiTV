@@ -90,7 +90,12 @@ class ClosedKeymapTests(unittest.TestCase):
 
     def test_i_info(self):
         self.assertEqual(closed(K.Key_I, "i"), (Action.INFO, ""))
-        self.assertEqual(closed(K.Key_I, "I", SHIFT), (Action.INFO, ""))
+
+    def test_shift_i_shows_the_statistics_and_a_the_picture_panel(self):
+        # Shift+I toggles the statistics, as in mpv (2.3); A is VLC's aspect key: the panel.
+        self.assertEqual(closed(K.Key_I, "I", SHIFT), (Action.STATS, ""))
+        self.assertEqual(closed(K.Key_A, "a"), (Action.PICTURE, ""))
+        self.assertIsNone(resolve(K.Key_A, NONE, "a", context="guide"))
 
     def test_f_fullscreen(self):
         self.assertEqual(closed(K.Key_F, "f"), (Action.FULLSCREEN, ""))
@@ -233,6 +238,18 @@ class OpenKeymapTests(unittest.TestCase):
         self.assertEqual(opened(K.Key_P, "p"), (Action.NAV_TEXT, "p"))
         self.assertEqual(opened(K.Key_S, "s"), (Action.NAV_TEXT, "s"))
         self.assertEqual(opened(K.Key_P, "p", CTRL), (Action.PIP, ""))
+
+    def test_delete_takes_the_highlighted_channel_out_of_recent_in_the_list_only(self):
+        self.assertEqual(opened(K.Key_Delete, "\x7f"), (Action.FORGET, ""))
+        self.assertEqual(opened(K.Key_Delete, "", SHIFT | KEYPAD), (Action.FORGET, ""))
+        self.assertIsNone(opened(K.Key_Delete, "", CTRL))  # a shortcut, never ours
+        self.assertEqual(opened(K.Key_Backspace), (Action.NAV_BACKSPACE, ""))  # the find's
+        for context in ("player", "guide", "library", "subtitles"):
+            self.assertNotEqual(
+                resolve(K.Key_Delete.value, NONE, "\x7f", context=context),
+                (Action.FORGET, ""),
+                context,
+            )
 
     def test_media_keys_work_with_the_drawer_open(self):
         self.assertEqual(opened(K.Key_MediaTogglePlayPause), (Action.PLAY_PAUSE, ""))

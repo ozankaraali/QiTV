@@ -422,7 +422,8 @@ class _Session:
         self._trimmer: RepeatTrimmer | None = None
         # Raw TS only: drops what a provider replays while its own source is down.
         self._loop_trimmer: LoopTrimmer | None = None
-        # Raw TS only: re-bases a restarted run's timestamps so its clock runs on.
+        # Re-bases a restarted run's timestamps (raw TS) and a clock that leaps ahead (raw TS
+        # and HLS) so the clock runs on.
         self._clock_joiner: ClockJoiner | None = None
         self._timeline = Timeline()
         self._bursts = BurstMeter()  # raw TS that arrives in bursts (HLS reports its own)
@@ -437,7 +438,7 @@ class _Session:
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
         self._heard_edge = 0.0  # the live edge the latest state reported
-        self._recorder: Recorder | None = None  # 2.3: writes the ring to a file (`record`)
+        self._recorder: Recorder | None = None  # 2.2: writes the ring to a file (`record`)
         self._finishing: set[Recorder] = set()  # stopped, still writing up to the live edge
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
 
@@ -570,20 +571,25 @@ class _Session:
             raise _Cancelled()
         self._adopt(self._make_ring())
         segmenter = self._segmenter
+
+        def program() -> tuple[int | None, int | None]:
+            return segmenter.video_pid, segmenter.video_type
+
         trimmer = rejoiner = None
         if not source.hls:  # HLS has its own discontinuities and no such restarts
-
-            def program() -> tuple[int | None, int | None]:
-                return segmenter.video_pid, segmenter.video_type
-
             rejoiner = self._rejoiner = ReconnectTrimmer(program=program)
-            self._clock_joiner = ClockJoiner(program=program)
+            # Its clock is the arrival a forward jump is measured against.
+            self._clock_joiner = ClockJoiner(program=program, clock=time.monotonic)
             # The clock joiner runs the counters on at every junction; without one, the trimmer
             # does where it drops.
             trimmer = self._trimmer = RepeatTrimmer(
                 program=program, clock=time.monotonic, join_counters=self._clock_joiner is None
             )
             self._loop_trimmer = LoopTrimmer(program=program, clock=time.monotonic)
+        else:
+            # A clock that leaps ahead inside a segment is re-based too: each segment's EXTINF
+            # is its arrival (`_follow`).
+            self._clock_joiner = ClockJoiner(program=program)
         ticking = self._hold_ticker(trimmer) if trimmer is not None else None
         try:
             try:
@@ -599,7 +605,7 @@ class _Session:
                 if trimmer is not None and rejoiner is not None:
                     self._pass_on(trimmer.feed(rejoiner.finish()))
                     self._pass_on(trimmer.finish())
-                    self._clock_end(reconnect=False)
+                self._clock_end(reconnect=False)
                 self._finish_segmenter()
         except SourceError as error:
             self._fail(error.kind, str(error), error.status)
@@ -773,7 +779,7 @@ class _Session:
                 # A reconnect: what they hold passes on untouched.
                 self._pass_on(trimmer.feed(rejoiner.reconnect()))
                 self._pass_on(trimmer.discontinuity())
-                self._clock_end(reconnect=True)
+            self._clock_end(reconnect=True)  # (HLS: a discontinuity)
             self._discontinuity()
         elif isinstance(item, CaughtUp):
             # The batch's end, which the throttle may have held back, and the start's
@@ -784,7 +790,7 @@ class _Session:
             self._follow(source)  # before its bytes: where an HLS segment begins
             self._received += len(item)
             if trimmer is None or rejoiner is None:
-                self._to_segmenter(item)
+                self._rebase([item])
             else:
                 self._pass_on(trimmer.feed(rejoiner.feed(item)))
             self._measure()
@@ -845,7 +851,7 @@ class _Session:
                     if self._rejoiner is not None:
                         self._pass_on(self._trimmer.feed(self._rejoiner.finish()))
                     self._pass_on(self._trimmer.finish())
-                    self._clock_end(reconnect=False)
+                self._clock_end(reconnect=False)
                 self._finish_segmenter()
             except _Cancelled:
                 raise
@@ -865,7 +871,8 @@ class _Session:
         self._rebase(pieces if loop is None else loop.feed(pieces))
 
     def _rebase(self, pieces: list[bytes]) -> None:
-        """Pieces through the clock joiner to the segmenter (see `_pass_on`)."""
+        """Pieces through the clock joiner to the segmenter (see `_pass_on`; HLS: its bytes,
+        one piece at a time)."""
         clock = self._clock_joiner
         for k, piece in enumerate(pieces):
             parts = [piece] if clock is None else clock.feed(piece, junction=k > 0)
@@ -876,8 +883,8 @@ class _Session:
                     self._to_segmenter(part)
 
     def _clock_end(self, reconnect: bool) -> None:
-        """The loop trimmer's and the clock joiner's input ends (a reconnect follows, or the
-        end): what they hold."""
+        """The loop trimmer's and the clock joiner's input ends (a reconnect or an HLS
+        discontinuity follows, or the end): what they hold."""
         loop = self._loop_trimmer
         if loop is not None:
             self._rebase(loop.reconnect() if reconnect else loop.finish())
@@ -908,10 +915,14 @@ class _Session:
         """HLS: note the live edge where each segment's first bytes begin (`_backlog`), and
         measure the one before if it arrived whole: its media against its EXTINF. Not the
         first that brought media (it began at edge 0.0): the timeline starts at its first
-        keyframe, so whatever came before that would read as missing media."""
+        keyframe, so whatever came before that would read as missing media. Its EXTINF is the
+        clock joiner's arrival (`ClockJoiner.arrive`)."""
         serial = getattr(source, "segment_serial", 0)
         if serial == self._segment[0]:
             return
+        fetching = getattr(source, "segment_s", None)
+        if self._clock_joiner is not None and isinstance(fetching, float):
+            self._clock_joiner.arrive(fetching)
         edge = self._live_edge()
         previous, began = self._segment
         whole = getattr(source, "last_whole", None)
@@ -989,6 +1000,8 @@ class _Session:
             # An HLS source: the parent keeps its player at 1x (VLC crawls once its rate
             # was changed on such a stream; 2.0.2).
             "hls": bool(source is not None and source.hls),
+            # HLS of fragmented MP4 segments, remuxed to TS (2.3: the statistics say so).
+            "fmp4": bool(source is not None and getattr(source, "fmp4", False) is True),
             # PTS jumps the timeline left out: (timeline position, seconds), the latest last.
             "breaks": list(self._breaks),
             # HLS: every segment its playlist listed has arrived, once at least (the backlog

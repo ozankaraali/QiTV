@@ -1,7 +1,9 @@
 """The two-layer drawer (spec §5.2): the webOS-like layered list over the video.
 
-A right-click on an item, episode or channel row asks for its context menu
-(`contextRequested`); it leaves the highlight where the keys put it.
+A right-click on an item, episode or channel row (or on ⟲ Recent) asks for its context menu
+(`contextRequested`); it leaves the highlight where the keys put it. A row that leaves the list
+it is in (taken out of ⟲ Recent or the favorites) hands the highlight to the row that takes its
+place, and the list stays where it was scrolled.
 
 Some rows leave the drawer when chosen (Enter, →, a click), and only then: the sources
 column's Settings and Add provider rows (`actionRequested`), and the Movies and Series
@@ -22,10 +24,12 @@ the last row asks for the Library's search (`libraryFindRequested`). Esc, ✕ or
 the right column is back where it was, its highlight and its scroll position too.
 
 While the multiview's grid shows (`set_drag_enabled`), a channel row can be dragged out onto
-a tile: once the pointer moved a drag distance with the button down, the list fades (the
-tiles behind it show), the pointer's moves come as `channelDragged`, and the release as
-`channelDropped` (never a click on the row); a drawer hidden meanwhile ends it
-(`dragEnded`).
+a tile: once the pointer left the list with the button down, the list fades (the tiles
+behind it show, a drop over it lands on the tile behind), the pointer's moves come as
+`channelDragged`, and the release as `channelDropped` (never a click on the row); a drawer
+hidden meanwhile ends it (`dragEnded`). A press that moves but stays over the list is a
+click: a trackpad's click often moves a little, and a drop there would land on the tile
+behind the list instead of the one the list was opened for.
 """
 
 from collections.abc import Callable, Sequence
@@ -101,6 +105,7 @@ from ui.theme import FOCUS_FILL_ALPHA, PALETTE, qcolor
 logger = logging.getLogger(__name__)
 
 _CONTEXT_LAYERS = ("item", "episode")  # rows with a context menu (channels are items)
+_CONTEXT_GROUPS = (RECENT_GROUP,)  # and these groups' rows ("Clear Recents")
 _RIGHT_PRESSES = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick)
 DRAG_OPACITY = 0.25  # the list while a channel is dragged out of it onto the grid
 LEFT_FRACTION = 0.25
@@ -252,6 +257,11 @@ def _is_focus_key(node: NavNode, wanted: "str | tuple[str, str]") -> bool:
             not provider or (isinstance(payload, dict) and provider_of(payload) == provider)
         )
     return node.key == wanted
+
+
+def _has_context(node: NavNode) -> bool:
+    """Whether a right-click on the row asks for a context menu."""
+    return node.layer in _CONTEXT_LAYERS or (node.layer == "group" and node.key in _CONTEXT_GROUPS)
 
 
 def _selectable(node: NavNode) -> bool:
@@ -592,7 +602,9 @@ class _Column:
         self.model = _NodeModel(logos, now_provider, drawer)
         self.view = ChannelListView(drawer)
         self.view.setModel(self.model)
-        self.channel_delegate = ChannelRowDelegate(0.9, self.view)
+        # A list that mixes providers names each row's below its name (as the find does), so
+        # a long name keeps the row's width; one provider's rows are drawn as before.
+        self.channel_delegate = ChannelRowDelegate(0.9, self.view, provider_below=True)
         self.simple_delegate = _SimpleRowDelegate(self.view)
         self.found_delegate = _FoundRowDelegate(
             self.simple_delegate,
@@ -1023,7 +1035,7 @@ class Drawer(Overlay):
         """A right-click at `pos` (viewport coordinates) of a column's list."""
         col = self._columns[side]
         row = col.view.indexAt(pos).row()
-        if 0 <= row < len(col.nodes) and col.nodes[row].layer in _CONTEXT_LAYERS:
+        if 0 <= row < len(col.nodes) and _has_context(col.nodes[row]):
             self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
 
     def _on_nav_changed(self) -> None:
@@ -1065,6 +1077,8 @@ class Drawer(Overlay):
         """Show `parent`'s children in `col`; `other` is where the other column was before
         (or where this one was before a find)."""
         parent_changed = parent != col.parent
+        # The highlighted row's place, should it leave the list (taken out of ⟲ Recent).
+        was_row = None if parent_changed else col.rows.get(col.current)
         # The other column's list comes over (a layer down: the genres go left; up: right).
         moved = parent_changed and parent is not None and parent == other.parent
         col.parent = parent
@@ -1122,6 +1136,11 @@ class Drawer(Overlay):
                     matched = True
             if not matched and moved and other.current in col.rows:
                 col.current = other.current  # a layer up: the row it was on stays highlighted
+                matched = True
+            if not matched and was_row is not None and nodes and col.current not in col.rows:
+                # The row left the list: the one that took its place (or the new last row).
+                place = self._selectable_row(col, min(was_row, len(nodes) - 1), 1)
+                col.current = nodes[place] if place is not None else None
                 matched = True
             if not matched and (parent_changed or col.current not in col.rows):
                 col.current = next((n for n in nodes if _selectable(n)), None)
@@ -1368,14 +1387,17 @@ class Drawer(Overlay):
         return False
 
     def _drag_node(self, where: QPoint) -> NavNode | None:
-        """The channel a press began on, once the pointer moved a drag distance (and the
-        grid shows); else None."""
+        """The channel a press began on, once the pointer left the list (and the grid
+        shows); else None."""
         start = self._drag_from
         if start is None or not self._drag_enabled():
             return None
         side, row, origin = start
         if (where - origin).manhattanLength() < QApplication.startDragDistance():
             return None
+        lists = self._columns["left"].rect.united(self._columns["right"].rect)
+        if lists.contains(self.mapFromGlobal(where)):
+            return None  # still over the list: a click that moved a little
         nodes = self._columns[side].nodes
         node = nodes[row] if 0 <= row < len(nodes) else None
         live = self.finding() or (node is not None and self._nav.section_of(node) == "live")

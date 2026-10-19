@@ -15,7 +15,7 @@ Version 2.0 works like a TV: the channel fills the window, ↑ and ↓ change ch
 Download QiTV from [RELEASES](https://github.com/ozankaraali/QiTV/releases):
 
 - **Windows:** `qitv-windows.exe`. Run it; there is nothing to install.
-- **macOS:** `qitv-macos-universal.zip` for Apple silicon Macs, `qitv-macos-intel.zip` for Intel Macs. Unzip it and move QiTV to Applications. QiTV needs macOS 13 or newer. QiTV is not notarized by Apple, so the first time macOS may say it cannot check the app: open System Settings → Privacy & Security and choose **Open Anyway**.
+- **macOS:** `qitv-macos-universal.dmg` for Apple silicon Macs, `qitv-macos-intel.dmg` for Intel Macs. Open it and drag QiTV onto Applications (the same app also comes as a `.zip`). To update, Help → Check for Updates downloads the new `.dmg`, opens it and closes QiTV: drag QiTV onto Applications again and choose **Replace**. QiTV needs macOS 13 or newer. QiTV is not notarized by Apple, so the first time macOS may say it cannot check the app: open System Settings → Privacy & Security and choose **Open Anyway**.
 - **Linux:** `qitv-linux`. Make it runnable with `chmod +x qitv-linux`, then start it.
 
 VLC comes inside QiTV: you do not need to install VLC to use it.
@@ -73,7 +73,7 @@ With two or more providers, QiTV mixes them: every channel, film and series know
 - **All providers.** The sources column (the channel list's left-most column) starts with **All providers**. It shows ★ Favorites, ⟲ Recent and All with every provider's channels together, each with its provider's name beside it, and then each provider's own groups under its name, named as that provider names them. Groups are never merged, even when two providers use the same name. Typed channel numbers find the first match, in the order of your providers in Settings.
 - **Browsing is only browsing.** Picking another provider, or All providers, only changes what the list shows: nothing that plays stops, picture-in-picture stays open, and <kbd>↑</kbd>/<kbd>↓</kbd> keep going through the list the channel was picked from. <kbd>Enter</kbd> (or a click on the picture) opens the list where the big picture's channel was picked: its provider, its group, its row.
 - **Two providers at once.** Watch a channel from one account and open one from another in picture-in-picture; swap them and change channels on either. Each provider's stream limit counts on its own, so two accounts that each allow one stream can each play one picture.
-- **One history.** ⟲ Recent lists the channels you watched at every provider, newest first, each with its provider's name. <kbd>Backspace</kbd> (the channel before) goes back across providers too, and **Start with the last channel** (Settings) tunes the last channel from its own provider.
+- **One history.** ⟲ Recent lists the channels you watched at every provider, newest first, each with its provider's name. Right-click one there for **Remove from Recents** (or highlight it and press <kbd>Delete</kbd>), or **Clear Recents** to empty the list (also on ⟲ Recent itself). <kbd>Backspace</kbd> (the channel before) goes back across providers too, and **Start with the last channel** (Settings) tunes the last channel from its own provider.
 - **The guide** of a provider is loaded while its channels are on screen or playing, and let go afterwards, so All providers doesn't download every guide at once.
 - **One account's trouble stays with it.** A provider that can't sign in or refresh keeps its saved lists, and the other providers keep working. A channel you play from it says which provider failed and why.
 - **The Providers menu** in the menu bar lists your providers with All providers at the top, and ticks the one the channel list shows.
@@ -114,6 +114,8 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Tab</kbd> | The mixer's other row (while it shows) |
 | <kbd>J</kbd> / <kbd>K</kbd> | Sound 50 ms earlier / later (sync with the picture) |
 | <kbd>Shift+J</kbd> / <kbd>Shift+K</kbd> | Subtitles 50 ms earlier / later |
+| <kbd>A</kbd> | Picture: aspect ratio, deinterlacing, sleep timer; pressed again, the next ratio |
+| <kbd>Shift+I</kbd> | Statistics over the picture: show or hide |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
@@ -135,6 +137,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Backspace</kbd> | Delete a letter of the find |
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
 | <kbd>Ctrl/⌘+P</kbd> | Open the channel in picture-in-picture |
+| <kbd>Delete (fn+⌫ on a Mac)</kbd> | Remove the channel from Recents |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>Esc</kbd> | End the find, then close |
@@ -204,11 +207,22 @@ Click anywhere else, or press <kbd>Esc</kbd>, to close a panel. While one is ope
 
 #### Subtitles from OpenSubtitles
 
-For a film or an episode, the Subtitles panel also has **Search OpenSubtitles…**: QiTV looks for subtitles on [OpenSubtitles.com](https://www.opensubtitles.com), a free subtitle website, using the title that plays (with the film's year, or the series with its season and episode number; tags such as "EN:" or "4K" in a provider's title are left out). The languages that have subtitles are on the left with how many each has, your last language (or your computer's) first; the selected language's subtitles are on the right, the best first: from trusted uploaders and downloaded most. **Machine translated** ones are marked and come last; **Hearing impaired** ones are marked and come after the others, unless the last ones you picked were for the hearing impaired. Click one, or press <kbd>Enter</kbd>, and it downloads, shows at once and appears in the Subtitles panel under its own name. If the title is not found, change the words in the search field at the top and press **Search**. The next time that film or episode plays, the Subtitles panel offers the same file again at its top ("… (OpenSubtitles)"), without a new download.
+For a film or an episode, the Subtitles panel also has **Search OpenSubtitles…**: QiTV looks for subtitles on [OpenSubtitles.com](https://www.opensubtitles.com), a free subtitle website: by the film's or series' TMDB or IMDb number when the provider lists one, else by the title that plays (with the film's year, or the series with its season and episode number; tags such as "EN:", "TR - " or "4K" in a provider's title are left out). Only subtitles made for that film or episode are listed. The languages that have subtitles are on the left with how many each has, your last language (or your computer's) first; the selected language's subtitles are on the right, the best first: from trusted uploaders and downloaded most. **Machine translated** ones are marked and come last; **Hearing impaired** ones are marked and come after the others, unless the last ones you picked were for the hearing impaired. Click one, or press <kbd>Enter</kbd>, and it downloads, shows at once and appears in the Subtitles panel under its own name. If the title is not found (a title translated by the provider often is not), type its original or English title in the search field at the top and press **Search**; **Show all results** lists what OpenSubtitles found for other titles, each with the title it was made for. The next time that film or episode plays, the Subtitles panel offers the same file again at its top ("… (OpenSubtitles)"), without a new download.
 
 OpenSubtitles needs an **API key**. The release downloads of QiTV may come with one. If yours does not, the first search asks for one: **Get a free key** opens the OpenSubtitles website, where you make a free account and then create a key on its "API consumers" page; copy the key, click **Paste** (or press <kbd>Ctrl/⌘+V</kbd>) and **Save**. You can change it later in **Settings → Subtitles**.
 
 Without signing in, OpenSubtitles allows 5 downloads a day per internet connection. To get more, enter your OpenSubtitles username and password in **Settings → Subtitles** (optional; **Sign out** there removes them). After each download QiTV says how many downloads you have left today and when more come back. Downloaded subtitles are kept in the `subtitles` folder beside QiTV's settings (see [Portable mode](#portable-mode) for where that is).
+
+### Picture, sleep timer and statistics
+
+The picture button beside the subtitles button (or <kbd>A</kbd>) opens the **Picture** panel. Click **‹** or **›** on a row (or use <kbd>←</kbd> and <kbd>→</kbd>) to change it:
+
+- **Aspect ratio**: **Auto** (the channel's own shape), **16:9**, **4:3**, or **Fill the window**, which crops the picture to the window's shape so there are no black bars. QiTV remembers it for each live channel, also after a restart. Pressing <kbd>A</kbd> again while the panel is open moves to the next ratio.
+- **Deinterlacing**, for TV channels whose picture shows fine horizontal lines on movement: **Auto** (VLC deinterlaces pictures marked as interlaced), **On** or **Off**, for every channel. After switching it on or off, **Auto** comes back the next time QiTV starts.
+- **Sleep timer**: **15**, **30**, **60** or **90 minutes**, or **End of the programme** when the guide knows when the programme ends. The row shows the time left. A minute before the end QiTV says playback stops soon; click **Keep watching** (or press <kbd>Enter</kbd>) to turn the timer off. Otherwise playback stops, fullscreen ends, and your computer may go to sleep again. The timer is not kept after QiTV closes.
+- **Statistics** (or <kbd>Shift+I</kbd>) shows technical details over the picture: the video and audio format, the picture size and frame rate, pictures shown and dropped, the bitrate, hardware or software decoding, whether the channel plays through time-shift, and how far behind live it is.
+
+In picture-in-picture the panel changes the big picture; in the multiview, the selected tile.
 
 ### Pause and rewind live TV (time-shift)
 
@@ -269,12 +283,14 @@ Picture-in-picture is for live TV, and it needs two streams: a provider that all
 Watch several live channels side by side: press <kbd>V</kbd>, choose **View → Multiview** (<kbd>Ctrl/⌘+4</kbd>) or click the grid button on the player controls. The channel you are watching becomes the first tile and an open picture-in-picture the second; the others show **+**.
 
 - Click a tile to give it the focus: its sound plays, and the player controls, the channel list, zapping and the banner act on it. Click **+** to choose a channel for that tile, or drag a channel from the channel list onto any tile.
-- The grid you leave is kept: next time, the **Last grid** chip beside the layout chip (or **View → Restore Last Multiview**) brings its channels back.
-- The chip beside the grid button switches between 2 and 4 tiles, and also 6 and 9 when hardware decoding is on (**Settings**).
+- Point at a tile for its own controls, which act on that tile without moving the focus: pause or play, its speaker, **LIVE** or how far behind live it plays (click to go live), the big picture (back to one picture with this tile big) and **✕**, which closes the tile and gives its stream back to your provider. Small tiles keep the speaker and ✕.
+- The layout chip beside the grid button (the grid's picture, **2×2** and ⌄) shows the layouts to pick from: 1×2, 2×2, 3×2 and 3×3. 3×2 and 3×3 need hardware decoding (**Settings**, after a restart); without it they are dimmed.
+- The sound follows the focused tile until you mix it: change the level or the speaker of a tile without the focus (in the mixer, or on the tile) and your mix stays as you move the focus. The mixer says which it is; **Follow focus** there goes back. Leaving the grid ends the mix: the big picture is heard.
+- The grid you leave is kept: next time, the **Last grid** chip (or **View → Restore Last Multiview**) brings its channels back.
 - Each tile asks your provider for a stream of its own. When a provider has no stream to spare, the tile says so and keeps the channel: click it to try again. QiTV never retries by itself.
-- <kbd>V</kbd>, <kbd>Esc</kbd> or a double-click on a tile goes back to one picture: the focused tile becomes the big picture and the tile you had before it stays as picture-in-picture. Picture-in-picture itself waits until you leave the grid.
+- <kbd>V</kbd>, <kbd>Esc</kbd>, a double-click on a tile or the grid button (one picture, while the grid shows) goes back to one picture: the focused tile becomes the big picture and the tile you had before it stays as picture-in-picture. Picture-in-picture itself waits until you leave the grid.
 
-Each tile's label shows LIVE, or how far behind live it plays (−00:42). Tiles without the focus play at normal speed and only jump back to live when they fall far behind; each can be paused and rewound like the big picture once it has the focus. Its time-shift buffer is in memory: the focused tile gets the memory per stream (**Settings**), the others a short one of 64 MiB (`"multiview_tile_ram_mib"` in `config.json` changes it; at least 48, enough for a 4K channel). A tile you paused or rewound keeps what it plays until it is back at live.
+Each tile's label shows LIVE, or how far behind live it plays (−00:42). Tiles without the focus play at normal speed and only jump back to live when they fall far behind (never while paused); each can be paused from its own controls, and rewound like the big picture once it has the focus. Its time-shift buffer is in memory: the focused tile gets the memory per stream (**Settings**), the others a short one of 64 MiB (`"multiview_tile_ram_mib"` in `config.json` changes it; at least 48, enough for a 4K channel). A tile you paused or rewound keeps what it plays until it is back at live.
 
 ## The guide
 

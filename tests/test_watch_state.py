@@ -101,6 +101,26 @@ class WatchStateTests(unittest.TestCase):
         self.assertEqual(self.cfg.saves, 1)
         self.assertEqual(self.cfg.playback_positions["c"]["position"], 30000)
 
+    def test_forget_drops_the_entries_it_picks_and_saves_the_rest_as_they_were(self):
+        one = {"provider_name": "P", "item_type": "channel", "item_data": {"id": 1}}
+        two = {"provider_name": "P", "item_type": "channel", "item_data": {"id": 2}}
+        film = {"provider_name": "P", "item_type": "movie", "item_data": {"id": 1}}
+        self.cfg.watch_history = [one, film, dict(one), two]
+        removed = self.ws.forget(
+            lambda e: e["item_type"] == "channel" and e["item_data"]["id"] == 1
+        )
+        self.assertEqual(removed, 2)  # both of its plays
+        self.assertEqual(self.cfg.watch_history, [film, two])  # the same entries, the same order
+        self.assertIs(self.cfg.watch_history[0], film)
+        self.assertEqual(self.cfg.saves, 1)
+
+    def test_forget_without_a_match_changes_and_saves_nothing(self):
+        history = [{"provider_name": "P", "item_type": "movie", "item_data": {"id": 1}}]
+        self.cfg.watch_history = history
+        self.assertEqual(self.ws.forget(lambda entry: False), 0)
+        self.assertIs(self.cfg.watch_history, history)
+        self.assertEqual(self.cfg.saves, 0)
+
     def test_flush_always_saves(self):
         self.ws.flush()
         self.ws.flush()
@@ -141,6 +161,12 @@ class DeferredSaveTests(unittest.TestCase):
         self.assertEqual(self.cfg.saves, 1)
         QTest.qWait(100)
         self.assertEqual(self.cfg.saves, 1)  # the timer no longer runs
+
+    def test_a_channel_taken_out_of_recents_is_saved_once_it_settles(self):
+        self.cfg.watch_history = [{"item_type": "channel", "item_data": {"id": 1}}]
+        self.assertEqual(self.ws.forget(lambda entry: True), 1)
+        self.assertEqual(self.cfg.saves, 0)  # never on the GUI thread at once
+        self.assertTrue(wait_until(lambda: self.cfg.saves == 1))
 
     def test_without_a_delay_a_play_is_saved_at_once(self):
         WatchState(self.cfg).record_play("P", {"id": 1}, item_type="movie", link="u")

@@ -31,6 +31,7 @@ _NAMES = {
     "PgUp": "Page Up",
     "PgDown": "Page Down",
     "Ctrl+Meta+F": "⌃⌘F (Mac)",
+    "Delete": "Delete (fn+⌫ on a Mac)",
 }
 _MODIFIERS = {"Ctrl+": "Ctrl/⌘+", "Alt+": "Alt/⌥+"}
 

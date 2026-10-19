@@ -128,6 +128,16 @@ def item_title(item: dict, *, episode: bool = False) -> str:
     return shown_label(str(title))
 
 
+def recent_channel(entry: dict) -> Optional[tuple[str, str]]:
+    """The channel a watch-history entry puts in ⟲ Recent: (its provider, its drawer key);
+    None for a film, an episode or an entry without a provider."""
+    provider = entry.get("provider_name")
+    if entry.get("item_type") != "channel" or not provider or not isinstance(provider, str):
+        return None
+    item = entry.get("item_data")
+    return provider, item_key(item if isinstance(item, dict) else {})
+
+
 def _item_node(item: dict, layer: str = "item") -> NavNode:
     episode = layer == "episode"
     key = episode_key(item) if episode else item_key(item)
@@ -535,11 +545,10 @@ class NavModel(QObject):
         known = set(self.catalog.provider_names())
         seen, result = set(), []
         for entry in self.config.watch_history or []:
-            provider = entry.get("provider_name")
-            if provider not in known or entry.get("item_type") != "channel":
+            key = recent_channel(entry)
+            if key is None or key[0] not in known:
                 continue
-            item = entry.get("item_data") or {}
-            key = (provider, item_key(item))
+            provider, item = key[0], entry.get("item_data") or {}
             if key not in seen:
                 seen.add(key)
                 # Stamped also with one provider (an entry older than 2.1 has no stamp): the
@@ -548,6 +557,20 @@ class NavModel(QObject):
             if len(result) >= _RECENT_LIMIT:
                 break
         return result
+
+    def recent_count(self) -> int:
+        """How many channels ⟲ Recent lists."""
+        return len(self._recent_items())
+
+    def is_recent_row(self, node: Optional[NavNode]) -> bool:
+        """Whether `node` is a channel of ⟲ Recent while the list shows it (the path ends at
+        ⟲ Recent): a row that can leave it (services.watch_state.WatchState.forget)."""
+        if node is None or node.layer != "item" or not isinstance(node.payload, dict):
+            return False
+        if not self._path or self._path[-1].key != RECENT_GROUP:
+            return False
+        wanted = (provider_of(node.payload), item_key(node.payload))
+        return any((provider_of(i), item_key(i)) == wanted for i in self._recent_items())
 
     def _pinned_groups(self) -> list[NavNode]:
         deps = (self._data_version(),) + self._pinned_deps()

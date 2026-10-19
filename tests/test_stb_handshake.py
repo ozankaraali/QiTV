@@ -57,6 +57,50 @@ class StbHandshakeTests(unittest.TestCase):
         profile = next(url for url in calls if "action=get_profile" in url)
         self.assertEqual(parse_qs(urlsplit(profile).query)["prehash"], [PREHASH])
 
+    def test_prefer_https_falls_back_to_http_on_an_http_only_portal(self):
+        # Neither portal path answers over HTTPS; the portal answers over HTTP at either one.
+        for path in ("/portal.php", "/server/load.php"):
+            with self.subTest(path=path):
+                calls = []
+
+                def fake_get(url, **kwargs):
+                    calls.append(urlsplit(url)._replace(query="").geturl())
+                    if url.startswith("https://"):
+                        raise requests.exceptions.SSLError("wrong version number")
+                    if path not in url:
+                        return _Response({}, status_code=404)
+                    return _accepting(url)
+
+                handshake = StbHandshake(prefer_https=True)
+                with patch("services.provider_manager.requests.get", side_effect=fake_get):
+                    self.assertTrue(handshake.run("http://portal.test", "00:1A:79:00:00:01"))
+                self.assertIsNone(handshake.failure)
+                self.assertEqual(
+                    calls[:3],
+                    [
+                        "https://portal.test/portal.php",
+                        "https://portal.test/server/load.php",
+                        "http://portal.test/portal.php",
+                    ],
+                )
+                self.assertTrue(calls[-1].startswith(f"http://portal.test{path}"), calls)
+
+    def test_prefer_https_failing_everywhere_warns_once(self):
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            raise requests.ConnectionError("Connection refused")
+
+        handshake = StbHandshake(prefer_https=True)
+        with (
+            patch("services.provider_manager.requests.get", side_effect=fake_get),
+            self.assertLogs("services.provider_manager", "WARNING") as logs,
+        ):
+            self.assertFalse(handshake.run("http://portal.test", "00:1A:79:00:00:01"))
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len([r for r in logs.records if r.levelname == "WARNING"]), 1)
+
     def test_headers_name_the_portals_host_and_refer_to_the_url_as_given(self):
         for url, host, referer in (
             ("http://portal.example:8080", "portal.example:8080", "http://portal.example:8080/c/"),

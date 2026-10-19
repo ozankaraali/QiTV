@@ -1,10 +1,12 @@
 """Checking for, downloading and launching a QiTV update; no widgets (they are ui/'s).
 
 `check_for_updates` asks GitHub for the latest release on a QThread, `start_download` fetches
-it on another, and `perform_update` launches it: on Windows the new executable replaces this
-one once the background work stopped (`call_before_update`); elsewhere the user replaces the
-app. What the user sees (the update prompt, progress and errors) is the `UpdateUI` the caller
-passes: ui/update_dialogs.py's dialogs.
+it on another, and `perform_update` launches it once the background work stopped
+(`call_before_update`): on Windows the new executable replaces this one; on macOS the disk
+image opens and QiTV quits, for the user to drag the new QiTV over this one (Finder cannot
+replace a running app). A zip (a release before the disk images) and Linux: the user replaces
+the app. What the user sees (the update prompt, progress and errors) is the `UpdateUI` the
+caller passes: ui/update_dialogs.py's dialogs.
 """
 
 import logging
@@ -13,6 +15,7 @@ import platform
 import re
 import subprocess
 import sys
+import time
 from typing import Callable, List, Optional, Protocol, Tuple, TypeAlias
 import weakref
 
@@ -31,11 +34,14 @@ requests = lazy_module("requests")
 # Platform-specific asset name patterns
 ASSET_PATTERNS = {
     "Windows": "qitv-windows.exe",
-    "Darwin": "qitv-macos",  # Will match qitv-macos-universal.zip or qitv-macos-intel.zip
+    # qitv-macos-universal or qitv-macos-intel: a .dmg and a .zip (a .zip alone before 2.3)
+    "Darwin": "qitv-macos",
     "Linux": "qitv-linux",
 }
 # A cancelled download's `failed` message: English, never shown (ui/update_dialogs.py).
 DOWNLOAD_CANCELLED = "Download cancelled"
+# How long `open` may take to hand the disk image to macOS (it returns once macOS has it).
+OPEN_TIMEOUT_S = 15.0
 
 
 class UpdateUI(Protocol):
@@ -51,6 +57,8 @@ class UpdateUI(Protocol):
 
     def downloaded(self, downloaded_path: str) -> None: ...  # replace the app by hand
 
+    def confirm_quit_and_open(self) -> bool: ...  # macOS: quit and open the disk image now?
+
 
 # Keep references to background threads/workers to avoid premature GC
 _update_jobs: List[Tuple[QThread, "UpdateWorker"]] = []
@@ -64,7 +72,8 @@ _undo_update: List[_Hook] = []
 def call_before_update(
     method: Callable[[], None], undo: Optional[Callable[[], None]] = None
 ) -> None:
-    """Run the bound `method` before a Windows self-update waits for background threads.
+    """Run the bound `method` before a self-update waits for background threads (Windows's,
+    or macOS's disk image).
 
     For work whose thread stays up for the whole run until told to stop: the live
     time-shift engine's supervisor (services/live/engine.py) would make the wait endless.
@@ -251,20 +260,19 @@ def get_download_url_for_platform(assets: list) -> Tuple[Optional[str], int]:
         return None, 0
 
     if system == "Darwin":
-        machine = platform.machine()
-        # Intel macs get intel build, ARM macs get universal build
-        preferred_suffix = "intel" if machine == "x86_64" else "universal"
-
-        for asset in assets:
-            name = asset.get("name", "")
-            if pattern in name and preferred_suffix in name:
-                return asset.get("browser_download_url"), asset.get("size", 0)
-
-        # Fallback: any macOS build
-        for asset in assets:
-            name = asset.get("name", "")
-            if pattern in name:
-                return asset.get("browser_download_url"), asset.get("size", 0)
+        # Intel Macs get the Intel build, Apple silicon the universal one; the disk image
+        # before the zip (a release before 2.3 has zips alone), then any macOS build.
+        machine = "intel" if platform.machine() == "x86_64" else "universal"
+        builds = [asset for asset in assets if pattern in asset.get("name", "")]
+        if builds:
+            best = min(
+                builds,
+                key=lambda asset: (
+                    machine not in asset.get("name", ""),
+                    not is_disk_image(asset.get("name", "")),
+                ),
+            )
+            return best.get("browser_download_url"), best.get("size", 0)
     else:
         for asset in assets:
             name = asset.get("name", "")
@@ -272,6 +280,11 @@ def get_download_url_for_platform(assets: list) -> Tuple[Optional[str], int]:
                 return asset.get("browser_download_url"), asset.get("size", 0)
 
     return None, 0
+
+
+def is_disk_image(name: str) -> bool:
+    """A macOS disk image (.dmg): QiTV.app beside a shortcut to Applications."""
+    return name.lower().endswith(".dmg")
 
 
 def get_downloads_folder() -> Path:
@@ -311,6 +324,10 @@ class UpdateDownloader(QObject):
             last_progress_update = 0
             chunk_size = 65536  # 64KB chunks for better performance
 
+            if is_disk_image(filename):
+                # A new file, not the last one rewritten: macOS may still have an earlier
+                # update's image mounted from it, and would not open this one.
+                download_path.unlink(missing_ok=True)
             with open(download_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=chunk_size):
                     if self._cancelled:
@@ -330,8 +347,14 @@ class UpdateDownloader(QObject):
                             self.progress.emit(downloaded, total_size)
                             last_progress_update = downloaded
 
-            # Verify download size
-            if total_size > 0 and downloaded < total_size * 0.9:
+            # Verify download size: a disk image whole (`open` succeeds before macOS checks
+            # it, and QiTV would quit for a damaged one), anything else within 10%.
+            short = (
+                downloaded < total_size
+                if is_disk_image(filename)
+                else downloaded < total_size * 0.9
+            )
+            if total_size > 0 and short:
                 download_path.unlink(missing_ok=True)
                 self.error.emit(
                     tr(
@@ -427,8 +450,11 @@ def perform_update(downloaded_path: str, release_url: str, ui: UpdateUI):
 
     if system == "Windows":
         _perform_windows_update(downloaded_path, release_url, ui)
+    elif system == "Darwin" and is_disk_image(downloaded_path):
+        if ui.confirm_quit_and_open():  # or not now: the image waits in Downloads
+            _perform_macos_update(downloaded_path, release_url, ui)
     else:
-        ui.downloaded(downloaded_path)  # macOS/Linux: the user replaces the app
+        ui.downloaded(downloaded_path)  # a zip, or Linux: the user replaces the app
 
 
 def _perform_windows_update(downloaded_path: str, release_url: str, ui: Optional[UpdateUI] = None):
@@ -452,16 +478,71 @@ def _perform_windows_update(downloaded_path: str, release_url: str, ui: Optional
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
 
-        # Run the normal window shutdown paths before exiting (a QApplication's).
-        close_all = getattr(app, "closeAllWindows", None)
-        if close_all is not None:
-            close_all()
+        _close_all_windows(app)
 
     except OSError as e:
         logger.error(f"Failed to launch update: {e}")
-        _undo_before_update()  # QiTV goes on: restart what the update stopped
-        if ui is not None:
-            ui.launch_failed(downloaded_path, release_url)
+        _launch_failed(downloaded_path, release_url, ui)
+
+
+def _perform_macos_update(downloaded_path: str, release_url: str, ui: Optional[UpdateUI] = None):
+    """macOS: open the downloaded disk image, then quit, so that the user can drag its QiTV
+    onto Applications (Finder cannot replace a running app)."""
+    app = QCoreApplication.instance()
+    _run_before_update()  # once: later retries find nothing left to stop
+    if app and has_pending_threads():
+        QTimer.singleShot(25, app, lambda: _perform_macos_update(downloaded_path, release_url, ui))
+        return
+    try:
+        # `open` exits once macOS has the image (Finder then shows its window); its exit is
+        # polled, never waited for.
+        process = subprocess.Popen(
+            ["open", downloaded_path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as e:
+        logger.error("Failed to open the update: %s", safe_message(e))
+        _launch_failed(downloaded_path, release_url, ui)
+        return
+    deadline = time.monotonic() + OPEN_TIMEOUT_S
+    _when_opened(process, deadline, downloaded_path, release_url, ui)
+
+
+def _when_opened(
+    process: subprocess.Popen,
+    deadline: float,
+    downloaded_path: str,
+    release_url: str,
+    ui: Optional[UpdateUI],
+) -> None:
+    """Quit once `open` handed the disk image to macOS (polled: the GUI never waits)."""
+    app = QCoreApplication.instance()
+    code = process.poll()
+    if code is None and app is not None and time.monotonic() < deadline:
+        QTimer.singleShot(
+            50, app, lambda: _when_opened(process, deadline, downloaded_path, release_url, ui)
+        )
+        return
+    if code == 0:
+        _close_all_windows(app)
+        return
+    logger.error("Failed to open the update: %s", "no answer" if code is None else f"exit {code}")
+    _launch_failed(downloaded_path, release_url, ui)
+
+
+def _close_all_windows(app: Optional[QCoreApplication]) -> None:
+    """Run the normal window shutdown paths, then QiTV quits (a QApplication's)."""
+    close_all = getattr(app, "closeAllWindows", None)
+    if close_all is not None:
+        close_all()
+
+
+def _launch_failed(downloaded_path: str, release_url: str, ui: Optional[UpdateUI]) -> None:
+    _undo_before_update()  # QiTV goes on: restart what the update stopped
+    if ui is not None:
+        ui.launch_failed(downloaded_path, release_url)
 
 
 def open_downloads_folder() -> None:

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from services import failure_reasons, i18n
 from services.epg_view import Programme
-from tests import test_drawer, test_track_panel, test_transport
+from tests import test_drawer, test_picture_panel, test_track_panel, test_transport
 from ui.overlays import guide
 from ui.overlays.painting import Units
 from ui.overlays.welcome import WelcomeCard
@@ -203,6 +203,45 @@ class TurkishSoundPanelTests(test_track_panel.PanelCase):
         self.assertEqual(cut.cut, [])
         self.assertEqual(test_track_panel.sync_text("Sound", 150), "Ses 150 ms geç")
         self.assertEqual(test_track_panel.sync_text("Sound", -1050), "Ses 1.050 ms erken")
+
+
+class PicturePanelChecks:
+    """The Picture panel, the statistics and the sleep timer's notice read whole in the
+    language, every choice of every row stepped through."""
+
+    def check_whole(self):
+        self.info = {"source": "fmp4", "lag": 12.5}
+        self.player.stats = dict(test_picture_panel.StatsTextTests.STATS)
+        self.left = 95 * 60.0  # "End of the programme" is offered
+        self.controls.toggle_stats()
+        self.open()
+        cut = Elisions(self)
+        for index, steps in ((0, 4), (1, 3), (2, 7)):
+            for _ in range(steps):
+                self.panel.grab()
+                self.step(index, 1)
+        self.stats.grab()
+        self.controls.set_sleep(15)
+        self.clock.now += 14 * 60 + 30
+        test_picture_panel.elapse(40)
+        self.assertTrue(self.notice.isVisible())
+        self.notice.grab()
+        self.assertEqual(cut.cut, [])
+        return self.panel.model().title, [row.text for row in self.panel.model().rows]
+
+
+class TurkishPicturePanelTests(PicturePanelChecks, test_picture_panel.PictureCase):
+    def setUp(self):
+        turkish(self)
+        super().setUp()
+
+    def test_the_picture_panel_reads_in_turkish_and_whole(self):
+        title, rows = self.check_whole()
+        self.assertEqual(title, "Görüntü")
+        self.assertEqual(
+            rows, ["En boy oranı", "Geçmeli tarama giderme", "Uyku zamanlayıcısı", "İstatistikler"]
+        )
+        self.assertEqual(self.notice.text(), "Oynatma 0:30 sonra duracak")
 
 
 class TurkishCardsTests(unittest.TestCase):
@@ -405,6 +444,19 @@ class FrenchSoundPanelTests(test_track_panel.PanelCase):
         self.assertEqual(test_track_panel.sync_text("Sound", 150), "Son retardé de 150 ms")
         self.assertEqual(
             test_track_panel.sync_text("Sound", -1050), f"Son avancé de 1{NNBSP}050 ms"
+        )
+
+
+class FrenchPicturePanelTests(PicturePanelChecks, test_picture_panel.PictureCase):
+    def setUp(self):
+        french(self)
+        super().setUp()
+
+    def test_the_picture_panel_reads_in_french_and_whole(self):
+        title, rows = self.check_whole()
+        self.assertEqual(title, "Image")
+        self.assertEqual(
+            rows, ["Format d’image", "Désentrelacement", "Minuteur de veille", "Statistiques"]
         )
 
 

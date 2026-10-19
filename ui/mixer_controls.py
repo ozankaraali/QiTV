@@ -9,15 +9,19 @@ label's speaker mutes or unmutes the small picture without showing the mixer (on
 follows). The arrows are the arrow keys only (a remote's Ch± and PageUp/PageDown still zap),
 and ←/→ and Tab are the mixer's only with two rows (else they still seek).
 
-Levels and mutes belong to the streams (SessionManager): a swap moves each with its stream,
-so the rows trade values. Raising the small picture's level makes it audible; lowering a
-muted one keeps it muted. Config `pip_volume` is the small picture's level: the "pip"
-player's, saved (once the mixer hides) only from changes made while it is the small one,
-and given back to it at startup.
+Mutes belong to the streams (SessionManager); levels to the roles: the large picture plays
+at the main level and the small one at the PiP's, whichever stream has the role, so a swap
+or a focus moved in the grid changes no loudness. Raising the small picture's level makes it
+audible; lowering a muted one keeps it muted. Config `volume` is the main level and
+`pip_volume` the PiP's (2.2.1, optional; older builds ignore `volume`): saved once the mixer
+hides, from changes made to those rows, and given back at startup.
 
 While the multiview's grid shows, the rows are its tiles that play: the focused one first
 (it is the large picture: the keys act on it), then the others in the grid's order, each
-named "Tile N" after its place.
+named "Tile N" after its place. A line under them says whose sound plays: it follows the
+focused tile until a tile without the focus is changed here (or by its own speaker,
+`toggle_mute_of`); then "Your mix stays", and moving the focus changes no sound until
+"Follow focus" (that line's action) or the grid is left (SessionManager's mix).
 
 Without a mixer (tests) or without picture in picture, a toast says the volume instead, and
 without a SessionManager the player's own volume and mute are used.
@@ -32,9 +36,9 @@ from PySide6.QtCore import QObject, Qt
 
 from services.i18n import N_, tr, translate
 from services.redact import safe_message
-from services.sessions import PIP_LEVEL, SessionManager, Slot
+from services.sessions import MAIN_LEVEL, PIP_LEVEL, SessionManager, Slot
 from ui.keymap import Action
-from ui.overlays.mixer import MixerRow
+from ui.overlays.mixer import MixerMode, MixerRow
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,13 @@ MAIN_ROW = 0  # the mixer's first row; the PiP's is the second
 MAIN_TITLE = N_("Main")
 # i18n: the mixer's row for the small picture (picture in picture); max ~8 letters
 PIP_TITLE = N_("PiP")
+# The multiview's line under the mixer's rows: whose sound plays.
+# i18n: the volume mixer, multiview: only the focused (selected) tile is heard; short
+FOLLOWS_TEXT = N_("Sound follows the focused tile")
+# i18n: the volume mixer, multiview: the levels and mutes the user set stay as the focus moves
+MIXED_TEXT = N_("Your mix stays")
+# i18n: a link after "Your mix stays": the sound follows the focused tile again; short
+FOLLOW_ACTION = N_("Follow focus")
 _UP, _DOWN = Qt.Key.Key_Up.value, Qt.Key.Key_Down.value
 _OTHER_ROW = (Action.SEEK_BACK, Action.SEEK_FWD, Action.TAB)
 
@@ -82,18 +93,26 @@ class MixerControls(QObject):
         self._tiles = tiles
         self._row = MAIN_ROW
         self._pip_level: Optional[int] = None  # the small picture's changed level, to remember
+        self._main_level: Optional[int] = None  # the large picture's, to remember
         self._main_muted = False  # without a SessionManager: the player's own mute
 
     def wire(self) -> None:
         sessions, overlay = self.sessions, self._overlay
+        if sessions is not None:  # the remembered levels
+            main = getattr(self.config, "volume", MAIN_LEVEL)
+            sessions.set_role_levels(
+                main=int(main), pip=int(getattr(self.config, "pip_volume", PIP_LEVEL))
+            )
         if sessions is not None:
-            level = getattr(self.config, "pip_volume", PIP_LEVEL)
-            sessions.set_level("pip", int(level))  # the PiP's remembered level
+            sessions.mixChanged.connect(lambda *_: self.refresh())  # the line follows
         if overlay is not None:
             overlay.levelRequested.connect(self._on_level)
             overlay.muteRequested.connect(self._on_mute)
             overlay.rowSelected.connect(self._on_selected)
             overlay.closed.connect(self.save)
+            followed = getattr(overlay, "followRequested", None)
+            if followed is not None:
+                followed.connect(self.follow_focus)
 
     # ---- actions ------------------------------------------------------------------------------
 
@@ -159,6 +178,10 @@ class MixerControls(QObject):
         """Whether the large picture is muted."""
         return self._muted(MAIN_ROW)
 
+    def main_level(self) -> int:
+        """The large picture's volume (0-100)."""
+        return self._level(MAIN_ROW)
+
     def toggle_small_mute(self) -> None:
         """The PiP label's speaker: mute or unmute the small picture (its label follows, and
         the mixer while it shows)."""
@@ -168,6 +191,25 @@ class MixerControls(QObject):
             return
         sessions.set_muted(small.name, not sessions.muted(small.name))
         self.refresh()
+
+    def toggle_mute_of(self, name: str) -> None:
+        """A multiview tile's speaker: mute or unmute that tile (the mixer follows while it
+        shows, as for the PiP label's speaker)."""
+        sessions = self.sessions
+        if sessions is None:
+            return
+        try:
+            muted = sessions.muted(name)
+        except KeyError:
+            return  # no such tile (any more)
+        sessions.set_muted(name, not muted)
+        self.refresh()
+
+    def follow_focus(self) -> None:
+        """The mixer's "Follow focus": the grid's sound follows the focused tile again."""
+        if self.sessions is not None:
+            self.sessions.follow_focus()
+            self.refresh()
 
     def refresh(self) -> None:
         """PiP opened, closed or swapped: the speakers follow, and the rows while the mixer
@@ -182,16 +224,20 @@ class MixerControls(QObject):
             self._overlay.dismiss()  # closed → save()
 
     def save(self) -> None:
-        """Remember the "pip" player's level (config pip_volume) once it changed."""
+        """Remember the main and the PiP's levels (config volume, pip_volume) once changed."""
         sessions = self.sessions
-        level, self._pip_level = self._pip_level, None
-        if sessions is None or level is None:
+        main, self._main_level = self._main_level, None
+        pip, self._pip_level = self._pip_level, None
+        if sessions is None or (main is None and pip is None):
             return
-        self.config.pip_volume = level
+        if main is not None:
+            self.config.volume = main
+        if pip is not None:
+            self.config.pip_volume = pip
         try:
             self.config.save_config()
         except Exception as e:
-            logger.warning("Couldn't save the picture-in-picture volume: %s", safe_message(e))
+            logger.warning("Couldn't save the volume: %s", safe_message(e))
 
     # ---- the overlay --------------------------------------------------------------------------
 
@@ -206,7 +252,16 @@ class MixerControls(QObject):
             MixerRow(title, channel, self._level(index), self._muted(index))
             for index, (_slot, title, channel) in enumerate(shown)
         ]
-        overlay.show_rows(rows, self._row)
+        overlay.show_rows(rows, self._row, self._mode())
+
+    def _mode(self) -> Optional[MixerMode]:
+        """The line under the rows while the multiview's grid shows (None otherwise)."""
+        sessions = self.sessions
+        if sessions is None or not sessions.grid():
+            return None
+        if sessions.mixed():
+            return MixerMode(translate(MIXED_TEXT), translate(FOLLOW_ACTION))
+        return MixerMode(translate(FOLLOWS_TEXT))
 
     def _on_level(self, row: int, level: int) -> None:
         if row < len(self._slots()):
@@ -259,8 +314,11 @@ class MixerControls(QObject):
         if slot is None or self.sessions is None:
             self._session().set_volume(level)
             return
-        self.sessions.set_level(slot.name, level)
-        if slot.name == "pip" and slot is self.sessions.small():
+        sessions = self.sessions
+        sessions.set_level(slot.name, level)
+        if slot is sessions.large():
+            self._main_level = level  # volume: the large picture's level, as set now
+        elif slot is sessions.small() and not sessions.grid():
             self._pip_level = level  # pip_volume: the small picture's level, as set now
 
     def _muted(self, row: int) -> bool:

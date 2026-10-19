@@ -24,6 +24,7 @@ from ui.overlays.painting import (
     fmt_clock,
     fmt_duration,
     initials,
+    volume_icon,
 )
 
 ICONS = [
@@ -34,6 +35,10 @@ ICONS = [
     "prev",
     "next",
     "volume",
+    "volume_0",
+    "volume_1",
+    "volume_2",
+    "volume_3",
     "mute",
     "fullscreen",
     "subtitles",
@@ -55,6 +60,14 @@ ICONS = [
     "close",
     "check",
     "record",
+    "grid",
+    "single",
+    "enlarge",
+    "chevron_down",
+    "layout_2",
+    "layout_4",
+    "layout_6",
+    "layout_9",
 ]
 
 
@@ -108,6 +121,41 @@ class PaintingTest(unittest.TestCase):
         self.assertNotEqual(start.strftime("%H:%M"), "20:03")
         self.assertEqual(fmt_clock(start), "20:03")
         self.assertEqual(fmt_clock(datetime(2026, 1, 2, 9, 5)), "09:05")  # naive: as given
+
+    def test_the_speaker_shows_the_level_a_wave_per_third_and_a_cross_when_muted(self):
+        for level, icon in (
+            (0, "volume_0"),  # silent, yet not muted: no wave
+            (1, "volume_1"),
+            (33, "volume_1"),
+            (34, "volume_2"),
+            (66, "volume_2"),
+            (67, "volume_3"),
+            (100, "volume_3"),
+        ):
+            with self.subTest(level=level):
+                self.assertEqual(volume_icon(level), icon)
+                self.assertEqual(volume_icon(level, muted=True), "mute")
+
+    def test_each_wave_adds_to_the_speaker_and_none_reaches_out_of_its_box(self):
+        def ink(name):
+            image = blank()
+            p = QPainter(image)
+            draw_icon(p, name, QRectF(8, 8, 48, 48), QColor("#ffffff"))
+            p.end()
+            pixels = [
+                (x, y) for x in range(64) for y in range(64) if image.pixelColor(x, y).alpha()
+            ]
+            inside = all(6 <= x < 58 and 6 <= y < 58 for x, y in pixels)  # its stroke's width
+            return len(pixels), inside
+
+        counts = []
+        for name in ("volume_0", "volume_1", "volume_2", "volume_3", "mute"):
+            count, inside = ink(name)
+            self.assertTrue(inside, name)
+            counts.append(count)
+        self.assertEqual(counts[:4], sorted(counts[:4]))
+        self.assertEqual(len(set(counts)), 5)
+        self.assertEqual(ink("volume"), ink("volume_2"))  # the level not known: two waves
 
     def test_every_icon_paints(self):
         for name in ICONS:

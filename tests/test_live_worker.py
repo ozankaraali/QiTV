@@ -28,10 +28,10 @@ import warnings
 from http_fixtures import LocalSource, leaf, tls_server_context
 from process_fixtures import still_running, terminate
 from test_fmp4 import movie, trak, visual
-from ts_fixtures import PMT_PID, make_stream
+from ts_fixtures import PMT_PID, VIDEO_PID, make_stream
 from urllib3.exceptions import InsecureRequestWarning
 
-from services.live import interruptible_http, source as source_module, worker
+from services.live import interruptible_http, source as source_module, ts as ts_module, worker
 from services.live.ring import RamRing
 from services.live.ts import Unsupported
 from services.live.worker import helper_main
@@ -51,6 +51,7 @@ STATE_KEYS = {
     "burst_s",
     "received",
     "hls",
+    "fmp4",
     "breaks",
     "caught_up",
     "backlog_s",
@@ -120,6 +121,28 @@ def second_pat(data):
             if seen == 2:
                 return at
     raise AssertionError("no second PAT")
+
+
+def discontinuous(*names, extinf=4):
+    """A finished media playlist of the segments `names` (`<name>.ts`, `extinf` seconds each)
+    with a discontinuity before each but the first."""
+    text = f"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:{extinf}\n"
+    text += "#EXT-X-MEDIA-SEQUENCE:0\n"
+    for k, name in enumerate(names):
+        text += ("#EXT-X-DISCONTINUITY\n" if k else "") + f"#EXTINF:{extinf},\n{name}.ts\n"
+    return (text + "#EXT-X-ENDLIST\n").encode()
+
+
+def video_steps(data):
+    """The steps between the pictures' PTS (`ts_fixtures`' video PID), in 90 kHz ticks."""
+    stamps = []
+    for at in range(0, len(data) - 187, 188):
+        pkt = data[at : at + 188]
+        if pkt[1] & 0x40 and ((pkt[1] & 0x1F) << 8 | pkt[2]) == VIDEO_PID:
+            pts = ts_module._pes_times(pkt, 0)[0]
+            if pts is not None:
+                stamps.append(pts)
+    return [ts_module.pts_delta(a, b) for a, b in zip(stamps, stamps[1:])]
 
 
 def helper_with_a_lingering_thread(conn, root):
@@ -417,12 +440,17 @@ class LiveWorkerTests(unittest.TestCase):
         # after an outage, an HLS discontinuity): where on the timeline, and how much. A step
         # under 3 s stays media and is not reported.
         helper = self.helper()
-        for path, jump, reported in (("/jump.ts", 5.0, [(4.0, 5.0)]), ("/step.ts", 2.0, [])):
+        for name, jump, reported in (("jump", 5.0, [(4.0, 5.0)]), ("step", 2.0, [])):
             with self.subTest(jump=jump):
                 first = make_stream(4)
                 second = make_stream(4, pts_start=900000 + round((4 + jump) * 90000))
-                source = self.source({path: (200, {}, first + second)})
-                sid = helper.open(source.url + path)
+                routes = {
+                    f"/user/secret/{name}.m3u8": (200, {}, discontinuous(f"{name}-a", f"{name}-b")),
+                    f"/user/secret/{name}-a.ts": (200, {}, first),
+                    f"/user/secret/{name}-b.ts": (200, {}, second),
+                }
+                source = self.source(routes)
+                sid = helper.open(source.url + f"/user/secret/{name}.m3u8")
                 helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
                 breaks = helper.of(sid, "state")[-1][2]["breaks"]
                 self.assertEqual(len(breaks), len(reported))
@@ -430,20 +458,53 @@ class LiveWorkerTests(unittest.TestCase):
                     self.assertAlmostEqual(where, at, delta=0.05)
                     self.assertAlmostEqual(seconds, left_out, delta=0.05)
 
+    def test_a_clock_that_leaps_ahead_runs_on_where_arrival_does_not_explain_it(self):
+        # A public news channel's clock leapt 13 s inside one 10 s HLS segment (no tag near):
+        # VLC sat out 15 s. In a raw TS burst, as inside an HLS segment, the stream VLC reads
+        # runs on a frame after the last picture, and the timeline leaves nothing out.
+        # 22 s in: a step is judged once the pictures went on 10 s since the program was known
+        data = make_stream(30, jumps=((22.0, 13.0),))
+        third = len(data) // 3 - len(data) // 3 % 188
+        playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n"
+        playlist += "".join(f"#EXTINF:10,\n{name}.ts\n" for name in "abc") + "#EXT-X-ENDLIST\n"
+        routes = {
+            "/user/secret/leap.ts": (200, {}, data),
+            "/user/secret/leap.m3u8": (200, {}, playlist.encode()),
+            "/user/secret/a.ts": (200, {}, data[:third]),
+            "/user/secret/b.ts": (200, {}, data[third : 2 * third]),
+            "/user/secret/c.ts": (200, {}, data[2 * third :]),
+        }
+        source = self.source(routes)
+        helper = self.helper()
+        for path in ("/user/secret/leap.ts", "/user/secret/leap.m3u8"):
+            with self.subTest(path=path):
+                sid = helper.open(source.url + path)
+                helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
+                snapshot = helper.of(sid, "state")[-1][2]
+                self.assertEqual(snapshot["breaks"], [])
+                self.assertAlmostEqual(snapshot["end"], 30.0, delta=0.1)
+                with urlopen(helper.stream_url(sid, 0), timeout=10) as response:
+                    media = split_header(response.read())[1]
+                self.assertEqual(set(video_steps(media)), {3600})  # a frame: the leap is gone
+                helper.close(sid)
+        self.assert_no_credentials(helper)
+
     def test_reported_jumps_stay_as_long_as_the_ring_holds_their_media(self):
-        # A flaky raw-TS source that reconnects every few seconds: 20 jumps of 5 s, 2 s of
-        # media apart. A viewer far behind must still find each break the ring still holds
+        # A flaky source whose timestamps jump at every discontinuity: 20 jumps of 5 s, 2 s
+        # of media apart. A viewer far behind must still find each break the ring still holds
         # (a count of eight dropped them); those whose media was evicted go with it, but for
         # those just before the ring's start (2.1 stage 5: a sparse-PCR clock's 2 s step and
         # a second more), which a player still reading evicted media may reach.
-        pieces = b"".join(
-            make_stream(2, pts_start=900000 + round(k * 7.0 * 90000)) for k in range(21)
-        )
-        source = self.source({"/flaky.ts": (200, {}, pieces)})
+        names = [f"flaky{k}" for k in range(21)]
+        routes = {"/user/secret/flaky.m3u8": (200, {}, discontinuous(*names, extinf=2))}
+        for k, name in enumerate(names):
+            body = make_stream(2, pts_start=900000 + round(k * 7.0 * 90000))
+            routes[f"/user/secret/{name}.ts"] = (200, {}, body)
+        source = self.source(routes)
         helper = self.helper()
         for name, ring in (("all held", RAM), ("evicting", {"kind": "ram", "max_bytes": 1 << 18})):
             with self.subTest(ring=name):
-                sid = helper.open(source.url + "/flaky.ts", ring=ring)
+                sid = helper.open(source.url + "/user/secret/flaky.m3u8", ring=ring)
                 helper.wait_for(lambda message, sid=sid: message == ("ended", sid))
                 snapshot = helper.of(sid, "state")[-1][2]
                 breaks = snapshot["breaks"]

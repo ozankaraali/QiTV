@@ -715,6 +715,22 @@ class PipLabelTests(LabelCase):
             label.set_info("Nature One HD", state)
             self.assertFalse(label.grab().isNull())
 
+    def test_the_speaker_shows_the_small_picture_s_level_while_it_is_heard(self):
+        _, label = self.make()
+        label.set_info("Two", "LIVE")
+        self.assertEqual(label.speaker_icon(), "mute")  # muted: crossed out at any level
+        label.set_audible(True)
+        self.assertEqual(label.speaker_icon(), "volume_1")  # the PiP's 30 until the mixer says
+        glyph = label.glyph_rect("speaker").toAlignedRect()
+        low = label.grab().toImage().copy(glyph)
+        label.set_level(80)
+        self.assertEqual(label.speaker_icon(), "volume_3")
+        self.assertNotEqual(label.grab().toImage().copy(glyph), low)
+        label.set_level(0)
+        self.assertEqual(label.speaker_icon(), "volume_0")
+        label.set_audible(False)
+        self.assertEqual(label.speaker_icon(), "mute")
+
 
 class PlayerCase(unittest.TestCase):
     """The frame and label wired as the window wires them, the host glued to the page."""

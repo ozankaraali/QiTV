@@ -159,6 +159,7 @@ jobs:
           enable-cache: true
       - name: Get latest VLC version
         id: vlc-version
+        continue-on-error: true  # the package feed may be down: VideoLAN's build then
         shell: powershell
         run: |
           $info = choco info vlc --limit-output
@@ -171,7 +172,32 @@ jobs:
           path: C:\vlc-cache
           key: vlc-windows-${{ steps.vlc-version.outputs.version }}
       - name: Install VLC using Chocolatey
+        # Chocolatey's community feed is down at times (503): the next step installs VLC's
+        # own build from VideoLAN then.
+        continue-on-error: true
         run: choco install vlc -y --cache-location=C:\vlc-cache
+      - name: Install VLC from VideoLAN when Chocolatey could not
+        shell: pwsh
+        env:
+          VLC_FALLBACK: 3.0.24  # VideoLAN's Windows build, checked against its published SHA-256
+        run: |
+          $dir = 'C:\Program Files\VideoLAN\VLC'
+          if (Test-Path "$dir\plugins") { echo "VLC is installed"; exit 0 }
+          $ProgressPreference = 'SilentlyContinue'
+          $name = "vlc-$env:VLC_FALLBACK-win64.zip"
+          $base = "https://download.videolan.org/pub/videolan/vlc/$env:VLC_FALLBACK/win64"
+          $zip = Join-Path $env:RUNNER_TEMP $name
+          Invoke-WebRequest "$base/$name" -OutFile $zip
+          # The checksum file comes as bytes (application/octet-stream): read it from disk.
+          Invoke-WebRequest "$base/$name.sha256" -OutFile "$zip.sha256"
+          $want = ((Get-Content "$zip.sha256" -Raw).Trim() -split '\s+')[0]
+          $got = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($got -ne $want) { throw "The VLC download ($got) does not match VideoLAN's checksum ($want)" }
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'vlc')
+          New-Item -ItemType Directory -Force -Path (Split-Path $dir) | Out-Null
+          Move-Item (Join-Path $env:RUNNER_TEMP "vlc\vlc-$env:VLC_FALLBACK") $dir
+          if (-not (Test-Path "$dir\libvlc.dll")) { throw "VLC is not where the build looks for it" }
+          echo "VLC $env:VLC_FALLBACK installed from VideoLAN"
       - name: Sync dependencies
         id: sync
         run: uv sync --frozen --dev
@@ -315,11 +341,34 @@ jobs:
       - name: Zip macOS App
         # ditto keeps the bundle's symlinks, which its signature seals (zip -r copies them).
         run: cd dist && ditto -c -k --keepParent qitv.app qitv-macos-universal.zip
+      - name: Make the macOS disk image
+        # QiTV.app beside a shortcut to Applications, to drag onto it. ditto copies the bundle
+        # with its symlinks, so the signature still seals it.
+        run: |
+          stage="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$stage" && mkdir -p "$stage"
+          ditto dist/QiTV.app "$stage/QiTV.app"
+          ln -s /Applications "$stage/Applications"
+          for attempt in 1 2 3; do
+            # A runner's hdiutil sometimes answers "Resource busy" at first.
+            hdiutil create -volname QiTV -srcfolder "$stage" -ov -format UDZO dist/qitv-macos-universal.dmg && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep 10
+          done
+      - name: Check the macOS disk image
+        run: |
+          volume="$RUNNER_TEMP/dmg-volume"
+          hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$volume" dist/qitv-macos-universal.dmg
+          codesign --verify --deep --strict "$volume/QiTV.app"
+          test "$(readlink "$volume/Applications")" = /Applications
+          hdiutil detach "$volume"
       - name: Upload macOS artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packaged-app-macos-universal
-          path: dist/qitv-macos-universal.zip
+          path: |
+            dist/qitv-macos-universal.zip
+            dist/qitv-macos-universal.dmg
       - name: Cancel the run after a failure
         # A failed job cancels the others: the run cannot release anyway, and a fix pushed
         # next does not wait for it (main's runs queue instead of replacing each other).
@@ -410,11 +459,34 @@ jobs:
       - name: Zip macOS App
         # ditto keeps the bundle's symlinks, which its signature seals (zip -r copies them).
         run: cd dist && ditto -c -k --keepParent qitv.app qitv-macos-intel.zip
+      - name: Make the macOS disk image
+        # QiTV.app beside a shortcut to Applications, to drag onto it. ditto copies the bundle
+        # with its symlinks, so the signature still seals it.
+        run: |
+          stage="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$stage" && mkdir -p "$stage"
+          ditto dist/QiTV.app "$stage/QiTV.app"
+          ln -s /Applications "$stage/Applications"
+          for attempt in 1 2 3; do
+            # A runner's hdiutil sometimes answers "Resource busy" at first.
+            hdiutil create -volname QiTV -srcfolder "$stage" -ov -format UDZO dist/qitv-macos-intel.dmg && break
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep 10
+          done
+      - name: Check the macOS disk image
+        run: |
+          volume="$RUNNER_TEMP/dmg-volume"
+          hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$volume" dist/qitv-macos-intel.dmg
+          codesign --verify --deep --strict "$volume/QiTV.app"
+          test "$(readlink "$volume/Applications")" = /Applications
+          hdiutil detach "$volume"
       - name: Upload macOS artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packaged-app-macos-intel
-          path: dist/qitv-macos-intel.zip
+          path: |
+            dist/qitv-macos-intel.zip
+            dist/qitv-macos-intel.dmg
       - name: Cancel the run after a failure
         # A failed job cancels the others: the run cannot release anyway, and a fix pushed
         # next does not wait for it (main's runs queue instead of replacing each other).
@@ -459,3 +531,5 @@ jobs:
             packaged-app-windows/qitv-windows.exe
             packaged-app-macos-universal/qitv-macos-universal.zip
             packaged-app-macos-intel/qitv-macos-intel.zip
+            packaged-app-macos-universal/qitv-macos-universal.dmg
+            packaged-app-macos-intel/qitv-macos-intel.dmg

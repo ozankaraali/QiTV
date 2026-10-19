@@ -252,6 +252,8 @@ class SessionManagerTests(_Fixture):
             [
                 ("main", "player", "set_muted", True),
                 ("pip", "player", "set_muted", False),
+                ("pip", "player", "set_volume", 100),  # the large picture's level
+                ("main", "player", "set_volume", 30),  # the PiP's
                 ("manager", "large", "pip"),
             ],
         )
@@ -471,14 +473,25 @@ class LevelTests(_Fixture):
         self.manager.set_level("pip", -5)
         self.assertEqual((self.manager.level("main"), self.manager.level("pip")), (100, 0))
 
-    def test_a_swap_carries_each_level_with_its_stream(self):
+    def test_the_levels_stay_with_the_roles_across_a_swap(self):
         self.open_granted(B)
         self.manager.set_level("main", 80)
         self.manager.set_level("pip", 20)
         before = len(self.log)
+        self.manager.swap()  # the large picture stays as loud, the small one as quiet
+        self.assertEqual((self.manager.level("pip"), self.manager.level("main")), (80, 20))
+        volumes = [e for e in self.log[before:] if e[2] == "set_volume"]
+        self.assertEqual(
+            volumes, [("pip", "player", "set_volume", 80), ("main", "player", "set_volume", 20)]
+        )
+        self.assertEqual(self.manager.role_levels(), (80, 20))
+
+    def test_remembered_levels_go_to_the_roles(self):
+        self.open_granted(B)
+        self.manager.set_role_levels(main=55, pip=15)
+        self.assertEqual((self.manager.level("main"), self.manager.level("pip")), (55, 15))
         self.manager.swap()
-        self.assertEqual((self.manager.level("main"), self.manager.level("pip")), (80, 20))
-        self.assertFalse([e for e in self.log[before:] if e[2] == "set_volume"])
+        self.assertEqual((self.manager.level("pip"), self.manager.level("main")), (55, 15))
 
 
 class AudibleSmallTests(_Fixture):
@@ -490,8 +503,10 @@ class AudibleSmallTests(_Fixture):
         before = len(self.log)
         self.assertTrue(self.manager.swap())
         self.assertIs(self.manager.large(), self.pip)
-        self.assertEqual(self.log[before:], [("manager", "large", "pip")])
+        mutes = [e for e in self.log[before:] if e[2] == "set_muted"]
+        self.assertEqual(mutes, [])  # both stay audible
         self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (False, False))
+        self.assertEqual((self.manager.level("pip"), self.manager.level("main")), (100, 40))
         self.manager.swap()
         self.assertEqual((self.manager.muted("main"), self.manager.muted("pip")), (False, False))
         self.assertEqual((self.last_mute("main"), self.last_mute("pip")), (False, False))
@@ -728,8 +743,8 @@ class ReleaseCapTests(_Fixture):
         self.assertEqual(self.budget.holders(PROVIDER), ["main"])
 
 
-class NamedSlotTests(_Fixture):
-    """More slots than two (a multiview's tiles): the large role goes to any of them."""
+class _Tiles(_Fixture):
+    """Two more slots, "t2" and "t3" (a multiview's tiles)."""
 
     def setUp(self):
         super().setUp()
@@ -741,6 +756,10 @@ class NamedSlotTests(_Fixture):
             self.manager.add_slot(self.tiles[name])
         self.changes = []
         self.manager.largeChanged.connect(lambda new, old: self.changes.append((new, old)))
+
+
+class NamedSlotTests(_Tiles):
+    """More slots than two (a multiview's tiles): the large role goes to any of them."""
 
     def test_slots_are_listed_in_the_order_they_were_made(self):
         names = [slot.name for slot in self.manager.slots()]
@@ -819,6 +838,117 @@ class NamedSlotTests(_Fixture):
     def test_a_tiles_timeline_is_reported_by_its_name(self):
         self.tiles["t3"].live.timelineChanged.emit({"lag": 3.0})
         self.assertEqual(self.timelines, [("t3", {"lag": 3.0})])
+
+
+class GridMixTests(_Tiles):
+    """The grid's sound: it follows the focus until the user mixes it, then stays as mixed
+    until "Follow focus" or the grid is left."""
+
+    def setUp(self):
+        super().setUp()
+        self.mixes = []
+        self.manager.mixChanged.connect(self.mixes.append)
+        self.manager.enter_grid()
+
+    def mutes(self):
+        return [self.manager.muted(name) for name in ("main", "t2", "t3")]
+
+    def test_the_sound_follows_the_focus_until_a_tile_without_it_is_changed(self):
+        self.manager.set_level("main", 60)  # the focused tile's own: the main sound
+        self.manager.set_muted("main", True)
+        self.manager.set_muted("main", False)
+        self.assertEqual((self.manager.mixed(), self.mixes), (False, []))
+        self.manager.set_large("t2")
+        self.assertEqual(self.mutes(), [True, False, True])  # the focus took the sound
+        self.assertEqual(self.manager.level("t2"), 60)  # at the main level
+
+    def test_a_mix_keeps_every_tiles_mute_and_level_as_the_focus_moves(self):
+        self.manager.set_level("t2", 45)  # a tile without the focus: raised, so heard
+        self.assertEqual((self.manager.mixed(), self.mixes), (True, [True]))
+        self.assertEqual(self.mutes(), [False, False, True])
+        self.manager.set_large("t3")  # the controls move; the sound stays
+        self.assertEqual(self.mutes(), [False, False, True])
+        levels = [self.manager.level(name) for name in ("main", "t2", "t3")]
+        self.assertEqual(levels, [MAIN_LEVEL, 45, PIP_LEVEL])
+        self.manager.set_level("t3", 20)  # the focused tile's level is its own in a mix
+        self.manager.set_large("main")
+        levels = [self.manager.level(name) for name in ("main", "t2", "t3")]
+        self.assertEqual(levels, [MAIN_LEVEL, 45, 20])
+        self.assertEqual(self.mixes, [True])
+
+    def test_a_tile_focused_untouched_in_a_mix_never_leaves_its_level_as_the_main_one(self):
+        self.manager.set_level("main", 80)  # the main sound
+        self.manager.set_muted("t2", False)  # a mix
+        self.manager.set_large("t3")  # never touched: its own default level
+        self.assertEqual(self.manager.level("t3"), PIP_LEVEL)
+        self.assertEqual(self.manager.role_levels()[0], 80)  # what is remembered meanwhile
+        self.manager.end_mix()
+        self.assertEqual((self.manager.level("t3"), self.manager.role_levels()[0]), (80, 80))
+
+    def test_a_level_set_on_the_focused_tile_in_a_mix_stays_as_the_main_one(self):
+        self.manager.set_level("main", 80)
+        self.manager.set_muted("t2", False)  # a mix
+        self.manager.set_large("t3")
+        self.manager.set_level("t3", 50)  # what the user hears now
+        self.manager.end_mix()
+        self.assertEqual((self.manager.level("t3"), self.manager.role_levels()[0]), (50, 50))
+
+    def test_follow_focus_gives_the_main_level_back_too(self):
+        self.manager.set_level("main", 70)
+        self.manager.set_level("t2", 40)  # a mix
+        self.manager.set_large("t2")  # set by the user in the mix: its own level stays
+        self.manager.follow_focus()
+        self.assertEqual(self.manager.level("t2"), 40)
+        self.manager.set_large("main")  # the sound and the main level follow the focus
+        self.assertEqual(self.manager.level("main"), 40)
+
+    def test_a_tiles_speaker_mixes_too(self):
+        self.manager.set_muted("t3", False)
+        self.assertTrue(self.manager.mixed())
+        self.manager.set_large("t2")
+        self.assertEqual(self.mutes(), [False, True, False])
+
+    def test_follow_focus_hears_the_focused_tile_alone_again(self):
+        self.manager.set_muted("t2", False)
+        self.manager.set_large("t3")
+        self.manager.follow_focus()
+        self.assertEqual((self.manager.mixed(), self.mixes), (False, [True, False]))
+        self.assertEqual(self.mutes(), [True, True, False])
+        self.manager.set_large("main")  # the sound follows the focus again
+        self.assertEqual(self.mutes(), [False, True, True])
+
+    def test_leaving_ends_the_mix_with_the_big_picture_heard(self):
+        self.manager.set_muted("t2", False)
+        self.manager.set_large("t3")  # muted in the mix
+        self.manager.end_mix()  # the grid leaves, before its tiles stop
+        self.assertEqual(self.mutes(), [False, False, False])  # the big picture heard
+        self.assertEqual((self.manager.mixed(), self.mixes), (False, [True, False]))
+        self.manager.leave_grid("t2")
+        self.assertEqual(self.mixes, [True, False])  # said once
+        self.assertFalse(self.manager.muted("t2"))  # the PiP stays heard, as made audible
+
+    def test_a_mix_with_every_tile_muted_leaves_the_big_picture_muted(self):
+        self.manager.set_muted("t2", True)  # no change: no mix
+        self.assertFalse(self.manager.mixed())
+        self.manager.set_level("t2", 10)  # lowered: a mix, still muted
+        self.manager.set_muted("main", True)
+        self.manager.set_large("t3")
+        self.manager.leave_grid(None)
+        self.assertEqual(self.mutes(), [True, True, True])
+        self.assertFalse(self.manager.mixed())
+
+    def test_the_next_grid_follows_the_focus_again(self):
+        self.manager.set_muted("t2", False)
+        self.manager.leave_grid(None)
+        self.manager.enter_grid()
+        self.assertFalse(self.manager.mixed())
+        self.manager.set_large("t3")
+        self.assertTrue(self.manager.muted("main"))
+
+    def test_outside_the_grid_nothing_mixes(self):
+        self.manager.leave_grid(None)
+        self.manager.set_muted("t2", False)
+        self.assertEqual((self.manager.mixed(), self.mixes), (False, []))
 
 
 if __name__ == "__main__":

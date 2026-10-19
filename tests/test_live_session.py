@@ -772,6 +772,21 @@ class StartTests(LiveSessionCase):
         self.assertEqual(self.live.position(), 0.0)
         self.assertEqual(self.notices, [])
 
+    def test_it_names_what_the_helper_reads_for_the_statistics(self):
+        # 2.3: raw TS, HLS, or HLS of fragmented MP4 (remuxed to TS); "" until it plays.
+        self.assertEqual(self.live.source_kind(), "")
+        sid = self.start()
+        self.engine.buffer(sid, [], open_seq=0, live_edge=2.0)
+        self.engine.sessionReady.emit(sid)
+        snapshot = self.engine.snapshot(sid)
+        for fields, kind in (
+            ({"answered": True}, "ts"),
+            ({"answered": True, "hls": True}, "hls"),
+            ({"answered": True, "hls": True, "fmp4": True}, "fmp4"),
+        ):
+            self.engine._snapshots[sid] = {**snapshot, **fields}
+            self.assertEqual(self.live.source_kind(), kind)
+
     def test_ready_bases_the_position_on_the_oldest_closed_segment(self):
         sid = self.ready(segments(7, 3, start=14.0), live_edge=20.5)
         self.assertEqual(self.playback.plays, [self.stream(sid, 7)])
