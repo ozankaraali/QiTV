@@ -118,6 +118,8 @@ FIND_TOOLTIP = "Find a genre or a channel at every provider: type its name"
 FIND_CLEAR_TOOLTIP = key_hint("Clear the find", "Esc")
 SEARCHING_TEXT = "Searching…"
 FIND_FAILED_TEXT = "Couldn't search — type again to retry"
+# The find's last row: the words in the box, for the Library's search (whole at 640 px wide).
+FIND_LIBRARY_TEXT = "Search films and series ›"
 FOUND_GENRE = "found_genre"  # a row of the find: a genre found (any provider's)
 FOUND_LIBRARY = "found_library"  # its last row: films and series in the Library's search
 FIND_PARENT = NavNode("find", "find", "Find")  # the right column's parent while it finds
@@ -1060,8 +1062,7 @@ class Drawer(Overlay):
             else:
                 notice = f"No genre or channel has “{text}”"
             nodes.append(NavNode("notice", "find:notice", notice))
-        library = f"Films and series with “{text}” in the Library ›"
-        nodes.append(NavNode(FOUND_LIBRARY, "find:library", library))
+        nodes.append(NavNode(FOUND_LIBRARY, "find:library", FIND_LIBRARY_TEXT))
         col.parent = FIND_PARENT
         col.message = None
         shown = ("find", _shown_rows(nodes, False, None, labels))

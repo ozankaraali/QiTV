@@ -29,10 +29,12 @@ from tests.test_navigation import FakeCatalog
 from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.keymap import key_hint
 from ui.overlay_host import OverlayHost
+from ui.overlays import drawer as drawer_module
 from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import (
     EMPTY_TEXT,
     FIND_CLEAR_TOOLTIP,
+    FIND_LIBRARY_TEXT,
     FIND_TOOLTIP,
     LOADING_TEXT,
     PAD_SIDE_U,
@@ -1025,7 +1027,7 @@ class FindTests(unittest.TestCase):
         self.assertEqual(len(channels), 201)  # 200 at most of a provider, then the other's
         self.assertEqual(channels[0], "Northwind Sport 1")
         self.assertEqual(channels[-1], "Harbor Spor 2")
-        library = "Films and series with “spor” in the Library ›"
+        library = FIND_LIBRARY_TEXT
         self.assertEqual(rows[-1], ("found_library", library))
         self.assertEqual(self.data("Sports", CountRole), "Home · 300 channels")
         self.assertEqual(self.data("TR: Spor", CountRole), "Backup · 1 channel")
@@ -1128,13 +1130,36 @@ class FindTests(unittest.TestCase):
         self.drawer.activate()
         self.assertEqual(self.library_finds, ["spor"])
 
+    def drawn(self):
+        """What the drawer's rows draw on a repaint, as (text, what is shown of it)."""
+        texts, elided = [], drawer_module.elided
+
+        def spy(p, text, width):
+            shown = elided(p, text, width)
+            texts.append((text, shown))
+            return shown
+
+        with mock.patch.object(drawer_module, "elided", spy):
+            self.drawer.grab()
+        return texts
+
+    def test_the_last_row_is_whole_at_the_default_size_and_in_a_small_window(self):
+        # Whatever the system's font (Linux CI's are wider): the words are in the box above.
+        for width, height in ((1280, 720), (640, 360)):
+            with self.subTest(size=(width, height)):
+                self.host.resize(width, height)
+                self.drawer.open_drawer()
+                self.type("kid")
+                self.assertEqual(self.rows()[-1], ("found_library", FIND_LIBRARY_TEXT))
+                self.assertIn((FIND_LIBRARY_TEXT, FIND_LIBRARY_TEXT), self.drawn())
+
     def test_nothing_found_says_so_and_still_offers_the_library(self):
         self.type("zzz")
         self.assertEqual(
             self.rows(),
             [
                 ("notice", "No genre or channel has “zzz”"),
-                ("found_library", "Films and series with “zzz” in the Library ›"),
+                ("found_library", FIND_LIBRARY_TEXT),
             ],
         )
         self.assertEqual(self.drawer.highlighted().layer, "found_library")
