@@ -27,6 +27,7 @@ from services.playback import PlaybackState
 from services.thread_cleanup import has_pending_threads
 from services.vlc_profile import PlayKind
 from tests.fixtures.live_source import LiveSource
+from tests.gc_fixtures import collect_on_the_gui_thread
 
 app = QApplication.instance() or QApplication([])
 
@@ -293,6 +294,10 @@ class BurstyRawTsTests(unittest.TestCase):
     """End to end in real time: the fixture channel in 3 s bursts, the helper, LiveSession."""
 
     BURST = 3.0
+
+    @classmethod
+    def setUpClass(cls):
+        collect_on_the_gui_thread(cls)  # the supervisor thread never runs the collector
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="qitv-live-bursts-test-")

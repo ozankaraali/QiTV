@@ -28,6 +28,7 @@ from urllib.request import urlopen
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from gc_fixtures import collect_on_the_gui_thread
 from http_fixtures import LocalSource
 from process_fixtures import still_running, terminate
 from ts_fixtures import make_stream
@@ -478,6 +479,7 @@ class LiveEngineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        collect_on_the_gui_thread(cls)  # the supervisor thread never runs the collector
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="qitv-live-engine-test-")

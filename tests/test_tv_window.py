@@ -36,6 +36,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
+from gc_fixtures import collect_on_the_gui_thread
 from timer_fixtures import elapse, wait_until
 
 import main as qitv_main
@@ -120,6 +121,7 @@ class WindowCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        collect_on_the_gui_thread(cls)  # as main() does: the engine's supervisor never collects
         QLoggingCategory.setFilterRules("qt.qpa.*=false")
         previous = None
 
