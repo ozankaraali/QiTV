@@ -254,7 +254,7 @@ class _SeqNumbers(LazyNumbers):
 
 
 def _numbers(group, shown):
-    """The numbers of the `shown` rows of a live group, the filter aside.
+    """The numbers of the `shown` rows of a live group.
 
     When no channel of the group has a number, its position in the group stands in, as on
     the banner and for number entry.

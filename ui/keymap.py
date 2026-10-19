@@ -183,7 +183,7 @@ def resolve(
     if held == _CTRL and key in _CTRL_KEYS:
         return _CTRL_KEYS[key], ""
     if held == _CTRL and key == _K.Key_P.value and context in ("player", "drawer"):
-        # The drawer types P into its filter: Ctrl/⌘+P opens the highlighted channel small.
+        # The drawer types P into its find: Ctrl/⌘+P opens the highlighted channel small.
         return Action.PIP, ""
     if context == "library":
         if key in _LIBRARY_KEYS:
@@ -214,7 +214,7 @@ def resolve(
 
 
 def _text(text: str, mods: int, *, windows: bool) -> tuple[Action, str] | None:
-    """Printable text for the drawer and Library filters.
+    """Printable text for the drawer's find and the Library's filters.
 
     Ctrl/⌘ and Meta never type, except Ctrl+Alt on Windows, which is how it reports AltGr
     (ł, @, €); on macOS ⌘⌥ is a shortcut. Alt (macOS Option) composes letters such as ç, so
