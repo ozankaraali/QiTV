@@ -3,8 +3,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+from services import provider_api
+from services.account_check import check_xtream
 from services.catalog import format_xtream_episodes
 from services.provider_api import (
     xtream_base,
@@ -39,6 +42,10 @@ class XtreamRequestTests(unittest.TestCase):
         self.requests = []
         self.allowed_formats = ["m3u8", "ts"]
         self.prefix = ""  # the path the panel is served under
+        self.elsewhere = 404  # what the API's file answers anywhere else: 404, or 200 (a page)
+        roots = patch.dict(provider_api._answered_at_root, clear=True)  # this test's session
+        roots.start()
+        self.addCleanup(roots.stop)
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -47,6 +54,16 @@ class XtreamRequestTests(unittest.TestCase):
                 query = parse_qs(url.query)
                 action = query.get("action", [None])[0]
                 fixture.requests.append((url.path, action))
+                if url.path.endswith("/player_api.php") and url.path != (
+                    f"{fixture.prefix}/player_api.php"
+                ):
+                    page = b"<html><body>It works!</body></html>"
+                    self.send_response(fixture.elsewhere)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(page)))
+                    self.end_headers()
+                    self.wfile.write(page)
+                    return
                 if url.path != f"{fixture.prefix}/player_api.php":
                     self.send_error(403, "Media must not be opened during catalog loading")
                     return
@@ -152,6 +169,64 @@ class XtreamRequestTests(unittest.TestCase):
                 self.assertEqual(catalog["resolved_base"], f"{self.base}/xc")
                 cmd = catalog["contents"][0]["cmd"]
                 self.assertEqual(cmd, f"{self.base}/xc/live/user/password/7.ts")
+        self.assertEqual(provider_api._answered_at_root, {})  # never asked at the root
+
+    def test_a_stray_path_on_a_panel_at_the_root_falls_back_to_the_root_once(self):
+        # 2.2.0 and older cut every address to its host: a saved '…/c/' worked. Its panel
+        # sits at the root: the path answers 404 (or a web server's page), the root is asked
+        # once and used from then on, the catalog, the account check and the guide alike.
+        for elsewhere in (404, 200):
+            with self.subTest(elsewhere=elsewhere):
+                provider_api._answered_at_root.clear()
+                self.requests.clear()
+                self.elsewhere = elsewhere
+                saved = f"{self.base}/c/"
+                with self.assertLogs("services.provider_api", "INFO") as logs:
+                    catalog = self.load_catalog("itv", saved)
+                self.assertEqual(
+                    self.requests,
+                    [
+                        ("/c/player_api.php", None),
+                        ("/player_api.php", None),
+                        ("/player_api.php", "get_live_categories"),
+                        ("/player_api.php", "get_live_streams"),
+                    ],
+                )
+                self.assertEqual(catalog["resolved_base"], self.base)
+                self.assertEqual(
+                    catalog["contents"][0]["cmd"], f"{self.base}/live/user/password/7.ts"
+                )
+                for line in logs.output:  # no address, no credential
+                    for secret in ("127.0.0.1", "password", "/c"):
+                        self.assertNotIn(secret, line)
+                self.requests.clear()  # remembered: no second try under the path
+                self.load_catalog("vod", saved)
+                self.assertNotIn(("/c/player_api.php", None), self.requests)
+                self.requests.clear()
+                check_xtream(saved, "user", "password")
+                self.assertEqual(self.requests, [("/player_api.php", None)])
+                self.assertEqual(
+                    xtream_xmltv_url(saved, "u", "p"),
+                    f"{self.base}/xmltv.php?username=u&password=p",
+                )
+
+    def test_the_account_check_falls_back_to_the_root_too(self):
+        check_xtream(f"{self.base}/c/", "user", "password")
+        self.assertEqual(self.requests, [("/c/player_api.php", None), ("/player_api.php", None)])
+        self.assertEqual(provider_api._answered_at_root, {f"{self.base}/c": self.base})
+
+    def test_a_panel_found_nowhere_is_asked_twice_at_most(self):
+        self.prefix = "/xc"  # neither under the saved '/c' nor at the root
+        worker = XtreamLoaderWorker(f"{self.base}/c", "user", "password", "itv")
+        errors = []
+        worker.error.connect(errors.append)
+        worker.run()
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(self.requests, [("/c/player_api.php", None), ("/player_api.php", None)])
+        self.assertEqual(provider_api._answered_at_root, {})
+        self.requests.clear()
+        check_xtream(f"{self.base}/c", "user", "password")
+        self.assertEqual(self.requests, [("/c/player_api.php", None), ("/player_api.php", None)])
 
 
 class XtreamBaseTests(unittest.TestCase):

@@ -36,7 +36,10 @@ from services.provider_api import (
     CLIENT_HEADERS,
     https_fallback_candidates,
     provider_prefers_https,
+    remember_xtream_root,
+    xtream_elsewhere,
     xtream_player_api_url,
+    xtream_sign_in_bases,
 )
 from services.provider_link import XTREAM, parse_provider_link
 
@@ -57,32 +60,45 @@ def check_xtream(
     now: Optional[datetime] = None,
     timeout: Any = TIMEOUT_S,
 ) -> Reason:
-    """The account's state from its Player API sign-in answer (HTTPS first when preferred)."""
+    """The account's state from its Player API sign-in answer (HTTPS first when preferred).
+    An address with a path whose panel is not there (a 404 or a page) is asked once more at
+    its server's root, as the catalog's sign-in does (`provider_api.xtream_sign_in_bases`)."""
     now = now or datetime.now(timezone.utc)
-    url = xtream_player_api_url(base, username, password)
     statuses: list[int] = []
     timed_out = False
-    for candidate in https_fallback_candidates(url, prefer_https):
-        try:
-            response = requests.get(
-                candidate, timeout=timeout, headers=CLIENT_HEADERS, verify=ssl_verify
-            )
-        except requests.exceptions.Timeout:
-            timed_out = True
-            continue
-        except requests.RequestException:
-            continue
-        try:
-            if response.status_code != 200:
-                statuses.append(int(response.status_code))
+    bases = xtream_sign_in_bases(base)
+    for at, server in enumerate(bases):
+        last = at + 1 == len(bases)
+        elsewhere = False
+        url = xtream_player_api_url(server, username, password)
+        for candidate in https_fallback_candidates(url, prefer_https):
+            try:
+                response = requests.get(
+                    candidate, timeout=timeout, headers=CLIENT_HEADERS, verify=ssl_verify
+                )
+            except requests.exceptions.Timeout:
+                timed_out = True
+                continue
+            except requests.RequestException:
                 continue
             try:
-                body = response.json() if response.content else None
-            except ValueError:
-                return Reason(reasons.UNEXPECTED, "")  # not the Player API's JSON
-            return reasons.xtream_reason(body, now)
-        finally:
-            response.close()
+                if not last and xtream_elsewhere(response):
+                    elsewhere = True
+                    continue
+                if response.status_code != 200:
+                    statuses.append(int(response.status_code))
+                    continue
+                try:
+                    body = response.json() if response.content else None
+                except ValueError:
+                    return Reason(reasons.UNEXPECTED, "")  # not the Player API's JSON
+                if at:
+                    remember_xtream_root(base, server)
+                return reasons.xtream_reason(body, now)
+            finally:
+                response.close()
+        if not elsewhere:
+            break  # the panel answered there (or nothing did): the root is not asked
     return _from_statuses(statuses, timed_out)
 
 

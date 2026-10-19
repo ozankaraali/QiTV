@@ -30,6 +30,7 @@ from services.provider_api import (
     https_fallback_candidates,
     provider_prefers_https,
     stb_endpoint,
+    xtream_sign_in_bases,
     xtream_xmltv_url,
 )
 from services.redact import redact_url, safe_exc
@@ -713,11 +714,20 @@ class EpgManager:
             "ssl_verify", self.config_manager.ssl_verify
         )
 
+        # HTTPS first when preferred; an address with a path is asked at its server's root
+        # too when nothing came under the path (a stray path: xtream_sign_in_bases).
+        candidates = [
+            candidate
+            for base in xtream_sign_in_bases(provider_url)
+            for candidate in https_fallback_candidates(
+                xtream_xmltv_url(base, username, password), prefer_https
+            )
+        ]
         r = None  # the answer in use: every streamed answer is closed
         try:
             # Fetch the XMLTV data from Xtream endpoint, trying HTTPS first if preferred
             body = None  # the chunks of the first non-empty answer, streamed (cancellable)
-            for _url in https_fallback_candidates(xmltv_url, prefer_https):
+            for _url in candidates:
                 if r is not None:
                     r.close()  # the answer of the candidate passed over
                     r = None

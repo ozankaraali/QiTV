@@ -19,12 +19,15 @@ from services.provider_api import (
     CLIENT_HEADERS,
     base_from_url,
     https_fallback_candidates,
+    remember_xtream_root,
     stb_create_link_url,
     stb_portal_base,
     stb_request_url,
     xtream_base,
     xtream_choose_resolved_base,
+    xtream_elsewhere,
     xtream_player_api_url,
+    xtream_sign_in_bases,
     xtream_stream_url,
 )
 from services.provider_manager import HANDSHAKE_UNEXPECTED, HANDSHAKE_UNREACHABLE
@@ -134,15 +137,24 @@ _XTREAM_CATALOG_ACTIONS = {
 
 def _xtream_sign_in(get: Callable[..., Any], worker: Any) -> Tuple[Any, str]:
     """Sign in to an Xtream panel (the Player API without an action): the reply's user_info,
-    and the base its API and streams are at."""
-    url = xtream_player_api_url(worker.base_url, worker.username, worker.password)
-    response = get(url, timeout=10, verify=worker.verify_ssl)
-    response.raise_for_status()
-    body = response.json() if response.content else {}
-    if not isinstance(body, dict):
-        body = {}
-    base = _resolve_xtream_base(body.get("server_info", {}), worker.base_url, worker.prefer_https)
-    return body.get("user_info", {}), base
+    and the base its API and streams are at. An address with a path whose panel is not there
+    (a 404 or a page, not the API's JSON) is asked once more at its server's root, which is
+    used from then on when it answers (a stray path 2.2.0 and older cut off)."""
+    bases = xtream_sign_in_bases(worker.base_url)
+    for at, server in enumerate(bases):
+        url = xtream_player_api_url(server, worker.username, worker.password)
+        response = get(url, timeout=10, verify=worker.verify_ssl)
+        if at + 1 < len(bases) and xtream_elsewhere(response):
+            continue  # the next is the root: no further one
+        response.raise_for_status()
+        body = response.json() if response.content else {}
+        if not isinstance(body, dict):
+            body = {}
+        if at:
+            remember_xtream_root(worker.base_url, server)
+        resolved = _resolve_xtream_base(body.get("server_info", {}), server, worker.prefer_https)
+        return body.get("user_info", {}), resolved
+    raise AssertionError("unreachable: the last base always answers or raises")
 
 
 def _xtream_categories(

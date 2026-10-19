@@ -117,14 +117,56 @@ def _ensure_base(url: str) -> str:
         return url
 
 
+# This session's saved addresses with a path whose panel answered at its server's root instead
+# (a stray path, 'http://host:8080/c/', that 2.2.0 and older cut off), by their base.
+_answered_at_root: Dict[str, str] = {}
+
+
 def xtream_base(url: str) -> str:
-    """An Xtream server address's base: where its API files and streams are."""
-    return _ensure_base(url)
+    """An Xtream server address's base: where its API files and streams are (its server's root
+    once the panel answered there instead of under the address's path)."""
+    base = _ensure_base(url)
+    return _answered_at_root.get(base, base)
+
+
+def xtream_sign_in_bases(url: str) -> List[str]:
+    """Where to ask the panel of the address `url`, in order: its base, then, when that has a
+    path, the server's root, once (`xtream_elsewhere`; `remember_xtream_root` when the root
+    answers)."""
+    base = xtream_base(url)
+    root = base_from_url(base)
+    return [base, root] if root != base else [base]
+
+
+def xtream_elsewhere(response: Any) -> bool:
+    """Whether a Player API answer under an address's path says the panel is not there: a 404,
+    or a body that is not the API's JSON (a web server's page)."""
+    if response.status_code == 404:
+        return True
+    if not response.content:
+        return False
+    try:
+        response.json()
+    except ValueError:
+        return True
+    return False
+
+
+def remember_xtream_root(url: str, root: str) -> None:
+    """The panel of the address `url` answered at its server's `root`: every address built for
+    it uses the root from now on (this session)."""
+    base = _ensure_base(url)
+    if root != base and _answered_at_root.get(base) != root:
+        _answered_at_root[base] = root
+        logger.info(
+            "The Xtream panel did not answer under its address's path but at its server's root;"
+            " the root is used."
+        )
 
 
 def _xtream_path(url: str) -> str:
     """The path an Xtream server address's panel is served under ('/xc'), or ''."""
-    return urlsplit(_ensure_base(url)).path
+    return urlsplit(xtream_base(url)).path
 
 
 def _build_xtream_url(
@@ -139,7 +181,7 @@ def _build_xtream_url(
     All Xtream URLs follow the pattern: {base}/{endpoint}?username=U&password=P[&extra...]
     This factory centralizes URL construction and query encoding.
     """
-    base = _ensure_base(base)
+    base = xtream_base(base)
     query = {"username": username, "password": password}
     if extra:
         query.update(extra)
@@ -201,7 +243,7 @@ def xtream_choose_resolved_base(
             # A panel under a path sits behind a web server it doesn't know of: the host
             # and port it advertises are its own, not that server's. The user's address is
             # where its API and streams are (HTTPS when preferred).
-            base = _ensure_base(input_base)
+            base = xtream_base(input_base)
             if prefer_https and base.startswith("http://"):
                 base = "https://" + base[len("http://") :]
             return base
