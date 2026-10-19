@@ -330,8 +330,9 @@ class PlayingTests(StbCase):
 
 
 class FailureTests(StbCase):
-    """A link that does not come is asked again once after the portal signs in again; then
-    the channel plays on (or live) and the toast says why."""
+    """A link that does not come is asked again once (another provider's portal signs in
+    again first; the browsed provider's makes a fresh link from its session); then the channel
+    plays on (or live) and the toast says why."""
 
     PORTAL = dict(ARCHIVED, _provider="Portal B")  # another provider's portal
 

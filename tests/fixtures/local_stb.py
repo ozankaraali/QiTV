@@ -1,4 +1,4 @@
-"""A fake STB portal (Stalker-style middleware) on 127.0.0.1 for the catch-up tests.
+"""A fake STB portal on 127.0.0.1 for the catch-up tests.
 
 `StbFixture` answers what QiTV asks of a portal's `load.php` (also as `portal.php`), shaped as
 such portals commonly answer:

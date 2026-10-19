@@ -52,13 +52,15 @@ portal makes a link to the recording of one programme of its guide, as it makes 
 live link. So a moment opens the recording of the guide's programme on then (one the guide does
 not mark as not recorded; none: the toast says so and what plays goes on), whose link is asked
 in the link lanes' side lane (`LinkLanes.request_archive`) while the channel plays on; it opens
-as any archive address does once it comes, sought to the moment, and is never probed (a probe
-could spend its play token, and a portal's limit counts as one stream). A portal that answers without a
-link has no recording: the toast says so (twice, for moments apart, is learned as "nothing
-there" above). A link that does not come otherwise (an expired session's "Authorization
-failed.", say), or a recording that does not open, has its link made again once after its
-portal signs in again (`item_provider.sign_in_again`, as a channel's link after a failure);
-then the toast says why and the channel plays live. A seek within the recording moves within
+as any archive address does once it comes, sought to the moment, and is never probed (a
+probe could spend its play token, and a portal's limit counts as one stream). A portal that
+answers there is nothing to play has no recording: the toast says so (twice, for moments
+apart, is learned as "nothing there" above). Its other errors (its limit, say), a link that
+does not come otherwise (an expired session's "Authorization failed.") and a recording that
+does not open have the link asked once more, as a channel's link after a failure
+(`item_provider.sign_in_again`): another provider's portal signs in again first; the browsed
+provider's does not, so its retry is a fresh link from the same session. Then the toast says
+the archive didn't answer and the channel plays live. A seek within the recording moves within
 it; one past its end, and its end, open the next programme's (live, quietly, when that one is
 not recorded yet: the programme on now).
 """
@@ -466,14 +468,15 @@ class CatchUp(QObject):
             self._learn_failure(ask)
             self._failed(ask, NOT_RECORDED_TEXT)
         elif not ask.fresh:
-            self._link_again(ask)  # e.g. "Authorization failed.": its session expired
+            self._link_again(ask)  # e.g. "Authorization failed.": its session may have expired
         else:
             self._failed(ask, NO_ANSWER_TEXT)
 
     def _link_again(self, ask: _Ask) -> None:
         """The recording's link did not come, or did not open: its portal's session may have
-        expired. It signs in again (a channel's link after a failure does so too) and the link
-        is asked once more."""
+        expired. The link is asked once more as a channel's is after a failure: another
+        provider's portal signs in again first; the browsed provider's does not (its retry is
+        a fresh link from the same session)."""
         logger.info("Asking for the recording of %s again", ask.target.title)
         item_provider.sign_in_again(self.catalog, ask.target.item)
         self._generation += 1
