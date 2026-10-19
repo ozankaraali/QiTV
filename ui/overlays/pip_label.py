@@ -12,8 +12,9 @@ too small for that leaves the swap button out (the pill swaps too), then gives t
 less room, down to the drawn size and its spacing.
 
 The state is what the pill is for, so it is never cut: the channel name gives way first, down
-to nothing, then the state's font shrinks. Only "Connecting…" may still be cut once its font
-shrank a little (a mini player's 90 px PiP); LIVE and the time behind live always show whole,
+to nothing, then the state's font shrinks (LIVE and the time behind live to 9 px, then their
+letters get narrower before they shrink further). Only "Connecting…" may still be cut once its
+font shrank a little (a mini player's 90 px PiP); LIVE and the time behind live always show whole,
 and so does REC, which a channel that records shows instead (2.3), after a red dot as LIVE.
 """
 
@@ -60,6 +61,10 @@ _BEHIND = re.compile(r"^[−-]\d+(:\d\d){1,2}$")  # "−MM:SS" or "−H:MM:SS"
 _FALLBACK_HOST_WIDTH = 1280
 _SHRINK = 0.8  # the smallest state font a cut state gets, of its normal size
 _SMALLEST_STATE_PX = 6  # LIVE and the time behind live shrink down to this, never cut
+# Before LIVE (or the time behind live) shrinks under this, its letters get narrower: a longer
+# language's word ("DIRECTO") in a mini player's 90 px PiP. (font stretch %, letter spacing %)
+_NARROW_AT_PX = 9
+_NARROWER = ((90, 96), (80, 92))
 _TYPICAL_BEHIND = "−00:00"  # the pill keeps room for this, or LIVE, before the buttons grow
 
 
@@ -264,10 +269,21 @@ class PipLabel(Overlay):
         whole = self._state in DOTTED or bool(_BEHIND.match(self._state))
         normal = state_font.pixelSize()
         smallest = _SMALLEST_STATE_PX if whole else max(_SMALLEST_STATE_PX, round(normal * _SHRINK))
-        while self._state_width(state_font, dot_gap) > state_room and (
-            state_font.pixelSize() > smallest
-        ):
-            state_font.setPixelSize(state_font.pixelSize() - 1)
+
+        def shrink(floor: int) -> None:
+            while self._state_width(state_font, dot_gap) > state_room and (
+                state_font.pixelSize() > floor
+            ):
+                state_font.setPixelSize(state_font.pixelSize() - 1)
+
+        if whole:  # down to _NARROW_AT_PX, then narrower letters, then smaller again
+            shrink(max(smallest, _NARROW_AT_PX))
+            for stretch, spacing in _NARROWER:
+                if self._state_width(state_font, dot_gap) <= state_room:
+                    break
+                state_font.setStretch(stretch)
+                state_font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, spacing)
+        shrink(smallest)
         states = QFontMetrics(state_font)
         dot = max(6, round(states.height() * 0.42))
         state = translate(self._state)

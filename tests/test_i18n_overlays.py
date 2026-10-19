@@ -1,6 +1,7 @@
 """The painted overlays in Turkish (i18n/tr.json) and French (i18n/fr.json) at the default
 window size: their texts are in the language, and QiTV's own words are never cut short (the
-player controls' layout checks run in each language too)."""
+player controls' layout checks run in each language too). The Stay live indicator is checked in
+every language."""
 
 from datetime import datetime, timedelta, timezone
 import os
@@ -181,6 +182,52 @@ class TurkishCardsTests(unittest.TestCase):
         )
         self.assertEqual(i18n.number(1234567), "1.234.567")
         self.assertEqual(i18n.decimal("1.25"), "1,25")
+
+
+class StayLiveIndicatorLanguagesTests(unittest.TestCase):
+    """The Stay live indicator's busiest states in every language, at 1280\u00d7720 and 960 wide:
+    its text is never cut; with less room it leaves out "adjusted", then its name (at 1280 it
+    keeps its name)."""
+
+    LANGUAGES = ("en", "tr", "de", "es", "fr")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_the_busiest_states_read_whole_in_every_language(self):
+        state = test_transport.SmallWidthLayoutTests.state
+        auto = dict(target=10.0, auto=True, adjusted=True)
+        states = {
+            "catching up": state("live", 12.5, 1.05),
+            "Auto adjusted, catching up": dict(state("live", 12.5, 1.05), **auto),
+            "Auto adjusted, adding buffer": dict(state("live", 12.5, 0.95), **auto, nudge=0.95),
+        }
+        cut = Elisions(self)
+        self.addCleanup(i18n.set_language, "en")
+        for language in self.LANGUAGES:
+            self.assertEqual(i18n.set_language(language), language)
+            name, adjusted = i18n.tr("Stay live"), i18n.tr("adjusted")
+            for width, height in ((1280, 720), (960, 540)):
+                t = test_transport.Transport(idle_ms=3000)
+                self.addCleanup(t.close)
+                t.setGeometry(0, 0, width, height)
+                t.set_pip_state(True, False)
+                t.show_timeshift("Liman Haber", "")
+                for label, timeline in states.items():
+                    with self.subTest(language=language, width=width, state=label):
+                        t.update_timeline(timeline, [])
+                        text = t.indicator_text()
+                        rate = i18n.decimal(f"{timeline['rate']:g}")
+                        self.assertTrue(text.endswith(f"{rate}\u00d7"), text)
+                        self.assertIn(i18n.decimal("12.5"), text)
+                        if adjusted in text:  # left out before the name
+                            self.assertTrue(text.startswith(f"{name} \u25cf "), text)
+                        if width == 1280:
+                            self.assertTrue(text.startswith(f"{name} \u25cf "), text)
+                        cut.cut.clear()
+                        t.grab()
+                        self.assertEqual(cut.cut, [])
 
 
 NNBSP = "\u202f"  # French digit grouping (Qt's)

@@ -27,8 +27,9 @@ time-shifted channel at its live edge has ◀10 beside play; on live TV the chan
 logo) shows its info, and a star after the name adds or removes it from the favorites. Each
 names its key when hovered. A movie or an episode played from the Library has "‹ Library" at the
 left of the right-hand buttons: back to where it came from, as Esc.
-At a small width the Stay live indicator's text is shortened, or the indicator left out, so it
-never runs under the play button.
+At a small width (or in a longer language) the Stay live indicator first leaves out "adjusted",
+then its name (the LIVE badge beside it says live), then its text is cut short, or the
+indicator left out, so it never runs under the play button.
 On live TV a record button (a red dot in a ring, R) follows the star (2.3), a control of the
 channel's as the star is: it records a time-shifted channel from where it plays, and while it
 records it is lit and a "● REC 01:23" chip after it counts the time; a channel played directly
@@ -688,8 +689,16 @@ class Transport(Overlay):
         return (fmt_duration(shown), "-" + fmt_duration(max(0, self._length - shown)))
 
     def indicator_text(self) -> str:
-        head, tail = self._indicator_parts()
-        return f"{head} ● {tail}" if tail else ""
+        """The Stay live indicator as it reads at this size ("" when it is not shown): with
+        less room without "adjusted", then without its name."""
+        box = self._layout().get("indicator") if self._timeshift else None
+        if box is None:
+            head, tail = self._indicator_parts()
+        else:
+            head, tail, _ = self._indicator_fit(Units(self.width()), box.width() + 0.01)
+        if not tail:
+            return ""
+        return f"{head} ● {tail}" if head else f"● {tail}"
 
     def mask_region(self) -> QRegion:
         top_h = round(self.height() * TOP_FRACTION)
@@ -749,33 +758,71 @@ class Transport(Overlay):
         return then.astimezone()
 
     def _indicator_parts(self) -> tuple[str, str]:
+        """The whole indicator: its name and its text."""
+        variants = self._indicator_variants()
+        return variants[0] if variants else ("", "")
+
+    def _indicator_variants(self) -> list[tuple[str, str]]:
+        """The indicator's (name, text), the whole first, then shorter ones for less room:
+        without "adjusted", then without the name (the LIVE badge beside it says live)."""
         if self._edge_lag is None:
-            return ("", "")
+            return []
         # The mode that keeps a channel near its live point.
         head = tr("Stay live")  # i18n: the latency indicator's name on the player bar; short
         if self._stalled:
-            return (head, translate(RECONNECTING if self._reconnecting else WAITING))
+            tail = translate(RECONNECTING if self._reconnecting else WAITING)
+            return [(head, tail), ("", tail)]
         seconds = i18n.decimal(f"{self._edge_lag:g}")
+        adjusted = ""
         if self._auto is not None:
             # i18n: Stay live indicator (Auto latency): how far behind live it plays; s = seconds
-            parts = [tr("≈ {seconds} s behind", seconds=seconds)]
+            lag = tr("≈ {seconds} s behind", seconds=seconds)
             if self._auto:
                 # i18n: the Stay live indicator: Auto latency raised this channel's delay
-                parts.append(tr("adjusted"))
+                adjusted = tr("adjusted")
         else:
             # i18n: Stay live indicator: how far behind the channel's source it plays; s = seconds
-            parts = [tr("≈ {seconds} s behind source", seconds=seconds)]
+            lag = tr("≈ {seconds} s behind source", seconds=seconds)
+        rate = ""
         if self._catching_up:
-            rate = i18n.decimal(f"{self._rate:g}")
+            speed = i18n.decimal(f"{self._rate:g}")
             if self._rate < 1.0:
                 # i18n: the Stay live indicator: it plays slower to build a buffer ("0.95×")
-                parts.append(tr("adding buffer {rate}×", rate=rate))
+                rate = tr("adding buffer {rate}×", rate=speed)
             elif self._rate > 1.0:
                 # i18n: the Stay live indicator: it plays faster to get nearer live ("1.05×")
-                parts.append(tr("catching up {rate}×", rate=rate))
+                rate = tr("catching up {rate}×", rate=speed)
             else:
-                parts.append(tr("catching up"))  # i18n: the Stay live indicator
-        return (head, " · ".join(parts))
+                rate = tr("catching up")  # i18n: the Stay live indicator
+        whole = " · ".join(part for part in (lag, adjusted, rate) if part)
+        short = " · ".join(part for part in (lag, rate) if part)
+        variants = [(head, whole)]
+        if short != whole:
+            variants.append((head, short))
+        variants.append(("", short))
+        return variants
+
+    def _indicator_fit(self, un: Units, room: float) -> tuple[str, str, float]:
+        """The indicator's (name, text) for `room` and its width: the first variant that fits
+        whole, else the shortest one painted elided in the room, else none (width 0)."""
+        variants = self._indicator_variants()
+        if not variants:
+            return ("", "", 0.0)
+        fm = QFontMetricsF(self._indicator_font(un))
+        for head, tail in variants:
+            width = self._indicator_bare(un, fm, head) + fm.horizontalAdvance(tail)
+            if width <= room:
+                return (head, tail, width)
+        head, tail = variants[-1]
+        if room >= self._indicator_bare(un, fm, head) + fm.horizontalAdvance("…"):
+            return (head, tail, room)
+        return (head, tail, 0.0)
+
+    @staticmethod
+    def _indicator_bare(un: Units, fm: QFontMetricsF, head: str) -> float:
+        """The indicator's width without its text: the pads, the name and the dot."""
+        named = fm.horizontalAdvance(head) + un.px(0.6) if head else 0.0
+        return 2 * un.px(1.1) + named + un.px(0.8) + un.px(0.6)
 
     # ---- geometry -----------------------------------------------------------------------------
 
@@ -893,16 +940,10 @@ class Transport(Overlay):
             pill_w = max(float(un.px(5.2)), badge + un.px(1.6))
             rects["live"] = QRectF(x - pill_w - un.px(0.4), cy - un.px(1.1), pill_w, un.px(2.2))
             if self._timeshift and self._edge_lag is not None:
-                head, tail = self._indicator_parts()
-                fm = QFontMetricsF(self._indicator_font(un))
-                bare = 2 * un.px(1.1) + fm.horizontalAdvance(head) + 2 * un.px(0.6) + un.px(0.8)
-                width = bare + fm.horizontalAdvance(tail)
-                pill = rects["live"]
-                right_edge = pill.x() - un.px(0.8)
-                # A narrow transport shortens the tail (painted elided), else leaves it out.
-                room = right_edge - left_end
-                if width > room:
-                    width = room if room >= bare + fm.horizontalAdvance("…") else 0.0
+                right_edge = rects["live"].x() - un.px(0.8)
+                # Less room drops "adjusted", then the name, then cuts the text (painted
+                # elided), else leaves the indicator out.
+                width = self._indicator_fit(un, right_edge - left_end)[2]
                 if width > 0:
                     rects["indicator"] = QRectF(
                         right_edge - width, cy - un.px(1.1), width, un.px(2.2)
@@ -1300,13 +1341,14 @@ class Transport(Overlay):
         if box is None:
             return
         fill_round(p, box, qcolor(PALETTE.panel), box.height() / 2)
-        head, tail = self._indicator_parts()
+        head, tail, _ = self._indicator_fit(un, box.width() + 0.01)  # as laid out
         p.setFont(self._indicator_font(un))
         p.setPen(text)
         fm = QFontMetricsF(p.font())  # as the layout measured it: whole pixels cut the tail
         x = box.x() + un.px(1.1)
-        p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, head)
-        x += fm.horizontalAdvance(head) + un.px(0.6)
+        if head:
+            p.drawText(QRectF(x, box.y(), box.right() - x, box.height()), Qt.AlignVCenter, head)
+            x += fm.horizontalAdvance(head) + un.px(0.6)
         d = un.px(0.8)
         # Green only at 1x: amber while stay-live steers the rate (either way) or reconnecting.
         dot = qcolor(PALETTE.warn if self._catching_up or self._stalled else PALETTE.ok)
