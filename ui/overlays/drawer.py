@@ -42,6 +42,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QFontMetricsF,
     QLinearGradient,
     QMouseEvent,
     QPainter,
@@ -92,6 +93,8 @@ FADE_U = 7.0
 PAD_TOP_U = 2.4
 PAD_SIDE_U = 1.6
 CRUMB_H_U = 2.2
+FOUND_GENRE_H_U = 5.0  # a genre the find found: its name, then its provider and count
+FOUND_CHANNEL_SCALE = 0.7  # its channels: a long name (and a 5-digit number) fits whole
 FILTER_H_U = 3.4  # the ⌕ Find box above the right column (the left column's room stays empty)
 FIND_X_U = 2.2  # its ✕, this wide at its right end
 GEAR_U = 1.9  # the header row's buttons (Search, refresh, Settings) at its right end, this wide
@@ -302,7 +305,7 @@ class _NodeModel(ChannelRowsModel):
         super().__init__(logos, now_provider, parent)
         self._nodes: Sequence[NavNode] = []
         self._labels = False  # a found genre names its provider (two providers or more)
-        self.channel_rows: set[int] = set()  # the find's channel rows (_FoundRowDelegate)
+        self.found_kinds: list[str] = []  # each of the find's rows: _FoundRowDelegate's kind
 
     def set_found(self, nodes: list[NavNode], labels: bool) -> None:
         """The find's rows: headings, genres, channels (each its provider's tag when
@@ -310,7 +313,7 @@ class _NodeModel(ChannelRowsModel):
         self._nodes = list(nodes)
         self._labels = labels
         rows = [n.payload if n.layer == "item" else {"name": n.title} for n in nodes]
-        self.channel_rows = {row for row, n in enumerate(nodes) if n.layer == "item"}
+        self.found_kinds = [_found_kind(n) for n in nodes]
         numbers = [
             (ZapContext.number_of(n.payload) or None) if n.layer == "item" else None for n in nodes
         ]
@@ -362,33 +365,55 @@ def _genre_label(genre: FoundGenre, labels: bool) -> str | None:
     return " · ".join(parts) or None
 
 
-class _FoundRowDelegate(QStyledItemDelegate):
-    """The find's rows: channels as the channel column paints them, the rest as titles.
+def _found_kind(node: NavNode) -> str:
+    if node.layer == "item":
+        return "channel"
+    return "genre" if isinstance(node.payload, FoundGenre) else "title"
 
-    The rows are of two heights, so the list asks each row's: one per kind and width is kept.
+
+class _FoundRowDelegate(QStyledItemDelegate):
+    """The find's rows: channels as the channel column paints them (the provider's name on
+    their second line), genres on two lines, the rest as titles.
+
+    The rows are of three heights, so the list asks each row's: one per kind and width is kept.
     """
 
-    def __init__(self, simple: QStyledItemDelegate, channel: QStyledItemDelegate, parent) -> None:
+    def __init__(
+        self,
+        title: QStyledItemDelegate,
+        channel: QStyledItemDelegate,
+        genre: QStyledItemDelegate,
+        parent,
+    ) -> None:
         super().__init__(parent)
-        self._simple = simple
-        self._channel = channel
-        self._sizes: dict[tuple[bool, int], QSize] = {}
+        self._delegates = {"title": title, "channel": channel, "genre": genre}
+        self._sizes: dict[tuple[str, int], QSize] = {}
 
-    def _for(self, index) -> QStyledItemDelegate:
-        model = index.model()
-        channel = index.row() in getattr(model, "channel_rows", ())
-        return self._channel if channel else self._simple
+    def _kind(self, index) -> str:
+        kinds = getattr(index.model(), "found_kinds", ())
+        row = index.row()
+        return kinds[row] if 0 <= row < len(kinds) else "title"
 
     def sizeHint(self, option, index) -> QSize:
-        delegate = self._for(index)
-        key = (delegate is self._channel, getattr(option.widget, "units_width", 0))
+        kind = self._kind(index)
+        key = (kind, getattr(option.widget, "units_width", 0))
         size = self._sizes.get(key)
         if size is None:
-            size = self._sizes[key] = delegate.sizeHint(option, index)
+            size = self._sizes[key] = self._delegates[kind].sizeHint(option, index)
         return size
 
     def paint(self, p: QPainter, option, index) -> None:
-        self._for(index).paint(p, option, index)
+        self._delegates[self._kind(index)].paint(p, option, index)
+
+
+def _paint_highlight(p: QPainter, rect: QRectF, u: float, focused: bool) -> None:
+    """A row's highlight: the accent, stronger in the focused column."""
+    box = rect.adjusted(0.3 * u, 0.2 * u, -0.3 * u, -0.2 * u)
+    fill_round(p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA if focused else 0.1), 1.0 * u)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(qcolor(PALETTE.accent, 0.7 if focused else 0.35))
+    p.setBrush(Qt.NoBrush)
+    p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 1.0 * u, 1.0 * u)
 
 
 class _SimpleRowDelegate(QStyledItemDelegate):
@@ -433,14 +458,7 @@ class _SimpleRowDelegate(QStyledItemDelegate):
             p.restore()
             return
         if selected:
-            box = rect.adjusted(0.3 * u, 0.2 * u, -0.3 * u, -0.2 * u)
-            fill_round(
-                p, box, qcolor(PALETTE.accent, FOCUS_FILL_ALPHA if focused else 0.1), 1.0 * u
-            )
-            p.setRenderHint(QPainter.Antialiasing, True)
-            p.setPen(qcolor(PALETTE.accent, 0.7 if focused else 0.35))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 1.0 * u, 1.0 * u)
+            _paint_highlight(p, rect, u, focused)
         x = rect.x() + 0.9 * u + 0.3 * u
         right = rect.right() - 0.9 * u - 0.3 * u
         title = str(index.data(Qt.DisplayRole) or "")
@@ -477,6 +495,44 @@ class _SimpleRowDelegate(QStyledItemDelegate):
         p.restore()
 
 
+class _FoundGenreDelegate(_SimpleRowDelegate):
+    """A genre the find found: its name across the row, then, smaller and grey, its provider
+    and how many channels it has (CountRole), so that genres of one name at several providers,
+    or with long names alike at their start, read apart."""
+
+    def sizeHint(self, option, index) -> QSize:
+        return QSize(0, self._units(option.widget).px(FOUND_GENRE_H_U))
+
+    def paint(self, p: QPainter, option, index) -> None:
+        units = self._units(option.widget)
+        u = units.u
+        rect = QRectF(option.rect)
+        p.save()
+        if option.state & QStyle.State_Selected:
+            _paint_highlight(p, rect, u, column_focused(option.widget))
+        left, width = rect.x() + 1.2 * u, max(0.0, rect.width() - 2.4 * u)
+        title_font, label_font = units.font(1.35), units.font(1.1)
+        title_h = QFontMetricsF(title_font).height()
+        label_h = QFontMetricsF(label_font).height()
+        label = str(index.data(CountRole) or "")
+        y = rect.y() + (rect.height() - title_h - (label_h if label else 0)) / 2
+        p.setFont(title_font)
+        p.setPen(qcolor(PALETTE.text))
+        title = str(index.data(Qt.DisplayRole) or "")
+        p.drawText(
+            QRectF(left, y, width, title_h), Qt.AlignLeft | Qt.AlignVCenter, elided(p, title, width)
+        )
+        if label:
+            p.setFont(label_font)
+            p.setPen(qcolor(PALETTE.text, 0.5))
+            p.drawText(
+                QRectF(left, y + title_h, width, label_h),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                elided(p, label, width),
+            )
+        p.restore()
+
+
 class _RowIndex:
     """Each node's row in a column; a long list of channels makes its nodes on demand."""
 
@@ -509,7 +565,10 @@ class _Column:
         self.channel_delegate = ChannelRowDelegate(0.9, self.view)
         self.simple_delegate = _SimpleRowDelegate(self.view)
         self.found_delegate = _FoundRowDelegate(
-            self.simple_delegate, self.channel_delegate, self.view
+            self.simple_delegate,
+            ChannelRowDelegate(FOUND_CHANNEL_SCALE, self.view, provider_below=True),
+            _FoundGenreDelegate(self.view),
+            self.view,
         )
         self.view.setItemDelegate(self.simple_delegate)
         self.view.rowClicked.connect(lambda row: drawer._on_row_clicked(side, row))
@@ -628,7 +687,8 @@ class Drawer(Overlay):
 
     def page(self, delta: int) -> None:
         col = self._columns[self.focus_side]
-        row_h = col.view.sizeHintForRow(0)
+        # (the find's rows are of several heights: a page of rows like the highlighted one)
+        row_h = col.view.sizeHintForRow(col.rows.get(col.current, 0))
         rows = max(1, col.view.height() // row_h - 1) if row_h > 0 else 8
         self.move_by(delta * rows)
 

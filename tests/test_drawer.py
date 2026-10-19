@@ -29,7 +29,7 @@ from tests.test_navigation import FakeCatalog
 from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.keymap import key_hint
 from ui.overlay_host import OverlayHost
-from ui.overlays import drawer as drawer_module
+from ui.overlays import channel_rows as channel_rows_module, drawer as drawer_module
 from ui.overlays.channel_rows import ChannelRowsModel, NumberRole
 from ui.overlays.drawer import (
     EMPTY_TEXT,
@@ -1163,17 +1163,101 @@ class FindTests(unittest.TestCase):
         self.assertEqual(self.library_finds, ["spor"])
 
     def drawn(self):
-        """What the drawer's rows draw on a repaint, as (text, what is shown of it)."""
-        texts, elided = [], drawer_module.elided
+        """What the drawer's rows draw on a repaint, as (text, what is shown of it): titles,
+        genres and channels alike."""
+        texts = []
 
-        def spy(p, text, width):
-            shown = elided(p, text, width)
-            texts.append((text, shown))
-            return shown
+        def spy_on(module):
+            elided = module.elided
 
-        with mock.patch.object(drawer_module, "elided", spy):
+            def spy(p, text, width):
+                shown = elided(p, text, width)
+                texts.append((text, shown))
+                return shown
+
+            return mock.patch.object(module, "elided", spy)
+
+        with spy_on(drawer_module), spy_on(channel_rows_module):
             self.drawer.grab()
         return texts
+
+    def long_names(self):
+        """Two providers with long names alike at their start, and 5-digit numbers."""
+        caches = []
+        for provider, first, genres in (
+            (
+                "Home",
+                10481,
+                {
+                    "TR| SPORTS CHANNEL GOLD": ["TR| SPORTS CHANNEL GOLD 1"],
+                    "TR| SPORTS CHANNEL VIP": ["TR| SPORTS CHANNEL VIP 1"],
+                    "UK | NATURE & WILDLIFE": [
+                        "UK: NATURE WILD HEVC 4K",
+                        "UK: NATURE WILD HEVC HD",
+                    ],
+                },
+            ),
+            (
+                "Backup",
+                20915,
+                {
+                    "TR| SPORTS CHANNEL LOCAL": ["TR| SPORTS CHANNEL LOCAL 1"],
+                    "UK | DOCUMENTARIES": ["UK: NATURE WILD HEVC FHD"],
+                },
+            ),
+        ):
+            content = provider_content(genres)
+            for at, item in enumerate(content["contents"]):
+                item["number"] = str(first + at)
+            caches.append((provider, {"itv": content}))
+        self.drawer.set_finder(FindSession(FakeProviders(caches), ImmediateRunner()))
+
+    def assertWhole(self, texts, names):
+        for name in names:
+            self.assertIn((name, name), texts, f"{name} is cut")
+
+    def test_long_genre_names_read_whole_their_provider_and_count_below(self):
+        self.long_names()
+        genres = ["TR| SPORTS CHANNEL GOLD", "TR| SPORTS CHANNEL VIP", "TR| SPORTS CHANNEL LOCAL"]
+        for width, height in ((1280, 720), (640, 360)):  # the default, the smallest list
+            with self.subTest(size=(width, height)):
+                self.host.resize(width, height)
+                self.drawer.open_drawer()
+                self.type("sports channel")
+                self.assertEqual([t for k, t in self.rows() if k == "found_genre"], genres)
+                drawn = self.drawn()
+                self.assertWhole(drawn, genres)
+                self.assertWhole(drawn, ["Home · 1 channel", "Backup · 1 channel"])
+
+    def test_long_channel_names_read_whole_their_provider_below_with_what_is_on(self):
+        self.long_names()
+        self.right.model._now_provider = lambda item: (
+            ("Deep Ocean Giants", 0.4) if item["name"].endswith("4K") else None
+        )
+        self.type("nature wild")
+        names = ["UK: NATURE WILD HEVC 4K", "UK: NATURE WILD HEVC HD", "UK: NATURE WILD HEVC FHD"]
+        self.assertEqual([t for k, t in self.rows() if k == "item"], names)
+        self.assertEqual(self.data("UK: NATURE WILD HEVC FHD", NumberRole), "20916")
+        drawn = self.drawn()
+        self.assertWhole(drawn, names)
+        # The provider starts the second line (no chip beside the name): what is on follows.
+        self.assertWhole(drawn, ["Home · Deep Ocean Giants", "Home", "Backup"])
+        self.assertEqual(self.rows()[-1], ("found_library", FIND_LIBRARY_TEXT))
+
+    def test_paging_through_rows_of_several_heights_keeps_the_highlight_in_sight(self):
+        self.type("spor")  # 2 genres, then 201 channels
+        view = self.right.view
+        seen = []
+        for _ in range(3):
+            self.drawer.page(1)
+            row = self.right.rows[self.drawer.highlighted()]
+            rect = view.visualRect(view.model().index(row))
+            self.assertTrue(view.viewport().rect().contains(rect), row)
+            seen.append(row)
+        self.assertEqual(seen, sorted(set(seen)))  # onward, a page at a time
+        self.assertGreater(seen[0], 3)
+        self.drawer.page(-1)
+        self.assertLess(self.right.rows[self.drawer.highlighted()], seen[-1])
 
     def test_the_last_row_is_whole_at_the_default_size_and_in_a_small_window(self):
         # Whatever the system's font (Linux CI's are wider): the words are in the box above.

@@ -251,7 +251,7 @@ class ProviderTagTests(unittest.TestCase):
         self.assertGreaterEqual(short_w, QFontMetricsF(name_font).horizontalAdvance("BBC"))
         self.assertAlmostEqual(dx - short_w, 0.8 * units.u)  # a gap, not a column
 
-    def render(self, rows, show_provider):
+    def render(self, rows, show_provider, **delegate):
         view = ChannelListView()
         view.units_width = 1000
         model = ChannelRowsModel(None, now_provider)
@@ -262,10 +262,33 @@ class ProviderTagTests(unittest.TestCase):
         image = QImage(600, 66, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(QColor("black"))
         painter = QPainter(image)
-        ChannelRowDelegate(1.0, view).paint(painter, option, model.index(0))
+        ChannelRowDelegate(1.0, view, **delegate).paint(painter, option, model.index(0))
         painter.end()
         view.deleteLater()
         return image
+
+    def drawn(self, rows, **delegate):
+        """The texts a row draws (through `elided`): its name, and its second line."""
+        from unittest import mock
+
+        from ui.overlays import channel_rows
+
+        texts, elided = [], channel_rows.elided
+
+        def spy(p, text, width):
+            texts.append(text)
+            return elided(p, text, width)
+
+        with mock.patch.object(channel_rows, "elided", spy):
+            self.render(rows, True, **delegate)
+        return texts
+
+    def test_the_provider_can_start_the_second_line_instead_of_a_chip(self):
+        # The drawer's find: the name keeps the row's width; "provider · what is on" below.
+        self.assertEqual(self.drawn(tagged()), ["Chan 0", "Show Chan 0"])  # a chip: no elided
+        below = self.drawn(tagged(), provider_below=True)
+        self.assertEqual(below, ["Chan 0", "Harbor IPTV · Show Chan 0"])
+        self.assertEqual(self.drawn(tagged(2)[1:], provider_below=True), ["Chan 1", "Harbor IPTV"])
 
     def test_a_tagged_row_paints_the_tag_and_an_untagged_one_does_not(self):
         plain = self.render(tagged(), False)

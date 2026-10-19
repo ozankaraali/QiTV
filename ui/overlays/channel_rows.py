@@ -216,9 +216,13 @@ def column_focused(widget) -> bool:
 
 
 class ChannelRowDelegate(QStyledItemDelegate):
-    def __init__(self, scale: float = 1.0, parent=None) -> None:
+    def __init__(self, scale: float = 1.0, parent=None, *, provider_below: bool = False) -> None:
+        """`provider_below`: the provider's name starts the second line ("Harbor IPTV · what
+        is on") instead of following the channel's in a chip, which leaves the name the row's
+        whole width (the drawer's find, where long names from several providers must read)."""
         super().__init__(parent)
         self._scale = scale
+        self._provider_below = provider_below
 
     def _units(self, widget) -> Units:
         width = getattr(widget, "units_width", 100) or 100
@@ -271,6 +275,9 @@ class ChannelRowDelegate(QStyledItemDelegate):
         # text column
         width = max(0.0, right - x)
         now = str(index.data(NowRole) or "")
+        tag = str(index.data(ProviderRole) or "")
+        if self._provider_below and tag:
+            now, tag = (f"{tag} · {now}" if now else tag), ""
         progress = index.data(ProgressRole)
         progress = -1.0 if progress is None else float(progress)
         name_h, now_h, bar_h, gap = 2.1 * u, 1.7 * u, 0.3 * u, 0.4 * u
@@ -282,7 +289,6 @@ class ChannelRowDelegate(QStyledItemDelegate):
         name_font = units.font(1.6, QFont.Weight.DemiBold)
         p.setFont(name_font)
         p.setPen(qcolor(PALETTE.text))
-        tag = str(index.data(ProviderRole) or "")
         if tag:
             # The provider's name follows the channel's, in a chip; the name elides first.
             chip_font = tag_font(units)
