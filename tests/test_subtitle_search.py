@@ -15,6 +15,7 @@ from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QGuiApplication, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from job_fixtures import ImmediateRunner
 from opensubtitles_fixtures import (
     API,
     LINK,
@@ -31,7 +32,6 @@ from test_track_panel import FakePlayer
 from test_tv_controller import ControllerTestCase
 
 from services import _build_keys
-from services.jobs import ImmediateRunner
 from services.next_episode import play_context
 from services.opensubtitles import CONSUMERS_URL, Problem, SubtitleFile
 from services.sound_sync import SoundSync
