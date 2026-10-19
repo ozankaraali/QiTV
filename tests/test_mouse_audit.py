@@ -16,7 +16,7 @@ Screens and their controls:
   and "reset";
 - "subtitles": the Subtitles panel its button opens, alike, and its "Load a file…";
 - "subtitle_search": the OpenSubtitles search its "Search OpenSubtitles…" opens: the key page's
-  "field", "clear" (✕), "get_key", "paste" and "save", the search's "field", "clear" and
+  "field", "clear" (✕), "get_key", "paste" and "save", the search's "field", "clear", "paste" and
   "search", its "languages" and "files" rows, and "close" (×);
 - "pip_label": the small picture's "swap", "speaker" and "close";
 - "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
@@ -270,7 +270,7 @@ def _subtitle_search(host: QWidget) -> set[str]:
     files = [SubtitleFile(1, "en", "Lighthouse.2019"), SubtitleFile(2, "de", "Lighthouse.2019")]
     rows = [LanguageRow("en", "English", 1), LanguageRow("de", "German", 1)]
     page.set_results(rows, {"en": files[:1], "de": files[1:]}, "2 subtitles in 2 languages")
-    take("field", "clear", "search", "close")
+    take("field", "clear", "paste", "search", "close")
     for name in ("languages", "files"):
         if not page.row_rect(name, 0).isEmpty():
             found.add(name)

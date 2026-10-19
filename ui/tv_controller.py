@@ -473,6 +473,8 @@ class TVController(QObject):
         self._closed = True
         self._lanes.close()
         self._autoplay.close()
+        if self._online is not None:
+            self._online.shutdown()  # a sign-in ends, never holding up the quit
         self._tuning.stop()
         self._cancel_external()
         self._flow.shutdown()

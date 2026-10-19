@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import threading
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject
@@ -76,10 +77,11 @@ _PASS_ON = frozenset(
         Action.VOL_DOWN,
         Action.MEDIA_NEXT,
         Action.MEDIA_PREV,
-        Action.MINI_PLAYER,
-        Action.SEARCH,
     }
 )
+# Keys that leave the player's page (the Library's search, the mini player): the page closes
+# first, then they act; nothing stays hidden under it.
+_CLOSE_FIRST = frozenset({Action.SEARCH, Action.MINI_PLAYER})
 
 
 @dataclass
@@ -208,9 +210,19 @@ class OnlineSubtitles(QObject):
         """The keys while the page shows: its own, but those that still reach the player."""
         if not self.visible():
             return False
+        if action in _CLOSE_FIRST:
+            self.close()
+            return False
         if self._page.handle(action, payload):
             return True
         return action not in _PASS_ON
+
+    def shutdown(self) -> None:
+        """QiTV quits: a sign-in ends at OpenSubtitles, on a thread of its own that the quit
+        never waits for (best effort: the token ends by itself otherwise)."""
+        client, self._client = self._client, None
+        if client is not None and client.signed_in():
+            threading.Thread(target=client.logout, name="opensubtitles-logout", daemon=True).start()
 
     # ---- searching -------------------------------------------------------------------------------
 
@@ -253,21 +265,25 @@ class OnlineSubtitles(QObject):
             return
         self._generation += 1
         worker = SearchWorker(client, query, self._preferred())
-        self._setup.jobs.run_worker(worker, self._on_found, self._on_failed, self._generation)
+        self._setup.jobs.run_worker(
+            worker, self._on_found, self._on_search_failed, self._generation
+        )
 
     def _on_search(self, text: str) -> None:
         """Search (Enter in the field): what it says, as "Title (2019)" or "Series S01E02"."""
         self._search(parse_query(text))
 
-    def _on_save_key(self, key: str) -> None:
-        config = self._config
-        config.opensubtitles_api_key = key
-        save = getattr(config, "save_config", None)
+    def _save_config(self) -> None:
+        save = getattr(self._config, "save_config", None)
         if callable(save):
             try:
                 save()
             except Exception as e:  # it applies for this run anyway
-                logger.warning("Couldn't save the OpenSubtitles key: %s", safe_message(e))
+                logger.warning("Couldn't save the OpenSubtitles settings: %s", safe_message(e))
+
+    def _on_save_key(self, key: str) -> None:
+        self._config.opensubtitles_api_key = key
+        self._save_config()
         target = self._target
         if target is not None and _same(self._current(), target):
             self._search(self.query_for(target))
@@ -275,10 +291,12 @@ class OnlineSubtitles(QObject):
             self.close()
 
     def _on_found(self, generation: int, result: object) -> None:
-        if generation != self._generation or not self.visible():
-            return
+        if generation != self._generation:
+            return  # a newer search was asked for
         if isinstance(result, Problem):
             self._show_problem(result)
+            return
+        if not self.visible():
             return
         if not isinstance(result, SearchResult):
             return
@@ -297,14 +315,22 @@ class OnlineSubtitles(QObject):
         left = remaining_text(self._remaining)
         self._page.set_results(rows, files, f"{status} · {left}" if left else status)
 
-    def _on_failed(self, _context: object, message: str) -> None:
-        logger.info("An OpenSubtitles job failed: %s", message)
+    def _on_search_failed(self, generation: int, message: str) -> None:
+        logger.info("An OpenSubtitles search failed: %s", message)
+        if generation == self._generation:
+            self._show_problem(Problem("failed", FAILED_TEXT))
+
+    def _on_download_failed(self, _context: object, message: str) -> None:
+        logger.info("An OpenSubtitles download failed: %s", message)
         self._downloading = False
-        if self.visible():
-            self._page.set_status(FAILED_TEXT, "error")
+        self._show_problem(Problem("failed", FAILED_TEXT))
 
     def _show_problem(self, problem: Problem) -> None:
-        if problem.kind in (NO_KEY, BAD_KEY):
+        """On the page while it shows (a refused key brings the key page back), else in a
+        toast."""
+        if not self.visible():
+            self._toast(problem.text, "error", ERROR_MS)
+        elif problem.kind in (NO_KEY, BAD_KEY):
             key = str(getattr(self._config, "opensubtitles_api_key", "") or "")
             self._page.show_key_page(problem.text, key=key)
         else:
@@ -327,16 +353,15 @@ class OnlineSubtitles(QObject):
         self._downloading = True
         folder = self._setup.picks.folder
         worker = DownloadWorker(client, file, folder, saved=saved)
-        self._setup.jobs.run_worker(worker, self._on_downloaded, self._on_failed, (target, file))
+        self._setup.jobs.run_worker(
+            worker, self._on_downloaded, self._on_download_failed, (target, file)
+        )
 
     def _on_downloaded(self, context: tuple[Target, SubtitleFile], result: object) -> None:
         self._downloading = False
         target, file = context
         if isinstance(result, Problem):
-            if self.visible():
-                self._show_problem(result)
-            else:
-                self._toast(result.text, "error", ERROR_MS)
+            self._show_problem(result)
             return
         if not isinstance(result, Downloaded):
             return
@@ -361,6 +386,7 @@ class OnlineSubtitles(QObject):
             config = self._config
             config.opensubtitles_language = result.language or file.language
             config.opensubtitles_hearing_impaired = file.hearing_impaired
+            self._save_config()
         key = self._key_for(target)
         if key:
             pick = Pick(result.file_id, result.name, result.path, result.language)

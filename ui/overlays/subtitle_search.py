@@ -16,8 +16,9 @@ on a language shows its subtitles; a click on one (or Enter) downloads it.
 
 The keys reach it through the shell (the "subtitles" key context, ui/keymap.py): typed text
 and Ctrl/⌘+V go into the field, Backspace deletes, ↑/↓ move in a list (up from its top to
-the field), ←/→ go between the lists (and the key page's buttons), Enter chooses and Esc
-closes. 1 u = 1% of the overlay host's width.
+the field), ←/→ go between the lists (and the field and the buttons beside it: Paste and
+Search, or the key page's), Enter chooses and Esc closes. 1 u = 1% of the overlay host's
+width.
 """
 
 from __future__ import annotations
@@ -76,6 +77,7 @@ BUTTONS = {
     "search": ("Search", "Search", "Return"),
 }
 KEY_BUTTONS = ("get_key", "paste", "save")
+SEARCH_ROW = ("field", "paste", "search")  # the search's top row, left to right
 CLOSE_TIP = ("Close", "Esc")
 CLEAR_TIP = ("Clear", "Backspace")
 
@@ -335,7 +337,7 @@ class SubtitleSearchPage(Overlay):
                 self._focus = "save" if self._key else "get_key"
             elif delta < 0 and focus in KEY_BUTTONS:
                 self._focus = "field"
-        elif focus in ("field", "search"):
+        elif focus in SEARCH_ROW:
             if delta > 0:
                 self._focus = "files" if self.files_shown() else "field"
                 if self._focus == "files":
@@ -361,10 +363,9 @@ class SubtitleSearchPage(Overlay):
             if focus in KEY_BUTTONS:
                 index = KEY_BUTTONS.index(focus) + delta
                 self._focus = KEY_BUTTONS[max(0, min(len(KEY_BUTTONS) - 1, index))]
-        elif focus == "field" and delta > 0:
-            self._focus = "search"
-        elif focus == "search" and delta < 0:
-            self._focus = "field"
+        elif focus in SEARCH_ROW:
+            index = SEARCH_ROW.index(focus) + delta
+            self._focus = SEARCH_ROW[max(0, min(len(SEARCH_ROW) - 1, index))]
         elif focus == "languages" and delta > 0 and self.files_shown():
             self._focus = "files"
             self._set_file(self._file)
@@ -400,6 +401,8 @@ class SubtitleSearchPage(Overlay):
                 self.getKeyRequested.emit()
             elif name == "paste":
                 self.paste()
+        elif name == "paste":
+            self.paste()
         elif name in ("field", "search"):
             query = " ".join(self._query.split())
             if query and not self._busy:
@@ -512,8 +515,11 @@ class SubtitleSearchPage(Overlay):
                 x -= gap
         else:
             search_w = self._button_width(un, "search")
+            paste_w = self._button_width(un, "paste")
             rects.buttons["search"] = QRectF(inner.right() - search_w, y, search_w, button_h)
-            rects.entry = QRectF(inner.left(), y, inner.width() - search_w - gap, field_h)
+            paste_x = inner.right() - search_w - gap - paste_w
+            rects.buttons["paste"] = QRectF(paste_x, y, paste_w, button_h)
+            rects.entry = QRectF(inner.left(), y, max(0.0, paste_x - gap - inner.left()), field_h)
             y += max(field_h, button_h)
             status_h = float(un.px(_STATUS_U))
             rects.status = QRectF(inner.left(), y, inner.width(), status_h)
@@ -724,6 +730,7 @@ class SubtitleSearchPage(Overlay):
 
     def _paint_results(self, p, un, fonts, rects: _Rects, text, muted) -> None:
         self._paint_field(p, un, fonts, rects, self._query, QUERY_PLACEHOLDER)
+        self._paint_button(p, un, fonts, rects.buttons["paste"], "paste", accent=False)
         self._paint_button(p, un, fonts, rects.buttons["search"], "search", accent=True)
         if self._status:
             p.setFont(fonts["status"])
@@ -887,7 +894,7 @@ class SubtitleSearchPage(Overlay):
             self._focus = "field"
             self.update()
         elif name in BUTTONS:
-            self._focus = name if self._page == KEY_PAGE else self._focus
+            self._focus = name if self._page == KEY_PAGE or name == "paste" else self._focus
             self._press(name)
             self.update()
         elif name == "languages":

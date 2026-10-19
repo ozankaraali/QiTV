@@ -8,9 +8,10 @@ names a title. The picks live in a small file of their own, `subtitle_picks.json
 config; beyond `MAX_ENTRIES` the oldest go first.
 
 `SubtitlePicks` reads the file once and keeps the picks in memory; each change writes it on
-one background thread, the newest state only, through a temporary file swapped in. A missing,
-unreadable or corrupt file, or one of another version, counts as empty, and a bad entry is
-left out. Version 1: a later build adds only optional fields, so this one keeps reading it.
+one background thread, the newest state only, through a temporary file swapped in. A missing
+file counts as empty; a corrupt one, or one of another version, too, and it is kept as
+`subtitle_picks.json.bak` rather than written over. A bad entry is left out. Version 1: a
+later build adds only optional fields, so this one keeps reading it.
 """
 
 from __future__ import annotations
@@ -57,7 +58,8 @@ def pick_key(
     provider: str, item: Mapping[str, Any], *, episode: bool, context: Optional[dict] = None
 ) -> str:
     """A film's or an episode's key under `provider` ("" when the item names nothing): an
-    episode's is its series' with its season and episode numbers."""
+    episode's is its series' with its season and episode numbers; without both numbers, its
+    own (never one every episode of the series would share)."""
     if not episode:
         identity = _identity(item)
         return _hashed(provider, f"film:{identity}") if identity else ""
@@ -66,11 +68,12 @@ def pick_key(
     season = context.get("season") if isinstance(context.get("season"), dict) else None
     number, position = season_and_episode(season, dict(item))
     owner = _identity(series) if series else ""
-    if not owner:
-        owner = _identity(item)
-    if not owner:
+    if owner and number not in (None, "") and position not in (None, ""):
+        return _hashed(provider, f"episode:{owner}:{number}:{position}")
+    own = _identity(item)
+    if not own:
         return ""
-    return _hashed(provider, f"episode:{owner}:{number or ''}:{position or ''}")
+    return _hashed(provider, f"episode-item:{own}:{number or ''}:{position or ''}")
 
 
 def _hashed(provider: str, identity: str) -> str:
@@ -166,11 +169,13 @@ class SubtitlePicks:
         except FileNotFoundError:
             return {}
         except (OSError, json.JSONDecodeError) as e:
-            _LOG.info("Ignoring the saved subtitle picks: %s", safe_message(e))
+            _LOG.info("Setting the saved subtitle picks aside: %s", safe_message(e))
+            self._set_aside()
             return {}
         titles = data.get("titles") if isinstance(data, dict) else None
         if not isinstance(titles, dict) or data.get("version") != _VERSION:
-            _LOG.info("Ignoring the saved subtitle picks: not this version's")
+            _LOG.info("Setting the saved subtitle picks aside: not this version's")
+            self._set_aside()
             return {}
         entries = {}
         for key, value in titles.items():
@@ -178,6 +183,17 @@ class SubtitlePicks:
             if isinstance(key, str) and key and entry is not None:
                 entries[key] = entry
         return entries
+
+    def _set_aside(self) -> None:
+        """A file this build cannot read (another version's, or damaged) is kept as .bak,
+        never written over."""
+        path = self._path
+        assert path is not None
+        try:
+            os.replace(path, path + ".bak")
+        except OSError as e:
+            _LOG.info("Couldn't set the saved subtitle picks aside: %s", safe_message(e))
+            self._path = None  # this run keeps its picks in memory: the file stays as it is
 
     def _trim(self) -> None:
         excess = len(self._entries) - self._max

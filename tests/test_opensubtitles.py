@@ -4,6 +4,8 @@ sign-in, and every problem said in plain words. HTTP is mocked: no key, no netwo
 import logging
 import os
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -71,8 +73,10 @@ class TitleTests(unittest.TestCase):
             "TR: Harbour Lights (2019) 4K": ("Harbour Lights", 2019),
             "|EN| Night Ferry 1080p": ("Night Ferry", None),
             "[DE] Der Leuchtturm - 2015": ("Der Leuchtturm", 2015),
-            "EN - Quiet Valley HD": ("Quiet Valley", None),
+            "FR| Le Phare Blanc": ("Le Phare Blanc", None),
+            "TR: Lighthouse": ("Lighthouse", None),  # one word, long enough
             "4K-TR: Salt Road": ("Salt Road", None),
+            "(US) Salt Road": ("Salt Road", None),
             "Harbour Lights (2019) [MULTI-SUB]": ("Harbour Lights", 2019),
             "(500) Lanterns": ("(500) Lanterns", None),  # a number in brackets is the title's
             "Tower Clock 2049": ("Tower Clock 2049", None),  # not a year: the future's
@@ -81,6 +85,19 @@ class TitleTests(unittest.TestCase):
         for title, expected in cases.items():
             with self.subTest(title=title):
                 self.assertEqual(clean_title(title), expected)
+
+    def test_only_known_codes_in_their_forms_are_taken_for_a_providers_tag(self):
+        cases = {
+            "[REC] 2": "[REC] 2",  # brackets that are the title's own
+            "Harbour (Director's Cut)": "Harbour (Director's Cut)",
+            "IT: Up": "IT: Up",  # never down to a single short word
+            "NF: Salt Road": "NF: Salt Road",  # not a country or language code
+            "EN - Quiet Valley": "EN - Quiet Valley",  # not one of the forms
+            "CSI: Harbour Nights": "CSI: Harbour Nights",
+        }
+        for title, expected in cases.items():
+            with self.subTest(title=title):
+                self.assertEqual(clean_title(title), (expected, None))
 
     def test_a_files_name_loses_its_release_tags(self):
         self.assertEqual(
@@ -199,6 +216,11 @@ class FoundTests(unittest.TestCase):
         self.assertEqual(safe_file_name('a/b\\c:"d".srt', "1.srt"), "c d .srt")
         self.assertEqual(safe_file_name("Harbour", "1.srt"), "Harbour.srt")
         self.assertEqual(safe_file_name("", "1.srt"), "1.srt")
+        # Windows' device names never name a file.
+        self.assertEqual(safe_file_name("con.srt", "1.srt"), "_con.srt")
+        self.assertEqual(safe_file_name("NUL", "1.srt"), "_NUL.srt")
+        self.assertEqual(safe_file_name("COM1.en.srt", "1.srt"), "_COM1.en.srt")
+        self.assertEqual(safe_file_name("Console.srt", "1.srt"), "Console.srt")
 
 
 class KeyTests(unittest.TestCase):
@@ -310,6 +332,12 @@ class ProblemTests(unittest.TestCase):
         http.answer("GET", API + "/subtitles", FakeResponse(200, None))
         self.assertEqual(self.problem(http).kind, SERVER)
 
+    def test_an_anonymous_download_refused_is_the_key(self):
+        http = FakeHttp()
+        http.answer("POST", API + "/download", FakeResponse(401, {"message": "invalid key"}))
+        self.assertEqual(self.problem(http, lambda c: c.download(1)).kind, BAD_KEY)
+        self.assertEqual(http.made("POST", "/login"), [])
+
     def test_a_file_that_is_gone(self):
         http = FakeHttp()
         http.answer("POST", API + "/download", FakeResponse(404, {"message": "gone"}))
@@ -342,6 +370,32 @@ class DownloadTests(unittest.TestCase):
         (fetched,) = http.made("GET", LINK)
         self.assertNotIn("Api-Key", fetched["headers"])  # the key stays with the API
         self.assertEqual([n for n in os.listdir(os.path.join(self.folder, "77"))], [result.name])
+
+    def test_the_link_is_read_in_pieces_and_its_redirects_stay_https(self):
+        http = FakeHttp()
+        http.answer("POST", API + "/download", FakeResponse(200, download_answer()))
+        cdn = "https://cdn.opensubtitles.example/f/1.srt"
+        http.answer("GET", LINK, FakeResponse(302, headers={"Location": cdn}))
+        http.answer("GET", cdn, FakeResponse(200, content=SRT))
+        content, _info = client(http).download(1)
+        self.assertEqual(content, SRT)
+        for url in (LINK, cdn):
+            (request,) = http.made("GET", url)
+            self.assertTrue(request["stream"])
+            self.assertFalse(request["allow_redirects"])  # each hop is checked
+        http.answer("GET", LINK, FakeResponse(302, headers={"Location": "http://plain.example/1"}))
+        with self.assertRaises(OpenSubtitlesError) as caught:
+            client(http).download(1)
+        self.assertEqual(caught.exception.problem.kind, SERVER)
+        self.assertEqual(http.made("GET", "http://plain.example/1"), [])  # never followed
+
+    def test_a_file_too_large_is_refused(self):
+        http = FakeHttp()
+        serving(http, entry(1, "en", "Harbour"))
+        with mock.patch.object(opensubtitles, "MAX_FILE_BYTES", len(SRT) - 1):
+            with self.assertRaises(OpenSubtitlesError) as caught:
+                client(http).download(1)
+        self.assertEqual(caught.exception.problem.kind, SERVER)
 
     def test_a_saved_file_is_not_downloaded_again(self):
         path = os.path.join(self.folder, "77", "Harbour.srt")
@@ -413,11 +467,56 @@ class SignInTests(unittest.TestCase):
 
     def test_a_wrong_password_is_said(self):
         http = FakeHttp()
-        http.answer("POST", API + "/login", FakeResponse(401, {"message": "invalid"}))
+        http.answer(
+            "POST", API + "/login", FakeResponse(401, {"message": "Invalid username/password"})
+        )
         with self.assertRaises(OpenSubtitlesError) as caught:
             client(http, username=USER, password="wrong").download(1)
         self.assertEqual(caught.exception.problem.kind, BAD_LOGIN)
         self.assertEqual(http.made("POST", "/download"), [])
+
+    def test_a_sign_in_refused_for_the_key_is_the_key(self):
+        http = FakeHttp()
+        http.answer(
+            "POST",
+            API + "/login",
+            FakeResponse(403, {"message": "You cannot consume this service"}),
+        )
+        with self.assertRaises(OpenSubtitlesError) as caught:
+            client(http, username=USER, password=PASSWORD).download(1)
+        self.assertEqual(caught.exception.problem.kind, BAD_KEY)
+
+    def test_refused_again_after_a_new_sign_in_asks_to_sign_in_again(self):
+        http = FakeHttp()
+        signed = self.signed(http)
+        http.answer("POST", API + "/download", FakeResponse(401, {"message": "token"}))
+        with self.assertRaises(OpenSubtitlesError) as caught:
+            signed.download(1)
+        problem = caught.exception.problem
+        self.assertEqual(problem.kind, BAD_LOGIN)  # never the key page for a sign-in
+        self.assertIn("Sign in to OpenSubtitles again", problem.text)
+        self.assertEqual(len(http.made("POST", "/login")), 2)  # one new sign-in, no loop
+        self.assertEqual(len(http.made("POST", "/download")), 2)
+
+    def test_jobs_at_once_sign_in_once(self):
+        http = FakeHttp()
+        signed = self.signed(http)
+        started = threading.Event()
+
+        def slow_login(_kwargs):
+            started.set()
+            time.sleep(0.05)
+            return FakeResponse(200, login_answer())
+
+        http.answer("POST", API + "/login", slow_login)
+        tokens = []
+        jobs = [threading.Thread(target=lambda: tokens.append(signed._token_now())) for _ in "ab"]
+        for job in jobs:
+            job.start()
+        for job in jobs:
+            job.join(5)
+        self.assertEqual(tokens, ["token-1", "token-1"])
+        self.assertEqual(len(http.made("POST", "/login")), 1)
 
     def test_a_signed_in_users_requests_go_to_their_host_but_only_opensubtitles(self):
         http = FakeHttp()

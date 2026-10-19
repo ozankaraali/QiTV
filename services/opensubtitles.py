@@ -31,7 +31,7 @@ import re
 import tempfile
 import threading
 from typing import Any, Iterable, Optional, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from PySide6.QtCore import QLocale, QObject, Signal, Slot
 
@@ -50,6 +50,9 @@ CONSUMERS_URL = "https://www.opensubtitles.com/en/consumers"  # sign up, then ma
 TIMEOUT = (4, 10)  # connect, read (seconds): short
 MAX_PAGES = 3  # of a search's results (OpenSubtitles sends up to 50 a page)
 MAX_FILE_BYTES = 10 * 1024 * 1024
+MAX_REDIRECTS = 5  # of a download's link, each one https
+_CHUNK = 64 * 1024
+_REDIRECTS = (301, 302, 303, 307, 308)
 ANONYMOUS_DAILY = 5  # downloads a day without signing in, per connection
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
 
@@ -68,6 +71,9 @@ NO_KEY_TEXT = "OpenSubtitles needs an API key."
 BAD_KEY_TEXT = "OpenSubtitles didn't accept the API key. Check it, or paste a new one."
 BAD_LOGIN_TEXT = (
     "OpenSubtitles didn't accept your username or password. Check them in Settings → Subtitles."
+)
+SIGN_IN_AGAIN_TEXT = (
+    "OpenSubtitles ended your sign-in. Sign in to OpenSubtitles again in Settings → Subtitles."
 )
 NETWORK_TEXT = "Couldn't reach OpenSubtitles. Check your internet connection and try again."
 SERVER_TEXT = "OpenSubtitles is having trouble right now. Try again in a while."
@@ -297,19 +303,25 @@ def ranked(files: Iterable[SubtitleFile], *, prefer_hi: bool = False) -> list[Su
 _VIDEO_EXTENSION = re.compile(
     r"\.(mkv|mp4|m4v|avi|mov|ts|m2ts|webm|wmv|flv|mpe?g|ogv)$", re.IGNORECASE
 )
-# A provider's prefix: "TR: ", "|EN| ", "[DE] ", "(FR) ", "EN - ", "4K-TR: " (repeated).
-_KNOWN_TAGS = (
-    "4K|8K|UHD|FHD|HD|SD|VIP|VOD|NEW|MULTI|LAT|ENG|GER|FRA|SPA|ITA|TUR|ARA|ARB|POR|RUS|POL|"
-    "NLD|DUT|SWE|NOR|DAN|FIN|HIN|KOR|JPN|CHN|PER|ALB|EXYU|NF|AMZN|DSNP|HBO|ATV"
-)
+# The country and language codes providers put before a title ("TR: ", "|EN| ", "[DE] ",
+# "FR| "): only these are taken for a provider's tag, and only in those forms.
+_CODES = frozenset("""
+    AF AL AM AR AT AU AZ BA BE BG BR BY CA CH CN CY CZ DE DK DZ EE EG EN ES EU FI FR GE GR HK HR
+    HU ID IE IL IN IQ IR IS IT JO JP KR KU KW KZ LA LB LT LU LV MA MK MT MX MY NL NO NZ PH PK PL
+    PT QA RO RS RU SA SE SG SI SK SQ SR SY TH TN TR TW UA UK US UZ VN ZA
+    ALB ARA ARB BUL CHI CHN CZE DAN DEU DUT ENG ESP EXYU FIN FRA FRE GER GRE HEB HIN HRV HUN IND
+    ITA JPN KOR KUR LAT LATAM NLD NOR PER POL POR ROM RUM RUS SPA SRP SWE TUR UKR
+    """.split())
 _PREFIX = re.compile(
     r"^\s*(?:"
-    r"[|\[(\{]\s*(?:[A-Z][A-Za-z0-9 +\-]{0,9}|4K|8K)\s*[|\])\}]"  # |EN|, [DE], (FR), {4K}
-    rf"|(?:[A-Z]{{2}}|{_KNOWN_TAGS})(?:[\-+ ](?:[A-Z]{{2}}|{_KNOWN_TAGS}))*\s*(?::|\||\s-\s|»)"
-    r")\s*"
+    r"\|\s*([A-Za-z]{2,5})\s*\|"  # |EN|
+    r"|\[\s*([A-Za-z]{2,5})\s*\]"  # [DE]
+    r"|([A-Za-z]{2,5})\s*\|"  # FR|
+    r"|([A-Za-z]{2,5}):"  # TR:
+    r")\s+"
 )
 _YEAR_IN_BRACKETS = re.compile(r"[(\[]\s*((?:19|20)\d{2})\s*[)\]]")
-_BRACKETED = re.compile(r"\[[^\]]*\]|\{[^}]*\}|\|[^|]*\||\((?=[^)]*[A-Za-z])[^)]*\)")
+_BRACKETED = re.compile(r"\[([^\]]*)\]|\{([^}]*)\}|\|([^|]*)\||\(([^)]*)\)")
 _QUALITY = re.compile(
     r"(?<![\w+])(?:4K|8K|UHD|FHD|QHD|HD|SD|HDR10\+?|HDR|DV|HEVC|H\.?26[45]|[xX]\.?26[45]"
     r"|(?:2160|1080|720|576|480)[pPi]|[56]0\s?FPS|MULTI[\- ]?SUBS?|MULTI|DUAL|ATMOS|WEB[\- ]?DL"
@@ -331,21 +343,44 @@ def _plausible_year(value: Any) -> Optional[int]:
     return year
 
 
+def _strip_tags(text: str) -> str:
+    """Strip a provider's tags before the title ("TR: ", "|EN| ", "[DE] ", "FR| "): only a
+    known country or language code, and only while a title of two words, or of one word of
+    four letters or more, remains."""
+    while True:
+        match = _PREFIX.match(text)
+        if match is None:
+            return text
+        code = next(group for group in match.groups() if group)
+        rest = text[match.end() :].strip()
+        words = rest.split()
+        if code.upper() not in _CODES or not (len(words) >= 2 or len(rest) >= 4):
+            return text
+        text = rest
+
+
+def _drop_bracketed(match: re.Match[str]) -> str:
+    """A bracketed tag goes when it is a code or a quality mark ("[MULTI-SUB]", "(US)",
+    "|4K|"); anything else in brackets is the title's own ("[REC]", "(Director's Cut)")."""
+    inner = next((group for group in match.groups() if group is not None), "").strip()
+    if inner.upper() in _CODES or (inner and not _QUALITY.sub("", inner).strip(_EDGES)):
+        return " "
+    return match.group(0)
+
+
 def clean_title(name: str) -> tuple[str, Optional[int]]:
-    """A provider's or a file's title without its prefixes, tags and quality marks, and the
-    year it names, if any: "TR: The Film (2019) 4K" → ("The Film", 2019), and
-    "The.Film.2019.1080p.WEB-DL.x264.mkv" → ("The Film", 2019)."""
-    text = str(name or "").strip()
+    """A provider's or a file's title without its tags and quality marks, and the year it
+    names, if any: "TR: The Film (2019) 4K" → ("The Film", 2019), and
+    "The.Film.2019.1080p.WEB-DL.x264.mkv" → ("The Film", 2019). Conservative: what may be the
+    title's own stays (the search field can be edited)."""
+    original = " ".join(str(name or "").split())
+    text = original
     file_like = bool(_VIDEO_EXTENSION.search(text))
     text = _VIDEO_EXTENSION.sub("", text)
     if file_like or (" " not in text and re.search(r"[._]", text)):
         text = re.sub(r"[._]+", " ", text)  # Some.Film.2019.1080p → Some Film 2019 1080p
         file_like = True
-    while True:
-        stripped = _PREFIX.sub("", text, count=1)
-        if stripped == text or not stripped.strip():
-            break
-        text = stripped
+    text = _strip_tags(text)
     year = None
     match = _YEAR_IN_BRACKETS.search(text)
     if match and text[: match.start()].strip(_EDGES):
@@ -361,14 +396,16 @@ def clean_title(name: str) -> tuple[str, Optional[int]]:
         quality = _QUALITY.search(text)
         if quality and text[: quality.start()].strip(_EDGES):
             text = text[: quality.start()]
-    text = _BRACKETED.sub(" ", text)
-    text = _QUALITY.sub(" ", text)
+    text = _BRACKETED.sub(_drop_bracketed, text)
+    cleaned = " ".join(_QUALITY.sub(" ", text).split()).strip(_EDGES)
+    if cleaned:
+        text = _strip_tags(cleaned)
     text = " ".join(text.split()).strip(_EDGES)
     if year is None:
         trailing = _DASH_YEAR.search(text)
         if trailing and _plausible_year(trailing.group(1)) and text[: trailing.start()].strip():
             year, text = int(trailing.group(1)), text[: trailing.start()]
-    return " ".join(text.split()).strip(_EDGES), year
+    return " ".join(text.split()).strip(_EDGES) or original, year
 
 
 def item_year(item: dict) -> Optional[int]:
@@ -492,6 +529,21 @@ def _retry_seconds(response: Any) -> Optional[int]:
     return None
 
 
+def _close(response: Any) -> None:
+    close = getattr(response, "close", None)
+    if callable(close):
+        close()
+
+
+def _refuses_the_key(response: Any) -> bool:
+    """Whether a refused sign-in is about the API key rather than the username and password
+    (OpenSubtitles says which in its message)."""
+    data = _json(response)
+    message = str(data.get("message") or "") if isinstance(data, dict) else ""
+    words = message.lower()
+    return "api key" in words or "api-key" in words or "apikey" in words or "consume" in words
+
+
 def _json(response: Any) -> Any:
     try:
         return response.json()
@@ -506,7 +558,8 @@ class OpenSubtitlesClient:
     def __init__(self, credentials: Credentials, *, http: Any = None) -> None:
         self.credentials = credentials
         self._http = http
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # the token and its host
+        self._login_lock = threading.Lock()  # one sign-in at a time
         self._token: Optional[str] = None
         self._base = API_URL
 
@@ -528,6 +581,8 @@ class OpenSubtitlesClient:
         )
         if response.status_code in (400, 401, 403):
             logger.info("OpenSubtitles refused the sign-in (%s)", response.status_code)
+            if _refuses_the_key(response):
+                raise OpenSubtitlesError(BAD_KEY, BAD_KEY_TEXT)
             raise OpenSubtitlesError(BAD_LOGIN, BAD_LOGIN_TEXT)
         data = self._checked(response, signed_in=False)
         token = data.get("token") if isinstance(data, dict) else None
@@ -562,11 +617,16 @@ class OpenSubtitlesClient:
         return API_URL
 
     def _token_now(self) -> Optional[str]:
+        """The sign-in's token, signing in first when there is none (one sign-in at a time:
+        a job that waited for another's uses its token)."""
         with self._lock:
             token = self._token
-        if token is None and self.credentials.signs_in:
-            token = self.login()
-        return token
+        if token is not None or not self.credentials.signs_in:
+            return token
+        with self._login_lock:
+            with self._lock:
+                token = self._token
+            return token if token is not None else self.login()
 
     # -- searching and downloading -----------------------------------------------------------
 
@@ -620,30 +680,68 @@ class OpenSubtitlesClient:
             response = self._call("POST", "/download", json={"file_id": int(file_id)}, token=token)
         if response.status_code == 404:
             raise OpenSubtitlesError(GONE, GONE_TEXT)
+        if response.status_code in (401, 403) and token is not None:
+            # Refused again with a fresh sign-in: the sign-in, not the key (anonymous
+            # downloads take the key alone).
+            raise OpenSubtitlesError(BAD_LOGIN, SIGN_IN_AGAIN_TEXT)
         info = self._checked(response, signed_in=token is not None)
         link = info.get("link") if isinstance(info, dict) else None
         if not isinstance(link, str) or not link.startswith("https://"):
             raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
-        try:
-            file = self._http_module().request(
-                "GET",
-                link,
-                headers={"User-Agent": user_agent()},
-                timeout=TIMEOUT,
-                allow_redirects=True,
-            )
-        except (requests.RequestException, OSError) as e:  # never the link: it is a key
-            logger.info("Couldn't fetch the subtitle file: %s", safe_exc(e))
-            raise OpenSubtitlesError(NETWORK, NETWORK_TEXT) from None
-        if file.status_code == 404 or file.status_code == 410:
+        return self._fetch(link), info
+
+    def _fetch(self, link: str) -> bytes:
+        """The file at a download's temporary link: each redirect https too, the body read
+        in pieces and refused beyond MAX_FILE_BYTES."""
+        url = link
+        for _hop in range(MAX_REDIRECTS + 1):
+            if not url.startswith("https://"):
+                logger.info("A subtitle file's link led away from https")
+                raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+            try:
+                file = self._http_module().request(
+                    "GET",
+                    url,
+                    headers={"User-Agent": user_agent()},
+                    timeout=TIMEOUT,
+                    allow_redirects=False,
+                    stream=True,
+                )
+            except (requests.RequestException, OSError) as e:  # never the link: it is a key
+                logger.info("Couldn't fetch the subtitle file: %s", safe_exc(e))
+                raise OpenSubtitlesError(NETWORK, NETWORK_TEXT) from None
+            if file.status_code in _REDIRECTS:
+                location = str((getattr(file, "headers", None) or {}).get("Location") or "")
+                _close(file)
+                url = urljoin(url, location) if location else ""
+                continue
+            try:
+                return self._body(file)
+            finally:
+                _close(file)
+        logger.info("A subtitle file's link redirected too often")
+        raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+
+    @staticmethod
+    def _body(file: Any) -> bytes:
+        if file.status_code in (404, 410):
             raise OpenSubtitlesError(GONE, GONE_TEXT)
         if not 200 <= file.status_code < 300:
             logger.info("The subtitle file's link answered %s", file.status_code)
             raise OpenSubtitlesError(SERVER, SERVER_TEXT)
-        content = file.content or b""
-        if not content or len(content) > MAX_FILE_BYTES:
+        content = bytearray()
+        try:
+            for chunk in file.iter_content(chunk_size=_CHUNK):
+                content += chunk
+                if len(content) > MAX_FILE_BYTES:
+                    logger.info("A subtitle file was larger than %s bytes", MAX_FILE_BYTES)
+                    raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
+        except (requests.RequestException, OSError) as e:
+            logger.info("The subtitle file stopped coming: %s", safe_exc(e))
+            raise OpenSubtitlesError(NETWORK, NETWORK_TEXT) from None
+        if not content:
             raise OpenSubtitlesError(SERVER, UNREADABLE_TEXT)
-        return bytes(content), info
+        return bytes(content)
 
     # -- HTTP --------------------------------------------------------------------------------
 
@@ -702,6 +800,8 @@ class OpenSubtitlesClient:
             return data
         logger.info("OpenSubtitles answered %s", status)
         if status in (401, 403):
+            if signed_in:  # with a sign-in's token: the sign-in ended
+                raise OpenSubtitlesError(BAD_LOGIN, SIGN_IN_AGAIN_TEXT)
             raise OpenSubtitlesError(BAD_KEY, BAD_KEY_TEXT)
         if status == 406:
             data = _json(response)
@@ -715,6 +815,9 @@ class OpenSubtitlesClient:
 # ---- saving -------------------------------------------------------------------------------
 
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED = frozenset(
+    ["CON", "PRN", "AUX", "NUL"] + [f"{name}{n}" for name in ("COM", "LPT") for n in range(1, 10)]
+)
 
 
 def safe_file_name(name: str, fallback: str) -> str:
@@ -723,6 +826,8 @@ def safe_file_name(name: str, fallback: str) -> str:
     clean = " ".join(clean.split()).strip(" .")[:120].strip(" .")
     if not clean:
         clean = fallback
+    if clean.split(".")[0].strip().upper() in _RESERVED:  # Windows' device names
+        clean = "_" + clean
     if os.path.splitext(clean)[1].lower() not in SUBTITLE_EXTENSIONS:
         clean += ".srt"
     return clean

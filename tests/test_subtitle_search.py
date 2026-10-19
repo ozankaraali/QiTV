@@ -4,6 +4,7 @@ worked by the keys and the mouse. HTTP is mocked: no key, no network."""
 
 import os
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -32,7 +33,7 @@ from test_tv_controller import ControllerTestCase
 from services import _build_keys
 from services.jobs import ImmediateRunner
 from services.next_episode import play_context
-from services.opensubtitles import CONSUMERS_URL, SubtitleFile
+from services.opensubtitles import CONSUMERS_URL, Problem, SubtitleFile
 from services.sound_sync import SoundSync
 from services.subtitle_picks import Pick, SubtitlePicks, pick_key
 from ui.keymap import Action, key_hint
@@ -132,6 +133,27 @@ class PicksTests(unittest.TestCase):
         other = dict(EPISODE.item, episode_num=6)
         self.assertNotEqual(episode, pick_key("Home", other, episode=True, context=EPISODE.context))
         self.assertEqual(pick_key("Home", {}, episode=False), "")
+
+    def test_an_episode_without_numbers_keys_on_its_own_id(self):
+        context = {"series": {"id": "s1", "name": "Salt Road"}}  # no season known
+        first = pick_key("Home", {"id": "e1"}, episode=True, context=context)
+        second = pick_key("Home", {"id": "e2"}, episode=True, context=context)
+        self.assertTrue(first and second)
+        self.assertNotEqual(first, second)  # never one key for the whole series
+
+    def test_a_file_of_another_version_is_set_aside_not_written_over(self):
+        newer = '{"version": 2, "titles": {"k": {"anything": 1}}}'
+        with open(self.path, "w") as f:
+            f.write(newer)
+        picks = SubtitlePicks(self.path, self.folder)
+        self.assertIsNone(picks.get("k"))
+        with open(self.path + ".bak") as f:
+            self.assertEqual(f.read(), newer)
+        picks.set("k", Pick(1, "a.srt", os.path.join(self.folder, "1", "a.srt")))
+        picks.flush()
+        with open(self.path + ".bak") as f:
+            self.assertEqual(f.read(), newer)  # kept as it was
+        self.assertIsNotNone(SubtitlePicks(self.path, self.folder).get("k"))
 
     def test_the_oldest_go_beyond_the_cap(self):
         clock = iter(range(100))
@@ -252,7 +274,7 @@ class ResultsPageTests(Case):
         page_.handle(Action.NAV_ACTIVATE)
         self.assertEqual(searched.at(0), ["Harbour Lights (2019)"])
         page_.handle(Action.NAV_RIGHT)
-        self.assertEqual(page_.focus(), "search")
+        self.assertEqual(page_.focus(), "paste")
         page_.handle(Action.NAV_DOWN)
         self.assertEqual(page_.focus(), "files")
 
@@ -290,6 +312,19 @@ class ResultsPageTests(Case):
         page_ = self.page
         self.click(page_, QPointF(5, 5))
         self.assertFalse(page_.isVisible())
+
+    def test_paste_beside_the_field_adds_the_clipboard(self):
+        page_ = self.page
+        QGuiApplication.clipboard().setText(" Salt Road S01E02 \nmore")
+        self.click(page_, page_.control_rect("clear").center())
+        self.click(page_, page_.control_rect("paste").center())
+        self.assertEqual((page_.query(), page_.focus()), ("Salt Road S01E02", "field"))
+        page_.handle(Action.NAV_RIGHT)
+        self.assertEqual(page_.focus(), "paste")
+        page_.handle(Action.NAV_RIGHT)
+        self.assertEqual(page_.focus(), "search")
+        tip = page_.tooltip_at(page_.control_rect("paste").center())
+        self.assertEqual(tip, key_hint("Paste", "Ctrl+V"))
 
     def test_search_and_the_fields_clear_take_clicks(self):
         page_ = self.page
@@ -588,6 +623,65 @@ class FlowTests(FlowCase):
         self.assertFalse(self.online.visible())
         self.assertFalse(self.online.handle(Action.NAV_TEXT, "x"))
 
+    def test_the_librarys_search_and_the_mini_player_close_it_first(self):
+        self.config.opensubtitles_api_key = KEY
+        serving(self.http, *FOUND)
+        for action in (Action.SEARCH, Action.MINI_PLAYER):
+            self.search()
+            self.assertFalse(self.online.handle(action))  # it acts…
+            self.assertFalse(self.search_page.isVisible())  # …with nothing left under it
+
+    def test_the_language_picked_is_saved_with_the_settings(self):
+        self.config.opensubtitles_api_key = KEY
+        serving(self.http, *FOUND)
+        self.search()
+        saves = self.saves
+        self.search_page.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.config.opensubtitles_language, "en")
+        self.assertEqual(self.saves, saves + 1)
+
+    def test_a_failed_search_leaves_a_download_alone_and_is_said_when_hidden(self):
+        self.config.opensubtitles_api_key = KEY
+        serving(self.http, *FOUND)
+        self.search()
+        self.online._downloading = True  # a download on its way
+        self.online._on_search_failed(self.online._generation, "The background task failed")
+        self.assertTrue(self.online._downloading)
+        self.online._downloading = False
+        self.search_page.dismiss()
+        self.online._on_found(self.online._generation, Problem("server", "Trouble at sea."))
+        self.assertEqual(self.toasts[-1], "Trouble at sea.")
+        self.online._on_download_failed((FILM, None), "The background task failed")
+        self.assertIn("Something went wrong", self.toasts[-1])
+
+    def test_a_sign_in_refused_again_is_said_on_the_page_not_the_key_page(self):
+        self.config.opensubtitles_api_key = KEY
+        self.config.opensubtitles_username = "harbour_viewer"
+        self.config.opensubtitles_password = "fictional-password"
+        serving(self.http, *FOUND)
+        self.http.answer("POST", API + "/login", FakeResponse(200, login_answer()))
+        self.http.answer("POST", API + "/download", FakeResponse(401, {"message": "token"}))
+        self.search()
+        self.search_page.handle(Action.NAV_ACTIVATE)
+        self.assertEqual(self.search_page.page(), RESULTS_PAGE)
+        self.assertIn("Sign in to OpenSubtitles again", self.search_page.status())
+
+    def test_quitting_signs_out_without_waiting(self):
+        self.config.opensubtitles_api_key = KEY
+        self.config.opensubtitles_username = "harbour_viewer"
+        self.config.opensubtitles_password = "fictional-password"
+        serving(self.http, *FOUND)
+        self.http.answer("POST", API + "/login", FakeResponse(200, login_answer()))
+        self.http.answer("DELETE", API + "/logout", FakeResponse(200, {}))
+        self.search()
+        self.search_page.handle(Action.NAV_ACTIVATE)
+        self.online.shutdown()  # returns at once: the sign-out runs on its own thread
+        deadline = time.monotonic() + 5
+        while not self.http.made("DELETE", "/logout") and time.monotonic() < deadline:
+            time.sleep(0.01)
+        (logout,) = self.http.made("DELETE", "/logout")
+        self.assertEqual(logout["headers"]["Authorization"], "Bearer token-1")
+
 
 class DownloadedLinkTests(FlowCase):
     def test_the_downloads_link_is_fetched_without_the_key(self):
@@ -636,6 +730,12 @@ class ControllerRoutingTests(ControllerTestCase):
         self.catalog.linkReady.emit(self.catalog.links[-1][0], self.MOVIE["cmd"])
         self.controller._online.open()
         self.assertTrue(self.page.isVisible())
+
+    def test_the_mini_player_closes_the_page_then_acts(self):
+        self.open_page()
+        self.controller.handle(Action.MINI_PLAYER)
+        self.assertFalse(self.page.isVisible())
+        self.assertEqual(self.window.calls[-1], "toggle_mini_player")
 
     def test_the_page_takes_the_keys_and_esc_gives_them_back(self):
         self.assertEqual(self.controller.key_context(), "player")
