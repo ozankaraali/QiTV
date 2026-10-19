@@ -14,6 +14,7 @@ import re
 import shutil
 import socket
 import ssl
+import struct
 import tempfile
 import threading
 import time
@@ -26,7 +27,7 @@ from Cryptodome.Util.Padding import pad
 from http_fixtures import LocalSource, leaf, tls_server_context
 import m3u8
 import requests
-from test_fmp4 import FIXTURES, box, frames, movie, sound, trak, visual
+from test_fmp4 import FIXTURES, box, elst, frames, full, movie, sound, trak, visual
 import ts_fixtures
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -469,6 +470,18 @@ class LiveSourceTests(SourceTestCase):
                 source_module._check_media(m3u8.loads(text, uri=base), base)
             self.assertEqual(str(raised.exception), source_module._NON_HTTP)
 
+    def test_a_live_playlists_key_methods_are_looked_at_whole(self):
+        # Review M6: a start further back than the URIs checked must meet no other key either.
+        base = "http://provider.test/live.m3u8"
+        text = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n"
+        text += (
+            '#EXT-X-KEY:METHOD=SAMPLE-AES,URI="k"\n#EXTINF:10,\nold.ts\n#EXT-X-KEY:METHOD=NONE\n'
+        )
+        text += "".join(f"#EXTINF:10,\nseg{k}.ts\n" for k in range(31))
+        with self.assertRaises(SourceError) as raised:
+            source_module._check_media(m3u8.loads(text, uri=base), base)
+        self.assertEqual(str(raised.exception), source_module._ENCRYPTION)
+
     def test_hls_segments_that_are_not_transport_streams_are_unsupported(self):
         server = self.server(
             {
@@ -611,7 +624,8 @@ video.m3u8
 
     def held_tail_routes(self, video_playlist):
         """A master whose video (4 s from 900000) has audio for its first 2 s at first, and
-        for the rest from its third load on (the video playlist's reload)."""
+        for the rest from its second load on (at the video playlist's reload: it is not
+        reloaded again sooner than a second, half its target duration)."""
         master = b"""#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,URI="audio.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"
@@ -619,8 +633,8 @@ video.m3u8
 """
 
         def audio_playlist(_request, count):
-            names = ["a0.ts", *(["a1.ts"] if count > 2 else [])]
-            return 200, {}, hls(0, names, target=2, ended=count > 2)
+            names = ["a0.ts", *(["a1.ts"] if count > 1 else [])]
+            return 200, {}, hls(0, names, target=2, ended=count > 1)
 
         return {
             "/master.m3u8": (200, {}, master),
@@ -656,7 +670,60 @@ video.m3u8
         times = [frame.pts for frame in frames(whole)[0x101]]
         audio = ts_fixtures.audio_only(2) + ts_fixtures.audio_only(2, pts_start=900000 + 180000)
         self.assertEqual(times, [frame.pts for frame in frames(audio)[0x101]])
-        self.assertEqual(server.counts["/audio.m3u8"], 3)  # read, again at once, then at the reload
+        self.assertEqual(server.counts["/audio.m3u8"], 2)  # read, then at the reload
+
+    def test_a_burst_of_video_does_not_reload_the_audio_playlist_for_each_segment(self):
+        # Review I2: each video segment of a burst reloaded the audio playlist that did not
+        # list its audio yet (up to 2 MB a second of a DVR window); at most every half target
+        # duration now, and once more at a finished playlist's end.
+        names = ["v0.ts", "v1.ts", "v2.ts", "v3.ts"]
+        routes = self.held_tail_routes(
+            lambda _request, _count: (200, {}, hls(0, names, target=4, ended=True))
+        )
+        routes["/audio.m3u8"] = (200, {}, hls(0, ["a0.ts"], target=2, ended=False))
+        for k in range(1, 4):
+            later = ts_fixtures.make_stream(4, audio=False, pts_start=900000 + k * 4 * 90000)
+            routes[f"/v{k}.ts"] = (200, {}, later)
+        server = self.server(routes)
+        media(server.url + "/master.m3u8")
+        self.assertEqual(server.counts["/audio.m3u8"], 2)
+
+    def test_the_audio_list_keeps_the_newest_segments_of_a_dvr_window(self):
+        routes = self.held_tail_routes(
+            lambda _request, _count: (200, {}, hls(0, ["v0.ts"], target=4, ended=True))
+        )
+        window = [f"a{k}.ts" for k in range(400)]
+        routes["/audio.m3u8"] = (200, {}, hls(100, window, target=1, ended=False))
+        server = self.server(routes)
+        source = open_source(
+            server.url + "/master.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
+        )
+        drain(source)
+        listed = sorted(source._audio_list)
+        self.assertEqual((len(listed), listed[-1]), (300, 499))
+
+    def test_after_a_break_the_audio_playlist_is_read_again_before_its_audio_is_found(self):
+        # Review M7: after a break the audio was looked for in the list read before it.
+        def video_playlist(_request, _count):
+            text = hls(0, ["v0.ts"], target=4).decode()
+            text += "#EXT-X-DISCONTINUITY\n#EXTINF:4,\nv1.ts\n#EXT-X-ENDLIST\n"
+            return 200, {}, text.encode()
+
+        def audio_playlist(_request, count):
+            text = hls(0, ["a0.ts"], target=4).decode()
+            if count > 1:
+                text += "#EXT-X-DISCONTINUITY\n#EXTINF:4,\nb0.ts\n"
+            return 200, {}, text.encode()
+
+        routes = self.held_tail_routes(video_playlist)
+        routes["/audio.m3u8"] = audio_playlist
+        routes["/a0.ts"] = (200, {}, ts_fixtures.audio_only(4))
+        routes["/b0.ts"] = (200, {}, ts_fixtures.audio_only(4, pts_start=90000))
+        server = self.server(routes)
+        _first, _marker, second = media(server.url + "/master.m3u8")
+        times = [frame.pts for frame in frames(second)[0x101]]
+        self.assertEqual(times[0], 90000)  # the new timeline's audio
+        self.assertEqual(server.counts["/b0.ts"], 1)
 
     def test_a_tail_still_held_at_a_break_goes_on_before_its_marker(self):
         def video_playlist(_request, count):
@@ -2314,6 +2381,33 @@ class FragmentedMp4Tests(SourceTestCase):
         woven, rendition = self.woven_audio(out, 4)
         self.assertEqual(woven, rendition)
         self.assertGreater(len(woven), 100)
+
+    def test_a_damaged_segment_is_skipped_with_a_marker(self):
+        # Review I1: a field past the data (here a tfdt with nothing in it) was an IndexError
+        # that ended the session; it is a damaged segment, skipped as any other.
+        tfhd = full(b"tfhd", 0, 0x20000, struct.pack(">I", 1))
+        damaged = box(b"moof", box(b"traf", tfhd, box(b"tfdt")))
+        routes = self.routes("avc-aac")
+        routes["/seg1.m4s"] = (200, {}, damaged)
+        server = self.server(routes)
+        first, marker, last = media(server.url + "/index.m3u8")
+        self.assertIsInstance(marker, Discontinuity)
+        segments = self.remuxed("avc-aac", "init.mp4", 3)
+        self.assertEqual(len(frames(first)[0x100]), len(frames(segments[0])[0x100]))
+        self.assertEqual(len(frames(last)[0x100]), len(frames(segments[2])[0x100]))
+
+    def test_one_sided_edit_lists_are_balanced(self):
+        def remuxer(media):
+            edits = elst((0, media)) if media is not None else b""
+            made = Fmp4Remuxer()
+            made.init(movie(trak(1, b"vide", 90000, visual(), edits=edits)))
+            return made
+
+        for video, audio, kept in ((180000, None, 0.0), (7200, None, 0.08), (180000, 90000, 2.0)):
+            with self.subTest(video=video, audio=audio):
+                pair = remuxer(video), remuxer(audio)
+                source_module._balance_edits(*pair)
+                self.assertEqual(pair[0].edit_media_s, kept)
 
     def test_an_init_that_cannot_be_remuxed_leaves_the_channel_unsupported(self):
         encrypted = movie(trak(1, b"vide", 90000, visual(b"encv")))

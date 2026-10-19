@@ -412,6 +412,31 @@ class InitTests(unittest.TestCase):
         tracks = read_init(movie(trak(2, b"soun", 48000, sound(b"mp4a", esds(b"", kind=0x6B)))))
         self.assertEqual((tracks[2].codec, tracks[2].stream_type), ("mp3", 0x03))
 
+    def test_an_edit_lists_media_time_past_ten_seconds_is_left_out(self):
+        far = movie(trak(1, b"vide", 90000, visual(), edits=elst((80, -1), (0, 20 * 90000))))
+        track = read_init(far)[1]
+        self.assertEqual((track.shift, track.edit_media), (-7200, 0))  # the empty edit stays
+        near = read_init(movie(trak(1, b"vide", 90000, visual(), edits=elst((0, 3600)))))[1]
+        self.assertEqual((near.shift, near.edit_media), (3600, 3600))  # a B-frame offset
+
+    def test_a_box_pointing_past_its_data_is_damaged_whatever_meets_it(self):
+        # Review I1: a struct.error or IndexError from a field past the data ended the session
+        # (direct play); as Fmp4Error it skips the segment, or refuses the init, as any damage.
+        normal = trak(1, b"vide", 90000, visual())
+        mdia = normal[normal.index(b"mdia") - 4 :]  # the trak's last box
+        short_tkhd = box(b"moov", box(b"trak", mdia, full(b"tkhd", 0, 3, bytes(4))))  # last
+        with self.assertRaisesRegex(Fmp4Error, "damaged"):
+            read_init(short_tkhd)
+        tracks = read_init(VIDEO_INIT)
+        tfhd = full(b"tfhd", 0, 0x20000, struct.pack(">I", 1))
+        empty_tfdt = box(b"moof", box(b"traf", tfhd, box(b"tfdt")))  # its version past the end
+        with self.assertRaisesRegex(Fmp4Error, "damaged"):
+            read_segment(empty_tfdt, tracks)
+        remuxer = Fmp4Remuxer()
+        remuxer.init(VIDEO_INIT)
+        with self.assertRaisesRegex(Fmp4Error, "damaged"):
+            remuxer.remux(empty_tfdt)
+
     def test_no_moov_or_a_damaged_one_is_refused(self):
         with self.assertRaisesRegex(Fmp4Error, "no init"):
             read_init(box(b"ftyp", bytes(8)))
@@ -640,6 +665,33 @@ class RemuxTests(unittest.TestCase):
         self.assertEqual([f.pts for f in video], [90000, 97200, 93600])  # presentation as given
         self.assertEqual([f.dts for f in video], [86400, 90000, 93600])  # decoding 3600 earlier
         self.assertTrue(all(f.pts >= f.dts for f in video))
+
+    def test_the_first_segment_sets_the_dts_shift_for_good(self):
+        # Review M3: a later, more negative composition offset stepped every DTS (and the PCR)
+        # back once; now that frame's DTS is clamped to its PTS and the rest keep their shift.
+        first = [(3600, nals(IDR), SYNC_FLAGS, 0), (3600, nals(SLICE), NON_SYNC, 3600)]
+        first += [(3600, nals(SLICE), NON_SYNC, -3600)]
+        later = [(3600, nals(IDR), SYNC_FLAGS, 0), (3600, nals(SLICE), NON_SYNC, -7200)]
+        later += [(3600, nals(SLICE), NON_SYNC, 0)]
+        with self.assertLogs("services.live.fmp4", "INFO") as logs:
+            _, data = self.remux(
+                segment(1, first, version=1, tfdt=90000),
+                segment(1, later, version=1, tfdt=90000 + 3 * 3600),
+                init=VIDEO_INIT,
+            )
+        video = frames(data)[fmp4._VIDEO_PID]
+        self.assertEqual([f.pts - f.dts for f in video], [3600, 7200, 0, 3600, 0, 3600])
+        self.assertEqual(video[4].dts, video[4].pts)  # clamped, not below its PTS
+        pcrs = [f.pcr for f in video]
+        self.assertEqual(pcrs, sorted(pcrs))  # the clock never steps back
+        self.assertTrue(any("outreached" in line for line in logs.output))
+
+    def test_a_one_sided_edit_media_time_can_be_left_out(self):
+        remuxer = Fmp4Remuxer()
+        remuxer.init(movie(trak(1, b"vide", 90000, visual(), edits=elst((80, -1), (0, 180000)))))
+        self.assertEqual(remuxer.edit_media_s, 2.0)
+        remuxer.drop_edit_media(1.0)
+        self.assertEqual((remuxer.tracks[1].shift, remuxer.edit_media_s), (-7200, 0.0))
 
     def test_times_wrap_at_33_bits(self):
         start = (1 << 33) + 4500 * 90000

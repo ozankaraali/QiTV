@@ -73,6 +73,9 @@ _PLAYLIST_TYPES = (
 # A variant whose master names a separate default audio playlist: how much of its first
 # segment may pass before its program tables must have shown audio of its own.
 _AUDIO_LOOK = 64 * 1024
+# A separate audio playlist is reloaded for a segment it does not list yet at most once in
+# this part of its target duration (at least a second apart).
+_AUDIO_RELOAD_PART = 0.5
 # An audio segment found by its place in the playlist that starts this long after the video
 # segment it is for (90 kHz): the one before it is taken too ...
 _AUDIO_SLACK = 45000
@@ -93,6 +96,9 @@ _KEY_LIMIT = 1024
 # A live playlist's newest segments checked before fetching, this long in all (`_check_media`).
 _CHECKED_SECONDS = 300.0
 _INIT_LIMIT = 4 * 1024 * 1024  # an fMP4 init segment (EXT-X-MAP): some kilobytes in practice
+# A media time an edit list on one rendition only keeps (`_balance_edits`): B-frame offsets and
+# AAC priming are a fraction of this.
+_EDIT_KEEP_S = 1.0
 # A live playlist without a new segment for this long is frozen.
 _FROZEN_TIMEOUT = 60.0
 # An older playlist copy that overlaps recent segments is waited out this many targets.
@@ -820,9 +826,10 @@ def _checked(playlist: Any) -> list[Any]:
 def _check_media(playlist: Any, base: str) -> None:
     """Reject what this fetcher cannot play, before fetching any of it: byte ranges (of a
     segment or an init section), keys other than AES-128, URIs other than HTTP(S). A live
-    playlist's URIs and keys are checked for its newest segments (`_checked`): a DVR window
-    lists hours of them, reloaded every few seconds, and the source fetches near its end
-    (resolving each URI again as it fetches it)."""
+    playlist's URIs are resolved for its newest segments (`_checked`): a DVR window lists
+    hours of them, reloaded every few seconds, and the source fetches near its end (resolving
+    each URI again as it fetches it); its key methods are looked at whole (a start further
+    back than that window still meets no other key)."""
     segments = playlist.segments
     if (
         any(segment.byterange for segment in segments)
@@ -830,6 +837,8 @@ def _check_media(playlist: Any, base: str) -> None:
         or any(s.init_section is not None and s.init_section.byterange for s in segments)
     ):
         raise SourceError("unsupported", _BYTE_RANGES)
+    if any(_key_method(segment.key) not in ("NONE", "AES-128") for segment in segments):
+        raise SourceError("unsupported", _ENCRYPTION)
     resolved: set[str] = set()  # an init's or key's URI, which many segments share
     for segment in _checked(playlist):
         _resolve(base, segment.uri)
@@ -1039,6 +1048,7 @@ class HlsSource:
         self._audio_list: dict[int, Any] = {}  # the audio playlist's segments by sequence
         self._audio_base = ""
         self._audio_target = 0.0  # its target duration
+        self._audio_loaded = -math.inf  # when it was (re)loaded last (time.monotonic)
         self._audio_next: int | None = None  # the audio segment to fetch next (None: find it)
         # The tail of the newest video segment whose sound is not listed yet (`_pass_covered`),
         # and the end of that segment (90 kHz).
@@ -1224,6 +1234,7 @@ class HlsSource:
                 progress = time.monotonic()
                 yield CaughtUp()  # what follows comes as the provider publishes it
             if playlist.is_endlist:
+                yield from self._emit(self._release(final=True))
                 yield from self._emit(self._flush_held())
                 return
             interval = max(1.0, float(playlist.target_duration or 0) / 2)
@@ -1318,6 +1329,8 @@ class HlsSource:
             remuxer.init(data)
         except Fmp4Error as error:
             raise _BadSegment(str(error)) from None
+        if self._audio_url is not None:
+            _balance_edits(self._remuxer, self._audio_remuxer)
         return uri
 
     def _with_audio(self, video: bytes, sequence: int, duration: float) -> tuple[bytes, bytes]:
@@ -1373,6 +1386,11 @@ class HlsSource:
         end = (start + round(duration * 90000)) % (1 << 33)
         if self._pending or self._audio_next is None:  # a break, or the first: found by time
             weaver.reset()
+            if self._pending:  # the audio's own break: as it is listed now
+                try:
+                    self._load_audio()
+                except _BadSegment:
+                    pass  # the list before it
             self._audio_next = self._audio_find(start, duration)
         self._take_audio(start, end, duration)
         video = held + video
@@ -1411,11 +1429,14 @@ class HlsSource:
         self._held, self._held_end = video[cut:], end
         return weaver.weave_due(video[:cut], end if until is None else until) if cut else b""
 
-    def _release(self) -> bytes:
+    def _release(self, final: bool = False) -> bytes:
         """At a playlist reload, while a tail is held: the audio listed since, and what of the
-        tail it covers, woven (`_pass_covered`)."""
+        tail it covers, woven (`_pass_covered`); `final` (a finished playlist's end): the audio
+        playlist reloaded however recently it was."""
         if not self._held or self._weaver is None:
             return b""
+        if final:
+            self._audio_loaded = -math.inf
         held, self._held = self._held, b""
         start = video_start(held)
         if start is not None:
@@ -1499,19 +1520,24 @@ class HlsSource:
             _check_media(playlist, final)
         except SourceError:
             raise _BadSegment(_SEPARATE_AUDIO) from None  # byte ranges, other keys: not read
-        first = playlist.media_sequence or 0
-        self._audio_list = {first + k: segment for k, segment in enumerate(playlist.segments)}
+        first = (playlist.media_sequence or 0) + len(playlist.segments)
+        newest = _checked(playlist)  # a DVR window's: as far back as a start may be
+        first -= len(newest)
+        self._audio_list = {first + k: segment for k, segment in enumerate(newest)}
+        self._audio_loaded = time.monotonic()
         self._audio_base = final
         self._audio_target = float(playlist.target_duration or 0)
         self._audio_ended = bool(playlist.is_endlist)
 
     def _audio_segment(self, sequence: int) -> bytes | None:
         """The audio segment of `sequence` (a live playlist that does not list it yet reloaded
-        once: the video is held meanwhile, `_pass_covered`), decrypted and as TS or packed
-        audio; None when the playlist does not list it (not yet, or no more), b"" when it fails
-        (the video plays without it)."""
+        once, unless it was less than half its target duration ago: the video is held
+        meanwhile, `_pass_covered`), decrypted and as TS or packed audio; None when the
+        playlist does not list it (not yet, or no more), b"" when it fails (the video plays
+        without it)."""
         segment = self._audio_list.get(sequence)
-        if segment is None and not self._audio_ended:
+        due = self._audio_loaded + max(1.0, _AUDIO_RELOAD_PART * self._audio_target)
+        if segment is None and not self._audio_ended and time.monotonic() >= due:
             if not self._audio_list or sequence > min(self._audio_list):  # not gone from it
                 try:
                     self._load_audio()
@@ -1605,6 +1631,16 @@ class HlsSource:
             return self._http.read_all(response, b"", limit)
         finally:
             self._http.release(response)
+
+
+def _balance_edits(video: Fmp4Remuxer, audio: Fmp4Remuxer) -> None:
+    """A video and its separate audio rendition (either fMP4, or both): an edit list's media
+    time on one side only, longer than a B-frame offset or an AAC priming (`_EDIT_KEEP_S`),
+    is left out, the other side having none to match: it would move the sound off the
+    picture (empty edits' delays stay)."""
+    video_s, audio_s = video.edit_media_s, audio.edit_media_s
+    if (video_s > 0) != (audio_s > 0):
+        (video if video_s > 0 else audio).drop_edit_media(_EDIT_KEEP_S)
 
 
 def _open_local(url: str, scheme: str) -> Source:

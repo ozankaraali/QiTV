@@ -21,10 +21,12 @@ raise `Fmp4Error`: those channels keep playing directly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 import logging
 import struct
-from typing import Iterator, NamedTuple
+from typing import NamedTuple
 
 from services.live.ts import PACKET, SYNC, _crc32
 
@@ -54,6 +56,8 @@ _AAC_OBJECTS = (0x40, 0x66, 0x67, 0x68)  # MPEG-4 audio; MPEG-2 AAC main, LC, SS
 _MPEG_AUDIO = {0x6B: 0x03, 0x69: 0x04}  # MPEG-1, MPEG-2 audio (layers 1-3)
 _SBR, _PS = 5, 29  # HE-AAC's object types: ADTS names the core (AAC LC) beneath them
 _NON_SYNC = 0x10000  # sample_is_non_sync_sample in a sample's flags
+# An edit list's media time past this (seconds) is no B-frame offset or AAC priming: left out.
+_EDIT_LIMIT_S = 10.0
 
 _H264_AUD = b"\x00\x00\x00\x01\x09\xf0"
 _HEVC_AUD = b"\x00\x00\x00\x01\x46\x01\x50"
@@ -68,6 +72,16 @@ class Fmp4Error(Exception):
     """An init or media segment that cannot be remuxed: `str(error)` says why."""
 
 
+@contextmanager
+def _reading() -> Iterator[None]:
+    """A box whose fields point past its data raises Fmp4Error(DAMAGED), whatever the reading
+    of it met first."""
+    try:
+        yield
+    except (struct.error, IndexError, ValueError, KeyError, OverflowError) as error:
+        raise Fmp4Error(DAMAGED) from error
+
+
 @dataclass(frozen=True)
 class Track:
     """One track of an init segment, as `Fmp4Remuxer` writes it."""
@@ -78,6 +92,7 @@ class Track:
     timescale: int
     stream_type: int
     shift: int = 0  # the edit list's media time at presentation 0, less an empty edit's delay
+    edit_media: int = 0  # ... that media time alone (0: no edit list, or one left out)
     decode_shift: int = 0  # `cslg`'s composition-to-DTS shift: how far DTS goes before a PTS
     nal_size: int = 4  # H.264/HEVC: the bytes of each NAL unit's length ...
     parameter_sets: bytes = b""  # ... and the init's parameter sets, Annex B
@@ -175,11 +190,14 @@ def _language(data: memoryview, at: int) -> str:
     return "" if text == "und" or not text.isalpha() else text
 
 
-def _shift(data: memoryview, span: tuple[int, int] | None, movie_scale: int, scale: int) -> int:
-    """An edit list's shift: its first edit's media time, less the delay of the empty edits
-    before it (the movie's timescale converted to the track's)."""
+def _edits(
+    data: memoryview, span: tuple[int, int] | None, movie_scale: int, scale: int
+) -> tuple[int, int]:
+    """An edit list's (media time of its first edit, delay of the empty edits before it), in
+    the track's timescale; a media time past `_EDIT_LIMIT_S` (no B-frame offset or AAC
+    priming: a packager's leftover) is left out (0)."""
     if span is None:
-        return 0
+        return 0, 0
     body, end = span
     version = data[body]
     at, delay = body + 8, 0
@@ -195,8 +213,13 @@ def _shift(data: memoryview, span: tuple[int, int] | None, movie_scale: int, sca
         if media == -1:
             delay += duration * scale // max(1, movie_scale)
             continue
-        return media - delay
-    return -delay
+        if abs(media) > _EDIT_LIMIT_S * scale:
+            logger.info(
+                "A fragmented MP4 edit list's media time is left out (%.1f s).", media / scale
+            )
+            media = 0
+        return media, delay
+    return 0, delay
 
 
 def _decode_shift(data: memoryview, stbl: tuple[int, int] | None) -> int:
@@ -353,8 +376,12 @@ def read_init(data: bytes | memoryview) -> dict[int, Track]:
     """The tracks of an init segment by track ID: its first video and first audio track.
 
     Raises `Fmp4Error`: no `moov`; encryption (`encv`, `enca`, `pssh`); a video track, or
-    every audio track, of a codec not remuxed."""
-    view = memoryview(data)
+    every audio track, of a codec not remuxed; damaged boxes."""
+    with _reading():
+        return _read_init(memoryview(data))
+
+
+def _read_init(view: memoryview) -> dict[int, Track]:
     moov = _child(view, 0, len(view), b"moov")
     if moov is None:
         raise Fmp4Error(NO_INIT)
@@ -403,13 +430,15 @@ def read_init(data: bytes | memoryview) -> dict[int, Track]:
             refused[track_kind] = error
             continue
         duration, size, flags = defaults.get(track_id, (0, 0, 0))
+        media, delay = _edits(view, _path(view, body, end, b"edts", b"elst"), movie_scale, scale)
         tracks[track_id] = Track(
             track_id=track_id,
             kind=track_kind,
             codec=entry.codec,
             timescale=scale,
             stream_type=entry.stream_type,
-            shift=_shift(view, _path(view, body, end, b"edts", b"elst"), movie_scale, scale),
+            shift=media - delay,
+            edit_media=media,
             decode_shift=_decode_shift(view, _path(view, body, end, b"mdia", b"minf", b"stbl")),
             nal_size=entry.nal_size,
             parameter_sets=entry.parameter_sets,
@@ -451,9 +480,13 @@ def read_segment(
     order. `ends` keeps each track's end (its next DTS) across segments: a track fragment
     without `tfdt` follows on from it.
 
-    Raises `Fmp4Error`: encrypted samples (`senc`, `saiz`, `saio`), data out of bounds."""
-    view = memoryview(data)
-    ends = {} if ends is None else ends
+    Raises `Fmp4Error`: encrypted samples (`senc`, `saiz`, `saio`), data out of bounds, damaged
+    boxes."""
+    with _reading():
+        return _read_segment(memoryview(data), tracks, {} if ends is None else ends)
+
+
+def _read_segment(view: memoryview, tracks: dict[int, Track], ends: dict[int, int]) -> list[Sample]:
     samples: list[Sample] = []
     for kind, moof, body, end in _boxes_at(view):
         if kind != b"moof":
@@ -656,12 +689,33 @@ class Fmp4Remuxer:
         self._version = 0
         self._counters: dict[int, int] = {}
         self._ends: dict[int, int] = {}
-        self._delays: dict[int, int] = {}  # each track's DTS shift: PTS never before its DTS
+        # Each track's DTS shift (PTS never before its DTS), set by its first segment and kept:
+        # DTS and the PCR never step back. A later frame that needs more has its DTS clamped.
+        self._delays: dict[int, int] = {}
+        self._clamped = False  # one was (logged once)
         self.segments = 0  # media segments remuxed so far
 
     @property
     def tracks(self) -> dict[int, Track]:
         return dict(self._tracks)
+
+    @property
+    def edit_media_s(self) -> float:
+        """The longest edit list media time of its tracks, in seconds (0: none)."""
+        return max(
+            (abs(track.edit_media) / track.timescale for track in self._tracks.values()),
+            default=0.0,
+        )
+
+    def drop_edit_media(self, beyond_s: float) -> None:
+        """Leave out an edit list's media time longer than `beyond_s` (its empty edits' delay
+        stays): a separate rendition whose other side has none to match (`HlsSource`)."""
+        for track_id, track in list(self._tracks.items()):
+            if abs(track.edit_media) > beyond_s * track.timescale:
+                logger.info("A one-sided fragmented MP4 edit list's media time is left out.")
+                self._tracks[track_id] = replace(
+                    track, shift=track.shift - track.edit_media, edit_media=0
+                )
 
     def init(self, data: bytes | memoryview) -> None:
         """Read an init segment (`read_init`); one unlike the last (codecs, track IDs) bumps
@@ -672,8 +726,7 @@ class Fmp4Remuxer:
         if self._tracks:
             self._version = (self._version + 1) & 0x1F
             logger.info("The fragmented MP4's init segment changed.")
-        self._tracks, self._ends = tracks, {}
-        self._delays = {track.track_id: track.decode_shift for track in tracks.values()}
+        self._tracks, self._ends, self._delays = tracks, {}, {}
         ordered = sorted(tracks.values(), key=lambda track: track.kind != "video")
         self._pids = {
             track.track_id: _VIDEO_PID if track.kind == "video" else _AUDIO_PID for track in ordered
@@ -684,18 +737,26 @@ class Fmp4Remuxer:
         """A media segment as TS: PAT, PMT, then its samples' PES in DTS order. A segment that
         carries its own `moov` is read with it. Raises `Fmp4Error`: no init read yet, or as
         `read_init` and `read_segment` do."""
-        view = memoryview(data)
+        with _reading():
+            return self._remux(memoryview(data))
+
+    def _remux(self, view: memoryview) -> bytes:
         if _child(view, 0, len(view), b"moov") is not None:
             self.init(view)
         if not self._tracks:
             raise Fmp4Error(NO_INIT)
         samples = read_segment(view, self._tracks, self._ends)
         delays = self._delays
+        seeding: dict[int, int] = {}
         for sample in samples:
             # Negative composition offsets (trun v1) put a B-frame's PTS before its DTS, which
-            # TS forbids: DTS goes that much earlier (the PTS, presentation, stay).
-            if sample.pts < sample.dts - delays[sample.track.track_id]:
-                delays[sample.track.track_id] = sample.dts - sample.pts
+            # TS forbids: DTS goes that much earlier (the PTS, presentation, stay), by the most
+            # a track's first segment needs (or its cslg's), kept from then on.
+            track = sample.track
+            if track.track_id not in delays:
+                need = max(track.decode_shift, sample.dts - sample.pts)
+                seeding[track.track_id] = max(seeding.get(track.track_id, 0), need)
+        delays.update(seeding)
         timed = [
             (
                 _ticks(sample.dts - delays[sample.track.track_id], sample.track.timescale),
@@ -742,6 +803,12 @@ class Fmp4Remuxer:
         pid = self._pids[track.track_id]
         pts = _ticks(sample.pts, track.timescale)
         video = track.kind == "video"
+        clock = dts  # decode order and the PCR keep the DTS before any clamping
+        if pts < dts:  # more negative than the first segment's: never before its PTS
+            if not self._clamped:
+                self._clamped = True
+                logger.info("A fragmented MP4 composition offset outreached its first segment's.")
+            dts = pts
         if video:
             payload = annex_b(track, sample.data, sample.key)
             stream_id = _VIDEO_STREAM
@@ -758,7 +825,7 @@ class Fmp4Remuxer:
             + bytes([stream_id])
             + (length if length <= 0xFFFF else 0).to_bytes(2, "big")
         )
-        pcr = (dts - _PCR_LEAD) % _PTS_MODULO if self._pcr and pid == self._pcr_pid else None
+        pcr = (clock - _PCR_LEAD) % _PTS_MODULO if self._pcr and pid == self._pcr_pid else None
         return self._packets(pid, pes + header + payload, pcr, sample.key and video)
 
     def _packets(self, pid: int, pes: bytes, pcr: int | None, key: bool) -> list[bytes]:
