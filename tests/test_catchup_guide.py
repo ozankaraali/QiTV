@@ -25,7 +25,7 @@ from ui.overlays.guide import WINDOW, Guide, slot_start
 
 NOW = datetime(2026, 10, 15, 19, 42, tzinfo=timezone.utc)
 CHANNELS = [
-    {"id": "a", "name": "Harbour News", "number": "1", "archive": 2},
+    {"id": "a", "name": "Harbour News", "number": "1", "archive_days": 2},
     {"id": "b", "name": "Quiet Pier", "number": "2"},
 ]
 
@@ -58,7 +58,7 @@ class GuideCatchupTests(unittest.TestCase):
             lambda channel, start, limit: half_hours(channel, start),
             lambda: NOW,
             self.host,
-            archive_days=lambda channel: int(channel.get("archive") or 0),
+            archive_days=lambda channel: int(channel.get("archive_days") or 0),
         )
         self.tuned, self.asked = [], []
         self.guide.tuneRequested.connect(self.tuned.append)

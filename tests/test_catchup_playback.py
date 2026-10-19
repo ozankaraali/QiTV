@@ -32,7 +32,7 @@ ARCHIVED = {
     "name": "Harbour News",
     "number": "1",
     "cmd": "http://panel.test/live/viewer/secret/1.ts",
-    "archive": 3,
+    "archive_days": 3,
 }
 PLAIN = {
     "id": 2,
@@ -46,7 +46,7 @@ APPENDED = {
     "name": "Lighthouse Sport",
     "number": "3",
     "cmd": "http://m3u.test/3.ts",
-    "archive": 2,
+    "archive_days": 2,
     "catchup": "append",
     "catchup_source": "?utc={utc}&lutc={lutc}",
 }

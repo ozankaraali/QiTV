@@ -95,6 +95,7 @@ class FieldTests(unittest.TestCase):
         )
         for item in (
             {},
+            {"archive": 1, "tv_archive_duration": "3"},  # an STB portal's own fields: not ours
             {ARCHIVE_KEY: 0},
             {ARCHIVE_KEY: True},
             {ARCHIVE_KEY: "3"},

@@ -7,7 +7,7 @@ judges what a probe of that address read. No Qt.
 
 What a channel's archive is, as the loaders keep it on the catalog item, and only on a channel
 that has one (a catalog can hold 200,000 items; older builds ignore the keys):
-- `archive`: its depth in days (Xtream: `tv_archive_duration` where `tv_archive` is 1; M3U:
+- `archive_days`: its depth in days (Xtream: `tv_archive_duration` where `tv_archive` is 1; M3U:
   `catchup-days`, else `timeshift` or `tvg-rec`);
 - M3U only: `catchup`, its type (default, append, shift, flussonic or xc), and
   `catchup_source`, the template the type fills in, when the playlist gives one. A playlist's
@@ -53,7 +53,7 @@ from services.lazy_import import lazy_module
 logger = logging.getLogger(__name__)
 requests = lazy_module("requests")
 
-ARCHIVE_KEY = "archive"  # days of archive, on a channel that has one
+ARCHIVE_KEY = "archive_days"  # days of archive, on a channel that has one (not STB's "archive")
 TYPE_KEY = "catchup"  # M3U: its catch-up type
 SOURCE_KEY = "catchup_source"  # M3U: the template its type fills in
 XTREAM = "xtream"  # an Xtream panel's channel: its archive's type
@@ -101,7 +101,7 @@ def _days(value: Any) -> int:
 
 
 def xtream_archive_fields(stream: Mapping[str, Any]) -> dict[str, Any]:
-    """The archive keys of a Player API live stream: `archive` with its days where
+    """The archive keys of a Player API live stream: `archive_days` with its days where
     `tv_archive` is 1 (a panel that gives no days keeps one), else none."""
     if _days(stream.get("tv_archive")) != 1:
         return {}

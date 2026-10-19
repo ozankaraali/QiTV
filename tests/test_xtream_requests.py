@@ -149,8 +149,8 @@ class XtreamRequestTests(unittest.TestCase):
     def test_the_archive_and_the_panels_time_zone_are_kept_compactly(self):
         catalog = self.load_catalog("itv")
         plain, archived = catalog["contents"]
-        self.assertNotIn("archive", plain)  # only a channel with an archive has the key
-        self.assertEqual(archived["archive"], 3)
+        self.assertNotIn("archive_days", plain)  # only a channel with an archive has the key
+        self.assertEqual(archived["archive_days"], 3)
         self.assertEqual((catalog["timezone"], catalog["tz_offset"]), ("Europe/Berlin", 60))
 
     def test_hls_only_provider_does_not_need_a_stream_probe(self):

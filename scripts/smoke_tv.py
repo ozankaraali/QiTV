@@ -1583,7 +1583,7 @@ class Driver:
         if current is None or not self.timeline:
             report.check(CATCHUP_CHECK, False, "no channel or no time-shift state to start from")
             return
-        current.item.update(archive=1, catchup="append", catchup_source="?archive={utc}")
+        current.item.update(archive_days=1, catchup="append", catchup_source="?archive={utc}")
         state = self.timeline[-1][1]
         transport = w.overlays.transport
         transport.seekToRequested.emit(float(state["start"]) - CATCHUP_BEFORE_S)
@@ -1599,7 +1599,7 @@ class Driver:
         self._capture(PIPELINE_CATCHUP)
         self._key(Qt.Key.Key_L)
         back = yield from self._wait(self._pipeline_playing, LIVE_PLAY_TIMEOUT_MS)
-        for key in ("archive", "catchup", "catchup_source"):
+        for key in ("archive_days", "catchup", "catchup_source"):
             current.item.pop(key, None)  # the steps after it are the live channel's
         report.data["pipeline"]["catchup"] = {"archive": archive, "texts": texts, "back": back}
         report.check(
