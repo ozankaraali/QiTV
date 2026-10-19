@@ -1697,8 +1697,9 @@ class KeyTests(ControllerTestCase):
         self.assertIsNone(self.controller.now_title(CHANNELS[0]))
 
     def test_mouse_move_shows_the_live_transport_while_playing(self):
+        before = list(self.transport.calls)  # the speaker's remembered level, from the start
         self.controller.mouse_moved()
-        self.assertEqual(self.transport.calls, [])
+        self.assertEqual(self.transport.calls, before)
         self.play(0)
         self.controller.mouse_moved()
         self.assertEqual(self.transport.named("show_live"), [("One", "")])
