@@ -16,11 +16,13 @@ instead of using others' distributions, which may have malware.**
   technical statistics over the picture.
 - **Controls on each multiview tile.** Point at a tile to get its own play/pause, sound, LIVE
   (or how far behind it plays: a click goes live), a button that makes it the big picture,
-  and ✕ to close it. They act on that tile without moving the focus. The layout chip on the
-  player controls now opens the four layouts as small pictures to pick from.
-- **Your mix stays.** In multiview the sound follows the focused tile until you set levels
-  in the mixer; from then on, clicking another tile moves only the controls, and the mixer
-  says which way it works, with a way back.
+  and ✕ to close it. They act on that tile without moving the focus. The layout chip beside
+  the multiview button now looks like a button and opens the four layouts as small pictures
+  to pick from (6 and 9 tiles need hardware decoding).
+- **Your mix stays.** In multiview the sound follows the focused tile until you change another
+  tile's sound (its level or mute, in the mixer or on the tile); from then on, clicking another
+  tile moves only the controls. The mixer says which way it works, and Follow focus, or leaving
+  the grid, goes back.
 - **macOS downloads as a .dmg.** Open it and drag QiTV onto Applications. An update from inside
   QiTV downloads the new .dmg, opens it and closes QiTV, so updating is one drag and Replace.
 - **Remove from Recents.** Right-click a channel in ⟲ Recent to remove it, or to clear Recents;
