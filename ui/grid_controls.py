@@ -1,5 +1,4 @@
-"""The multiview in the TV shell: several live channels at once, on a grid (stage 1 of
-docs/superpowers/specs/2026-10-19-multiview-design.md).
+"""The multiview in the TV shell: several live channels at once, on a grid.
 
 V, View → Multiview (Ctrl/⌘+4) or the grid button on the player controls shows it over live
 TV: the channel playing becomes tile 1, an open picture-in-picture tile 2 (nothing opens
