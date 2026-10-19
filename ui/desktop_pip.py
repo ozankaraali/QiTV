@@ -30,11 +30,14 @@ logger = logging.getLogger(__name__)
 POLL_MS = 400  # how often the fullscreen window's desktop is asked about
 WIDTH_FRACTION = 0.25  # the floating window: a quarter of the screen's width, 16:9
 MARGIN = 24  # from the screen's corner
+AWAY_CHECKS = 2  # answers "another desktop" in a row before the picture floats (the
+# fullscreen animation may answer it once)
 _MOUSE_EVENTS = (
     QEvent.Type.MouseButtonPress,
     QEvent.Type.MouseButtonRelease,
     QEvent.Type.MouseButtonDblClick,
     QEvent.Type.MouseMove,
+    QEvent.Type.Wheel,  # never the shell's: a scroll drifting over it would zap
 )
 
 
@@ -48,15 +51,17 @@ def corner_rect(available: QRect, screen_width: int) -> QRect:
 
 
 class FloatingPlayer(QWidget):
-    """A frameless window on top that holds the large picture's surface; a click asks for the
-    fullscreen desktop again (`returnRequested`), a drag moves it."""
+    """A frameless panel on top that holds the large picture's surface; a click asks for the
+    fullscreen desktop again (`returnRequested`), a drag moves it. A panel that takes no focus
+    (on macOS a non-activating one): a press on it leaves QiTV inactive and the desktop shown,
+    so it can be dragged there."""
 
     returnRequested = Signal()
 
     def __init__(self) -> None:
         super().__init__(
             None,
-            Qt.WindowType.Window
+            Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.WindowDoesNotAcceptFocus,
@@ -100,7 +105,7 @@ class FloatingPlayer(QWidget):
         if watched is not self._surface or event.type() not in _MOUSE_EVENTS:
             return False
         if not isinstance(event, QMouseEvent):
-            return True
+            return True  # the wheel
         left = Qt.MouseButton.LeftButton
         where = event.globalPosition().toPoint()
         kind = event.type()
@@ -150,6 +155,7 @@ class DesktopPip(QObject):
         self._join_all_spaces = join_all_spaces
         self._floating: Optional[FloatingPlayer] = None
         self._shown = False
+        self._away = 0  # "another desktop" answers in a row
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self.check)
@@ -168,10 +174,14 @@ class DesktopPip(QObject):
 
     def check(self) -> None:
         """The window's desktop now: float the picture when it is away, put it back when not."""
+        if self._shown and not self._may_float():
+            self.dock()  # nothing to float any more (it stopped, the grid or the Library came)
+            return
         shown = self._on_active_space(self._window)
         if shown is None:
             return
-        if not shown and not self._shown and self._may_float():
+        self._away = 0 if shown else self._away + 1
+        if self._away >= AWAY_CHECKS and not self._shown and self._may_float():
             self._float()
         elif shown and self._shown:
             self.dock()
@@ -198,8 +208,10 @@ class DesktopPip(QObject):
             floating.returnRequested.connect(self._return)
         floating.setGeometry(self._place())
         floating.hold(surface)
+        floating.winId()  # its native window, to be told before it shows
+        self._join_all_spaces(floating)
         floating.show()
-        self._join_all_spaces(floating)  # its native window exists once shown
+        self._join_all_spaces(floating)  # again: showing may set its own
         self._shown = True
         logger.info("Desktop picture in picture: floating")
         self.floatingChanged.emit(True)
@@ -207,10 +219,10 @@ class DesktopPip(QObject):
     def _return(self) -> None:
         """A click on the floating window: the fullscreen window's desktop again (macOS shows
         it as the window is activated); the next check puts the picture back."""
+        self.dock()  # back at once, while macOS brings that desktop
         window = self._window
         window.raise_()
         window.activateWindow()
-        QTimer.singleShot(0, self, self.check)
 
     def close(self) -> None:
         """QiTV closes: the picture back first, then the floating window goes."""

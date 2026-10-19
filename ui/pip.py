@@ -105,6 +105,7 @@ class _Press:
 
 class PipFrame(QObject):
     swapRequested = Signal()  # a click on the small surface
+    suspending = Signal()  # the multiview takes the surfaces: a lent one must come back first
     cornerChanged = Signal(str)  # a drag snapped it to another corner (saved as pip_corner)
     smallRectChanged = Signal(QRect)  # container coordinates, empty when hidden (the label)
 
@@ -181,6 +182,8 @@ class PipFrame(QObject):
         if not self._closed:
             surface.setParent(self._container)
             surface.lower()  # under the small surface, as laid out
+            if self._suspended:
+                surface.show()  # (setParent hid it) the multiview lays it out
         self._layout()
 
     def set_large(self, name: str) -> None:
@@ -245,6 +248,7 @@ class PipFrame(QObject):
         shows again when picture in picture next opens (`show_pip`)."""
         if self._suspended:
             return
+        self.suspending.emit()  # a lent surface comes back first (the desktop PiP's)
         self._lifting.stop()
         self._press = None
         self._swap_at = None
@@ -325,7 +329,9 @@ class PipFrame(QObject):
         for name, surface in self._surfaces.items():
             if name not in (self._large, self._small_name, self._lent):
                 surface.hide()  # a tile's, outside the multiview
-        if self._shown:
+        if self._small_name == self._lent:
+            pass  # (a swap while it is out: its place is the other window's)
+        elif self._shown:
             small.setGeometry(self._small_target())
             small.show()
             # macOS can stack a native view under its sibling after a geometry change.

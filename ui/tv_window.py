@@ -175,6 +175,11 @@ def _local_now() -> datetime:
     return datetime.now().astimezone()
 
 
+def _macos_desktops() -> bool:
+    """Only macOS has fullscreen desktops to leave (the desktop picture in picture)."""
+    return QGuiApplication.platformName() == "cocoa"
+
+
 def _native_video_handles() -> bool:
     """False on Qt platforms without real window ids (offscreen, Wayland): libVLC would crash."""
     return QGuiApplication.platformName() == _NATIVE_PLATFORMS.get(platform.system())
@@ -556,6 +561,7 @@ class TVWindow(QMainWindow):
         self.floating_note.setStyleSheet("color: rgba(255, 255, 255, 0.55); font-size: 18px;")
         self.floating_note.hide()
         self.desktop_pip.floatingChanged.connect(self._on_picture_floating)
+        self.pip_frame.suspending.connect(self.desktop_pip.dock)  # the multiview lays them out
         # The host covers the page exactly: page coordinates are the host's.
         self.pip_frame.smallRectChanged.connect(self.pip_label.follow)
         self.pip_frame.smallRectChanged.connect(self.mixer.avoid)
@@ -626,6 +632,8 @@ class TVWindow(QMainWindow):
         # The corner player (the Library with what plays in a corner of it): ⤢ and a click on
         # it bring the player back, × stops it, the speaker mutes.
         self.pages.modeChanged.connect(self._on_page_mode)
+        # The Library (its corner player) lays the player out: a floating picture comes back.
+        self.pages.modeChanged.connect(lambda *_: self.desktop_pip.dock())
         self.pages.cornerClicked.connect(self.screens.back_to_player)
         self.corner_controls.backRequested.connect(self.screens.back_to_player)
         self.corner_controls.stopRequested.connect(self.screens.stop_corner)
@@ -1109,6 +1117,8 @@ class TVWindow(QMainWindow):
             return False
         if not getattr(self.config_manager, "desktop_pip", True):
             return False
+        if QApplication.activeModalWidget() is not None:
+            return False  # a dialog would block the small window's clicks
         if self.controller.multiview_shown() or self.screens.library_shown():
             return False
         playing = (PlaybackState.OPENING, PlaybackState.BUFFERING, PlaybackState.PLAYING)
@@ -1159,7 +1169,7 @@ class TVWindow(QMainWindow):
             self._update_menu_bar()
             # Fullscreen: the desktop shown is asked about (the picture may float); else the
             # picture is back, and nothing is asked.
-            self.desktop_pip.watch(self.isFullScreen() and not self._closing)
+            self.desktop_pip.watch(self.isFullScreen() and not self._closing and _macos_desktops())
             if isinstance(event, QWindowStateChangeEvent):
                 was_fullscreen = event.oldState() & Qt.WindowState.WindowFullScreen
                 if not was_fullscreen and self.isFullScreen() and self._pre_fullscreen is None:
@@ -1426,7 +1436,10 @@ class TVWindow(QMainWindow):
         if not self._closing:
             self._closing = True
             self._mini_waiting = False
-            self.desktop_pip.close()  # the picture back in its window first
+            try:
+                self.desktop_pip.close()  # the picture back in its window first
+            except Exception as e:  # never in the way of closing
+                logger.warning("Could not put the floating picture back: %s", safe_message(e))
             self._shut_down()
             self._thread_wait.start()
             self._close_later(event)
