@@ -1,7 +1,9 @@
 """The channel list's find: genres and channels at every provider (see services.find).
 
-The first find makes the index in a worker; it is kept until the catalogs' content changes
-(`signature`), then made again at the next find. Each letter typed narrows what was found at
+The first find makes the index in a worker. It holds the catalogs' own channels, so it goes
+when their content changes (`content_changed`, the hub's signals; a find on screen then runs
+again) and when the find has been idle for IDLE_DROP_MS; the next find makes it again. Each
+letter typed narrows what was found at
 once, here; the genres and channels for the new text, ranked, follow from a worker after a
 short pause (`preferences`, read here, rank the user's own first). One worker runs at a time:
 a text typed meanwhile waits, and only the latest one runs.
@@ -15,13 +17,21 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from services.find import FindIndex, FindWorker, FoundGenre, Preferences, matches, words
+from services.find import (
+    FindIndex,
+    FindWorker,
+    FoundChannel,
+    FoundGenre,
+    Preferences,
+    matches,
+    words,
+)
 from services.provider_ids import with_provider
-from services.search import Hit
 
 logger = logging.getLogger(__name__)
 
 DEBOUNCE_MS = 150
+IDLE_DROP_MS = 5 * 60 * 1000  # an ended find's index (200,000 channels: ~100 MB) goes then
 
 
 class FindSession(QObject):
@@ -35,6 +45,7 @@ class FindSession(QObject):
         loaded: Optional[Callable[[], dict]] = None,
         signature: Optional[Callable[[], Any]] = None,
         preferences: Optional[Callable[[], Preferences]] = None,
+        idle_ms: int = IDLE_DROP_MS,
         parent: Optional[QObject] = None,
     ) -> None:
         super().__init__(parent)
@@ -52,13 +63,17 @@ class FindSession(QObject):
         self._queued = False
         self._closed = False
         self.genres: list[FoundGenre] = []
-        self.channels: list[Hit] = []  # each item stamped with its provider
+        self.channels: list[FoundChannel] = []  # each item stamped with its provider
         self.searching = False  # the genres and channels for the text are on their way
         self.failed = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(DEBOUNCE_MS)
         self._timer.timeout.connect(self._start)
+        self._idle = QTimer(self)
+        self._idle.setSingleShot(True)
+        self._idle.setInterval(idle_ms)
+        self._idle.timeout.connect(self._on_idle)
 
     @property
     def query(self) -> str:
@@ -69,6 +84,7 @@ class FindSession(QObject):
             self.clear()
             return
         self._query = text
+        self._idle.stop()
         if self._index is not None and self._signature is not None:
             if self._signature() != self._made_for:
                 self.drop_snapshot()
@@ -87,6 +103,7 @@ class FindSession(QObject):
         self._query = ""
         self.genres, self.channels = [], []
         self.searching = self.failed = False
+        self._idle.start()  # an index unused for a while goes
         self.changed.emit()
 
     def drop_snapshot(self) -> None:
@@ -94,9 +111,34 @@ class FindSession(QObject):
         self._snapshot += 1
         self._index = None
 
+    def content_changed(self, _provider: str = "") -> None:
+        """A catalog's content or the providers changed (the hub's contentChanged and
+        providersChanged): an index made before goes, and a find on screen runs again."""
+        if self._index is None and not self._running:
+            return  # none made, none on its way: the next find reads the content as it is
+        if self._index is not None and self._signature is not None:
+            if self._signature() == self._made_for:
+                return  # (a section reported ready again, unchanged)
+        self.refresh()  # (one being made from the old content is never kept)
+
+    def refresh(self) -> None:
+        """Find again from the catalogs as they are now (what is shown stays meanwhile)."""
+        self.drop_snapshot()
+        if self._query.strip():
+            self._timer.start()
+
+    def group_of(self, item: dict) -> str:
+        """The genre a found channel (as `channels` holds it) is first listed in, or ""."""
+        return next((c.group_id for c in self.channels if c.item is item), "")
+
+    def _on_idle(self) -> None:
+        if not self._query.strip():
+            self.drop_snapshot()
+
     def shutdown(self) -> None:
         self._closed = True
         self._timer.stop()
+        self._idle.stop()
         self._generation += 1
         self._queued = False
 

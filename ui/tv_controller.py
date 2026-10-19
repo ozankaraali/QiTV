@@ -76,7 +76,7 @@ from services.navigation import (
     payloads,
 )
 from services.next_episode import play_context
-from services.provider_ids import ALL_PROVIDERS, provider_of, split_group_id
+from services.provider_ids import ALL_PROVIDERS, mixed_group_id, provider_of, split_group_id
 from services.redact import safe_traceback, scrub
 from services.sessions import SessionManager, Slot
 from services.vlc_profile import classify
@@ -851,13 +851,37 @@ class TVController(QObject):
         self.tune(node.payload, group_key=parent.key, channels=channels)
         self.overlays.drawer.close_drawer()
 
-    def play_found(self, channel: dict) -> None:
-        """A channel the drawer's find found (any provider's): it plays as one found by the
-        Library's search does, ↑/↓ then walking every channel, and the list closes."""
+    def play_found(self, channel: dict, group_id: str = "") -> None:
+        """A channel the drawer's find found (any provider's), and the list closes. ↑/↓ then
+        walk the genre it is first listed in (`group_id`, its provider's), as from that genre's
+        list, when the list shows that provider (or every one); else every channel, as a
+        channel found by the Library's search."""
         if self._closed:
             return
-        self.tune_live(channel)
+        key, channels = self._found_group(channel, group_id)
+        if key is None:
+            self.tune_live(channel)
+        else:
+            self._flow.leave_library()
+            self.tune(channel, group_key=key, channels=channels)
         self.overlays.drawer.close_drawer()
+
+    def _found_group(self, channel: dict, group_id: str) -> tuple[Optional[str], list[dict]]:
+        """The list's key of a found channel's genre and its channels; (None, []) when the
+        list cannot show it (another provider's while it shows one) or it is not there."""
+        if not group_id:
+            return None, []
+        provider = provider_of(channel)
+        if self.nav.all_mode():
+            key = mixed_group_id(provider, group_id)
+        elif provider in ("", self.catalog.current_provider_name()):
+            key = group_id
+        else:
+            return None, []
+        channels = list(self.catalog.items("live", key) or [])
+        if not any(ZapContext.same(channel, c) for c in channels):
+            return None, []
+        return key, channels
 
     def play_vod(
         self,

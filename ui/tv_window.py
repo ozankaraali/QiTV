@@ -548,6 +548,9 @@ class TVWindow(QMainWindow):
             parent=self,
         )
         self.overlays.drawer.set_finder(self.finder)
+        # Its index holds the catalogs' channels: a refresh or an edited list lets them go.
+        self.catalogs.contentChanged.connect(self.finder.content_changed)
+        self.catalogs.providersChanged.connect(self.finder.content_changed)
         self.overlays.drawer.libraryFindRequested.connect(self.screens.open_search)
         # A Windows self-update waits for background threads: the engine's must stop first,
         # and start again if the update cannot launch.

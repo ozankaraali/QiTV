@@ -353,7 +353,7 @@ class FakeColumn(FakeOverlay):
 
 class FakeDrawer(FakeOverlay):
     playRequested = Signal(object, object, object)
-    channelFound = Signal(object)
+    channelFound = Signal(object, str)
     contextRequested = Signal(object, object)
     closed = Signal()
     highlight = None
@@ -1673,13 +1673,30 @@ class DrawerPlayTests(ControllerTestCase):
         self.assertEqual(self.zap.context.channels, CHANNELS)
         self.assertEqual(self.drawer.calls[-1], ("close_drawer",))
 
-    def test_a_channel_the_find_found_plays_with_every_channel_and_the_list_closes(self):
+    def test_a_channel_the_find_found_plays_in_its_genre_and_the_list_closes(self):
+        self.catalog.live["20"] = [{"id": 9, "name": "Nine", "cmd": "ffrt http://tv/9"}]
         self.controller.start()
         self.drawer.visible = True
-        self.drawer.channelFound.emit(BACKUP_TWO)  # another provider's, as the find stamps it
+        self.drawer.channelFound.emit({**CHANNELS[1], "_provider": "Home"}, "10")
         self.assertEqual(self.requested(), ["Two"])
-        self.assertEqual(self.zap.context.group_key, "*")  # ↑/↓ walk every channel
+        self.assertEqual(self.zap.context.group_key, "10")  # ↑/↓ walk its genre, as in 2.0
+        self.assertEqual(
+            [c["name"] for c in self.zap.context.channels], ["One", "Two", "Three", "Four"]
+        )
         self.assertEqual(self.drawer.calls[-1], ("close_drawer",))
+
+    def test_a_found_channel_the_list_cannot_show_in_its_genre_walks_every_channel(self):
+        self.catalog.live["20"] = [{"id": 9, "name": "Nine", "cmd": "ffrt http://tv/9"}]
+        self.controller.start()
+        for channel, group in (
+            (BACKUP_TWO, "10"),  # another provider's, the list on Home
+            ({**CHANNELS[1], "_provider": "Home"}, "20"),  # a genre that does not list it
+            ({**CHANNELS[1], "_provider": "Home"}, ""),  # in no genre
+        ):
+            self.drawer.visible = True
+            self.drawer.channelFound.emit(channel, group)
+            self.assertEqual(self.zap.context.group_key, "*", (channel, group))
+            self.assertEqual(len(self.zap.context.channels), 5)
 
     def test_the_drawer_plays_only_channels(self):
         # Movies and Series open the Library from the drawer: their titles and episodes

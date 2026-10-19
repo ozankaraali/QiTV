@@ -111,6 +111,13 @@ class IndexTests(unittest.TestCase):
             ["Harbor Spor 2", "Northwind Sport 1"],
         )
 
+    def test_a_found_channel_knows_the_first_genre_that_lists_it(self):
+        index = build_find_index(caches() + [("Bare", {"itv": [{"id": 1, "name": "Spor X"}]})])
+        groups = {(h.provider, h.title): h.group_id for h in find_channels(index, "spor")}
+        self.assertEqual(groups[("Harbor IPTV", "Harbor Spor 2")], "TR: Spor")
+        self.assertEqual(groups[("Demo TV", "Northwind Sport 1")], "Sports")
+        self.assertEqual(groups[("Bare", "Spor X")], "")  # a list without genres
+
     def test_words_are_runs_of_letters_and_digits_folded(self):
         self.assertEqual(words("TR| SPOR-Kanalı (1440p)"), ["tr", "spor", "kanali", "1440p"])
 
@@ -279,6 +286,44 @@ class SessionTests(unittest.TestCase):
         session.set_query("sport")
         elapse(WAIT)
         self.assertEqual([g.provider for g in session.genres], ["Harbor IPTV", "Demo TV"])
+
+    def test_a_change_of_the_catalogs_drops_the_index_and_finds_again_on_screen(self):
+        self.session.set_query("kids")
+        elapse(WAIT)
+        self.session.content_changed("Demo TV")  # the same content (reported ready again)
+        self.assertEqual(len(self.providers.reads), 1)
+        self.providers.contents = [("Demo TV", demo())]  # Harbor IPTV refreshed away
+        self.version[0] = 2
+        self.session.content_changed("Harbor IPTV")
+        self.assertIsNone(self.session._index)  # its channels are let go at once
+        self.assertEqual([h.title for h in self.session.channels], ["Harbor Kids"])  # meanwhile
+        elapse(WAIT)
+        self.assertEqual(len(self.providers.reads), 2)  # the find on screen ran again
+        self.assertEqual(self.session.channels, [])
+
+    def test_a_change_while_the_index_is_made_keeps_none_of_it(self):
+        runner = HeldRunner()
+        session = FindSession(self.providers, runner)
+        session.set_query("kids")
+        elapse(WAIT)
+        session.content_changed("Harbor IPTV")  # the index on its way reads the old content
+        elapse(WAIT)
+        runner.release()
+        self.assertIsNone(session._index)
+        runner.release()  # the find again, from the content as it is now
+        self.assertIsNotNone(session._index)
+        self.assertEqual(len(self.providers.reads), 2)
+
+    def test_an_ended_find_lets_its_index_go_after_a_while(self):
+        session = FindSession(self.providers, ImmediateRunner(), idle_ms=50)
+        session.set_query("kids")
+        elapse(WAIT)
+        session.set_query("kid")  # (still in use: kept)
+        elapse(100)
+        self.assertIsNotNone(session._index)
+        session.clear()
+        elapse(100)
+        self.assertIsNone(session._index)
 
     def test_the_index_is_made_again_when_the_catalogs_changed(self):
         self.session.set_query("news")

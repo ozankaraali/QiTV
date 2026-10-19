@@ -990,7 +990,9 @@ class FindTests(unittest.TestCase):
         self.finder = FindSession(FakeProviders(caches), ImmediateRunner())
         self.drawer.set_finder(self.finder)
         self.found_channels, self.library_finds = [], []
-        self.drawer.channelFound.connect(self.found_channels.append)
+        self.drawer.channelFound.connect(
+            lambda item, group: self.found_channels.append((item, group))
+        )
         self.drawer.libraryFindRequested.connect(self.library_finds.append)
         self.nav.reset_to("live", "News")
         self.drawer.open_drawer()
@@ -1127,11 +1129,31 @@ class FindTests(unittest.TestCase):
         self.assertEqual([n.key for n in self.nav.path], ["Backup", "live", "TR: Spor"])
         self.assertEqual(self.drawer.highlighted().title, "Harbor Spor 2")
 
+    def test_a_genre_whose_provider_went_keeps_the_find_and_finds_again(self):
+        self.type("spor")
+        self.catalog.provider_names = lambda: ["Home"]  # Backup removed since
+        self.finder._provider_manager.contents = self.finder._provider_manager.contents[:1]
+        self.click_row("TR: Spor")
+        self.assertEqual([n.key for n in self.nav.path], ["Home", "live", "News"])  # stayed
+        self.assertEqual(self.drawer.find_text, "spor")
+        elapse(FIND_WAIT)
+        self.assertNotIn(("found_genre", "TR: Spor"), self.rows())
+        self.assertIn(("found_genre", "Sports"), self.rows())
+
+    def test_closing_the_list_ends_the_find(self):
+        self.type("spor")
+        self.drawer.close_drawer()
+        self.assertEqual((self.drawer.find_text, self.finder.query), ("", ""))
+        self.drawer.open_drawer()
+        self.assertEqual(self.right.nodes[0].title, "Evening News")
+
     def test_a_click_on_a_found_channel_plays_it(self):
         self.type("harbor k")
         self.click_row("Harbor Kids")
-        self.assertEqual([c["name"] for c in self.found_channels], ["Harbor Kids"])
-        self.assertEqual(provider_of(self.found_channels[0]), "Backup")
+        self.assertEqual(
+            [(c["name"], g) for c, g in self.found_channels], [("Harbor Kids", "Kids")]
+        )
+        self.assertEqual(provider_of(self.found_channels[0][0]), "Backup")
         self.assertEqual(self.catalog.selected, [])  # nothing switched: the shell tunes it
 
     def test_the_last_row_looks_for_films_and_series_in_the_library(self):

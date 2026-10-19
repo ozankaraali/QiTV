@@ -51,7 +51,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QToolTip
 
-from services.find import FoundGenre
+from services.find import FoundChannel, FoundGenre
 from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
@@ -67,7 +67,6 @@ from services.navigation import (
     item_title,
 )
 from services.provider_ids import mixed_group_id, provider_of
-from services.search import Hit
 from services.zapping import ZapContext
 from ui.find_session import FindSession
 from ui.keymap import key_hint
@@ -533,7 +532,8 @@ class Drawer(Overlay):
     # (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION).
     actionRequested = Signal(str)
     libraryRequested = Signal(str)  # "movies" or "series", for the Library
-    channelFound = Signal(object)  # a channel the find found (stamped with its provider)
+    # A channel the find found (stamped with its provider), and the genre it is first listed in.
+    channelFound = Signal(object, str)
     libraryFindRequested = Signal(str)  # the find's text, for the Library's search
     closed = Signal()
 
@@ -590,6 +590,7 @@ class Drawer(Overlay):
     def close_drawer(self) -> None:
         self._flush_preview()
         was_visible = self.isVisible()
+        self._drop_find()  # (its index goes after a while unused)
         self.hide()
         if was_visible:
             self.closed.emit()
@@ -794,18 +795,20 @@ class Drawer(Overlay):
         """Enter, → or a click on a row of the find."""
         if isinstance(node.payload, FoundGenre):
             genre = node.payload
+            if not self._nav.open_found_group(genre.provider, genre.group_id):
+                if self._finder is not None:
+                    self._finder.refresh()  # its provider went since: the find stays, anew
+                return
             self._find_open = False
             self.find_text = ""
-            self._before_find = None  # it opens where it is: nothing to go back to
+            self._before_find = None  # it opened where it is: nothing to go back to
             if self._finder is not None:
                 self._finder.clear()
             self.focus_side = "right"
-            before = self._nav.path
-            self._nav.open_found_group(genre.provider, genre.group_id)
-            if self._nav.path == before:
-                self._refresh()  # the path's change refreshes otherwise
+            self._refresh()
         elif node.layer == "item" and isinstance(node.payload, dict):
-            self.channelFound.emit(node.payload)
+            group = self._finder.group_of(node.payload) if self._finder is not None else ""
+            self.channelFound.emit(node.payload, group)
         elif node.layer == FOUND_LIBRARY:
             self.libraryFindRequested.emit(self.find_text.strip())
 
@@ -1034,7 +1037,7 @@ class Drawer(Overlay):
         """The right column lists what the find found: genres, channels, the Library row."""
         finder = self._finder
         genres: list[FoundGenre] = finder.genres if finder is not None else []
-        channels: list[Hit] = finder.channels if finder is not None else []
+        channels: list[FoundChannel] = finder.channels if finder is not None else []
         searching = finder is not None and finder.searching
         text = self.find_text.strip()
         labels = len(self._nav.catalog.provider_names()) >= 2  # with one provider, as in 2.0

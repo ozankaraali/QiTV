@@ -18,6 +18,7 @@ At most GENRE_LIMIT genres are kept, and CHANNEL_LIMIT channels of each provider
 
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass, field
 import logging
 import time
@@ -27,7 +28,7 @@ from PySide6.QtCore import QObject, Signal
 
 from services.catalog import ALL_GROUP_ID
 from services.navigation import item_key
-from services.search import Hit, _title, iter_items
+from services.search import _title, iter_items
 from services.text_fold import fold, fold_all
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ GENRE_LIMIT = 100  # genres shown, at most
 CHANNEL_LIMIT = 200  # channels shown per provider, at most
 WATCHED_LIMIT = 20  # the channels watched lately that rank first (as many as ⟲ Recent lists)
 _LINE = ord("\n")
+_NO_GENRE = 0xFFFF  # (a row's genre, in `_Channels.genre_of`)
 
 
 @dataclass(frozen=True)
@@ -47,10 +49,20 @@ class FoundGenre:
 
 
 @dataclass(frozen=True)
+class FoundChannel:
+    provider: str
+    title: str
+    item: dict
+    group_id: str  # the first of its provider's genres that lists it ("" when none does)
+
+
+@dataclass(frozen=True)
 class _Channels:
     provider: str
     spaced: list[str]  # each title as `words()` makes it, a space before and after
     items: list[dict]
+    genres: list[str]  # the provider's genre ids, as listed
+    genre_of: array  # each row's first genre (an index into `genres`; _NO_GENRE: none)
 
 
 @dataclass(frozen=True)
@@ -157,15 +169,45 @@ def build_find_index(caches: list[tuple[str, dict]]) -> FindIndex:
         live = cache.get("itv")
         found = live_genres(provider, live)
         genres += zip(_spaced([g.title for g in found]), found)
-        seen: set[str] = set()
+        rows: dict[str, int] = {}
         items: list[dict] = []
         for item in iter_items(live):
-            ident = str(item.get("id") or item.get("cmd") or _title(item))
-            if ident not in seen:
-                seen.add(ident)
+            ident = _ident(item)
+            if ident not in rows:
+                rows[ident] = len(items)
                 items.append(item)
-        channels.append(_Channels(provider, _spaced([_title(i) for i in items]), items))
+        genre_of = _genre_rows(live, found, rows, len(items))
+        ids = [g.group_id for g in found]
+        channels.append(
+            _Channels(provider, _spaced([_title(i) for i in items]), items, ids, genre_of)
+        )
     return FindIndex(genres, channels)
+
+
+def _ident(item: dict) -> str:
+    return str(item.get("id") or item.get("cmd") or _title(item))
+
+
+def _genre_rows(live: Any, genres: list[FoundGenre], rows: dict[str, int], count: int) -> array:
+    """Each channel's first genre (an index into `genres`), for a found one to play in it."""
+    genre_of = array("H", [_NO_GENRE]) * count
+    if not isinstance(live, dict) or len(genres) >= _NO_GENRE:
+        return genre_of
+    contents, sorted_map = live.get("contents"), live.get("sorted_channels")
+    for at, genre in enumerate(genres):
+        if isinstance(sorted_map, dict) and isinstance(contents, list):
+            members = [
+                contents[i] for i in sorted_map.get(genre.group_id, []) if 0 <= i < len(contents)
+            ]
+        elif isinstance(contents, dict):
+            members = contents.get(genre.group_id) or []
+        else:
+            return genre_of
+        for item in members:
+            row = rows.get(_ident(item)) if isinstance(item, dict) else None
+            if row is not None and genre_of[row] == _NO_GENRE:
+                genre_of[row] = at
+    return genre_of
 
 
 def _tiers(spaced: list[str], rows: list[int], typed: list[str]) -> tuple[list[int], ...]:
@@ -208,7 +250,7 @@ def find_channels(
     text: str,
     preferences: Preferences = Preferences(),
     limit: int = CHANNEL_LIMIT,
-) -> list[Hit]:
+) -> list[FoundChannel]:
     """Each provider's channels whose title has every word typed, `limit` at most of each,
     ranked (see the module)."""
     typed = words(text)
@@ -216,7 +258,7 @@ def find_channels(
         return []
     rank = _provider_rank(preferences, [part.provider for part in index.channels])
     favorite, watched = preferences.favorite, preferences.watched
-    ranked: list[tuple[int, int, int, Hit]] = []
+    ranked: list[tuple[int, int, int, FoundChannel]] = []
     for part in index.channels:
         spaced, items, provider = part.spaced, part.items, part.provider
 
@@ -242,7 +284,9 @@ def find_channels(
             taken += [(tier, r) for r in members[:room]]
         at = rank.get(provider, len(rank))
         for position, (tier, r) in enumerate(taken):
-            hit = Hit(provider, "live", _title(items[r]), items[r])
+            genre = part.genre_of[r]
+            group = part.genres[genre] if genre != _NO_GENRE else ""
+            hit = FoundChannel(provider, _title(items[r]), items[r], group)
             ranked.append((tier, at, position, hit))
     ranked.sort(key=lambda entry: entry[:3])
     return [hit for _tier, _provider, _position, hit in ranked]
