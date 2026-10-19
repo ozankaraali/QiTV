@@ -19,8 +19,10 @@ none: a closed connection may stay counted for a while), a probe reads its first
 worker, holding a "probe" slot of the connection budget meanwhile, while the channel plays
 on; a form that plays opens, else the toast says why and the channel plays on (and an archive
 that answered "nothing there" is remembered as failed). Without a stream to spare it opens
-unprobed, and VLC's answer teaches the same: failing within `QUICK_S` of its open (a
-timeout, or anything later, teaches nothing) is the archive's failure.
+unprobed; VLC failing within `QUICK_S` of that open (a timeout, or anything later, teaches
+nothing) has the same address probed in the slot VLC's stream left (`_diagnose`: VLC does
+not say why): "nothing there" is remembered, a refusal is not (a 1-stream account may still
+count the live stream closed a moment ago), and an archive that plays opens again once.
 
 The archive plays in the large picture's player as an on-demand stream through the tuner's
 `open(direct=True)`: the live stream is stopped first and its connection released before
@@ -265,8 +267,8 @@ class CatchUp(QObject):
             return False
         now = self._now().timestamp()
         moment = min(max(moment, now - archive.seconds + EDGE_S), now - MIN_AGE_S)
-        asked = datetime.fromtimestamp(moment, timezone.utc)
-        begins = address_start(archive, asked)
+        when = datetime.fromtimestamp(moment, timezone.utc)
+        begins = address_start(archive, when)
         ends = now if until is None or until <= moment else min(until + AFTER_S, now)
         ends = max(ends, moment + 60.0)
         provider = item_provider.provider_dict(self.catalog, target.item)
@@ -319,7 +321,7 @@ class CatchUp(QObject):
             return False
         self._probing, self._asked = True, ask
         worker = ArchiveProbeWorker(ask.urls, self._headers(ask.target), self._verify(ask.target))
-        context = (self._generation, ticket)
+        context = (self._generation, ticket, list(range(len(ask.urls))))
         self._runner.run_worker(worker, self._on_probed, self._on_probe_failed, context=context)
         return True
 
@@ -333,25 +335,26 @@ class CatchUp(QObject):
         provider = item_provider.provider_dict(self.catalog, target.item)
         return bool(provider.get("ssl_verify", getattr(self.config, "ssl_verify", True)))
 
-    def _probed(self, context: tuple[int, int]) -> Optional[_Ask]:
+    def _probed(self, context: tuple[int, int, list[int]]) -> Optional[_Ask]:
         """A probe ended: its slot goes back (its connection is closed by now); the ask it
         answers, unless a zap, a swap or another channel's ask came meanwhile."""
-        generation, ticket = context
-        self._tuner.budget.release(ticket)
+        generation, ticket, _forms = context
+        self._tuner.budget.release(ticket)  # DENIED (a diagnosis has none) is ignored
         if generation != self._generation or self._asked is None:
             return None
         ask, self._asked = self._asked, None
         self._probing = False
         return ask
 
-    def _on_probed(self, context: tuple[int, int], result: Any) -> None:
+    def _on_probed(self, context: tuple[int, int, list[int]], result: Any) -> None:
         ask = self._probed(context)
         if ask is None:
             return
+        forms = context[2]  # the probed addresses' forms, in the order probed
         index, answer = result if isinstance(result, tuple) else (-1, Answer.UNKNOWN.value)
-        if isinstance(index, int) and 0 <= index < len(ask.urls):
-            self.memory.remember(ask.key, True, index)
-            self._play(ask, index, probed=True)
+        if isinstance(index, int) and 0 <= index < len(forms):
+            self.memory.remember(ask.key, True, forms[index])
+            self._play(ask, forms[index], probed=True)
             return
         if answer == Answer.NONE.value:
             self._learn_failure(ask)
@@ -361,7 +364,7 @@ class CatchUp(QObject):
         else:
             self._failed(ask, NO_ANSWER_TEXT)
 
-    def _on_probe_failed(self, context: tuple[int, int], _message: str) -> None:
+    def _on_probe_failed(self, context: tuple[int, int, list[int]], _message: str) -> None:
         ask = self._probed(context)
         if ask is not None:
             self._failed(ask, NO_ANSWER_TEXT)
@@ -373,7 +376,9 @@ class CatchUp(QObject):
     def _failed(self, ask: _Ask, text: str) -> None:
         """The archive did not open: say why; the channel plays live (it does, or it opens)."""
         self._toast(translate(text))
-        if not ask.live_playing:
+        if self._playing is not None:
+            self.go_live()  # an archive opened before (it failed, or it plays an older stretch)
+        elif not ask.live_playing:
             self._request(replace(ask.target, archive_at=None, archive_until=None, zapped=False))
 
     def _play(self, ask: _Ask, form: int, *, probed: bool) -> None:
@@ -515,10 +520,21 @@ class CatchUp(QObject):
             return True
         quick = self._clock() - playing.opened <= QUICK_S
         if not playing.played and not playing.probed and quick:
-            self._learn_failure(playing.ask)
+            self._diagnose(playing)  # what the provider says, now that VLC let go
+            return True
         self._toast(translate(NO_ANSWER_TEXT))
         self.go_live()
         return True
+
+    def _diagnose(self, playing: _Playing) -> None:
+        """VLC could not open an archive it opened unprobed, and does not say why: its address
+        is probed in the slot VLC's stream left (nothing else plays meanwhile)."""
+        self._generation += 1
+        self._probing, self._asked = True, playing.ask
+        target = playing.ask.target
+        worker = ArchiveProbeWorker([playing.url], self._headers(target), self._verify(target))
+        context = (self._generation, DENIED, [playing.form])  # no slot of its own
+        self._runner.run_worker(worker, self._on_probed, self._on_probe_failed, context=context)
 
     def on_ended(self) -> bool:
         """The archive's stretch ended: the next one opens, or live near now. True when it

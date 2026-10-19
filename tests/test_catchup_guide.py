@@ -212,6 +212,7 @@ class ControllerCatchupTests(CatchupCase):
         self.live.released.emit()
         links = len(self.catalog.links)
         self.session.errorOccurred.emit("The stream could not be opened")
+        self.runner.answer(-1, "none")  # probed once VLC let go: nothing there
         self.assertTrue(self.memory.failed(channel_key("Home", ARCHIVED)))
         self.assertEqual(len(self.catalog.links), links + 1)
         self.catalog.linkReady.emit(self.catalog.links[-1][0], ARCHIVED["cmd"])

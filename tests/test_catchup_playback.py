@@ -23,6 +23,7 @@ from ui.catchup_controls import (
     NO_ANSWER_TEXT,
     NO_RECORDING_TEXT,
     NOT_AVAILABLE_TEXT,
+    REFUSED_TEXT,
 )
 from ui.keymap import Action
 
@@ -259,13 +260,20 @@ class ArchiveModeTests(CatchupCase):
 
 
 class FailureTests(CatchupCase):
-    def test_an_unprobed_archive_failing_at_once_is_remembered_and_live_comes_back(self):
+    def fail_unprobed(self):
+        """A 1-stream account's archive opened unprobed, and VLC failed at once."""
         self.start_archived()
-        self.live.timelineChanged.emit(dict(STATE, position=3000.0 - 0.0, start=3000.0))
         self.transport.seekToRequested.emit(1000.0)  # 43 min ago
         self.live.released.emit()
-        links = len(self.catalog.links)
         self.session.errorOccurred.emit("The stream could not be opened")
+        [(worker, *_rest)] = self.runner.jobs  # VLC says no more: the address is probed
+        self.assertEqual(worker.urls, [self.archive_plays()[-1][0]])
+        self.assertEqual(self.budget.holders("Home"), ["main"])  # in the archive's own slot
+
+    def test_an_unprobed_archive_failing_at_once_is_remembered_and_live_comes_back(self):
+        self.fail_unprobed()
+        links = len(self.catalog.links)
+        self.runner.answer(-1, "none")  # nothing there
         self.assertIn((NO_ANSWER_TEXT, "info"), self.toast.messages())
         self.assertNotIn(("The stream could not be opened", "error"), self.toast.messages())
         self.assertTrue(self.memory.failed(channel_key("Home", ARCHIVED)))
@@ -281,6 +289,26 @@ class FailureTests(CatchupCase):
         self.controller.handle(Action.SEEK_BACK)
         self.assertIn((NOT_AVAILABLE_TEXT, "info"), self.toast.messages())
         self.assertEqual(self.live.named("seek_relative")[-1], (-10.0,))  # the buffer only
+
+    def test_a_refusal_after_vlc_failed_teaches_nothing(self):
+        self.fail_unprobed()
+        links = len(self.catalog.links)
+        self.runner.answer(-1, "refused")  # the live stream closed a moment ago still counts
+        self.assertIn((REFUSED_TEXT, "info"), self.toast.messages())
+        self.assertFalse(self.memory.failed(channel_key("Home", ARCHIVED)))
+        self.assertFalse(self.catchup.active())
+        self.assertEqual(len(self.catalog.links), links + 1)  # live again
+
+    def test_an_archive_that_plays_when_probed_opens_again_once(self):
+        self.fail_unprobed()
+        plays = len(self.archive_plays())
+        self.runner.answer(0, "plays")
+        self.assertEqual(len(self.archive_plays()), plays + 1)
+        self.assertEqual(self.memory.answered(channel_key("Home", ARCHIVED)), 0)
+        self.session.errorOccurred.emit("The stream could not be opened")  # again: live
+        self.assertEqual(self.runner.jobs, [])
+        self.assertFalse(self.catchup.active())
+        self.assertFalse(self.memory.failed(channel_key("Home", ARCHIVED)))
 
 
 class ProbeTests(CatchupCase):
