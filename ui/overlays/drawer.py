@@ -169,6 +169,16 @@ class _Header:
     gear: QRectF
 
 
+@dataclass(frozen=True)
+class _Place:
+    """Where a column's list was before a refresh: a list that moves to the other column (a
+    layer down or up) keeps its rows at the same height there, and its highlight."""
+
+    parent: NavNode | None
+    current: NavNode | None
+    top: int  # the list's first row, in drawer coordinates (above the column when scrolled)
+
+
 def _crumb_key(index: int | None) -> str:
     return f"{_CRUMB}{'up' if index is None else index}"
 
@@ -248,11 +258,21 @@ def _shown_rows(
     """What a column's list shows for `nodes`: equal values show the same rows.
 
     A row shows its node's title, count and icon, and a live channel its item (by identity:
-    a refreshed catalog brings new item dicts) and number.
+    a refreshed catalog brings new item dicts) and number. A genre's payload is told by its
+    value: the catalog makes its Group anew at each catalog event and at each zap.
     """
     if isinstance(nodes, NodeSeq):  # a long list is told by its identity, not row by row
         return (live, ("rows", nodes.token), getattr(numbers, "signature", None), tagged)
-    rows = tuple((n.layer, n.key, n.title, n.count, id(n.payload)) for n in nodes)
+    rows = tuple(
+        (
+            n.layer,
+            n.key,
+            n.title,
+            n.count,
+            id(n.payload) if isinstance(n.payload, dict) else n.payload,
+        )
+        for n in nodes
+    )
     return (live, rows, tuple(numbers) if numbers is not None else None, tagged)
 
 
@@ -736,12 +756,18 @@ class Drawer(Overlay):
             self._filter_key = key
             self.filter_text = ""
         needle = fold(self.filter_text)
-        self._fill(self._columns["left"], left_parent, left_children, needle)
-        self._fill(self._columns["right"], right_parent, right_children, needle)
+        left, right = self._columns["left"], self._columns["right"]
+        was = {side: self._place(col) for side, col in self._columns.items()}
+        self._fill(left, left_parent, left_children, needle, was["right"])
+        self._fill(right, right_parent, right_children, needle, was["left"])
         for side, col in self._columns.items():
             col.view.setProperty("columnFocused", side == self.focus_side)
             col.view.viewport().update()
         self.update()
+
+    @staticmethod
+    def _place(col: _Column) -> _Place:
+        return _Place(col.parent, col.current, col.view.y() - col.view.verticalScrollBar().value())
 
     def _fill(
         self,
@@ -749,8 +775,12 @@ class Drawer(Overlay):
         parent: NavNode | None,
         children: Sequence[NavNode] | None,
         needle: str,
+        other: _Place,
     ) -> None:
+        """Show `parent`'s children in `col`; `other` is where the other column was before."""
         parent_changed = parent != col.parent
+        # The other column's list comes over (a layer down: the genres go left; up: right).
+        moved = parent_changed and parent is not None and parent == other.parent
         col.parent = parent
         loading = parent is not None and self._nav.is_loading(parent)
         if parent is not None and not loading and self._nav.provider_error(parent):
@@ -789,6 +819,9 @@ class Drawer(Overlay):
             col.rows = _RowIndex(nodes)
             col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
             col.model.set_nodes(nodes, live, numbers, tagged)
+            if moved:
+                col.view.executeDelayedItemsLayout()  # the rows' range, before it is scrolled
+                col.view.verticalScrollBar().setValue(col.view.y() - other.top)
         else:
             col.model.refresh_now()  # a refresh still looks "now" up again (the EPG loaded)
         if col.side == "left":
@@ -807,6 +840,9 @@ class Drawer(Overlay):
                 if match is not None:
                     col.current = match
                     matched = True
+            if not matched and moved and other.current in col.rows:
+                col.current = other.current  # a layer up: the row it was on stays highlighted
+                matched = True
             if not matched and (parent_changed or col.current not in col.rows):
                 col.current = next((n for n in nodes if _selectable(n)), None)
             if children is not None:

@@ -867,5 +867,136 @@ class HostedDrawerInputTests(unittest.TestCase):
         self.assertEqual(self.events, [])
 
 
+GENRES = 300  # more than a batch of rows (the list views lay rows out 100 at a time)
+
+
+class GenrePlaceTests(unittest.TestCase):
+    """A genre chosen far down the list keeps its place (owner, 2.1.0: "when clicked to a
+    genre, list resets back to the top instead of holding position")."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.catalog, self.nav, self.host, self.drawer = make()
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        self.counts = {}
+        # New Group objects at every call, as the catalog makes them.
+        self.catalog.groups = lambda section: [
+            Group(section, str(i), f"Genre {i}", self.counts.get(i, 1)) for i in range(GENRES)
+        ]
+        self.catalog.live = {str(i): [{"id": i, "name": f"Chan {i}"}] for i in range(GENRES)}
+        self.nav.reset_to("live")  # Home › Live TV: the genres in the right column
+        self.drawer.open_drawer()
+        elapse(50)  # the lists lay out, as they do before anyone clicks
+
+    def view(self, side):
+        return self.drawer._columns[side].view
+
+    def rect(self, side, row):
+        view = self.view(side)
+        return view.visualRect(view.model().index(row))
+
+    def screen_y(self, side, row):
+        """Where the row is on the screen (host coordinates)."""
+        return self.view(side).viewport().mapTo(self.host, self.rect(side, row).center()).y()
+
+    def assertShown(self, side, row):
+        rect = self.rect(side, row)
+        self.assertTrue(rect.isValid(), f"row {row} is not laid out")
+        self.assertTrue(self.view(side).viewport().rect().contains(rect), f"row {row}: {rect}")
+
+    def scroll_genres_to(self, row):
+        """The user scrolls the genres until `row` shows mid-column."""
+        right = self.view("right")
+        right.scrollTo(right.model().index(row), right.ScrollHint.PositionAtCenter)
+        self.assertShown("right", row)
+
+    def click(self, side, row):
+        QTest.mouseClick(
+            self.view(side).viewport(), Qt.LeftButton, pos=self.rect(side, row).center()
+        )
+        elapse(50)
+
+    def test_a_click_on_a_genre_far_down_leaves_it_where_it_was(self):
+        self.scroll_genres_to(250)
+        y = self.screen_y("right", 250)
+        self.click("right", 250)
+        self.assertEqual(self.nav.path[-1].title, "Genre 250")
+        self.assertEqual(self.drawer._columns["left"].current.title, "Genre 250")
+        self.assertShown("left", 250)  # was: the genres from the top, Genre 250 out of sight
+        self.assertAlmostEqual(self.screen_y("left", 250), y, delta=2)
+
+    def test_enter_on_a_genre_far_down_leaves_it_where_it_was(self):
+        self.drawer.move_by(250)  # ↓ down the genres
+        self.assertEqual(self.drawer.highlighted().title, "Genre 250")
+        y = self.screen_y("right", 250)
+        self.drawer.activate()
+        elapse(50)
+        self.assertEqual(self.nav.path[-1].title, "Genre 250")
+        self.assertShown("left", 250)
+        self.assertAlmostEqual(self.screen_y("left", 250), y, delta=2)
+
+    def test_back_and_return_keep_the_genre_and_its_place(self):
+        self.scroll_genres_to(250)
+        self.click("right", 250)
+        y = self.screen_y("left", 250)
+        back = self.drawer.back_rect().center().toPoint()
+        QTest.mouseClick(self.drawer, Qt.LeftButton, pos=back)  # ‹: the genres on the right again
+        elapse(50)
+        self.assertEqual([n.layer for n in self.nav.path], ["source", "section"])
+        self.assertEqual(self.drawer._columns["right"].current.title, "Genre 250")  # not Genre 0
+        self.assertShown("right", 250)
+        self.assertAlmostEqual(self.screen_y("right", 250), y, delta=2)
+        self.drawer.right()  # → onto the genres: the one left
+        self.assertEqual(self.drawer.highlighted().title, "Genre 250")
+        self.drawer.activate()  # Enter: its channels again, the genres where they were
+        elapse(50)
+        self.assertEqual(self.nav.path[-1].title, "Genre 250")
+        self.assertShown("left", 250)
+        self.assertAlmostEqual(self.screen_y("left", 250), y, delta=2)
+        self.drawer.go_up()  # and back with ←, the same
+        self.assertEqual(self.drawer._columns["right"].current.title, "Genre 250")
+        self.assertShown("right", 250)
+        self.click("right", 250)  # returning with the mouse
+        self.assertShown("left", 250)
+        self.assertAlmostEqual(self.screen_y("left", 250), y, delta=2)
+
+    def test_the_genres_are_not_refilled_when_nothing_in_them_changed(self):
+        self.scroll_genres_to(250)
+        self.click("right", 250)
+        left = self.drawer._columns["left"]
+        resets = []
+        left.model.modelReset.connect(lambda: resets.append(True))
+        value = left.view.verticalScrollBar().value()
+        self.catalog.groupReady.emit("live", "250")  # a catalog event: the genres made again
+        self.assertEqual(resets, [])
+        self.assertEqual(left.view.verticalScrollBar().value(), value)
+
+    def test_genres_refilled_with_a_new_count_stay_where_they_were(self):
+        self.scroll_genres_to(250)
+        self.click("right", 250)
+        left = self.drawer._columns["left"]
+        value = left.view.verticalScrollBar().value()
+        self.counts[250] = 2  # e.g. an STB portal's genre whose channels just came
+        self.catalog.groupReady.emit("live", "250")
+        elapse(50)
+        self.assertEqual(left.view.verticalScrollBar().value(), value)
+        self.assertShown("left", 250)
+        self.assertEqual(left.current.title, "Genre 250")
+
+    def test_opening_on_a_channel_far_down_shows_it(self):
+        self.catalog.live["7"] = [{"id": n, "name": f"Chan {n}"} for n in range(600)]
+        self.drawer.close_drawer()
+        self.nav.reset_to("live", "7")
+        self.drawer.open_drawer("550")
+        elapse(50)
+        self.assertEqual(self.drawer.highlighted().title, "Chan 550")
+        self.assertShown("right", 550)
+        self.assertShown("left", 7)
+
+
 if __name__ == "__main__":
     unittest.main()

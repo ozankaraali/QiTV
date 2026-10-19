@@ -15,6 +15,7 @@ from services.provider_ids import PROVIDER_KEY
 from ui.overlay_host import OverlayHost
 from ui.overlays.channel_column import ChannelColumn
 from ui.overlays.channel_rows import (
+    SINGLE_PASS_ROWS,
     ChannelListView,
     ChannelRowDelegate,
     ChannelRowsModel,
@@ -428,6 +429,86 @@ class ColumnTests(unittest.TestCase):
         col.rowClicked.connect(got.append)
         col._view.rowClicked.emit(4)
         self.assertEqual(got, [4])
+
+
+def shown(view, row):
+    """Whether the row is laid out and wholly in sight."""
+    rect = view.visualRect(view.model().index(row))
+    return rect.isValid() and view.viewport().rect().contains(rect)
+
+
+class FarRowTests(unittest.TestCase):
+    """A row far down a list is scrolled to right after the list is set (2.1.0 laid the rows
+    out 100 at a time, and a scroll to a row past them did nothing: the list showed its top)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        host = QWidget()
+        host.resize(600, 400)
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        self.view = ChannelListView(host)
+        self.view.units_width = 1280
+        self.view.setGeometry(0, 0, 500, 400)
+        self.view.setItemDelegate(ChannelRowDelegate(1.0, self.view))
+        self.model = ChannelRowsModel(None, now_provider, self.view)
+        self.view.setModel(self.model)
+        host.show()
+
+    def go_to(self, row, hint=ChannelListView.ScrollHint.EnsureVisible):
+        index = self.model.index(row)
+        self.view.setCurrentIndex(index)
+        self.view.scrollTo(index, hint)
+
+    def test_a_row_far_down_is_shown_right_after_the_list_is_set(self):
+        self.model.set_channels(items(600))
+        self.go_to(550)
+        self.assertTrue(shown(self.view, 550))
+
+    def test_a_list_set_again_keeps_its_scroll_position(self):
+        self.model.set_channels(items(600))
+        self.go_to(400, ChannelListView.ScrollHint.PositionAtCenter)
+        value = self.view.verticalScrollBar().value()
+        self.model.set_channels(items(600))  # e.g. a count changed
+        elapse(20)
+        self.assertEqual(self.view.verticalScrollBar().value(), value)
+        self.assertTrue(shown(self.view, 400))
+
+    def test_a_row_far_down_a_very_long_list_is_shown_once_its_rows_are_laid_out(self):
+        count = SINGLE_PASS_ROWS * 2  # laid out in batches between events
+        self.model.set_channels(items(count))
+        self.go_to(count - 10)
+        self.assertTrue(wait_until(lambda: shown(self.view, count - 10), 5000))
+
+    def test_a_wheel_turn_while_the_row_waits_keeps_the_users_scroll(self):
+        count = SINGLE_PASS_ROWS * 2
+        self.model.set_channels(items(count))
+        self.go_to(count - 10)
+        self.assertFalse(self.view.visualRect(self.model.index(count - 10)).isValid())
+        center = QPointF(self.view.viewport().rect().center())
+        QTest.wheelEvent(self.view.window().windowHandle(), center, QPoint(0, -120))
+        laid_out = lambda: self.view.visualRect(
+            self.model.index(count - 10)
+        ).isValid()  # noqa: E731
+        self.assertTrue(wait_until(laid_out, 5000))
+        elapse(20)
+        self.assertFalse(shown(self.view, count - 10))  # not pulled down there after the turn
+
+    def test_the_fast_zap_column_opens_centred_on_a_channel_far_down(self):
+        host = QWidget()
+        host.resize(1280, 720)
+        self.addCleanup(host.deleteLater)
+        self.addCleanup(host.close)
+        column = ChannelColumn(FakeLogos(), now_provider, parent=host)
+        host.show()
+        column.open("All", items(600), 550)
+        view = column._view
+        self.assertTrue(shown(view, 550))
+        middle = view.visualRect(column._model.index(550)).center().y()
+        self.assertAlmostEqual(middle, view.viewport().rect().center().y(), delta=40)
 
 
 class HostedColumnInputTests(unittest.TestCase):

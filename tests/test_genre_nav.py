@@ -158,6 +158,35 @@ class GenreListTests(unittest.TestCase):
         self.list.page(-1)
         self.assertLess(int(self.list.current_id()[1:]), 149)
 
+    def shown(self, genre_id):
+        view = self.list._view
+        rect = view.visualRect(self.list._model.index(self.list._rows_by_id[genre_id]))
+        return rect.isValid() and view.viewport().rect().contains(rect)
+
+    def test_a_genre_far_down_is_shown_when_it_is_highlighted(self):
+        # 2.1.0 laid a list out 100 rows at a time: the list stayed at its top.
+        self.list.show()
+        self.list.set_genres([Genre(f"g{i}", f"Genre {i}", i) for i in range(300)])
+        self.list.set_current("g250")
+        self.assertTrue(self.shown("g250"))
+
+    def test_a_click_far_down_leaves_the_list_where_it_was_when_the_counts_change(self):
+        self.list.show()
+        many = [Genre(f"g{i}", f"Genre {i}", None) for i in range(300)]
+        self.list.set_genres(many)
+        view = self.list._view
+        row = self.list._rows_by_id["g250"]
+        view.scrollTo(self.list._model.index(row), view.ScrollHint.PositionAtCenter)
+        value = view.verticalScrollBar().value()
+        pos = view.visualRect(self.list._model.index(row)).center()
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=pos)
+        self.assertEqual(self.activated, ["g250"])
+        many[250] = Genre("g250", "Genre 250", 42)  # its titles came: the count is known
+        self.list.set_genres(many)
+        elapse(20)
+        self.assertEqual(view.verticalScrollBar().value(), value)
+        self.assertTrue(self.shown("g250"))
+
     def test_filtered_list_keeps_current_or_previews_first_match(self):
         self.list.set_current("doc")
         self.list.set_genres([g for g in GENRES if g.id in ("doc", "drama")])
