@@ -268,13 +268,14 @@ class CatchUp(QObject):
         now = self._now().timestamp()
         moment = min(max(moment, now - archive.seconds + EDGE_S), now - MIN_AGE_S)
         when = datetime.fromtimestamp(moment, timezone.utc)
-        begins = address_start(archive, when)
+        cmd = str(target.item.get("cmd") or link)
+        begins = address_start(archive, when, cmd)
         ends = now if until is None or until <= moment else min(until + AFTER_S, now)
         ends = max(ends, moment + 60.0)
         provider = item_provider.provider_dict(self.catalog, target.item)
         urls = archive_urls(
             archive,
-            str(target.item.get("cmd") or link),
+            cmd,
             begins,
             ends - begins.timestamp(),
             self._now(),

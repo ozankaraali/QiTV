@@ -68,9 +68,9 @@ class FieldTests(unittest.TestCase):
             {ARCHIVE_KEY: 5, "catchup": "flussonic"},
         )
         self.assertEqual(
-            m3u_archive_fields({"timeshift": "2"}), {ARCHIVE_KEY: 2, "catchup": "shift"}
+            m3u_archive_fields({"timeshift": "2"}), {ARCHIVE_KEY: 2, "catchup": "auto"}
         )
-        self.assertEqual(m3u_archive_fields({"tvg-rec": "3"}), {ARCHIVE_KEY: 3, "catchup": "shift"})
+        self.assertEqual(m3u_archive_fields({"tvg-rec": "3"}), {ARCHIVE_KEY: 3, "catchup": "auto"})
         self.assertEqual(
             m3u_archive_fields({"catchup-source": "http://a.test/{utc}"}),
             {ARCHIVE_KEY: 1, "catchup": "default", "catchup_source": "http://a.test/{utc}"},
@@ -122,7 +122,7 @@ class M3uParseTests(unittest.TestCase):
         )
         first, second, third = parse_m3u(playlist)
         self.assertEqual(archive_of(first), Archive(3, "append", "?utc={utc}&lutc={lutc}"))
-        self.assertEqual(archive_of(second), Archive(2, "shift"))
+        self.assertEqual(archive_of(second), Archive(2, "auto"))
         self.assertNotIn(ARCHIVE_KEY, third)
         self.assertNotIn("catchup", third)
 
@@ -271,6 +271,30 @@ class TemplateTests(unittest.TestCase):
             "http://p.test:81/timeshift/u/p/30/2026-01-20:14-05/7.ts",
         )
         self.assertIsNone(url("xc", "http://x.test/news.ts"))
+
+    def test_days_without_a_type_are_xc_on_an_xtream_address_else_shift(self):
+        start = int(WINTER.timestamp())
+        now = int(NOW.timestamp())
+
+        def url(cmd):
+            return m3u_archive_url(Archive(3, "auto"), cmd, WINTER, 1800, NOW)
+
+        self.assertEqual(
+            url("http://p.test:81/u/p/7"), "http://p.test:81/timeshift/u/p/30/2026-01-20:14-05/7.ts"
+        )
+        self.assertEqual(
+            url("http://p.test/live/u/p/7.m3u8"),
+            "http://p.test/timeshift/u/p/30/2026-01-20:14-05/7.m3u8",
+        )
+        self.assertEqual(
+            url("http://cdn.test/live/news/1.ts"),
+            f"http://cdn.test/live/news/1.ts?utc={start}&lutc={now}",
+        )
+        auto = Archive(3, "auto")
+        self.assertEqual(
+            address_start(auto, WINTER, "http://p.test:81/u/p/7"), WINTER.replace(second=0)
+        )
+        self.assertEqual(address_start(auto, WINTER, "http://cdn.test/news.ts"), WINTER)
 
     def test_archive_urls_dispatches_and_keeps_web_addresses_only(self):
         xtream = archive_urls(

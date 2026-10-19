@@ -9,7 +9,8 @@ What a channel's archive is, as the loaders keep it on the catalog item, and onl
 that has one (a catalog can hold 200,000 items; older builds ignore the keys):
 - `archive_days`: its depth in days (Xtream: `tv_archive_duration` where `tv_archive` is 1; M3U:
   `catchup-days`, else `timeshift` or `tvg-rec`);
-- M3U only: `catchup`, its type (default, append, shift, flussonic or xc), and
+- M3U only: `catchup`, its type (default, append, shift, flussonic, xc, or auto for days
+  given without a type), and
   `catchup_source`, the template the type fills in, when the playlist gives one. A playlist's
   `#EXTM3U` line may set them for every channel.
 A catalog saved before 2.3 has none of them: its channels have no archive until it refreshes.
@@ -22,7 +23,9 @@ Addresses (`archive_urls`):
 - M3U, by its type: default (the template is the address), append (the template goes after
   the channel's address), shift (`utc=` and `lutc=` go after it), flussonic
   (`…/index-{start}-{duration}.m3u8`, `…/timeshift_abs-{start}.ts`) and xc (the Xtream form,
-  built from the channel's address, in UTC: a playlist names no time zone). Templates take the
+  built from the channel's address, in UTC: a playlist names no time zone); auto (days with
+  no type, as playlists made by Xtream panels give them) is xc for an Xtream stream's address
+  (`…/live/U/P/123.ts`, or `…/U/P/123`), else shift. Templates take the
   common placeholders, as the public documentation of catch-up playlists names them:
   {utc} ${start} {start}, {utcend} ${end} {end}, {lutc} ${now} {now} ${timestamp}
   {timestamp} (Unix seconds); {duration} ${duration} (seconds), {duration:60} (divided);
@@ -57,7 +60,7 @@ ARCHIVE_KEY = "archive_days"  # days of archive, on a channel that has one (not 
 TYPE_KEY = "catchup"  # M3U: its catch-up type
 SOURCE_KEY = "catchup_source"  # M3U: the template its type fills in
 XTREAM = "xtream"  # an Xtream panel's channel: its archive's type
-TYPES = ("default", "append", "shift", "flussonic", "xc")
+TYPES = ("default", "append", "shift", "flussonic", "xc", "auto")
 MAX_DAYS = 31  # a longer archive reads as this long
 MAX_MINUTES = 6 * 60  # the longest stretch one address asks for
 PROBE_BYTES = 16 * 1024
@@ -114,7 +117,7 @@ def m3u_archive_fields(
     """The archive keys of an M3U entry's attributes (`defaults`: its `#EXTM3U` line's).
 
     A type the playlist names needs what it fills in: default and append a template. Days alone
-    (`timeshift`, `tvg-rec`) read as the shift type. Without either, there is no archive.
+    (`timeshift`, `tvg-rec`) read as auto. Without either, there is no archive.
     """
     defaults = defaults or {}
 
@@ -136,7 +139,7 @@ def m3u_archive_fields(
     elif source:
         kind = "default"
     elif days:
-        kind = "shift"
+        kind = "auto"
     else:
         return {}
     if kind in ("default", "append") and not source:
@@ -259,6 +262,17 @@ def _xtream_stream(cmd: str, username: str = "", password: str = "") -> Optional
     path = "/" + "/".join(head) if head else ""
     base = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
     return _XtreamStream(base, user, secret, *found, parts.query)
+
+
+def _xtream_like(cmd: str) -> bool:
+    """An Xtream panel's stream address: `…/live/U/P/123.ext`, or `…/U/P/123` alone."""
+    try:
+        segments = [s for s in urlsplit(str(cmd or "")).path.split("/") if s]
+    except ValueError:
+        return False
+    if len(segments) >= 4 and segments[-4].lower() == "live":
+        return _stream_file(segments[-1]) is not None
+    return len(segments) == 3 and _DIGITS.match(segments[-1]) is not None
 
 
 def _stream_file(last: str) -> Optional[tuple[str, str]]:
@@ -387,6 +401,8 @@ def m3u_archive_url(
         return expand(archive.source, start, end, now)
     if kind == "append":
         return f"{cmd}{expand(archive.source, start, end, now)}"
+    if kind == "auto":
+        kind = "xc" if _xtream_like(cmd) else "shift"
     if kind == "shift":
         sep = "&" if "?" in cmd else "?"
         return f"{cmd}{sep}utc={int(start.timestamp())}&lutc={int(now.timestamp())}"
@@ -418,9 +434,11 @@ def archive_urls(
     return [url] if url and url.lower().startswith(("http://", "https://")) else []
 
 
-def address_start(archive: Archive, start: datetime) -> datetime:
-    """Where an address for `start` really starts: an Xtream one at the whole minute."""
-    if archive.kind in (XTREAM, "xc"):
+def address_start(archive: Archive, start: datetime, cmd: str = "") -> datetime:
+    """Where an address for `start` really starts: an Xtream one (`cmd`'s, for auto) at the
+    whole minute."""
+    minute = archive.kind in (XTREAM, "xc") or (archive.kind == "auto" and _xtream_like(cmd))
+    if minute:
         return start.replace(second=0, microsecond=0)
     return start.replace(microsecond=0)
 
