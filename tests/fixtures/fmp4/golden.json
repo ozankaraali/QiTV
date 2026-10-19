@@ -1,0 +1,68 @@
+{
+ "avc-aac": {
+  "256": {
+   "digest": "90b5e781d908e656520fbf136ae6002c44b3755ebccd3e86018c557016e48f68",
+   "first_dts": 0,
+   "first_pts": 7200,
+   "frames": 150,
+   "keys": 6
+  },
+  "257": {
+   "digest": "19ab78d5898f7b76de69ba8da34186e2e58e00fee79b0ff49e7f1374f5e07039",
+   "first_dts": 5280,
+   "first_pts": 5280,
+   "frames": 283,
+   "keys": 0
+  }
+ },
+ "avc-ac3": {
+  "256": {
+   "digest": "ad29fb9fa5d1261d209ad42cbc9f5046e6474c91d5c886d33c98fb19892cb649",
+   "first_dts": 0,
+   "first_pts": 7200,
+   "frames": 100,
+   "keys": 4
+  },
+  "257": {
+   "digest": "0283b07e83df088ee9bd26e09b06d1aa68821750994ccd7f55f9a3661cf1ab6d",
+   "first_dts": 6720,
+   "first_pts": 6720,
+   "frames": 125,
+   "keys": 0
+  }
+ },
+ "hevc-eac3": {
+  "256": {
+   "digest": "90fcb63a7d89bd8ad7928c84b36d96804622d36e1f344ecdb086938962e59a4d",
+   "first_dts": 0,
+   "first_pts": 7200,
+   "frames": 150,
+   "keys": 6
+  },
+  "257": {
+   "digest": "ce761acdcdf0879e549f8baecc159b112482fdd683a89c6b68c8086cbb8541b2",
+   "first_dts": 6720,
+   "first_pts": 6720,
+   "frames": 188,
+   "keys": 0
+  }
+ },
+ "split/0": {
+  "256": {
+   "digest": "90b5e781d908e656520fbf136ae6002c44b3755ebccd3e86018c557016e48f68",
+   "first_dts": 0,
+   "first_pts": 7200,
+   "frames": 150,
+   "keys": 6
+  }
+ },
+ "split/1": {
+  "257": {
+   "digest": "ccb590042e7df89b1d34bf8325699c200b36509b5edd47db96d5c50716d0194d",
+   "first_dts": 3240,
+   "first_pts": 3240,
+   "frames": 144,
+   "keys": 0
+  }
+ }
+}
