@@ -1539,5 +1539,57 @@ class RamFallbackSizeTests(unittest.TestCase):
         self.assertEqual(adopted[0]._max_bytes, 3 * 1024**2)
 
 
+class HeardEdgeTests(unittest.TestCase):
+    """A burst that lands in one read is reported at once, not with the next read: the
+    throttle used to hold the state back, so the GUI heard an edge up to a segment old."""
+
+    def test_the_state_reports_a_burst_at_once(self):
+        from services.live.ts import Segmenter
+
+        data = make_stream(30, gop_s=10.0)  # 10 s segments: their closes are 10 s apart
+        second = len(data) // 30
+        reads = [(0.0, data[: 2 * second]), (0.3, data[2 * second : 3 * second])]
+        rest = data[3 * second :]
+        step = len(rest) // 3 + 1  # 27 s of media in three reads, 10 ms apart
+        reads += [(0.35 + 0.01 * k, rest[k * step : (k + 1) * step]) for k in range(3)]
+        clock = SimpleNamespace(now=0.0)
+        sent = []
+        behind = []
+        helper = SimpleNamespace(
+            root="",
+            send=lambda message, session=None: sent.append(message),
+            server=SimpleNamespace(add_session=lambda *args: None),
+        )
+        session = worker._Session(helper, "e", "http://provider.test/e.ts", {}, True, RAM, 6.0)
+        session._segmenter = Segmenter(clock=lambda: clock.now)
+
+        class Source:
+            hls = False
+            burst_s = 0.0
+            user_agent = "test"
+
+            def chunks(self):
+                for at, chunk in reads:
+                    clock.now = at
+                    yield chunk
+                    # The read is in: what the GUI heard last, against the pipeline's edge.
+                    heard = [m[2]["live_edge"] for m in sent if m[0] == "state"]
+                    behind.append(session._live_edge() - heard[-1])
+
+            def close(self):
+                pass
+
+            def wait_closed(self, timeout):
+                return True
+
+        with (
+            patch.object(worker, "time", SimpleNamespace(monotonic=lambda: clock.now)),
+            patch.object(source_module, "open_source", lambda *args, **kwargs: Source()),
+        ):
+            session._ingest()
+        self.assertGreater(session._live_edge(), 25.0)
+        self.assertLess(max(behind), worker._EDGE_STEP_S)
+
+
 if __name__ == "__main__":
     unittest.main()

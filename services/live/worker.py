@@ -86,6 +86,9 @@ if TYPE_CHECKING:
 _LOG = logging.getLogger(__name__)
 _POLL = 0.1
 _NOTIFY_INTERVAL = 0.25
+# A live edge this far past the one last reported is reported at once, throttle or not: a burst
+# lands in one read, and the throttle held it back until the next read (up to a pause later).
+_EDGE_STEP_S = 0.5
 # The parent terminates the helper 0.5 s after "shutdown"; both waits are usually instant.
 _SHUTDOWN_GRACE = 0.25  # for session threads to remove their disk buffers
 _FLUSH_GRACE = 0.25  # for the writer to deliver what is queued
@@ -384,6 +387,7 @@ class _Session:
         # (timeline position, seconds left out) of the latest PTS jumps the segmenter dropped
         self._breaks: deque[tuple[float, float]] = deque(maxlen=_BREAKS_KEPT)
         self._last_notify = 0.0
+        self._heard_edge = 0.0  # the live edge the latest state reported
         self.thread = threading.Thread(target=self._run, name="qitv-live-session", daemon=True)
 
     def cancel(self) -> None:
@@ -690,10 +694,11 @@ class _Session:
 
     def _measure(self) -> None:
         """Feed the burst meter; a new estimate is reported at once (it moves the parent's
-        target and stall bound)."""
+        target and stall bound), and so is a live edge `_EDGE_STEP_S` past the last reported."""
         before = self._bursts.burst_s
-        self._bursts.add(time.monotonic(), self._live_edge())
-        if self._bursts.burst_s != before:
+        edge = self._live_edge()
+        self._bursts.add(time.monotonic(), edge)
+        if self._bursts.burst_s != before or edge - self._heard_edge >= _EDGE_STEP_S:
             self._notify(force=True)
 
     def _notify(self, force: bool = False) -> None:
@@ -713,6 +718,7 @@ class _Session:
             if first is not None and evicted is not None and first <= evicted:
                 timeline.on_evicted(evicted)
         breaks = self._breaks
+        edge = self._live_edge()
         while breaks and breaks[0][0] < timeline.start - _BREAK_SLACK_S:
             breaks.popleft()  # its media went a while ago: no player can reach it any more
         snapshot = {
@@ -721,7 +727,7 @@ class _Session:
             "open": ring.open_seq if ring is not None else None,
             "start": timeline.start,
             "end": timeline.end,
-            "live_edge": self._live_edge(),
+            "live_edge": edge,
             "bytes": ring.bytes if ring is not None else 0,
             "ended": self._ended,
             # HLS: the target duration, which a reload may change; raw TS: what the meter
@@ -751,6 +757,7 @@ class _Session:
             # The source answered (2.1): its headers came, though no byte may have yet.
             "answered": self._answered,
         }
+        self._heard_edge = edge
         additions, self._pending = self._pending, []
         # Only newly completed segments cross IPC (ported from main's `_notify`): the
         # parent drops spans older than `first` and appends the additions, so a long
