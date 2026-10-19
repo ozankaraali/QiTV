@@ -131,8 +131,9 @@ class ReplayCaptureTests(unittest.TestCase):
         self.assertEqual(row["pipeline"]["how"], "segmenter discontinuity")
         self.assertEqual(row["pipeline"]["cut_into_run_s"], 0.0)
         self.assertEqual(row["pipeline"]["start"], "key")
-        # The provider's cut-short packet goes to VLC whole, its tail from the next packet.
-        self.assertEqual(row["ring"]["cut_short_passed_on"], [144])
+        # The provider's cut-short packet never reaches VLC: it is dropped whole (the 144
+        # bytes left out), and the new run's first packet passes with its flag.
+        self.assertEqual(row["ring"]["cut_short_passed_on"], [])
         self.assertTrue(row["ring"]["indicator_reaches_vlc"])
         self.assertEqual(result["ring"]["frames_repeated"], int(repeat * FPS) - 1)
         self.assertEqual(result["ring"]["input_bytes_left_out"], 144)

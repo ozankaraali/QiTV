@@ -1,10 +1,12 @@
 """MPEG-TS scanner and keyframe segmenter for the live pipeline (no remuxing).
 
 The segmenter cuts a raw 188-byte transport stream into keyframe-aligned segments. Packets pass
-through byte for byte. Each segment is announced with copies of the latest PAT and PMT packets,
-which the consumer prepends so that VLC can start playback at any segment. Its close says how
-cleanly playback starts there (`Closed.start_quality`): at an IDR picture, at an intra picture
-whose leading pictures may reach behind it (open GOP), or without a keyframe (a forced cut).
+through byte for byte, but for two repairs: a packet cut short is dropped whole, and a PCR that
+steps back without the discontinuity_indicator gets it (see `Segmenter._scan`). Each segment
+is announced with copies of the latest PAT and PMT packets, which the consumer prepends so that
+VLC can start playback at any segment. Its close says how cleanly playback starts there
+(`Closed.start_quality`): at an IDR picture, at an intra picture whose leading pictures may
+reach behind it (open GOP), or without a keyframe (a forced cut).
 
 Pure logic: no Qt and no I/O, and the wall clock is injected.
 
@@ -38,6 +40,9 @@ _CRC_REPEATS = 3  # identical bad-CRC sections accepted while no valid one has b
 # Backward PTS steps up to this size are B-frame reordering, not a reset: with RAI on every
 # PES a reordered B-frame must not cut a one-frame "discontinuity" segment.
 _REORDER_TICKS = _CLOCK
+# A PCR never steps back on its PID: one more than this behind the last starts a new clock,
+# which VLC takes only with the discontinuity_indicator (more than any PCR jitter).
+_PCR_BACK_TICKS = _CLOCK // 10
 # A longer forward step between two PES is a timestamp jump, unless the stream's own cadence
 # (its previous forward step) is at least half as long: a slideshow's stills seconds apart.
 # A jump is left out of the timeline (`Segmenter.dropped`); a shorter step stays media.
@@ -158,6 +163,8 @@ class Segmenter:
         self._buf = b""
         self._pos = 0  # absolute input offset of _buf[0]
         self._searching = True  # the next packet start must be proven by three sync bytes
+        self._flushed: list[Event] = []  # the old input's last packet, after `discontinuity()`
+        self._pcrs: dict[int, int] = {}  # the latest PCR base by PID
         self._probe: bytearray | None = bytearray()
         self._start_wall: float | None = None
         self._feed_wall: float | None = None  # the injected clock at the latest input
@@ -240,9 +247,11 @@ class Segmenter:
     def discontinuity(self) -> None:
         """Mark the next cut as a discontinuity (the source restarted its timestamps).
 
-        The input starts afresh: a partial packet the old input left is dropped, and the next
-        packet start must be proven again, so no packet joins the two inputs.
+        The input starts afresh: the old input's last whole packet is taken as it came (its
+        events come with the next `feed` or `finish`), a partial packet it left is dropped, and
+        the next packet start must be proven again, so no packet joins the two inputs.
         """
+        self._flushed += self._flush()
         self._latch()
         self._media_ref = None  # measure the new content's age from its first PTS
         self._look = None  # the rest of the open segment's first PES never comes
@@ -251,9 +260,13 @@ class Segmenter:
         self._searching = True
 
     def feed(self, chunk: bytes) -> list[Event]:
-        """Consume input bytes; raises `Unsupported` for input that cannot be segmented."""
+        """Consume input bytes; raises `Unsupported` for input that cannot be segmented.
+
+        A whole packet at the end of the input waits for the next input's first byte: only a
+        sync byte there proves it was not cut short (see `_scan`)."""
+        events, self._flushed = self._flushed, []
         if not chunk:
-            return []
+            return events
         if type(chunk) is not bytes:
             chunk = bytes(chunk)
         wall = self._tick()
@@ -262,20 +275,28 @@ class Segmenter:
         data = self._buf + chunk if self._buf else chunk
         if len(data) < PACKET:
             self._buf = data
-            return []
-        events: list[Event] = []
+            return events
         self._scan(data, wall, events)
         return events
 
-    def finish(self) -> list[Closed]:
-        """Close the open segment at the end of the input."""
+    def finish(self) -> list[Event]:
+        """Close the open segment at the end of the input: the last packet goes first (it
+        waited for a next input), then the close."""
+        events, self._flushed = self._flushed + self._flush(), []
         if not self._open:
-            return []
+            return events
         self._open = False
         pts = self._on_segment_axis(self._latest_pts)
-        closed = Closed(self._seq, pts, self._tick(), self._seg_quality)
+        events.append(Closed(self._seq, pts, self._tick(), self._seg_quality))
         self._seq += 1
-        return [closed]
+        return events
+
+    def _flush(self) -> list[Event]:
+        """The input ends: scan the packet held for the next input's sync byte as its last."""
+        events: list[Event] = []
+        if len(self._buf) >= PACKET and not self._searching:
+            self._scan(self._buf, self._wall, events, last=True)
+        return events
 
     def _tick(self) -> float:
         """The stall-free wall time now (see `wall`)."""
@@ -303,7 +324,15 @@ class Segmenter:
             raise Unsupported("unsupported packet size")
         raise Unsupported("not MPEG-TS")
 
-    def _scan(self, data: bytes, wall: float, events: list[Event]) -> None:
+    def _scan(self, data: bytes, wall: float, events: list[Event], last: bool = False) -> None:
+        """Scan whole packets. A packet passes once the next one's sync byte follows it, so
+        the input's last packet waits for the next input (`last`: the input ended, it passes
+        as it is). A packet the next one does not follow, while a proven packet start (three
+        sync bytes 188 apart) lies within its 188 bytes, was cut short (a provider splicing
+        two streams): it is dropped whole, never passed on with the next packet's first bytes
+        as its tail. A PCR that steps back by more than `_PCR_BACK_TICKS` without the
+        discontinuity_indicator gets it, so VLC takes the new clock (ContinuityJoiner does the
+        same at an HLS discontinuity); no timestamp is ever rewritten."""
         if self._start_wall is None:
             self._start_wall = wall
         # The cut PID went quiet while other packets flow: cut at the next PES start of any PID.
@@ -313,17 +342,21 @@ class Segmenter:
         run = 0 if self._open else -1  # start of the packets not yet emitted as Data
         searching = self._searching
         scrambled = self._scrambled_run
+
+        def emit(start: int, stop: int) -> None:
+            if 0 <= start < stop:  # (`data` as it is then: a flagged PCR replaces it)
+                events.append(Data(data[start:stop]))
+
         # A reading of the open segment's first PES that the previous input's end interrupted.
         # (No scan starts out of sync while one goes on: `discontinuity()` ends it, and a sync
         # lost within an input ends it as the reading reaches that packet first.)
         if self._look is not None:
-            self._read_ahead(data, 0)
+            self._read_ahead(data, 0, last)
         cut_pid = self._cut_pid
         pmt_pid = self._pmt_pid
         while off + PACKET <= n:
             if searching or data[off] != SYNC:
-                if 0 <= run < off:
-                    events.append(Data(data[run:off]))
+                emit(run, off)
                 run = -1
                 found = _find_sync(data, off)
                 if found < 0:
@@ -343,11 +376,39 @@ class Segmenter:
                     run = off
                 continue
             end = off + PACKET
+            if end == n and not last:
+                break  # the next input's first byte tells whether this packet is whole
+            if end < n and data[end] != SYNC:
+                # Within the packet's bytes, three sync bytes 188 apart from where a candidate
+                # can still be checked; until then the packet waits for more input.
+                found = _find_sync(data, off + 1)
+                if found < 0 and n - 2 * PACKET < end and not last:
+                    break
+                if 0 <= found < end:
+                    logger.debug("dropped a packet cut short after %d bytes", found - off)
+                    emit(run, off)
+                    off = found
+                    run = off if self._open else -1
+                    continue
+                # A whole packet with bytes out of sync after it: those are skipped next.
             b1 = data[off + 1]
             pid = ((b1 & 0x1F) << 8) | data[off + 2]
+            b3 = data[off + 3]
+            if b3 & 0x20 and data[off + 4] >= 7 and data[off + 5] & 0x10 and not b1 & 0x80:
+                pcr = _pcr_base(data, off + 6)
+                previous = self._pcrs.get(pid)
+                self._pcrs[pid] = pcr
+                if (
+                    previous is not None
+                    and pts_delta(previous, pcr) < -_PCR_BACK_TICKS
+                    and not data[off + 5] & 0x80
+                ):
+                    logger.debug("flagged a PCR %.2f s back", -pts_delta(previous, pcr) / _CLOCK)
+                    # Once per new clock: a copy with that one bit set.
+                    data = data[: off + 5] + bytes([data[off + 5] | 0x80]) + data[off + 6 :]
             if pid == cut_pid:
                 if not b1 & 0x80:  # with the transport error flag the header is untrusted
-                    if data[off + 3] & 0xC0:
+                    if b3 & 0xC0:
                         scrambled += 1
                         self._scrambled_total += 1
                         self._check_scrambled(scrambled, wall)
@@ -357,12 +418,11 @@ class Segmenter:
                             silent = False
                             cut = self._on_pusi(data[off:end], wall)
                             if cut:
-                                if 0 <= run < off:
-                                    events.append(Data(data[run:off]))
+                                emit(run, off)
                                 events.extend(cut)
                                 run = off
                                 if self._look is not None:
-                                    self._read_ahead(data, end)
+                                    self._read_ahead(data, end, last)
             else:
                 if (
                     (b1 & 0xC0) == 0x40  # a PES or section start without a transport error
@@ -371,8 +431,7 @@ class Segmenter:
                 ):
                     silent = False
                     logger.debug("PID %#x went quiet; cutting at PID %#x", cut_pid, pid)
-                    if 0 <= run < off:
-                        events.append(Data(data[run:off]))
+                    emit(run, off)
                     events.extend(self._cut(None, wall, True))
                     run = off
                 if pid == 0 or pid == pmt_pid:
@@ -383,8 +442,7 @@ class Segmenter:
                 elif cut_pid is None and self._pos + off >= _TABLE_LIMIT:
                     raise Unsupported("no program tables")
             off = end
-        if 0 <= run < off:
-            events.append(Data(data[run:off]))
+        emit(run, off)
         self._buf = data[off:]
         self._pos += off
         self._searching = searching
@@ -545,24 +603,27 @@ class Segmenter:
             self._look = _Look(bytearray(pkt[es:]), pkt[3] & 0x0F, pkt, rai)
         return events
 
-    def _read_ahead(self, data: bytes, off: int) -> None:
+    def _read_ahead(self, data: bytes, off: int, last: bool = False) -> None:
         """Read the open segment's first PES on in `data` from the packet at `off`, until its
         picture is known or `_LOOK_AHEAD` ES bytes were read. The packets are only peeked at
         (the scan forwards them as usual), and when the input ends first the reading goes on
-        with the next input: the scan's loop over every packet pays nothing.
+        with the next input: the scan's loop over every packet pays nothing. As in the scan, a
+        packet counts once the next one's sync byte follows it (the input's last waits for the
+        next input, unless it is the `last`).
 
         The reading ends, keeping the first packet's fallback, wherever its bytes could belong
-        to another picture: at the next PES start, at a lost packet sync, and at damage on the
-        cut PID (a transport error, scrambling bits, a continuity counter that skips, or a
-        repeated counter on a packet that is no true duplicate).
+        to another picture: at the next PES start, at a lost packet sync or a packet the next
+        one does not follow, and at damage on the cut PID (a transport error, scrambling bits,
+        a continuity counter that skips, or a repeated counter on a packet that is no true
+        duplicate).
         """
         look = self._look
         if look is None:
             return
         cut_pid = self._cut_pid
         n = len(data)
-        while off + PACKET <= n:
-            if data[off] != SYNC:
+        while off + PACKET < n or (last and off + PACKET == n):
+            if data[off] != SYNC or (off + PACKET < n and data[off + PACKET] != SYNC):
                 break
             b1 = data[off + 1]
             if ((b1 & 0x1F) << 8) | data[off + 2] == cut_pid:
@@ -959,6 +1020,17 @@ def _pes_start(pkt: bytes) -> tuple[bool, int | None, int]:
         b = pkt[start + 9 : start + 14]
         pts = ((b[0] >> 1) & 7) << 30 | b[1] << 22 | (b[2] >> 1) << 15 | b[3] << 7 | b[4] >> 1
     return rai, pts, start + 9 + header_length
+
+
+def _pcr_base(data: bytes, at: int) -> int:
+    """The 33-bit base of the PCR whose six bytes start at `at` (90 kHz ticks)."""
+    return (
+        data[at] << 25
+        | data[at + 1] << 17
+        | data[at + 2] << 9
+        | data[at + 3] << 1
+        | data[at + 4] >> 7
+    )
 
 
 def _quality(kind: int, rai: bool) -> StartQuality | None:
