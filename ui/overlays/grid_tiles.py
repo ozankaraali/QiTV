@@ -499,9 +499,13 @@ class GridTiles(Overlay):
             controls: tuple[str, ...] = CARD_CONTROLS
         else:
             position = self._position_width(un, tile)
-            whole = 4 * side + position + 2 * gap + 2 * un.px(0.4)
+            # Two pills, each padded both sides: ▶ 🔊 LIVE (two gaps) and ⤢ ✕ (one), a gap
+            # between them.
+            whole = 4 * side + position + 4 * gap + 4 * un.px(0.4)
             controls = CONTROLS if whole <= room else ESSENTIALS
-        if len(controls) * side + 2 * un.px(0.4) > room or side + 2 * inset > rect.height():
+        pills = 1 if controls == CARD_CONTROLS else 2
+        least = len(controls) * side + 2 * pills * un.px(0.4) + (pills - 1) * gap
+        if least > room or side + 2 * inset > rect.height():
             return None
         over_label = False
         if tile.state in CARDS:  # a card's ✕ only: in its top corner, else its bottom one

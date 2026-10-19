@@ -978,9 +978,22 @@ class Transport(Overlay):
 
     def _layout(self) -> dict[str, QRectF]:
         """The controls' rects; in a row too crowded for them (a small window, a longer
-        language, every button of the multiview and the second channel), the icons sit closer."""
+        language, every button of the multiview and the second channel, or the multiview's
+        chips cut short), the icons sit closer."""
         rects, crowded = self._layout_at(_ICON_GAP_U)
-        return self._layout_at(_TIGHT_GAP_U)[0] if crowded else rects
+        if crowded or self._grid_chips_short(rects):
+            return self._layout_at(_TIGHT_GAP_U)[0]
+        return rects
+
+    def _grid_chips_short(self, rects: dict[str, QRectF]) -> bool:
+        """While the grid shows: its layout chip went without its name, or left out, or
+        "Last grid" did (closer icons may make room for them)."""
+        if not (self._grid_shown and self._grid_layout):
+            return False
+        chip = rects.get("layout")
+        if chip is None or chip.width() < self._layout_chip_width(Units(self.width()), True) - 0.5:
+            return True
+        return self._grid_restorable and "restore" not in rects
 
     def _layout_at(self, icon_gap: float) -> tuple[dict[str, QRectF], bool]:
         """The rects with `icon_gap` (u) between the icons, and whether the chips at their left
