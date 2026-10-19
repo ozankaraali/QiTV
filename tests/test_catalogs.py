@@ -9,13 +9,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
 import orjson
 from test_catalog_lifecycle import RealSetupFactory
 from test_catalog_service import FakeWorker
 
 from services.catalogs import Catalogs
-from services.jobs import ImmediateRunner
 from services.provider_ids import provider_of, with_provider
 from ui.link_lanes import LinkLanes, Target
 from ui.tv_window import ABANDONED_EXIT_CODE

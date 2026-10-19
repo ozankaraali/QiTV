@@ -9,11 +9,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, Qt, qInstallMessageHandler
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from job_fixtures import ImmediateRunner
 from mixed_fixtures import live_content
 from timer_fixtures import elapse
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
-from services.jobs import ImmediateRunner
 from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,

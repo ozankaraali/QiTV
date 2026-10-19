@@ -11,9 +11,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
+from job_fixtures import ImmediateRunner
 
 from services.catalog import CatalogService
-from services.jobs import ImmediateRunner
 from services.provider_manager import ProviderManager
 from tests.test_catalog_service import FakeFactory, make_service
 from tests.test_series_view import FakePosters

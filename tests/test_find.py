@@ -9,6 +9,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
+from job_fixtures import ImmediateRunner
 from mixed_fixtures import live_content
 from timer_fixtures import elapse
 
@@ -24,7 +25,6 @@ from services.find import (
     preferences_for,
     words,
 )
-from services.jobs import ImmediateRunner
 from services.provider_ids import provider_of
 from ui.find_session import DEBOUNCE_MS, FindSession
 
@@ -167,7 +167,9 @@ class RankingTests(unittest.TestCase):
             ["TR: MOSS FERN 4K", "Mossy Fernery (Bulgaria)", "MossFern Wild Free"],
         )  # whole words, word starts, then only somewhere in a word
         # "1" only starts "1440p": a weaker match than the word "1" itself
-        self.assertEqual(self.channels("moss 1"), ["TR: MOSS 1 4K", "Moss 1 (1440p)", "Moss 2 (1440p)"])
+        self.assertEqual(
+            self.channels("moss 1"), ["TR: MOSS 1 4K", "Moss 1 (1440p)", "Moss 2 (1440p)"]
+        )
 
     def test_the_genres_are_ranked_before_their_limit_is_applied(self):
         found = find_genres(self.index, "spor")

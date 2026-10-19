@@ -30,8 +30,8 @@ def cancel_requested() -> bool:
 class _WorkerGuard(QObject):
     """Runs a worker and guarantees one terminal signal (finished or error) and a quit.
 
-    Lives on the worker thread (or the caller's thread for ImmediateRunner), so the
-    terminal-signal flag is updated on the same thread that runs the worker.
+    Lives on the worker thread (or the caller's thread, in the tests' ImmediateRunner), so
+    the terminal-signal flag is updated on the same thread that runs the worker.
     """
 
     def __init__(self, worker: QObject, thread: Optional[QThread] = None):
@@ -145,23 +145,3 @@ class JobRunner(QObject):
 
     def pending(self) -> int:
         return len(self._jobs)
-
-
-class ImmediateRunner:
-    """Test double: runs a worker synchronously on the calling thread with direct signals."""
-
-    def run_worker(
-        self,
-        worker: QObject,
-        on_finished: Callable,
-        on_error: Optional[Callable] = None,
-        context: Any = None,
-    ) -> QObject:
-        worker.finished.connect(lambda payload: on_finished(context, payload))
-        if on_error is not None:
-            worker.error.connect(lambda message: on_error(context, message))
-        _WorkerGuard(worker).run()
-        return worker
-
-    def pending(self) -> int:
-        return 0

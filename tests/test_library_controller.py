@@ -8,9 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, QPoint, QRectF, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication
+from job_fixtures import ImmediateRunner
 from timer_fixtures import elapse
 
-from services.jobs import ImmediateRunner
 from services.library import LibraryModel
 from services.provider_ids import (
     ALL_PROVIDERS,

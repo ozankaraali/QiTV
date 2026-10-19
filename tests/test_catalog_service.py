@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from job_fixtures import ImmediateRunner
 
 from services.catalog import (
     ALL_GROUP_ID,
@@ -16,7 +17,7 @@ from services.catalog import (
     CatalogService,
     Group,
 )
-from services.jobs import ImmediateRunner, JobRunner
+from services.jobs import JobRunner
 
 
 class FakeWorker(QObject):

@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from job_fixtures import ImmediateRunner
 from mixed_fixtures import DEMO, HARBOR, HeldSetups, live_content, mixed_config
 from test_browsed_catalog import FakeEpg, ScriptedFactory
 from test_catalog_service import FakeWorker
@@ -17,7 +18,6 @@ from timer_fixtures import elapse
 from services.browsed_catalog import BrowsedCatalog
 from services.catalog import ALL_GROUP_ID
 from services.catalogs import Catalogs
-from services.jobs import ImmediateRunner
 from services.m3u import parse_m3u
 from services.navigation import FAVORITES_GROUP, RECENT_GROUP, NavModel, NavNode, item_key
 from services.provider_ids import (

@@ -1,10 +1,11 @@
 import random
 import unittest
 
+from auto_target import AutoTarget
+
 from services.live.stay_live import (
     AUTO,
     TARGETS,
-    AutoTarget,
     Decision,
     LagFilter,
     Mode,

@@ -11,8 +11,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+from job_fixtures import ImmediateRunner
 
-from services.jobs import Cancelled, ImmediateRunner, JobRunner, cancel_requested
+from services.jobs import Cancelled, JobRunner, cancel_requested
 from tests.timer_fixtures import wait_until
 
 GENERIC_FAILURE = "The background task failed"

@@ -143,7 +143,7 @@ CAP_MIN_S = 10.0  # today's cap: Stable's 6 s + 4 s ...
 CAP_ABOVE_S = 2.0  # ... or the burst (here: the need) + 2 s, whichever is larger
 STALL_S = 2.0  # a source silent this much longer than its rhythm has stalled
 STEP_S = 3.0  # an edge this far above where the window saw it is a step
-NEED_MAX_S = 60.0  # 2.0.2's bound on a remembered extra
+NEED_MAX_S = 60.0  # 2.0.2's bound on a remembered extra (its Auto: tests/auto_target.py)
 _TICK_S = 0.25  # what a first sample stands for
 _MAX_DT = 1.0  # a longer gap between two samples counts as this long
 

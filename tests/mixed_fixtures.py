@@ -7,10 +7,10 @@ import os
 import time
 from unittest import mock
 
+from job_fixtures import ImmediateRunner
 import orjson
 
 from services.config_manager import ConfigManager
-from services.jobs import ImmediateRunner
 from services.provider_manager import ProviderManager
 
 DEMO = {"type": "M3UPLAYLIST", "name": "Demo TV", "url": "http://127.0.0.1:9/demo.m3u"}
