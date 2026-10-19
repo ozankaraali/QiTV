@@ -608,7 +608,7 @@ class PosterGridTests(unittest.TestCase):
         self.assertEqual(self.grid.current_index(), 0)
 
     def test_a_list_loaded_again_keeps_its_title_by_key_and_its_place(self):
-        # Owner (2.2.0): a genre's titles loaded again (new dicts) sent the grid to the top.
+        # Reported in 2.2.0: a genre's titles loaded again (new dicts) sent the grid to the top.
         items = titles(200)
         self.grid.set_key_provider(lambda item: item["name"])
         self.grid.set_sections([("", items)])

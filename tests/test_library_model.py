@@ -359,7 +359,7 @@ class LibraryModelTests(unittest.TestCase):
         return cat, model
 
     def test_the_provider_shown_ready_again_keeps_the_genre(self):
-        # Owner (2.2.0): a film chosen in a genre far down the list; its provider set up again
+        # Reported in 2.2.0: a film chosen in a genre far down the list; its provider set up again
         # and the Library went back to its first genre, at the top.
         cat, model = self.two_genres()
         cat.requests.clear()

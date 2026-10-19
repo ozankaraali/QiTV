@@ -1786,7 +1786,7 @@ class XtreamLibraryTests(TwoProviderCase):
         self.stop_corner_player()
 
     def test_a_film_chosen_while_its_provider_sets_up_again_plays_and_the_library_stays(self):
-        # Owner (2.2.0): a film chosen in a genre down the list while its provider was set up
+        # Reported in 2.2.0: a film chosen in a genre down the list while its provider was set up
         # again; the Library went back to its first genre, at the top. The film plays once its
         # provider is ready, and Esc finds the Library on that genre and title.
         plays = self.play_spy()

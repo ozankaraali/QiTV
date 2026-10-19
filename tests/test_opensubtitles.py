@@ -340,8 +340,8 @@ class FoundTests(unittest.TestCase):
         self.assertFalse(same_title("", "Harbour"))
 
     def test_only_the_subtitles_for_the_title_asked_for_are_kept(self):
-        """A translated title and its year find other films of that year (the owner's
-        screenshot: 64 subtitles, none for the film): none of them is taken for it."""
+        """A translated title and its year find other films of that year (reported in 2.2.0:
+        64 subtitles, none for the film): none of them is taken for it."""
         query = search_query("movies", "TR - Süper Liman Bekçileri (2014)")
         data = page(
             entry(1, "tr", "grown.beginners.2014.tur", made_for=feature("Grown Beginners", 2014)),

@@ -913,7 +913,7 @@ class LibraryControllerTests(unittest.TestCase):
                 self.catalog.item_map[key] = [dict(item) for item in items]
 
     def test_a_film_chosen_while_its_provider_sets_up_again_plays_where_it_was(self):
-        # Owner (2.2.0): a film chosen in a genre far down the list; its provider was not ready
+        # Reported in 2.2.0: a film chosen in a genre far down the list; its provider was not ready
         # and the Library went back to its first genre, at the top. It plays once its provider
         # is ready, once, and the Library stays on the genre and the title.
         ctl = self.open_movies()
