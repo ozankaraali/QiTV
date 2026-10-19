@@ -15,6 +15,7 @@ os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.*=false")
 
 from PySide6.QtCore import (
     QEvent,
+    QEventLoop,
     QLoggingCategory,
     QMargins,
     QMimeData,
@@ -2068,6 +2069,57 @@ class DrawerSettingsTests(WindowCase):
     def test_a_click_right_after_the_menu_opened_the_search_reaches_the_library(self):
         events = self.click_where_search_was(self.menu_actions()["Search"].trigger)
         self.assertEqual(events, [QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease])
+
+    def test_a_click_on_the_menus_entry_keeps_its_second_click_off_the_library(self):
+        # On Windows and Linux the menu drops down over the page: a double-click on its Search
+        # entry put the second click on the Library it shows. Only its shortcut (above) and
+        # the menu's own keys are keys.
+        action = self.menu_actions()["Search"]
+
+        def click_the_entry():
+            menu = next(o for o in action.associatedObjects() if isinstance(o, QMenu))
+            menu.popup(self.window.mapToGlobal(QPoint(40, 40)))
+            self.assertTrue(QTest.qWaitForWindowExposed(menu))
+            QTest.mouseClick(
+                menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center()
+            )
+
+        self.assertEqual(self.click_where_search_was(click_the_entry), [])
+        QTest.qWait(1)  # the click was handled: the next entry chosen by its keys is a key
+        self.assertFalse(self.window.menus._clicked)
+
+    def test_a_dialogs_own_loop_inside_a_menu_entry_guards_its_clicks(self):
+        # A menu entry (or a key) that opens a modal dialog: a click in the dialog's own event
+        # loop that shows a page is a click, whose second click is guarded.
+        self.show()
+        self.wait_for_drawer()
+        screens = self.window.screens
+        armed = []
+        with mock.patch.object(screens._second_click, "arm", lambda: armed.append(True)):
+            with screens.from_keys():
+                screens.open_library("movies")  # the key's own move: not guarded
+                self.assertEqual(armed, [])
+                loop = QEventLoop()
+
+                def clicked_in_the_dialog():
+                    screens.open_search()  # what a click in the dialog does meanwhile
+                    loop.quit()
+
+                QTimer.singleShot(0, clicked_in_the_dialog)
+                loop.exec()  # as a modal dialog's exec
+                screens.open_library("series")  # the key's again, once the dialog closed
+        self.assertEqual(armed, [True])
+
+    def test_a_closing_window_arms_no_guard(self):
+        self.show()
+        self.wait_for_drawer()
+        screens = self.window.screens
+        with (
+            mock.patch.object(screens._second_click, "arm") as arm,
+            mock.patch.object(self.window, "closing", return_value=True),
+        ):
+            screens._guard_second_click()
+        arm.assert_not_called()
 
     def test_a_closing_window_keeps_no_click_off_another_window(self):
         # The second-click guard filters the whole application. A window closed within the

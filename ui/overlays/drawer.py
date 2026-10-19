@@ -29,7 +29,7 @@ tiles behind it show), the pointer's moves come as `channelDragged`, and the rel
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 
 from PySide6.QtCore import (
@@ -1041,7 +1041,11 @@ class Drawer(Overlay):
         if self.finding():
             self._fill_found(right)
         else:
-            self._fill(right, right_parent, right_children, back or was["left"])
+            # A layer up the left list comes right with the path's node highlighted: the one
+            # whose list the right column showed, not a genre only highlighted (previewed) on
+            # the left.
+            up = replace(was["left"], current=was["right"].parent)
+            self._fill(right, right_parent, right_children, back or up)
         for side, col in self._columns.items():
             col.view.setProperty("columnFocused", side == self.focus_side)
             col.view.viewport().update()

@@ -18,7 +18,7 @@ from contextlib import contextmanager
 import logging
 from typing import Iterator, Optional
 
-from PySide6.QtCore import QObject, QPoint
+from PySide6.QtCore import QObject, QPoint, QThread
 from PySide6.QtWidgets import QFileDialog, QWidget
 
 from services.exporter import ExportKind
@@ -40,6 +40,11 @@ MEDIA_PATTERNS = (
 )
 
 
+def _loop_level() -> int:
+    """How many event loops run on this (the GUI) thread: a modal dialog's exec adds one."""
+    return QThread.currentThread().loopLevel()
+
+
 def media_filter() -> str:
     """Open File's filters: media files, then every file."""
     media = tr("Media files")  # i18n: a file type in the Open File dialog
@@ -56,7 +61,8 @@ class TVPages(QObject):
         self._return_to_library = False  # the movie playing came from the Library
         # After ‹ Library, ⌕ and the Movies/Series rows: see _guard_second_click.
         self._second_click = SecondClickGuard(self)
-        self._keyed = False  # a key or a menu item moves the pages: see from_keys
+        # The event loop level a key or a menu item moves the pages at, else None: from_keys.
+        self._keys_level: Optional[int] = None
         self.library_model = LibraryModel(
             window.library_catalog, window.config_manager, window.watch, self
         )
@@ -109,19 +115,23 @@ class TVPages(QObject):
         """A click just showed another page: a double-click's second click would land on
         whatever that page shows under the pointer, so for the double-click interval it reaches
         nothing (SecondClickGuard). A key or a menu item makes no double-click (from_keys):
-        the next click is the user's own and reaches the page."""
-        if not self._keyed:
+        the next click is the user's own and reaches the page. A closing window arms nothing
+        (it let go of the guard: shutdown)."""
+        if self._window.closing():
+            return
+        if self._keys_level is None or self._keys_level != _loop_level():
             self._second_click.arm()
 
     @contextmanager
     def from_keys(self) -> Iterator[None]:
         """The page moves made inside come from a key or a menu item (TVWindow's keys, the
-        menus' entries and their shortcuts): no second click follows them."""
-        keyed, self._keyed = self._keyed, True
+        menus' shortcuts and keyed entries): no second click follows them. Only at this event
+        loop level: a modal dialog's own loop inside (exec) takes clicks, which are guarded."""
+        keyed, self._keys_level = self._keys_level, _loop_level()
         try:
             yield
         finally:
-            self._keyed = keyed
+            self._keys_level = keyed
 
     def shutdown(self) -> None:
         """The window closes: the guard, which filters the whole application, lets go now

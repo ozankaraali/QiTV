@@ -275,6 +275,34 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.nav.path[-1].title, "Group 2")
         self.assertEqual(self.drawer.focus_side, "right")
 
+    def test_going_up_from_a_genre_only_previewed_highlights_the_paths_genre(self):
+        # ↓↓ on the left highlights Group 2, whose preview has not opened yet; going up at
+        # once (← or ‹) brings the genres right with the path's genre highlighted, not Group 2.
+        for name in ("left", "go_up"):
+            with self.subTest(name):
+                self.many_groups()
+                self.drawer.open_drawer()
+                self.drawer.left()
+                self.drawer.move_by(1)
+                self.drawer.move_by(1)
+                self.assertEqual(self.drawer.highlighted().title, "Group 2")
+                getattr(self.drawer, name)()
+                elapse(320)
+                self.assertEqual(self.opened, [])  # the preview never opened
+                self.assertEqual(self.nav.path[-1].layer, "section")
+                right = self.drawer._columns["right"]
+                self.assertEqual(right.current.title, "Group 0")
+                self.assertEqual(right.view.currentIndex().row(), right.rows.get(right.current))
+
+    def test_going_up_after_a_preview_opened_highlights_that_genre(self):
+        self.many_groups()
+        self.drawer.open_drawer()
+        self.drawer.left()
+        self.drawer.move_by(1)
+        elapse(320)  # Group 1 previewed: the path's genre now
+        self.drawer.left()
+        self.assertEqual(self.drawer._columns["right"].current.title, "Group 1")
+
     def test_sources_are_highlighted_not_previewed(self):
         self.nav.open(self.nav.path[0])
         self.drawer.open_drawer()

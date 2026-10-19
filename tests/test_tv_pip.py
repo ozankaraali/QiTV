@@ -156,7 +156,7 @@ class PagesForTest(TVPages):
         self._window = window
         self._return_to_library = False
         self._second_click = mock.Mock()
-        self._keyed = False
+        self._keys_level = None
         self.library_controller = mock.Mock()
 
 

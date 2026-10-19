@@ -17,7 +17,7 @@ from functools import partial
 import logging
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Qt, QUrl
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QMenu, QVBoxLayout, QWidget
 
@@ -106,6 +106,9 @@ class TVMenus(QObject):
         self._player_actions: list[QAction] = []  # entries of the player's keys
         self._provider_group: Optional[QActionGroup] = None
         self.providers_menu: QMenu
+        # A mouse button was let go on an open menu: the entry it triggers now was clicked
+        # (until the event is handled), not chosen by its shortcut or the menu's keys.
+        self._clicked = False
 
     # ---- building -----------------------------------------------------------------------------
 
@@ -181,6 +184,7 @@ class TVMenus(QObject):
         action.setMenuRole(role)
         action.triggered.connect(lambda _checked=False: self._run(slot))
         menu.addAction(action)
+        menu.installEventFilter(self)  # its clicks (once per menu: Qt keeps no duplicates)
         if not shortcut:
             return action
         sequence = QKeySequence(shortcut)
@@ -196,9 +200,25 @@ class TVMenus(QObject):
         return action
 
     def _run(self, slot: Callable[[], Any]) -> None:
-        """A menu entry or its shortcut: a page it shows gets no second click (TVPages)."""
+        """A menu entry or its shortcut. A page a shortcut (or the menu's keys) shows gets no
+        second click (TVPages.from_keys); a click on the entry is a click: on Windows and
+        Linux the menu drops down over the page, and a double-click's second click would land
+        on the page it shows (macOS's menu bar is the system's: no click reaches the menus)."""
+        if self._clicked:
+            slot()
+            return
         with self._window.screens.from_keys():
             slot()
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.MouseButtonRelease and isinstance(obj, QMenu):
+            # The menu triggers the entry under the pointer while it handles this release.
+            self._clicked = True
+            QTimer.singleShot(0, self._click_handled)
+        return False
+
+    def _click_handled(self) -> None:
+        self._clicked = False
 
     def _handler(self, action: Action) -> Callable[[], None]:
         return lambda: self._window.controller.handle(action)
