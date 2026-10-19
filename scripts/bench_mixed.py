@@ -401,6 +401,7 @@ def run(args) -> int:
     from services import playback
     from services.config_manager import ConfigManager
     from services.epg_manager import EpgManager
+    from services.gc_guard import GcGuard
     from services.image_manager import ImageManager
     from services.provider_manager import ProviderManager
     from ui import tv_window
@@ -411,6 +412,9 @@ def run(args) -> int:
     if args.trace:
         install_trace()
     app = QApplication.instance() or QApplication(sys.argv)
+    if not args.automatic_gc:
+        gc_guard = GcGuard(app)  # as main.py does: garbage cycles collected on the GUI thread
+        gc_guard.start()
     if playback.vlc is not None:
 
         def muted(extra_args: Optional[list[str]] = None) -> Any:
@@ -626,6 +630,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--switch", type=float, default=0.0005, help="sys.setswitchinterval(s)")
     parser.add_argument("--sample", action="store_true", help="show where threads are in a stall")
     parser.add_argument("--trace", action="store_true", help="time the hot functions per step")
+    parser.add_argument(
+        "--automatic-gc", action="store_true", help="Python collects on any thread (no GcGuard)"
+    )
     parser.add_argument(
         "--profile", action="append", default=[], metavar="STEP", help="print a cProfile of STEP"
     )

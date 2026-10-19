@@ -113,6 +113,7 @@ import qdarktheme  # noqa: E402
 from services import playback, thread_cleanup  # noqa: E402
 from services.config_manager import ConfigManager  # noqa: E402
 from services.epg_manager import EpgManager  # noqa: E402
+from services.gc_guard import GcGuard  # noqa: E402
 from services.image_manager import ImageManager  # noqa: E402
 from services.playback import VLC_LOG_ENV, PlaybackSession, PlaybackState  # noqa: E402
 from services.provider_manager import ProviderManager  # noqa: E402
@@ -981,6 +982,8 @@ def run_app(
     config_dir = os.environ["QITV_CONFIG_DIR"]
     provider = write_local_provider(config_dir, fixture_dir=fixtures, live_urls=live_urls)
     app = QApplication([sys.argv[0]])
+    gc_guard = GcGuard(app)  # as main.py does: garbage cycles collected on the GUI thread only
+    gc_guard.start()
     config = ConfigManager()
     if live_urls:
         # Time-shift consent: the buffer goes to disk, so the empty directory at the end

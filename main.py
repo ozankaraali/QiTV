@@ -94,6 +94,7 @@ def main() -> int:
     from services import i18n
     from services.config_manager import ConfigManager, get_app_version
     from services.epg_manager import EpgManager
+    from services.gc_guard import GcGuard
     from services.image_manager import ImageManager
     from services.provider_manager import ProviderManager
     from services.sleep_manager import allow_sleep, prevent_sleep
@@ -122,6 +123,9 @@ def main() -> int:
     # the window responsive while it works.
     sys.setswitchinterval(0.0005)
     app = QApplication(sys.argv)
+    # Before any worker starts: garbage cycles are collected on this (the GUI) thread only.
+    gc_guard = GcGuard(app)
+    gc_guard.start()
 
     # Optional: capture Qt warnings to help debug thread/timer issues
     def _qt_msg_handler(mode, context, message):
