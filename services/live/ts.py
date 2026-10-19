@@ -1340,8 +1340,8 @@ class RepeatTrimmer:
     the video PTS stepped back from the clock before it; if either goes on instead, it was
     none and the bytes pass on as they came. A restart is held
     until its burst settled (a second brought at most `_TRIM_BURST_RATE` s of media),
-    `_TRIM_HOLD_S` passed or `_TRIM_HOLD_BYTES` are held, all judged as input arrives (a source
-    that sends nothing keeps the hold until its next read or its reconnect). R, how far the
+    `_TRIM_HOLD_S` passed or `_TRIM_HOLD_BYTES` are held, all judged as input arrives, and
+    while a source sends nothing on the caller's `tick()`. R, how far the
     restart moved the media ahead of the wall clock, is media minus clock where the burst
     settled (else at the release), less media minus clock where the old run last brought media
     (before the silence: a burst that only makes up its silence is R 0), less `_TRIM_MARGIN_S`.
@@ -1595,6 +1595,20 @@ class RepeatTrimmer:
         self._settle = None
         if self._before is None:
             self._release_now = "first"  # nothing to measure it from
+
+    def tick(self) -> list[bytes]:
+        """Time passed without input (a source that pauses): a held restart is judged as a
+        read would judge it, so one whose hold is due (settled: its media stood still, or the
+        cap) passes on now, not with the next read or the reconnect after the pause."""
+        pieces = [b""]
+        if self._held is None or not self._confirmed:
+            return pieces
+        now = self._clock()
+        self._samples.append((now, self._run_media()))
+        reason = self._release_now or self._due(now)
+        if reason is not None:
+            self._release(now, pieces, reason or None)
+        return pieces
 
     def discontinuity(self) -> list[bytes]:
         """A reconnect comes next: what is held passes on untouched, and so does the partial

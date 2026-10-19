@@ -1665,6 +1665,50 @@ class HeardEdgeTests(unittest.TestCase):
         self.assertEqual(heard, [False, True])
         self.assertFalse(states[-1])
 
+    def test_a_held_restart_goes_on_while_the_source_pauses(self):
+        # A raw TS restart's burst lands, then the source sends nothing for a while: the hold
+        # is let go during the pause (its media stood still), not with the next read.
+        from tests.test_repeat_trimmer import backlogged, repeat_runs, stream
+
+        timed = stream(repeat_runs(5.0, 1.0))
+        resume = backlogged(20.0) + 1.0  # the new run's burst lands then, the rest at 1x
+        before = b"".join(p for at, p in timed if at < resume)
+        burst = b"".join(p for at, p in timed if resume <= at <= resume + 1e-9)
+        rest = b"".join(p for at, p in timed if at > resume + 1e-9)
+        helper = SimpleNamespace(
+            root="",
+            send=lambda *args, **kwargs: None,
+            server=SimpleNamespace(add_session=lambda *a: None),
+        )
+        session = worker._Session(helper, "h", "http://provider.test/h.ts", {}, True, RAM, 6.0)
+        seen = {}
+
+        class Source:
+            hls = False
+            burst_s = 0.0
+            user_agent = "test"
+
+            def chunks(self):
+                yield before[: 188 * 20]  # the tables: the segmenter knows the picture's PID
+                yield before[188 * 20 :]
+                yield burst
+                seen["held"] = session._trimmer.holding
+                time.sleep(1.8)  # the source pauses
+                seen["after"] = session._trimmer.holding
+                seen["trims"] = [trim.reason for trim in session._trimmer.trims]
+                yield rest
+
+            def close(self):
+                pass
+
+            def wait_closed(self, timeout):
+                return True
+
+        with patch.object(source_module, "open_source", lambda *args, **kwargs: Source()):
+            session._ingest()
+        self.assertEqual((seen["held"], seen["after"]), (True, False))
+        self.assertEqual(seen["trims"], ["dropped"])
+
 
 if __name__ == "__main__":
     unittest.main()

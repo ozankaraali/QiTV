@@ -91,7 +91,14 @@ class Run:
     """Feed a timed stream to a trimmer read by read, at each read's arrival time; with
     `clock`, through a ClockJoiner after it, as the helper does."""
 
-    def __init__(self, timed, *, reconnect_before: int | None = None, clock: bool = False):
+    def __init__(
+        self,
+        timed,
+        *,
+        reconnect_before: int | None = None,
+        clock: bool = False,
+        finish: bool = True,
+    ):
         self.now = 0.0
         self.trimmer = RepeatTrimmer(
             program=lambda: (VIDEO_PID, 0x1B), clock=lambda: self.now, join_counters=not clock
@@ -115,6 +122,8 @@ class Run:
                 k += 1
             self.now = at
             self._take(self.trimmer.feed(b"".join(chunk)))
+        if not finish:  # the source goes silent: the caller ticks
+            return
         self._take(self.trimmer.finish())
         if self.joiner is not None:
             self.joined.append(self.joiner.finish())
@@ -287,6 +296,30 @@ class RepeatTrimmerTests(unittest.TestCase):
         (trim,) = run.trimmer.trims
         self.assertEqual(trim.reason, "end")
         self.assertEqual(run.output, run.input)
+
+    def test_a_hold_is_judged_on_ticks_while_the_source_pauses(self):
+        # The burst lands, then the source sends nothing: on the caller's ticks the hold sees
+        # its media stand still, settles and drops the repeat then, not at the next read.
+        timed = stream(repeat_runs(5.0, 1.0))
+        resume = backlogged(20.0) + 1.0
+        run = Run([item for item in timed if item[0] <= resume], finish=False)
+        trimmer = run.trimmer
+        self.assertTrue(trimmer.holding)
+        released = []
+        for k in range(1, 8):
+            run.now = resume + 0.25 * k
+            pieces = trimmer.tick()
+            if len(pieces) > 1:
+                released.append((run.now - resume, pieces))
+                break
+        ((after, pieces),) = released
+        self.assertGreaterEqual(after, 1.0)  # a second of standing still: settled
+        self.assertLessEqual(after, 1.5)
+        self.assertFalse(trimmer.holding)
+        (trim,) = trimmer.trims
+        self.assertEqual((trim.reason, trim.dropped_s), ("dropped", 4.0))
+        self.assertEqual(video_pts(pieces[1])[0], 4 * CLOCK)  # from the keyframe at 4 s
+        self.assertEqual(trimmer.tick(), [b""])  # nothing held: nothing to say
 
     def assert_runs_on(self, out: bytes) -> None:
         """One clock: pictures a frame apart, sound and PCRs only forward, counters on."""

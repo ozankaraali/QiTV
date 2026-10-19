@@ -103,6 +103,8 @@ _NOTIFY_INTERVAL = 0.25
 # A live edge this far past the one last reported is reported at once, throttle or not: a burst
 # lands in one read, and the throttle held it back until the next read (up to a pause later).
 _EDGE_STEP_S = 0.5
+# Raw TS: how often a restart the trimmer holds is judged while the source sends nothing.
+_HOLD_TICK_S = 0.5
 # The parent terminates the helper 0.5 s after "shutdown"; both waits are usually instant.
 _SHUTDOWN_GRACE = 0.25  # for session threads to remove their disk buffers
 _FLUSH_GRACE = 0.25  # for the writer to deliver what is queued
@@ -373,6 +375,9 @@ class _Session:
         # is queued, so nothing from this session follows its "closed".
         self.cancelled = False
         self.lock = threading.Lock()
+        # Raw TS: held by whatever moves bytes down the pipeline (the session thread with each
+        # item of the source, the hold ticker while the source is silent: `_hold_ticker`).
+        self._moving = threading.RLock()
         self.released = threading.Event()  # the session holds no upstream connection anymore
         self._helper = helper
         self._url = url
@@ -459,13 +464,7 @@ class _Session:
 
     def _ingest(self) -> None:
         from services.live.ring import RingError
-        from services.live.source import (
-            CaughtUp,
-            Discontinuity,
-            Reconnecting,
-            SourceError,
-            open_source,
-        )
+        from services.live.source import SourceError, open_source
 
         target = self._start.get("target")
         try:
@@ -504,43 +503,22 @@ class _Session:
             trimmer = self._trimmer = RepeatTrimmer(
                 program=program, clock=time.monotonic, join_counters=self._clock_joiner is None
             )
+        ticking = self._hold_ticker(trimmer) if trimmer is not None else None
         try:
-            for item in source.chunks():
+            try:
+                for item in source.chunks():
+                    with self._moving:
+                        self._take(item, source, trimmer, rejoiner)
+            finally:
+                if ticking is not None:
+                    ticking.set()
+            with self._moving:
                 self._check()
-                if isinstance(item, Reconnecting):
-                    self._reconnecting = True
-                    self._notify(force=True)
-                    continue
-                self._reconnecting = False
-                if isinstance(item, Discontinuity):
-                    self._relabeler.reconnect()
-                    if trimmer is not None and rejoiner is not None:
-                        # A reconnect: what they hold passes on untouched.
-                        self._pass_on(trimmer.feed(rejoiner.reconnect()))
-                        self._pass_on(trimmer.discontinuity())
-                        self._clock_end(reconnect=True)
-                    self._discontinuity()
-                elif isinstance(item, CaughtUp):
-                    # The batch's end, which the throttle may have held back, and the start's
-                    # backlog has landed: the parent chooses where to start on this.
-                    self._caught_up = True
-                    self._notify(force=True)
-                else:
-                    self._follow(source)  # before its bytes: where an HLS segment begins
-                    self._received += len(item)
-                    if trimmer is None or rejoiner is None:
-                        self._to_segmenter(item)
-                    else:
-                        self._pass_on(trimmer.feed(rejoiner.feed(item)))
-                    self._measure()
-                    if not self._ready:
-                        self._notify()  # bytes flow, nothing playable yet: say so
-            self._check()
-            if trimmer is not None and rejoiner is not None:
-                self._pass_on(trimmer.feed(rejoiner.finish()))
-                self._pass_on(trimmer.finish())
-                self._clock_end(reconnect=False)
-            self._finish_segmenter()
+                if trimmer is not None and rejoiner is not None:
+                    self._pass_on(trimmer.feed(rejoiner.finish()))
+                    self._pass_on(trimmer.finish())
+                    self._clock_end(reconnect=False)
+                self._finish_segmenter()
         except SourceError as error:
             self._fail(error.kind, str(error), error.status)
             return
@@ -690,8 +668,76 @@ class _Session:
             self._answered = answered
             self._notify(force=True)
 
+    def _take(
+        self,
+        item: Any,
+        source: Source,
+        trimmer: RepeatTrimmer | None,
+        rejoiner: ReconnectTrimmer | None,
+    ) -> None:
+        """One item of the source down the pipeline: bytes, or a marker."""
+        from services.live.source import CaughtUp, Discontinuity, Reconnecting
+
+        self._check()
+        if isinstance(item, Reconnecting):
+            self._reconnecting = True
+            self._notify(force=True)
+            return
+        self._reconnecting = False
+        if isinstance(item, Discontinuity):
+            self._relabeler.reconnect()
+            if trimmer is not None and rejoiner is not None:
+                # A reconnect: what they hold passes on untouched.
+                self._pass_on(trimmer.feed(rejoiner.reconnect()))
+                self._pass_on(trimmer.discontinuity())
+                self._clock_end(reconnect=True)
+            self._discontinuity()
+        elif isinstance(item, CaughtUp):
+            # The batch's end, which the throttle may have held back, and the start's
+            # backlog has landed: the parent chooses where to start on this.
+            self._caught_up = True
+            self._notify(force=True)
+        else:
+            self._follow(source)  # before its bytes: where an HLS segment begins
+            self._received += len(item)
+            if trimmer is None or rejoiner is None:
+                self._to_segmenter(item)
+            else:
+                self._pass_on(trimmer.feed(rejoiner.feed(item)))
+            self._measure()
+            if not self._ready:
+                self._notify()  # bytes flow, nothing playable yet: say so
+
+    def _hold_ticker(self, trimmer: RepeatTrimmer) -> threading.Event:
+        """Raw TS: while the session thread waits on a silent source (it reads with a 20 s
+        stall timeout), a restart the trimmer holds is still judged every `_HOLD_TICK_S`
+        (`RepeatTrimmer.tick`), so a pause in its burst lets it go then, not with the next
+        read: VLC plays its cushion meanwhile, and what was held would be missing from it.
+        Each tick takes the pipeline as the session thread does (`_moving`); returns the event
+        that stops it."""
+        stop = threading.Event()
+
+        def tick() -> None:
+            while not stop.wait(_HOLD_TICK_S):
+                with self._moving:
+                    if stop.is_set() or self.cancelled or not trimmer.holding:
+                        continue
+                    try:
+                        self._pass_on(trimmer.tick())
+                        self._measure()
+                    except Exception as error:  # the session thread meets it with its next item
+                        _LOG.debug("A held restart's tick failed (%s).", type(error).__name__)
+                        return
+
+        threading.Thread(target=tick, name=f"qitv-live-hold-{self.sid}", daemon=True).start()
+        return stop
+
     def _fail(self, kind: str, message: str, status: int | None = None) -> None:
         """Report a failure that ends the input; the buffered part stays playable."""
+        with self._moving:
+            self._end_input(kind, message, status)
+
+    def _end_input(self, kind: str, message: str, status: int | None) -> None:
         if self._ring is not None:
             self._check()  # a cancelled session never touches its ring again
             try:
