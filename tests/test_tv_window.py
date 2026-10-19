@@ -1943,6 +1943,29 @@ class XtreamLibraryTests(TwoProviderCase):
         self.assertTrue(window.controller.vod_current())
 
 
+class LibraryOnAnotherProviderTests(TwoProviderCase):
+    """The TV page on the playlist, the Library on the Xtream provider (chosen in an earlier
+    session): nothing sets that one up until the Library asks for its films."""
+
+    def prepare_config(self):
+        super().prepare_config()
+        self.config.library_provider_name = XTREAM
+
+    def test_its_films_list_once_it_is_set_up_and_a_film_plays(self):
+        plays = self.play_spy()
+        self.show()
+        self.wait_for_drawer()
+        window = self.window
+        self.assertFalse(window.catalogs.is_ready(XTREAM))
+        self.menu_actions()["Movies"].trigger()  # said "has no movies", and stayed so
+        grid = self.wait_for_titles()
+        self.assertEqual(window.library_catalog.current_provider_name(), XTREAM)
+        current = grid.item(grid.current_index())
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        self.assertTrue(wait_until(lambda: plays == [current["cmd"]], LIBRARY_WAIT_MS), plays)
+        self.assertEqual(window.catalog.current_provider_name(), PROVIDER_NAME)  # not moved
+
+
 class LibraryReturnTests(WindowCase):
     """Esc back to the Library and the mini player (review findings)."""
 
