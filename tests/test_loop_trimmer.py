@@ -350,6 +350,37 @@ class LoopTrimmerTests(unittest.TestCase):
         self.assertEqual(loop.ended_by, "stall")
         self.assertGreater(len(sounds(passed)), 4 * CLOCK // SOUND - 2 * 64)
 
+    def test_a_channel_that_is_a_30_s_loop_plays_again_after_three_minutes(self):
+        # An off-air card: the same 30 s for ever. It is dropped as a replay, then after 3
+        # minutes it plays again from a keyframe, its clock running on, and stays playing;
+        # a different loop later is dropped again.
+        now = [0.0]
+        loops = trimmer(now)
+        w = Writer()
+        pieces = [b""]
+
+        def send(contents: list[int]) -> None:
+            for at in range(0, len(contents), FPS):  # a second at a time, at real time
+                parts = loops.feed([w.pictures(contents[at : at + FPS])])
+                pieces[-1] += parts[0]
+                pieces.extend(parts[1:])
+                now[0] += 1.0
+
+        send(list(range(750)) * 9)  # 270 s
+        send(list(range(5000, 5500)) + list(range(5275, 5500)) * 2)  # new, then its last 9 s
+        pieces[-1] += loops.finish()[0]
+        given, other = loops.loops
+        self.assertEqual(given.ended_by, "given up")
+        self.assertAlmostEqual(given.ended_at - given.found_at, ts._LOOP_GIVE_UP_S, delta=1.0)
+        out = rebased(pieces)
+        self.assertEqual(steps(out, VIDEO_PID), {FRAME})
+        shown = contents(out)
+        resumed = 750 + round(given.dropped_s * FPS)
+        self.assertEqual(shown[:750], list(range(750)))
+        self.assertEqual(shown[750], shown[750] // GOP * GOP)  # from a keyframe
+        self.assertEqual(len(shown), 9 * 750 - resumed + 750 + 500)  # it stays playing
+        self.assertEqual((other.ended_by, other.dropped_s), ("end", 18.0))
+
     def test_memory_stays_bounded(self):
         with (
             mock.patch.object(ts, "_LOOP_WINDOW_PICTURES", 64),

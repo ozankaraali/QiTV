@@ -98,6 +98,10 @@ _LOOP_SOUND_NEW = 4  # ... and no replay once this many of its PES are new
 _LOOP_EARLY_TICKS = _CLOCK  # sound this far before a loop's first picture still passes
 _LOOP_HOLD_BYTES = 16 * 1024 * 1024  # a run judged is held at most this much (2 s of 64 Mbit/s)
 _LOOP_SOUND_WAIT = 64  # other PES that begin while a picture is read: past it, the video stalled
+# A loop dropped this long plays again (from a keyframe): a channel that is itself a short loop
+# (an off-air card, a promo) must not freeze for good, while the provider outages measured lasted
+# 12 s and 90 s.
+_LOOP_GIVE_UP_S = 180.0
 
 
 class Unsupported(Exception):
@@ -1835,7 +1839,8 @@ class Loop:
     the input ranges left out ((offset, bytes)). `ended_by`: "keyframe" (a new picture to start
     at), "pictures" (new pictures without a keyframe for `_LOOP_MIN_S`), "sound" (new sound for
     `_LOOP_MIN_S` while the pictures repeated), "stall" (the pictures stopped while the sound
-    went on: `_LOOP_SOUND_WAIT`), "end" (the input ended).
+    went on: `_LOOP_SOUND_WAIT`), "given up" (dropped `_LOOP_GIVE_UP_S`: it plays again),
+    "end" (the input ended).
     """
 
     offset: int
@@ -1900,8 +1905,10 @@ class LoopTrimmer:
     sound timed before it (each PID's, until a PES at or after it, `_CLOCK_PENDING_PACKETS` at
     most), as a new run (a piece of its own) that `ClockJoiner` re-bases onto the last picture
     passed on: the live edge stood still while the loop went (the player says "Waiting for the
-    channel…", as for a stalled source) and goes on with no timestamp jump. From the first
-    loop's end on, what passes on goes through `ContinuityJoiner`, so the counters run on
+    channel…", as for a stalled source) and goes on with no timestamp jump. A loop dropped for
+    `_LOOP_GIVE_UP_S` plays again the same way, from a keyframe (a channel that is itself a
+    short loop must not freeze for good), and its pictures begin no run any more; another loop
+    is judged as before. From the first loop's end on, what passes on goes through `ContinuityJoiner`, so the counters run on
     across loops and reconnects (about a microsecond a packet).
 
     A picture is judged once the next begins: its bytes wait that long (a picture's delay), or
@@ -1956,10 +1963,13 @@ class LoopTrimmer:
         self._run_sound = [0, 0]
         self._repeated: set[int] = set()  # where its sound PES that repeat begin (input offsets)
         self._rejected: tuple[int, int] | None = None  # a run judged no loop: (back, next number)
+        # The pictures of the latest loop given up (`_LOOP_GIVE_UP_S`): none of them begins a run
+        self._given_up: frozenset[int] = frozenset()
         # Dropping:
         self._found_at = 0.0
         self._reached: set[int] = set()  # sound PIDs past the sound that still passes
         self._new = 0  # new pictures in a row
+        self._new_since = 0  # pictures since the loop was given up, while a keyframe is waited for
         self._live: dict[int, int] = {}  # the PTS where new sound began, by PID
         self._live_now = False  # the next picture ends the loop (the sound is new)
         self._dropped: list[tuple[int, int]] = []
@@ -2141,8 +2151,15 @@ class LoopTrimmer:
                 self._new = 0
                 if self._live_now:  # a still picture repeated, its sound live
                     how = "sound"
+                elif self._clock() - self._found_at >= _LOOP_GIVE_UP_S:
+                    self._new_since += 1  # (pictures since: a keyframe is waited for)
+                    if picture.key or self._new_since * self._ticks() >= _LOOP_MIN_S * _CLOCK:
+                        how = "given up"
+                        self._given_up = frozenset(self._run_digests)
             if how is None:
                 self._run_pictures += 1
+                if len(self._run_digests) < _LOOP_WINDOW_PICTURES:
+                    self._run_digests.add(digest)
                 self._settle(end, out, drop=True)
             else:
                 self._resume(picture.at, picture.pts, end, how, out)
@@ -2168,6 +2185,8 @@ class LoopTrimmer:
                 latest = None
             else:
                 self._rejected = None
+        if latest is not None and digest in self._given_up:
+            latest = None  # a picture of a loop given up: it plays
         if latest is not None and (number - latest) * self._ticks() >= _LOOP_MIN_S * _CLOCK:
             self._settle(picture.at, out, drop=False)
             self._state = _HOLDING
@@ -2201,7 +2220,7 @@ class LoopTrimmer:
         self._close()  # the loop before it, should its sound still have been judged
         self._gate = None
         self._reached, self._keep, self._live = set(), {}, {}
-        self._new, self._live_now = 0, False
+        self._new, self._new_since, self._live_now = 0, 0, False
         self._counters, self._counted = {}, False
         self._dropped = []
         back = self._run_back * self._ticks() / _CLOCK
