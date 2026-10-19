@@ -147,6 +147,50 @@ class AudioRelabelerTests(unittest.TestCase):
                 self.assertEqual(tables[-1], (AAC, 1, True))
                 self.assertTrue(all(intact for _, _, intact in tables))
 
+    def test_a_provider_that_declares_the_true_type_again_is_trusted_at_once(self):
+        # Renamed to AAC; then the provider's PMT itself says AAC: nothing more is renamed,
+        # and the stream VLC sees keeps its type and version (no second re-creation).
+        later = labelled(make_stream(3, pts_start=900000 + 3 * 90000), AAC)
+        out, relabeler = relabelled(labelled(make_stream(3), MPEG_AUDIO) + later, chunk=1000)
+        tables = declared(out)
+        self.assertEqual(tables[-1], (AAC, 1, True))
+        self.assertEqual({t for t in tables[1:]}, {(AAC, 1, True)})
+        self.assertEqual(len(relabeler.renamings), 1)
+
+    def test_a_pmt_that_declares_another_type_is_trusted_at_once(self):
+        # Renamed to AAC under a stale "MPEG audio"; then the provider switches to MPEG-2
+        # audio and declares it (0x04): its PMT passes as declared from its first one, with
+        # the next version (VLC re-creates the stream), not after three PES as AAC.
+        start = 900000 + 3 * 90000
+        later = labelled(sound_from(make_stream(3, pts_start=start), 0, b"\xff\xf5"), 0x04)
+        out, relabeler = relabelled(labelled(make_stream(3), MPEG_AUDIO) + later, chunk=1000)
+        tables = declared(out)
+        first_later = next(k for k, t in enumerate(tables) if t[0] == 0x04)
+        self.assertEqual(tables[first_later - 1], (AAC, 1, True))
+        self.assertEqual(set(tables[first_later:]), {(0x04, 2, True)})
+        self.assertEqual(len(relabeler.renamings), 1)
+
+    def test_a_reconnect_trusts_the_pmt_again_and_moves_the_version_each_time(self):
+        # After a reconnect the stale PMT passes as declared (another version than the renamed
+        # one, so VLC re-creates the stream), and three PES later it is renamed again.
+        data = labelled(make_stream(3), MPEG_AUDIO)
+        relabeler = AudioRelabeler()
+        out = relabeler.feed(data) + relabeler.flush()
+        relabeler.reconnect()
+        out += relabeler.feed(data) + relabeler.flush()
+        tables = declared(out)
+        versions = [version for _, version, _ in tables]
+        self.assertEqual(tables[-1], (AAC, 3, True))
+        self.assertIn((MPEG_AUDIO, 2, True), tables)
+        self.assertEqual(versions, sorted(versions))
+        self.assertTrue(all(intact for _, _, intact in tables))
+
+    def test_a_section_too_short_to_read_passes(self):
+        tiny = psi(bytes([0x02, 0xB0, 0x09, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1]), 0)
+        data = labelled(make_stream(1), MPEG_AUDIO) + b"".join(tiny)
+        out, _ = relabelled(data)
+        self.assertEqual(out[-PACKET:], tiny[0])
+
     def test_a_payload_without_a_known_sync_counts_for_nothing(self):
         data = labelled(sound_from(make_stream(3), 0, b"\x00\x00"), MPEG_AUDIO)
         out, relabeler = relabelled(data)

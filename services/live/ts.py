@@ -2139,9 +2139,14 @@ class AudioRelabeler:
     the PMT lists (MPEG audio, AAC, LATM, AC-3), the payload's first bytes tell the codec
     (`_sniffed_type`; anything else counts for nothing). After `_RELABEL_PES` PES in a row of a
     codec the PMT does not declare, every following PMT names that one (0x0F, 0x03 or 0x04,
-    0x81), its version_number moved on and its CRC32 recomputed, so VLC re-creates the stream
-    with the right decoder; the same way back once the PES carry what the provider declares
-    again. A PMT section spanning packets is held with the packets after it until it ends
+    0x81) with its CRC32 recomputed; the same way back once the PES carry what the provider
+    declares again. A renaming is forgotten when the provider's PMT declares another type for
+    that PID, names another PMT PID, or a reconnect comes (`reconnect()`): its PMT is trusted
+    again until its PES disagree anew. From the first renaming on, the version_number is this
+    stage's: the last one written plus one whenever the section written differs from the last
+    one (so VLC re-creates the stream with the right decoder, and a seek back to a segment
+    whose header PMT names the stream otherwise sees another version), else the same. A PMT
+    section spanning packets is held with the packets after it until it ends
     (`_RELABEL_HOLD_PACKETS` at most, then it passes as it came), and only a section whose CRC
     holds is changed. While the PES agree with the PMT nothing changes. It reads the bytes on
     their way to the segmenter (raw TS and HLS), whose segment headers then carry the renamed
@@ -2154,7 +2159,9 @@ class AudioRelabeler:
         self._declared: dict[int, int] = {}  # audio PID -> the stream type its PMT declares
         self._renamed: dict[int, int] = {}  # audio PID -> the stream type written instead
         self._streak: dict[int, tuple[int, int]] = {}  # PID -> (sniffed type, PES in a row)
-        self._shift = 0  # how far the version_number is moved on: once per renaming
+        self._managed = False  # a renaming came: the version_number is this stage's
+        self._version: int | None = None  # the last version_number written
+        self._written = b""  # the last section written, but for its version and CRC
         self.renamings: deque[tuple[int, int, int]] = deque(maxlen=_TRIMS_KEPT)  # (PID, from, to)
 
     def feed(self, chunk: bytes) -> bytes:
@@ -2194,6 +2201,11 @@ class AudioRelabeler:
         held, self._buf = self._buf, b""
         return held
 
+    def reconnect(self) -> None:
+        """A new connection (or an HLS discontinuity) comes next: its PMT is trusted again."""
+        self._renamed.clear()
+        self._streak.clear()
+
     def _on_pat(self, data: bytes, off: int) -> None:
         section = _section_at(data, off)
         if section is None or section[0] != 0x00 or _crc32(section):
@@ -2204,6 +2216,8 @@ class AudioRelabeler:
                 if pmt_pid != self._pmt_pid:
                     self._pmt_pid = pmt_pid
                     self._declared.clear()
+                    self._renamed.clear()
+                    self._streak.clear()
                 return
 
     def _on_pmt(self, data: bytes, off: int) -> list[tuple[int, int]] | None:
@@ -2213,7 +2227,7 @@ class AudioRelabeler:
         if places is None:
             return None
         section = bytearray(data[at] for at in places)
-        if not places or section[0] != 0x02 or _crc32(bytes(section)):
+        if len(section) < 16 or section[0] != 0x02 or _crc32(bytes(section)):
             return []
         end = len(section) - 4
         i = 12 + (((section[10] & 0x0F) << 8) | section[11])
@@ -2223,6 +2237,9 @@ class AudioRelabeler:
             pid = ((section[i + 1] & 0x1F) << 8) | section[i + 2]
             if stream_type in _CODEC_FAMILY:
                 declared[pid] = stream_type
+                if self._declared.get(pid, stream_type) != stream_type:
+                    self._renamed.pop(pid, None)  # the provider's PMT says otherwise now
+                    self._streak.pop(pid, None)
                 renamed = self._renamed.get(pid)
                 if renamed is not None:
                     section[i] = renamed
@@ -2230,9 +2247,16 @@ class AudioRelabeler:
         for pid in set(self._renamed) - set(declared):
             del self._renamed[pid]  # no longer listed
         self._declared = declared
-        if not self._shift:
+        written = bytes(section[:5]) + bytes([section[5] & 0xC1]) + bytes(section[6:-4])
+        version = (section[5] >> 1) & 0x1F
+        if self._managed:
+            if written != self._written and self._version is not None:
+                version = (self._version + 1) & 0x1F
+            elif self._version is not None:
+                version = self._version
+        self._version, self._written = version, written
+        if not self._managed:
             return []
-        version = (((section[5] >> 1) & 0x1F) + self._shift) & 0x1F
         section[5] = (section[5] & 0xC1) | (version << 1)
         section[-4:] = _crc32(bytes(section[:-4])).to_bytes(4, "big")
         return [(at, section[k]) for k, at in enumerate(places) if section[k] != data[at]]
@@ -2257,7 +2281,7 @@ class AudioRelabeler:
             del self._renamed[pid]  # what the provider's PMT declares again
         else:
             self._renamed[pid] = found
-        self._shift += 1
+        self._managed = True
         to = self._renamed.get(pid, declared)
         self.renamings.append((pid, written, to))
         logger.info(
@@ -2275,7 +2299,7 @@ def _section_at(data: bytes, off: int) -> bytes | None:
     if begin + 3 > off + PACKET:
         return None
     end = begin + 3 + (((data[begin + 1] & 0x0F) << 8) | data[begin + 2])
-    return data[begin:end] if end <= off + PACKET and end - begin >= 12 else None
+    return data[begin:end] if end <= off + PACKET and end - begin >= 16 else None
 
 
 def _section_places(data: bytes, off: int, pid: int | None) -> list[int] | None:
@@ -2302,7 +2326,7 @@ def _section_places(data: bytes, off: int, pid: int | None) -> list[int] | None:
         afc = (data[at + 3] >> 4) & 3
         places.extend(range(at + (5 + data[at + 4] if afc & 2 else 4), at + PACKET))
         at += PACKET
-    if len(places) < 12:
+    if len(places) < 16:
         return []
     return places[: 3 + (((data[places[1]] & 0x0F) << 8) | data[places[2]])]
 

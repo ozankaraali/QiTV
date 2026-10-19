@@ -481,6 +481,7 @@ class _Session:
             for item in source.chunks():
                 self._check()
                 if isinstance(item, Discontinuity):
+                    self._relabeler.reconnect()
                     if trimmer is not None and rejoiner is not None:
                         # A reconnect: what they hold passes on untouched.
                         self._pass_on(trimmer.feed(rejoiner.reconnect()))
