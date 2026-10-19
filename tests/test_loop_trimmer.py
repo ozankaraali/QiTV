@@ -332,6 +332,24 @@ class LoopTrimmerTests(unittest.TestCase):
         self.assertEqual(contents(out)[-50:], list(range(1000, 1050)))
         self.assertGreater(len(sounds(out)), 2 * 500 + 3 * CLOCK // SOUND - 64)
 
+    def test_a_loop_ends_when_no_picture_comes_after_a_reconnect_while_the_sound_goes_on(self):
+        # The next connection brings sound, but no picture on the video PID (its pictures
+        # moved to another PID, say): nothing piles up, and the sound passes on.
+        w = Writer()
+        old = w.pictures(range(500)) + w.pictures(range(275, 400))
+        new = w.sound_only(4.0)
+        loops = trimmer()
+        loops.feed([old])
+        loops.reconnect()
+        passed = b"".join(
+            b"".join(loops.feed([new[at : at + 1000]])) for at in range(0, len(new), 1000)
+        )
+        self.assertLess(len(loops._held), 4 * 1024)
+        self.assertEqual(loops.finish(), [b""])
+        (loop,) = loops.loops
+        self.assertEqual(loop.ended_by, "stall")
+        self.assertGreater(len(sounds(passed)), 4 * CLOCK // SOUND - 2 * 64)
+
     def test_memory_stays_bounded(self):
         with (
             mock.patch.object(ts, "_LOOP_WINDOW_PICTURES", 64),

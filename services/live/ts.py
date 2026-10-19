@@ -1906,7 +1906,7 @@ class LoopTrimmer:
 
     A picture is judged once the next begins: its bytes wait that long (a picture's delay), or
     until `_LOOP_SOUND_WAIT` other PES began (the video stalled: what is held passes on, and a
-    loop ends there). `feed` takes and returns pieces as `RepeatTrimmer` passes them on (each after the first
+    loop ends there, as it does when that many begin while no picture is read). `feed` takes and returns pieces as `RepeatTrimmer` passes them on (each after the first
     starts a new run): a run being judged passes on as it came at a new run, and a loop goes on
     across it (its new run starts where the loop ends). `reconnect()` (a reconnect comes next)
     and `finish()` pass on what is held as it came, or drop it during a loop, which goes on
@@ -2043,6 +2043,11 @@ class LoopTrimmer:
         self._scan = self._base + off
         if self._picture is not None and self._since > _LOOP_SOUND_WAIT:
             self._stalled(self._picture, out)
+        elif self._picture is None and self._state == _DROPPING:
+            if self._since > _LOOP_SOUND_WAIT:  # other PES and no picture (another PID's?)
+                self._resume(self._scan, None, self._scan, "stall", out)
+            else:
+                self._settle(self._scan, out, drop=True)  # no picture is read: nothing waits
         if self._state == _PASSING and self._picture is None:
             self._settle(self._scan, out, drop=False)  # no picture is read: nothing waits
 
@@ -2052,7 +2057,7 @@ class LoopTrimmer:
         (what comes is no replay of pictures)."""
         self._picture = None
         if self._state == _DROPPING:
-            self._resume(picture, self._scan, "stall", out)
+            self._resume(picture.at, picture.pts, self._scan, "stall", out)
             return
         if self._state == _HOLDING:
             self._rejected = (self._run_back, self._count)
@@ -2140,7 +2145,7 @@ class LoopTrimmer:
                 self._run_pictures += 1
                 self._settle(end, out, drop=True)
             else:
-                self._resume(picture, end, how, out)
+                self._resume(picture.at, picture.pts, end, how, out)
             return
         if self._state == _HOLDING:
             back = self._run_back
@@ -2203,9 +2208,10 @@ class LoopTrimmer:
         logger.info("The source replays what it sent %.1f s before: dropped until it is new.", back)
         self._settle(end, out, drop=True)
 
-    def _resume(self, picture: _Unit, end: int, how: str, out: list[list[bytes]]) -> None:
-        """The loop ends: new content passes on from `picture` as a new run."""
-        self._settle(picture.at, out, drop=True)
+    def _resume(self, at: int, pts: int | None, end: int, how: str, out: list[list[bytes]]) -> None:
+        """The loop ends: new content passes on from input offset `at` (a picture with `pts`)
+        as a new run."""
+        self._settle(at, out, drop=True)
         self._state = _PASSING
         self._ended(how)
         out.append([])  # the new content's clock is re-based onto what passed on (ClockJoiner)
@@ -2216,7 +2222,7 @@ class LoopTrimmer:
         self._joiner.segment()  # the new content's counters run on from what passed on
         self._rejected = None
         self._keep = {}
-        self._gate, self._gated, self._gate_left = picture.pts, set(), _CLOCK_PENDING_PACKETS
+        self._gate, self._gated, self._gate_left = pts, set(), _CLOCK_PENDING_PACKETS
         if self._gate is None:
             self._close()  # no sound to judge after it
         self._settle(end, out, drop=False)
@@ -2260,6 +2266,7 @@ class LoopTrimmer:
             out[-1].append(self._joiner.end())
             self._joiner.segment()
         self._picture = None
+        self._since = 0
         self._reading.clear()
         self._scan = self._base
         self._searching = True
