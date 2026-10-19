@@ -1588,9 +1588,9 @@ class MixerTests(PipCase):
         self.assertEqual(self.label.level, 30)  # the small picture's
         self.controller.handle(Action.VOL_DOWN)  # the large picture's 100 → 95
         self.assertEqual(self.transport.named("set_level")[-1], (95,))
-        self.controller.handle(Action.SWAP)  # the levels go with their streams
-        self.assertEqual(self.transport.named("set_level")[-1], (30,))
-        self.assertEqual(self.label.level, 95)
+        self.controller.handle(Action.SWAP)  # the levels stay with the roles
+        self.assertEqual(self.transport.named("set_level")[-1], (95,))
+        self.assertEqual(self.label.level, 30)
 
     def test_raising_the_pip_row_from_zero_unmutes_the_small_picture(self):
         self.start_large(0)
