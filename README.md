@@ -80,7 +80,7 @@ Use the arrow keys like a TV remote: <kbd>↑</kbd> and <kbd>↓</kbd> change th
 
 ![The fast-zap list while changing channels](docs/screenshots/02-fast-zap.png)
 
-The channel list has your groups (with ★ Favorites and Recent at the top) on the left and their channels on the right, each with what is on now. Type to filter it. With the mouse: click the picture for the channel list, double-click it for fullscreen, and use the wheel to change channels (or the volume: see Settings → Mouse wheel; <kbd>Ctrl/⌘</kbd> with the wheel always changes the volume). Moving the mouse shows the player controls. Besides play and the speaker they have **⌕** (search), the guide, **⟲** (the channel before) and, at the live edge of a channel you can rewind, **◀10**. On live TV, click the channel's name at the top for what is on, and the **★** beside it to add it to your favorites or remove it. Typing aside, every key in the tables below has a way to do it on screen: a button (its tooltip names the key), a row, the A–Z rail, the mixer's rows, a click, double-click or the wheel on the picture, or the window's own close button.
+The channel list has your groups (with ★ Favorites and Recent at the top) on the left and their channels on the right, each with what is on now. To find a genre or a channel, type its name (or click **⌕ Find** above the channels first): the matching genres come first, then the channels, from every provider (with two or more, each says which provider it is from). Click or press <kbd>Enter</kbd> to open a genre or play a channel; the last row looks for films and series with those words in the Library. <kbd>Esc</kbd> or **✕** takes the list back to where it was. With the mouse: click the picture for the channel list, double-click it for fullscreen, and use the wheel to change channels (or the volume: see Settings → Mouse wheel; <kbd>Ctrl/⌘</kbd> with the wheel always changes the volume). Moving the mouse shows the player controls. Besides play and the speaker they have **⌕** (search), the guide, **⟲** (the channel before) and, at the live edge of a channel you can rewind, **◀10**. On live TV, click the channel's name at the top for what is on, and the **★** beside it to add it to your favorites or remove it. Typing aside, every key in the tables below has a way to do it on screen: a button (its tooltip names the key), a row, the A–Z rail, the mixer's rows, a click, double-click or the wheel on the picture, or the window's own close button.
 
 ![The channel list over the picture](docs/screenshots/03-drawer.png)
 
@@ -121,13 +121,13 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>Page Up</kbd> / <kbd>Page Down</kbd> | Page |
 | <kbd>←</kbd> / <kbd>→</kbd> | Layer up / down |
 | <kbd>Enter</kbd> | Open or play |
-| <kbd>A–Z</kbd> | Type to filter |
-| <kbd>Backspace</kbd> | Delete a letter of the filter |
+| <kbd>A–Z</kbd> | Find a genre or channel (every provider) |
+| <kbd>Backspace</kbd> | Delete a letter of the find |
 | <kbd>Ctrl/⌘+D</kbd> | Add or remove a favorite channel |
 | <kbd>Ctrl/⌘+P</kbd> | Open the channel in picture-in-picture |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
-| <kbd>Esc</kbd> | Clear the filter, then close |
+| <kbd>Esc</kbd> | End the find, then close |
 
 **Guide**
 

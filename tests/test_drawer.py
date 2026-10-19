@@ -9,9 +9,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, Qt, qInstallMessageHandler
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
+from mixed_fixtures import live_content
 from timer_fixtures import elapse
 
 from services.catalog import PROVIDER_LOADING_MESSAGE, Group
+from services.jobs import ImmediateRunner
 from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
@@ -19,19 +21,26 @@ from services.navigation import (
     OPEN_FILE_ROW,
     SETTINGS_ROW,
     NavModel,
+    item_key,
 )
+from services.provider_ids import provider_of
+from tests.test_find import FakeProviders
 from tests.test_navigation import FakeCatalog
+from ui.find_session import DEBOUNCE_MS, FindSession
 from ui.keymap import key_hint
 from ui.overlay_host import OverlayHost
-from ui.overlays.channel_rows import ChannelRowsModel, NumberRole
+from ui.overlays.channel_rows import ChannelRowsModel
 from ui.overlays.drawer import (
     EMPTY_TEXT,
+    FIND_CLEAR_TOOLTIP,
+    FIND_TOOLTIP,
     LOADING_TEXT,
     PAD_SIDE_U,
     PREVIEW_DEBOUNCE_MS,
     PROVIDER_ERROR_TEXT,
     REFRESH_ACTION,
     SEARCH_ACTION,
+    CountRole,
     Drawer,
     IconRole,
 )
@@ -120,17 +129,6 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.nav.path[-1].layer, "section")
         self.assertEqual(self.drawer.focus_side, "right")
 
-    def test_filter_and_escape(self):
-        self.drawer.open_drawer()
-        self.drawer.type_text("tw")
-        self.assertEqual(self.drawer.highlighted().title, "Two")
-        self.assertTrue(self.drawer.escape())
-        self.assertEqual(self.drawer.filter_text, "")
-        self.assertTrue(self.drawer.isVisible())
-        self.assertTrue(self.drawer.escape())
-        self.assertFalse(self.drawer.isVisible())
-        self.assertEqual(self.closed, [True])
-
     def test_a_refresh_with_the_same_rows_keeps_the_lists(self):
         self.drawer.open_drawer("1")
         resets = []
@@ -174,19 +172,6 @@ class DrawerTests(unittest.TestCase):
             self.assertEqual(layout.call_count, 2)  # both columns, once
         self.assertEqual(self.drawer._columns["right"].view.units_width, 960)
         self.assertEqual(self.drawer.highlighted().title, "One")
-
-    def test_backspace(self):
-        self.drawer.open_drawer()
-        self.drawer.type_text("tw")
-        self.drawer.backspace()
-        self.assertEqual(self.drawer.filter_text, "t")
-
-    def test_filter_casefold(self):
-        self.catalog.live["10"] = [{"id": 7, "name": "şov"}]
-        self.nav.changed.emit()
-        self.drawer.open_drawer()
-        self.drawer.type_text("Ş")
-        self.assertEqual(self.drawer.highlighted().title, "şov")
 
     def test_loading_layer_renders(self):
         self.catalog.live = {}
@@ -255,17 +240,6 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.drawer.focus_side, "right")
         self.drawer.activate()
         self.assertEqual(self.catalog.selected, ["Home"])
-
-    def test_unnumbered_rows_show_their_position_in_the_group_even_when_filtered(self):
-        self.catalog.live["10"] = [{"id": i, "name": f"Chan {i}"} for i in range(5)]
-        self.nav.changed.emit()
-        self.drawer.open_drawer()
-        col = self.drawer._columns["right"]
-        numbers = [col.model.index(r).data(NumberRole) for r in range(5)]
-        self.assertEqual(numbers, ["1", "2", "3", "4", "5"])
-        self.drawer.type_text("chan 3")
-        self.assertEqual(col.model.rowCount(), 1)
-        self.assertEqual(col.model.index(0).data(NumberRole), "4")  # its number in the group
 
     def many_groups(self, count=8):
         self.catalog.groups = lambda section: [
@@ -594,76 +568,22 @@ class DrawerTests(unittest.TestCase):
         self.assertEqual(self.library, ["movies"])
         self.assertEqual(self.nav.path[-1].key, "live")
 
-    # ---- a highlight the filter hid is not chosen by Enter (review finding) -------------
+    # ---- typing: the find (see FindTests) ---------------------------------------------
 
-    def test_enter_after_the_filter_hid_settings_chooses_what_is_highlighted(self):
-        self.open_on_the_sources()
-        self.drawer.move_by(2)
-        self.assertEqual(self.drawer.highlighted().key, SETTINGS_ROW)
-        self.drawer.type_text("h")  # only Home matches: the highlight falls back to it
-        self.assertEqual(self.drawer.highlighted().key, "Home")
-        self.drawer.activate()  # raised KeyError: 'action' (NavModel.open of the hidden row)
-        self.assertEqual((self.actions, self.catalog.selected, self.library), ([], [], []))
-        self.assertEqual([n.key for n in self.nav.path], ["Home"])
-
-    def test_enter_after_the_filter_hid_a_provider_selects_nothing(self):
-        self.open_on_the_sources()
-        self.drawer.move_by(1)
-        self.assertEqual(self.drawer.highlighted().key, "Backup")
-        self.drawer.type_text("h")
-        self.assertEqual(self.drawer.highlighted().key, "Home")
-        self.drawer.activate()
-        self.assertEqual(self.catalog.selected, [])  # Backup was hidden: never set up
-        self.assertEqual([n.key for n in self.nav.path], ["Home"])
-
-    def test_enter_after_the_filter_hid_movies_does_not_browse_them(self):
-        self.drawer.open_drawer()
-        self.record_hand_offs()
-        self.drawer.left()
-        self.drawer.left()  # the sections on the left, on Live TV
-        self.drawer.move_by(1)
-        self.assertEqual(self.drawer.highlighted().title, "Movies")
-        self.drawer.type_text("l")  # only Live TV matches
-        self.assertEqual(self.drawer.highlighted().title, "Live TV")
-        self.drawer.activate()
-        self.assertEqual(self.nav.path[-1].key, "live")  # not opened in the drawer
-        self.assertNotIn(("section", "movies"), self.catalog.requests)
-        self.assertEqual(self.library, [])
-
-    def test_left_typing_highlights_and_opens_first_match(self):
-        self.many_groups()
-        self.drawer.open_drawer()
-        self.drawer.left()
-        self.drawer.type_text("group 6")
-        self.assertEqual(self.drawer.highlighted().title, "Group 6")
-        self.drawer.activate()
-        self.assertEqual(self.nav.path[-1].title, "Group 6")
-        self.assertEqual(self.drawer.focus_side, "right")
-
-    def test_filter_folds_turkish_and_accents(self):
-        self.catalog.live["10"] = [
-            {"id": 7, "name": "İstanbul"},
-            {"id": 8, "name": "ısı"},
-            {"id": 9, "name": "Café"},
-        ]
-        self.nav.changed.emit()
-        self.drawer.open_drawer()
-        self.drawer.type_text("ist")
-        self.assertEqual(self.drawer.highlighted().title, "İstanbul")
-        self.drawer.escape()
-        self.drawer.type_text("isi")
-        self.assertEqual(self.drawer.highlighted().title, "ısı")
-        self.drawer.escape()
-        self.drawer.type_text("cafe")
-        self.assertEqual(self.drawer.highlighted().title, "Café")
-
-    def test_filter_resets_when_parent_changes(self):
-        self.nav.open(self.nav.path[0])
-        self.drawer.open_drawer()
-        self.drawer.type_text("liv")
-        self.assertEqual(self.drawer.filter_text, "liv")
-        self.drawer.right()  # opens Live TV; the right column's parent changes
-        self.assertEqual(self.drawer.filter_text, "")
+    def test_typing_without_a_finder_offers_the_library_and_esc_ends_it(self):
+        self.drawer.open_drawer("2")
+        self.drawer.type_text("tw")
+        self.drawer.backspace()
+        self.assertEqual(self.drawer.find_text, "t")
+        right = self.drawer._columns["right"]
+        self.assertEqual([n.layer for n in right.nodes], ["notice", "found_library"])
+        self.assertTrue(self.drawer.escape())  # the find ends: the channels again
+        self.assertEqual(self.drawer.find_text, "")
+        self.assertTrue(self.drawer.isVisible())
+        self.assertEqual(self.drawer.highlighted().title, "Two")
+        self.assertTrue(self.drawer.escape())
+        self.assertFalse(self.drawer.isVisible())
+        self.assertEqual(self.closed, [True])
 
     def test_page_moves_several_rows(self):
         self.catalog.live["10"] = [{"id": i, "name": f"Chan {i}"} for i in range(60)]
@@ -996,6 +916,238 @@ class GenrePlaceTests(unittest.TestCase):
         self.assertEqual(self.drawer.highlighted().title, "Chan 550")
         self.assertShown("right", 550)
         self.assertShown("left", 7)
+
+
+FIND_WAIT = DEBOUNCE_MS + 100
+# Two fictional providers, each with its own genres (the id of a genre is its title).
+FIND_DATA = {
+    "Home": {
+        "News": ["Evening News", "Morning News"],
+        "Sports": [f"Northwind Sport {n}" for n in range(1, 301)],
+    },
+    "Backup": {"TR: Spor": ["Harbor Spor 2"], "Kids": ["Harbor Kids"]},
+}
+
+
+def provider_content(genres: dict[str, list[str]]) -> dict:
+    names = [name for channels in genres.values() for name in channels]
+    positions, at = {}, 0
+    for title, channels in genres.items():
+        positions[title] = list(range(at, at + len(channels)))
+        at += len(channels)
+    return live_content(names, positions)
+
+
+class FindTests(unittest.TestCase):
+    """The find (owner's design A): typing, or a click on ⌕ Find, finds genres and channels at
+    every provider, whichever column has the focus; a genre opens as if walked to, a channel
+    plays, the last row asks the Library; Esc, ✕ or ← take the list back to where it was."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.catalog, self.nav, self.host, self.drawer = make()
+        self.addCleanup(self.host.deleteLater)
+        self.addCleanup(self.host.close)
+        contents = {name: provider_content(genres) for name, genres in FIND_DATA.items()}
+        catalog = self.catalog
+
+        def groups(section):
+            if section != "live":
+                return []
+            content = contents[catalog.provider]
+            return [
+                Group("live", g["id"], g["title"], len(content["sorted_channels"][g["id"]]))
+                for g in content["categories"][1:]
+            ]
+
+        catalog.groups = groups
+        catalog.live = {
+            title: [content["contents"][i] for i in positions]
+            for content in contents.values()
+            for title, positions in content["sorted_channels"].items()
+        }
+
+        def select_provider(name=None, **_kwargs):
+            catalog.selected.append(name)
+            catalog.provider = name
+
+        catalog.select_provider = select_provider
+        caches = [(name, {"itv": content}) for name, content in contents.items()]
+        self.finder = FindSession(FakeProviders(caches), ImmediateRunner())
+        self.drawer.set_finder(self.finder)
+        self.found_channels, self.library_finds = [], []
+        self.drawer.channelFound.connect(self.found_channels.append)
+        self.drawer.libraryFindRequested.connect(self.library_finds.append)
+        self.nav.reset_to("live", "News")
+        self.drawer.open_drawer()
+
+    def type(self, text):
+        self.drawer.type_text(text)
+        elapse(FIND_WAIT)  # the channels come after a pause in the typing
+
+    @property
+    def right(self):
+        return self.drawer._columns["right"]
+
+    def rows(self):
+        return [(n.layer, n.title) for n in self.right.nodes]
+
+    def data(self, title, role):
+        row = next(r for r, n in enumerate(self.right.nodes) if n.title == title)
+        return self.right.model.index(row).data(role)
+
+    def click_row(self, title):
+        view = self.right.view
+        row = next(r for r, n in enumerate(self.right.nodes) if n.title == title)
+        view.scrollTo(view.model().index(row))
+        rect = view.visualRect(view.model().index(row))
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=rect.center())
+
+    def click(self, rect):
+        QTest.mouseClick(self.drawer, Qt.LeftButton, pos=rect.center().toPoint())
+
+    def test_typing_finds_genres_then_channels_at_both_providers_with_their_names(self):
+        self.type("spor")
+        rows = self.rows()
+        self.assertEqual(
+            rows[:4],
+            [
+                ("header", "Genres"),
+                ("found_genre", "Sports"),
+                ("found_genre", "TR: Spor"),
+                ("header", "Channels"),
+            ],
+        )
+        channels = [title for layer, title in rows if layer == "item"]
+        self.assertEqual(len(channels), 201)  # 200 at most of a provider, then the other's
+        self.assertEqual(channels[0], "Northwind Sport 1")
+        self.assertEqual(channels[-1], "Harbor Spor 2")
+        library = "Films and series with “spor” in the Library ›"
+        self.assertEqual(rows[-1], ("found_library", library))
+        self.assertEqual(self.data("Sports", CountRole), "Home · 300 channels")
+        self.assertEqual(self.data("TR: Spor", CountRole), "Backup · 1 channel")
+        self.assertEqual(self.data("Harbor Spor 2", ChannelRowsModel.ProviderRole), "Backup")
+        self.assertEqual(self.data(library, IconRole), "search")
+        self.assertEqual(self.drawer.focus_side, "right")
+        self.assertEqual(self.drawer.highlighted().title, "Sports")
+        self.assertFalse(self.drawer.grab().isNull())
+
+    def test_typing_with_the_focus_on_the_genres_finds_there_too(self):
+        self.drawer.left()  # the genre column: no ← first, no filter of that column alone
+        self.type("kid")
+        self.assertEqual(self.drawer.focus_side, "right")
+        self.assertIn(("found_genre", "Kids"), self.rows())
+        self.assertIn(("item", "Harbor Kids"), self.rows())
+        self.assertEqual(self.drawer._columns["left"].current.title, "News")  # left untouched
+
+    def test_a_click_on_find_then_typing_finds_and_x_takes_the_list_back(self):
+        self.assertEqual(self.drawer.tooltip_at(self.drawer.find_rect().center()), FIND_TOOLTIP)
+        self.assertTrue(self.drawer.find_clear_rect().isEmpty())  # nothing to clear yet
+        self.click(self.drawer.find_rect())
+        clear = self.drawer.find_clear_rect()
+        self.assertFalse(clear.isEmpty())  # the box is open: a caret and ✕
+        self.assertEqual(self.drawer.tooltip_at(clear.center()), FIND_CLEAR_TOOLTIP)
+        self.assertEqual(self.right.nodes[0].title, "Evening News")  # nothing typed yet
+        self.type("news")
+        self.assertIn(("found_genre", "News"), self.rows())
+        self.click(self.drawer.find_clear_rect())
+        self.assertEqual(self.drawer.find_text, "")
+        self.assertTrue(self.drawer.find_clear_rect().isEmpty())
+        self.assertEqual([n.title for n in self.right.nodes], ["Evening News", "Morning News"])
+
+    def test_esc_and_left_take_the_list_back_to_its_place(self):
+        sports = self.catalog.live["Sports"]
+        self.nav.reset_to("live", "Sports")
+        self.drawer.open_drawer(item_key(sports[249]))
+        elapse(50)
+        bar = self.right.view.verticalScrollBar()
+        value = bar.value()
+        self.assertGreater(value, 0)
+        for leave in (self.drawer.escape, self.drawer.left):
+            self.type("kid")
+            self.assertEqual(self.rows()[1], ("found_genre", "Kids"))
+            leave()
+            self.assertEqual(self.drawer.find_text, "")
+            self.assertEqual(self.drawer.highlighted().title, "Northwind Sport 250")
+            self.assertEqual(bar.value(), value)
+            self.assertEqual(self.drawer.focus_side, "right")
+        self.assertTrue(self.drawer.isVisible())
+
+    def test_backspace_to_nothing_takes_the_list_back(self):
+        self.type("k")
+        self.drawer.backspace()
+        self.assertEqual([n.title for n in self.right.nodes], ["Evening News", "Morning News"])
+        self.assertTrue(self.drawer.find_clear_rect().isEmpty())  # the box closed with it
+        self.drawer.left()  # ← as without a find: the genres
+        self.assertEqual(self.drawer.focus_side, "left")
+        self.assertTrue(self.drawer.escape())
+        self.assertFalse(self.drawer.isVisible())
+
+    def test_an_empty_find_box_closes_on_esc_before_the_list_does(self):
+        self.click(self.drawer.find_rect())
+        self.assertTrue(self.drawer.escape())
+        self.assertTrue(self.drawer.isVisible())
+        self.assertTrue(self.drawer.find_clear_rect().isEmpty())
+        self.assertTrue(self.drawer.escape())
+        self.assertFalse(self.drawer.isVisible())
+
+    def test_a_found_genre_opens_as_if_walked_to_and_back_returns_to_it(self):
+        self.type("spor")
+        self.drawer.activate()  # Enter on "Sports" (the first row)
+        self.assertEqual([n.key for n in self.nav.path], ["Home", "live", "Sports"])
+        self.assertEqual(self.drawer.find_text, "")
+        self.assertEqual(self.drawer._columns["left"].current.title, "Sports")
+        self.assertEqual(self.drawer.highlighted().title, "Northwind Sport 1")
+        self.click(self.drawer.back_rect())  # ‹: the genres, Sports still highlighted
+        self.assertEqual([n.key for n in self.nav.path], ["Home", "live"])
+        self.assertEqual(self.right.current.title, "Sports")
+
+    def test_a_found_genre_of_the_other_provider_opens_at_that_provider(self):
+        requested = []
+        self.nav.providerRequested.connect(requested.append)
+        self.type("spor")
+        self.click_row("TR: Spor")
+        self.assertEqual(self.catalog.selected, ["Backup"])
+        self.assertEqual(requested, ["Backup"])  # the shell says it loads
+        self.assertEqual([n.key for n in self.nav.path], ["Backup", "live", "TR: Spor"])
+        self.assertEqual(self.drawer.highlighted().title, "Harbor Spor 2")
+
+    def test_a_click_on_a_found_channel_plays_it(self):
+        self.type("harbor k")
+        self.click_row("Harbor Kids")
+        self.assertEqual([c["name"] for c in self.found_channels], ["Harbor Kids"])
+        self.assertEqual(provider_of(self.found_channels[0]), "Backup")
+        self.assertEqual(self.catalog.selected, [])  # nothing switched: the shell tunes it
+
+    def test_the_last_row_looks_for_films_and_series_in_the_library(self):
+        self.type("spor ")
+        self.drawer.move_by(10_000)
+        self.drawer.activate()
+        self.assertEqual(self.library_finds, ["spor"])
+
+    def test_nothing_found_says_so_and_still_offers_the_library(self):
+        self.type("zzz")
+        self.assertEqual(
+            self.rows(),
+            [
+                ("notice", "No genre or channel has “zzz”"),
+                ("found_library", "Films and series with “zzz” in the Library ›"),
+            ],
+        )
+        self.assertEqual(self.drawer.highlighted().layer, "found_library")
+
+    def test_with_one_provider_no_provider_is_named(self):
+        self.catalog.provider_names = lambda: ["Home"]
+        home = provider_content(FIND_DATA["Home"])
+        finder = FindSession(FakeProviders([("Home", {"itv": home})]), ImmediateRunner())
+        self.drawer.set_finder(finder)
+        self.type("spor")
+        self.assertEqual(self.data("Sports", CountRole), "300 channels")
+        self.assertEqual(self.data("Northwind Sport 1", ChannelRowsModel.ProviderRole), "")
+        self.assertNotIn(("found_genre", "TR: Spor"), self.rows())
 
 
 if __name__ == "__main__":

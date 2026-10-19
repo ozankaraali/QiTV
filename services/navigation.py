@@ -765,6 +765,20 @@ class NavModel(QObject):
             self.reset_to(section, ALL_GROUP_ID)
         self._revealed = item
 
+    def open_found_group(self, provider: str, group_id: str) -> None:
+        """A live genre the drawer's find found, opened as if walked to: in "All providers" its
+        row there (under its provider's heading), else at its provider, which the list then
+        shows (set up as choosing it among the sources would, nothing that plays stops)."""
+        if self.all_mode():
+            group_id = mixed_group_id(provider, group_id)
+        elif provider != self.catalog.current_provider_name():
+            if provider not in self.catalog.provider_names():
+                return
+            self._provider_errors.pop(provider, None)
+            self.providerRequested.emit(provider)
+            self.catalog.select_provider(provider)
+        self.reset_to("live", group_id)
+
     def _lists(self, item: dict) -> bool:
         """Whether the group the path ends at lists `item` (True while its rows load): a row
         with its key, of its provider (a row or an item without one may be any's)."""

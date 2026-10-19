@@ -268,9 +268,13 @@ class LibraryController(QObject):
             self._on_model_changed()
         self._focus("grid")
 
-    def open_search(self) -> None:
+    def open_search(self, query: str = "") -> None:
+        """The search; `query` (typed elsewhere: the channel list's find) is searched at once."""
         if self._closed:
             return
+        if query:
+            self._search.set_query(query)
+            self._search.run_now()
         if self._grid_content == "browse":  # the series view keeps its series current
             self._restore_item = self._current_item()
         self._series = None

@@ -598,6 +598,14 @@ class LibraryControllerTests(unittest.TestCase):
         self.assertEqual(len(self.jobs.workers), 2)
         self.assertEqual(self.pm.loads, 1)  # the second search reused the caches and index
 
+    def test_words_from_the_channel_lists_find_are_searched_at_once(self):
+        ctl = self.build()
+        ctl.open_search("sal")  # its films-and-series row
+        self.assertEqual(ctl.query, "sal")
+        self.assertEqual(len(self.jobs.workers), 1)  # no pause: the words were typed already
+        self.assertEqual(self.grid_names(), ["Salt TV", "Salt Roads", "Salt Lake"])
+        self.assertEqual(self.screen.search_field.query, "sal")
+
     def test_a_stale_search_result_is_ignored(self):
         runner = DeferredRunner()
         ctl = self.build(jobs=runner)

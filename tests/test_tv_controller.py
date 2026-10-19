@@ -353,6 +353,7 @@ class FakeColumn(FakeOverlay):
 
 class FakeDrawer(FakeOverlay):
     playRequested = Signal(object, object, object)
+    channelFound = Signal(object)
     contextRequested = Signal(object, object)
     closed = Signal()
     highlight = None
@@ -1670,6 +1671,14 @@ class DrawerPlayTests(ControllerTestCase):
         self.drawer.playRequested.emit(nodes[2], filtered, group)
         self.assertEqual(self.requested(), ["Three"])
         self.assertEqual(self.zap.context.channels, CHANNELS)
+        self.assertEqual(self.drawer.calls[-1], ("close_drawer",))
+
+    def test_a_channel_the_find_found_plays_with_every_channel_and_the_list_closes(self):
+        self.controller.start()
+        self.drawer.visible = True
+        self.drawer.channelFound.emit(BACKUP_TWO)  # another provider's, as the find stamps it
+        self.assertEqual(self.requested(), ["Two"])
+        self.assertEqual(self.zap.context.group_key, "*")  # ↑/↓ walk every channel
         self.assertEqual(self.drawer.calls[-1], ("close_drawer",))
 
     def test_the_drawer_plays_only_channels(self):

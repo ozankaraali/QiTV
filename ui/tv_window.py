@@ -77,6 +77,7 @@ from services.watch_state import WatchState
 from services.zapping import ZapController
 from ui.bottom_band import BottomBand
 from ui.export_flow import ExportFlow
+from ui.find_session import FindSession
 from ui.free_channels_menu import show_menu as show_free_channels_menu
 from ui.keymap import Action, as_int, resolve
 from ui.library.library_screen import LibraryScreen
@@ -535,6 +536,17 @@ class TVWindow(QMainWindow):
         self.overlays.welcome.addRequested.connect(self.add_provider)
         self.overlays.welcome.freeRequested.connect(self.show_free_channels)
         self.overlays.drawer.actionRequested.connect(self.menus.on_drawer_action)
+        # The channel list's find: genres and channels at every provider, found in a worker;
+        # its last row looks for films and series in the Library's search.
+        self.finder = FindSession(
+            self.provider_manager,
+            self.jobs,
+            loaded=self.catalog.loaded_contents,
+            signature=self._find_signature,
+            parent=self,
+        )
+        self.overlays.drawer.set_finder(self.finder)
+        self.overlays.drawer.libraryFindRequested.connect(self.screens.open_search)
         # A Windows self-update waits for background threads: the engine's must stop first,
         # and start again if the update cannot launch.
         call_before_update(self.stop_live, self.restart_live)
@@ -1165,12 +1177,20 @@ class TVWindow(QMainWindow):
     def _lives(self) -> list[LiveSession]:
         return [live for live in (self.live_session, self.pip_live) if live is not None]
 
+    def _find_signature(self) -> tuple:
+        """Changes when what the channel list's find reads may have: the providers, or the
+        content of a provider's catalog."""
+        hub = self.catalogs
+        versions = tuple((name, hub.catalog(name).content_version()) for name in hub.created())
+        return tuple(hub.names()), versions
+
     def _shut_down(self) -> None:
         self.epg_refresh.stop()
         self._run_steps(
             ("let the next click through", self.screens.shutdown),
             ("cancel the export", self.exports.shutdown),
             ("close the Library", self.library_controller.shutdown),  # its search, its pending
+            ("stop the channel list's find", self.finder.shutdown),
             ("stop the live pipeline", self.stop_live),
             ("stop the catalogs", self.catalogs.shutdown),  # and cancel their running jobs
             ("cancel the Library's jobs", self.jobs.cancel_all),  # its searches

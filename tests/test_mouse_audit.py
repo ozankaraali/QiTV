@@ -13,8 +13,8 @@ Screens and their controls:
 - "picture": the video's own "click", "double-click" and "wheel";
 - "mixer": each row's "speaker" and "slider", and the "row" itself;
 - "pip_label": the small picture's "swap", "speaker" and "close";
-- "drawer": the top row's "back", "names", "search", "refresh" and "settings", its "rows", and
-  the rows of its sources and sections columns by title ("Settings", "Open file", "Movies" …);
+- "drawer": the top row's "back", "names", "search", "refresh" and "settings", the ⌕ "find" box,
+  its "rows", and the rows of its sources and sections columns by title ("Settings", "Movies" …);
 - "context": the channel list's right-click menu, by entry;
 - "guide": its header's buttons and its "rows";
 - "library": the top bar's items ("live", "search", "fullscreen" …), the grid's "posters", the
@@ -87,6 +87,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
     ("drawer", "PgUp, PgDown"): (("drawer", "rows"),),
     ("drawer", "Left, Right"): (("drawer", "back"), ("drawer", "names"), ("drawer", "rows")),
     ("drawer", "Return"): (("drawer", "rows"),),
+    ("drawer", "A…Z"): (("drawer", "find"),),  # a click on it, then the rows of what it finds
     ("drawer", "Ctrl+D"): (("context", "Add to favorites"),),
     ("drawer", "Ctrl+P"): (("context", OPEN_PIP_TEXT),),
     ("drawer", "Ctrl+F"): (("drawer", "search"),),
@@ -122,8 +123,7 @@ ON_SCREEN: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {
 
 EXEMPT: dict[tuple[str, str], str] = {
     ("player", "0…9"): "a channel number: the channel list lists every channel (the brief)",
-    ("drawer", "A…Z"): "typing to filter needs a keyboard; the rows are there to click",
-    ("drawer", "Backspace"): "deletes a letter typed into the filter",
+    ("drawer", "Backspace"): "deletes a letter typed into the find (its ✕ clears it all)",
     ("guide", "0…9"): "a channel number: the rows and the wheel reach every channel",
     ("menu", "Ctrl+Q"): "the window's own close button (leave fullscreen with ⛶ first)",
 }
@@ -215,6 +215,7 @@ def _drawer_and_context(host: QWidget) -> tuple[set[str], set[str]]:
         ("search", drawer.search_rect()),
         ("refresh", drawer.refresh_rect()),
         ("settings", drawer.settings_gear_rect()),
+        ("find", drawer.find_rect()),
     ):
         if not rect.isEmpty():
             found.add(name)

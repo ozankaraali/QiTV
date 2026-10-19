@@ -153,13 +153,14 @@ class TVPages(QObject):
         self.library_controller.open(section)
         self._guard_second_click()
 
-    def open_search(self) -> None:
+    def open_search(self, query: str = "") -> None:
         """The quick search: from ⌕ (the player controls, the guide, the channel list) a
-        double-click's second click reaches nothing, as in open_library."""
+        double-click's second click reaches nothing, as in open_library. `query` is what the
+        channel list's find had typed (its films-and-series row)."""
         if self._window.closing():
             return
         self._enter_library()
-        self.library_controller.open_search()
+        self.library_controller.open_search(query)
         self._guard_second_click()
 
     def _enter_library(self) -> None:

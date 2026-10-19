@@ -490,9 +490,9 @@ class TVWindowTests(WindowCase):
         self.assertEqual(triggered, [])  # not "Channel list" re-opening the drawer
         for key in (Qt.Key.Key_F, Qt.Key.Key_M, Qt.Key.Key_Space):
             QTest.keyClick(self.window, key)
-        self.assertEqual(drawer.filter_text, "fm ")
-        QTest.keyClick(self.window, Qt.Key.Key_Backspace)  # edits the filter: not "previous"
-        self.assertEqual(drawer.filter_text, "fm")
+        self.assertEqual(drawer.find_text, "fm ")
+        QTest.keyClick(self.window, Qt.Key.Key_Backspace)  # edits the find: not "previous"
+        self.assertEqual(drawer.find_text, "fm")
         self.assertTrue(drawer.isVisible())
         self.assertFalse(self.window.isFullScreen())
         self.assertEqual(triggered, [])
@@ -549,6 +549,40 @@ class TVWindowTests(WindowCase):
         QTest.keyClick(window, Qt.Key.Key_F, ctrl)
         self.assertTrue(window.screens.library_shown())
         self.assertFalse(window.overlays.guide.isVisible())
+
+    def found(self, text):
+        """Type `text` in the open channel list; its find's rows once the channels came."""
+        drawer = self.window.overlays.drawer
+        QTest.keyClicks(self.window, text)
+        self.assertEqual(drawer.find_text, text)
+        right = drawer._columns["right"]
+        self.assertTrue(wait_until(lambda: any(n.layer == "item" for n in right.nodes)))
+        return drawer, right
+
+    def test_a_channel_the_find_found_plays_and_the_list_closes(self):
+        self.show()
+        self.wait_for_drawer()
+        drawer, right = self.found("channel 2")
+        row = next(r for r, n in enumerate(right.nodes) if n.title == "Channel 2")
+        drawer.move_by(row - right.nodes.index(drawer.highlighted()))
+        QTest.keyClick(self.window, Qt.Key.Key_Return)
+        zap = self.window.zap
+        self.assertTrue(
+            wait_until(lambda: (zap.context.current() or {}).get("name") == "Channel 2")
+        )
+        self.assertFalse(drawer.isVisible())
+
+    def test_the_finds_last_row_searches_the_library_with_its_words(self):
+        self.show()
+        self.wait_for_drawer()
+        drawer, right = self.found("channel")
+        drawer.move_by(len(right.nodes))  # the last row
+        self.assertEqual(drawer.highlighted().layer, "found_library")
+        QTest.keyClick(self.window, Qt.Key.Key_Return)
+        window = self.window
+        self.assertTrue(window.screens.library_shown())
+        self.assertEqual(window.library_controller.mode, "search")
+        self.assertEqual(window.library_controller.query, "channel")
 
     def test_the_librarys_fullscreen_button_toggles_fullscreen(self):
         # Windows and Linux hide the menu bar in fullscreen: the Library has a button for it.

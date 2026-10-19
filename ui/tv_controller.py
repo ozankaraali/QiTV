@@ -377,6 +377,7 @@ class TVController(QObject):
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
+        drawer.channelFound.connect(self.play_found)
         drawer.contextRequested.connect(self._on_context)
         self._guide.tuneRequested.connect(self._on_guide_tune)
         self.overlays.guide.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
@@ -848,6 +849,14 @@ class TVController(QObject):
         nodes = self.nav.children(parent) or siblings
         channels = payloads(nodes)
         self.tune(node.payload, group_key=parent.key, channels=channels)
+        self.overlays.drawer.close_drawer()
+
+    def play_found(self, channel: dict) -> None:
+        """A channel the drawer's find found (any provider's): it plays as one found by the
+        Library's search does, ↑/↓ then walking every channel, and the list closes."""
+        if self._closed:
+            return
+        self.tune_live(channel)
         self.overlays.drawer.close_drawer()
 
     def play_vod(

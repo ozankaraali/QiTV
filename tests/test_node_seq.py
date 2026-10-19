@@ -26,7 +26,7 @@ from services.navigation import (
     fold_notifier,
     payloads,
 )
-from tests.test_drawer import DrawerTests, make
+from tests.test_drawer import DrawerTests
 from tests.test_navigation import FakeCatalog
 
 
@@ -158,28 +158,6 @@ class FoldedFilterTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
-
-    def test_a_filter_typed_before_the_fold_applies_when_it_ends(self):
-        with mock.patch.object(navigation, "LAZY_ROWS", 1):
-            catalog, nav, host, drawer = make()
-        self.addCleanup(host.deleteLater)
-        self.addCleanup(host.close)
-        with mock.patch.object(navigation, "LAZY_ROWS", 1):
-            nav._memo.clear()
-            nav.reset_to("live", "10")
-            started = []
-            with mock.patch.object(NodeSeq, "_fold_in_background", lambda s: started.append(s)):
-                drawer.open_drawer()
-                drawer.type_text("tw")
-                self.assertEqual(len(drawer._columns["right"].nodes), 2)  # not filtered yet
-            seq = started[0]
-            with mock.patch.object(drawer, "_refresh") as refresh:
-                fold_notifier().folded.emit(-1)  # another list's fold (not shown) changes nothing
-            refresh.assert_not_called()
-            seq._fold_in_background()
-            seq._folding.join(5)
-            QTest.qWait(50)  # the signal is queued to this thread
-            self.assertEqual([n.title for n in drawer._columns["right"].nodes], ["Two"])
 
     def test_a_list_replaced_while_it_folds_is_let_go_on_the_gui_thread(self):
         # The fold thread never holds the list: when the drawer and the nav model let go of it

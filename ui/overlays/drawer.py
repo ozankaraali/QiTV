@@ -12,6 +12,14 @@ sources), then names where the left column is, each a link: a name shows its nod
 in the left column, and the provider's name shows the sources, the provider highlighted, to
 pick another. A head cut short ("…") goes a layer up. ⌕ (Search, as Ctrl/⌘+F), ↻ (refresh) and
 ⚙ (Settings) end it; each takes clicks over at least MIN_HIT_PX and names its key when hovered.
+
+The find: typing (or a click on the ⌕ Find box above the right column) finds genres and
+channels at every provider, whichever column had the focus. The right column then lists the
+genres found (each with its provider's name when there are two or more, and its channel
+count), the channels found, and a last row that looks for films and series in the Library. A
+genre opens as if walked to (`NavModel.open_found_group`), a channel plays (`channelFound`),
+the last row asks for the Library's search (`libraryFindRequested`). Esc, ✕ or ← end the find:
+the right column is back where it was, its highlight and its scroll position too.
 """
 
 from collections.abc import Sequence
@@ -43,6 +51,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QAbstractItemView, QStyle, QStyledItemDelegate, QToolTip
 
+from services.find import FoundGenre
 from services.navigation import (
     ADD_PROVIDER_ROW,
     FAVORITES_GROUP,
@@ -54,11 +63,13 @@ from services.navigation import (
     NavModel,
     NavNode,
     NodeSeq,
-    fold_notifier,
+    item_key,
+    item_title,
 )
-from services.provider_ids import provider_of
-from services.text_fold import fold
+from services.provider_ids import mixed_group_id, provider_of
+from services.search import Hit
 from services.zapping import ZapContext
+from ui.find_session import FindSession
 from ui.keymap import key_hint
 from ui.overlays.base import Overlay
 from ui.overlays.channel_rows import (
@@ -82,7 +93,8 @@ FADE_U = 7.0
 PAD_TOP_U = 2.4
 PAD_SIDE_U = 1.6
 CRUMB_H_U = 2.2
-FILTER_H_U = 3.4
+FILTER_H_U = 3.4  # the ⌕ Find box above the right column (the left column's room stays empty)
+FIND_X_U = 2.2  # its ✕, this wide at its right end
 GEAR_U = 1.9  # the header row's buttons (Search, refresh, Settings) at its right end, this wide
 GEAR_GAP_U = 0.7
 MIN_HIT_PX = 28  # the header's buttons take clicks over this square at least
@@ -99,6 +111,16 @@ LOADING_TEXT = "Loading…"
 EMPTY_TEXT = "Nothing here"
 ERROR_TEXT = "Couldn't load — press Enter to retry"
 PROVIDER_ERROR_TEXT = "Couldn't connect — press Enter to retry"
+FIND_ACTION = "find"  # the ⌕ Find box above the right column
+FIND_CLEAR = "find_clear"  # its ✕
+FIND_PLACEHOLDER = "Find a genre or channel"
+FIND_TOOLTIP = "Find a genre or a channel at every provider: type its name"
+FIND_CLEAR_TOOLTIP = key_hint("Clear the find", "Esc")
+SEARCHING_TEXT = "Searching…"
+FIND_FAILED_TEXT = "Couldn't search — type again to retry"
+FOUND_GENRE = "found_genre"  # a row of the find: a genre found (any provider's)
+FOUND_LIBRARY = "found_library"  # its last row: films and series in the Library's search
+FIND_PARENT = NavNode("find", "find", "Find")  # the right column's parent while it finds
 
 NodeRole = Qt.UserRole + 10
 CountRole = Qt.UserRole + 11
@@ -282,6 +304,20 @@ class _NodeModel(ChannelRowsModel):
     def __init__(self, logos, now_provider, parent=None) -> None:
         super().__init__(logos, now_provider, parent)
         self._nodes: Sequence[NavNode] = []
+        self._labels = False  # a found genre names its provider (two providers or more)
+        self.channel_rows: set[int] = set()  # the find's channel rows (_FoundRowDelegate)
+
+    def set_found(self, nodes: list[NavNode], labels: bool) -> None:
+        """The find's rows: headings, genres, channels (each its provider's tag when
+        `labels`), and the Library row."""
+        self._nodes = list(nodes)
+        self._labels = labels
+        rows = [n.payload if n.layer == "item" else {"name": n.title} for n in nodes]
+        self.channel_rows = {row for row, n in enumerate(nodes) if n.layer == "item"}
+        numbers = [
+            (ZapContext.number_of(n.payload) or None) if n.layer == "item" else None for n in nodes
+        ]
+        self.set_channels(rows, numbers, labels)
 
     def set_nodes(
         self,
@@ -309,11 +345,53 @@ class _NodeModel(ChannelRowsModel):
             if role == NodeRole:
                 return node
             if role == CountRole:
+                if isinstance(node.payload, FoundGenre):
+                    return _genre_label(node.payload, self._labels)
                 return node.count
             if role == IconRole:
+                if node.layer == FOUND_LIBRARY:
+                    return "search"
                 icons = {"group": _PINNED_ICONS, "action": _ACTION_ICONS}.get(node.layer, {})
                 return icons.get(node.key)
         return super().data(index, role)
+
+
+def _genre_label(genre: FoundGenre, labels: bool) -> str | None:
+    """What a found genre says beside its title: "Demo TV · 6 channels" ("6 channels" with
+    one provider; no count for a genre an STB portal has not listed yet)."""
+    parts = [genre.provider] if labels else []
+    if genre.count is not None:
+        parts.append(f"{genre.count:,} channel" + ("" if genre.count == 1 else "s"))
+    return " · ".join(parts) or None
+
+
+class _FoundRowDelegate(QStyledItemDelegate):
+    """The find's rows: channels as the channel column paints them, the rest as titles.
+
+    The rows are of two heights, so the list asks each row's: one per kind and width is kept.
+    """
+
+    def __init__(self, simple: QStyledItemDelegate, channel: QStyledItemDelegate, parent) -> None:
+        super().__init__(parent)
+        self._simple = simple
+        self._channel = channel
+        self._sizes: dict[tuple[bool, int], QSize] = {}
+
+    def _for(self, index) -> QStyledItemDelegate:
+        model = index.model()
+        channel = index.row() in getattr(model, "channel_rows", ())
+        return self._channel if channel else self._simple
+
+    def sizeHint(self, option, index) -> QSize:
+        delegate = self._for(index)
+        key = (delegate is self._channel, getattr(option.widget, "units_width", 0))
+        size = self._sizes.get(key)
+        if size is None:
+            size = self._sizes[key] = delegate.sizeHint(option, index)
+        return size
+
+    def paint(self, p: QPainter, option, index) -> None:
+        self._for(index).paint(p, option, index)
 
 
 class _SimpleRowDelegate(QStyledItemDelegate):
@@ -433,6 +511,9 @@ class _Column:
         self.view.setModel(self.model)
         self.channel_delegate = ChannelRowDelegate(0.9, self.view)
         self.simple_delegate = _SimpleRowDelegate(self.view)
+        self.found_delegate = _FoundRowDelegate(
+            self.simple_delegate, self.channel_delegate, self.view
+        )
         self.view.setItemDelegate(self.simple_delegate)
         self.view.rowClicked.connect(lambda row: drawer._on_row_clicked(side, row))
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -454,6 +535,8 @@ class Drawer(Overlay):
     # (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION).
     actionRequested = Signal(str)
     libraryRequested = Signal(str)  # "movies" or "series", for the Library
+    channelFound = Signal(object)  # a channel the find found (stamped with its provider)
+    libraryFindRequested = Signal(str)  # the find's text, for the Library's search
     closed = Signal()
 
     def __init__(self, nav: NavModel, logos, now_provider, parent=None) -> None:
@@ -467,8 +550,12 @@ class Drawer(Overlay):
             "right": _Column("right", self, logos, now_provider),
         }
         self.focus_side = "right"
-        self.filter_text = ""
-        self._filter_key: tuple | None = None
+        self.find_text = ""
+        self._find_open = False  # the ⌕ Find box was clicked (or typed into): it shows a caret
+        self._find_moved = False  # ↑/↓ in the find: its highlight no longer follows the results
+        self._finder: FindSession | None = None  # (set_finder) without one nothing is found
+        self._before_find: tuple[_Place, str] | None = None  # the right column, the focus
+        self._restore: _Place | None = None  # where the right column goes back to (_refresh)
         self._pending_key: str | tuple[str, str] | None = None
         self._left_choice: NavNode | None = None  # the left highlight, which may lead the path
         self._preview_node: NavNode | None = None
@@ -481,8 +568,6 @@ class Drawer(Overlay):
         # Hover over the header buttons (a move elsewhere goes on to the host, as without it).
         self.setMouseTracking(True)
         nav.changed.connect(self._on_nav_changed)
-        # A long list's titles folded in the background: a filter typed meanwhile applies now.
-        fold_notifier().folded.connect(self._on_folded)
         if parent is not None:
             parent.installEventFilter(self)
         self.hide()
@@ -494,8 +579,7 @@ class Drawer(Overlay):
     ) -> None:
         """Open on the NavModel's path, focusing the right column (or the left one)."""
         self.focus_side = focus_side
-        self.filter_text = ""
-        self._filter_key = None
+        self._drop_find()
         self._left_choice = None  # the left highlight starts at the end of the path
         self._pending_key = focus_key
         self._cancel_preview()
@@ -524,6 +608,7 @@ class Drawer(Overlay):
         if not col.nodes:
             return
         self._pending_key = None
+        self._find_moved = self.finding()
         row = col.rows.get(col.current, -1 if delta > 0 else len(col.nodes))  # type: ignore[arg-type]
         target = self._selectable_row(col, min(len(col.nodes) - 1, max(0, row + delta)), delta)
         if target is not None:
@@ -549,6 +634,10 @@ class Drawer(Overlay):
         self.move_by(delta * rows)
 
     def left(self) -> None:
+        if self.finding():
+            self._end_find()  # ← in the find: back to where it started
+            return
+        self._find_open = False  # an empty Find box closes: ← goes on as without it
         if self.focus_side == "right":
             self.focus_side = "left"
             self._left_choice = None
@@ -559,6 +648,9 @@ class Drawer(Overlay):
             self._nav.up()
 
     def right(self) -> None:
+        if self.finding():
+            self.activate()
+            return
         if self.focus_side == "left":
             if self._hand_off(self.highlighted()):
                 return
@@ -584,23 +676,46 @@ class Drawer(Overlay):
         node = self.highlighted()
         if node is None:
             return
-        if self.focus_side == "right" and self._nav.is_playable(node):
+        if self.finding():
+            self._choose_found(node)
+        elif self.focus_side == "right" and self._nav.is_playable(node):
             nodes = col.nodes if isinstance(col.nodes, NodeSeq) else list(col.nodes)
             self.playRequested.emit(node, nodes, self._nav.path[-1])
         else:
             self.right()
 
     def type_text(self, text: str) -> None:
-        self.filter_text += text
-        self._refresh()
+        """Typing finds genres and channels, whichever column has the focus."""
+        self._find_open = True
+        self._set_find(self.find_text + text)
 
     def backspace(self) -> None:
-        if self.filter_text:
-            self.filter_text = self.filter_text[:-1]
-            self._refresh()
+        if self.find_text:
+            if len(self.find_text) == 1:
+                self._find_open = False  # nothing left to find: the box closes too
+            self._set_find(self.find_text[:-1])
+
+    def start_find(self) -> None:
+        """A click on the ⌕ Find box: it shows a caret; typing finds."""
+        self._find_open = True
+        self.update()
+
+    def clear_find(self) -> None:
+        """✕ in the Find box: the find ends, the lists are back where they were."""
+        self._end_find()
+
+    def finding(self) -> bool:
+        """Whether the right column lists what the find found."""
+        return bool(self.find_text.strip())
+
+    def set_finder(self, finder: FindSession) -> None:
+        """The FindSession that finds the genres and channels (services.find)."""
+        self._finder = finder
+        finder.changed.connect(self._on_found)
 
     def go_up(self) -> None:
         """‹ (or the elided head): a layer up, as ← does with the focus on the left column."""
+        self._end_find(refresh=False)
         self.focus_side = "left"
         self._cancel_preview()
         self._left_choice = None
@@ -614,6 +729,7 @@ class Drawer(Overlay):
         path = self._nav.path
         if not 0 <= index < len(path):
             return
+        self._end_find(refresh=False)
         self.focus_side = "left"
         self._cancel_preview()
         self._left_choice = None
@@ -625,12 +741,75 @@ class Drawer(Overlay):
         self._refresh()
 
     def escape(self) -> bool:
-        if self.filter_text:
-            self.filter_text = ""
-            self._refresh()
-            return True
-        self.close_drawer()
+        if not self._end_find():
+            self.close_drawer()
         return True
+
+    # ---- the find -----------------------------------------------------------------------------
+
+    def _set_find(self, text: str) -> None:
+        was_finding = self.finding()
+        self.find_text = text
+        self._find_moved = False
+        if self.finding() and not was_finding:
+            right = self._columns["right"]
+            self._before_find = (self._place(right), self.focus_side)
+            self.focus_side = "right"  # the find lists in the right column
+            self._cancel_preview()
+        elif was_finding and not self.finding():
+            self._back_from_find()
+        if self._finder is not None:
+            self._finder.set_query(text)  # its `changed` refreshes a find that shows
+        if self.isVisible() and (self._finder is None or not self.finding()):
+            self._refresh()
+
+    def _back_from_find(self) -> None:
+        """The right column goes back to where it was before the find, and the focus too."""
+        if self._before_find is not None:
+            self._restore, self.focus_side = self._before_find
+            self._before_find = None
+
+    def _end_find(self, *, refresh: bool = True) -> bool:
+        """End the find (Esc, ✕, ←, the header): False when there was none."""
+        if not self.find_text and not self._find_open:
+            return False
+        self._find_open = False
+        if self.find_text:
+            self._set_find("")
+        elif refresh:
+            self.update()
+        return True
+
+    def _drop_find(self) -> None:
+        """A new opening: no find, nothing to go back to."""
+        self.find_text = ""
+        self._find_open = False
+        self._before_find = self._restore = None
+        if self._finder is not None:
+            self._finder.clear()
+
+    def _on_found(self) -> None:
+        if self.isVisible() and self.finding():
+            self._refresh()
+
+    def _choose_found(self, node: NavNode) -> None:
+        """Enter, → or a click on a row of the find."""
+        if isinstance(node.payload, FoundGenre):
+            genre = node.payload
+            self._find_open = False
+            self.find_text = ""
+            self._before_find = None  # it opens where it is: nothing to go back to
+            if self._finder is not None:
+                self._finder.clear()
+            self.focus_side = "right"
+            before = self._nav.path
+            self._nav.open_found_group(genre.provider, genre.group_id)
+            if self._nav.path == before:
+                self._refresh()  # the path's change refreshes otherwise
+        elif node.layer == "item" and isinstance(node.payload, dict):
+            self.channelFound.emit(node.payload)
+        elif node.layer == FOUND_LIBRARY:
+            self.libraryFindRequested.emit(self.find_text.strip())
 
     # ---- state ------------------------------------------------------------------------------
 
@@ -715,6 +894,8 @@ class Drawer(Overlay):
         col = self._columns[side]
         if not 0 <= row < len(col.nodes) or not _selectable(col.nodes[row]):
             return  # a heading does nothing
+        if side == "left" and self.finding():
+            self._end_find()  # a genre of the left column: the find gives way
         if side != self.focus_side:
             self.focus_side = side
             self._refresh()
@@ -738,28 +919,22 @@ class Drawer(Overlay):
         if 0 <= row < len(col.nodes) and col.nodes[row].layer in _CONTEXT_LAYERS:
             self.contextRequested.emit(col.nodes[row], col.view.viewport().mapToGlobal(pos))
 
-    def _on_folded(self, token: int) -> None:
-        # (A list still unfiltered for want of its folded titles is the column's own list.)
-        shown = any(getattr(col.nodes, "token", None) == token for col in self._columns.values())
-        if shown and self.isVisible() and self.filter_text:
-            self._refresh()
-
     def _on_nav_changed(self) -> None:
         if self.isVisible():
             self._refresh()
 
     def _refresh(self) -> None:
         (left_parent, left_children), (right_parent, right_children) = self._nav.columns()
-        focused_parent = left_parent if self.focus_side == "left" else right_parent
-        key = (self.focus_side, focused_parent)
-        if key != self._filter_key:
-            self._filter_key = key
-            self.filter_text = ""
-        needle = fold(self.filter_text)
         left, right = self._columns["left"], self._columns["right"]
         was = {side: self._place(col) for side, col in self._columns.items()}
-        self._fill(left, left_parent, left_children, needle, was["right"])
-        self._fill(right, right_parent, right_children, needle, was["left"])
+        # After a find, the right column's list comes back as it was (unless the path moved).
+        restore, self._restore = self._restore, None
+        back = restore if restore is not None and restore.parent == right_parent else None
+        self._fill(left, left_parent, left_children, was["right"])
+        if self.finding():
+            self._fill_found(right)
+        else:
+            self._fill(right, right_parent, right_children, back or was["left"])
         for side, col in self._columns.items():
             col.view.setProperty("columnFocused", side == self.focus_side)
             col.view.viewport().update()
@@ -774,10 +949,10 @@ class Drawer(Overlay):
         col: _Column,
         parent: NavNode | None,
         children: Sequence[NavNode] | None,
-        needle: str,
         other: _Place,
     ) -> None:
-        """Show `parent`'s children in `col`; `other` is where the other column was before."""
+        """Show `parent`'s children in `col`; `other` is where the other column was before
+        (or where this one was before a find)."""
         parent_changed = parent != col.parent
         # The other column's list comes over (a layer down: the genres go left; up: right).
         moved = parent_changed and parent is not None and parent == other.parent
@@ -798,13 +973,6 @@ class Drawer(Overlay):
         else:
             col.message = None
         nodes = children or []
-        if isinstance(nodes, NodeSeq):
-            nodes.fold_ahead()  # typing to filter will find the titles folded
-        if col.side == self.focus_side and needle:
-            if isinstance(nodes, NodeSeq):
-                nodes = nodes.matching(needle)
-            else:
-                nodes = [n for n in nodes if _selectable(n) and needle in fold(n.title)]
         if col.message is None and not nodes:
             col.message = EMPTY_TEXT
         live = bool(nodes) and _is_live_item(self._nav, nodes[0])
@@ -817,6 +985,7 @@ class Drawer(Overlay):
             col.shown = shown
             col.nodes = nodes
             col.rows = _RowIndex(nodes)
+            col.view.setUniformItemSizes(True)  # (a find's rows are of two heights)
             col.view.setItemDelegate(col.channel_delegate if live else col.simple_delegate)
             col.model.set_nodes(nodes, live, numbers, tagged)
             if moved:
@@ -853,19 +1022,61 @@ class Drawer(Overlay):
         path = self._nav.path
         end = path[-1] if path else None
         if self._left_choice is not None and self._left_choice not in col.rows:
-            # The filter hid it: Enter must choose what is highlighted now, not the hidden row.
+            # Gone from the list: Enter must choose what is highlighted now, not that row.
             self._left_choice = None
             self._cancel_preview()
         if self._left_choice in col.rows:
             col.current = self._left_choice
         elif end in col.rows:
             col.current = end
-        elif col.side == self.focus_side and self.filter_text and nodes:
-            col.current = nodes[0]  # auto-highlight the first match and preview it
-            self._left_choice = nodes[0]
-            self._schedule_preview(nodes[0])
         else:
             col.current = None
+
+    def _fill_found(self, col: _Column) -> None:
+        """The right column lists what the find found: genres, channels, the Library row."""
+        finder = self._finder
+        genres: list[FoundGenre] = finder.genres if finder is not None else []
+        channels: list[Hit] = finder.channels if finder is not None else []
+        searching = finder is not None and finder.searching
+        text = self.find_text.strip()
+        labels = len(self._nav.catalog.provider_names()) >= 2  # with one provider, as in 2.0
+        nodes: list[NavNode] = []
+        if genres:
+            nodes.append(NavNode("header", "find:genres", "Genres"))
+            nodes += [
+                NavNode(FOUND_GENRE, mixed_group_id(g.provider, g.group_id), g.title, g)
+                for g in genres
+            ]
+        if channels:
+            nodes.append(NavNode("header", "find:channels", "Channels"))
+            nodes += [
+                NavNode("item", item_key(h.item), item_title(h.item), h.item) for h in channels
+            ]
+        if not genres and not channels:
+            if searching:
+                notice = SEARCHING_TEXT
+            elif finder is not None and finder.failed:
+                notice = FIND_FAILED_TEXT
+            else:
+                notice = f"No genre or channel has “{text}”"
+            nodes.append(NavNode("notice", "find:notice", notice))
+        library = f"Films and series with “{text}” in the Library ›"
+        nodes.append(NavNode(FOUND_LIBRARY, "find:library", library))
+        col.parent = FIND_PARENT
+        col.message = None
+        shown = ("find", _shown_rows(nodes, False, None, labels))
+        if shown != col.shown:
+            col.shown = shown
+            col.nodes = nodes
+            col.rows = _RowIndex(nodes)
+            col.view.setUniformItemSizes(False)
+            col.view.setItemDelegate(col.found_delegate)
+            col.model.set_found(nodes, labels)
+        else:
+            col.model.refresh_now()
+        if not self._find_moved or col.current not in col.rows:
+            col.current = next((n for n in nodes if _selectable(n)), None)  # the best match
+        self._show_current(col)
 
     # ---- mouse: consumed here, so it never reaches the video behind -------------------------
 
@@ -878,6 +1089,10 @@ class Drawer(Overlay):
         if event.button() == Qt.LeftButton and button is not None:
             if button in (SETTINGS_ROW, REFRESH_ACTION, SEARCH_ACTION):
                 self.actionRequested.emit(button)
+            elif button == FIND_ACTION:
+                self.start_find()
+            elif button == FIND_CLEAR:
+                self.clear_find()
             elif button in (BACK_BUTTON, _crumb_key(None)):
                 self.go_up()
             else:
@@ -930,10 +1145,15 @@ class Drawer(Overlay):
         return super().event(event)
 
     def tooltip_at(self, point: QPointF) -> str:
-        """What hovering `point` says: a header button's name and key, ‹, or the provider."""
+        """What hovering `point` says: a header button's name and key, ‹, the provider, or the
+        Find box and its ✕."""
         button = self._header_button_at(point)
         if button in _HEADER_TOOLTIPS:
             return _HEADER_TOOLTIPS[button]
+        if button == FIND_ACTION:
+            return FIND_TOOLTIP
+        if button == FIND_CLEAR:
+            return FIND_CLEAR_TOOLTIP
         if button == BACK_BUTTON:
             return BACK_TOOLTIP
         if button == _crumb_key(0):
@@ -950,7 +1170,12 @@ class Drawer(Overlay):
         return rect.adjusted(-grow, -grow, grow, grow)
 
     def _header_button_at(self, point: QPointF) -> str | None:
-        """What of the header row is at `point`: a button, a name (_crumb_key), or None."""
+        """What of the header row or of the Find box is at `point`: a button, a name
+        (_crumb_key), the box (FIND_ACTION) or its ✕ (FIND_CLEAR), or None."""
+        if self.find_clear_rect().contains(point):
+            return FIND_CLEAR
+        if self.find_rect().contains(point):
+            return FIND_ACTION
         header = self._header()
         hit = self.header_hit_rect
         if hit(header.gear).contains(point):
@@ -968,6 +1193,23 @@ class Drawer(Overlay):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         event.accept()  # a list at its end, the header or the fade: never a zap behind
+
+    def find_rect(self) -> QRectF:
+        """The ⌕ Find box above the right column (drawer coordinates)."""
+        u = self._units.u
+        col = self._columns["right"]
+        side = self._units.px(PAD_SIDE_U)
+        return QRectF(
+            col.rect.x() + side, PAD_TOP_U * u, col.rect.width() - 2 * side, FILTER_H_U * u
+        ).adjusted(0.5, 0.5, -0.5, -0.5)
+
+    def find_clear_rect(self) -> QRectF:
+        """The Find box's ✕ (where it takes clicks); empty when there is nothing to clear."""
+        if not self.find_text and not self._find_open:
+            return QRectF()
+        box = self.find_rect()
+        width = min(box.width(), FIND_X_U * self._units.u)
+        return QRectF(box.right() - width, box.y(), width, box.height())
 
     # ---- layout and painting ----------------------------------------------------------------
 
@@ -1022,6 +1264,7 @@ class Drawer(Overlay):
         grad.setColorAt(1.0, qcolor(PALETTE.panel, 0.0))
         p.fillRect(fade, grad)
         self._paint_breadcrumb(p, left)
+        self._paint_find(p, units)
         for col in (left, right):
             self._paint_column(p, col, units)
 
@@ -1139,26 +1382,56 @@ class Drawer(Overlay):
             else:
                 _draw_refresh(p, rect, tone)
 
+    def _paint_find(self, p: QPainter, units: Units) -> None:
+        """The ⌕ Find box: a prompt; once clicked or typed into, the text, a caret and ✕."""
+        u = units.u
+        box = self.find_rect()
+        active = bool(self.find_text) or self._find_open
+        fill_round(p, box, qcolor(PALETTE.canvas, 0.6 if active else 0.35), 0.9 * u)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        hovered = self._hover == FIND_ACTION
+        p.setPen(
+            qcolor(PALETTE.accent, 0.7)
+            if active
+            else qcolor(PALETTE.text, 0.3 if hovered else 0.15)
+        )
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(box, 0.9 * u, 0.9 * u)
+        p.restore()
+        size = 1.5 * u
+        draw_icon(
+            p,
+            "search",
+            QRectF(box.x() + 1.0 * u, box.center().y() - size / 2, size, size),
+            qcolor(PALETTE.text, 0.8 if active else 0.5),
+        )
+        clear = self.find_clear_rect()
+        right = (clear.left() if not clear.isEmpty() else box.right()) - 0.6 * u
+        inner = QRectF(box.x() + 1.0 * u + size + 0.7 * u, box.y(), 0, box.height())
+        inner.setRight(max(inner.left(), right))
+        p.setFont(units.font(1.35))
+        if active:
+            p.setPen(qcolor(PALETTE.text))
+            text = elided(p, self.find_text + "▏", inner.width())
+        else:
+            p.setPen(qcolor(PALETTE.text, 0.5))
+            text = elided(p, FIND_PLACEHOLDER, inner.width())
+        p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, text)
+        if not clear.isEmpty():
+            mark = 1.1 * u
+            tone = (
+                qcolor(PALETTE.accent) if self._hover == FIND_CLEAR else qcolor(PALETTE.text, 0.6)
+            )
+            draw_icon(
+                p,
+                "close",
+                QRectF(clear.center().x() - mark / 2, clear.center().y() - mark / 2, mark, mark),
+                tone,
+            )
+
     def _paint_column(self, p: QPainter, col: _Column, units: Units) -> None:
         u = units.u
-        side = units.px(PAD_SIDE_U)
-        if col.side == self.focus_side and self.filter_text:
-            top = PAD_TOP_U + (CRUMB_H_U + 0.2 if col.side == "left" else 0.0)
-            box = QRectF(
-                col.rect.x() + side, top * u, col.rect.width() - 2 * side, FILTER_H_U * u
-            ).adjusted(0.5, 0.5, -0.5, -0.5)
-            fill_round(p, box, qcolor(PALETTE.canvas, 0.6), 0.9 * u)
-            p.save()
-            p.setRenderHint(QPainter.Antialiasing, True)
-            p.setPen(qcolor(PALETTE.accent, 0.7))
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(box, 0.9 * u, 0.9 * u)
-            p.restore()
-            p.setFont(units.font(1.35))
-            p.setPen(qcolor(PALETTE.text))
-            text = "⌕ " + self.filter_text + "▏"
-            inner = box.adjusted(1.0 * u, 0, -1.0 * u, 0)
-            p.drawText(inner, Qt.AlignLeft | Qt.AlignVCenter, elided(p, text, inner.width()))
         if col.message:
             error = col.message in (ERROR_TEXT, PROVIDER_ERROR_TEXT)
             p.setFont(units.font(1.35))
