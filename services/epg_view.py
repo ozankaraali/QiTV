@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import Any, Iterable, Optional
 
 from services.epg_time import parse_stb, parse_xmltv, parse_xmltv_naive
 
 logger = logging.getLogger(__name__)
+
+# A guide entry this long or longer is a placeholder (the channel's name from 00:00 to 12:00,
+# "Program" until the guide's end), not a programme: it loses to one starting with it.
+PLACEHOLDER_SPAN = timedelta(hours=12)
 
 
 @dataclass(frozen=True)
@@ -100,20 +104,28 @@ def _show(
     return since
 
 
+def _rank(programme: Programme) -> tuple[bool, timedelta]:
+    """Of programmes starting together, the highest ranked shows: a placeholder loses to any
+    shorter one, and of the others the longer wins (the film over the hour's "Movie" block,
+    the match over the league's name)."""
+    span = programme.stop - programme.start
+    return (True, span) if span < PLACEHOLDER_SPAN else (False, -span)
+
+
 def timeline(programmes: Iterable[Programme]) -> list[Programme]:
     """One programme at a time, oldest first: what the guide's grid, its details bar, the info
     line and the banner all show.
 
     Some guides list several programmes at once for a channel (feeds merged by the provider,
     or a placeholder a day long beside the real programmes). The one that started last shows;
-    of programmes starting together, the shortest (an exact tie goes by title, so the order
-    the guide lists them in never matters). A programme shows until another starts, and
-    again after that one when it outlasts it: no gap where the guide has a programme, never
-    two at once. A programme cut so is shown in pieces with their own times; one that
-    overlaps nothing is kept as it is.
+    of programmes starting together, the one _rank puts first (an exact tie: the one listed
+    last). A programme shows until another starts, and again after that one when it outlasts
+    it: no gap where the guide has a programme, never two at once. A programme cut so is
+    shown in pieces with their own times; one that overlaps nothing is kept as it is.
     """
-    # Programmes starting together go longest first: the shortest is on top of `shown`.
-    ordered = sorted(programmes, key=lambda p: (p.start, p.start - p.stop, p.title, p.description))
+    # Programmes starting together go lowest ranked first, so the winner is on top of `shown`;
+    # the sort is stable, so of an exact tie the one listed last is.
+    ordered = sorted(programmes, key=lambda p: (p.start, _rank(p)))
     result: list[Programme] = []
     shown: list[Programme] = []  # started, the latest on top; ones under it may have ended
     since: Optional[datetime] = None  # the timeline is complete up to here

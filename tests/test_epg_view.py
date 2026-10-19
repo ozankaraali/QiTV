@@ -171,16 +171,38 @@ class TimelineTests(unittest.TestCase):
             [("A", 20, 20.5), ("B", 20.5, 21.5)],
         )
 
-    def test_of_equal_starts_the_shortest_shows_first_whatever_the_listing(self):
-        news, filler = show("News", 10, 11), show("Filler", 10, 24)
-        expected = [("News", 10, 11), ("Filler", 11, 24)]
+    def test_a_day_long_filler_loses_to_a_real_programme_starting_with_it(self):
+        news, filler = show("News", 10, 11), show("Filler", 10, 36)
+        expected = [("News", 10, 11), ("Filler", 11, 36)]
         self.assertEqual(hours([news, filler]), expected)
         self.assertEqual(hours([filler, news]), expected)  # the filler listed after it
 
-    def test_an_exact_tie_does_not_depend_on_the_listing(self):
+    def test_an_entry_of_twelve_hours_loses_and_one_just_under_does_not(self):
+        real = show("Late Show", 0, 1.5)
+        self.assertEqual(hours([real, show("Channel One", 0, 12)])[0], ("Late Show", 0, 1.5))
+        self.assertEqual(hours([real, show("Marathon", 0, 11.75)]), [("Marathon", 0, 11.75)])
+
+    def test_of_two_fillers_starting_together_the_shorter_shows(self):
+        week, day = show("Week Filler", 0, 168), show("Day Filler", 0, 26)
+        expected = [("Day Filler", 0, 26), ("Week Filler", 26, 168)]
+        self.assertEqual(hours([week, day]), expected)
+        self.assertEqual(hours([day, week]), expected)
+
+    def test_of_equal_starts_the_longer_programme_shows(self):
+        block, film = show("Movie", 0.5, 1.5), show("River Song", 0.5, 2.5)
+        self.assertEqual(hours([block, film]), [("River Song", 0.5, 2.5)])
+        self.assertEqual(hours([film, block]), [("River Song", 0.5, 2.5)])
+
+    def test_a_short_placeholder_loses_to_a_longer_real_programme(self):
+        filler = show("Channel One HD 01:00", 1, 5)
+        real = show("Evening with Friends", 1, 6.5)
+        self.assertEqual(hours([filler, real]), [("Evening with Friends", 1, 6.5)])
+        self.assertEqual(hours([real, filler]), [("Evening with Friends", 1, 6.5)])
+
+    def test_an_exact_tie_goes_to_the_one_listed_last(self):
         a, b = show("Evening Talk", 10, 11), show("Night Talk", 10, 11)
-        self.assertEqual(hours([a, b]), hours([b, a]))
-        self.assertEqual(len(timeline([a, b])), 1)
+        self.assertEqual(hours([a, b]), [("Night Talk", 10, 11)])
+        self.assertEqual(hours([b, a]), [("Evening Talk", 10, 11)])
 
     def test_a_long_programme_resumes_after_one_inside_it(self):
         self.assertEqual(
@@ -201,27 +223,33 @@ class TimelineTests(unittest.TestCase):
         )
 
     def test_every_moment_shows_the_latest_started_programme_on(self):
+        def rank(item):
+            # The rule written out again: started last; then a placeholder (12 h or more)
+            # below the rest, the shorter of two placeholders, the longer of the rest; then
+            # the one listed last.
+            index, p = item
+            span = (p.stop - p.start) / HOUR
+            return (p.start, span < 12, span if span < 12 else -span, index)
+
         rng = random.Random(7)
-        for trial in range(300):
+        for trial in range(400):
             programmes = []
             for i in range(rng.randint(1, 8)):
                 start = rng.randrange(0, 40) / 4
-                programmes.append(show(f"P{i}", start, start + rng.randrange(1, 40) / 4))
+                span = rng.choice((rng.randrange(1, 40), rng.randrange(44, 120))) / 4
+                programmes.append(show(f"P{i}", start, start + span))
             result = timeline(programmes)
-            shuffled = programmes[:]
-            rng.shuffle(shuffled)
             with self.subTest(trial=trial):
-                self.assertEqual(timeline(shuffled), result)
                 for before, after in zip(result, result[1:]):
                     self.assertLessEqual(before.stop, after.start)  # never two at once
-                for minute in range(0, 20 * 60, 5):
+                for minute in range(0, 40 * 60, 10):
                     moment = DAY + timedelta(minutes=minute)
-                    on = [p for p in programmes if p.is_on(moment)]
+                    on = [(i, p) for i, p in enumerate(programmes) if p.is_on(moment)]
                     shown = [p for p in result if p.is_on(moment)]
                     if not on:
                         self.assertEqual(shown, [])
                         continue
-                    latest = max(on, key=lambda p: (p.start, p.start - p.stop, p.title))
+                    latest = max(on, key=rank)[1]
                     self.assertEqual([p.title for p in shown], [latest.title])
                     self.assertTrue(latest.start <= shown[0].start < shown[0].stop <= latest.stop)
 

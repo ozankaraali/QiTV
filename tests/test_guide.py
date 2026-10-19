@@ -565,11 +565,17 @@ class ProgrammeSpansTests(unittest.TestCase):
         self.assertEqual(self.spans([a, b]), [("A", 0.0, 100.0), ("B", 100.0, 200.0)])
         self.assertEqual(result[0].programme.stop, self.start + HALF_HOUR)
 
-    def test_of_equal_starts_the_shorter_is_drawn_first_and_the_longer_after_it(self):
+    def test_of_equal_starts_the_longer_is_drawn(self):
         a, b = prog("A", self.start, 30), prog("B", self.start, 60)
-        expected = [("A", 0.0, 100.0), ("B", 100.0, 100.0)]
-        self.assertEqual(self.spans([a, b]), expected)
-        self.assertEqual(self.spans([b, a]), expected)
+        self.assertEqual(self.spans([a, b]), [("B", 0.0, 200.0)])
+        self.assertEqual(self.spans([b, a]), [("B", 0.0, 200.0)])
+
+    def test_a_day_long_placeholder_starting_with_a_programme_is_drawn_after_it(self):
+        placeholder = prog("Placeholder", self.start, 26 * 60)
+        film = prog("Film", self.start, 60)
+        self.assertEqual(
+            self.spans([placeholder, film]), [("Film", 0.0, 200.0), ("Placeholder", 200.0, 300.0)]
+        )
 
     def test_a_long_programme_is_drawn_again_after_one_inside_it(self):
         outer = prog("Outer", self.start, 120)
