@@ -22,10 +22,12 @@ the last row asks for the Library's search (`libraryFindRequested`). Esc, ✕ or
 the right column is back where it was, its highlight and its scroll position too.
 
 While the multiview's grid shows (`set_drag_enabled`), a channel row can be dragged out onto
-a tile: once the pointer moved a drag distance with the button down, the list fades (the
-tiles behind it show), the pointer's moves come as `channelDragged`, and the release as
-`channelDropped` (never a click on the row); a drawer hidden meanwhile ends it
-(`dragEnded`).
+a tile: once the pointer left the list with the button down, the list fades (the tiles
+behind it show, a drop over it lands on the tile behind), the pointer's moves come as
+`channelDragged`, and the release as `channelDropped` (never a click on the row); a drawer
+hidden meanwhile ends it (`dragEnded`). A press that moves but stays over the list is a
+click: a trackpad's click often moves a little, and a drop there would land on the tile
+behind the list instead of the one the list was opened for.
 """
 
 from collections.abc import Callable, Sequence
@@ -1368,14 +1370,17 @@ class Drawer(Overlay):
         return False
 
     def _drag_node(self, where: QPoint) -> NavNode | None:
-        """The channel a press began on, once the pointer moved a drag distance (and the
-        grid shows); else None."""
+        """The channel a press began on, once the pointer left the list (and the grid
+        shows); else None."""
         start = self._drag_from
         if start is None or not self._drag_enabled():
             return None
         side, row, origin = start
         if (where - origin).manhattanLength() < QApplication.startDragDistance():
             return None
+        lists = self._columns["left"].rect.united(self._columns["right"].rect)
+        if lists.contains(self.mapFromGlobal(where)):
+            return None  # still over the list: a click that moved a little
         nodes = self._columns[side].nodes
         node = nodes[row] if 0 <= row < len(nodes) else None
         live = self.finding() or (node is not None and self._nav.section_of(node) == "live")

@@ -967,9 +967,20 @@ class DrawerDragTests(unittest.TestCase):
         self.drawer.set_drag_enabled(lambda: True)
         self.drag()
         kinds = [event[0] for event in self.events]
-        self.assertEqual(kinds, ["drag", "drag", "ended", "drop"])
+        self.assertEqual(kinds, ["drag", "ended", "drop"])  # once out of the list
         self.assertIs(self.events[0][1], self.node)
         self.assertIsNone(self.drawer.graphicsEffect())  # the list is whole again
+        self.assertIsNone(self.drawer.dragging())
+
+    def test_a_click_that_moves_but_stays_over_the_list_is_a_click(self):
+        # A trackpad's click that moved a little: a drop there would land on the tile behind
+        # the list, not on the one the list was opened for.
+        self.drawer.set_drag_enabled(lambda: True)
+        self.mouse(QEvent.Type.MouseButtonPress, self.row)
+        self.mouse(QEvent.Type.MouseMove, self.row + QPoint(40, 6))
+        self.mouse(QEvent.Type.MouseButtonRelease, self.row + QPoint(40, 6), Qt.NoButton)
+        self.assertNotIn("drag", [event[0] for event in self.events])
+        self.assertNotIn("drop", [event[0] for event in self.events])
         self.assertIsNone(self.drawer.dragging())
 
     def test_without_the_grid_nothing_drags(self):
