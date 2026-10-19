@@ -119,6 +119,7 @@ from ui.overlays.welcome import WelcomeCard
 from ui.overlays.zap_banner import BannerInfo, ZapBanner
 from ui.picture_controls import PictureControls
 from ui.pip_controls import PipControls
+from ui.player_keys import PlayerKeys
 from ui.pointer import PointerInput
 from ui.provider_flow import ProviderFlow
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
@@ -371,6 +372,9 @@ class TVController(QObject):
                 toast=self._toast,
                 parent=self,
             )
+        # Each player's live channel and the key it opened with: the channel's sound sync
+        # and shape are kept under that key while it plays there.
+        self._player_keys = PlayerKeys(self._sync_key)
         # The sound's and the subtitles' tracks and sync (their panels, J/K and Shift+J/K),
         # subtitle files; a channel's sound sync is kept.
         self._tracks = TrackControls(
@@ -383,7 +387,7 @@ class TVController(QObject):
             session=lambda: self.session,
             current=lambda: self._current,
             playing=self._has_media,
-            channel_key=self._sync_key,
+            keys=self._player_keys,
             store=sound_sync if sound_sync is not None else SoundSync(None),
             toast=self._toast,
             show_transport=self._show_transport,
@@ -400,7 +404,7 @@ class TVController(QObject):
             current=lambda: self._current,
             playing=self._has_media,
             players=lambda: [player for _name, player in self._players()],
-            channel_key=self._sync_key,
+            keys=self._player_keys,
             store=channel_pictures if channel_pictures is not None else ChannelPictures(None),
             config=config,
             toast=self._toast,
@@ -535,6 +539,7 @@ class TVController(QObject):
             self.sessions.largeChanged.connect(lambda *_: self._update_guides())
             self.sessions.pipStarted.connect(self._on_pip_started)
             self.sessions.pipStateChanged.connect(self._on_pip_state)
+            self.sessions.slotState.connect(self._on_slot_state)
         column.closed.connect(zap.close_column)
         column.rowClicked.connect(self._on_column_row)
         drawer.playRequested.connect(self.play_item)
@@ -1388,8 +1393,18 @@ class TVController(QObject):
             self.swap()  # the empty picture, small now, closes
 
     def _on_pip_state(self, open_: bool) -> None:
-        if not open_:
-            self._give_back_later = False
+        sessions = self.sessions
+        if open_ or sessions is None:
+            return
+        self._give_back_later = False
+        closed = sessions.other()  # the small picture's slot: once closed, it plays nothing
+        if closed.channel is None and closed is not sessions.large():
+            self._player_keys.forget(closed.playback)
+
+    def _on_slot_state(self, name: str, open_: bool) -> None:
+        """A multiview tile opened or closed: a closed one's player keeps no channel key."""
+        if not open_ and self.sessions is not None:
+            self._player_keys.forget(self.sessions.slot(name).playback)
 
     def _restore_channel(self) -> None:
         """After a failed tune, INFO and the drawer follow the channel still playing."""

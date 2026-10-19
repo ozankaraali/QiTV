@@ -21,6 +21,7 @@ from ui.keymap import Action, key_hint
 from ui.link_lanes import Target
 from ui.overlays.track_panel import IDLE_MS, PanelModel, PanelRow, PanelSync, TrackPanel
 from ui.overlays.transport import Transport
+from ui.player_keys import PlayerKeys
 from ui.track_controls import TrackControls, sync_text, toast_text
 
 CHANNEL = Target({"id": 1, "name": "Harbour Nature", "cmd": "http://tv/1"}, "live", "Harbour")
@@ -137,7 +138,7 @@ class PanelCase(unittest.TestCase):
             session=lambda: self.player,
             current=lambda: self.current,
             playing=lambda: self.playing,
-            channel_key=lambda item: f"key-{item['id']}",
+            keys=PlayerKeys(lambda item: f"key-{item['id']}"),
             store=self.store,
             toast=lambda text, *args: self.toasts.append(text),
             show_transport=self.transport.poke,

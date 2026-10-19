@@ -680,6 +680,18 @@ class MultiviewTests(MultiviewCase):
         t2.live.released.emit()  # its upstream closed
         self.assertEqual(sorted(self.budget.holders("Home")), ["main", "t3"])
 
+    def test_a_stopped_tiles_player_keeps_no_channel_key(self):
+        self.catalog.current_provider = lambda: {"name": "Home", "type": "STB", "max_streams": 4}
+        self.start_large(0)
+        self.v()
+        t2 = self.pick_in("t2", CHANNELS[2], "http://stream/3")
+        t3 = self.pick_in("t3", CHANNELS[3], "http://stream/4")
+        keys = self.controller._player_keys
+        self.assertCountEqual(keys.players(), [self.session, t2.playback, t3.playback])
+        self.grid_frame.focusRequested.emit("main")
+        self.v()  # t2 stops; t3 plays on as the small picture
+        self.assertCountEqual(keys.players(), [self.session, t3.playback])
+
     def test_a_plus_tile_takes_the_focus_opens_the_channel_list_and_plays_the_pick(self):
         self.start_large(0)
         self.v()

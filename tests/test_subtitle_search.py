@@ -49,6 +49,7 @@ from ui.overlays.subtitle_search import (
 )
 from ui.overlays.track_panel import TrackPanel
 from ui.overlays.transport import Transport
+from ui.player_keys import PlayerKeys
 from ui.subtitle_search import OnlineSetup, OnlineSubtitles
 from ui.track_controls import REMEMBERED, SEARCH_ONLINE, SEARCH_ONLINE_TEXT, TrackControls
 
@@ -434,7 +435,7 @@ class FlowCase(Case):
             session=lambda: self.player,
             current=lambda: self.current,
             playing=lambda: self.playing,
-            channel_key=lambda item: f"key-{item['id']}",
+            keys=PlayerKeys(lambda item: f"key-{item['id']}"),
             store=SoundSync(None),
             toast=lambda text, *args: self.toasts.append(text),
             show_transport=self.transport.poke,
