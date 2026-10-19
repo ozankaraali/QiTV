@@ -606,7 +606,7 @@ class FlowTests(FlowCase):
         )
         self.assertEqual(self.search_page.query(), "Salt Road S02E05")
 
-    def test_other_films_found_for_a_translated_title_are_never_shown_as_its(self):
+    def test_other_films_found_for_a_translated_title_are_listed_each_named(self):
         self.current = TRANSLATED
         self.config.opensubtitles_api_key = KEY
         serving(self.http, *OTHER_FILMS)
@@ -617,15 +617,8 @@ class FlowTests(FlowCase):
         self.assertEqual(
             dict(request["params"]), {"query": "süper liman bekçileri", "year": "2014"}
         )
-        self.assertEqual(
-            page_.status(),
-            "No subtitles found for this title. Try its original title, or its English one.",
-        )
-        self.assertEqual(page_.languages(), [])
-        self.assertTrue(page_.offers_others())
-        # "Show all results": each one names its film.
-        page_.handle(Action.NAV_DOWN)
-        page_.handle(Action.NAV_ACTIVATE)
+        # Listed at once (a translated title's own film is named otherwise), each row
+        # naming its film, and the line says so: never shown as this title's.
         self.assertEqual(
             page_.status(),
             "4 subtitles in 3 languages for other titles: check the title under each one",

@@ -9,8 +9,8 @@ title), in a worker: the languages found, the viewer's last one and then this co
 first, and each language's subtitles ranked. Searching again for the same words keeps the
 id; other words search by themselves. Only the subtitles made for the title asked for are
 listed (the line names it when OpenSubtitles calls it otherwise: a translated title's film);
-when OpenSubtitles found other titles' only, the page says so, and "Show all results" lists
-them, each named. A subtitle chosen is downloaded in a worker into the subtitles folder,
+when OpenSubtitles found only subtitles for titles named otherwise, it lists them, each row
+naming its title, and the line says to check it. A subtitle chosen is downloaded in a worker into the subtitles folder,
 shown with what plays (as a file loaded from the panel is: it is chosen, under its own
 name), kept as the title's pick (services.subtitle_picks) and said in a toast with the
 downloads left today; the page closes.
@@ -360,9 +360,10 @@ class OnlineSubtitles(QObject):
         if result.files:
             self._list(result.files, result.query)
         elif result.others:
-            # Only other titles' subtitles: never shown as this one's.
-            text = translate(NOTHING_FOR_TITLE_TEXT)
-            self._page.set_results([], {}, text, kind="error", others=len(result.others))
+            # Only subtitles made for titles named otherwise (a translated title OpenSubtitles
+            # knows by its original name, or other films): listed at once, each row naming
+            # its title and the line saying so, never as this one's.
+            self._list(result.others, result.query, others=True)
         else:
             label = result.query.label()
             text = translate(NOTHING_FOUND_TEXT, query=label)
