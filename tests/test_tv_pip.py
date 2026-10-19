@@ -484,6 +484,41 @@ class PipTests(PipCase):
         self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
         self.assertIs(self.pip_session.plays[-1][1]["software"], True)
 
+    def test_a_swap_during_the_small_pictures_back_off_reopens_it_large(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (80, 120)))
+        self.start_large(0)
+        self.open_small(CHANNELS[1])
+        self.pip_live.play_direct()
+        url = self.pip_session.plays[-1][0]
+        plays = len(self.pip_session.plays)
+        self.pip_session.stateChanged.emit("ended")
+        self.assertEqual(self.toast.messages()[-1], ("Two: Reconnecting…", "info"))
+        self.controller.handle(Action.SWAP)  # its player is the large picture's now
+        self.assertIs(self.sessions.large(), self.pip_slot)
+        self.assertTrue(wait_until(lambda: len(self.pip_session.plays) == plays + 1))
+        self.assertEqual(self.pip_session.plays[-1][0], url)
+        QTest.qWait(150)
+        self.assertEqual(len(self.pip_session.plays), plays + 1)  # once
+        self.assertNotIn(("The stream ended", "info"), self.toast.messages())
+
+    def test_a_swap_during_the_large_pictures_back_off_reopens_it_small(self):
+        self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (80, 120)))
+        self.catalog.ptype = "XTREAM"  # no link to make again: it reconnects
+        self.start_large(0)
+        self.live.play_direct()  # the large picture's live session fell back
+        self.open_small(CHANNELS[1])
+        url = self.session.plays[-1][0]
+        plays = len(self.session.plays)
+        self.session.ended.emit()
+        self.assertEqual(self.toast.messages()[-1], ("Reconnecting…", "info"))
+        self.controller.handle(Action.SWAP)  # its player is the small picture's now
+        self.assertIs(self.sessions.small(), self.main_slot)
+        self.assertTrue(wait_until(lambda: len(self.session.plays) == plays + 1))
+        self.assertEqual(self.session.plays[-1][0], url)
+        QTest.qWait(150)
+        self.assertEqual(len(self.session.plays), plays + 1)  # once
+        self.assertEqual(sorted(self.budget.holders("Home")), ["main", "pip"])
+
     def test_a_time_shifted_small_picture_is_not_reopened_here(self):
         self.enterContext(mock.patch("ui.live_controls.RECONNECT_MS", (40, 120)))
         self.start_large(0)

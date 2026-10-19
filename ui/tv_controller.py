@@ -1909,6 +1909,8 @@ class TVController(QObject):
         if sessions is None or pip is None or self._closed:
             return
         new, old = sessions.slot(name), sessions.slot(old_name)
+        # An ended stream on its way to open again goes with its player, in its new role.
+        reopens = self._live_controls.take_reopen(), pip.take_reopen(new.name)
         view = pip.take_large(
             old.name, new.name, self._current, self.zap.context, self._current_url, self._cid
         )
@@ -1918,6 +1920,11 @@ class TVController(QObject):
         self._use_slot(new)
         # A movie's resume key comes back with its slot: its position is saved again.
         self._current, self._cid, self._current_url = view.target, view.cid, view.url
+        large_reopen, small_reopen = reopens
+        if small_reopen is not None:
+            self._live_controls.adopt_reopen(small_reopen)
+        if large_reopen is not None and not self.multiview_shown():
+            pip.adopt_reopen(old.name, large_reopen)
         self._restore_channel()
         self._state = self._states.get(new.name, "idle")
         self._tuning.stop()

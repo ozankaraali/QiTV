@@ -28,7 +28,8 @@ swaps (the shell's `swap`).
 A channel the small picture plays directly (its live session fell back) whose stream ends
 opens again in the same player, so in its budget slot, as the large picture's does
 (`ui.live_controls`): after RECONNECT_MS, twice per channel (twice more once it played for
-HEALTHY_S), then "The stream ended".
+HEALTHY_S), then "The stream ended". A swap during the back-off hands the reopen to the
+picture that has the player then (`take_reopen`, `adopt_reopen`, and LiveControls' own).
 
 What each slot shows (its target, the zap group it came from and, for a movie or an episode,
 its resume key) is kept here, so a swap can give the shell the new large picture's
@@ -178,7 +179,7 @@ class PipControls(QObject):
         # opened, each player's last "playing" (monotonic), and the reopen after its back-off.
         self._reopens: dict[str, int] = {}
         self._playing_since: dict[str, float] = {}
-        self._reopen_due: Optional[tuple[str, Target, str]] = None
+        self._reopen_due: Optional[tuple[str, Target, str, PlayKind]] = None
         self._reopen_timer = QTimer(self, singleShot=True)
         self._reopen_timer.timeout.connect(self._reopen)
 
@@ -685,11 +686,11 @@ class PipControls(QObject):
             return  # already on its way
         target = self.view(name).target
         playback = small.playback
-        url = getattr(playback, "url", None)
-        if target is None or not target.live or small.live.mode != "direct" or not url:
+        url, kind = getattr(playback, "url", None), getattr(playback, "kind", None)
+        if target is None or not target.live or not url:
             return
-        if getattr(playback, "kind", None) is not PlayKind.LIVE:
-            return
+        if kind is None or kind in live_controls.NOT_REOPENED:
+            return  # the time-shift buffer reopens itself
         count = self._reopens.get(name, 0)
         since = self._playing_since.pop(name, None)
         if since is not None and time.monotonic() - since >= live_controls.HEALTHY_S:
@@ -698,7 +699,7 @@ class PipControls(QObject):
             self._say(name, tr("The stream ended"))
             return
         self._reopens[name] = count + 1
-        self._reopen_due = (name, target, url)
+        self._reopen_due = (name, target, url, kind)
         self._reopen_timer.start(live_controls.RECONNECT_MS[count])
         self._say(name, translate(RECONNECTING))
 
@@ -706,17 +707,17 @@ class PipControls(QObject):
         due, self._reopen_due = self._reopen_due, None
         if due is None or self._closed():
             return
-        name, target, url = due
+        name, target, url, kind = due
         small = self.sessions.small()
         if small is None or small.name != name or self.view(name).target is not target:
-            return  # closed, swapped or another channel small meanwhile
+            return  # closed or another channel small meanwhile (a swap hands it over)
         playback = small.playback
-        if small.live.mode != "direct" or getattr(playback, "url", None) != url:
+        if getattr(playback, "url", None) != url:
             return
         logger.info("Opening %s small again after its stream ended", target.title)
         playback.play(
             url,
-            kind=PlayKind.LIVE,
+            kind=kind,
             latency=self.config.live_latency,
             **live_controls.reopen_options(playback, target.item),
         )
@@ -724,6 +725,24 @@ class PipControls(QObject):
     def _cancel_reopen(self) -> None:
         self._reopen_due = None
         self._reopen_timer.stop()
+
+    def take_reopen(self, name: str) -> Optional[live_controls.Reopen]:
+        """A swap made slot `name` large: its ended stream on its way to open again goes with
+        it (to LiveControls; None: none waits). It no longer opens here."""
+        due = self._reopen_due
+        if due is None or due[0] != name:
+            return None
+        remaining = max(0, self._reopen_timer.remainingTime())
+        self._cancel_reopen()
+        _name, target, url, kind = due
+        return live_controls.Reopen(target, url, kind, remaining, self._reopens.get(name, 0))
+
+    def adopt_reopen(self, name: str, reopen: live_controls.Reopen) -> None:
+        """A swap made slot `name` small while its ended stream was on its way to open again
+        (large): it opens here once the rest of its back-off is over."""
+        self._reopens[name] = reopen.count
+        self._reopen_due = (name, reopen.target, reopen.url, reopen.kind)
+        self._reopen_timer.start(reopen.remaining_ms)
 
     def _on_timeline(self, name: str, state: dict) -> None:
         self._timelines[name] = state

@@ -28,7 +28,7 @@ session and player (`use_slot`); a multiview's focused tile is the large picture
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import logging
 import time
@@ -69,7 +69,7 @@ RECONNECTING_TEXT = N_("Reconnecting…")
 NOT_YET_TEXT = N_("Recording can start once the channel plays")
 _PIPELINE_SCHEMES = ("http", "https")  # what the pipeline's source can read
 # Never opened again: on-demand content, and a file listed as a channel ends for good.
-_NOT_LIVE = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
+NOT_REOPENED = (PlayKind.VOD_FILE, PlayKind.VOD_STREAM, PlayKind.LIVE_PIPELINE)
 
 
 def stream_options(item: dict) -> dict[str, Any]:
@@ -88,6 +88,18 @@ def reopen_options(player, item: dict) -> dict[str, Any]:
     if player.decodes_in_software():
         options["software"] = True
     return options
+
+
+@dataclass
+class Reopen:
+    """An ended direct stream on its way to open again in its player, as a swap hands it to
+    the picture that has that player now (`take_reopen`, `adopt_reopen`)."""
+
+    target: Target
+    url: str
+    kind: PlayKind
+    remaining_ms: int  # of its back-off
+    count: int  # its reopens so far
 
 
 def _named(title: str, message: str) -> str:
@@ -341,7 +353,7 @@ class LiveControls(QObject):
         if self._reopen_due is not None:
             return True  # already on its way
         url, kind = self.session.url, self.session.kind
-        if not url or kind is None or kind in _NOT_LIVE:
+        if not url or kind is None or kind in NOT_REOPENED:
             return False
         since, self._playing_since = self._playing_since, None
         if since is not None and time.monotonic() - since >= HEALTHY_S:
@@ -375,6 +387,24 @@ class LiveControls(QObject):
     def _cancel_reopen(self) -> None:
         self._reopen_due = None
         self._reopen_timer.stop()
+
+    def take_reopen(self) -> Optional[Reopen]:
+        """A swap: the large picture's ended stream on its way to open again goes with its
+        player, to the small picture (None: none waits). It no longer opens here."""
+        due = self._reopen_due
+        if due is None:
+            return None
+        remaining = max(0, self._reopen_timer.remainingTime())
+        self._cancel_reopen()
+        target, url, kind = due
+        return Reopen(target, url, kind, remaining, self._reconnects)
+
+    def adopt_reopen(self, reopen: Reopen) -> None:
+        """A swap made the large picture a player whose ended stream was on its way to open
+        again (small): it opens here once the rest of its back-off is over."""
+        self._reopen_due = (reopen.target, reopen.url, reopen.kind)
+        self._reconnects = reopen.count
+        self._reopen_timer.start(reopen.remaining_ms)
 
     def retry(self, current: Target) -> None:
         logger.info("Making the link of %s again after a playback failure", current.title)
