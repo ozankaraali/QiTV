@@ -89,6 +89,13 @@ def stream(url):
     return source, drain(source)
 
 
+def settle(capture):
+    """Wait until the capture's writer has done what was queued so far."""
+    done = threading.Event()
+    capture._queue(done.set)
+    assert done.wait(5), "the capture's writer is stuck"
+
+
 class CaptureFileTests(unittest.TestCase):
     """The tee itself, with arrival times given."""
 
@@ -143,6 +150,7 @@ class CaptureFileTests(unittest.TestCase):
         first, second = self.capture(), self.capture()
         second.name = first.name
         first.write(b"one", first._opened)
+        settle(first)  # each capture has a writer of its own: the first one names its pair first
         second.write(b"two", second._opened)
         first.close()
         second.close()
@@ -176,8 +184,10 @@ class CaptureFileTests(unittest.TestCase):
     def test_a_mark_flushes_both_files(self):
         capture = self.capture()
         capture.write(b"abc", capture._opened)
+        settle(capture)
         self.assertEqual(self.on_disk(capture), (b"", ""))  # buffered
         capture.mark("reconnect")
+        settle(capture)
         data, times = self.on_disk(capture)
         self.assertEqual(data, b"abc")
         self.assertRegex(times, r"^3 0\.000\n# reconnect \d+\.\d{3}\n$")
@@ -187,30 +197,75 @@ class CaptureFileTests(unittest.TestCase):
         opened = capture._opened
         capture.write(b"abc", opened + 0.2)
         capture.write(b"def", opened + 0.9)
+        settle(capture)
         self.assertEqual(self.on_disk(capture), (b"", ""))
         capture.write(b"ghi", opened + 2.5)  # after a stall
+        settle(capture)
         self.assertEqual(self.on_disk(capture), (b"abcdefghi", "3 0.200\n6 0.900\n9 2.500\n"))
         capture.write(b"jkl", opened + 2.6)
+        settle(capture)
         self.assertEqual(self.on_disk(capture)[0], b"abcdefghi")
 
-    def test_flush_from_another_thread_never_waits_for_the_reading_thread(self):
+    def test_the_reading_thread_never_waits_for_the_disk(self):
         capture = self.capture()
         capture.write(b"abc")
-        with capture._lock:  # the reading thread is writing: left to it
-            flushing = threading.Thread(target=capture.flush)
-            flushing.start()
-            flushing.join(1.0)
-            self.assertFalse(flushing.is_alive())
-        self.assertEqual(self.on_disk(capture)[0], b"")
-        flushing = threading.Thread(target=capture.flush)
+        settle(capture)
+        disk = threading.Event()
+        capture._queue(disk.wait)  # the disk hangs: the writer waits for it
+        started = time.monotonic()
+        capture.write(b"def")
+        capture.mark("reconnect")
+        flushing = threading.Thread(target=capture.flush)  # from another thread, as a close
         flushing.start()
         flushing.join(1.0)
+        self.assertFalse(flushing.is_alive())
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(self.on_disk(capture)[0], b"")
+        disk.set()
+        settle(capture)
         data, times = self.on_disk(capture)
-        self.assertEqual(data, b"abc")
-        self.assertRegex(times, r"^3 \d+\.\d{3}\n$")
-        capture.write(b"def")  # still open: the reading thread closes it
+        self.assertEqual(data, b"abcdef")
+        self.assertRegex(times, r"^3 \d+\.\d{3}\n6 \d+\.\d{3}\n# reconnect \d+\.\d{3}\n$")
+        capture.write(b"ghi")  # still open: the reading thread closes it
         capture.close()
-        self.assertEqual(self.on_disk(capture)[0], b"abcdef")
+        self.assertEqual(self.on_disk(capture)[0], b"abcdefghi")
+
+    def test_the_disk_is_reached_from_the_writer_alone(self):
+        nested = os.path.join(self.root, "made")
+        capture = capture_module._Capture(nested, "http://host.invalid/1.ts")
+        self.addCleanup(capture.close)
+        threads = []
+        usage = capture_module.shutil.disk_usage
+
+        def disk_usage(path):
+            threads.append(threading.current_thread())
+            return usage(path)
+
+        with patch.object(capture_module.shutil, "disk_usage", disk_usage):
+            capture.write(b"abc")
+            settle(capture)
+        self.assertTrue(threads)
+        self.assertNotIn(threading.current_thread(), threads)
+
+    def test_reads_a_slow_disk_cannot_take_are_dropped_with_one_warning(self):
+        capture = self.capture()
+        disk = threading.Event()
+        with patch.object(capture_module, "_CAPTURE_QUEUE_BYTES", 10), _Logs() as logs:
+            capture._queue(disk.wait)
+            capture.write(b"0123456")  # queued
+            capture.write(b"789")  # queued: 10 bytes wait
+            capture.write(b"x")  # dropped
+            capture.write(b"y")  # dropped
+            disk.set()
+            settle(capture)
+            capture.write(b"z")  # room again
+            capture.close()
+        self.assertEqual(self.on_disk(capture)[0], b"0123456789z")
+        warnings = [message for level, message in logs if level == logging.WARNING]
+        self.assertEqual(
+            warnings,
+            [f"The live stream capture {capture.name} is dropping reads: its disk is slow."],
+        )
 
     def test_closing_the_source_flushes_its_capture(self):
         for method in ("close", "wait_closed"):
@@ -222,11 +277,13 @@ class CaptureFileTests(unittest.TestCase):
                     http, "http://host.invalid/1.ts", None, b"", capture=capture
                 )
                 capture.write(b"abc")
+                settle(capture)
                 self.assertEqual(self.on_disk(capture)[0], b"")
                 if method == "close":
                     source.close()
                 else:
                     source.wait_closed(0.0)
+                settle(capture)
                 self.assertEqual(self.on_disk(capture)[0], b"abc")
                 capture.close()
 
@@ -236,6 +293,7 @@ class CaptureFileTests(unittest.TestCase):
         with patch.object(capture_module, "_CAPTURE_MAX_BYTES", 25), _Logs() as logs:
             for index in range(5):
                 capture.write(b"0123456789", opened + index)
+            settle(capture)
         (name,) = captures(self.root)
         self.assertEqual((Path(self.root) / f"{name}.ts").read_bytes(), b"0123456789" * 2)
         self.assertEqual(read_times(Path(self.root) / f"{name}.times")[0], [(10, 0.0), (20, 1.0)])
@@ -249,6 +307,7 @@ class CaptureFileTests(unittest.TestCase):
             capture.write(b"abc", opened + 3 * 3600 - 0.5)
             capture.write(b"def", opened + 3 * 3600)
             capture.write(b"ghi", opened + 3 * 3600 + 1)
+            settle(capture)
         (name,) = captures(self.root)
         self.assertEqual((Path(self.root) / f"{name}.ts").read_bytes(), b"abc")
         stops = [message for _level, message in logs if "stopped" in message]
@@ -261,6 +320,7 @@ class CaptureFileTests(unittest.TestCase):
         with patch.object(capture_module.shutil, "disk_usage", return_value=usage), _Logs() as logs:
             capture.write(b"abc")
             capture.write(b"def")
+            settle(capture)
         self.assertEqual(os.listdir(self.root), [])
         self.assertEqual(
             [level for level, message in logs if "less than 1 GiB free" in message],
@@ -278,6 +338,7 @@ class CaptureFileTests(unittest.TestCase):
         ):
             for _ in range(5):
                 capture.write(b"0123456")
+            settle(capture)
         (name,) = captures(self.root)
         # Looked up at the start, after 14 bytes and after 28: the last stops it.
         self.assertEqual((Path(self.root) / f"{name}.ts").read_bytes(), b"0123456" * 4)
@@ -294,6 +355,7 @@ class CaptureFileTests(unittest.TestCase):
             capture.write(b"def")  # fails
             capture.write(b"ghi")  # stopped: never tried
             capture.mark("reconnect")
+            settle(capture)
         self.assertEqual(writes.attempts, 2)
         warnings = [message for level, message in logs if level == logging.WARNING]
         self.assertEqual(

@@ -5,14 +5,16 @@ reading an HLS capture's segments back (`captured_segments`)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import hashlib
 import logging
 import os
 from pathlib import Path
+import queue
 import shutil
 import threading
 import time
-from typing import BinaryIO, TextIO
+from typing import BinaryIO, Callable, Optional, TextIO
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +30,8 @@ _CAPTURE_FREE_FLOOR = 1 << 30  # and never leaves the disk less than 1 GiB free
 _CAPTURE_CHECK_BYTES = 32 << 20  # the free space is looked up again after this much
 _CAPTURE_BUFFER = 1 << 20
 _CAPTURE_FLUSH_S = 1.0  # a read this long after the last flush flushes both files
+_CAPTURE_QUEUE_BYTES = 64 << 20  # reads waiting for a slow disk; more are dropped
+_CAPTURE_CLOSE_WAIT_S = 2.0  # a closing source waits this long for its capture's last writes
 
 
 def _private(path: str, flags: int) -> int:
@@ -63,13 +67,16 @@ class _Capture:
     replays with sound (``scripts/replay_capture.py`` does).
 
     The files are made at the first bytes, readable by their owner only (and the directory,
-    when it is made here), and written in the reading thread, buffered. Both are flushed by
-    a comment line, by a read that comes a second or more after the last flush (so also the
-    first read after a stall), and when the source closes: `flush` from the closing thread,
-    then the reading thread's own close (the helper ends with ``os._exit``, which flushes
-    nothing). A capture stops after 2 GiB or 3 hours, or where the disk would keep less than
-    1 GiB free; a failure to write logs one warning and stops it (its audio pair with it).
-    Playback goes on unchanged either way.
+    when it is made here), and written buffered by a thread of the capture's own, in the
+    order the reads came: the reading thread only queues them, so a slow disk never holds
+    the stream up. Reads that would leave more than 64 MiB waiting for the disk are dropped
+    (one warning says so). Both files are flushed by a comment line, by a read that comes a
+    second or more after the last flush (so also the first read after a stall), and when the
+    source closes: `flush` from the closing thread, then the reading thread's own close,
+    which waits up to 2 seconds for what is queued (the helper ends with ``os._exit``, which
+    flushes nothing). A capture stops after 2 GiB or 3 hours, or where the disk would keep
+    less than 1 GiB free; a failure to write logs one warning and stops it (its audio pair
+    with it). Playback goes on unchanged either way.
     """
 
     def __init__(self, directory: str, url: str, *, video: _Capture | None = None) -> None:
@@ -79,12 +86,20 @@ class _Capture:
         digest = hashlib.sha256(url.encode("utf-8", "surrogatepass")).hexdigest()[:8]
         self.name = f"{time.strftime('%Y%m%d-%H%M%S')}-{digest}"
         self._directory = directory
-        self._lock = threading.Lock()  # the reading thread, and `flush` from a closing one
+        # The writer's alone: the files and what went to them.
         self._files: tuple[BinaryIO, TextIO] | None = None
         self._written = 0
         self._checked = 0  # what had been written when the free space was last looked up
         self._flushed = self._opened
-        self._stopped = False
+        self._stopped = False  # by a limit, a failure or the close (the writer)
+        # The reading thread's: the writer and its jobs (None: the close), the bytes queued
+        # and not yet written, and whether reads were dropped (said once).
+        self._writer: threading.Thread | None = None
+        self._jobs: queue.SimpleQueue[Optional[Callable[[], None]]] = queue.SimpleQueue()
+        self._queued = 0
+        self._queued_lock = threading.Lock()  # the reading thread adds, the writer takes
+        self._closing = False  # close() came: nothing more is queued
+        self._dropped = False
         self._audio: _Capture | None = None
 
     def audio(self) -> _Capture:
@@ -100,20 +115,32 @@ class _Capture:
         return cls(directory, url) if directory else None
 
     @property
-    def _ended(self) -> bool:
+    def _halted(self) -> bool:
         """It stopped (an audio pair also once its video's did)."""
         return self._stopped or (self._video is not None and self._video._stopped)
+
+    @property
+    def _ended(self) -> bool:
+        """Nothing more is queued: it stopped, or its source closed."""
+        video = self._video
+        return self._halted or self._closing or (video is not None and video._closing)
 
     def write(self, block: bytes, at: float | None = None) -> None:
         """One read's bytes, which arrived at ``at`` (`time.monotonic`; now by default)."""
         if self._ended or not block:
             return
         now = time.monotonic() if at is None else at
-        with self._lock:
-            try:
-                self._write(block, now)
-            except Exception as error:
-                self._failed(error)
+        with self._queued_lock:
+            room = self._queued + len(block) <= _CAPTURE_QUEUE_BYTES
+            if room:
+                self._queued += len(block)
+        if room:
+            self._queue(partial(self._write_queued, block, now))
+        elif not self._dropped:
+            self._dropped = True
+            log.warning(
+                "The live stream capture %s is dropping reads: its disk is slow.", self.name
+            )
 
     def mark(self, event: str, *words: object) -> None:
         """A ``# <event> <seconds> [<word> …]`` line in the times file, now; both files are
@@ -122,36 +149,72 @@ class _Capture:
             return
         now = time.monotonic()
         line = " ".join([f"# {event} {now - self._opened:.3f}", *map(str, words)])
-        with self._lock:
-            try:
-                files = self._open()
-                if files is not None:
-                    files[1].write(line + "\n")
-                    self._flush(now)
-            except Exception as error:
-                self._failed(error)
+        self._queue(partial(self._mark_queued, line, now))
 
     def flush(self) -> None:
-        """From any thread (the source's ``close`` and ``wait_closed``): what is buffered goes
-        to disk (the audio pair's too). Never waits: while the reading thread is writing, it
-        is left to that thread, which closes the files as the source ends."""
+        """From any thread (the source's ``close`` and ``wait_closed``): what was read goes to
+        disk (the audio pair's too), once the writer has written it. Never waits."""
         if self._audio is not None:
             self._audio.flush()
-        if self._stopped or not self._lock.acquire(blocking=False):
-            return
-        try:
-            if self._files is not None:
-                self._flush(time.monotonic())
-        except Exception as error:
-            self._failed(error)
-        finally:
-            self._lock.release()
+        if self._writer is not None and not self._ended:
+            self._jobs.put(self._flush_queued)
 
     def close(self) -> None:
-        """In the reading thread, as the source ends: both files are flushed and closed (and
-        the audio pair's)."""
-        with self._lock:
-            self._close()
+        """In the reading thread, as the source ends: what was read is written, and both files
+        are flushed and closed (and the audio pair's). Waits up to 2 seconds for that."""
+        if self._audio is not None:
+            self._audio.close()
+        self._closing = True
+        writer = self._writer
+        if writer is None:
+            self._stopped = True  # nothing was ever queued: no file was made
+            return
+        self._jobs.put(None)
+        writer.join(_CAPTURE_CLOSE_WAIT_S)
+        if writer.is_alive():
+            log.info("The live stream capture %s is still being written.", self.name)
+
+    # ---- the writer ---------------------------------------------------------------------------
+
+    def _queue(self, job: Callable[[], None]) -> None:
+        if self._writer is None:
+            writer = threading.Thread(target=self._run, name="qitv-capture", daemon=True)
+            try:
+                writer.start()
+            except Exception as error:  # the stream goes on without its capture
+                self._failed(error)
+                return
+            self._writer = writer
+        self._jobs.put(job)
+
+    def _run(self) -> None:
+        """The writer: each job in the order queued; the files close at the close."""
+        while (job := self._jobs.get()) is not None:
+            try:
+                job()
+            except Exception as error:
+                self._failed(error)
+        self._close()
+
+    def _write_queued(self, block: bytes, now: float) -> None:
+        try:
+            if not self._halted:
+                self._write(block, now)
+        finally:
+            with self._queued_lock:
+                self._queued -= len(block)
+
+    def _mark_queued(self, line: str, now: float) -> None:
+        if self._halted:
+            return
+        files = self._open()
+        if files is not None:
+            files[1].write(line + "\n")
+            self._flush(now)
+
+    def _flush_queued(self) -> None:
+        if not self._halted and self._files is not None:
+            self._flush(time.monotonic())
 
     def _write(self, block: bytes, now: float) -> None:
         seconds = now - self._opened
@@ -178,6 +241,7 @@ class _Capture:
         self._flushed = now
 
     def _close(self) -> None:
+        """The writer's: the files close (an audio pair's writer closes its own)."""
         self._stopped = True
         files, self._files = self._files, None
         if files is not None:
@@ -186,8 +250,6 @@ class _Capture:
                     file.close()
                 except Exception as error:
                     log.debug("Closing the capture failed (%s).", type(error).__name__)
-        if self._audio is not None:  # only ever written by this (the reading) thread
-            self._audio.close()
 
     def _open(self) -> tuple[BinaryIO, TextIO] | None:
         """The files, made at the first call; None once the disk is too full."""
