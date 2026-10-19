@@ -1692,3 +1692,4 @@ class MixerTests(PipCase):
         controller.start()
         self.assertEqual((self.sessions.level("main"), self.sessions.level("pip")), (45, 12))
         self.assertEqual(self.session.level, 45)
+        self.assertEqual(self.transport.named("set_level")[-1], (45,))  # its speaker too

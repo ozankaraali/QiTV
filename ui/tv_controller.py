@@ -557,6 +557,7 @@ class TVController(QObject):
         self._picture.wire()
         if self._pip is not None:
             self._pip.wire()
+        self._on_audio_changed()  # the speakers show the remembered levels from the start
         if self._grid is not None:
             self._grid.wire()
             gridded = getattr(transport, "gridRequested", None)
