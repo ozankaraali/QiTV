@@ -31,15 +31,17 @@ import _socket
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+import hashlib
 import logging
 import os
 import re
+import shutil
 import socket
 import ssl
 import sys
 import threading
 import time
-from typing import Any, BinaryIO, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, Protocol, TextIO, TypeVar, cast
 from urllib.parse import urljoin, urlsplit
 from urllib.request import url2pathname
 import weakref
@@ -113,6 +115,16 @@ _WINDOWS = sys.platform == "win32"
 # instead of shutting down duplicates (see the module docstring).
 _INTERRUPT_OWNERS = _WINDOWS
 _TLS_SLICE = 0.25
+# A directory where every opened source saves what it reads from the provider, with arrival
+# times (`_Capture`). For debugging only: the files hold the provider's stream. Unset (the
+# default), nothing is saved and nothing is paid.
+CAPTURE_ENV = "QITV_CAPTURE_DIR"
+_CAPTURE_MAX_BYTES = 2 << 30  # a capture stops after 2 GiB ...
+_CAPTURE_MAX_SECONDS = 3 * 3600.0  # ... or 3 hours
+_CAPTURE_FREE_FLOOR = 1 << 30  # and never leaves the disk less than 1 GiB free
+_CAPTURE_CHECK_BYTES = 32 << 20  # the free space is looked up again after this much
+_CAPTURE_BUFFER = 1 << 20
+_CAPTURE_FLUSH_S = 1.0  # a helper ended by os._exit loses at most this much of it
 
 _OPEN_FAILED = "The channel could not be opened for time-shift."
 _HTTP_FAILED = "The channel could not be reached over HTTP."
@@ -808,8 +820,147 @@ def _shorten_read_timeout(response: Any) -> None:
         log.debug("A read timeout could not be shortened (%s).", type(error).__name__)
 
 
-def _guarded(http: _Http, inner: Iterator[Chunk]) -> Iterator[Chunk]:
-    """End quietly when closed; turn every other failure into a context-free SourceError."""
+class _Capture:
+    """What one opened source reads from the provider, saved under ``QITV_CAPTURE_DIR`` so a
+    glitch can be replayed exactly (`scripts/replay_capture.py`, or VLC and mpv).
+
+    ``<stamp>-<hash>.ts`` holds the bytes as they were read, before any parsing, joining or
+    segmenting: a raw TS body from its first byte on, and an HLS channel's media segments one
+    after another in arrival order (an AES-128 segment decrypted, as it reaches the joiner;
+    no playlist). ``<stamp>-<hash>.times`` has one ``<cumulative bytes> <seconds>`` line per
+    read, the seconds counted from the open's start with 3 decimals, and comment lines that
+    readers skip: ``# reconnect <seconds>`` once a raw TS stream's new connection answered
+    (its bytes go on in the same pair, as they go on in the stream the helper reads), and for
+    HLS ``# segment <seconds>`` as each segment answers, after ``# discontinuity <seconds>``
+    when a break comes before it. The stamp is the local time at the open and the hash 8 hex
+    digits of the channel URL's SHA-256: no address or credential reaches a file or a log.
+
+    Files are made at the first bytes, written in the reading thread and buffered (flushed
+    every second). A capture stops after 2 GiB or 3 hours, or where the disk would keep less
+    than 1 GiB free; a failure to write logs one warning and stops it. Playback goes on
+    unchanged either way.
+    """
+
+    def __init__(self, directory: str, url: str) -> None:
+        self._opened = time.monotonic()
+        digest = hashlib.sha256(url.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+        self.name = f"{time.strftime('%Y%m%d-%H%M%S')}-{digest}"
+        self._directory = directory
+        self._files: tuple[BinaryIO, TextIO] | None = None
+        self._written = 0
+        self._checked = 0  # what had been written when the free space was last looked up
+        self._flushed = self._opened
+        self._stopped = False
+
+    @classmethod
+    def from_environment(cls, url: str) -> _Capture | None:
+        directory = os.environ.get(CAPTURE_ENV, "")
+        return cls(directory, url) if directory else None
+
+    def write(self, block: bytes, at: float | None = None) -> None:
+        """One read's bytes, which arrived at ``at`` (`time.monotonic`; now by default)."""
+        if self._stopped or not block:
+            return
+        now = time.monotonic() if at is None else at
+        seconds = now - self._opened
+        try:
+            if seconds >= _CAPTURE_MAX_SECONDS:
+                self._stop(logging.INFO, "after 3 hours")
+                return
+            if self._written + len(block) > _CAPTURE_MAX_BYTES:
+                self._stop(logging.INFO, "at 2 GiB")
+                return
+            files = self._open()
+            if files is None:
+                return
+            data, times = files
+            data.write(block)
+            self._written += len(block)
+            times.write(f"{self._written} {seconds:.3f}\n")
+            if now - self._flushed >= _CAPTURE_FLUSH_S:
+                self._flushed = now
+                data.flush()
+                times.flush()
+        except Exception as error:
+            self._failed(error)
+
+    def mark(self, event: str) -> None:
+        """A ``# <event> <seconds>`` line in the times file, now."""
+        if self._stopped:
+            return
+        seconds = time.monotonic() - self._opened
+        try:
+            files = self._open()
+            if files is not None:
+                files[1].write(f"# {event} {seconds:.3f}\n")
+        except Exception as error:
+            self._failed(error)
+
+    def close(self) -> None:
+        self._stopped = True
+        files, self._files = self._files, None
+        if files is not None:
+            for file in files:
+                _quietly(file.close, "capture")
+
+    def _open(self) -> tuple[BinaryIO, TextIO] | None:
+        """The files, made at the first call; None once the disk is too full."""
+        if self._files is None:
+            os.makedirs(self._directory, exist_ok=True)
+            if not self._room():
+                return None
+            self._files = self._create()
+            log.info("Capturing the live stream to %s.ts and .times.", self.name)
+        elif self._written - self._checked >= _CAPTURE_CHECK_BYTES and not self._room():
+            return None
+        return self._files
+
+    def _create(self) -> tuple[BinaryIO, TextIO]:
+        """A new pair: a second open in the same second of the same channel adds -2, -3..."""
+        for attempt in range(1, 100):
+            name = self.name if attempt == 1 else f"{self.name}-{attempt}"
+            path = os.path.join(self._directory, name)
+            try:
+                data = open(path + ".ts", "xb", buffering=_CAPTURE_BUFFER)
+            except FileExistsError:
+                continue
+            try:
+                times = open(path + ".times", "x", encoding="ascii", newline="\n")
+            except BaseException:
+                data.close()
+                raise
+            self.name = name
+            return data, times
+        raise FileExistsError()
+
+    def _room(self) -> bool:
+        """Whether the disk keeps 1 GiB free until the next look, even with the buffer."""
+        self._checked = self._written
+        free = shutil.disk_usage(self._directory).free
+        if free >= _CAPTURE_FREE_FLOOR + _CAPTURE_CHECK_BYTES + _CAPTURE_BUFFER:
+            return True
+        self._stop(logging.WARNING, "with less than 1 GiB free on its disk")
+        return False
+
+    def _stop(self, level: int, why: str) -> None:
+        self.close()
+        log.log(level, "The live stream capture %s stopped %s.", self.name, why)
+
+    def _failed(self, error: Exception) -> None:
+        # An OSError's text names the path: only its type is told.
+        self.close()
+        log.warning(
+            "The live stream capture %s stopped: it could not be written (%s).",
+            self.name,
+            type(error).__name__,
+        )
+
+
+def _guarded(
+    http: _Http, inner: Iterator[Chunk], capture: _Capture | None = None
+) -> Iterator[Chunk]:
+    """End quietly when closed; turn every other failure into a context-free SourceError.
+    The capture, if any, is closed with the source, in the reading thread."""
     failure: SourceError | None = None
     try:
         yield from inner
@@ -820,7 +971,11 @@ def _guarded(http: _Http, inner: Iterator[Chunk]) -> Iterator[Chunk]:
             return
         failure = _translate(error)
     finally:
-        http.close()
+        try:
+            http.close()
+        finally:
+            if capture is not None:
+                capture.close()
     if failure is not None:
         raise failure
 
@@ -834,19 +989,29 @@ class TsSource:
 
     hls = False
 
-    def __init__(self, http: _Http, url: str, response: Any, prefix: bytes) -> None:
+    def __init__(
+        self,
+        http: _Http,
+        url: str,
+        response: Any,
+        prefix: bytes,
+        *,
+        capture: _Capture | None = None,
+    ) -> None:
         self.user_agent = http.user_agent
         self._http = http
         self._url = url
         self._response = response
         self._prefix = prefix
+        self._prefix_at = time.monotonic()  # the open has just read it
+        self._capture = capture
 
     @property
     def burst_s(self) -> float:
         return 0.0
 
     def chunks(self) -> Iterator[Chunk]:
-        return _guarded(self._http, self._run())
+        return _guarded(self._http, self._run(), self._capture)
 
     def close(self) -> None:
         self._http.close()
@@ -855,17 +1020,21 @@ class TsSource:
         return self._http.wait_closed(timeout)
 
     def _run(self) -> Iterator[bytes | Discontinuity]:
-        http, response, prefix = self._http, self._response, self._prefix
+        http, response, prefix, capture = self._http, self._response, self._prefix, self._capture
         self._response, self._prefix = None, b""
         if response is None:
             return
         backoff = _Backoff()
         connected, received, reconnected = time.monotonic(), 0, False
         if prefix:
+            if capture is not None:
+                capture.write(prefix, self._prefix_at)
             yield prefix
         while True:
             try:
                 while block := http.read(response):
+                    if capture is not None:
+                        capture.write(block)
                     if reconnected:
                         reconnected = False
                         yield Discontinuity()
@@ -886,6 +1055,8 @@ class TsSource:
             finally:
                 http.release(response)
             response = http.retry(lambda: http.get(self._url), backoff)
+            if capture is not None:
+                capture.mark("reconnect")
             connected, received, reconnected = time.monotonic(), 0, True
 
 
@@ -1180,9 +1351,11 @@ class HlsSource:
         extra: float = 0.0,
         *,
         separate_audio: bool = False,
+        capture: _Capture | None = None,
     ) -> None:
         self.user_agent = http.user_agent
         self._http = http
+        self._capture = capture
         self._playlist = playlist
         # The master named a separate default audio playlist: the first segment must show the
         # variant's own audio (`_own_audio`) before any of it passes.
@@ -1242,7 +1415,7 @@ class HlsSource:
         return self._rest
 
     def chunks(self) -> Iterator[Chunk]:
-        return _guarded(self._http, self._run())
+        return _guarded(self._http, self._run(), self._capture)
 
     def close(self) -> None:
         self._http.close()
@@ -1384,6 +1557,10 @@ class HlsSource:
         content = False
         joiner = self._joiner
         joiner.segment()
+        if self._capture is not None:
+            if self._pending:
+                self._capture.mark("discontinuity")
+            self._capture.mark("segment")
         try:
             blocks = _checked_ts(self._blocks(response, decryptor))
             if self._audio_unknown:
@@ -1443,10 +1620,18 @@ class HlsSource:
         self._mark()
 
     def _blocks(self, response: Any, decryptor: _Decryptor | None) -> Iterator[bytes]:
+        capture = self._capture
         while block := self._http.read(response):
-            yield decryptor.update(block) if decryptor else block
+            if decryptor:
+                block = decryptor.update(block)
+            if capture is not None:
+                capture.write(block)
+            yield block
         if decryptor:
-            yield decryptor.finish()
+            block = decryptor.finish()
+            if capture is not None:
+                capture.write(block)
+            yield block
 
     def _decryptor(self, key: Any, sequence: int, base: str) -> _Decryptor | None:
         if _key_method(key) == "NONE":
@@ -1562,16 +1747,19 @@ def _open_http(
     target: float | None,
     extra: float,
     on_answer: Callable[[bool], None] | None = None,
+    capture: _Capture | None = None,
 ) -> Source:
     response, prefix, content = _first_answer(http, url, on_answer)
     if content is None:
-        return TsSource(http, url, response, prefix)  # it now owns the response
+        return TsSource(http, url, response, prefix, capture=capture)  # it now owns the response
     try:
         final = str(response.url)
     finally:
         http.release(response)
     playlist, base, separate = _media_playlist(http, content, final)
-    return HlsSource(http, playlist, base, live_delay, target, extra, separate_audio=separate)
+    return HlsSource(
+        http, playlist, base, live_delay, target, extra, separate_audio=separate, capture=capture
+    )
 
 
 def open_source(
@@ -1612,6 +1800,8 @@ def open_source(
     the result from another thread interrupts a TLS handshake, read or wait; a DNS lookup
     is not bounded and a TCP connect ends within the 60 s timeout per address. An
     interrupted open raises ``SourceError("network")``; an interrupted ``chunks()`` ends.
+
+    With ``QITV_CAPTURE_DIR`` set, the source also saves what it reads there (`_Capture`).
     """
     try:
         scheme = _scheme(url)
@@ -1624,8 +1814,9 @@ def open_source(
     if scheme not in ("http", "https"):
         raise SourceError("unsupported")
     http = _Http(headers, verify_ssl, stop)
+    capture = _Capture.from_environment(url)
     try:
-        return _open_http(http, url, live_delay, target, extra, on_answer)
+        return _open_http(http, url, live_delay, target, extra, on_answer, capture)
     except Exception as error:
         failure = SourceError("network", _STOPPED) if http.closed else _translate(error)
     except BaseException:
