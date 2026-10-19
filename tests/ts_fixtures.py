@@ -215,3 +215,21 @@ def make_stream(
     if packet_size == 204:
         return b"".join(p + b"\x00" * 16 for p in pkts)
     return b"".join(pkts)
+
+
+def audio_only(seconds, *, pid=AUDIO_PID, pts_start=900000) -> bytes:
+    """An audio-only TS segment, as a separate HLS audio rendition's: PAT, a PMT listing one
+    AAC stream (its own PCR PID), then one ADTS-tagged PES per AAC frame from `pts_start`."""
+    body = (0xE000 | pid).to_bytes(2, "big") + b"\xf0\x00"
+    body += bytes([0x0F]) + (0xE000 | pid).to_bytes(2, "big") + b"\xf0\x00"
+    head = bytes([0x02]) + (0xB000 | (5 + len(body) + 4)).to_bytes(2, "big")
+    pkts, cc = [
+        pat(),
+        _psi_packet(PMT_PID, head + (1).to_bytes(2, "big") + bytes([0xC1, 0, 0]) + body, 0),
+    ], 0
+    for j in range(int(seconds * CLOCK) // AUDIO_FRAME_TICKS):
+        ps, cc = pes_packets(
+            pid, 0xC0, b"\xff\xf1" + b"\xaa" * 200, pts_start + j * AUDIO_FRAME_TICKS, cc_start=cc
+        )
+        pkts.extend(ps)
+    return b"".join(pkts)

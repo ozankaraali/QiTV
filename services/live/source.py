@@ -56,6 +56,7 @@ from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import NameResolutionError, ReadTimeoutError
 from urllib3.util.ssl_ import create_urllib3_context, resolve_cert_reqs, resolve_ssl_version
 
+from services.live.hls_audio import AudioWeaver
 from services.live.refusals import REFUSALS, STREAM_LIMIT, STREAM_REFUSED  # noqa: F401 (and here)
 from services.live.ts import ContinuityJoiner, program_has_audio
 from services.vlc_profile import DEFAULT_USER_AGENT
@@ -83,6 +84,9 @@ _PLAYLIST_TYPES = (
 # A variant whose master names a separate default audio playlist: how much of its first
 # segment may pass before its program tables must have shown audio of its own.
 _AUDIO_LOOK = 64 * 1024
+# A separate audio playlist that does not list a video segment's audio yet: reloaded this many
+# times, a target duration apart in all, before the segment plays silent.
+_AUDIO_RELOADS = 4
 _PACKET = 188
 _BLOCK = 16
 _RECONNECT_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 8.0)
@@ -1253,19 +1257,23 @@ def _check_media(playlist: Any, base: str) -> None:
             raise SourceError("unsupported", _ENCRYPTION)
 
 
-def _check_audio(playlist: Any) -> bool:
-    """Only the default AUDIO rendition matters: whether it is a separate playlist (True), which
-    a TS-only fetcher cannot mux. The variant may carry that audio too (some multi-track restream
-    servers name each track's playlist and mux the first into the video's): its first segment
-    decides (`HlsSource._own_audio`)."""
+def _check_audio(playlist: Any, url: str) -> str | None:
+    """Only the default AUDIO rendition matters: its playlist's URL when it is a separate one
+    (2.2: woven into the variant's TS, `AudioWeaver`), else None. The variant may carry that
+    audio too (some multi-track restream servers name each track's playlist and mux the first
+    into the video's): its first segment decides (`HlsSource._with_audio`)."""
     audio = [item for item in playlist.media if item.type == "AUDIO"]
     if not audio:
-        return False
+        return None
     default = next((item for item in audio if item.default == "YES"), audio[0])
-    dropped = [item.name or item.language or "unnamed" for item in audio if item.uri]
+    dropped = [
+        item.name or item.language or "unnamed"
+        for item in audio
+        if item.uri and item is not default
+    ]
     if dropped:
         log.info("Alternate audio renditions are not time-shifted: %s.", ", ".join(dropped))
-    return bool(default.uri)
+    return _resolve(url, default.uri) if default.uri else None
 
 
 def _sniff(http: _Http, response: Any) -> tuple[bytes, bytes | None]:
@@ -1291,16 +1299,16 @@ def _load_playlist(http: _Http, url: str) -> tuple[bytes, str]:
     return content, final
 
 
-def _media_playlist(http: _Http, content: bytes, url: str) -> tuple[Any, str, bool]:
-    """Follow the best variant down to a checked media playlist and its final URL; and
-    whether a master on the way named a separate default audio playlist (`_check_audio`)."""
-    separate = False
+def _media_playlist(http: _Http, content: bytes, url: str) -> tuple[Any, str, str | None]:
+    """Follow the best variant down to a checked media playlist and its final URL; and the
+    separate default audio playlist a master on the way named (`_check_audio`), if any."""
+    separate: str | None = None
     for _hop in range(_PLAYLIST_HOPS):
         playlist = _select_manifest(content, url)
         if not playlist.is_variant:
             _check_media(playlist, url)
             return playlist, url, separate
-        separate = _check_audio(playlist) or separate
+        separate = _check_audio(playlist, url) or separate
         content, url = _load_playlist(http, _resolve(url, playlist.playlists[0].uri))
     raise SourceError("unsupported", _INVALID_PLAYLIST)
 
@@ -1395,9 +1403,13 @@ class HlsSource:
       window, resumes at the live start;
     - reloads that bring no new segment for 60 s (download time excluded) time out.
 
-    A master that names a separate default audio playlist is followed to its variant; the
-    variant's first segment then passes only when its program tables list audio of its own
-    (`_own_audio`), else the channel is unsupported (nothing here muxes the separate audio).
+    A master that names a separate default audio playlist is followed to its variant. When the
+    variant's first segment lists no audio of its own in its program tables, the separate
+    playlist (MPEG-TS or packed ADTS segments) is woven in (2.2, `_with_audio`): each video
+    segment waits for the audio segment of the same media sequence number, and passes on as
+    one TS with it (`AudioWeaver`); a missing audio segment leaves its video segment silent.
+    An audio playlist that cannot be read, or of fragmented MP4, leaves the channel
+    unsupported, as before.
 
     Segments are joined with each PID's continuity counter running on (`ContinuityJoiner`):
     some CDNs package every segment on its own, its counters restarting at 0, and VLC took
@@ -1417,16 +1429,21 @@ class HlsSource:
         target: float | None = None,
         extra: float = 0.0,
         *,
-        separate_audio: bool = False,
+        separate_audio: str | None = None,
         capture: _Capture | None = None,
     ) -> None:
         self.user_agent = http.user_agent
         self._http = http
         self._capture = capture
         self._playlist = playlist
-        # The master named a separate default audio playlist: the first segment must show the
-        # variant's own audio (`_own_audio`) before any of it passes.
-        self._audio_unknown = separate_audio
+        # The master named a separate default audio playlist: the first segment shows whether
+        # the variant carries audio of its own, or the separate one is woven in (`_with_audio`).
+        self._audio_url = separate_audio
+        self._audio_unknown = separate_audio is not None
+        self._weaver: AudioWeaver | None = None
+        self._audio_list: dict[int, Any] = {}  # the audio playlist's segments by sequence
+        self._audio_base = ""
+        self._audio_ended = False  # it is finished (ENDLIST): no reload lists more
         self._url = url
         self._live_delay = live_delay
         self._target = target  # the session's target (None: start at live_delay only)
@@ -1634,8 +1651,8 @@ class HlsSource:
             self._capture.mark("segment")
         try:
             blocks = _checked_ts(self._blocks(response, decryptor))
-            if self._audio_unknown:
-                blocks = self._own_audio(blocks)
+            if self._audio_unknown or self._weaver is not None:
+                blocks = iter([self._with_audio(b"".join(blocks), sequence)])
             for block in blocks:
                 if self._pending:  # only ever right before bytes that really arrive
                     self._pending = False
@@ -1659,26 +1676,84 @@ class HlsSource:
         else:
             self._skip(failure, content)
 
-    def _own_audio(self, blocks: Iterator[bytes]) -> Iterator[bytes]:
-        """A segment's blocks, held until its program tables show whether the variant carries
-        audio of its own (2.1: public channels VLC played were refused for their master alone,
-        which named a separate default audio playlist the variant also muxed). Without such
-        audio by `_AUDIO_LOOK` bytes (or the segment's end), the channel is unsupported: a
-        TS-only fetcher cannot mux the separate playlist. Asked of the first whole segment
-        only (a missing one is skipped as any other, and the next one asked)."""
-        head = b""
-        audio: bool | None = None
-        for block in blocks:
-            head += block
-            audio = program_has_audio(head)
-            if audio is not None or len(head) >= _AUDIO_LOOK:
+    def _with_audio(self, video: bytes, sequence: int) -> bytes:
+        """A whole video segment with its sound: the first one's program tables show whether
+        the variant carries audio of its own (2.1: some multi-track restream servers name a
+        separate default audio playlist and mux it too), which leaves the separate playlist
+        out; else that playlist is read (`_load_audio`: unreadable or fragmented MP4, the
+        channel is unsupported) and from then on each segment's audio is woven in (2.2).
+        Asked of the first whole segment only (a missing one is skipped as any other)."""
+        if self._audio_unknown:
+            if program_has_audio(video[:_AUDIO_LOOK]):
+                self._audio_unknown = False
+                log.info("The HLS variant carries audio of its own; its separate one is left out.")
+                return video
+            self._load_audio()
+            self._audio_unknown = False
+            self._weaver = AudioWeaver()
+            log.info("The HLS variant has no audio of its own; its separate playlist is woven in.")
+        assert self._weaver is not None
+        audio = self._audio_segment(sequence)
+        return self._weaver.weave(video, audio) if audio else video
+
+    def _load_audio(self) -> None:
+        """(Re)load the separate audio playlist; raise `_BadSegment` when it cannot be woven."""
+        assert self._audio_url is not None
+        url = self._audio_url
+        try:
+            content, final = self._http.fetch(lambda: _load_playlist(self._http, url))
+            playlist = m3u8.loads(content.decode("utf-8-sig"), uri=final)
+        except _Closed:
+            raise
+        except Exception:
+            raise _BadSegment(_SEPARATE_AUDIO) from None
+        if (
+            playlist.is_variant
+            or playlist.segment_map
+            or any(segment.byterange for segment in playlist.segments)
+        ):
+            raise _BadSegment(_SEPARATE_AUDIO)  # fragmented MP4 (or byte ranges): not read
+        first = playlist.media_sequence or 0
+        self._audio_list = {first + k: segment for k, segment in enumerate(playlist.segments)}
+        self._audio_base = final
+        self._audio_ended = bool(playlist.is_endlist)
+
+    def _audio_segment(self, sequence: int) -> bytes:
+        """The audio segment of `sequence` (a live playlist that does not list it yet reloaded
+        up to `_AUDIO_RELOADS` times), decrypted; b"" when it is not there or fails (the video
+        plays without it)."""
+        segment = self._audio_list.get(sequence)
+        for attempt in range(_AUDIO_RELOADS):
+            if segment is not None or self._audio_ended:
                 break
-        if not audio:
-            raise _BadSegment(_SEPARATE_AUDIO)
-        self._audio_unknown = False
-        log.info("The HLS variant carries audio of its own; its separate playlist is left out.")
-        yield head
-        yield from blocks
+            if self._audio_list and sequence < min(self._audio_list):
+                break  # gone from its window already
+            # At the live edge the audio playlist may list a segment a little after the video's
+            # (another packager's): reloaded after a pause, up to a target duration in all.
+            if attempt and self._http.wait(max(0.5, self._burst / _AUDIO_RELOADS)):
+                raise _Closed()
+            try:
+                self._load_audio()
+            except _BadSegment:
+                return b""
+            segment = self._audio_list.get(sequence)
+        if segment is None:
+            log.info("The HLS audio playlist does not list segment %d; it plays silent.", sequence)
+            return b""
+        uri = _resolve(self._audio_base, segment.uri)
+        try:
+            decryptor = self._decryptor(segment.key, sequence, self._audio_base)
+            response = self._http.fetch(lambda: self._http.get(uri, headers=_IDENTITY))
+        except Exception as error:
+            if _skippable(error) is None:
+                raise
+            return b""
+        try:
+            return b"".join(self._blocks(response, decryptor))
+        except _ReadError, _BadSegment:
+            return b""
+        finally:
+            self._http.release(response)
 
     def _skip(self, failure: SourceError, content: bool = False) -> None:
         """Skip a segment with a marker, or end the session: on bad content before any

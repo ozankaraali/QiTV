@@ -89,6 +89,12 @@ def drain(source, *, caught_up=False, reconnecting=False):
     return parts
 
 
+def ts_fixtures_has_audio(data):
+    from services.live.ts import program_has_audio
+
+    return program_has_audio(data) is True
+
+
 def joined(*items):
     """What an HLS source yields for these segments (bytes) and markers, as `drain` joins it:
     each PID's continuity counter runs on across the segments, and the first PCR after a
@@ -504,11 +510,13 @@ unsupported.m3u8
         self.assertEqual(server.counts["/media/low.m3u8"], 0)
         self.assertEqual(server.counts["/media/unsupported.m3u8"], 0)
 
-    def test_an_external_audio_group_is_unsupported_unless_the_variant_carries_audio(self):
-        # A TS-only fetcher cannot mux a separate audio playlist. Some multi-track restream
-        # servers name each track's playlist and still mux the first audio into the video's,
-        # though: whether the variant carries audio of its own, its first segment's program
-        # tables tell (2.1: public channels VLC played were refused for their master alone).
+    def test_an_external_audio_group_is_woven_in_unless_the_variant_carries_audio(self):
+        # Some multi-track restream servers name each track's playlist and still mux the first
+        # audio into the video's: whether the variant carries audio of its own, its first
+        # segment's program tables tell (2.1: public channels VLC played were refused for their
+        # master alone), and the separate playlist is left out. A video-only variant has its
+        # separate default audio woven in, segment by segment (2.2); a segment the audio
+        # playlist does not list (after one reload) plays silent.
         master = b'''#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="languages",NAME="English",LANGUAGE="eng",DEFAULT=YES,AUTOSELECT=YES,URI="audio/en.m3u8"
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="languages",NAME="French",LANGUAGE="fra",DEFAULT=NO,AUTOSELECT=YES,URI="audio/fr.m3u8"
@@ -518,7 +526,8 @@ low.m3u8
 high.m3u8
 '''
         video_only = ts_fixtures.make_stream(4, audio=False)
-        for name, segment, plays in (
+        audio = ts_fixtures.audio_only(4)
+        for name, segment, own in (
             ("its own audio", self.video, True),
             ("video only", video_only, False),
         ):
@@ -528,6 +537,7 @@ high.m3u8
                         "/master.m3u8": (200, {}, master),
                         "/high.m3u8": (200, {}, leaf("video.ts", "next.ts")),
                         "/audio/en.m3u8": (200, {}, leaf("en.ts")),
+                        "/audio/en.ts": (200, {}, audio),
                         "/video.ts": (200, {}, segment),
                         "/next.ts": (200, {}, segment),
                     }
@@ -535,21 +545,74 @@ high.m3u8
                 source = open_source(
                     server.url + "/master.m3u8", headers={}, verify_ssl=True, stop=threading.Event()
                 )
-                if plays:
-                    self.assertEqual(drain(source), joined(segment, segment))
-                    self.assertEqual(server.counts["/next.ts"], 1)
+                parts = drain(source)
+                if own:
+                    self.assertEqual(parts, joined(segment, segment))
+                    self.assertEqual(server.counts["/audio/en.m3u8"], 0)  # never fetched
                 else:
-                    parts = []
-                    with self.assertRaises(SourceError) as raised:
-                        parts.extend(source.chunks())
-                    self.assertEqual(raised.exception.kind, "unsupported")
-                    self.assertIn("separate", str(raised.exception))
-                    self.assertEqual(parts, [])  # not one byte of it
-                    self.assertEqual(server.counts["/next.ts"], 0)
+                    (out,) = parts
+                    first = out[: len(segment) + len(audio) - 2 * 188]  # its PAT and PMT left out
+                    self.assertTrue(ts_fixtures_has_audio(first))
+                    self.assertEqual(len(out), len(first) + len(segment))  # the next one silent
+                    self.assertEqual(server.counts["/audio/en.m3u8"], 1)  # finished: no reload
+                    self.assertEqual(server.counts["/audio/en.ts"], 1)
+                self.assertEqual(server.counts["/next.ts"], 1)
                 self.assertEqual(server.counts["/master.m3u8"], 1)
                 self.assertEqual(server.counts["/high.m3u8"], 1)
-                self.assertEqual(server.counts["/audio/en.m3u8"], 0)  # never fetched
                 self.assertEqual(server.counts["/video.ts"], 1)
+
+    def test_an_audio_playlist_a_little_behind_the_video_is_waited_for(self):
+        # At the live edge the audio packager may list a segment after the video's: its
+        # playlist is reloaded (a target duration in all) before the video segment goes on
+        # without it.
+        master = b"""#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"
+video.m3u8
+"""
+
+        def audio_playlist(_request, count):
+            return 200, {}, leaf("a0.ts", *(["a1.ts"] if count > 1 else []), ended=False)
+
+        video = ts_fixtures.make_stream(4, audio=False)
+        server = self.server(
+            {
+                "/master.m3u8": (200, {}, master),
+                "/video.m3u8": (200, {}, leaf("v0.ts", "v1.ts")),
+                "/audio.m3u8": audio_playlist,
+                "/v0.ts": (200, {}, video),
+                "/v1.ts": (200, {}, video),
+                "/a0.ts": (200, {}, ts_fixtures.audio_only(4)),
+                "/a1.ts": (200, {}, ts_fixtures.audio_only(4, pts_start=900000 + 4 * 90000)),
+            }
+        )
+        (out,) = media(server.url + "/master.m3u8")
+        self.assertEqual(server.counts["/audio.m3u8"], 2)  # once more for a1.ts, then listed
+        self.assertEqual((server.counts["/a0.ts"], server.counts["/a1.ts"]), (1, 1))
+        self.assertEqual(len(out), 2 * (len(video) + len(ts_fixtures.audio_only(4)) - 2 * 188))
+
+    def test_an_external_audio_playlist_of_fragmented_mp4_is_unsupported(self):
+        # 2.2 weaves MPEG-TS and packed ADTS audio; fMP4 (CMAF) audio leaves the channel to
+        # direct play, as before.
+        master = b"""#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=100000,AUDIO="a"
+video.m3u8
+"""
+        fmp4 = leaf("a1.m4s", extra='#EXT-X-MAP:URI="init.mp4"\n')
+        server = self.server(
+            {
+                "/master.m3u8": (200, {}, master),
+                "/video.m3u8": (200, {}, leaf("video.ts")),
+                "/audio.m3u8": (200, {}, fmp4),
+                "/video.ts": (200, {}, ts_fixtures.make_stream(4, audio=False)),
+            }
+        )
+        with self.assertRaises(SourceError) as raised:
+            media(server.url + "/master.m3u8")
+        self.assertEqual(raised.exception.kind, "unsupported")
+        self.assertIn("separate", str(raised.exception))
+        self.assertEqual(server.counts["/audio.m3u8"], 1)
 
     def test_live_leaf_reloads_real_redirect_url_and_tolerates_segment_gap(self):
         def playlist(_request, count):
@@ -1975,11 +2038,15 @@ high.m3u8
                     if accepted:
                         self.assertEqual(media(server.url + "/master.m3u8"), [segment])
                     else:
+                        # Its separate playlist cannot be read (404): unsupported, as before.
                         with self.assertRaises(SourceError) as raised:
                             media(server.url + "/master.m3u8")
                         self.assertEqual(raised.exception.kind, "unsupported")
-                self.assertEqual(server.counts["/audio/fr.m3u8"], 0)
-                if accepted:
+                woven = not accepted  # a video-only variant asks for the separate one
+                self.assertEqual(server.counts["/audio/fr.m3u8"], int(woven))
+                if accepted and "external" in name:  # the default, left out for the variant's
+                    self.assertTrue(any("left out" in line for line in logs), logs)
+                elif accepted:  # an alternate rendition
                     self.assertTrue(any("French" in line for line in logs), logs)
 
     def test_the_user_agent_and_referer_reach_every_origin_and_no_other_header_does(self):
