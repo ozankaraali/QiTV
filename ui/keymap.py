@@ -319,7 +319,7 @@ SHORTCUTS: dict[str, list[tuple[str, str]]] = {
         ("Up, Down", N_("Move between channels")),
         ("Left, Right", N_("Earlier / later")),
         ("0…9", N_("Jump to a channel number")),
-        ("Return", N_("Watch the channel")),
+        ("Return", N_("Watch the channel; a past programme from its start")),
         ("Ctrl+F", N_("Search")),
         ("F, F11, Ctrl+Meta+F", N_("Fullscreen")),
         ("G, Esc", N_("Close the guide")),

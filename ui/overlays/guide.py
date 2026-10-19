@@ -6,6 +6,15 @@ rows, so groups with thousands of channels stay cheap.
 Its header has a button for each of its keys (the owner's mouse-only rule): ‹ and › beside the
 day move the time window (← →, dimmed at its ends), and ⌕ (Search), ⛶ (Fullscreen) and ×
 (close, as G or Esc) sit at its right end. Each names its key when hovered.
+
+Catch-up (2.3): when a listed channel's provider keeps an archive (`archive_days(channel)`:
+its days, 0 for none or one that did not answer lately), the window also moves back, as far
+as the deepest archive listed (at most `MAX_BACK`). On the highlighted channel, a past
+programme within its archive can be watched from its start (`programmeRequested`): the one
+clicked on (a programme that has ended), else, with the window moved back from now, the one
+at the window's left edge. It is outlined, the footer describes it, and its "▶ Watch from the
+start" button and Enter (a double-click on its box) play it; the footer's button also shows
+for the programme on now (from its start). Otherwise Enter tunes the channel, as before.
 """
 
 from collections.abc import Callable
@@ -31,6 +40,7 @@ from PySide6.QtWidgets import QWidget
 
 from services import i18n
 from services.catalog import shown_label
+from services.catchup import ARCHIVE_KEY
 from services.epg_view import Programme, now_next, timeline
 from services.i18n import N_, tr, translate
 from services.navigation import item_key
@@ -46,6 +56,7 @@ SLOT = timedelta(minutes=30)
 SLOTS = 5
 WINDOW = SLOTS * SLOT  # 2.5 h on screen (R4)
 MAX_AHEAD = timedelta(hours=24)
+MAX_BACK = timedelta(days=7)  # the furthest back the window goes (a channel's archive)
 LOOKUP_LIMIT = 12
 REPAINT_MS = 30_000  # keeps the now-line and the on-now boxes current while open
 TOP_U = 1.0
@@ -57,6 +68,8 @@ SIDE_U = 1.6
 MIN_BOX_U = 1.5  # narrower boxes (slivers at the window's edges) are not drawn
 TIME_DETAIL_U = 8.0  # boxes at least this wide show their time under the title
 NO_INFO_TEXT = N_("No programme information")  # i18n: a channel's guide is empty
+# i18n: the guide's button: a past programme from the provider's archive, from its beginning
+WATCH_TEXT = N_("Watch from the start")
 BUTTON_U = 2.2  # the header's buttons: 28 px at the default 1280 px window
 BUTTON_GAP_U = 0.6
 # The header's buttons, left to right: what they do and their key (ui.keymap.SHORTCUTS);
@@ -185,8 +198,16 @@ class _Layout:
         return max(1, math.ceil(self.rows.height() / self.row_h))
 
 
+def _archive_depth(channel: dict) -> int:
+    """The days of archive the loaders kept on a channel (0: none); read cheaply, for every
+    listed channel (`services.catchup.archive_of` reads the rest)."""
+    days = channel.get(ARCHIVE_KEY)
+    return days if isinstance(days, int) and not isinstance(days, bool) and days > 0 else 0
+
+
 class Guide(Overlay):
     tuneRequested = Signal(object)  # channel dict
+    programmeRequested = Signal(object, object)  # channel dict, Programme: from its start
     closed = Signal()
     searchRequested = Signal()  # the header's ⌕
     fullscreenRequested = Signal()  # the header's ⛶
@@ -198,7 +219,10 @@ class Guide(Overlay):
         programmes: Callable[[dict, datetime, int], list[Programme]],
         now: Callable[[], datetime],
         parent: QWidget | None = None,
+        archive_days: Callable[[dict], int] = lambda channel: 0,
     ) -> None:
+        """`archive_days(channel)`: the days of the channel's archive that may play now (0:
+        none)."""
         super().__init__(parent)
         self.setFocusPolicy(Qt.NoFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
@@ -208,6 +232,9 @@ class Guide(Overlay):
         self._channels: list[dict] = []
         self._current = -1
         self._top = 0
+        self._archive_days = archive_days
+        self._back = timedelta(0)  # how far back the window goes (the deepest archive listed)
+        self._picked: tuple[int, Programme] | None = None  # a past programme clicked on
         self._window_start = slot_start(now())
         self._cache: dict[_Key, list[Programme]] = {}
         self._failed: set[_Key] = set()  # lookups that raised: logged once, retried
@@ -231,6 +258,9 @@ class Guide(Overlay):
         self._channels = list(channels)
         self._current = min(max(current, 0), len(self._channels) - 1)
         self._window_start = slot_start(self._now())
+        self._picked = None
+        deepest = max((_archive_depth(c) for c in self._channels), default=0)
+        self._back = min(MAX_BACK, timedelta(days=deepest))
         self._forget_lookups()
         self._requested.clear()  # a reopened guide retries logos that failed
         self._relayout()
@@ -267,12 +297,14 @@ class Guide(Overlay):
         target = self._shifted(delta)
         if target != self._window_start:
             self._window_start = target
+            self._picked = None
             self._forget_lookups()
             self.update()
 
     def _shifted(self, delta: int) -> datetime:
-        earliest = slot_start(self._now())
-        return min(max(self._window_start + delta * SLOT, earliest), earliest + MAX_AHEAD)
+        now = slot_start(self._now())
+        earliest = now - self._back
+        return min(max(self._window_start + delta * SLOT, earliest), now + MAX_AHEAD)
 
     def header_buttons(self) -> dict[str, QRectF]:
         """The header's buttons, left to right: ‹ › at the right of the channels' column, then
@@ -300,12 +332,107 @@ class Guide(Overlay):
             if rect.contains(point):
                 what, keys = HEADER_BUTTONS[name]
                 return key_hint(translate(what), keys)
+        if self.watch_button().contains(point):
+            what = translate(WATCH_TEXT)
+            return key_hint(what, "Return") if self.chosen() is not None else what
         return ""
 
     def activate(self) -> None:
+        """Enter: the chosen past programme from its start (see `chosen`), else the channel."""
         channel = self.current_channel()
-        if channel is not None:
+        if channel is None:
+            return
+        programme = self.chosen()
+        if programme is not None:
+            self.programmeRequested.emit(channel, programme)
+        else:
             self.tuneRequested.emit(channel)
+
+    # ---- catch-up (2.3) ---------------------------------------------------------------------
+
+    def _playable(self, programme: Programme | None, channel: dict | None) -> bool:
+        """`programme` began in the past, within the channel's archive."""
+        if programme is None or channel is None:
+            return False
+        days = self._archive_days(channel)
+        now = self._now().astimezone()
+        return days > 0 and now - timedelta(days=days) <= programme.start < now
+
+    def chosen(self) -> Programme | None:
+        """The past programme Enter plays from its start: the one clicked on in the highlighted
+        row, else, with the window moved back from now, the one at its left edge; None when
+        there is none, or the channel's archive doesn't reach it."""
+        channel = self.current_channel()
+        if channel is None:
+            return None
+        programme: Programme | None = None
+        if self._picked is not None and self._picked[0] == self._current:
+            programme = self._picked[1]
+        elif self._window_start < slot_start(self._now()):
+            programme = self._programme_at(self._current, self._window_start)
+        return programme if self._playable(programme, channel) else None
+
+    def _programme_at(self, row: int, moment: datetime) -> Programme | None:
+        for programme in timeline(self._programmes_for(row)):
+            if programme.is_on(moment):
+                return programme
+        return None
+
+    def _footer_choice(self) -> tuple[Programme | None, bool]:
+        """The footer's programme and whether its "Watch from the start" button shows."""
+        chosen = self.chosen()
+        if chosen is not None:
+            return chosen, True
+        if self.current_channel() is None:
+            return None, False
+        now = self._now().astimezone()
+        programme = footer_programme(self._programmes_for(self._current), now)
+        on_now = programme is not None and programme.is_on(now)
+        return programme, on_now and self._playable(programme, self.current_channel())
+
+    def watch_button(self) -> QRectF:
+        """The footer's "▶ Watch from the start" (empty when it doesn't show)."""
+        if self.isHidden() or not self._footer_choice()[1]:
+            return QRectF()
+        return self._watch_rect(self._layout())
+
+    def _watch_rect(self, layout: _Layout) -> QRectF:
+        units, footer = layout.units, layout.footer
+        u = units.u
+        fm = QFontMetrics(units.font(1.05, QFont.Weight.DemiBold))
+        width = fm.horizontalAdvance("▶  " + translate(WATCH_TEXT)) + 2.4 * u
+        height = max(2.6 * u, fm.height() + 0.8 * u)
+        right = footer.right() - SIDE_U * u
+        return QRectF(right - width, footer.center().y() - height / 2, width, height)
+
+    def _watch_chosen(self) -> None:
+        """The footer's button: its programme from the start."""
+        channel = self.current_channel()
+        programme, shown = self._footer_choice()
+        if channel is not None and programme is not None and shown:
+            self.programmeRequested.emit(channel, programme)
+
+    def _pick_at(self, row: int, x: float) -> None:
+        """A click on `row` at `x`: a past programme there (within the archive) is chosen."""
+        layout = self._layout()
+        picked = None
+        if layout.times.left() <= x <= layout.times.right():
+            spans = programme_spans(
+                self._programmes_for(row),
+                self._window_start,
+                layout.times.left(),
+                layout.times.width(),
+                MIN_BOX_U * layout.units.u,
+            )
+            for span in spans:
+                ended = span.programme.stop <= self._now().astimezone()
+                if span.x <= x < span.x + span.width and ended:
+                    if self._playable(span.programme, self._channels[row]):
+                        picked = (row, span.programme)
+                    break
+        if picked != self._picked:
+            self._picked = picked
+            self.update()
 
     def escape(self) -> bool:
         self.close_guide()
@@ -330,6 +457,7 @@ class Guide(Overlay):
         if row != self._current:
             old, top = self._current, self._top
             self._current = row
+            self._picked = None
             self._ensure_visible()
             if self._top != top:
                 self.update()  # the rows scrolled
@@ -423,6 +551,7 @@ class Guide(Overlay):
         if row is None:
             return False
         self._set_current(row)
+        self._pick_at(row, event.position().x())
         return True
 
     def _button_at(self, event: QMouseEvent) -> str | None:
@@ -444,6 +573,8 @@ class Guide(Overlay):
             button = self._button_at(event)
             if button is not None:
                 self._press_button(button)
+            elif self.watch_button().contains(event.position()):
+                self._watch_chosen()
             else:
                 self._select_at(event)
         event.accept()
@@ -453,6 +584,8 @@ class Guide(Overlay):
             button = self._button_at(event)
             if button in ("earlier", "later"):
                 self._press_button(button)  # a quick second click moves the window again
+            elif self.watch_button().contains(event.position()):
+                pass  # the first press played it
             elif button is None and self._select_at(event):
                 self.activate()
         event.accept()
@@ -614,12 +747,19 @@ class Guide(Overlay):
             fill_round(p, box, qcolor(PALETTE.text, 0.03), 0.6 * u)
             return [(box, None, False)]
         boxes: list[_Box] = []
+        chosen = self.chosen() if row == self._current else None
         for span in programme_spans(programmes, start, times.left(), times.width(), MIN_BOX_U * u):
             box = QRectF(span.x, rect.top(), span.width, rect.height()).adjusted(
                 0.2 * u, 0.2 * u, -0.2 * u, -0.2 * u
             )
             on_now = span.programme.is_on(now)
             self._paint_box_fill(p, units, box, on_now)
+            if chosen is not None and span.programme == chosen:
+                p.save()  # Enter plays it from its start: outlined
+                p.setPen(QPen(qcolor(PALETTE.accent), max(1.5, 0.2 * u)))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(box.adjusted(1, 1, -1, -1), 0.6 * u, 0.6 * u)
+                p.restore()
             boxes.append((box, span.programme, on_now))
         return boxes
 
@@ -707,6 +847,13 @@ class Guide(Overlay):
                 elided(p, fmt_span(programme), inner.width()),
             )
 
+    def _paint_watch(self, p: QPainter, units: Units, button: QRectF) -> None:
+        """The footer's "▶ Watch from the start" chip."""
+        fill_round(p, button, qcolor(PALETTE.accent), button.height() / 2)
+        p.setFont(units.font(1.05, QFont.Weight.DemiBold))
+        p.setPen(qcolor(PALETTE.canvas))
+        p.drawText(button, Qt.AlignCenter, "▶  " + translate(WATCH_TEXT))
+
     def _paint_now_line(self, p: QPainter, layout: _Layout, now: datetime, bottom: float) -> None:
         now_x = self._now_x(layout, now)
         if now_x is None or bottom <= layout.rows.top():
@@ -726,8 +873,12 @@ class Guide(Overlay):
         )
         if self.current_channel() is None:
             return
-        programme = footer_programme(self._programmes_for(self._current), now)
+        programme, watch = self._footer_choice()
         left, width = SIDE_U * u, footer.width() - 2 * SIDE_U * u
+        if watch:
+            button = self._watch_rect(layout)
+            width = max(0.0, button.left() - 1.2 * u - left)
+            self._paint_watch(p, units, button)
         if programme is None:
             p.setFont(units.font(1.0))
             p.setPen(qcolor(PALETTE.text, 0.45))

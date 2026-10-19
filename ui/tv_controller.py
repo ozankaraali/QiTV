@@ -69,6 +69,7 @@ from PySide6.QtWidgets import QAbstractScrollArea
 
 from services import external_players, favorites, recording
 from services.catalog import ALL_GROUP_ID, PROVIDER_LOADING_MESSAGE, shown_label
+from services.catchup import archive_of
 from services.catchup_memory import CatchupMemory
 from services.connection_budget import ConnectionBudget
 from services.epg_view import Programme, now_next
@@ -501,6 +502,7 @@ class TVController(QObject):
         drawer.channelFound.connect(self.play_found)
         drawer.contextRequested.connect(self._on_context)
         self._guide.tuneRequested.connect(self._on_guide_tune)
+        self._guide.catchupRequested.connect(self._on_guide_catchup)
         self.overlays.guide.fullscreenRequested.connect(self.window_actions.toggle_fullscreen)
         transport.nextRequested.connect(self._on_next_requested)
         transport.playPauseRequested.connect(self._toggle_pause)
@@ -966,7 +968,17 @@ class TVController(QObject):
         """Tune a channel the shell chose (drawer, autotune, column click)."""
         self._tune(channel, group_key, channels, from_zap=False)
 
-    def _tune(self, channel: dict, group_key: str, channels: list[dict], *, from_zap: bool) -> None:
+    def _tune(
+        self,
+        channel: dict,
+        group_key: str,
+        channels: list[dict],
+        *,
+        from_zap: bool,
+        archive: Optional[tuple[float, float]] = None,
+    ) -> None:
+        """`archive`: the channel's provider archive from a moment to another (Unix seconds:
+        the guide's past programme) instead of live."""
         if self._closed:
             return
         self._cancel_external()  # a newer choice: the settling external launch is dropped
@@ -990,6 +1002,14 @@ class TVController(QObject):
         self._channel = channel
         self._update_guides()
         self._show_banner(channel)
+        if stay and archive is not None and playing is not None:
+            # Its archive on the player that plays it (live, or its archive already).
+            if self._live_controls.catchup.open(playing, archive[0], until=archive[1]):
+                if self._lanes.busy():
+                    self._lanes.queued = playing  # a choice still on its way is dropped
+                self.zap.tuned(channel)
+                self._show_transport()
+                return
         if stay:
             # The channel already playing was chosen again: never restart it, and drop a
             # pending choice when it settles (the "stay" marker is the playing target).
@@ -1014,6 +1034,8 @@ class TVController(QObject):
                 group_key=group_key,
                 source=self.zap.context.source or picked,
                 zapped=from_zap,
+                archive_at=archive[0] if archive is not None else None,
+                archive_until=archive[1] if archive is not None else None,
             )
         )
         self._tuning_since = time.monotonic()
@@ -2410,6 +2432,25 @@ class TVController(QObject):
     def _on_guide_tune(self, channel: dict, group_key: str, channels: list[dict]) -> None:
         if not self._closed:
             self.tune(channel, group_key=group_key, channels=channels)
+
+    def _on_guide_catchup(
+        self, channel: dict, programme: Programme, group_key: str, channels: list[dict]
+    ) -> None:
+        """The guide's "Watch from the start": the channel's archive from the programme's start
+        to its end (catch-up, 2.3); live when the archive does not play."""
+        if not self._closed:
+            span = (programme.start.timestamp(), programme.stop.timestamp())
+            self._tune(channel, group_key, channels, from_zap=False, archive=span)
+
+    def archive_days(self, channel: dict) -> int:
+        """The days of the channel's provider archive that may play now (the guide's reach):
+        0 without one, when it did not answer lately, or while archives can't play."""
+        archive = archive_of(channel)
+        if archive is None or self._closed or not self._archive_allowed():
+            return 0
+        if self._live_controls.catchup.known_failed(Target(channel, "live", "")):
+            return 0
+        return archive.days
 
     def _escape(self) -> None:
         overlays = self.overlays

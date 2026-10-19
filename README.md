@@ -146,7 +146,7 @@ These are also in the app under Help → Keyboard Shortcuts. <kbd>Ctrl/⌘</kbd>
 | <kbd>↑</kbd> / <kbd>↓</kbd> | Move between channels |
 | <kbd>←</kbd> / <kbd>→</kbd> | Earlier / later |
 | <kbd>0–9</kbd> | Jump to a channel number |
-| <kbd>Enter</kbd> | Watch the channel |
+| <kbd>Enter</kbd> | Watch the channel; a past programme from its start |
 | <kbd>Ctrl/⌘+F</kbd> | Search |
 | <kbd>F</kbd> / <kbd>F11</kbd> / <kbd>⌃⌘F (Mac)</kbd> | Fullscreen |
 | <kbd>G</kbd> / <kbd>Esc</kbd> | Close the guide |
@@ -219,6 +219,17 @@ QiTV keeps the last few minutes of every live channel you watch, so you can paus
 - **In memory, by default.** Each stream has its own memory for this, set in Settings → Time-shift → **Memory per stream**: 128, 256 (the default) or 512 MiB, about 2, 4 or 9 minutes of HD video.
 - **On disk, only if you allow it.** Tick **Use disk for a longer time-shift buffer** in the same tab and choose the size with the slider, from 256 MiB to 16 GiB (2 GiB is about 36 minutes of HD). Only one stream uses the disk at a time; the small picture of picture-in-picture always uses memory. This is temporary history, not a recording: QiTV deletes the oldest part as it goes and everything when you change channel or quit.
 
+### Catch-up: your provider's archive
+
+Many providers keep the last days of some channels, so you can watch what was on earlier. QiTV knows which channels have such an archive from your provider's channel list (Xtream providers, and M3U playlists that say so; not STB portals yet), and uses it where its own time-shift buffer ends:
+
+- **Rewind further back.** On a channel with an archive, the time-shift bar reaches half an hour further back than the buffer; that part of the line is dashed. Drag there, press <kbd>←</kbd> at the start of the buffer, or press **⏮** for a programme that began before it, and QiTV plays the provider's archive from that moment ("From the provider's archive"). The bar then shows the archive from that time to now, the bubble over the knob says which moment plays (with the day, if it is not today), and <kbd>←</kbd>, <kbd>→</kbd>, **⏮** and the bar move within it. <kbd>L</kbd> or **Go live** goes back to the live channel.
+- **Watch a past programme from the start.** In the guide, <kbd>←</kbd> (or **‹**) also goes back in time on such channels. The programme at the left edge of the guide, or a past one you click, is outlined: press <kbd>Enter</kbd>, double-click it, or click **▶ Watch from the start** at the bottom of the guide. That button also plays the programme on now from its beginning.
+- **One stream at a time.** The archive is another stream from your provider, so QiTV closes the live stream before it opens the archive, and the other way round when you go back to live. With a provider that allows one stream, you never use two.
+- **Some archives don't answer.** A channel can claim an archive the provider doesn't have. Then QiTV says so, keeps playing (or goes back to live), and doesn't ask for that channel's archive again for three days.
+
+How far back you can go depends on the provider (often one to seven days). Archive times follow your provider's time zone, which QiTV reads from Xtream providers when it loads their channels; M3U playlists get UTC times, as such playlists expect. While the archive plays, <kbd>R</kbd> doesn't record: recordings come from the live buffer.
+
 ### Recording
 
 Press <kbd>R</kbd>, or the red **●** after the channel's name and ★ at the top of the player controls, to record the live channel you are watching; press it again to stop. While it records, the **●** is lit and **● REC 01:23** beside it counts the time.
@@ -267,7 +278,7 @@ Each tile's label shows LIVE, or how far behind live it plays (−00:42). Tiles 
 
 ## The guide
 
-Press <kbd>G</kbd> (or the guide button in the player controls) for the programme guide (EPG): the channels of the group you are watching, from the current half hour on, up to 24 hours ahead. Move with the arrow keys, type a number to jump to a channel, and press <kbd>Enter</kbd> to watch it. With the mouse, click a channel and double-click it to watch; **‹** and **›** beside the day move in time, and **⌕**, **⛶** (fullscreen) and **×** (close) are at the top right. The bottom shows the highlighted programme's description.
+Press <kbd>G</kbd> (or the guide button in the player controls) for the programme guide (EPG): the channels of the group you are watching, from the current half hour on, up to 24 hours ahead. Move with the arrow keys, type a number to jump to a channel, and press <kbd>Enter</kbd> to watch it. With the mouse, click a channel and double-click it to watch; **‹** and **›** beside the day move in time, and **⌕**, **⛶** (fullscreen) and **×** (close) are at the top right. The bottom shows the highlighted programme's description. On channels whose provider keeps an archive, the guide also goes back in time and plays past programmes from their start (see [Catch-up](#catch-up-your-providers-archive)).
 
 ![The programme guide](docs/screenshots/07-guide.png)
 

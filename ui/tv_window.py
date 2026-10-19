@@ -452,6 +452,9 @@ class TVWindow(QMainWindow):
         def guide_programmes(channel: dict, start: datetime, limit: int):
             return catalog.programmes(channel, start, limit=limit)
 
+        def archive_days(channel: dict) -> int:
+            return controller.archive_days(channel)
+
         host = self.host
         self.grid_tiles = GridTiles(host)  # the multiview's labels, focus ring, "+" and cards
         self.pip_label = PipLabel(host)
@@ -466,7 +469,9 @@ class TVWindow(QMainWindow):
             drawer=Drawer(self.nav, self.logos, now_provider, parent=host),
             transport=Transport(host),
             toast=Toast(host),
-            guide=Guide(self.logos, guide_programmes, _local_now, parent=host),
+            guide=Guide(
+                self.logos, guide_programmes, _local_now, parent=host, archive_days=archive_days
+            ),
             next_card=NextCard(host),
             welcome=WelcomeCard(host),
             pip_label=self.pip_label,
